@@ -127,6 +127,7 @@ use mp_protocol::events::{Arrival, SyncCompleted};
 use mp_protocol::state::Bootstrap;
 use mp_protocol::{EventEnvelope, Request, RequestId, JSONRPC_VERSION};
 
+use super::daemon::TestDaemon;
 use crate::config::{AccountConfig, GlobalConfig, ImapConfig};
 use crate::daemon::config::{ConfigState, ConfigStore};
 use crate::daemon::dispatch::{ClientCtx, ClientKind};
@@ -137,7 +138,6 @@ use crate::tui::app::{build_mailboxes, Action, App, MailboxKind};
 use crate::tui::commands::dispatch;
 use crate::tui::events::{drain, Applied, Incoming, Subscription};
 use crate::tui::queries::{list_emails, Queries};
-use super::daemon::TestDaemon;
 
 use crate::tui::{COALESCE_BUDGET, MAX_COALESCED_EVENTS};
 

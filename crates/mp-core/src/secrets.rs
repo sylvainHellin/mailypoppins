@@ -220,9 +220,8 @@ pub fn write_secret_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<(
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            return Err(anyhow!(e)).with_context(|| {
-                format!("Failed to remove stale temp file: {}", tmp.display())
-            })
+            return Err(anyhow!(e))
+                .with_context(|| format!("Failed to remove stale temp file: {}", tmp.display()))
         }
     }
 
@@ -240,9 +239,8 @@ pub fn write_secret_file_atomic(path: &std::path::Path, data: &[u8]) -> Result<(
         .with_context(|| format!("Failed to write secret file: {}", tmp.display()))?;
     drop(file);
 
-    fs::rename(&tmp, path).with_context(|| {
-        format!("Failed to rename {} -> {}", tmp.display(), path.display())
-    })?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("Failed to rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
@@ -347,12 +345,11 @@ impl EncryptedFileBackend {
 
     fn save_locked(&self, state: &EncryptedFileState) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create secrets dir: {}", parent.display())
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create secrets dir: {}", parent.display()))?;
         }
-        let plaintext = toml::to_string(&state.file)
-            .context("Failed to serialize secrets to TOML")?;
+        let plaintext =
+            toml::to_string(&state.file).context("Failed to serialize secrets to TOML")?;
         let blob = encrypt_with_key(&state.key, plaintext.as_bytes())?;
         // Atomic write, created with 0600 from the start (no umask window).
         write_secret_file_atomic(&self.path, &blob)?;
@@ -382,7 +379,10 @@ impl SecretsBackend for EncryptedFileBackend {
             .inner
             .write()
             .map_err(|_| anyhow!("secrets lock poisoned"))?;
-        state.file.entries.insert(key.to_string(), value.to_string());
+        state
+            .file
+            .entries
+            .insert(key.to_string(), value.to_string());
         self.save_locked(&state)
     }
 
@@ -430,8 +430,8 @@ pub struct KeyringBackend;
 impl SecretsBackend for KeyringBackend {
     fn get(&self, key: &str) -> Result<String> {
         keyring_get_with_fallback(key, |service, key| {
-            let entry = keyring::Entry::new(service, key)
-                .context("Failed to create keyring entry")?;
+            let entry =
+                keyring::Entry::new(service, key).context("Failed to create keyring entry")?;
             entry.get_password().map_err(anyhow::Error::from)
         })
         .with_context(|| {
@@ -443,16 +443,16 @@ impl SecretsBackend for KeyringBackend {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<()> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, key)
-            .context("Failed to create keyring entry")?;
+        let entry =
+            keyring::Entry::new(KEYRING_SERVICE, key).context("Failed to create keyring entry")?;
         entry
             .set_password(value)
             .with_context(|| format!("Failed to store '{}' in keyring", key))
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, key)
-            .context("Failed to create keyring entry")?;
+        let entry =
+            keyring::Entry::new(KEYRING_SERVICE, key).context("Failed to create keyring entry")?;
         entry
             .delete_credential()
             .with_context(|| format!("Failed to delete '{}' from keyring", key))
@@ -611,7 +611,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("secrets.enc");
 
-        let backend_a = EncryptedFileBackend::open_with_ikm_for_test(path.clone(), b"ikm-A").unwrap();
+        let backend_a =
+            EncryptedFileBackend::open_with_ikm_for_test(path.clone(), b"ikm-A").unwrap();
         backend_a.set("k", "v").unwrap();
 
         // Different IKM -- should produce an Undecryptable error.
@@ -728,4 +729,3 @@ mod tests {
         assert_eq!(back.as_slice(), pt);
     }
 }
-

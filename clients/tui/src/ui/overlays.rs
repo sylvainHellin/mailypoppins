@@ -6,8 +6,8 @@ use ratatui::Frame;
 
 use super::super::app::{
     App, AttachmentPicker, AttachmentPickerMode, CommandPalette, ConfirmDialog, DirPicker,
-    DirPickerMode, MailboxPicker, PersistentError, RsvpOverlay, SignaturesMode,
-    SignaturesOverlay, ThreadEntry, ThreadOverlay,
+    DirPickerMode, MailboxPicker, PersistentError, RsvpOverlay, SignaturesMode, SignaturesOverlay,
+    ThreadEntry, ThreadOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
@@ -146,7 +146,13 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
         width: chip_w,
         height: 1,
     };
-    render_action_button(frame, chip, Some("esc"), "close", theme::active().border_focused);
+    render_action_button(
+        frame,
+        chip,
+        Some("esc"),
+        "close",
+        theme::active().border_focused,
+    );
 
     let inner_width = inner.width as usize;
     let mut lines: Vec<Line> = Vec::new();
@@ -167,7 +173,9 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
         // any non-ASCII filename and panics the draw.
         let display = truncate(&name, name_width);
         let cursor_style = if i == picker.selected {
-            Style::default().fg(theme::active().heading).bg(theme::active().surface)
+            Style::default()
+                .fg(theme::active().heading)
+                .bg(theme::active().surface)
         } else {
             Style::default().fg(theme::active().text)
         };
@@ -293,7 +301,9 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
                     let display = path.display().to_string();
                     let display = truncate(&display, inner_width);
                     let style = if i == picker.selected {
-                        Style::default().fg(theme::active().heading).bg(theme::active().surface)
+                        Style::default()
+                            .fg(theme::active().heading)
+                            .bg(theme::active().surface)
                     } else {
                         Style::default().fg(theme::active().text)
                     };
@@ -351,9 +361,14 @@ pub(super) fn render_dir_picker(picker: &DirPicker, frame: &mut Frame, area: Rec
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| dir.display().to_string());
-                let display = format!("\u{f024b} {}", truncate(&name, inner_width.saturating_sub(2)));
+                let display = format!(
+                    "\u{f024b} {}",
+                    truncate(&name, inner_width.saturating_sub(2))
+                );
                 let style = if i + 1 == picker.selected {
-                    Style::default().fg(theme::active().heading).bg(theme::active().surface)
+                    Style::default()
+                        .fg(theme::active().heading)
+                        .bg(theme::active().surface)
                 } else {
                     Style::default().fg(theme::active().text)
                 };
@@ -442,7 +457,10 @@ pub(super) fn render_mailbox_picker(picker: &MailboxPicker, frame: &mut Frame, a
     let input_spans = vec![
         Span::styled("> ", Style::default().fg(theme::active().border_focused)),
         Span::styled(value, Style::default().fg(theme::active().text)),
-        Span::styled("\u{2588}", Style::default().fg(theme::active().border_focused)),
+        Span::styled(
+            "\u{2588}",
+            Style::default().fg(theme::active().border_focused),
+        ),
     ];
     frame.render_widget(Paragraph::new(Line::from(input_spans)), chunks[0]);
 
@@ -458,11 +476,16 @@ pub(super) fn render_mailbox_picker(picker: &MailboxPicker, frame: &mut Frame, a
         for (pos, &cand_idx) in picker.filtered.iter().enumerate() {
             let label = &picker.candidates[cand_idx].1;
             let style = if pos == picker.selected {
-                Style::default().fg(theme::active().heading).bg(theme::active().surface)
+                Style::default()
+                    .fg(theme::active().heading)
+                    .bg(theme::active().surface)
             } else {
                 Style::default().fg(theme::active().text)
             };
-            lines.push(Line::from(Span::styled(truncate(label, inner_width), style)));
+            lines.push(Line::from(Span::styled(
+                truncate(label, inner_width),
+                style,
+            )));
         }
     }
     frame.render_widget(Paragraph::new(lines), chunks[1]);
@@ -536,8 +559,7 @@ pub(super) fn render_signatures_overlay(
     };
     let header = match prompt_label {
         Some(label) => {
-            let avail = (chunks[0].width as usize)
-                .saturating_sub(label.len() + 1);
+            let avail = (chunks[0].width as usize).saturating_sub(label.len() + 1);
             let value = super::util::scrolled_input_value(&overlay.input, avail);
             Line::from(vec![
                 Span::styled(label, Style::default().fg(theme::active().border_focused)),
@@ -549,10 +571,7 @@ pub(super) fn render_signatures_overlay(
             ])
         }
         None => {
-            let default = overlay
-                .default
-                .as_deref()
-                .unwrap_or("(none)");
+            let default = overlay.default.as_deref().unwrap_or("(none)");
             Line::from(Span::styled(
                 truncate(&format!("Default: {default}"), chunks[0].width as usize),
                 Style::default().fg(theme::active().text_muted),
@@ -589,7 +608,10 @@ pub(super) fn render_signatures_overlay(
             } else {
                 Style::default().fg(theme::active().text)
             };
-            lines.push(Line::from(Span::styled(truncate(&label, inner_width), style)));
+            lines.push(Line::from(Span::styled(
+                truncate(&label, inner_width),
+                style,
+            )));
         }
     }
     frame.render_widget(Paragraph::new(lines), chunks[1]);
@@ -613,11 +635,7 @@ pub(super) fn render_signatures_overlay(
 /// over the runnable `KeyAction` catalogue. A query input line on top, the
 /// matching action labels below (cursor row highlighted), and a footer with the
 /// key hints. Modelled on [`render_mailbox_picker`], wider to fit action names.
-pub(super) fn render_command_palette(
-    palette: &CommandPalette,
-    frame: &mut Frame,
-    area: Rect,
-) {
+pub(super) fn render_command_palette(palette: &CommandPalette, frame: &mut Frame, area: Rect) {
     let dialog_width = 60u16.min(area.width.saturating_sub(4));
     let list_len = palette.filtered.len().max(1) as u16;
     // Cap the list height so a long catalogue does not overflow a short frame.
@@ -664,7 +682,10 @@ pub(super) fn render_command_palette(
     let input_spans = vec![
         Span::styled("> ", Style::default().fg(theme::active().border_focused)),
         Span::styled(value, Style::default().fg(theme::active().text)),
-        Span::styled("\u{2588}", Style::default().fg(theme::active().border_focused)),
+        Span::styled(
+            "\u{2588}",
+            Style::default().fg(theme::active().border_focused),
+        ),
     ];
     frame.render_widget(Paragraph::new(Line::from(input_spans)), chunks[0]);
 
@@ -682,11 +703,16 @@ pub(super) fn render_command_palette(
         for (pos, &idx) in palette.filtered.iter().enumerate().skip(start).take(rows) {
             let label = palette.entries[idx].label;
             let style = if pos == palette.selected {
-                Style::default().fg(theme::active().heading).bg(theme::active().surface)
+                Style::default()
+                    .fg(theme::active().heading)
+                    .bg(theme::active().surface)
             } else {
                 Style::default().fg(theme::active().text)
             };
-            lines.push(Line::from(Span::styled(truncate(label, inner_width), style)));
+            lines.push(Line::from(Span::styled(
+                truncate(label, inner_width),
+                style,
+            )));
         }
     }
     frame.render_widget(Paragraph::new(lines), chunks[1]);
@@ -794,7 +820,10 @@ fn thread_line(entry: &ThreadEntry, cursor: bool, width: usize) -> Line<'static>
     };
 
     // The caret and the one-cell glyph cost three columns before the tail.
-    let tail = format!("{}  {}  [{}]", entry.date_display, entry.from, entry.mailbox);
+    let tail = format!(
+        "{}  {}  [{}]",
+        entry.date_display, entry.from, entry.mailbox
+    );
     let tail = truncate(&tail, width.saturating_sub(caret.chars().count() + 2));
     Line::from(vec![
         Span::styled(caret, Style::default().fg(theme::active().accent)),
@@ -823,7 +852,9 @@ pub(super) fn render_persistent_error(error: &PersistentError, frame: &mut Frame
     let mut lines = vec![
         Line::from(Span::styled(
             "Error",
-            Style::default().fg(theme::active().error).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::active().error)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
@@ -885,7 +916,10 @@ pub(super) fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) 
 
     let entry_line = |key: &str, desc: &str| -> Line {
         Line::from(vec![
-            Span::styled(format!("  {key:<12}"), Style::default().fg(theme::active().accent)),
+            Span::styled(
+                format!("  {key:<12}"),
+                Style::default().fg(theme::active().accent),
+            ),
             Span::styled(desc.to_string(), Style::default().fg(theme::active().text)),
         ])
     };
@@ -967,10 +1001,16 @@ pub(super) fn render_help_overlay(app: &mut App, frame: &mut Frame, area: Rect) 
 
         let mut spans = vec![
             Span::styled("/", Style::default().fg(theme::active().accent)),
-            Span::styled(app.help_filter.as_str(), Style::default().fg(theme::active().text)),
+            Span::styled(
+                app.help_filter.as_str(),
+                Style::default().fg(theme::active().text),
+            ),
         ];
         if app.help_filter_active {
-            spans.push(Span::styled("\u{2588}", Style::default().fg(theme::active().accent)));
+            spans.push(Span::styled(
+                "\u{2588}",
+                Style::default().fg(theme::active().accent),
+            ));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
 

@@ -227,8 +227,7 @@ fn an_open_marks_the_row_it_resolved_and_queues_one_server_op() {
 #[test]
 fn only_a_mutation_that_touches_an_invite_asks_for_an_agenda_rebuild() {
     let mut app = App::default_for_tests();
-    app.emails =
-        std::sync::Arc::new(vec![entry("Standup", 1, true), entry("Receipt", 2, false)]);
+    app.emails = std::sync::Arc::new(vec![entry("Standup", 1, true), entry("Receipt", 2, false)]);
 
     assert!(any_invite(&app, &[MessageRef::new(1)]));
     assert!(any_invite(&app, &[MessageRef::new(2), MessageRef::new(1)]));
@@ -523,10 +522,7 @@ fn the_send_lines_are_the_ones_the_send_key_has_always_shown() {
     );
     assert_eq!(
         sent_line(&outcome(&[true, false])),
-        Ok(
-            "Partial: 1/2 succeeded -- failed: r1@example.com [queued for delivery]"
-                .to_string()
-        )
+        Ok("Partial: 1/2 succeeded -- failed: r1@example.com [queued for delivery]".to_string())
     );
     assert_eq!(
         sent_line(&outcome(&[false, false])),

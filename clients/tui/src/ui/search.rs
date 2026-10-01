@@ -161,7 +161,9 @@ fn render_search_field(
     let label_style = if greyed {
         Style::default().fg(theme.text_faint)
     } else if is_focused {
-        Style::default().fg(theme.emphasis).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.emphasis)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.text_muted)
     };

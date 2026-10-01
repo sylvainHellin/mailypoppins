@@ -187,9 +187,7 @@ impl App {
                 // below do with the sidebar. Dropped rather than kept: a row
                 // the client never heard about being removed is worse than a
                 // reload.
-                for slot in &mut state.email_cache {
-                    *slot = None;
-                }
+                state.email_cache.fill(None);
             }
             if !rows.is_empty() {
                 let template = super::build_mailboxes(&state.account_config);

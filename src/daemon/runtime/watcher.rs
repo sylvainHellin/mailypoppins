@@ -351,7 +351,10 @@ mod tests {
             .expect("the old watcher stopped inside its round")
             .expect("the old watcher's task");
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!new_watch.is_finished(), "the replacement's watcher is still watching");
+        assert!(
+            !new_watch.is_finished(),
+            "the replacement's watcher is still watching"
+        );
 
         // A runtime dropped without a retire (the shutdown) stops its watcher too.
         drop(new);

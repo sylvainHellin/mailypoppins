@@ -295,7 +295,12 @@ impl StatusIndex {
     ///   `(SEQUENCE, DTSTAMP)`, so a re-delivered or replayed copy at an equal
     ///   or lower version never displaces the newer state.
     pub fn apply(&self, event: &mut EventFrontmatter, dtstamp: &str) {
-        let Some(uid) = event.uid.as_deref().map(str::trim).filter(|u| !u.is_empty()) else {
+        let Some(uid) = event
+            .uid
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+        else {
             return;
         };
         let rid = event.recurrence_id.clone();

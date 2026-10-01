@@ -84,8 +84,7 @@ fn save_token_cache(account_name: &str, cache: &TokenCache) -> Result<()> {
         .with_context(|| format!("Failed to create token cache dir: {}", dir.display()))?;
     let path = token_cache_path(account_name);
     let json = serde_json::to_vec(cache).context("Failed to serialize token cache")?;
-    let blob = crate::secrets::encrypt_blob(&json)
-        .context("Failed to encrypt token cache")?;
+    let blob = crate::secrets::encrypt_blob(&json).context("Failed to encrypt token cache")?;
     // Atomic write, created with 0600 from the start (no umask window).
     crate::secrets::write_secret_file_atomic(&path, &blob)
         .with_context(|| format!("Failed to write token cache: {}", path.display()))?;
@@ -194,7 +193,10 @@ pub async fn device_code_flow_reporting(
         return Err(anyhow!("Device code request failed: {}", body));
     }
 
-    let dc: DeviceCodeResponse = resp.json().await.context("Failed to parse device code response")?;
+    let dc: DeviceCodeResponse = resp
+        .json()
+        .await
+        .context("Failed to parse device code response")?;
 
     // Step 2: hand the instructions to whoever can show them.
     on_device_code(&dc.verification_uri, &dc.user_code);
@@ -268,7 +270,11 @@ pub async fn device_code_flow_reporting(
                 }
             }
         } else {
-            return Err(anyhow!("Unexpected token response (HTTP {}): {}", status, body));
+            return Err(anyhow!(
+                "Unexpected token response (HTTP {}): {}",
+                status,
+                body
+            ));
         }
     }
 }
@@ -306,7 +312,10 @@ async fn refresh_token(
         ));
     }
 
-    let token: TokenResponse = resp.json().await.context("Failed to parse refresh response")?;
+    let token: TokenResponse = resp
+        .json()
+        .await
+        .context("Failed to parse refresh response")?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -358,11 +367,15 @@ pub async fn load_or_refresh_token(
         ));
     }
 
-    warn!(
-        "OAuth2 token expired for '{}', refreshing...",
-        account_name
-    );
-    let new_cache = refresh_token(client_id, tenant_id, &cache.refresh_token, account_name, scopes).await?;
+    warn!("OAuth2 token expired for '{}', refreshing...", account_name);
+    let new_cache = refresh_token(
+        client_id,
+        tenant_id,
+        &cache.refresh_token,
+        account_name,
+        scopes,
+    )
+    .await?;
     Ok(new_cache.access_token)
 }
 
@@ -381,14 +394,24 @@ pub fn load_or_refresh_token_blocking(
         std::thread::scope(|s| {
             s.spawn(|| {
                 let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(load_or_refresh_token(account_name, client_id, tenant_id, &scopes))
+                rt.block_on(load_or_refresh_token(
+                    account_name,
+                    client_id,
+                    tenant_id,
+                    &scopes,
+                ))
             })
             .join()
             .map_err(|_| anyhow!("OAuth2 token refresh thread panicked"))?
         })
     } else {
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(load_or_refresh_token(account_name, client_id, tenant_id, &scopes))
+        rt.block_on(load_or_refresh_token(
+            account_name,
+            client_id,
+            tenant_id,
+            &scopes,
+        ))
     }
 }
 
@@ -417,9 +440,14 @@ mod tests {
         let result = build_xoauth2_string("user@example.com", "ya29.token");
         // Decode and verify structure
         use base64::Engine;
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&result).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&result)
+            .unwrap();
         let decoded_str = String::from_utf8(decoded).unwrap();
-        assert_eq!(decoded_str, "user=user@example.com\x01auth=Bearer ya29.token\x01\x01");
+        assert_eq!(
+            decoded_str,
+            "user=user@example.com\x01auth=Bearer ya29.token\x01\x01"
+        );
     }
 
     #[test]

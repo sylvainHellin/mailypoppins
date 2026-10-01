@@ -159,7 +159,8 @@ mod store_backed_drafts {
         assert!(!content.contains("cc: \""), "{content}");
         assert!(content.contains("{{SIGNATURE}}"), "{content}");
         assert!(
-            content.contains("On Mon, 01 Jan 2024 12:00:00 +0000, Alice <alice@example.com> wrote:"),
+            content
+                .contains("On Mon, 01 Jan 2024 12:00:00 +0000, Alice <alice@example.com> wrote:"),
             "{content}"
         );
         assert!(content.contains("> Original body"), "{content}");
@@ -247,7 +248,10 @@ mod store_backed_drafts {
             content.contains("---------- Forwarded message ----------"),
             "{content}"
         );
-        assert!(content.contains("From: Alice <alice@example.com>"), "{content}");
+        assert!(
+            content.contains("From: Alice <alice@example.com>"),
+            "{content}"
+        );
         assert!(content.contains("Original body"), "{content}");
 
         let expected = crate::parse::stable_attachments_dir(
@@ -360,12 +364,9 @@ mod store_backed_drafts {
             content_id: None,
         }];
 
-        let source = crate::draft::source_from_fetched(
-            &crate::config::account_dir("alice"),
-            &email,
-            true,
-        )
-        .unwrap();
+        let source =
+            crate::draft::source_from_fetched(&crate::config::account_dir("alice"), &email, true)
+                .unwrap();
 
         let (path, selector) = create_draft_from_source(
             "alice",
@@ -521,14 +522,18 @@ mod store_backed_mutations {
         let err = validate_then_approve(&path).unwrap_err();
         assert!(format!("{err:#}").contains("No recipients"), "{err:#}");
         assert!(
-            std::fs::read_to_string(&path).unwrap().contains("status: draft"),
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("status: draft"),
             "a refused send must not persist an approved flag"
         );
 
         // With the recipients restored the same preamble approves the draft.
         std::fs::write(&path, &text).unwrap();
         validate_then_approve(&path).unwrap();
-        assert!(std::fs::read_to_string(&path).unwrap().contains("status: approved"));
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("status: approved"));
     }
 
     /// Regression: `validate_then_approve` must hand back the *approved*
@@ -588,7 +593,9 @@ mod store_backed_mutations {
         assert!(text.contains("Email not approved for sending"), "{text}");
         assert!(text.contains("Current status: draft"), "{text}");
         assert_eq!(outbox_counts(&fx).total(), 0, "nothing was enqueued");
-        assert!(std::fs::read_to_string(&path).unwrap().contains("status: draft"));
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("status: draft"));
     }
 
     /// An approved draft is committed to the outbox before the submission is
@@ -705,8 +712,8 @@ mod store_backed_files {
     use super::store_backed_drafts::{fixture_email, Fixture};
     use super::*;
     use crate::parse::{AttachmentData, FetchedEmail};
-    use crate::store::BlobStore;
     use crate::store::read::MessageRow;
+    use crate::store::BlobStore;
     use crate::tui::app::EmailEntry;
 
     fn attachment(name: &str, bytes: &[u8]) -> AttachmentData {
@@ -871,7 +878,10 @@ mod store_backed_files {
     fn app_on_draft(fx: &Fixture, attachments: &[String]) -> App {
         let dir = crate::config::drafts_dir("alice");
         std::fs::create_dir_all(&dir).unwrap();
-        let listed: String = attachments.iter().map(|a| format!("  - \"{a}\"\n")).collect();
+        let listed: String = attachments
+            .iter()
+            .map(|a| format!("  - \"{a}\"\n"))
+            .collect();
         let body = if listed.is_empty() {
             "attachments:\n".to_string()
         } else {
@@ -988,7 +998,10 @@ mod store_backed_files {
         assert!(written.ends_with("<p>Rich body</p>"), "{written}");
         // The file is served with no HTTP headers, so it carries its own
         // charset and CSP.
-        assert!(written.starts_with("<meta http-equiv=\"Content-Security-Policy\""), "{written}");
+        assert!(
+            written.starts_with("<meta http-equiv=\"Content-Security-Policy\""),
+            "{written}"
+        );
         assert!(written.contains("<meta charset=\"UTF-8\">"), "{written}");
     }
 
@@ -1118,7 +1131,10 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         );
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("---\n"), "{content}");
-        assert!(content.contains("subject: 'Quarterly Report: Q3'\n"), "{content}");
+        assert!(
+            content.contains("subject: 'Quarterly Report: Q3'\n"),
+            "{content}"
+        );
         assert!(content.contains("mailbox: inbox\n"), "{content}");
         assert!(content.contains("read: true\n"), "{content}");
         assert!(content.contains("answered: false\n"), "{content}");

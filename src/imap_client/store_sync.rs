@@ -48,7 +48,10 @@ pub struct ImapBackend<'a> {
 
 impl<'a> ImapBackend<'a> {
     pub fn new(config: &'a ImapConfig) -> Self {
-        Self { config, body_budget: None }
+        Self {
+            config,
+            body_budget: None,
+        }
     }
 
     /// Bound each mailbox's body download (#0113).
@@ -83,27 +86,32 @@ impl SyncBackend for ImapBackend<'_> {
         let concurrency = self.config.fetch_concurrency.clamp(1, 8);
         let config = self.config;
         let body_budget = self.body_budget;
-        futures::stream::iter(targets.iter().zip(knowns).map(|(target, known)| async move {
-            // One borrowed session per mailbox, not one shared one: IMAP allows
-            // a single SELECTed mailbox per connection, so N mailboxes need N
-            // connections to overlap their latency. What #0041 changed is that
-            // they are borrowed and returned rather than opened and logged out.
-            let mut pooled = pool::checkout(config).await?;
-            // The capability gate travels with the connection that advertised
-            // it: `caps` is what *this* server said after *this* login, never a
-            // remembered or configured answer (#0041).
-            let caps = pooled.caps();
-            let out = fetch_new_raw_on_session(
-                pooled.session(),
-                &target.server_name,
-                Some(limit),
-                known,
-                caps,
-                body_budget,
-            )
-            .await;
-            pooled.check(out)
-        }))
+        futures::stream::iter(
+            targets
+                .iter()
+                .zip(knowns)
+                .map(|(target, known)| async move {
+                    // One borrowed session per mailbox, not one shared one: IMAP allows
+                    // a single SELECTed mailbox per connection, so N mailboxes need N
+                    // connections to overlap their latency. What #0041 changed is that
+                    // they are borrowed and returned rather than opened and logged out.
+                    let mut pooled = pool::checkout(config).await?;
+                    // The capability gate travels with the connection that advertised
+                    // it: `caps` is what *this* server said after *this* login, never a
+                    // remembered or configured answer (#0041).
+                    let caps = pooled.caps();
+                    let out = fetch_new_raw_on_session(
+                        pooled.session(),
+                        &target.server_name,
+                        Some(limit),
+                        known,
+                        caps,
+                        body_budget,
+                    )
+                    .await;
+                    pooled.check(out)
+                }),
+        )
         .buffered(concurrency)
         .collect()
         .await

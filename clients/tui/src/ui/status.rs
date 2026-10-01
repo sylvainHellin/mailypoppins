@@ -69,7 +69,11 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
         }
         // The leader badge: a printable name for Space, otherwise the
         // uppercased key (e.g. `g` -> `G`).
-        let badge = if p == ' ' { "SPACE".to_string() } else { p.to_uppercase().to_string() };
+        let badge = if p == ' ' {
+            "SPACE".to_string()
+        } else {
+            p.to_uppercase().to_string()
+        };
         (badge, conts)
     } else {
         // Off-Mail, only the view-agnostic Global bindings actually fire
@@ -138,7 +142,10 @@ pub(super) fn render_hint_bar(app: &App, frame: &mut Frame, area: Rect) {
         ));
     }
     if truncated {
-        spans.push(Span::styled(" …", Style::default().fg(theme::active().text_muted).bg(bg)));
+        spans.push(Span::styled(
+            " …",
+            Style::default().fg(theme::active().text_muted).bg(bg),
+        ));
     }
 
     let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(bg));
@@ -151,7 +158,11 @@ fn mode_label(app: &App, ctx: KeyCtx) -> String {
     // A zoom hides the other panes, so the bar has to say so: the badge is the
     // only chrome left that can (#TKT-0044). It suffixes whatever the badge
     // would otherwise be, selection included, because both facts matter.
-    let zoom = if app.zoomed_pane().is_some() { " ZOOM" } else { "" };
+    let zoom = if app.zoomed_pane().is_some() {
+        " ZOOM"
+    } else {
+        ""
+    };
     if !app.selection.is_empty() {
         return format!("{} SELECTED{zoom}", app.selection.len());
     }

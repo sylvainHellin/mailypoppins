@@ -1,7 +1,4 @@
-use super::app::{
-    App, BgResult, MailboxKind, MessageRef, SearchOverlayFocus,
-    StatusLevel,
-};
+use super::app::{App, BgResult, MailboxKind, MessageRef, SearchOverlayFocus, StatusLevel};
 
 /// The status level of a completed sync/fetch: Success, unless the drain
 /// suffix says mutations were rolled back (#0039 review note) or the sync
@@ -86,10 +83,8 @@ fn apply_contacts_rebuild(
     let settled = match result {
         Ok(settled) => settled,
         Err(e) => {
-            return app.set_status_level(
-                format!("Contacts refresh failed: {e}"),
-                StatusLevel::Error,
-            );
+            return app
+                .set_status_level(format!("Contacts refresh failed: {e}"), StatusLevel::Error);
         }
     };
     let contacts = settled["contacts"].as_u64().unwrap_or(0);
@@ -134,7 +129,10 @@ pub(super) fn land_rollback(app: &mut App, account_index: usize, failed: u64) {
         _ => String::new(),
     };
     app.set_status_level(
-        format!("{prefix}{}", mp_client::format::mutations_rolled_back_line(failed)),
+        format!(
+            "{prefix}{}",
+            mp_client::format::mutations_rolled_back_line(failed)
+        ),
         StatusLevel::Warning,
     );
     refresh_after_server_sync(app, account_index);
@@ -168,10 +166,17 @@ fn record_sync_health(app: &mut App, account_index: usize, outcome: Result<(), &
 pub fn handle_bg_result(app: &mut App, result: BgResult) {
     app.bg_count = app.bg_count.saturating_sub(1);
     match result {
-        BgResult::Send { account_index, result } => {
+        BgResult::Send {
+            account_index,
+            result,
+        } => {
             match result {
                 Ok(msg) => {
-                    let text = if msg.is_empty() { "Email sent".into() } else { msg };
+                    let text = if msg.is_empty() {
+                        "Email sent".into()
+                    } else {
+                        msg
+                    };
                     app.set_status_level(text, StatusLevel::Success);
                     if account_index == app.active_account {
                         // Send moves a draft to Sent -- only those two need invalidation
@@ -190,10 +195,17 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
-        BgResult::Rsvp { account_index, result } => {
+        BgResult::Rsvp {
+            account_index,
+            result,
+        } => {
             match result {
                 Ok(msg) => {
-                    let text = if msg.is_empty() { "RSVP sent".into() } else { msg };
+                    let text = if msg.is_empty() {
+                        "RSVP sent".into()
+                    } else {
+                        msg
+                    };
                     app.set_status_level(text, StatusLevel::Success);
                     // Our own reply is now a row in `sent` (the outbox
                     // ingests the appended copy during the send), so the
@@ -213,26 +225,33 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
-        BgResult::SendApproved { account_index, result } => {
-            match result {
-                Ok(msg) => {
-                    let text = if msg.is_empty() { "Approved emails sent".into() } else { msg };
-                    app.set_status_level(text, StatusLevel::Success);
-                    if account_index == app.active_account {
-                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
-                            app.invalidate_cache_idx(idx);
-                        }
-                        if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Sent) {
-                            app.invalidate_cache_idx(idx);
-                        }
-                        app.reload_current_mailbox();
-                    } else {
-                        app.invalidate_all_caches_on(account_index);
+        BgResult::SendApproved {
+            account_index,
+            result,
+        } => match result {
+            Ok(msg) => {
+                let text = if msg.is_empty() {
+                    "Approved emails sent".into()
+                } else {
+                    msg
+                };
+                app.set_status_level(text, StatusLevel::Success);
+                if account_index == app.active_account {
+                    if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+                        app.invalidate_cache_idx(idx);
                     }
+                    if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Sent) {
+                        app.invalidate_cache_idx(idx);
+                    }
+                    app.reload_current_mailbox();
+                } else {
+                    app.invalidate_all_caches_on(account_index);
                 }
-                Err(e) => app.set_status_level(format!("Send-approved failed: {e}"), StatusLevel::Error),
             }
-        }
+            Err(e) => {
+                app.set_status_level(format!("Send-approved failed: {e}"), StatusLevel::Error)
+            }
+        },
 
         BgResult::Fetch {
             account_index,
@@ -240,7 +259,10 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             new_inbox_mail,
         } => land_sync(app, account_index, result, new_inbox_mail),
 
-        BgResult::Sync { account_index, result } => {
+        BgResult::Sync {
+            account_index,
+            result,
+        } => {
             record_sync_health(
                 app,
                 account_index,
@@ -248,7 +270,11 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             );
             match result {
                 Ok(msg) => {
-                    let text = if msg.is_empty() { "Sync complete".into() } else { msg };
+                    let text = if msg.is_empty() {
+                        "Sync complete".into()
+                    } else {
+                        msg
+                    };
                     let level = drained_sync_level(&text);
                     app.set_status_level(text, level);
                     refresh_after_server_sync(app, account_index);
@@ -260,7 +286,12 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             }
         }
 
-        BgResult::MailboxLoaded { account_index, mailbox_idx, generation, entries } => {
+        BgResult::MailboxLoaded {
+            account_index,
+            mailbox_idx,
+            generation,
+            entries,
+        } => {
             if !mailbox_loaded_is_current(
                 app.active_account,
                 app.active_mailbox,
@@ -331,12 +362,8 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
                     // left is the count the footer prints and the mailboxes
                     // that refused, which do not fail the search.
                     let count = app.server_search_results.len();
-                    let unreachable = settled["unreachable"]
-                        .as_array()
-                        .map(Vec::len)
-                        .unwrap_or(0);
-                    let mut line =
-                        format!("{count} result{}", if count == 1 { "" } else { "s" });
+                    let unreachable = settled["unreachable"].as_array().map(Vec::len).unwrap_or(0);
+                    let mut line = format!("{count} result{}", if count == 1 { "" } else { "s" });
                     if unreachable > 0 {
                         line.push_str(&format!(
                             "; {unreachable} mailbox{} unreachable",
@@ -370,7 +397,10 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             apply_search_hit_fetch(app, &message_id, result);
         }
 
-        BgResult::AccountOpened { account_index, counts } => {
+        BgResult::AccountOpened {
+            account_index,
+            counts,
+        } => {
             // Phase two of startup (#0003): this account's store opened on a
             // background thread, ran its integrity check (and, on failure, the
             // drop-and-rebuild path of #0066) and read the real counts. Fill
@@ -493,11 +523,7 @@ pub(super) fn apply_row_delta(app: &mut App, delta: &super::queries::MessageRowD
 /// its Message-ID becomes a resolved row, and the mailbox lists pick the new
 /// row up. The fetch is `message.fetch` since P5-U10c, so this lands one
 /// settled operation rather than two client-side paths.
-pub(super) fn apply_search_hit_fetch(
-    app: &mut App,
-    message_id: &str,
-    result: Result<i64, String>,
-) {
+pub(super) fn apply_search_hit_fetch(app: &mut App, message_id: &str, result: Result<i64, String>) {
     match result {
         Ok(row_id) => {
             if let Some(hit) = app
@@ -580,10 +606,15 @@ mod tests {
     #[test]
     fn a_rollback_suffix_downgrades_the_sync_status_to_warning() {
         assert!(matches!(
-            drained_sync_level("Synced 3 mailboxes; 2 mutation(s) failed and were rolled back (see the log)"),
+            drained_sync_level(
+                "Synced 3 mailboxes; 2 mutation(s) failed and were rolled back (see the log)"
+            ),
             StatusLevel::Warning
         ));
-        assert!(matches!(drained_sync_level("Sync complete"), StatusLevel::Success));
+        assert!(matches!(
+            drained_sync_level("Sync complete"),
+            StatusLevel::Success
+        ));
     }
 
     /// #0115: the same rule for the other suffix a green line must not carry.
@@ -686,7 +717,9 @@ mod tests {
 
     impl DataDir {
         fn new() -> Self {
-            Self { _dir: mp_core::config::test_env::TestDataDir::new() }
+            Self {
+                _dir: mp_core::config::test_env::TestDataDir::new(),
+            }
         }
     }
 
@@ -801,7 +834,10 @@ mod tests {
         refresh_after_server_sync(&mut app, 1);
 
         assert!(
-            app.accounts[1].email_cache.iter().all(|slot| slot.is_none()),
+            app.accounts[1]
+                .email_cache
+                .iter()
+                .all(|slot| slot.is_none()),
             "the synced account's rows changed under its cache"
         );
         assert_eq!(
@@ -810,7 +846,10 @@ mod tests {
             "an off-screen account keeps its counts until it is switched to"
         );
         assert!(
-            app.accounts[0].email_cache.iter().all(|slot| slot.is_some()),
+            app.accounts[0]
+                .email_cache
+                .iter()
+                .all(|slot| slot.is_some()),
             "the other background account is untouched"
         );
         assert!(
@@ -955,7 +994,10 @@ mod tests {
             },
         );
 
-        assert!(!app.accounts[1].opening, "the opened account drops its loading marker");
+        assert!(
+            !app.accounts[1].opening,
+            "the opened account drops its loading marker"
+        );
         assert_eq!(app.accounts[1].mailbox_counts, vec![42]);
         assert!(
             app.accounts[0].opening,
@@ -1071,7 +1113,10 @@ mod tests {
         })
         .expect("a message.row event decodes");
 
-        assert!(apply_row_delta(&mut app, &delta), "a replace owes no reload");
+        assert!(
+            apply_row_delta(&mut app, &delta),
+            "a replace owes no reload"
+        );
         assert_eq!(app.emails.len(), 1);
         assert_eq!(app.emails[0].subject, "Seven");
         assert_eq!(
@@ -1099,12 +1144,14 @@ mod tests {
         })
         .expect("a state.invalidate over a listing decodes");
 
-        assert!(!apply_row_delta(&mut app, &delta), "an invalidate owes a reload");
         assert!(
-            app.pending_actions.iter().any(|a| matches!(
-                a,
-                crate::app::Action::LoadMailbox { mailbox_idx: 1, .. }
-            )),
+            !apply_row_delta(&mut app, &delta),
+            "an invalidate owes a reload"
+        );
+        assert!(
+            app.pending_actions
+                .iter()
+                .any(|a| matches!(a, crate::app::Action::LoadMailbox { mailbox_idx: 1, .. })),
             "the reload is queued as the background load, not run here"
         );
     }

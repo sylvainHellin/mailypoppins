@@ -327,7 +327,11 @@ pub fn get(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError
 /// is on by `messages.id` and nothing else, and resolving it back through
 /// `"<mailbox>/<uid>"` would make the client carry a second identity for the
 /// same row and re-derive it on every cursor move.
-pub(super) fn address(params: &Value, store: &Store, account: &str) -> Result<MessageRow, RpcError> {
+pub(super) fn address(
+    params: &Value,
+    store: &Store,
+    account: &str,
+) -> Result<MessageRow, RpcError> {
     let addressed = |key: &str| !matches!(params.get(key), None | Some(Value::Null));
     if addressed("row_id") {
         if addressed("id") || addressed("selector") {
@@ -414,8 +418,11 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
         .thread_id
         .clone()
         .unwrap_or_else(|| row.message_id.clone());
-    let mut rows = read::thread_messages(&store, &name, &thread_id)
-        .map_err(|e| internal(format!("folding the conversation {thread_id} of {name}: {e:#}")))?;
+    let mut rows = read::thread_messages(&store, &name, &thread_id).map_err(|e| {
+        internal(format!(
+            "folding the conversation {thread_id} of {name}: {e:#}"
+        ))
+    })?;
     // The addressed message is always in its own conversation. The fold reads
     // the `thread_id` column, so a row ingest left `NULL` there matches
     // nothing and would answer an empty array, which is the different claim

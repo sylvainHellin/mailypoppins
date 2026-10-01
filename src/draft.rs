@@ -246,7 +246,6 @@ pub fn delete_indexed_draft(
     remove_draft_files(&row.path)
 }
 
-
 // ---------------------------------------------------------------------------
 // The drafts index, as the wire spells it (#0126, P5-U10e)
 // ---------------------------------------------------------------------------
@@ -281,13 +280,14 @@ pub fn indexed_drafts(account: &str) -> (Vec<DraftEntry>, Vec<DraftSkip>) {
     // The reporting refresh hands back the files it skipped for a parse
     // failure, so the Drafts list can show them as error rows instead of
     // silently dropping them (#0080).
-    let skipped: Vec<DraftSkip> = match crate::store::drafts::refresh_reporting(&store, account, &dir) {
-        Ok((_, _, skipped)) => skipped.iter().map(skip_to_wire).collect(),
-        Err(e) => {
-            log::warn!("[drafts] refreshing the index of {account} failed: {e:#}");
-            Vec::new()
-        }
-    };
+    let skipped: Vec<DraftSkip> =
+        match crate::store::drafts::refresh_reporting(&store, account, &dir) {
+            Ok((_, _, skipped)) => skipped.iter().map(skip_to_wire).collect(),
+            Err(e) => {
+                log::warn!("[drafts] refreshing the index of {account} failed: {e:#}");
+                Vec::new()
+            }
+        };
     match crate::store::drafts::list(&store, account, None) {
         Ok(rows) => (
             rows.iter().map(|row| draft_to_wire(account, row)).collect(),
@@ -439,14 +439,18 @@ mod tests {
 
         let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
         crate::store::drafts::refresh(&store, "work", &dir).unwrap();
-        let row = crate::store::drafts::find(&store, "work", "aaa").unwrap().unwrap();
+        let row = crate::store::drafts::find(&store, "work", "aaa")
+            .unwrap()
+            .unwrap();
 
         delete_indexed_draft(&store, "work", &row, false).unwrap();
         assert!(!path.exists(), "the draft file is gone");
         assert!(!companion.exists(), "the html companion is gone");
 
         crate::store::drafts::refresh(&store, "work", &dir).unwrap();
-        assert!(crate::store::drafts::find(&store, "work", "aaa").unwrap().is_none());
+        assert!(crate::store::drafts::find(&store, "work", "aaa")
+            .unwrap()
+            .is_none());
     }
 
     /// An approved draft is a queued send: deleting it silently drops the send,
@@ -464,9 +468,13 @@ mod tests {
         .unwrap();
         let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
         crate::store::drafts::refresh(&store, "work", &dir).unwrap();
-        let row = crate::store::drafts::find(&store, "work", "bbb").unwrap().unwrap();
+        let row = crate::store::drafts::find(&store, "work", "bbb")
+            .unwrap()
+            .unwrap();
 
-        let err = delete_indexed_draft(&store, "work", &row, false).unwrap_err().to_string();
+        let err = delete_indexed_draft(&store, "work", &row, false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("approved"), "{err}");
         assert!(path.exists(), "the refused draft is still on disk");
 
@@ -557,10 +565,16 @@ mod tests {
         )
         .unwrap();
 
-        assert!(path.exists(), "a send with no durable record keeps the file");
+        assert!(
+            path.exists(),
+            "a send with no durable record keeps the file"
+        );
         let after = fs::read_to_string(&path).unwrap();
         assert!(after.contains("status: sent\n"), "{after}");
-        assert!(after.contains("message_id: \"<abc@example.com>\"\n"), "{after}");
+        assert!(
+            after.contains("message_id: \"<abc@example.com>\"\n"),
+            "{after}"
+        );
     }
 
     /// A partial send keeps the marked file: it is the only thing that still
@@ -584,7 +598,10 @@ mod tests {
         assert!(path.exists(), "a partial send leaves the draft addressable");
         let after = fs::read_to_string(&path).unwrap();
         assert!(after.contains("status: sent\n"), "{after}");
-        assert!(after.contains("message_id: \"<abc@example.com>\"\n"), "{after}");
+        assert!(
+            after.contains("message_id: \"<abc@example.com>\"\n"),
+            "{after}"
+        );
         // The companion HTML is dead weight once submitted either way: that
         // behaviour belongs to `mark_draft_sent` and is unchanged.
         assert!(!companion.exists());
@@ -598,7 +615,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let failed = draft_with_unknown_fields(tmp.path(), "approved");
         let draft = parse_email_draft(&failed).unwrap();
-        settle_sent_draft(&draft, &durable_report(&[("alice@example.com", false)]), None).unwrap();
+        settle_sent_draft(
+            &draft,
+            &durable_report(&[("alice@example.com", false)]),
+            None,
+        )
+        .unwrap();
         assert!(failed.exists());
 
         settle_sent_draft(&draft, &durable_report(&[]), None).unwrap();
@@ -620,5 +642,4 @@ mod tests {
 
         assert!(!path.exists());
     }
-
 }

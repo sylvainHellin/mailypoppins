@@ -5,7 +5,11 @@ use log::info;
 use super::open_imap_session;
 use crate::config::ImapConfig;
 
-pub async fn watch_mailbox(imap_config: &ImapConfig, mailbox: &str, timeout: Option<u64>) -> Result<i32> {
+pub async fn watch_mailbox(
+    imap_config: &ImapConfig,
+    mailbox: &str,
+    timeout: Option<u64>,
+) -> Result<i32> {
     let mut session = open_imap_session(imap_config).await?;
 
     session

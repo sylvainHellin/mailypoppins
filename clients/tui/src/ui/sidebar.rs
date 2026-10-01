@@ -76,7 +76,10 @@ fn wrap_to(text: &str, width: usize, rows: usize) -> Vec<String> {
             if consumed == 0 {
                 // `width` is narrower than the first glyph: emit it alone
                 // rather than loop forever on a line that can never fit.
-                let first = word.chars().next().expect("split_whitespace yields non-empty words");
+                let first = word
+                    .chars()
+                    .next()
+                    .expect("split_whitespace yields non-empty words");
                 lines.push(first.to_string());
                 word = &word[first.len_utf8()..];
                 if word.is_empty() {
@@ -321,7 +324,10 @@ mod tests {
             wrap_to("üüüüüüü", 4, 2),
             vec!["üüüü".to_string(), "üüü".to_string()]
         );
-        assert_eq!(wrap_to("anything", 0, 2), vec![String::new(), String::new()]);
+        assert_eq!(
+            wrap_to("anything", 0, 2),
+            vec![String::new(), String::new()]
+        );
     }
 
     /// The wrap is measured in display cells: a width-2 glyph fills two of
@@ -331,7 +337,10 @@ mod tests {
         let wrapped = wrap_to("\u{65e5}\u{672c}\u{8a9e}\u{306e}", 4, 2);
         assert_eq!(
             wrapped,
-            vec!["\u{65e5}\u{672c}".to_string(), "\u{8a9e}\u{306e}".to_string()]
+            vec![
+                "\u{65e5}\u{672c}".to_string(),
+                "\u{8a9e}\u{306e}".to_string()
+            ]
         );
         assert!(wrapped.iter().all(|l| display_width(l) <= 4));
     }
@@ -379,7 +388,11 @@ mod tests {
             "and its reason, wrapped rather than cut at the preamble:\n{frame}"
         );
         assert!(frame.contains("user"), "including its tail:\n{frame}");
-        assert_eq!(sync_health_rows(&app), 3, "the block is paid for in the layout");
+        assert_eq!(
+            sync_health_rows(&app),
+            3,
+            "the block is paid for in the layout"
+        );
     }
 
     /// A healthy account, and an account that has not synced yet, add nothing.
@@ -387,7 +400,9 @@ mod tests {
     fn a_healthy_sidebar_says_nothing_about_sync_health() {
         for health in [
             SyncHealth::Unknown,
-            SyncHealth::Ok { at: chrono::Local::now() },
+            SyncHealth::Ok {
+                at: chrono::Local::now(),
+            },
         ] {
             let app = app_with(vec![account("tum", health)], 0);
             assert_eq!(sync_failure_lines(&app), None);
@@ -403,7 +418,12 @@ mod tests {
     fn the_line_follows_the_active_account() {
         let accounts = vec![
             account("perso", failed_at(15, 42)),
-            account("tum", SyncHealth::Ok { at: chrono::Local::now() }),
+            account(
+                "tum",
+                SyncHealth::Ok {
+                    at: chrono::Local::now(),
+                },
+            ),
         ];
         let mut app = app_with(accounts, 0);
         assert!(sync_failure_lines(&app).is_some());

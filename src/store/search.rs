@@ -160,7 +160,10 @@ pub fn search_ast(
     // expression is generated, so a failure is a bug in the translation and not
     // something to hand to the user as SQL.
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(binds.iter().map(|b| b.as_ref())), map)
+        .query_map(
+            rusqlite::params_from_iter(binds.iter().map(|b| b.as_ref())),
+            map,
+        )
         .context("running the full-text search")?;
     let mut out = Vec::new();
     for hit in rows {
@@ -208,7 +211,10 @@ mod tests {
 
     #[test]
     fn a_plain_query_becomes_and_ed_quoted_terms() {
-        assert_eq!(fts_expression("hello world").unwrap(), "\"hello\" \"world\"");
+        assert_eq!(
+            fts_expression("hello world").unwrap(),
+            "\"hello\" \"world\""
+        );
     }
 
     #[test]
@@ -246,9 +252,15 @@ mod tests {
 
     #[test]
     fn known_fields_become_column_filters() {
-        assert_eq!(fts_expression("subject:invoice").unwrap(), "subject:\"invoice\"");
+        assert_eq!(
+            fts_expression("subject:invoice").unwrap(),
+            "subject:\"invoice\""
+        );
         assert_eq!(fts_expression("from:ada").unwrap(), "from_:\"ada\"");
-        assert_eq!(fts_expression("body:ledger").unwrap(), "body_text:\"ledger\"");
+        assert_eq!(
+            fts_expression("body:ledger").unwrap(),
+            "body_text:\"ledger\""
+        );
     }
 
     #[test]

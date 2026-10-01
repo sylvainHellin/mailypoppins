@@ -108,7 +108,10 @@ pub struct EnvelopeRecord {
 /// mailboxes named in `mailbox_filter` when that filter is non-empty (matched
 /// case-insensitively against both the mailbox id and its sidebar label).
 /// Mailbox directories that do not exist contribute nothing.
-pub fn collect_records(accounts: &[AccountConfig], mailbox_filter: &[String]) -> Vec<EnvelopeRecord> {
+pub fn collect_records(
+    accounts: &[AccountConfig],
+    mailbox_filter: &[String],
+) -> Vec<EnvelopeRecord> {
     let mut rows: Vec<(SortKey, EnvelopeRecord)> = Vec::new();
 
     for account in accounts {
@@ -122,8 +125,7 @@ pub fn collect_records(accounts: &[AccountConfig], mailbox_filter: &[String]) ->
         let selected: Vec<String> = build_mailboxes(account)
             .into_iter()
             .filter_map(|mailbox| {
-                mailbox_selected(&mailbox.id, &mailbox.label, mailbox_filter)
-                    .then_some(mailbox.id)
+                mailbox_selected(&mailbox.id, &mailbox.label, mailbox_filter).then_some(mailbox.id)
             })
             .collect();
 
@@ -257,7 +259,11 @@ mod tests {
         assert!(mailbox_selected("inbox", "Inbox", &["INBOX".to_string()]));
         assert!(mailbox_selected("inbox", "Inbox", &["inbox".to_string()]));
         assert!(!mailbox_selected("inbox", "Inbox", &["sent".to_string()]));
-        assert!(mailbox_selected("some-folder", "Some/Folder", &["Some/Folder".to_string()]));
+        assert!(mailbox_selected(
+            "some-folder",
+            "Some/Folder",
+            &["Some/Folder".to_string()]
+        ));
     }
 
     /// parity: NDJSON is one compact object per line, trailing newline
@@ -274,7 +280,10 @@ mod tests {
             subject: Some("hi".to_string()),
             date_sort: "2026-01-01T00:00:00".to_string(),
             flags: vec!["seen".to_string()],
-            attachments: vec![AttachmentRecord { name: "a.pdf".to_string(), size: Some(3) }],
+            attachments: vec![AttachmentRecord {
+                name: "a.pdf".to_string(),
+                size: Some(3),
+            }],
             invite: false,
             thread: Some("<t@example.com>".to_string()),
         };

@@ -365,7 +365,10 @@ async fn mark_unread_on_session(
     message_id: &str,
     mailbox: &str,
 ) -> Result<()> {
-    info!("Marking email as unread on server: Message-ID={}", message_id);
+    info!(
+        "Marking email as unread on server: Message-ID={}",
+        message_id
+    );
     session
         .select(mailbox)
         .await

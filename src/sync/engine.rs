@@ -228,8 +228,7 @@ pub async fn run_sync_guarded_at(
     run: &SyncRun<'_>,
     span: &mut TimingSpan,
 ) -> Result<Option<SyncResult>> {
-    let Some(_lock) = crate::engine_lock::EngineLock::take_turn_at(lock_path, run.account)?
-    else {
+    let Some(_lock) = crate::engine_lock::EngineLock::take_turn_at(lock_path, run.account)? else {
         info!(
             "[sync] another engine is syncing {}; leaving the ingest to it",
             run.account
@@ -262,7 +261,14 @@ pub async fn run_sync(
     run: &SyncRun<'_>,
     span: &mut TimingSpan,
 ) -> Result<SyncResult> {
-    let SyncRun { store, blobs, account, targets, limit, dry_run } = *run;
+    let SyncRun {
+        store,
+        blobs,
+        account,
+        targets,
+        limit,
+        dry_run,
+    } = *run;
 
     let mut result = SyncResult::default();
     // Every prune this run will apply, collected here and applied after the
@@ -283,7 +289,11 @@ pub async fn run_sync(
     // across a reset would skip bodies that were never downloaded.
     let mut knowns = Vec::with_capacity(targets.len());
     for target in targets {
-        knowns.push(ingest::known_uids_with_cursor(store, account, target.role.as_str())?);
+        knowns.push(ingest::known_uids_with_cursor(
+            store,
+            account,
+            target.role.as_str(),
+        )?);
     }
 
     // Phase 2: the transport. One result per target, in target order, whatever
@@ -398,8 +408,14 @@ pub async fn run_sync(
         // #0074 declares expected. The flag is what keeps the detector off it.
         let mut gave_up = false;
         let mut note_failure = |uid: u32, error: &str| {
-            if note_ingest_failure(store, account, target.role.as_str(), &target.server_name, uid, error)
-            {
+            if note_ingest_failure(
+                store,
+                account,
+                target.role.as_str(),
+                &target.server_name,
+                uid,
+                error,
+            ) {
                 unmet.push(uid);
             } else {
                 gave_up = true;
@@ -446,10 +462,9 @@ pub async fn run_sync(
                         result.uid_rebound += 1;
                     }
                     if outcome.inserted && target.role.is_inbox() {
-                        result.new_inbox_mail.push(crate::notify::NewMailMeta::new(
-                            &email.from,
-                            &email.subject,
-                        ));
+                        result
+                            .new_inbox_mail
+                            .push(crate::notify::NewMailMeta::new(&email.from, &email.subject));
                     }
                     result.fresh_observations.push(FreshObservation {
                         role: target.role.clone(),
@@ -679,7 +694,8 @@ mod tests {
         ) -> Vec<Result<MailboxFetch>> {
             let mut out = Vec::with_capacity(targets.len());
             for (target, known) in targets.iter().zip(knowns) {
-                self.seen.push((target.server_name.clone(), limit, known.uids.len()));
+                self.seen
+                    .push((target.server_name.clone(), limit, known.uids.len()));
                 let mut next = self
                     .passes
                     .get_mut(&target.server_name)
@@ -739,11 +755,19 @@ mod tests {
         MailboxFetch {
             messages: messages
                 .into_iter()
-                .map(|(uid, raw)| FetchedRaw { uid, raw, flags: MessageFlags::default() })
+                .map(|(uid, raw)| FetchedRaw {
+                    uid,
+                    raw,
+                    flags: MessageFlags::default(),
+                })
                 .collect(),
             skipped: 0,
             known_flags: Vec::new(),
-            state: MailboxState { uid_validity: Some(7), uid_next: Some(200), exists: 2 },
+            state: MailboxState {
+                uid_validity: Some(7),
+                uid_next: Some(200),
+                exists: 2,
+            },
             vanished: Vec::new(),
             listed,
             uidvalidity_reset: false,
@@ -762,8 +786,14 @@ mod tests {
 
     fn targets() -> Vec<SyncTarget> {
         vec![
-            SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() },
-            SyncTarget { role: MailboxRole::Archive, server_name: "Archive".into() },
+            SyncTarget {
+                role: MailboxRole::Inbox,
+                server_name: "INBOX".into(),
+            },
+            SyncTarget {
+                role: MailboxRole::Archive,
+                server_name: "Archive".into(),
+            },
         ]
     }
 
@@ -778,7 +808,11 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let store = Store::open(tmp.path().join("store.sqlite3")).unwrap();
             let blobs = BlobStore::new(tmp.path().join("blobs"));
-            Self { _tmp: tmp, store, blobs }
+            Self {
+                _tmp: tmp,
+                store,
+                blobs,
+            }
         }
 
         fn run(&self, backend: &mut FakeBackend, targets: &[SyncTarget]) -> SyncResult {
@@ -866,7 +900,9 @@ mod tests {
         }
 
         fn cursor_mark(&self, mailbox: &str) -> Option<u32> {
-            ingest::known_uids_with_cursor(&self.store, "acct", mailbox).unwrap().arrival_mark
+            ingest::known_uids_with_cursor(&self.store, "acct", mailbox)
+                .unwrap()
+                .arrival_mark
         }
 
         /// The persisted `(hash, count, streak)` of the #0115 detector, or
@@ -888,12 +924,22 @@ mod tests {
     #[test]
     fn a_streak_continues_only_on_an_identical_fingerprint() {
         let first = fingerprint(&[102, 101]);
-        assert_eq!(first, fingerprint(&[101, 102]), "the UID set is order-independent");
+        assert_eq!(
+            first,
+            fingerprint(&[101, 102]),
+            "the UID set is order-independent"
+        );
         assert_ne!(first, fingerprint(&[101, 103]));
 
         assert_eq!(advance_streak(None, first), (first.0, first.1, 1));
-        assert_eq!(advance_streak(Some((first.0, first.1, 1)), first), (first.0, first.1, 2));
-        assert_eq!(advance_streak(Some((first.0, first.1, 9)), first), (first.0, first.1, 10));
+        assert_eq!(
+            advance_streak(Some((first.0, first.1, 1)), first),
+            (first.0, first.1, 2)
+        );
+        assert_eq!(
+            advance_streak(Some((first.0, first.1, 9)), first),
+            (first.0, first.1, 10)
+        );
 
         let other = fingerprint(&[101, 103]);
         assert_eq!(
@@ -902,13 +948,20 @@ mod tests {
             "a different set starts over"
         );
         // A count that disagrees is a new fingerprint even if the hash did not.
-        assert_eq!(advance_streak(Some((first.0, first.1 + 1, 4)), first), (first.0, first.1, 1));
+        assert_eq!(
+            advance_streak(Some((first.0, first.1 + 1, 4)), first),
+            (first.0, first.1, 1)
+        );
 
         let loud: Vec<u32> = (1..=32).filter(|&s| streak_is_loud(s)).collect();
         assert_eq!(loud, vec![2, 3, 10, 20, 30]);
 
         assert_eq!(parse_streak_row("7:2:3"), Some((7, 2, 3)));
-        assert_eq!(parse_streak_row("7:2"), None, "a malformed row starts the streak over");
+        assert_eq!(
+            parse_streak_row("7:2"),
+            None,
+            "a malformed row starts the streak over"
+        );
         assert_eq!(parse_streak_row("7:2:3:4"), None);
     }
 
@@ -918,7 +971,10 @@ mod tests {
     #[test]
     fn a_pass_that_downloads_the_same_uids_again_reports_a_fetch_that_is_not_converging() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
         let same = || Ok(fetch(vec![(101, raw("one")), (102, raw("two"))]));
         backend.script(
@@ -927,7 +983,10 @@ mod tests {
         );
 
         let first = fx.run(&mut backend, &targets);
-        assert!(first.non_converging.is_empty(), "one download of a UID set proves nothing");
+        assert!(
+            first.non_converging.is_empty(),
+            "one download of a UID set proves nothing"
+        );
         assert_eq!(fx.streak("inbox").map(|s| s.2), Some(1));
 
         let second = fx.run(&mut backend, &targets);
@@ -935,11 +994,18 @@ mod tests {
         assert_eq!(fx.streak("inbox").map(|s| s.2), Some(2));
 
         let third = fx.run(&mut backend, &targets);
-        assert_eq!(third.non_converging, vec!["INBOX".to_string()], "and keeps saying it");
+        assert_eq!(
+            third.non_converging,
+            vec!["INBOX".to_string()],
+            "and keeps saying it"
+        );
         assert_eq!(fx.streak("inbox").map(|s| s.2), Some(3));
 
         let moved_on = fx.run(&mut backend, &targets);
-        assert!(moved_on.non_converging.is_empty(), "a different set is a fetch making progress");
+        assert!(
+            moved_on.non_converging.is_empty(),
+            "a different set is a fetch making progress"
+        );
         assert_eq!(fx.streak("inbox").map(|s| s.2), Some(1));
     }
 
@@ -949,7 +1015,10 @@ mod tests {
     #[test]
     fn a_short_repeat_pass_neither_counts_nor_resets_the_streak() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
         let same = || fetch(vec![(101, raw("one")), (102, raw("two"))]);
         let truncated = || {
@@ -964,8 +1033,15 @@ mod tests {
         assert_eq!(fx.streak("inbox").map(|s| s.2), Some(1));
 
         let cut = fx.run(&mut backend, &targets);
-        assert!(cut.non_converging.is_empty(), "a truncated pass may repeat itself");
-        assert_eq!(fx.streak("inbox").map(|s| s.2), Some(1), "and leaves the marker alone");
+        assert!(
+            cut.non_converging.is_empty(),
+            "a truncated pass may repeat itself"
+        );
+        assert_eq!(
+            fx.streak("inbox").map(|s| s.2),
+            Some(1),
+            "and leaves the marker alone"
+        );
 
         let cut_again = fx.run(&mut backend, &targets);
         assert!(cut_again.non_converging.is_empty());
@@ -977,7 +1053,10 @@ mod tests {
     #[test]
     fn a_uidvalidity_reset_clears_the_convergence_marker() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
         let same = || Ok(fetch(vec![(101, raw("one")), (102, raw("two"))]));
         let mut reset = fetch(vec![(1, raw("one")), (2, raw("two"))]);
@@ -991,7 +1070,11 @@ mod tests {
 
         let after = fx.run(&mut backend, &targets);
         assert!(after.non_converging.is_empty());
-        assert_eq!(fx.streak("inbox"), None, "the marker is dropped with the modseq");
+        assert_eq!(
+            fx.streak("inbox"),
+            None,
+            "the marker is dropped with the modseq"
+        );
     }
 
     /// #0115: a pass with nothing new is the fetch converging, which is what
@@ -999,13 +1082,19 @@ mod tests {
     #[test]
     fn a_pass_with_nothing_new_clears_the_convergence_marker() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
         let same = || Ok(fetch(vec![(101, raw("one")), (102, raw("two"))]));
         backend.script("INBOX", vec![same(), same(), Ok(fetch(vec![]))]);
 
         fx.run(&mut backend, &targets);
-        assert_eq!(fx.run(&mut backend, &targets).non_converging, vec!["INBOX".to_string()]);
+        assert_eq!(
+            fx.run(&mut backend, &targets).non_converging,
+            vec!["INBOX".to_string()]
+        );
 
         let quiet = fx.run(&mut backend, &targets);
         assert!(quiet.non_converging.is_empty());
@@ -1021,7 +1110,10 @@ mod tests {
     #[test]
     fn a_message_the_store_gave_up_on_is_not_a_fetch_that_fails_to_converge() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
         let poisoned = || Ok(fetch(vec![(105, unparsable())]));
         let passes = ingest::MAX_INGEST_ATTEMPTS + 2;
@@ -1033,7 +1125,11 @@ mod tests {
                 result.non_converging.is_empty(),
                 "pass {pass} downloaded a message it cannot write, which is not a repeat"
             );
-            assert_eq!(fx.streak("inbox"), None, "pass {pass} leaves no marker behind");
+            assert_eq!(
+                fx.streak("inbox"),
+                None,
+                "pass {pass} leaves no marker behind"
+            );
         }
 
         assert!(
@@ -1041,7 +1137,10 @@ mod tests {
                 >= ingest::MAX_INGEST_ATTEMPTS,
             "the store did give up, so the silence is the gave-up path and not a retry"
         );
-        assert!(fx.rows("inbox").is_empty(), "and the message still has no row");
+        assert!(
+            fx.rows("inbox").is_empty(),
+            "and the message still has no row"
+        );
     }
 
     /// The baseline: what the backend hands back is ingested, counted and
@@ -1051,14 +1150,21 @@ mod tests {
         let fx = Fixture::new();
         let targets = targets();
         let mut backend = FakeBackend::default();
-        backend.script("INBOX", vec![Ok(fetch(vec![(101, raw("one")), (102, raw("two"))]))]);
+        backend.script(
+            "INBOX",
+            vec![Ok(fetch(vec![(101, raw("one")), (102, raw("two"))]))],
+        );
         backend.script("Archive", vec![Ok(fetch(vec![(55, raw("old"))]))]);
 
         let result = fx.run(&mut backend, &targets);
 
         assert_eq!(result.saved, 3);
         assert_eq!(result.new_inbox_mail.len(), 2, "only inbox arrivals notify");
-        assert_eq!(result.fresh_observations.len(), 3, "every ingest feeds the contacts hook");
+        assert_eq!(
+            result.fresh_observations.len(),
+            3,
+            "every ingest feeds the contacts hook"
+        );
         assert_eq!(fx.rows("inbox"), vec![101, 102]);
         assert_eq!(fx.rows("archive"), vec![55]);
         // The cursor is the highest UID this pass ingested, and the next pass
@@ -1073,7 +1179,10 @@ mod tests {
         let asked = &backend.seen[2..];
         assert_eq!(
             asked,
-            &[("INBOX".to_string(), usize::MAX, 2), ("Archive".to_string(), usize::MAX, 1)],
+            &[
+                ("INBOX".to_string(), usize::MAX, 2),
+                ("Archive".to_string(), usize::MAX, 1)
+            ],
             "pass 2 hands the backend the skip list pass 1 wrote, in target order"
         );
     }
@@ -1089,7 +1198,10 @@ mod tests {
     #[test]
     fn an_unwritable_message_holds_the_mark_down_and_the_retry_writes_it_once() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
 
         // Pass 0 seeds the row a later prune will delete, so `pruned` is
@@ -1111,24 +1223,51 @@ mod tests {
 
         let result = fx.run(&mut backend, &targets);
 
-        assert_eq!(result.saved, 1, "the poisoned message does not stop the one beside it");
-        assert_eq!(fx.rows("inbox"), vec![90, 104], "and 105 is simply not there");
+        assert_eq!(
+            result.saved, 1,
+            "the poisoned message does not stop the one beside it"
+        );
+        assert_eq!(
+            fx.rows("inbox"),
+            vec![90, 104],
+            "and 105 is simply not there"
+        );
         assert_eq!(
             fx.cursor_mark("inbox"),
             Some(104),
             "the mark sits below the message that was not written"
         );
-        assert_eq!(result.pruned, 0, "and the same failure suspends this pass's prune");
+        assert_eq!(
+            result.pruned, 0,
+            "and the same failure suspends this pass's prune"
+        );
         assert_eq!(result.prunes_deferred, 1);
-        assert_eq!(ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105), 1);
+        assert_eq!(
+            ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105),
+            1
+        );
 
         let result = fx.run(&mut backend, &targets);
 
         assert_eq!(result.saved, 1);
-        assert_eq!(fx.cursor_mark("inbox"), None, "a pass that wrote what it owed reopens the gate");
-        assert_eq!(ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105), 0);
-        assert_eq!(result.pruned, 1, "and the reopened gate applies the prune it deferred");
-        assert_eq!(fx.rows("inbox"), vec![104, 105], "written once, and the vanished row is gone");
+        assert_eq!(
+            fx.cursor_mark("inbox"),
+            None,
+            "a pass that wrote what it owed reopens the gate"
+        );
+        assert_eq!(
+            ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105),
+            0
+        );
+        assert_eq!(
+            result.pruned, 1,
+            "and the reopened gate applies the prune it deferred"
+        );
+        assert_eq!(
+            fx.rows("inbox"),
+            vec![104, 105],
+            "written once, and the vanished row is gone"
+        );
     }
 
     /// #0113: a body pass that stopped at its deadline is a short pass, and
@@ -1146,7 +1285,10 @@ mod tests {
     #[test]
     fn a_pass_cut_by_the_body_deadline_defers_the_prune_records_no_modseq_and_resumes() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
 
         // Pass 0 seeds the row the prune will want to delete, so `pruned` is
@@ -1165,7 +1307,11 @@ mod tests {
         rest.highest_modseq = Some(4_100);
         backend.script(
             "INBOX",
-            vec![Ok(fetch(vec![(90, raw("doomed"))])), Ok(truncated), Ok(rest)],
+            vec![
+                Ok(fetch(vec![(90, raw("doomed"))])),
+                Ok(truncated),
+                Ok(rest),
+            ],
         );
 
         let seed = fx.run(&mut backend, &targets);
@@ -1173,20 +1319,40 @@ mod tests {
 
         let cut = fx.run(&mut backend, &targets);
 
-        assert_eq!(cut.saved, 1, "a stopped pass still ingests every body it did collect");
+        assert_eq!(
+            cut.saved, 1,
+            "a stopped pass still ingests every body it did collect"
+        );
         assert_eq!(cut.bodies_truncated, 1, "and says which mailbox was cut");
-        assert_eq!(cut.pruned, 0, "a pass that skipped a body may not delete a row");
+        assert_eq!(
+            cut.pruned, 0,
+            "a pass that skipped a body may not delete a row"
+        );
         assert_eq!(cut.prunes_deferred, 1);
-        assert_eq!(fx.modseq("inbox"), None, "and vouches for no flag it did not look at");
+        assert_eq!(
+            fx.modseq("inbox"),
+            None,
+            "and vouches for no flag it did not look at"
+        );
         assert_eq!(fx.rows("inbox"), vec![90, 92]);
 
         let done = fx.run(&mut backend, &targets);
 
-        assert_eq!(done.saved, 1, "the backlog resumes on the next pass, from the same cursor");
+        assert_eq!(
+            done.saved, 1,
+            "the backlog resumes on the next pass, from the same cursor"
+        );
         assert_eq!(done.bodies_truncated, 0);
-        assert_eq!(done.pruned, 1, "which reopens the gate and applies the prune it held");
+        assert_eq!(
+            done.pruned, 1,
+            "which reopens the gate and applies the prune it held"
+        );
         assert_eq!(fx.rows("inbox"), vec![91, 92]);
-        assert_eq!(fx.modseq("inbox"), Some(4_100), "a complete pass records its resume point");
+        assert_eq!(
+            fx.modseq("inbox"),
+            Some(4_100),
+            "a complete pass records its resume point"
+        );
     }
 
     /// #0074: the mark may not become a deadlock. A message the store rejects
@@ -1196,27 +1362,47 @@ mod tests {
     #[test]
     fn a_permanently_unwritable_message_stops_holding_the_prune_after_three_passes() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
         let poisoned = || {
             let mut f = fetch(vec![(105, unparsable())]);
             f.vanished = vec![90];
             Ok(f)
         };
-        backend.script("INBOX", vec![poisoned(), poisoned(), poisoned(), poisoned()]);
+        backend.script(
+            "INBOX",
+            vec![poisoned(), poisoned(), poisoned(), poisoned()],
+        );
 
         for pass in 1..ingest::MAX_INGEST_ATTEMPTS {
             let result = fx.run(&mut backend, &targets);
-            assert_eq!(fx.cursor_mark("inbox"), Some(104), "pass {pass} still owes the message");
+            assert_eq!(
+                fx.cursor_mark("inbox"),
+                Some(104),
+                "pass {pass} still owes the message"
+            );
             assert_eq!(result.pruned, 0, "pass {pass} keeps the prune suspended");
         }
 
         // The last attempt is the give-up: the UID drops out of `unmet`, so it
         // neither lowers the mark nor reports the pass short from here on.
         let result = fx.run(&mut backend, &targets);
-        assert_eq!(fx.cursor_mark("inbox"), None, "a given-up UID leaves no mark behind");
-        assert_eq!(result.prunes_deferred, 0, "and no longer reports the pass short");
-        assert_eq!(ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105), 3);
+        assert_eq!(
+            fx.cursor_mark("inbox"),
+            None,
+            "a given-up UID leaves no mark behind"
+        );
+        assert_eq!(
+            result.prunes_deferred, 0,
+            "and no longer reports the pass short"
+        );
+        assert_eq!(
+            ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105),
+            3
+        );
     }
 
     /// #0074 review, through the loop: a UIDVALIDITY reset clears the mailbox's
@@ -1226,16 +1412,25 @@ mod tests {
     #[test]
     fn a_uidvalidity_reset_clears_the_mailboxs_failure_counts() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
         let poisoned = || Ok(fetch(vec![(105, unparsable())]));
         let mut after_reset = fetch(vec![(105, unparsable())]);
         after_reset.uidvalidity_reset = true;
-        backend.script("INBOX", vec![poisoned(), poisoned(), Ok(after_reset), poisoned()]);
+        backend.script(
+            "INBOX",
+            vec![poisoned(), poisoned(), Ok(after_reset), poisoned()],
+        );
 
         fx.run(&mut backend, &targets);
         fx.run(&mut backend, &targets);
-        assert_eq!(ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105), 2);
+        assert_eq!(
+            ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105),
+            2
+        );
 
         let result = fx.run(&mut backend, &targets);
         assert_eq!(result.uidvalidity_resets, 1);
@@ -1245,8 +1440,15 @@ mod tests {
             "the reset wiped the count and this pass's own failure is the first again"
         );
         fx.run(&mut backend, &targets);
-        assert_eq!(ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105), 2);
-        assert_eq!(fx.cursor_mark("inbox"), Some(104), "still retrying, so still owed");
+        assert_eq!(
+            ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105),
+            2
+        );
+        assert_eq!(
+            fx.cursor_mark("inbox"),
+            Some(104),
+            "still retrying, so still owed"
+        );
     }
 
     /// #0072/#0055: prunes run after *every* target is ingested, so a message
@@ -1271,7 +1473,11 @@ mod tests {
 
         assert_eq!(result.pruned, 1);
         assert!(fx.rows("inbox").is_empty(), "the inbox row goes");
-        assert_eq!(fx.rows("archive"), vec![7], "and the archive row is already there");
+        assert_eq!(
+            fx.rows("archive"),
+            vec![7],
+            "and the archive row is already there"
+        );
     }
 
     /// The coverage gate is account-wide: one target that came back short
@@ -1296,15 +1502,26 @@ mod tests {
 
         assert_eq!(result.pruned, 0);
         assert_eq!(result.prunes_deferred, 1);
-        assert_eq!(fx.rows("inbox"), vec![101], "the row stays until a pass sees everything");
-        assert_eq!(fx.rows("archive"), vec![55], "and the failed target is left untouched");
+        assert_eq!(
+            fx.rows("inbox"),
+            vec![101],
+            "the row stays until a pass sees everything"
+        );
+        assert_eq!(
+            fx.rows("archive"),
+            vec![55],
+            "and the failed target is left untouched"
+        );
     }
 
     /// `dry_run` counts and writes nothing: no rows, no cursor, no prune.
     #[test]
     fn a_dry_run_touches_neither_the_store_nor_the_blobs() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
         let mut f = fetch(vec![(101, raw("one")), (102, raw("two"))]);
         f.vanished = vec![90];
@@ -1312,11 +1529,20 @@ mod tests {
 
         let result = fx.run_with(&mut backend, &targets, 50, true);
 
-        assert_eq!(result.saved, 2, "it still reports what it would have ingested");
+        assert_eq!(
+            result.saved, 2,
+            "it still reports what it would have ingested"
+        );
         assert!(fx.rows("inbox").is_empty());
         assert_eq!(result.pruned, 0);
-        assert!(result.fresh_observations.is_empty(), "and feeds the contacts hook nothing");
-        assert_eq!(backend.seen[0].1, 50, "the limit reaches the transport verbatim");
+        assert!(
+            result.fresh_observations.is_empty(),
+            "and feeds the contacts hook nothing"
+        );
+        assert_eq!(
+            backend.seen[0].1, 50,
+            "the limit reaches the transport verbatim"
+        );
     }
 
     /// Flags are the second status axis (#TKT-0051) and arrive only on rows the
@@ -1324,13 +1550,23 @@ mod tests {
     #[test]
     fn known_flags_from_the_backend_are_applied_to_rows_the_store_already_holds() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
         backend.script("INBOX", vec![Ok(fetch(vec![(101, raw("one"))]))]);
         fx.run(&mut backend, &targets);
 
         let mut flagged = fetch(vec![]);
-        flagged.known_flags = vec![(101, MessageFlags { seen: true, answered: true, ..Default::default() })];
+        flagged.known_flags = vec![(
+            101,
+            MessageFlags {
+                seen: true,
+                answered: true,
+                ..Default::default()
+            },
+        )];
         flagged.skipped = 1;
         backend.script("INBOX", vec![Ok(flagged)]);
         let result = fx.run(&mut backend, &targets);
@@ -1362,7 +1598,10 @@ mod tests {
     #[test]
     fn a_condstore_modseq_survives_the_passes_that_cannot_vouch_for_one() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Inbox, server_name: "INBOX".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Inbox,
+            server_name: "INBOX".into(),
+        }];
         let mut backend = FakeBackend::default();
 
         // Pass 1 is a full pass over a CONDSTORE server: it records a modseq.
@@ -1423,7 +1662,10 @@ mod tests {
     #[test]
     fn n_listed_copies_of_one_message_id_get_n_rows_and_the_next_pass_skips_them_all() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Sent,
+            server_name: "Sent Items".into(),
+        }];
         let mut backend = FakeBackend::default();
         let copy = || raw("dup");
         backend.script(
@@ -1449,9 +1691,16 @@ mod tests {
 
         let second = fx.run(&mut backend, &targets);
 
-        assert_eq!(second.saved, 0, "an unchanged mailbox has nothing new on the next pass");
+        assert_eq!(
+            second.saved, 0,
+            "an unchanged mailbox has nothing new on the next pass"
+        );
         assert_eq!(second.uid_rebound, 0);
-        assert_eq!(fx.rows("sent"), vec![6540, 6542, 6543], "and no row's uid moved");
+        assert_eq!(
+            fx.rows("sent"),
+            vec![6540, 6542, 6543],
+            "and no row's uid moved"
+        );
         assert_eq!(
             backend.seen[1].2, 3,
             "the skip list pass 2 is handed holds every copy the server lists"
@@ -1479,13 +1728,21 @@ mod tests {
             let mut stmt = conn
                 .prepare("SELECT id FROM messages WHERE mailbox = 'inbox' ORDER BY id")
                 .unwrap();
-            let out = stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+            let out = stmt
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
             out
         };
         for id in &ids {
             crate::store::write::move_row(&fx.store, *id, "archive").unwrap();
         }
-        assert_eq!(fx.rows("archive"), vec![-ids[1], -ids[0]], "both wait on the sentinel");
+        assert_eq!(
+            fx.rows("archive"),
+            vec![-ids[1], -ids[0]],
+            "both wait on the sentinel"
+        );
 
         // The server acknowledges: gone from INBOX, two copies in Archive.
         let mut gone = fetch(vec![]);
@@ -1494,8 +1751,14 @@ mod tests {
         backend.script("Archive", vec![Ok(fetch(vec![(7, copy()), (8, copy())]))]);
         let result = fx.run(&mut backend, &targets);
 
-        assert_eq!(result.uid_rebound, 2, "both sentinel rows follow their message");
-        assert_eq!(result.saved, 0, "and neither copy is invented as a third row");
+        assert_eq!(
+            result.uid_rebound, 2,
+            "both sentinel rows follow their message"
+        );
+        assert_eq!(
+            result.saved, 0,
+            "and neither copy is invented as a third row"
+        );
         assert_eq!(fx.rows("archive"), vec![7, 8]);
         assert_eq!(
             fx.store
@@ -1518,8 +1781,10 @@ mod tests {
     fn an_empty_listing_falls_back_to_the_unconditional_rebind() {
         for short_enumeration in [false, true] {
             let fx = Fixture::new();
-            let targets =
-                vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+            let targets = vec![SyncTarget {
+                role: MailboxRole::Sent,
+                server_name: "Sent Items".into(),
+            }];
             let mut backend = FakeBackend::default();
             let blind = |uid: u32| {
                 let mut f = fetch(vec![(uid, raw("dup"))]);
@@ -1542,8 +1807,15 @@ mod tests {
             let second = fx.run(&mut backend, &targets);
 
             assert_eq!(second.saved, 0, "short_enumeration={short_enumeration}");
-            assert_eq!(second.uid_rebound, 1, "the rebind is taken with no listing to decline it");
-            assert_eq!(fx.rows("sent"), vec![6542], "one row, moved onto the newer UID");
+            assert_eq!(
+                second.uid_rebound, 1,
+                "the rebind is taken with no listing to decline it"
+            );
+            assert_eq!(
+                fx.rows("sent"),
+                vec![6542],
+                "one row, moved onto the newer UID"
+            );
         }
     }
 
@@ -1554,14 +1826,20 @@ mod tests {
     #[test]
     fn a_reset_rebinds_every_copy_onto_its_own_row() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Sent,
+            server_name: "Sent Items".into(),
+        }];
         let mut backend = FakeBackend::default();
         let copy = || raw("dup");
         let mut renumbered = fetch(vec![(11, copy()), (12, copy())]);
         renumbered.uidvalidity_reset = true;
         backend.script(
             "Sent Items",
-            vec![Ok(fetch(vec![(6540, copy()), (6542, copy())])), Ok(renumbered)],
+            vec![
+                Ok(fetch(vec![(6540, copy()), (6542, copy())])),
+                Ok(renumbered),
+            ],
         );
 
         fx.run(&mut backend, &targets);
@@ -1571,7 +1849,10 @@ mod tests {
 
         assert_eq!(result.uidvalidity_resets, 1);
         assert_eq!(result.uid_rebound, 2, "each copy follows the row it was on");
-        assert_eq!(result.saved, 0, "a renumbering must not duplicate the mailbox");
+        assert_eq!(
+            result.saved, 0,
+            "a renumbering must not duplicate the mailbox"
+        );
         assert_eq!(fx.rows("sent"), vec![11, 12]);
     }
 
@@ -1594,14 +1875,19 @@ mod tests {
     #[test]
     fn a_reset_rebinds_a_row_parked_on_a_uid_its_own_listing_still_holds() {
         let fx = Fixture::new();
-        let targets =
-            vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Sent,
+            server_name: "Sent Items".into(),
+        }];
         let mut backend = FakeBackend::default();
         let mut renumbered = fetch(vec![(10, raw("one")), (11, raw("two"))]);
         renumbered.uidvalidity_reset = true;
         backend.script(
             "Sent Items",
-            vec![Ok(fetch(vec![(11, raw("one")), (12, raw("two"))])), Ok(renumbered)],
+            vec![
+                Ok(fetch(vec![(11, raw("one")), (12, raw("two"))])),
+                Ok(renumbered),
+            ],
         );
 
         fx.run(&mut backend, &targets);
@@ -1615,8 +1901,15 @@ mod tests {
             result.uid_rebound, 2,
             "the reset's own listing may not decline a rebind: both rows follow their message"
         );
-        assert_eq!(result.saved, 0, "so neither message is inserted a second time");
-        assert_eq!(fx.rows("sent"), vec![10, 11], "and no row is stranded on the old numbering");
+        assert_eq!(
+            result.saved, 0,
+            "so neither message is inserted a second time"
+        );
+        assert_eq!(
+            fx.rows("sent"),
+            vec![10, 11],
+            "and no row is stranded on the old numbering"
+        );
         assert_eq!(
             fx.row_ids("sent"),
             vec![(before[0].0, 10), (before[1].0, 11)],
@@ -1637,14 +1930,19 @@ mod tests {
     #[test]
     fn a_short_enumeration_rebinds_a_row_parked_on_a_uid_its_listing_holds() {
         let fx = Fixture::new();
-        let targets =
-            vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Sent,
+            server_name: "Sent Items".into(),
+        }];
         let mut backend = FakeBackend::default();
         let mut short = fetch(vec![(10, raw("one")), (11, raw("two"))]);
         short.enumeration_complete = false;
         backend.script(
             "Sent Items",
-            vec![Ok(fetch(vec![(11, raw("one")), (12, raw("two"))])), Ok(short)],
+            vec![
+                Ok(fetch(vec![(11, raw("one")), (12, raw("two"))])),
+                Ok(short),
+            ],
         );
 
         fx.run(&mut backend, &targets);
@@ -1657,8 +1955,15 @@ mod tests {
             result.uid_rebound, 2,
             "a listing that came back short may not decline a rebind either"
         );
-        assert_eq!(result.saved, 0, "so neither message is inserted a second time");
-        assert_eq!(fx.rows("sent"), vec![10, 11], "and no row is stranded on the old numbering");
+        assert_eq!(
+            result.saved, 0,
+            "so neither message is inserted a second time"
+        );
+        assert_eq!(
+            fx.rows("sent"),
+            vec![10, 11],
+            "and no row is stranded on the old numbering"
+        );
         assert_eq!(
             fx.row_ids("sent"),
             vec![(before[0].0, 10), (before[1].0, 11)],
@@ -1707,8 +2012,10 @@ mod tests {
     #[test]
     fn a_reset_wider_than_the_window_converges_on_the_next_full_sync() {
         let fx = Fixture::new();
-        let targets =
-            vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Sent,
+            server_name: "Sent Items".into(),
+        }];
         let mut backend = FakeBackend::default();
 
         // Pass 2, the detecting pass: the mailbox was recreated under a new
@@ -1744,7 +2051,10 @@ mod tests {
         let reset = fx.run_with(&mut backend, &targets, 1, false);
 
         assert_eq!(reset.uidvalidity_resets, 1);
-        assert_eq!(reset.uid_rebound, 1, "the window covered one of the two rows");
+        assert_eq!(
+            reset.uid_rebound, 1,
+            "the window covered one of the two rows"
+        );
         assert_eq!(
             fx.row_ids("sent"),
             vec![(one_row, -one_row), (two_row, 13)],
@@ -1752,7 +2062,9 @@ mod tests {
              rather than left claiming a UID the new numbering gave to another message"
         );
         assert_eq!(
-            ingest::known_uids_with_cursor(&fx.store, "acct", "sent").unwrap().uidvalidity,
+            ingest::known_uids_with_cursor(&fx.store, "acct", "sent")
+                .unwrap()
+                .uidvalidity,
             Some(8),
             "the detecting pass still records the new UIDVALIDITY, so no later pass reports a \
              reset and the fix may not depend on one"
@@ -1766,8 +2078,14 @@ mod tests {
 
         let after = fx.run(&mut backend, &targets);
 
-        assert_eq!(after.uid_rebound, 1, "`one` follows its own row onto its new UID");
-        assert_eq!(after.saved, 1, "and only `three`, which is genuinely new, is inserted");
+        assert_eq!(
+            after.uid_rebound, 1,
+            "`one` follows its own row onto its new UID"
+        );
+        assert_eq!(
+            after.saved, 1,
+            "and only `three`, which is genuinely new, is inserted"
+        );
         assert_eq!(fx.rows("sent"), vec![11, 12, 13]);
         assert_eq!(
             fx.rows_for("sent", "<one@example.com>"),
@@ -1775,9 +2093,16 @@ mod tests {
             "one message, one row, and the row it started on: the thread assignment and the \
              blob references ride on that id"
         );
-        assert_eq!(fx.rows_for("sent", "<two@example.com>"), vec![(two_row, 13)]);
+        assert_eq!(
+            fx.rows_for("sent", "<two@example.com>"),
+            vec![(two_row, 13)]
+        );
         let three = fx.rows_for("sent", "<three@example.com>");
-        assert_eq!(three.len(), 1, "and the message on the recycled UID has a row of its own");
+        assert_eq!(
+            three.len(),
+            1,
+            "and the message on the recycled UID has a row of its own"
+        );
         assert_eq!(three[0].1, 11);
     }
 
@@ -1803,9 +2128,14 @@ mod tests {
     #[test]
     fn the_message_on_a_recycled_uid_is_downloaded_after_a_windowed_reset() {
         let fx = Fixture::new();
-        let targets =
-            vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
-        let mut backend = FakeBackend { honour_skip_list: true, ..Default::default() };
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Sent,
+            server_name: "Sent Items".into(),
+        }];
+        let mut backend = FakeBackend {
+            honour_skip_list: true,
+            ..Default::default()
+        };
 
         let mut renumbered = fetch(vec![(13, raw("two"))]);
         renumbered.listed = vec![11, 12, 13];
@@ -1842,7 +2172,11 @@ mod tests {
             1,
             "and the message that was parked on that UID is not duplicated"
         );
-        assert_eq!(fx.rows("sent"), vec![11, 12, 13], "three messages, three rows");
+        assert_eq!(
+            fx.rows("sent"),
+            vec![11, 12, 13],
+            "three messages, three rows"
+        );
     }
 
     /// The other edge of the same unbinding: a row is taken off its UID only
@@ -1856,8 +2190,10 @@ mod tests {
     #[test]
     fn a_reset_leaves_a_row_alone_when_the_new_listing_has_no_uid_for_it() {
         let fx = Fixture::new();
-        let targets =
-            vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Sent,
+            server_name: "Sent Items".into(),
+        }];
         let mut backend = FakeBackend::default();
 
         // The recreated mailbox lists 12 and 13 only: 11, which `one` sits on,
@@ -1868,7 +2204,10 @@ mod tests {
         renumbered.state.uid_validity = Some(8);
         backend.script(
             "Sent Items",
-            vec![Ok(fetch(vec![(11, raw("one")), (12, raw("two"))])), Ok(renumbered)],
+            vec![
+                Ok(fetch(vec![(11, raw("one")), (12, raw("two"))])),
+                Ok(renumbered),
+            ],
         );
 
         fx.run(&mut backend, &targets);
@@ -1893,8 +2232,10 @@ mod tests {
     #[test]
     fn a_reset_that_hands_a_held_uid_to_another_message_keeps_each_row_its_own() {
         let fx = Fixture::new();
-        let targets =
-            vec![SyncTarget { role: MailboxRole::Sent, server_name: "Sent Items".into() }];
+        let targets = vec![SyncTarget {
+            role: MailboxRole::Sent,
+            server_name: "Sent Items".into(),
+        }];
         let mut backend = FakeBackend::default();
 
         let mut renumbered = fetch(vec![(5, raw("f"))]);
@@ -1903,7 +2244,10 @@ mod tests {
         renumbered.state.uid_validity = Some(8);
         backend.script(
             "Sent Items",
-            vec![Ok(fetch(vec![(5, raw("e")), (6, raw("f"))])), Ok(renumbered)],
+            vec![
+                Ok(fetch(vec![(5, raw("e")), (6, raw("f"))])),
+                Ok(renumbered),
+            ],
         );
 
         fx.run(&mut backend, &targets);
@@ -1912,7 +2256,9 @@ mod tests {
         let thread = |id: i64| -> String {
             fx.store
                 .conn()
-                .query_row("SELECT thread_id FROM messages WHERE id = ?1", [id], |r| r.get(0))
+                .query_row("SELECT thread_id FROM messages WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
                 .unwrap()
         };
         let e_thread = thread(e_row);
@@ -1922,7 +2268,11 @@ mod tests {
         let f = fx.rows_for("sent", "<f@example.com>");
         assert_eq!(f, vec![(f_row, 5)], "`f` keeps its own row, now on 5");
         assert_ne!(f[0].0, e_row, "`f` did not take over `e`'s row");
-        assert_ne!(thread(f_row), e_thread, "`f` is not filed in `e`'s conversation");
+        assert_ne!(
+            thread(f_row),
+            e_thread,
+            "`f` is not filed in `e`'s conversation"
+        );
         assert_eq!(
             fx.rows_for("sent", "<e@example.com>"),
             vec![(e_row, -e_row)],

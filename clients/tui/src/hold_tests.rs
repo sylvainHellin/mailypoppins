@@ -92,7 +92,11 @@ fn u_cancels_the_latest_hold_and_the_other_survives_when_the_first_fires() {
     app.apply_event(&event(2, KIND_SEND_HOLD_STARTED, &a));
     app.apply_event(&event(3, KIND_SEND_HOLD_STARTED, &b));
     // A ticks after B started: it must neither take the slot nor the line.
-    app.apply_event(&event(4, KIND_SEND_HOLD_TICK, &hold("op-a", 15, &a.fires_at)));
+    app.apply_event(&event(
+        4,
+        KIND_SEND_HOLD_TICK,
+        &hold("op-a", 15, &a.fires_at),
+    ));
 
     assert_eq!(app.holds.len(), 2, "both holds are armed");
     assert_eq!(
@@ -106,12 +110,20 @@ fn u_cancels_the_latest_hold_and_the_other_survives_when_the_first_fires() {
     );
     assert_eq!(cancelled_by_u(&mut app), json!("op-b"), "`u` cancels B");
 
-    app.apply_event(&event(5, KIND_SEND_HOLD_FIRED, &hold("op-a", 0, &a.fires_at)));
+    app.apply_event(&event(
+        5,
+        KIND_SEND_HOLD_FIRED,
+        &hold("op-a", 0, &a.fires_at),
+    ));
 
     assert_eq!(
         app.hold.as_ref().map(|hold| hold.operation_id.as_str()),
         Some("op-b"),
         "A firing leaves B armed"
     );
-    assert_eq!(cancelled_by_u(&mut app), json!("op-b"), "and still cancellable");
+    assert_eq!(
+        cancelled_by_u(&mut app),
+        json!("op-b"),
+        "and still cancellable"
+    );
 }

@@ -191,7 +191,11 @@ pub fn rewrite_draft_signature(
 ) -> Result<()> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
-    let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
 
     let after_open = content
         .strip_prefix("---\n")
@@ -401,7 +405,12 @@ pub fn create_reply_draft_from(
     // several mailboxes, and every one of them is a primary recipient.
     let from_addr = extract_email_address(&inbox.from);
     let mut primaries: Vec<String> = Vec::new();
-    for addr in inbox.reply_to.as_deref().map(split_addresses).unwrap_or_default() {
+    for addr in inbox
+        .reply_to
+        .as_deref()
+        .map(split_addresses)
+        .unwrap_or_default()
+    {
         let email = extract_email_address(&addr);
         let lower = email.to_lowercase();
         if !email.is_empty() && !primaries.iter().any(|p| p.to_lowercase() == lower) {
@@ -736,7 +745,11 @@ pub fn rewrite_draft_recipients(path: &Path, edit: &DraftRecipientEdit) -> Resul
 
     // Detect the dominant line ending so we can re-emit the frontmatter with
     // the same style the file already uses (avoids mixed CRLF/LF endings).
-    let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
 
     // Split off the opening fence without touching the body bytes.
     let after_open = content
@@ -929,7 +942,11 @@ pub fn rewrite_draft_recipients(path: &Path, edit: &DraftRecipientEdit) -> Resul
 pub fn append_draft_attachment(path: &Path, entry: &str) -> Result<()> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
-    let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
 
     let after_open = content
         .strip_prefix("---\n")
@@ -987,8 +1004,7 @@ pub fn append_draft_attachment(path: &Path, entry: &str) -> Result<()> {
             // continuation lines immediately following the key line.
             let mut insert_at = key_idx + 1;
             while insert_at < fm_lines.len()
-                && (fm_lines[insert_at].starts_with(' ')
-                    || fm_lines[insert_at].starts_with('\t'))
+                && (fm_lines[insert_at].starts_with(' ') || fm_lines[insert_at].starts_with('\t'))
             {
                 insert_at += 1;
             }
@@ -1033,7 +1049,9 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     #[cfg(unix)]
     let existing_mode = {
         use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o7777)
+        fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o7777)
     };
 
     // Use a PID-qualified extension so we never collide with (and clobber) a
@@ -1155,11 +1173,12 @@ enum FieldWrite {
 /// Matching is the same as [`rewrite_draft_recipients`]: only zero-indent
 /// key lines are managed, and a replaced key's continuation lines (block
 /// scalars, nested mappings) are dropped with it.
-fn rewrite_frontmatter_scalars(
-    content: &str,
-    updates: &[(&str, FieldWrite)],
-) -> Result<String> {
-    let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+fn rewrite_frontmatter_scalars(content: &str, updates: &[(&str, FieldWrite)]) -> Result<String> {
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
 
     let after_open = content
         .strip_prefix("---\n")
@@ -1295,7 +1314,9 @@ fn rewrite_frontmatter_scalars_at(path: &Path, updates: &[(&str, FieldWrite)]) -
 /// bare `id:` key. That is exactly the #0077 shape that used to be silently
 /// re-minted, so the check that catches it has to run on the `Pod` itself.
 fn reject_non_string_id(data: &gray_matter::Pod) -> Result<()> {
-    let gray_matter::Pod::Hash(map) = data else { return Ok(()) };
+    let gray_matter::Pod::Hash(map) = data else {
+        return Ok(());
+    };
     match map.get("id") {
         None | Some(gray_matter::Pod::Null) | Some(gray_matter::Pod::String(_)) => Ok(()),
         Some(other) => {
@@ -1319,11 +1340,12 @@ pub fn parse_email_draft(path: &Path) -> Result<EmailDraft> {
     let matter = Matter::<YAML>::new();
     let parsed = matter.parse(&content);
 
-    let data = parsed.data.ok_or_else(|| anyhow!("No frontmatter found in file"))?;
+    let data = parsed
+        .data
+        .ok_or_else(|| anyhow!("No frontmatter found in file"))?;
     reject_non_string_id(&data)?;
-    let frontmatter: EmailFrontmatter = data
-        .deserialize()
-        .context("Failed to parse frontmatter")?;
+    let frontmatter: EmailFrontmatter =
+        data.deserialize().context("Failed to parse frontmatter")?;
 
     let body_markdown = parsed.content.trim().to_string();
 
@@ -1338,9 +1360,21 @@ pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
     // Check that at least one recipient exists across to/cc/bcc
-    let to_empty = draft.frontmatter.to.as_deref().is_none_or(|s| s.trim().is_empty());
-    let cc_empty = draft.frontmatter.cc.as_deref().is_none_or(|s| s.trim().is_empty());
-    let bcc_empty = draft.frontmatter.bcc.as_deref().is_none_or(|s| s.trim().is_empty());
+    let to_empty = draft
+        .frontmatter
+        .to
+        .as_deref()
+        .is_none_or(|s| s.trim().is_empty());
+    let cc_empty = draft
+        .frontmatter
+        .cc
+        .as_deref()
+        .is_none_or(|s| s.trim().is_empty());
+    let bcc_empty = draft
+        .frontmatter
+        .bcc
+        .as_deref()
+        .is_none_or(|s| s.trim().is_empty());
     if to_empty && cc_empty && bcc_empty {
         return Err(anyhow!("No recipients (to, cc, and bcc are all empty)"));
     }
@@ -1362,11 +1396,7 @@ pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
             for email in split_addresses(value) {
                 let normalized = normalize_address_for_smtp(&email);
                 if normalized.parse::<lettre::message::Mailbox>().is_err() {
-                    return Err(anyhow!(
-                        "Invalid email address in '{}': {}",
-                        name,
-                        email
-                    ));
+                    return Err(anyhow!("Invalid email address in '{}': {}", name, email));
                 }
             }
         }
@@ -1388,10 +1418,7 @@ pub fn validate_draft(draft: &EmailDraft) -> Result<Vec<String>> {
                     .map(|entries| {
                         entries.flatten().any(|e| {
                             e.path().is_file()
-                                && !e
-                                    .file_name()
-                                    .to_str()
-                                    .is_some_and(|n| n.starts_with('.'))
+                                && !e.file_name().to_str().is_some_and(|n| n.starts_with('.'))
                         })
                     })
                     .unwrap_or(false);
@@ -1424,7 +1451,11 @@ pub fn preview_draft(
             .as_ref()
             .unwrap_or(&smtp_config.default_from)
     );
-    println!("{}: {}", "To".bold(), draft.frontmatter.to.as_deref().unwrap_or("(bcc only)"));
+    println!(
+        "{}: {}",
+        "To".bold(),
+        draft.frontmatter.to.as_deref().unwrap_or("(bcc only)")
+    );
 
     if let Some(cc) = &draft.frontmatter.cc {
         println!("{}: {}", "Cc".bold(), cc);
@@ -1567,8 +1598,9 @@ pub fn remove_draft_files(path: &Path) -> Result<()> {
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(anyhow::Error::from(e))
-            .context(format!("deleting the draft {}", path.display())),
+        Err(e) => {
+            Err(anyhow::Error::from(e)).context(format!("deleting the draft {}", path.display()))
+        }
     }
 }
 
@@ -1744,7 +1776,11 @@ mod tests {
     }
 
     fn make_draft(to: &str, subject: &str, body: &str, status: EmailStatus) -> EmailDraft {
-        let to_opt = if to.is_empty() { None } else { Some(to.to_string()) };
+        let to_opt = if to.is_empty() {
+            None
+        } else {
+            Some(to.to_string())
+        };
         EmailDraft {
             path: PathBuf::from("test.md"),
             frontmatter: EmailFrontmatter {
@@ -1932,7 +1968,10 @@ mod tests {
         rewrite_draft_recipients(&path, &edit).unwrap();
 
         let result = fs::read_to_string(&path).unwrap();
-        assert!(!result.contains("line one"), "literal block not consumed: {result}");
+        assert!(
+            !result.contains("line one"),
+            "literal block not consumed: {result}"
+        );
         assert!(!result.contains("line two"));
 
         let draft = parse_email_draft(&path).unwrap();
@@ -2062,7 +2101,10 @@ mod tests {
         rewrite_draft_recipients(&path, &edit).unwrap();
 
         let result = fs::read_to_string(&path).unwrap();
-        assert!(!result.contains("folded line one"), "scalar not consumed: {result}");
+        assert!(
+            !result.contains("folded line one"),
+            "scalar not consumed: {result}"
+        );
         assert!(!result.contains("folded line two"));
         // The next top-level key survives verbatim.
         assert!(
@@ -2145,13 +2187,21 @@ mod tests {
 
         let result = fs::read_to_string(&path).unwrap();
         // Frontmatter lines must use CRLF, not bare LF (no mixed endings).
-        assert!(result.contains("to: \"new@example.com\"\r\n"), "frontmatter not CRLF: {result:?}");
         assert!(
-            !result.lines().any(|l| l.starts_with("to:") && !result.contains(&format!("{l}\r"))),
+            result.contains("to: \"new@example.com\"\r\n"),
+            "frontmatter not CRLF: {result:?}"
+        );
+        assert!(
+            !result
+                .lines()
+                .any(|l| l.starts_with("to:") && !result.contains(&format!("{l}\r"))),
             "mixed endings: {result:?}"
         );
         // No lone LF that isn't part of a CRLF pair.
-        assert!(!result.replace("\r\n", "").contains('\n'), "stray LF found: {result:?}");
+        assert!(
+            !result.replace("\r\n", "").contains('\n'),
+            "stray LF found: {result:?}"
+        );
 
         let draft = parse_email_draft(&path).unwrap();
         assert_eq!(draft.frontmatter.to.as_deref(), Some("new@example.com"));
@@ -2257,7 +2307,11 @@ mod tests {
 
         let err = append_draft_attachment(&path, "/tmp/a.pdf").unwrap_err();
         assert!(format!("{err:#}").contains("inline value"), "{err:#}");
-        assert_eq!(fs::read_to_string(&path).unwrap(), original, "no write on refusal");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            original,
+            "no write on refusal"
+        );
     }
 
     /// A bare `attachments:` key (the new-draft skeleton) gains the first item
@@ -2267,8 +2321,7 @@ mod tests {
     fn test_append_attachment_to_a_bare_key() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("draft.md");
-        let original =
-            "---\nto: a@x.com\nsubject: S\nstatus: draft\nattachments:\n---\n\nBody.\n";
+        let original = "---\nto: a@x.com\nsubject: S\nstatus: draft\nattachments:\n---\n\nBody.\n";
         fs::write(&path, original).unwrap();
 
         append_draft_attachment(&path, "~/Documents/report.pdf").unwrap();
@@ -2338,8 +2391,7 @@ mod tests {
     fn test_append_attachment_escapes_quotes() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("draft.md");
-        let original =
-            "---\nto: a@x.com\nsubject: S\nstatus: draft\nattachments:\n---\n\nBody.\n";
+        let original = "---\nto: a@x.com\nsubject: S\nstatus: draft\nattachments:\n---\n\nBody.\n";
         fs::write(&path, original).unwrap();
 
         append_draft_attachment(&path, "/tmp/wei\"rd.pdf").unwrap();
@@ -2562,10 +2614,16 @@ mod tests {
 
         let after = fs::read_to_string(&path).unwrap();
         assert!(after.contains("status: sent\n"), "{after}");
-        assert!(after.contains("date: 2026-07-01T12:00:00+02:00\n"), "{after}");
+        assert!(
+            after.contains("date: 2026-07-01T12:00:00+02:00\n"),
+            "{after}"
+        );
         assert!(after.contains("x-ticket: PROJ-42\n"), "{after}");
         assert!(after.contains("  - urgent\n"), "{after}");
-        assert!(after.contains("message_id: \"<abc@example.com>\"\n"), "{after}");
+        assert!(
+            after.contains("message_id: \"<abc@example.com>\"\n"),
+            "{after}"
+        );
         assert!(after.contains("sent_at: 20"), "{after}");
         assert!(after.contains("sent_via: \"mailypoppins v"), "{after}");
         assert!(after.contains("Body stays put.\n"), "{after}");
@@ -2758,7 +2816,11 @@ mod tests {
                 create_reply_draft_from(&source, false, "me@example.com", Some(tmp.path()), None)
                     .unwrap();
             let draft = parse_email_draft(&path).unwrap();
-            assert_eq!(draft.frontmatter.to.as_deref(), Some("a@x.com, b@x.com"), "{reply_to}");
+            assert_eq!(
+                draft.frontmatter.to.as_deref(),
+                Some("a@x.com, b@x.com"),
+                "{reply_to}"
+            );
             assert_eq!(draft.frontmatter.cc, None);
 
             // Reply-all: no Reply-To mailbox is repeated into cc.
@@ -2766,7 +2828,11 @@ mod tests {
                 create_reply_draft_from(&source, true, "me@example.com", Some(tmp.path()), None)
                     .unwrap();
             let draft = parse_email_draft(&path).unwrap();
-            assert_eq!(draft.frontmatter.to.as_deref(), Some("a@x.com, b@x.com"), "{reply_to}");
+            assert_eq!(
+                draft.frontmatter.to.as_deref(),
+                Some("a@x.com, b@x.com"),
+                "{reply_to}"
+            );
             assert_eq!(
                 draft.frontmatter.cc.as_deref(),
                 Some("noreply@x.com, carol@x.com"),
@@ -2782,8 +2848,12 @@ mod tests {
         // behind `serde_yaml`) refuses the whole block, so both are checked.
         let strict = |path: &Path| {
             let raw = fs::read_to_string(path).unwrap();
-            let block: String =
-                raw.lines().skip(1).take_while(|l| *l != "---").map(|l| format!("{l}\n")).collect();
+            let block: String = raw
+                .lines()
+                .skip(1)
+                .take_while(|l| *l != "---")
+                .map(|l| format!("{l}\n"))
+                .collect();
             let value: serde_yaml::Value = serde_yaml::from_str(&block).unwrap();
             value["subject"].as_str().unwrap().to_string()
         };
@@ -2797,12 +2867,18 @@ mod tests {
             create_reply_draft_from(&source, false, "me@example.com", Some(tmp.path()), None)
                 .unwrap();
         let draft = parse_email_draft(&reply).unwrap();
-        assert_eq!(draft.frontmatter.subject, "Re: odd \u{fffe} and \u{ffff} end");
+        assert_eq!(
+            draft.frontmatter.subject,
+            "Re: odd \u{fffe} and \u{ffff} end"
+        );
         assert_eq!(strict(&reply), draft.frontmatter.subject);
         let forward =
             create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None).unwrap();
         let draft = parse_email_draft(&forward).unwrap();
-        assert_eq!(draft.frontmatter.subject, "Fwd: odd \u{fffe} and \u{ffff} end");
+        assert_eq!(
+            draft.frontmatter.subject,
+            "Fwd: odd \u{fffe} and \u{ffff} end"
+        );
         assert_eq!(strict(&forward), draft.frontmatter.subject);
     }
 

@@ -165,7 +165,14 @@ pub fn enqueue(
             account, kind, target_message_id, payload, state, attempts,
             last_error, created, updated
          ) VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, ?6, ?6)",
-        rusqlite::params![account, op.kind(), target_message_id, payload, STATE_QUEUED, now],
+        rusqlite::params![
+            account,
+            op.kind(),
+            target_message_id,
+            payload,
+            STATE_QUEUED,
+            now
+        ],
     )
     .context("inserting the pending op row")?;
     Ok(conn.last_insert_rowid())
@@ -194,9 +201,18 @@ pub fn apply_move(
         rusqlite::params![id, dest_mailbox, -id],
     )
     .context("moving the message row")?;
-    let op_id = enqueue(&tx, account, Some(id), &op, &Rollback::Move(previous.clone()))?;
+    let op_id = enqueue(
+        &tx,
+        account,
+        Some(id),
+        &op,
+        &Rollback::Move(previous.clone()),
+    )?;
     tx.commit().context("committing the move and its op")?;
-    info!("[pending_ops] queued a {} for row {id} as op {op_id}", op.kind());
+    info!(
+        "[pending_ops] queued a {} for row {id} as op {op_id}",
+        op.kind()
+    );
     Ok(Some((previous, op_id)))
 }
 
@@ -287,8 +303,12 @@ fn apply_flag_change(
         &op,
         &Rollback::Flags { id, flags: old },
     )?;
-    tx.commit().context("committing the flag change and its op")?;
-    info!("[pending_ops] queued a {} for row {id} as op {op_id}", op.kind());
+    tx.commit()
+        .context("committing the flag change and its op")?;
+    info!(
+        "[pending_ops] queued a {} for row {id} as op {op_id}",
+        op.kind()
+    );
     Ok(Some(op_id))
 }
 
@@ -329,7 +349,8 @@ pub fn apply_post_send_flag(
         .immediate_transaction()
         .context("opening the post-send flag transaction")?;
     let ids: Vec<i64> = {
-        let mut stmt = tx.prepare("SELECT id FROM messages WHERE account = ?1 AND message_id = ?2")?;
+        let mut stmt =
+            tx.prepare("SELECT id FROM messages WHERE account = ?1 AND message_id = ?2")?;
         let rows = stmt.query_map(rusqlite::params![account, message_id], |row| row.get(0))?;
         rows.collect::<rusqlite::Result<Vec<i64>>>()
             .context("listing the local copies of a sent message's source")?
@@ -347,9 +368,15 @@ pub fn apply_post_send_flag(
             .flatten();
         let old = crate::types::MessageFlags::parse(current.as_deref().unwrap_or_default());
         let new = if answered {
-            crate::types::MessageFlags { answered: true, ..old }
+            crate::types::MessageFlags {
+                answered: true,
+                ..old
+            }
         } else {
-            crate::types::MessageFlags { forwarded: true, ..old }
+            crate::types::MessageFlags {
+                forwarded: true,
+                ..old
+            }
         };
         tx.execute(
             "UPDATE messages SET flags = ?2 WHERE id = ?1",
@@ -372,7 +399,8 @@ pub fn apply_post_send_flag(
             &Rollback::None,
         )?)
     };
-    tx.commit().context("committing the post-send flag and its op")?;
+    tx.commit()
+        .context("committing the post-send flag and its op")?;
     if let Some(op_id) = op_id {
         info!("[pending_ops] queued a set_answered for {message_id} as op {op_id}");
     }
@@ -399,9 +427,9 @@ pub fn failed_ops(store: &Store, account: &str) -> Result<Vec<PendingOp>> {
 
 /// `(queued, failed)` counts in one query, for a badge.
 pub fn counts(store: &Store, account: &str) -> Result<(usize, usize)> {
-    let mut stmt = store.conn().prepare(
-        "SELECT state, COUNT(*) FROM pending_ops WHERE account = ?1 GROUP BY state",
-    )?;
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT state, COUNT(*) FROM pending_ops WHERE account = ?1 GROUP BY state")?;
     let rows = stmt.query_map([account], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
     })?;
@@ -437,7 +465,11 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingOp> {
         .as_deref()
         .and_then(|p| serde_json::from_str(p).ok())
         .ok_or_else(|| {
-            rusqlite::Error::InvalidColumnType(4, "payload".to_string(), rusqlite::types::Type::Text)
+            rusqlite::Error::InvalidColumnType(
+                4,
+                "payload".to_string(),
+                rusqlite::types::Type::Text,
+            )
         })?;
     Ok(PendingOp {
         id: row.get(0)?,
@@ -551,7 +583,10 @@ pub(crate) async fn drain<E: OpExecutor>(
                     result.failed += 1;
                 } else {
                     if let Err(e) = bump_attempt(store, row.id, &err) {
-                        warn!("[pending_ops] could not record a failed attempt on op {}: {e:#}", row.id);
+                        warn!(
+                            "[pending_ops] could not record a failed attempt on op {}: {e:#}",
+                            row.id
+                        );
                     }
                     result.still_open += 1;
                 }
@@ -748,7 +783,10 @@ fn fail_and_roll_back(store: &Store, blobs: &BlobStore, row: &PendingOp, err: &s
     let err = match apply_rollback(store, blobs, &row.rollback) {
         Ok(()) => err.to_string(),
         Err(e) => {
-            warn!("[pending_ops] op {} ({}) could not be rolled back: {e:#}", row.id, row.kind);
+            warn!(
+                "[pending_ops] op {} ({}) could not be rolled back: {e:#}",
+                row.id, row.kind
+            );
             format!("{err} (rollback failed: {e:#})")
         }
     };
@@ -906,9 +944,7 @@ mod tests {
     impl OpExecutor for FakeExecutor {
         async fn execute(&mut self, op: &ServerOp) -> Result<()> {
             self.seen.push(op.clone());
-            self.verdicts
-                .pop_front()
-                .unwrap_or(Ok(()))
+            self.verdicts.pop_front().unwrap_or(Ok(()))
         }
     }
 
@@ -939,12 +975,21 @@ mod tests {
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 1, "Receipt");
 
-        let (previous, _op_id) = apply_move(&fx.store, "alice", id, "archive", move_op("<inbox-1@example.com>"))
-            .unwrap()
-            .unwrap();
+        let (previous, _op_id) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(previous.mailbox, "inbox");
-        assert_eq!(read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox, "archive");
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "archive"
+        );
         let queued = queued_ops(&fx.store, "alice").unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].kind, "move");
@@ -958,15 +1003,27 @@ mod tests {
     async fn a_successful_drain_retires_the_row() {
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 1, "Receipt");
-        apply_move(&fx.store, "alice", id, "archive", move_op("<inbox-1@example.com>")).unwrap();
+        apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+        )
+        .unwrap();
 
         let mut exec = FakeExecutor::always_ok();
-        let result = drain(&fx.store, &fx.blobs, "alice", &mut exec, unix_now() + 10).await.unwrap();
+        let result = drain(&fx.store, &fx.blobs, "alice", &mut exec, unix_now() + 10)
+            .await
+            .unwrap();
 
         assert_eq!(result.completed, 1);
         assert_eq!(exec.seen.len(), 1, "the op ran exactly once");
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
-        assert_eq!(read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox, "archive");
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "archive"
+        );
     }
 
     /// Crash-safety with the real not-found contract: the server move landed
@@ -980,13 +1037,23 @@ mod tests {
     async fn a_queued_op_replays_after_a_simulated_crash() {
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 1, "Receipt");
-        apply_move(&fx.store, "alice", id, "archive", move_op("<inbox-1@example.com>")).unwrap();
+        apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+        )
+        .unwrap();
 
         // The "crash": the process died after the server move but before the
         // drain retired the row. On restart the row is still queued and the
         // store still shows the optimistic move.
         assert_eq!(queued_ops(&fx.store, "alice").unwrap().len(), 1);
-        assert_eq!(read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox, "archive");
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "archive"
+        );
 
         let mut exec = FakeExecutor::scripted(vec![not_found("<inbox-1@example.com>")]);
         let result = drain(&fx.store, &fx.blobs, "alice", &mut exec, unix_now() + 10)
@@ -994,10 +1061,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(exec.seen.len(), 1, "replay runs the op once");
-        assert_eq!(result.completed, 1, "a not-found replay converges, it does not fail");
+        assert_eq!(
+            result.completed, 1,
+            "a not-found replay converges, it does not fail"
+        );
         assert_eq!(result.failed, 0);
         assert_eq!(
-            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox, "archive",
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "archive",
             "a converged replay keeps the move; it is not rolled back"
         );
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
@@ -1014,26 +1085,52 @@ mod tests {
         // Not-found: converges at once, no rollback, no failed row.
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 1, "Receipt");
-        apply_move(&fx.store, "alice", id, "archive", move_op("<inbox-1@example.com>")).unwrap();
+        apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+        )
+        .unwrap();
         let mut exec = FakeExecutor::scripted(vec![not_found("<inbox-1@example.com>")]);
-        let r = drain(&fx.store, &fx.blobs, "alice", &mut exec, unix_now() + 10).await.unwrap();
+        let r = drain(&fx.store, &fx.blobs, "alice", &mut exec, unix_now() + 10)
+            .await
+            .unwrap();
         assert_eq!((r.completed, r.failed), (1, 0));
-        assert_eq!(read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox, "archive");
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "archive"
+        );
         assert!(failed_ops(&fx.store, "alice").unwrap().is_empty());
 
         // Genuine error: retried to the budget, then rolled the row home and
         // parked as failed. A not-found must never be mistaken for this.
         let id2 = fx.ingest_plain("inbox", 2, "Other");
-        apply_move(&fx.store, "alice", id2, "archive", move_op("<inbox-2@example.com>")).unwrap();
+        apply_move(
+            &fx.store,
+            "alice",
+            id2,
+            "archive",
+            move_op("<inbox-2@example.com>"),
+        )
+        .unwrap();
         let base = unix_now();
         for tick in 0..MAX_ATTEMPTS {
             let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("NO server refused"))]);
-            drain(&fx.store, &fx.blobs, "alice", &mut exec, base + (tick + 1) * 10_000_000)
-                .await
-                .unwrap();
+            drain(
+                &fx.store,
+                &fx.blobs,
+                "alice",
+                &mut exec,
+                base + (tick + 1) * 10_000_000,
+            )
+            .await
+            .unwrap();
         }
         assert_eq!(
-            read::find_by_id(&fx.store, id2).unwrap().unwrap().mailbox, "inbox",
+            read::find_by_id(&fx.store, id2).unwrap().unwrap().mailbox,
+            "inbox",
             "a genuine refusal must still roll the row home"
         );
         assert_eq!(failed_ops(&fx.store, "alice").unwrap().len(), 1);
@@ -1046,26 +1143,43 @@ mod tests {
     async fn a_transient_failure_backs_off_and_then_retries() {
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 1, "Receipt");
-        apply_move(&fx.store, "alice", id, "archive", move_op("<inbox-1@example.com>")).unwrap();
+        apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+        )
+        .unwrap();
 
         let base = unix_now();
         let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("connection reset"))]);
-        let r1 = drain(&fx.store, &fx.blobs, "alice", &mut exec, base + 5).await.unwrap();
+        let r1 = drain(&fx.store, &fx.blobs, "alice", &mut exec, base + 5)
+            .await
+            .unwrap();
         assert_eq!(r1.still_open, 1);
         let queued = queued_ops(&fx.store, "alice").unwrap();
         assert_eq!(queued[0].attempts, 1);
-        assert!(queued[0].last_error.as_deref().unwrap().contains("connection reset"));
+        assert!(queued[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("connection reset"));
 
         // Same instant: backoff (30s after one failure) has not elapsed, so the
         // op is not attempted again.
         let mut exec2 = FakeExecutor::always_ok();
-        let r2 = drain(&fx.store, &fx.blobs, "alice", &mut exec2, base + 5).await.unwrap();
+        let r2 = drain(&fx.store, &fx.blobs, "alice", &mut exec2, base + 5)
+            .await
+            .unwrap();
         assert_eq!(r2.still_open, 1);
         assert!(exec2.seen.is_empty(), "backoff must hold the retry back");
 
         // Well past the backoff window: it retries and succeeds.
         let mut exec3 = FakeExecutor::always_ok();
-        let r3 = drain(&fx.store, &fx.blobs, "alice", &mut exec3, base + 10_000_000).await.unwrap();
+        let r3 = drain(&fx.store, &fx.blobs, "alice", &mut exec3, base + 10_000_000)
+            .await
+            .unwrap();
         assert_eq!(r3.completed, 1);
         assert_eq!(exec3.seen.len(), 1);
     }
@@ -1076,8 +1190,18 @@ mod tests {
     async fn a_refused_move_fails_and_rolls_the_row_home() {
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 1, "Receipt");
-        apply_move(&fx.store, "alice", id, "archive", move_op("<inbox-1@example.com>")).unwrap();
-        assert_eq!(read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox, "archive");
+        apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+        )
+        .unwrap();
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "archive"
+        );
 
         // Fail every attempt; drive the drain past the budget with elapsed
         // backoff each time.
@@ -1085,9 +1209,15 @@ mod tests {
         let mut failed = false;
         for tick in 0..MAX_ATTEMPTS {
             let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("NO server refused"))]);
-            let r = drain(&fx.store, &fx.blobs, "alice", &mut exec, base + (tick + 1) * 10_000_000)
-                .await
-                .unwrap();
+            let r = drain(
+                &fx.store,
+                &fx.blobs,
+                "alice",
+                &mut exec,
+                base + (tick + 1) * 10_000_000,
+            )
+            .await
+            .unwrap();
             if r.failed == 1 {
                 failed = true;
             }
@@ -1095,11 +1225,18 @@ mod tests {
         assert!(failed, "the op never reached the failed state");
 
         let row = read::find_by_id(&fx.store, id).unwrap().unwrap();
-        assert_eq!(row.mailbox, "inbox", "a refused move must roll the row home");
+        assert_eq!(
+            row.mailbox, "inbox",
+            "a refused move must roll the row home"
+        );
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
         let failed_rows = failed_ops(&fx.store, "alice").unwrap();
         assert_eq!(failed_rows.len(), 1);
-        assert!(failed_rows[0].last_error.as_deref().unwrap().contains("refused"));
+        assert!(failed_rows[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("refused"));
     }
 
     /// A move that keeps failing while the source mailbox still syncs: the sync
@@ -1111,7 +1248,14 @@ mod tests {
     async fn a_refused_move_whose_slot_was_refetched_drops_the_placeholder() {
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 1, "Receipt");
-        apply_move(&fx.store, "alice", id, "archive", move_op("<inbox-1@example.com>")).unwrap();
+        apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+        )
+        .unwrap();
         // The sync re-downloads the UID the moved row no longer claims.
         let refetched = fx.ingest_plain("inbox", 1, "Receipt");
         assert_ne!(refetched, id, "the refetch is a row of its own");
@@ -1119,9 +1263,15 @@ mod tests {
         let base = unix_now();
         for tick in 0..MAX_ATTEMPTS {
             let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("NO no such mailbox"))]);
-            drain(&fx.store, &fx.blobs, "alice", &mut exec, base + (tick + 1) * 10_000_000)
-                .await
-                .unwrap();
+            drain(
+                &fx.store,
+                &fx.blobs,
+                "alice",
+                &mut exec,
+                base + (tick + 1) * 10_000_000,
+            )
+            .await
+            .unwrap();
         }
 
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
@@ -1136,8 +1286,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rows, 1, "one message, one row");
-        assert!(read::find_by_id(&fx.store, id).unwrap().is_none(), "the placeholder is gone");
-        assert_eq!(read::find_by_id(&fx.store, refetched).unwrap().unwrap().mailbox, "inbox");
+        assert!(
+            read::find_by_id(&fx.store, id).unwrap().is_none(),
+            "the placeholder is gone"
+        );
+        assert_eq!(
+            read::find_by_id(&fx.store, refetched)
+                .unwrap()
+                .unwrap()
+                .mailbox,
+            "inbox"
+        );
     }
 
     /// One row whose settlement errors must not stall the queue: the drain
@@ -1147,7 +1306,14 @@ mod tests {
         let fx = fixture();
         let stuck = fx.ingest_plain("inbox", 1, "Stuck");
         let next = fx.ingest_plain("inbox", 2, "Next");
-        apply_move(&fx.store, "alice", stuck, "archive", move_op("<inbox-1@example.com>")).unwrap();
+        apply_move(
+            &fx.store,
+            "alice",
+            stuck,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+        )
+        .unwrap();
         // Any rollback of `stuck` errors.
         fx.store
             .conn()
@@ -1160,12 +1326,25 @@ mod tests {
         let base = unix_now();
         for tick in 0..MAX_ATTEMPTS - 1 {
             let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("NO refused"))]);
-            drain(&fx.store, &fx.blobs, "alice", &mut exec, base + (tick + 1) * 10_000_000)
-                .await
-                .unwrap();
+            drain(
+                &fx.store,
+                &fx.blobs,
+                "alice",
+                &mut exec,
+                base + (tick + 1) * 10_000_000,
+            )
+            .await
+            .unwrap();
         }
         // The second op is queued behind the one about to exhaust its budget.
-        apply_move(&fx.store, "alice", next, "archive", move_op("<inbox-2@example.com>")).unwrap();
+        apply_move(
+            &fx.store,
+            "alice",
+            next,
+            "archive",
+            move_op("<inbox-2@example.com>"),
+        )
+        .unwrap();
         let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("NO refused")), Ok(())]);
         let r = drain(&fx.store, &fx.blobs, "alice", &mut exec, base + 100_000_000)
             .await
@@ -1175,7 +1354,11 @@ mod tests {
         assert_eq!(exec.seen.len(), 2, "the later op was still drained");
         let failed = failed_ops(&fx.store, "alice").unwrap();
         assert_eq!(failed.len(), 1);
-        assert!(failed[0].last_error.as_deref().unwrap().contains("rollback failed"));
+        assert!(failed[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("rollback failed"));
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
     }
 
@@ -1198,9 +1381,15 @@ mod tests {
         let base = unix_now();
         for tick in 0..MAX_ATTEMPTS {
             let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("STORE rejected"))]);
-            drain(&fx.store, &fx.blobs, "alice", &mut exec, base + (tick + 1) * 10_000_000)
-                .await
-                .unwrap();
+            drain(
+                &fx.store,
+                &fx.blobs,
+                "alice",
+                &mut exec,
+                base + (tick + 1) * 10_000_000,
+            )
+            .await
+            .unwrap();
         }
 
         let row = read::find_by_id(&fx.store, id).unwrap().unwrap();
@@ -1227,12 +1416,21 @@ mod tests {
         let base = unix_now();
         for tick in 0..MAX_ATTEMPTS {
             let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("delete refused"))]);
-            drain(&fx.store, &fx.blobs, "alice", &mut exec, base + (tick + 1) * 10_000_000)
-                .await
-                .unwrap();
+            drain(
+                &fx.store,
+                &fx.blobs,
+                "alice",
+                &mut exec,
+                base + (tick + 1) * 10_000_000,
+            )
+            .await
+            .unwrap();
         }
 
-        assert!(read::find_by_id(&fx.store, id).unwrap().is_none(), "a delete has nothing to restore");
+        assert!(
+            read::find_by_id(&fx.store, id).unwrap().is_none(),
+            "a delete has nothing to restore"
+        );
         assert_eq!(failed_ops(&fx.store, "alice").unwrap().len(), 1);
         assert_eq!(counts(&fx.store, "alice").unwrap(), (0, 1));
     }
@@ -1243,14 +1441,23 @@ mod tests {
     fn settle_retires_a_succeeded_op_and_keeps_the_local_change() {
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 1, "Receipt");
-        let (_prev, op_id) = apply_move(&fx.store, "alice", id, "archive", move_op("<inbox-1@example.com>"))
-            .unwrap()
-            .unwrap();
+        let (_prev, op_id) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+        )
+        .unwrap()
+        .unwrap();
 
         let row = row_by_id(&fx.store, op_id).unwrap().unwrap();
         settle(&fx.store, &fx.blobs, &row, Ok(())).unwrap();
 
-        assert_eq!(read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox, "archive");
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "archive"
+        );
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
     }
 
@@ -1260,15 +1467,30 @@ mod tests {
     fn settle_rolls_a_refused_op_home_and_returns_the_error() {
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 1, "Receipt");
-        let (_prev, op_id) = apply_move(&fx.store, "alice", id, "archive", move_op("<inbox-1@example.com>"))
-            .unwrap()
-            .unwrap();
+        let (_prev, op_id) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+        )
+        .unwrap()
+        .unwrap();
 
         let row = row_by_id(&fx.store, op_id).unwrap().unwrap();
-        let err = settle(&fx.store, &fx.blobs, &row, Err(anyhow::anyhow!("NO server refused"))).unwrap_err();
+        let err = settle(
+            &fx.store,
+            &fx.blobs,
+            &row,
+            Err(anyhow::anyhow!("NO server refused")),
+        )
+        .unwrap_err();
 
         assert!(format!("{err:#}").contains("refused"));
-        assert_eq!(read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox, "inbox");
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "inbox"
+        );
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
     }
 
@@ -1284,7 +1506,9 @@ mod tests {
             message_id: "<inbox-1@example.com>".to_string(),
             source_mailbox: "INBOX".to_string(),
         };
-        let (_prev, op_id) = apply_delete(&fx.store, &fx.blobs, "alice", id, op).unwrap().unwrap();
+        let (_prev, op_id) = apply_delete(&fx.store, &fx.blobs, "alice", id, op)
+            .unwrap()
+            .unwrap();
 
         let not_found = crate::ops::NotFoundOnServer {
             message_id: "<inbox-1@example.com>".to_string(),
@@ -1299,7 +1523,10 @@ mod tests {
             expected,
             "Email with Message-ID <inbox-1@example.com> not found in INBOX on server"
         );
-        assert!(read::find_by_id(&fx.store, id).unwrap().is_none(), "a delete has nothing to restore");
+        assert!(
+            read::find_by_id(&fx.store, id).unwrap().is_none(),
+            "a delete has nothing to restore"
+        );
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
     }
 
@@ -1353,7 +1580,10 @@ mod tests {
         let id = fx.ingest_plain("inbox", 1, "Question");
         let envelope = crate::outbox::Envelope {
             from: "me@example.com".to_string(),
-            recipients: vec![("bob@example.com".to_string(), crate::send::RecipientRole::To)],
+            recipients: vec![(
+                "bob@example.com".to_string(),
+                crate::send::RecipientRole::To,
+            )],
             ..Default::default()
         };
         let row_id = crate::outbox::enqueue(
@@ -1374,7 +1604,10 @@ mod tests {
             &crate::outbox::SubmitOutcome::Accepted,
         )
         .unwrap();
-        assert!(!state.is_open(), "the message is out and its row is settled");
+        assert!(
+            !state.is_open(),
+            "the message is out and its row is settled"
+        );
 
         // The bookkeeping the send owes, and a server that refuses it forever.
         apply_post_send_flag(
@@ -1388,9 +1621,15 @@ mod tests {
         let base = unix_now();
         for tick in 0..MAX_ATTEMPTS {
             let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("STORE rejected"))]);
-            drain(&fx.store, &fx.blobs, "alice", &mut exec, base + (tick + 1) * 10_000_000)
-                .await
-                .unwrap();
+            drain(
+                &fx.store,
+                &fx.blobs,
+                "alice",
+                &mut exec,
+                base + (tick + 1) * 10_000_000,
+            )
+            .await
+            .unwrap();
         }
 
         // The send is untouched: same row, same terminal state, nothing the
@@ -1398,12 +1637,23 @@ mod tests {
         let sent = crate::outbox::load(&fx.store, row_id).unwrap().unwrap();
         assert_eq!(sent.state, state);
         let sweep = crate::outbox::sweep_pending_sends(&fx.store, "alice").unwrap();
-        assert!(sweep.resubmittable.is_empty(), "a failed flag op must never re-send");
+        assert!(
+            sweep.resubmittable.is_empty(),
+            "a failed flag op must never re-send"
+        );
         assert!(sweep.stranded.is_empty());
-        assert_eq!(crate::outbox::unfinished_rows(&fx.store, "alice").unwrap().len(), 0);
+        assert_eq!(
+            crate::outbox::unfinished_rows(&fx.store, "alice")
+                .unwrap()
+                .len(),
+            0
+        );
 
         // The bit stands, and the refusal is visible.
-        assert!(read::find_by_id(&fx.store, id).unwrap().unwrap().is_answered());
+        assert!(read::find_by_id(&fx.store, id)
+            .unwrap()
+            .unwrap()
+            .is_answered());
         assert_eq!(failed_ops(&fx.store, "alice").unwrap().len(), 1);
     }
 
@@ -1423,10 +1673,15 @@ mod tests {
         .unwrap();
 
         let mut exec = FakeExecutor::scripted(vec![not_found("<inbox-1@example.com>")]);
-        let r = drain(&fx.store, &fx.blobs, "alice", &mut exec, unix_now() + 10).await.unwrap();
+        let r = drain(&fx.store, &fx.blobs, "alice", &mut exec, unix_now() + 10)
+            .await
+            .unwrap();
 
         assert_eq!((r.completed, r.failed), (1, 0));
-        assert!(read::find_by_id(&fx.store, id).unwrap().unwrap().is_forwarded());
+        assert!(read::find_by_id(&fx.store, id)
+            .unwrap()
+            .unwrap()
+            .is_forwarded());
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
     }
 
@@ -1434,11 +1689,23 @@ mod tests {
     #[test]
     fn applying_to_a_missing_row_queues_nothing() {
         let fx = fixture();
-        assert!(apply_move(&fx.store, "alice", 404, "archive", move_op("<x@x>")).unwrap().is_none());
-        assert!(apply_delete(&fx.store, &fx.blobs, "alice", 404, ServerOp::Delete {
-            message_id: "<x@x>".to_string(),
-            source_mailbox: "INBOX".to_string(),
-        }).unwrap().is_none());
+        assert!(
+            apply_move(&fx.store, "alice", 404, "archive", move_op("<x@x>"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(apply_delete(
+            &fx.store,
+            &fx.blobs,
+            "alice",
+            404,
+            ServerOp::Delete {
+                message_id: "<x@x>".to_string(),
+                source_mailbox: "INBOX".to_string(),
+            }
+        )
+        .unwrap()
+        .is_none());
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
     }
 }

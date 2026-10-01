@@ -3,17 +3,15 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
-use serde_json::json;
 use ratatui::{backend::CrosstermBackend, Terminal};
+use serde_json::json;
 
 use super::app::{
     mailbox_key, Action, App, BgResult, ComposeField, ComposeMode, ComposeWizard, Focus,
     MailboxKind, MessageRef, Overlay, SearchOverlayFocus, StatusLevel,
 };
-use super::helpers::{
-    edit_file, resume_terminal, suspend_terminal,
-};
 use super::commands;
+use super::helpers::{edit_file, resume_terminal, suspend_terminal};
 use super::session::QueryHandle;
 
 use mp_core::draft::{DraftFromSource, DraftRecipientEdit};
@@ -81,8 +79,7 @@ pub(super) fn park_until_idle(app: &mut App, action: Action, label: &str) {
 /// carrying its own `message.html` cannot overwrite the rendition.
 fn render_temp_file(stem: &str, name: &str) -> Result<PathBuf> {
     let dir = mp_core::parse::materialisation_dir(stem)?.join("render");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir.join(name))
 }
 
@@ -167,13 +164,14 @@ fn draft_attachment_files(app: &mut App) -> Option<Vec<PathBuf>> {
     }
 
     if !missing.is_empty() {
-        let level = if files.is_empty() { StatusLevel::Error } else { StatusLevel::Warning };
+        let level = if files.is_empty() {
+            StatusLevel::Error
+        } else {
+            StatusLevel::Warning
+        };
         let n = missing.len();
         let noun = if n == 1 { "attachment" } else { "attachments" };
-        app.set_status_level(
-            format!("{n} {noun} missing: {}", missing.join(", ")),
-            level,
-        );
+        app.set_status_level(format!("{n} {noun} missing: {}", missing.join(", ")), level);
         if files.is_empty() {
             return None;
         }
@@ -290,8 +288,7 @@ fn html_temp_file(html: &str, stem: &str) -> Result<PathBuf> {
     // hostile email runs scripts and loads tracking pixels (both pre-#0037
     // fixes, lost with the legacy save path in the store rebuild).
     let html = mp_core::parse::inject_csp_meta(&mp_core::parse::ensure_utf8_charset(html));
-    std::fs::write(&path, html)
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(&path, html).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }
 
@@ -474,13 +471,8 @@ fn write_draft_and_edit(
     what: &str,
 ) -> Result<()> {
     let account = app.account_config.name.clone();
-    let built = commands::draft_from_source(
-        &daemon_door(app),
-        &account,
-        msg.row_id(),
-        kind,
-        headers,
-    );
+    let built =
+        commands::draft_from_source(&daemon_door(app), &account, msg.row_id(), kind, headers);
     let (path, selector) = match built {
         Ok(pair) => pair,
         Err(e) => {
@@ -488,7 +480,12 @@ fn write_draft_and_edit(
             return Ok(());
         }
     };
-    edit_new_draft(app, terminal, &path, format!("{what} draft ready: {selector}"))
+    edit_new_draft(
+        app,
+        terminal,
+        &path,
+        format!("{what} draft ready: {selector}"),
+    )
 }
 
 /// [`write_draft_and_edit`] over a message the client already holds, which is
@@ -520,7 +517,12 @@ fn write_fetched_draft_and_edit(
             return Ok(());
         }
     };
-    edit_new_draft(app, terminal, &path, format!("{what} draft ready: {selector}"))
+    edit_new_draft(
+        app,
+        terminal,
+        &path,
+        format!("{what} draft ready: {selector}"),
+    )
 }
 
 /// Hand a freshly written draft to `$EDITOR` and put `ready` on the status
@@ -561,10 +563,7 @@ fn edit_new_draft(
 /// received message is a store row, so "the same thing but for mail" does not
 /// exist for editing, sending or approving.
 pub fn cursor_draft(app: &mut App, why: &str) -> Option<(String, PathBuf)> {
-    let id = match app.selected_email() {
-        Some(email) => email.draft_id.clone(),
-        None => return None,
-    };
+    let id = app.selected_email()?.draft_id.clone();
     let Some(id) = id else {
         app.set_status_level(why.to_string(), StatusLevel::Warning);
         return None;
@@ -726,10 +725,9 @@ pub(super) fn handle_action(
             // and everything after that is one method call: the build, the
             // outbox row, the transport and the draft file's fate are the
             // daemon's, and so is the undo window.
-            let Some((id, path)) = cursor_draft(
-                app,
-                "Send needs a draft; received mail has nothing to send",
-            ) else {
+            let Some((id, path)) =
+                cursor_draft(app, "Send needs a draft; received mail has nothing to send")
+            else {
                 return Ok(());
             };
             if let Err(e) = validate_then_approve(&path) {
@@ -779,20 +777,17 @@ pub(super) fn handle_action(
                     }
                     app.reload_current_mailbox();
                 }
-                Err(e) => app.set_status_level(format!("New draft failed: {e}"), StatusLevel::Error),
+                Err(e) => {
+                    app.set_status_level(format!("New draft failed: {e}"), StatusLevel::Error)
+                }
             }
         }
 
         Action::CopyMessageRef => match selected_selector(app) {
-            Some(text) => {
-                match super::helpers::copy_to_clipboard(&text) {
-                    Ok(()) => app.set_status(format!("{text} copied to clipboard")),
-                    Err(e) => app.set_status_level(
-                        format!("Copy failed: {e}"),
-                        StatusLevel::Error,
-                    ),
-                }
-            }
+            Some(text) => match super::helpers::copy_to_clipboard(&text) {
+                Ok(()) => app.set_status(format!("{text} copied to clipboard")),
+                Err(e) => app.set_status_level(format!("Copy failed: {e}"), StatusLevel::Error),
+            },
             None => app.set_status_level(
                 "That message is not in the local store, so it has no selector yet".to_string(),
                 StatusLevel::Warning,
@@ -805,10 +800,9 @@ pub(super) fn handle_action(
                 resume_terminal(terminal)?;
                 match result {
                     Ok(()) => app.set_status("Returned from log file".to_string()),
-                    Err(e) => app.set_status_level(
-                        format!("Open log failed: {e}"),
-                        StatusLevel::Error,
-                    ),
+                    Err(e) => {
+                        app.set_status_level(format!("Open log failed: {e}"), StatusLevel::Error)
+                    }
                 }
             }
             None => app.set_status_level(
@@ -832,10 +826,9 @@ pub(super) fn handle_action(
                     Ok(()) => app.set_status(
                         "Config saved \u{2014} restart mailypoppins to apply changes".to_string(),
                     ),
-                    Err(e) => app.set_status_level(
-                        format!("Open config failed: {e}"),
-                        StatusLevel::Error,
-                    ),
+                    Err(e) => {
+                        app.set_status_level(format!("Open config failed: {e}"), StatusLevel::Error)
+                    }
                 }
             } else {
                 app.set_status_level(
@@ -882,7 +875,12 @@ pub(super) fn handle_action(
                 );
             } else {
                 app.set_status_level(
-                    format!("Saved {}/{} file(s) ({} failed)", saved, saved + failed, failed),
+                    format!(
+                        "Saved {}/{} file(s) ({} failed)",
+                        saved,
+                        saved + failed,
+                        failed
+                    ),
                     StatusLevel::Warning,
                 );
             }
@@ -897,7 +895,10 @@ pub(super) fn handle_action(
             }
         },
 
-        Action::LoadMailbox { mailbox_idx, generation } => {
+        Action::LoadMailbox {
+            mailbox_idx,
+            generation,
+        } => {
             // Background mailbox load (P1 step 2, daemon-backed since P5-U4).
             // Queued by `App::request_mailbox_load` on cache-miss
             // switches/reloads so the load (seconds on large mailboxes) never
@@ -922,18 +923,13 @@ pub(super) fn handle_action(
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
                 let entries = match queries {
-                    Some(queries) => {
-                        super::queries::list_emails(&queries, &account, &mailbox).unwrap_or_else(
-                            |e| {
-                                log::warn!("[queries] listing {account}/{mailbox}: {e:#}");
-                                Vec::new()
-                            },
-                        )
-                    }
+                    Some(queries) => super::queries::list_emails(&queries, &account, &mailbox)
+                        .unwrap_or_else(|e| {
+                            log::warn!("[queries] listing {account}/{mailbox}: {e:#}");
+                            Vec::new()
+                        }),
                     None => {
-                        log::warn!(
-                            "[queries] no daemon session: {account}/{mailbox} lists empty"
-                        );
+                        log::warn!("[queries] no daemon session: {account}/{mailbox} lists empty");
                         Vec::new()
                     }
                 };
@@ -946,7 +942,11 @@ pub(super) fn handle_action(
             });
         }
 
-        Action::ServerSearch { query, targets, local_mailbox } => {
+        Action::ServerSearch {
+            query,
+            targets,
+            local_mailbox,
+        } => {
             // The account name travels with the search so each hit can be
             // resolved against that account's store (#0038).
             let account = app.account_config.name.clone();
@@ -1036,12 +1036,10 @@ pub(super) fn handle_action(
             send_contact_as_vcard(app, terminal, &contact)?;
         }
 
-        Action::CopyContactEmail { address } => {
-            match super::helpers::copy_to_clipboard(&address) {
-                Ok(()) => app.set_status(format!("{address} copied to clipboard")),
-                Err(e) => app.set_status_level(format!("Copy failed: {e}"), StatusLevel::Error),
-            }
-        }
+        Action::CopyContactEmail { address } => match super::helpers::copy_to_clipboard(&address) {
+            Ok(()) => app.set_status(format!("{address} copied to clipboard")),
+            Err(e) => app.set_status_level(format!("Copy failed: {e}"), StatusLevel::Error),
+        },
 
         Action::OpenEventSource { msg } => {
             // The agenda row carries its own [`MessageRef`] (the invite may
@@ -1183,8 +1181,7 @@ fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
         // built by the same rule the draft will use.
         ComposeMode::Forward { msg } => {
             let account = app.account_config.name.clone();
-            let subject =
-                commands::forward_subject(&daemon_door(app), &account, msg.row_id());
+            let subject = commands::forward_subject(&daemon_door(app), &account, msg.row_id());
             (
                 String::new(),
                 String::new(),
@@ -1525,9 +1522,7 @@ fn submit_compose_wizard(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    let Overlay::Compose(mut wizard) =
-        std::mem::replace(&mut app.overlay, Overlay::None)
-    else {
+    let Overlay::Compose(mut wizard) = std::mem::replace(&mut app.overlay, Overlay::None) else {
         return Ok(());
     };
     app.focus = Focus::List;
@@ -1750,7 +1745,10 @@ fn write_new_draft_from_wizard(app: &App, wizard: &ComposeWizard) -> Result<Path
     // the inline body when there is one. An empty body still opens `$EDITOR`
     // (that decision reads `wizard.body`, not the file), so the user edits a
     // draft that already carries the signature.
-    if let Some(block) = sig_md.as_deref().and_then(mp_core::draft::wrap_signature_block) {
+    if let Some(block) = sig_md
+        .as_deref()
+        .and_then(mp_core::draft::wrap_signature_block)
+    {
         if !body.is_empty() {
             fm.push('\n');
         }
@@ -1835,9 +1833,8 @@ fn handle_search_result_action(
             let Some(msg) = hit.entry.msg else {
                 // The overlay covers the status bar, so the decline goes to
                 // the overlay's own footer line (#0104).
-                app.server_search_status = Some(
-                    "Not in the local store; press f to fetch it first".to_string(),
-                );
+                app.server_search_status =
+                    Some("Not in the local store; press f to fetch it first".to_string());
                 return Ok(());
             };
             open_readonly_view(app, terminal, msg.row_id())?;
@@ -1850,9 +1847,8 @@ fn handle_search_result_action(
                 return Ok(());
             };
             let Some(msg) = hit.entry.msg else {
-                app.server_search_status = Some(
-                    "Not in the local store; press f to fetch it first".to_string(),
-                );
+                app.server_search_status =
+                    Some("Not in the local store; press f to fetch it first".to_string());
                 return Ok(());
             };
             // The hit names its own mailbox: `source_label` is the sidebar
@@ -1868,8 +1864,9 @@ fn handle_search_result_action(
                 .find(|m| m.label == label)
                 .map(mailbox_key)
             else {
-                app.server_search_status =
-                    Some(format!("Cannot open: mailbox {label} is not in the sidebar"));
+                app.server_search_status = Some(format!(
+                    "Cannot open: mailbox {label} is not in the sidebar"
+                ));
                 return Ok(());
             };
             app.close_overlay();
@@ -1884,14 +1881,12 @@ fn handle_search_result_action(
                 return Ok(());
             };
             let Some(msg) = hit.entry.msg else {
-                app.server_search_status = Some(
-                    "Not in the local store; press f to fetch it first".to_string(),
-                );
+                app.server_search_status =
+                    Some("Not in the local store; press f to fetch it first".to_string());
                 return Ok(());
             };
             let Some(rendition) = readonly_view_for_row(app, msg.row_id()) else {
-                app.server_search_status =
-                    Some("Yank failed; see the activity log".to_string());
+                app.server_search_status = Some("Yank failed; see the activity log".to_string());
                 return Ok(());
             };
             let shown = rendition.path.display().to_string();
@@ -2152,7 +2147,6 @@ mod tests {
         );
     }
 
-
     // -----------------------------------------------------------------------
     // Parking a sync: one announcement, and a release that matches the gate
     // -----------------------------------------------------------------------
@@ -2286,10 +2280,7 @@ mod tests {
             for info in parsed.iter() {
                 match info {
                     mailparse::MailAddr::Single(s) => {
-                        assert!(
-                            !s.addr.trim().is_empty(),
-                            "empty address from {cleaned:?}"
-                        );
+                        assert!(!s.addr.trim().is_empty(), "empty address from {cleaned:?}");
                     }
                     mailparse::MailAddr::Group(g) => {
                         for s in &g.addrs {
@@ -2416,7 +2407,8 @@ mod tests {
         )
         .unwrap();
         let opened_with = wizard_signature(&app, app.compose_wizard().unwrap()).0;
-        mp_core::draft::rewrite_draft_signature(&path, opened_with.as_deref(), Some("work")).unwrap();
+        mp_core::draft::rewrite_draft_signature(&path, opened_with.as_deref(), Some("work"))
+            .unwrap();
         assert!(
             std::fs::read_to_string(&path).unwrap().contains("Alice"),
             "the draft starts with the pre-edit block"

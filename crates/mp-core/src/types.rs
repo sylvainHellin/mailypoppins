@@ -256,7 +256,8 @@ where
 
     struct IdVisitor;
 
-    const EXPECTING: &str = "a quoted string id (an unquoted YAML number or boolean is not an id; wrap it in quotes)";
+    const EXPECTING: &str =
+        "a quoted string id (an unquoted YAML number or boolean is not an id; wrap it in quotes)";
 
     impl<'de> Visitor<'de> for IdVisitor {
         type Value = Option<String>;
@@ -281,10 +282,7 @@ where
             Ok(None)
         }
 
-        fn visit_some<D2: serde::Deserializer<'de>>(
-            self,
-            d: D2,
-        ) -> Result<Self::Value, D2::Error> {
+        fn visit_some<D2: serde::Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
             d.deserialize_any(IdVisitor)
         }
 
@@ -317,7 +315,11 @@ pub struct EmailFrontmatter {
     ///
     /// Read strictly: see [`strict_optional_id`]. A non-string scalar here is
     /// a loud per-draft error, never a silent re-mint (#0083).
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "strict_optional_id")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "strict_optional_id"
+    )]
     pub id: Option<String>,
     #[serde(default)]
     pub to: Option<String>,
@@ -417,7 +419,10 @@ mod tests {
             forwarded: true,
             flagged: true,
         };
-        assert_eq!(all.to_flag_string(), "\\Seen \\Answered \\Flagged $Forwarded");
+        assert_eq!(
+            all.to_flag_string(),
+            "\\Seen \\Answered \\Flagged $Forwarded"
+        );
         assert_eq!(MessageFlags::parse(&all.to_flag_string()), all);
         assert_eq!(MessageFlags::default().to_flag_string(), "");
         assert_eq!(MessageFlags::parse(""), MessageFlags::default());

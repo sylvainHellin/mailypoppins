@@ -158,7 +158,9 @@ async fn add_flag_on_session(
         .map_err(|e| anyhow!("Failed to select {}: {}", mailbox, e))?;
 
     let uids = session
-        .uid_search(&crate::imap_client::search::message_id_search_term(message_id))
+        .uid_search(&crate::imap_client::search::message_id_search_term(
+            message_id,
+        ))
         .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
     let Some(uid) = uids.iter().next().copied() else {
@@ -220,7 +222,10 @@ async fn run_batch(
     if let Err(e) = session.select(source_mailbox).await {
         let msg = format!("Failed to select {}: {}", source_mailbox, e);
         pooled.poison();
-        return message_ids.iter().map(|_| Err(anyhow!("{}", msg))).collect();
+        return message_ids
+            .iter()
+            .map(|_| Err(anyhow!("{}", msg)))
+            .collect();
     }
 
     let mut results: Vec<Result<()>> = Vec::with_capacity(message_ids.len());
@@ -241,7 +246,10 @@ async fn run_batch(
         match session.expunge().await {
             Ok(stream) => {
                 if let Err(e) = stream.try_collect::<Vec<_>>().await {
-                    info!("Batch EXPUNGE collect failed (non-fatal to the batch): {}", e);
+                    info!(
+                        "Batch EXPUNGE collect failed (non-fatal to the batch): {}",
+                        e
+                    );
                     expunge_failed = true;
                 }
             }
@@ -281,7 +289,10 @@ mod tests {
     /// leftover bytes as its own answer.
     #[test]
     fn a_failed_expunge_poisons_even_when_every_op_succeeded() {
-        assert!(must_poison(false, true), "EXPUNGE failure alone must poison");
+        assert!(
+            must_poison(false, true),
+            "EXPUNGE failure alone must poison"
+        );
         assert!(must_poison(true, false), "a failed op still poisons");
         assert!(must_poison(true, true));
         // The only clean case: everything succeeded, stream fully read.

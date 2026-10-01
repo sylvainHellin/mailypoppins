@@ -49,14 +49,14 @@ pub(crate) fn prompt_input(prompt: &str, default: &str) -> Result<String> {
 
 /// Prompt user to select a mailbox from a list using FuzzySelect.
 /// Pre-selects the first matching candidate from `preferred`.
-pub(crate) fn select_mailbox(prompt: &str, options: &[String], preferred: &[&str]) -> Result<String> {
+pub(crate) fn select_mailbox(
+    prompt: &str,
+    options: &[String],
+    preferred: &[&str],
+) -> Result<String> {
     let default_idx = preferred
         .iter()
-        .find_map(|pref| {
-            options
-                .iter()
-                .position(|o| o.eq_ignore_ascii_case(pref))
-        })
+        .find_map(|pref| options.iter().position(|o| o.eq_ignore_ascii_case(pref)))
         .unwrap_or(0);
 
     let selection = dialoguer::FuzzySelect::new()
@@ -70,7 +70,13 @@ pub(crate) fn select_mailbox(prompt: &str, options: &[String], preferred: &[&str
 }
 
 /// Test SMTP connection: connect with TLS and authenticate.
-pub(crate) fn test_smtp_connection(host: &str, port: u16, username: &str, password: &str, accept_invalid_certs: bool) -> Result<()> {
+pub(crate) fn test_smtp_connection(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    accept_invalid_certs: bool,
+) -> Result<()> {
     use lettre::transport::smtp::authentication::Credentials;
 
     if accept_invalid_certs {
@@ -81,18 +87,20 @@ pub(crate) fn test_smtp_connection(host: &str, port: u16, username: &str, passwo
     let mailer = if port == 465 {
         let mut transport = lettre::SmtpTransport::relay(host)?;
         if accept_invalid_certs {
-            let tls_params = lettre::transport::smtp::client::TlsParameters::builder(host.to_string())
-                .dangerous_accept_invalid_certs(true)
-                .build()?;
+            let tls_params =
+                lettre::transport::smtp::client::TlsParameters::builder(host.to_string())
+                    .dangerous_accept_invalid_certs(true)
+                    .build()?;
             transport = transport.tls(lettre::transport::smtp::client::Tls::Wrapper(tls_params));
         }
         transport.port(port).credentials(creds).build()
     } else {
         let mut transport = lettre::SmtpTransport::starttls_relay(host)?;
         if accept_invalid_certs {
-            let tls_params = lettre::transport::smtp::client::TlsParameters::builder(host.to_string())
-                .dangerous_accept_invalid_certs(true)
-                .build()?;
+            let tls_params =
+                lettre::transport::smtp::client::TlsParameters::builder(host.to_string())
+                    .dangerous_accept_invalid_certs(true)
+                    .build()?;
             transport = transport.tls(lettre::transport::smtp::client::Tls::Required(tls_params));
         }
         transport.port(port).credentials(creds).build()
@@ -103,7 +111,13 @@ pub(crate) fn test_smtp_connection(host: &str, port: u16, username: &str, passwo
 }
 
 /// Test IMAP connection: connect with TLS, login, and logout.
-pub(crate) fn test_imap_connection(host: &str, port: u16, username: &str, password: &str, accept_invalid_certs: bool) -> Result<()> {
+pub(crate) fn test_imap_connection(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    accept_invalid_certs: bool,
+) -> Result<()> {
     use crate::imap_client::open_imap_session;
 
     let imap_config = crate::config::ImapConfig {

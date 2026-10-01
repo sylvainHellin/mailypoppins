@@ -94,6 +94,13 @@ use mp_protocol::state::Bootstrap;
 use mp_protocol::{Request, RequestId, JSONRPC_VERSION};
 use serde_json::json;
 
+use crate::config::{AccountConfig, GlobalConfig, MailboxMapping, MailboxesConfig};
+use crate::daemon::config::{ConfigState, ConfigStore};
+use crate::daemon::dispatch::{ClientCtx, ClientKind};
+use crate::daemon::runtime::InstanceMeta;
+use crate::daemon::server::DaemonState;
+use crate::daemon::state::Change;
+use crate::tui::app::App;
 use crate::tui::ui::golden_frames::{
     calendar_fixture, calendar_view_cancelled_event_detail_app, command_palette_app,
     compose_wizard_with_body_app, contacts_fixture, drafts_fixture, drafts_view_attach_prompt_app,
@@ -103,13 +110,6 @@ use crate::tui::ui::golden_frames::{
     pin_theme, search_form_empty_app, search_form_filled_app, signatures_overlay_app, HEIGHT,
     WIDTH,
 };
-use crate::config::{AccountConfig, GlobalConfig, MailboxMapping, MailboxesConfig};
-use crate::daemon::config::{ConfigState, ConfigStore};
-use crate::daemon::dispatch::{ClientCtx, ClientKind};
-use crate::daemon::runtime::InstanceMeta;
-use crate::daemon::server::DaemonState;
-use crate::daemon::state::Change;
-use crate::tui::app::App;
 
 /// The one account the fixture configures, and the one every frame shows.
 ///

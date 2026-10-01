@@ -210,7 +210,11 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
             "/"
         };
         let typed = inline.unwrap_or(app.search_query.as_str());
-        let cursor_reserve = if app.focus == Focus::Search || inline.is_some() { 1 } else { 0 };
+        let cursor_reserve = if app.focus == Focus::Search || inline.is_some() {
+            1
+        } else {
+            0
+        };
         let avail = (search_rect.width as usize)
             .saturating_sub(super::util::display_width(prefix))
             .saturating_sub(cursor_reserve);
@@ -405,12 +409,21 @@ mod badge_tests {
             draft_id: None,
             skip: None,
             selector: None,
-            from: "a".into(), to: "b".into(), cc: None,
-            reply_to: None, bcc: None,
-            subject: "S".into(), status: "inbox".into(),
-            date_display: "2026-07-01".into(), date_sort: "2026-07-01T00:00:00".into(),
-            has_attachments: has_att, read: false, answered: false, forwarded: false,
-            flagged: false, is_invite,
+            from: "a".into(),
+            to: "b".into(),
+            cc: None,
+            reply_to: None,
+            bcc: None,
+            subject: "S".into(),
+            status: "inbox".into(),
+            date_display: "2026-07-01".into(),
+            date_sort: "2026-07-01T00:00:00".into(),
+            has_attachments: has_att,
+            read: false,
+            answered: false,
+            forwarded: false,
+            flagged: false,
+            is_invite,
         }
     }
 
@@ -449,7 +462,10 @@ mod badge_tests {
 
         let prefix = invite_and_attachment_prefix(&e);
         assert!(prefix.starts_with(SKIP_GLYPH), "prefix={prefix:?}");
-        assert!(!prefix.contains(INVITE_GLYPH), "no invite badge on an error row");
+        assert!(
+            !prefix.contains(INVITE_GLYPH),
+            "no invite badge on an error row"
+        );
         assert!(!prefix.contains('\u{f0c6}'), "no paperclip on an error row");
 
         let off_cursor = list_row_style(&e, false, false);

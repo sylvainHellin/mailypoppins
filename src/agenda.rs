@@ -137,8 +137,10 @@ pub fn load_events_for_account(
         }
     }
 
-    let mut events: Vec<AgendaEvent> =
-        candidates.into_values().map(|candidate| candidate.row).collect();
+    let mut events: Vec<AgendaEvent> = candidates
+        .into_values()
+        .map(|candidate| candidate.row)
+        .collect();
 
     // Chronological, undated last; the row reference as the final tiebreak so
     // the order is stable across runs.
@@ -355,13 +357,25 @@ mod tests {
             "inbox",
             1,
             "Standup",
-            &event_ics("REQUEST", Some("uid-a"), 0, "Standup", Some(":20260801T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-a"),
+                0,
+                "Standup",
+                Some(":20260801T090000Z"),
+            ),
         );
         fx.ingest_invite(
             "archive",
             1,
             "Retro",
-            &event_ics("REQUEST", Some("uid-b"), 0, "Retro", Some(":20260802T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-b"),
+                0,
+                "Retro",
+                Some(":20260802T090000Z"),
+            ),
         );
         let events = agenda(&fx);
         assert_eq!(events.len(), 2);
@@ -384,7 +398,13 @@ mod tests {
         let events = agenda_of(
             "inbox",
             1,
-            &event_ics("REPLY", Some("uid-a"), 0, "Standup", Some(":20260801T090000Z")),
+            &event_ics(
+                "REPLY",
+                Some("uid-a"),
+                0,
+                "Standup",
+                Some(":20260801T090000Z"),
+            ),
         );
         assert!(events.is_empty());
     }
@@ -453,7 +473,10 @@ mod tests {
         );
         let events = agenda(&fx);
         let mine = events.iter().find(|e| e.subject == "My meeting").unwrap();
-        let theirs = events.iter().find(|e| e.subject == "Their meeting").unwrap();
+        let theirs = events
+            .iter()
+            .find(|e| e.subject == "Their meeting")
+            .unwrap();
         assert!(mine.is_organizer);
         assert!(!theirs.is_organizer);
     }
@@ -493,13 +516,25 @@ mod tests {
             "inbox",
             1,
             "Doomed",
-            &event_ics("REQUEST", Some("uid-c"), 0, "Doomed", Some(":20260801T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-c"),
+                0,
+                "Doomed",
+                Some(":20260801T090000Z"),
+            ),
         );
         fx.ingest_invite(
             "inbox",
             2,
             "Cancelled: Doomed",
-            &event_ics("CANCEL", Some("uid-c"), 1, "Doomed", Some(":20260801T090000Z")),
+            &event_ics(
+                "CANCEL",
+                Some("uid-c"),
+                1,
+                "Doomed",
+                Some(":20260801T090000Z"),
+            ),
         );
         let events = agenda(&fx);
         assert_eq!(events.len(), 1, "the CANCEL is not its own agenda row");
@@ -515,13 +550,25 @@ mod tests {
             "inbox",
             1,
             "Weekly",
-            &event_ics("REQUEST", Some("uid-eq"), 2, "Weekly", Some(":20260801T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-eq"),
+                2,
+                "Weekly",
+                Some(":20260801T090000Z"),
+            ),
         );
         fx.ingest_invite(
             "inbox",
             2,
             "Cancelled: Weekly",
-            &event_ics("CANCEL", Some("uid-eq"), 2, "Weekly", Some(":20260801T090000Z")),
+            &event_ics(
+                "CANCEL",
+                Some("uid-eq"),
+                2,
+                "Weekly",
+                Some(":20260801T090000Z"),
+            ),
         );
         let events = agenda(&fx);
         assert_eq!(events.len(), 1);
@@ -541,7 +588,13 @@ mod tests {
             "inbox",
             1,
             "Weekly",
-            &event_ics("REQUEST", Some("uid-r"), 0, "Weekly", Some(":20260801T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-r"),
+                0,
+                "Weekly",
+                Some(":20260801T090000Z"),
+            ),
         );
         fx.ingest_invite(
             "inbox",
@@ -567,7 +620,13 @@ mod tests {
             "inbox",
             1,
             "Weekly",
-            &event_ics("REQUEST", Some("uid-o"), 0, "Weekly", Some(":20260801T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-o"),
+                0,
+                "Weekly",
+                Some(":20260801T090000Z"),
+            ),
         );
         fx.ingest_invite(
             "inbox",
@@ -601,7 +660,13 @@ mod tests {
             "inbox",
             1,
             "Weekly",
-            &event_ics("REQUEST", Some("uid-m"), 0, "Weekly", Some(":20260801T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-m"),
+                0,
+                "Weekly",
+                Some(":20260801T090000Z"),
+            ),
         );
         fx.ingest_invite("inbox", 2, "Cancelled: Weekly", "METHOD:CANCEL but broken");
         let events = agenda(&fx);
@@ -618,13 +683,25 @@ mod tests {
             "inbox",
             1,
             "Cancelled: Doomed",
-            &event_ics("CANCEL", Some("uid-ooo"), 0, "Doomed", Some(":20260801T090000Z")),
+            &event_ics(
+                "CANCEL",
+                Some("uid-ooo"),
+                0,
+                "Doomed",
+                Some(":20260801T090000Z"),
+            ),
         );
         fx.ingest_invite(
             "inbox",
             2,
             "Doomed",
-            &event_ics("REQUEST", Some("uid-ooo"), 0, "Doomed", Some(":20260801T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-ooo"),
+                0,
+                "Doomed",
+                Some(":20260801T090000Z"),
+            ),
         );
         let events = agenda(&fx);
         assert_eq!(events.len(), 1, "the event is kept, not deleted");
@@ -641,7 +718,13 @@ mod tests {
             "inbox",
             1,
             "Weekly",
-            &event_ics("REQUEST", Some("uid-up"), 0, "Weekly", Some(":20260801T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-up"),
+                0,
+                "Weekly",
+                Some(":20260801T090000Z"),
+            ),
         );
         fx.ingest_invite(
             "inbox",
@@ -660,7 +743,13 @@ mod tests {
             "archive",
             3,
             "Weekly",
-            &event_ics("REQUEST", Some("uid-up"), 0, "Weekly", Some(":20260801T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-up"),
+                0,
+                "Weekly",
+                Some(":20260801T090000Z"),
+            ),
         );
         let events = agenda(&fx);
         assert_eq!(events.len(), 1);
@@ -678,13 +767,25 @@ mod tests {
             "inbox",
             1,
             "Cancelled: Weekly",
-            &event_ics("CANCEL", Some("uid-s"), 0, "Weekly", Some(":20260801T090000Z")),
+            &event_ics(
+                "CANCEL",
+                Some("uid-s"),
+                0,
+                "Weekly",
+                Some(":20260801T090000Z"),
+            ),
         );
         fx.ingest_invite(
             "inbox",
             2,
             "Weekly",
-            &event_ics("REQUEST", Some("uid-s"), 2, "Weekly", Some(":20260808T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-s"),
+                2,
+                "Weekly",
+                Some(":20260808T090000Z"),
+            ),
         );
         let events = agenda(&fx);
         assert_eq!(events.len(), 1);
@@ -714,7 +815,13 @@ mod tests {
             "inbox",
             2,
             "Late",
-            &event_ics("REQUEST", Some("uid-l"), 0, "Late", Some(":20260801T093000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-l"),
+                0,
+                "Late",
+                Some(":20260801T093000Z"),
+            ),
         );
         let events = agenda(&fx);
         assert_eq!(subjects(&events), vec!["Early", "Late"]);
@@ -729,7 +836,13 @@ mod tests {
             "inbox",
             1,
             "Dated",
-            &event_ics("REQUEST", Some("uid-d"), 0, "Dated", Some(":20260801T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-d"),
+                0,
+                "Dated",
+                Some(":20260801T090000Z"),
+            ),
         );
         fx.ingest_invite(
             "inbox",
@@ -757,7 +870,13 @@ mod tests {
             "inbox",
             2,
             "Real",
-            &event_ics("REQUEST", Some("uid-ok"), 0, "Real", Some(":20260801T090000Z")),
+            &event_ics(
+                "REQUEST",
+                Some("uid-ok"),
+                0,
+                "Real",
+                Some(":20260801T090000Z"),
+            ),
         );
         assert_eq!(subjects(&agenda(&fx)), vec!["Real"]);
     }
@@ -1014,4 +1133,3 @@ mod tests {
         assert_eq!(after[0].event.attendees[0].status, "declined");
     }
 }
-

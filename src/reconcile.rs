@@ -196,13 +196,7 @@ pub(crate) mod tests {
             .row_id
         }
 
-        fn email(
-            &self,
-            mailbox: &str,
-            uid: i64,
-            subject: &str,
-            ics: Option<&str>,
-        ) -> FetchedEmail {
+        fn email(&self, mailbox: &str, uid: i64, subject: &str, ics: Option<&str>) -> FetchedEmail {
             FetchedEmail {
                 from: "Organizer <me@example.com>".into(),
                 to: "a@example.com".into(),
@@ -298,10 +292,7 @@ pub(crate) mod tests {
         }
 
         /// The store-backed agenda, the oracle `calendar.events` answers.
-        pub(crate) fn agenda(
-            &self,
-            self_address: &str,
-        ) -> Vec<mp_protocol::calendar::AgendaEvent> {
+        pub(crate) fn agenda(&self, self_address: &str) -> Vec<mp_protocol::calendar::AgendaEvent> {
             crate::agenda::load_events_for_account(
                 &self.store,
                 &self.blobs,
@@ -378,7 +369,12 @@ pub(crate) mod tests {
     #[test]
     fn a_reply_flips_the_matching_attendee() {
         let fx = fixture();
-        fx.ingest_invite("sent", 1, "Plan", &invite_ics("u1@x", 0, &["a@example.com"]));
+        fx.ingest_invite(
+            "sent",
+            1,
+            "Plan",
+            &invite_ics("u1@x", 0, &["a@example.com"]),
+        );
         fx.ingest_invite(
             "inbox",
             2,
@@ -404,7 +400,13 @@ pub(crate) mod tests {
             "inbox",
             2,
             "Re: Plan",
-            &reply_ics("u1@x", 0, "alice@example.com", "DECLINED", "20260710T120000Z"),
+            &reply_ics(
+                "u1@x",
+                0,
+                "alice@example.com",
+                "DECLINED",
+                "20260710T120000Z",
+            ),
         );
         assert_eq!(statuses(&fx, "u1@x")[0].1, "declined");
     }
@@ -412,7 +414,12 @@ pub(crate) mod tests {
     #[test]
     fn the_latest_dtstamp_wins_within_a_sequence() {
         let fx = fixture();
-        fx.ingest_invite("sent", 1, "Plan", &invite_ics("u1@x", 0, &["a@example.com"]));
+        fx.ingest_invite(
+            "sent",
+            1,
+            "Plan",
+            &invite_ics("u1@x", 0, &["a@example.com"]),
+        );
         fx.ingest_invite(
             "inbox",
             2,
@@ -433,7 +440,12 @@ pub(crate) mod tests {
         let fx = fixture();
         // The invite was bumped to sequence 2, so a reply for sequence 1
         // answered a version of the event that no longer exists.
-        fx.ingest_invite("sent", 1, "Plan", &invite_ics("u1@x", 2, &["a@example.com"]));
+        fx.ingest_invite(
+            "sent",
+            1,
+            "Plan",
+            &invite_ics("u1@x", 2, &["a@example.com"]),
+        );
         fx.ingest_invite(
             "inbox",
             2,
@@ -454,7 +466,12 @@ pub(crate) mod tests {
     #[test]
     fn a_reply_from_an_uninvited_address_is_ignored() {
         let fx = fixture();
-        fx.ingest_invite("sent", 1, "Plan", &invite_ics("u1@x", 0, &["a@example.com"]));
+        fx.ingest_invite(
+            "sent",
+            1,
+            "Plan",
+            &invite_ics("u1@x", 0, &["a@example.com"]),
+        );
         fx.ingest_invite(
             "inbox",
             2,
@@ -550,7 +567,12 @@ pub(crate) mod tests {
     fn an_unreadable_ics_skips_only_that_invite() {
         let fx = fixture();
         let broken = fx.ingest_invite("inbox", 1, "Broken", "not an ics at all");
-        fx.ingest_invite("inbox", 2, "Plan", &invite_ics("u1@x", 0, &["a@example.com"]));
+        fx.ingest_invite(
+            "inbox",
+            2,
+            "Plan",
+            &invite_ics("u1@x", 0, &["a@example.com"]),
+        );
 
         let invites = load_invites(&fx.store, &fx.blobs, "alice");
         assert_eq!(invites.len(), 1, "the unparseable payload is skipped");
@@ -569,7 +591,12 @@ pub(crate) mod tests {
     #[test]
     fn a_forged_md_attachment_cannot_move_a_partstat() {
         let fx = fixture();
-        fx.ingest_invite("sent", 1, "Plan", &invite_ics("u1@x", 0, &["a@example.com"]));
+        fx.ingest_invite(
+            "sent",
+            1,
+            "Plan",
+            &invite_ics("u1@x", 0, &["a@example.com"]),
+        );
 
         // The exact shape the old walk classified: frontmatter with from/to/
         // subject and an event: block, method REPLY, the real UID, and a
@@ -641,7 +668,12 @@ status: accepted\n---\n\nsee attached\n";
     #[test]
     fn a_cancel_tombstones_the_whole_event() {
         let fx = fixture();
-        fx.ingest_invite("inbox", 1, "Plan", &request_ics("u1@x", 0, "20260701T090000Z", None));
+        fx.ingest_invite(
+            "inbox",
+            1,
+            "Plan",
+            &request_ics("u1@x", 0, "20260701T090000Z", None),
+        );
         fx.ingest_invite("inbox", 2, "Cancelled: Plan", &cancel_ics("u1@x", 1, None));
         let event = folded(&fx, "u1@x", None);
         assert!(event.cancelled);
@@ -659,7 +691,12 @@ status: accepted\n---\n\nsee attached\n";
     fn a_cancel_that_arrives_before_its_request_still_applies() {
         let fx = fixture();
         fx.ingest_invite("inbox", 1, "Cancelled: Plan", &cancel_ics("u2@x", 1, None));
-        fx.ingest_invite("inbox", 2, "Plan", &request_ics("u2@x", 0, "20260701T090000Z", None));
+        fx.ingest_invite(
+            "inbox",
+            2,
+            "Plan",
+            &request_ics("u2@x", 0, "20260701T090000Z", None),
+        );
         assert!(folded(&fx, "u2@x", None).cancelled);
     }
 
@@ -668,7 +705,12 @@ status: accepted\n---\n\nsee attached\n";
     #[test]
     fn an_occurrence_cancel_does_not_kill_the_series() {
         let fx = fixture();
-        fx.ingest_invite("inbox", 1, "Plan", &request_ics("u3@x", 0, "20260701T090000Z", None));
+        fx.ingest_invite(
+            "inbox",
+            1,
+            "Plan",
+            &request_ics("u3@x", 0, "20260701T090000Z", None),
+        );
         fx.ingest_invite(
             "inbox",
             2,
@@ -676,7 +718,10 @@ status: accepted\n---\n\nsee attached\n";
             &cancel_ics("u3@x", 1, Some("20260727T120000Z")),
         );
         let series = folded(&fx, "u3@x", None);
-        assert!(!series.cancelled, "the series survives an occurrence cancel");
+        assert!(
+            !series.cancelled,
+            "the series survives an occurrence cancel"
+        );
         assert_eq!(
             series.cancelled_instances,
             vec!["2026-07-27T12:00:00Z".to_string()]
@@ -688,7 +733,12 @@ status: accepted\n---\n\nsee attached\n";
     #[test]
     fn an_occurrence_cancel_marks_only_that_occurrence() {
         let fx = fixture();
-        fx.ingest_invite("inbox", 1, "Plan", &request_ics("u4@x", 0, "20260701T090000Z", None));
+        fx.ingest_invite(
+            "inbox",
+            1,
+            "Plan",
+            &request_ics("u4@x", 0, "20260701T090000Z", None),
+        );
         fx.ingest_invite(
             "inbox",
             2,
@@ -712,7 +762,12 @@ status: accepted\n---\n\nsee attached\n";
     fn a_stale_cancel_does_not_tombstone_a_newer_request() {
         let fx = fixture();
         fx.ingest_invite("inbox", 1, "Cancelled: Plan", &cancel_ics("u5@x", 0, None));
-        fx.ingest_invite("inbox", 2, "Plan", &request_ics("u5@x", 2, "20260701T090000Z", None));
+        fx.ingest_invite(
+            "inbox",
+            2,
+            "Plan",
+            &request_ics("u5@x", 2, "20260701T090000Z", None),
+        );
         assert!(!folded(&fx, "u5@x", None).cancelled);
     }
 
@@ -721,7 +776,12 @@ status: accepted\n---\n\nsee attached\n";
     #[test]
     fn a_uidless_cancel_tombstones_nothing() {
         let fx = fixture();
-        fx.ingest_invite("inbox", 1, "Plan", &request_ics("u6@x", 0, "20260701T090000Z", None));
+        fx.ingest_invite(
+            "inbox",
+            1,
+            "Plan",
+            &request_ics("u6@x", 0, "20260701T090000Z", None),
+        );
         fx.ingest_invite(
             "inbox",
             2,
@@ -738,7 +798,12 @@ status: accepted\n---\n\nsee attached\n";
     #[test]
     fn a_malformed_cancel_degrades_to_no_cancellation() {
         let fx = fixture();
-        fx.ingest_invite("inbox", 1, "Plan", &request_ics("u7@x", 0, "20260701T090000Z", None));
+        fx.ingest_invite(
+            "inbox",
+            1,
+            "Plan",
+            &request_ics("u7@x", 0, "20260701T090000Z", None),
+        );
         fx.ingest_invite(
             "inbox",
             2,
@@ -762,8 +827,18 @@ status: accepted\n---\n\nsee attached\n";
     #[test]
     fn a_higher_sequence_request_supersedes_the_stored_one() {
         let fx = fixture();
-        fx.ingest_invite("inbox", 1, "Plan", &request_ics("u8@x", 0, "20260701T090000Z", None));
-        fx.ingest_invite("inbox", 2, "Plan (moved)", &request_ics("u8@x", 1, "20260702T090000Z", None));
+        fx.ingest_invite(
+            "inbox",
+            1,
+            "Plan",
+            &request_ics("u8@x", 0, "20260701T090000Z", None),
+        );
+        fx.ingest_invite(
+            "inbox",
+            2,
+            "Plan (moved)",
+            &request_ics("u8@x", 1, "20260702T090000Z", None),
+        );
         let invites = load_invites(&fx.store, &fx.blobs, "alice");
         let status = fold_status(&invites);
         for invite in invites.iter().filter(|i| i.method() == "REQUEST") {
@@ -786,11 +861,26 @@ status: accepted\n---\n\nsee attached\n";
     fn a_stale_or_equal_sequence_request_never_supersedes() {
         let fx = fixture();
         // sequence 2 is the current version.
-        fx.ingest_invite("inbox", 1, "Plan", &request_ics("u9@x", 2, "20260703T090000Z", None));
+        fx.ingest_invite(
+            "inbox",
+            1,
+            "Plan",
+            &request_ics("u9@x", 2, "20260703T090000Z", None),
+        );
         // A replay of sequence 1, and a duplicate of sequence 2 with the same
         // DTSTAMP (the same version delivered twice).
-        fx.ingest_invite("archive", 2, "Plan", &request_ics("u9@x", 1, "20260705T090000Z", None));
-        fx.ingest_invite("archive", 3, "Plan", &request_ics("u9@x", 2, "20260703T090000Z", None));
+        fx.ingest_invite(
+            "archive",
+            2,
+            "Plan",
+            &request_ics("u9@x", 1, "20260705T090000Z", None),
+        );
+        fx.ingest_invite(
+            "archive",
+            3,
+            "Plan",
+            &request_ics("u9@x", 2, "20260703T090000Z", None),
+        );
 
         let invites = load_invites(&fx.store, &fx.blobs, "alice");
         let status = fold_status(&invites);

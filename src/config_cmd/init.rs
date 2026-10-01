@@ -4,14 +4,12 @@ use std::fs;
 use std::io::{self, Write};
 
 use crate::config::{
-    account_dir, blobs_dir, drafts_dir,
-    mailypoppins_data_dir, set_secret, store_path, tokens_dir,
+    account_dir, blobs_dir, drafts_dir, mailypoppins_data_dir, set_secret, store_path, tokens_dir,
 };
 use crate::imap_client::list_mailboxes;
 
 use super::helpers::{
-    prompt_input, run_async_blocking, select_mailbox, test_imap_connection,
-    test_smtp_connection,
+    prompt_input, run_async_blocking, select_mailbox, test_imap_connection, test_smtp_connection,
 };
 
 /// Create the account directory and say what it will hold.
@@ -144,13 +142,18 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
     } else {
         "main"
     };
-    let account_name = prompt_input("Account name (unique slug, e.g. 'tum', 'gmail')", default_account_name)?;
+    let account_name = prompt_input(
+        "Account name (unique slug, e.g. 'tum', 'gmail')",
+        default_account_name,
+    )?;
     println!();
 
     // -- SMTP
     println!("{}", "SMTP Configuration".bold());
     let smtp_host = prompt_input("SMTP host", default_smtp_host)?;
-    let smtp_port: u16 = prompt_input("SMTP port", default_smtp_port)?.parse().unwrap_or(465);
+    let smtp_port: u16 = prompt_input("SMTP port", default_smtp_port)?
+        .parse()
+        .unwrap_or(465);
     let smtp_username = prompt_input("SMTP username (email)", "")?;
     let default_from = prompt_input("Default from address", &smtp_username)?;
 
@@ -176,7 +179,9 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
         } else {
             imap_host_input.clone()
         };
-        imap_port = prompt_input("IMAP port", default_imap_port)?.parse().unwrap_or(993);
+        imap_port = prompt_input("IMAP port", default_imap_port)?
+            .parse()
+            .unwrap_or(993);
         imap_username_input = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
 
         // Run device code flow
@@ -186,12 +191,8 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
         let tid = oauth2_tenant_id.clone();
         let acct = account_name.clone();
         let cache = run_async_blocking(async move {
-            crate::oauth2::device_code_flow(
-                &cid,
-                &tid,
-                &acct,
-                crate::oauth2::IMAP_SMTP_SCOPES,
-            ).await
+            crate::oauth2::device_code_flow(&cid, &tid, &acct, crate::oauth2::IMAP_SMTP_SCOPES)
+                .await
         })?;
         println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
         imap_password = cache.access_token;
@@ -205,7 +206,13 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
 
             print!("  Testing SMTP connection... ");
             io::stdout().flush()?;
-            match test_smtp_connection(&smtp_host, smtp_port, &smtp_username, &pw, accept_invalid_certs) {
+            match test_smtp_connection(
+                &smtp_host,
+                smtp_port,
+                &smtp_username,
+                &pw,
+                accept_invalid_certs,
+            ) {
                 Ok(()) => {
                     println!("{}", "OK".green());
                     break pw;
@@ -218,7 +225,9 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
                     let mut input = String::new();
                     io::stdin().read_line(&mut input)?;
                     if matches!(input.trim().to_lowercase().as_str(), "n" | "no") {
-                        return Err(anyhow::anyhow!("SMTP connection test failed. Aborting setup."));
+                        return Err(anyhow::anyhow!(
+                            "SMTP connection test failed. Aborting setup."
+                        ));
                     }
                 }
             }
@@ -231,15 +240,19 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
 
         // -- IMAP
         println!("{}", "IMAP Configuration".bold());
-        imap_host_input = prompt_input("IMAP host (leave empty to use SMTP host)", default_imap_host)?;
+        imap_host_input = prompt_input(
+            "IMAP host (leave empty to use SMTP host)",
+            default_imap_host,
+        )?;
         imap_host = if imap_host_input.is_empty() {
             smtp_host.clone()
         } else {
             imap_host_input.clone()
         };
-        imap_port = prompt_input("IMAP port", default_imap_port)?.parse().unwrap_or(993);
-        imap_username_input =
-            prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
+        imap_port = prompt_input("IMAP port", default_imap_port)?
+            .parse()
+            .unwrap_or(993);
+        imap_username_input = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
         let imap_username = if imap_username_input.is_empty() {
             smtp_username.clone()
         } else {
@@ -262,7 +275,13 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
 
                 print!("  Testing IMAP connection... ");
                 io::stdout().flush()?;
-                match test_imap_connection(&imap_host, imap_port, &imap_username, &pw, accept_invalid_certs) {
+                match test_imap_connection(
+                    &imap_host,
+                    imap_port,
+                    &imap_username,
+                    &pw,
+                    accept_invalid_certs,
+                ) {
                     Ok(()) => {
                         println!("{}", "OK".green());
                         break pw;
@@ -290,7 +309,13 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
             // Test with SMTP password
             print!("  Testing IMAP connection... ");
             io::stdout().flush()?;
-            match test_imap_connection(&imap_host, imap_port, &imap_username, &smtp_password, accept_invalid_certs) {
+            match test_imap_connection(
+                &imap_host,
+                imap_port,
+                &imap_username,
+                &smtp_password,
+                accept_invalid_certs,
+            ) {
                 Ok(()) => {
                     println!("{}", "OK".green());
                 }
@@ -336,28 +361,25 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
     };
 
     let imap_config_for_list = imap_config.clone();
-    let server_mailboxes = match run_async_blocking(async move { list_mailboxes(&imap_config_for_list).await }) {
-        Ok(mbs) => {
-            println!("{} ({} mailboxes)", "OK".green(), mbs.len());
-            mbs
-        }
-        Err(e) => {
-            println!("{}", "FAILED".red());
-            eprintln!("  Error: {}", e);
-            eprintln!("  Continuing with manual mailbox configuration.");
-            Vec::new()
-        }
-    };
+    let server_mailboxes =
+        match run_async_blocking(async move { list_mailboxes(&imap_config_for_list).await }) {
+            Ok(mbs) => {
+                println!("{} ({} mailboxes)", "OK".green(), mbs.len());
+                mbs
+            }
+            Err(e) => {
+                println!("{}", "FAILED".red());
+                eprintln!("  Error: {}", e);
+                eprintln!("  Continuing with manual mailbox configuration.");
+                Vec::new()
+            }
+        };
 
     // Select special-role mailboxes
     let (inbox_server, archive_server, sent_server) = if !server_mailboxes.is_empty() {
         let mut available = server_mailboxes.clone();
 
-        let inbox = select_mailbox(
-            "Which mailbox is your Inbox?",
-            &available,
-            &["INBOX"],
-        )?;
+        let inbox = select_mailbox("Which mailbox is your Inbox?", &available, &["INBOX"])?;
         available.retain(|m| m != &inbox);
 
         let archive = select_mailbox(
@@ -401,7 +423,10 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
                 .interact()
                 .unwrap_or_default();
 
-            selection.iter().map(|&i| remaining[i].to_string()).collect()
+            selection
+                .iter()
+                .map(|&i| remaining[i].to_string())
+                .collect()
         } else {
             Vec::new()
         }
@@ -420,9 +445,15 @@ pub fn cmd_config_init(path: &std::path::Path, exists: bool) -> Result<()> {
         None
     };
     let toml_content = build_init_toml(
-        &account_name, &default_from,
-        &smtp_host, smtp_port, &smtp_username, accept_invalid_certs,
-        &imap_host_input, imap_port, &imap_username_input,
+        &account_name,
+        &default_from,
+        &smtp_host,
+        smtp_port,
+        &smtp_username,
+        accept_invalid_certs,
+        &imap_host_input,
+        imap_port,
+        &imap_username_input,
         &inbox_server,
         &archive_server,
         &sent_server,
@@ -485,7 +516,11 @@ pub fn cmd_config_add_account(
     println!(
         "{} Existing accounts: {}",
         "\u{2139}".blue(),
-        if existing_names.is_empty() { "(none)".to_string() } else { existing_names.join(", ") }
+        if existing_names.is_empty() {
+            "(none)".to_string()
+        } else {
+            existing_names.join(", ")
+        }
     );
     println!();
 
@@ -558,7 +593,11 @@ pub fn cmd_config_add_account(
     let account_name = loop {
         let name = prompt_input("Account name (unique slug)", default_account_name)?;
         if existing_names.contains(&name.as_str()) {
-            println!("{} Account '{}' already exists. Choose a different name.", "\u{26a0}".yellow(), name);
+            println!(
+                "{} Account '{}' already exists. Choose a different name.",
+                "\u{26a0}".yellow(),
+                name
+            );
         } else {
             break name;
         }
@@ -568,7 +607,9 @@ pub fn cmd_config_add_account(
     // -- SMTP
     println!("{}", "SMTP Configuration".bold());
     let smtp_host = prompt_input("SMTP host", default_smtp_host)?;
-    let smtp_port: u16 = prompt_input("SMTP port", default_smtp_port)?.parse().unwrap_or(465);
+    let smtp_port: u16 = prompt_input("SMTP port", default_smtp_port)?
+        .parse()
+        .unwrap_or(465);
     let smtp_username = prompt_input("SMTP username (email)", "")?;
     let default_from = prompt_input("Default from address", &smtp_username)?;
 
@@ -588,8 +629,14 @@ pub fn cmd_config_add_account(
 
         println!("{}", "IMAP Configuration".bold());
         imap_host_input = prompt_input("IMAP host", default_imap_host)?;
-        imap_host = if imap_host_input.is_empty() { smtp_host.clone() } else { imap_host_input.clone() };
-        imap_port = prompt_input("IMAP port", default_imap_port)?.parse().unwrap_or(993);
+        imap_host = if imap_host_input.is_empty() {
+            smtp_host.clone()
+        } else {
+            imap_host_input.clone()
+        };
+        imap_port = prompt_input("IMAP port", default_imap_port)?
+            .parse()
+            .unwrap_or(993);
         imap_username_input = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
 
         println!();
@@ -598,12 +645,8 @@ pub fn cmd_config_add_account(
         let tid = oauth2_tenant_id.clone();
         let acct = account_name.clone();
         let cache = run_async_blocking(async move {
-            crate::oauth2::device_code_flow(
-                &cid,
-                &tid,
-                &acct,
-                crate::oauth2::IMAP_SMTP_SCOPES,
-            ).await
+            crate::oauth2::device_code_flow(&cid, &tid, &acct, crate::oauth2::IMAP_SMTP_SCOPES)
+                .await
         })?;
         println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
         imap_password = cache.access_token;
@@ -615,8 +658,17 @@ pub fn cmd_config_add_account(
                 .context("Password input cancelled")?;
             print!("  Testing SMTP connection... ");
             io::stdout().flush()?;
-            match test_smtp_connection(&smtp_host, smtp_port, &smtp_username, &pw, accept_invalid_certs) {
-                Ok(()) => { println!("{}", "OK".green()); break pw; }
+            match test_smtp_connection(
+                &smtp_host,
+                smtp_port,
+                &smtp_username,
+                &pw,
+                accept_invalid_certs,
+            ) {
+                Ok(()) => {
+                    println!("{}", "OK".green());
+                    break pw;
+                }
                 Err(e) => {
                     println!("{}", "FAILED".red());
                     eprintln!("  Error: {}", e);
@@ -636,11 +688,24 @@ pub fn cmd_config_add_account(
         println!();
 
         println!("{}", "IMAP Configuration".bold());
-        imap_host_input = prompt_input("IMAP host (leave empty to use SMTP host)", default_imap_host)?;
-        imap_host = if imap_host_input.is_empty() { smtp_host.clone() } else { imap_host_input.clone() };
-        imap_port = prompt_input("IMAP port", default_imap_port)?.parse().unwrap_or(993);
+        imap_host_input = prompt_input(
+            "IMAP host (leave empty to use SMTP host)",
+            default_imap_host,
+        )?;
+        imap_host = if imap_host_input.is_empty() {
+            smtp_host.clone()
+        } else {
+            imap_host_input.clone()
+        };
+        imap_port = prompt_input("IMAP port", default_imap_port)?
+            .parse()
+            .unwrap_or(993);
         imap_username_input = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
-        let imap_username = if imap_username_input.is_empty() { smtp_username.clone() } else { imap_username_input.clone() };
+        let imap_username = if imap_username_input.is_empty() {
+            smtp_username.clone()
+        } else {
+            imap_username_input.clone()
+        };
 
         print!("Use same password as SMTP? [Y/n] ");
         io::stdout().flush()?;
@@ -655,8 +720,17 @@ pub fn cmd_config_add_account(
                     .context("Password input cancelled")?;
                 print!("  Testing IMAP connection... ");
                 io::stdout().flush()?;
-                match test_imap_connection(&imap_host, imap_port, &imap_username, &pw, accept_invalid_certs) {
-                    Ok(()) => { println!("{}", "OK".green()); break pw; }
+                match test_imap_connection(
+                    &imap_host,
+                    imap_port,
+                    &imap_username,
+                    &pw,
+                    accept_invalid_certs,
+                ) {
+                    Ok(()) => {
+                        println!("{}", "OK".green());
+                        break pw;
+                    }
                     Err(e) => {
                         println!("{}", "FAILED".red());
                         eprintln!("  Error: {}", e);
@@ -677,11 +751,20 @@ pub fn cmd_config_add_account(
         } else {
             print!("  Testing IMAP connection... ");
             io::stdout().flush()?;
-            match test_imap_connection(&imap_host, imap_port, &imap_username, &smtp_password, accept_invalid_certs) {
+            match test_imap_connection(
+                &imap_host,
+                imap_port,
+                &imap_username,
+                &smtp_password,
+                accept_invalid_certs,
+            ) {
                 Ok(()) => println!("{}", "OK".green()),
                 Err(e) => {
                     println!("{}", "FAILED".red());
-                    eprintln!("  {} SMTP password did not work for IMAP.", "\u{26a0}".yellow());
+                    eprintln!(
+                        "  {} SMTP password did not work for IMAP.",
+                        "\u{26a0}".yellow()
+                    );
                     eprintln!("  Error: {}", e);
                 }
             }
@@ -694,10 +777,16 @@ pub fn cmd_config_add_account(
     println!("{}", "Mailbox Configuration".bold());
     print!("  Fetching mailbox list from server... ");
     io::stdout().flush()?;
-    let imap_username = if imap_username_input.is_empty() { smtp_username.clone() } else { imap_username_input.clone() };
+    let imap_username = if imap_username_input.is_empty() {
+        smtp_username.clone()
+    } else {
+        imap_username_input.clone()
+    };
     let imap_config = crate::config::ImapConfig {
-        host: imap_host.clone(), port: imap_port,
-        username: imap_username.clone(), password: imap_password.clone(),
+        host: imap_host.clone(),
+        port: imap_port,
+        username: imap_username.clone(),
+        password: imap_password.clone(),
         accept_invalid_certs,
         auth_method: if is_exchange {
             crate::config::AuthMethod::OAuth2
@@ -708,18 +797,34 @@ pub fn cmd_config_add_account(
         body_fetch_deadline_secs: 30,
     };
     let imap_config_for_list = imap_config.clone();
-    let server_mailboxes = match run_async_blocking(async move { list_mailboxes(&imap_config_for_list).await }) {
-        Ok(mbs) => { println!("{} ({} mailboxes)", "OK".green(), mbs.len()); mbs }
-        Err(e) => { println!("{}", "FAILED".red()); eprintln!("  Error: {}", e); Vec::new() }
-    };
+    let server_mailboxes =
+        match run_async_blocking(async move { list_mailboxes(&imap_config_for_list).await }) {
+            Ok(mbs) => {
+                println!("{} ({} mailboxes)", "OK".green(), mbs.len());
+                mbs
+            }
+            Err(e) => {
+                println!("{}", "FAILED".red());
+                eprintln!("  Error: {}", e);
+                Vec::new()
+            }
+        };
 
     let (inbox_server, archive_server, sent_server) = if !server_mailboxes.is_empty() {
         let mut available = server_mailboxes.clone();
         let inbox = select_mailbox("Which mailbox is your Inbox?", &available, &["INBOX"])?;
         available.retain(|m| m != &inbox);
-        let archive = select_mailbox("Which mailbox is your Archive?", &available, &["Archive", "All Mail"])?;
+        let archive = select_mailbox(
+            "Which mailbox is your Archive?",
+            &available,
+            &["Archive", "All Mail"],
+        )?;
         available.retain(|m| m != &archive);
-        let sent = select_mailbox("Which mailbox is your Sent folder?", &available, &["Sent", "Sent Items", "Sent Messages"])?;
+        let sent = select_mailbox(
+            "Which mailbox is your Sent folder?",
+            &available,
+            &["Sent", "Sent Items", "Sent Messages"],
+        )?;
         (inbox, archive, sent)
     } else {
         let inbox = prompt_input("Inbox mailbox name", "INBOX")?;
@@ -729,16 +834,31 @@ pub fn cmd_config_add_account(
     };
 
     let extra_mailboxes: Vec<String> = if !server_mailboxes.is_empty() {
-        let remaining: Vec<&str> = server_mailboxes.iter()
-            .filter(|m| m.as_str() != inbox_server && m.as_str() != archive_server && m.as_str() != sent_server)
-            .map(|s| s.as_str()).collect();
+        let remaining: Vec<&str> = server_mailboxes
+            .iter()
+            .filter(|m| {
+                m.as_str() != inbox_server
+                    && m.as_str() != archive_server
+                    && m.as_str() != sent_server
+            })
+            .map(|s| s.as_str())
+            .collect();
         if !remaining.is_empty() {
             let selection = dialoguer::MultiSelect::new()
                 .with_prompt("Select additional mailboxes to sync (optional)")
-                .items(&remaining).interact().unwrap_or_default();
-            selection.iter().map(|&i| remaining[i].to_string()).collect()
-        } else { Vec::new() }
-    } else { Vec::new() };
+                .items(&remaining)
+                .interact()
+                .unwrap_or_default();
+            selection
+                .iter()
+                .map(|&i| remaining[i].to_string())
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
     println!();
 
     print_account_data_paths(&account_name);
@@ -750,9 +870,15 @@ pub fn cmd_config_add_account(
         None
     };
     let block = build_add_account_toml(
-        &account_name, &default_from,
-        &smtp_host, smtp_port, &smtp_username, accept_invalid_certs,
-        &imap_host_input, imap_port, &imap_username_input,
+        &account_name,
+        &default_from,
+        &smtp_host,
+        smtp_port,
+        &smtp_username,
+        accept_invalid_certs,
+        &imap_host_input,
+        imap_port,
+        &imap_username_input,
         &inbox_server,
         &archive_server,
         &sent_server,
@@ -799,12 +925,17 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
         "{} Microsoft 365 (Graph API) -- no IMAP/SMTP needed.",
         "\u{2139}".blue()
     );
-    println!("  Requires an Azure Entra ID app with Mail.Read, Mail.ReadWrite, Mail.Send permissions.");
+    println!(
+        "  Requires an Azure Entra ID app with Mail.Read, Mail.ReadWrite, Mail.Send permissions."
+    );
     println!("  See docs/exchange-setup.md for details.");
     println!();
 
     // -- Account name
-    let account_name = prompt_input("Account name (unique slug, e.g. 'exchange', 'work')", "exchange")?;
+    let account_name = prompt_input(
+        "Account name (unique slug, e.g. 'exchange', 'work')",
+        "exchange",
+    )?;
     println!();
 
     // -- Email address
@@ -818,7 +949,10 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
     println!();
 
     // -- Device code flow
-    println!("{} Running OAuth2 device code flow (Graph API)...", "\u{2139}".blue());
+    println!(
+        "{} Running OAuth2 device code flow (Graph API)...",
+        "\u{2139}".blue()
+    );
     {
         let cid = oauth2_client_id.clone();
         let tid = oauth2_tenant_id.clone();
@@ -885,7 +1019,11 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
         available.retain(|m| m != &inbox);
         let archive = select_mailbox("Which folder is your Archive?", &available, &["Archive"])?;
         available.retain(|m| m != &archive);
-        let sent = select_mailbox("Which folder is your Sent folder?", &available, &["Sent Items"])?;
+        let sent = select_mailbox(
+            "Which folder is your Sent folder?",
+            &available,
+            &["Sent Items"],
+        )?;
         available.retain(|m| m != &sent);
         (inbox, archive, sent)
     } else {
@@ -912,7 +1050,10 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
                 .items(&remaining)
                 .interact()
                 .unwrap_or_default();
-            selection.iter().map(|&i| remaining[i].to_string()).collect()
+            selection
+                .iter()
+                .map(|&i| remaining[i].to_string())
+                .collect()
         } else {
             Vec::new()
         }
@@ -925,17 +1066,22 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
 
     // -- Build config TOML
     let mut toml_content = String::new();
-    toml_content.push_str("# TUI theme: catppuccin-mocha (default), catppuccin-latte, tokyo-night, terminal\n");
+    toml_content.push_str(
+        "# TUI theme: catppuccin-mocha (default), catppuccin-latte, tokyo-night, terminal\n",
+    );
     toml_content.push_str("theme = \"catppuccin-mocha\"\n\n");
-    toml_content.push_str("# Desktop notifications for new mail while the TUI runs (default: false)\n");
+    toml_content
+        .push_str("# Desktop notifications for new mail while the TUI runs (default: false)\n");
     toml_content.push_str("notifications = false\n\n");
     toml_content.push_str("[email]\n");
     toml_content.push_str("font_family = \"Helvetica, Arial, sans-serif\"\n");
     toml_content.push_str("font_size = \"16px\"\n");
     toml_content.push_str("include_signature = true\n\n");
     toml_content.push_str(&build_graph_account_toml(
-        &account_name, &default_from,
-        &oauth2_client_id, &oauth2_tenant_id,
+        &account_name,
+        &default_from,
+        &oauth2_client_id,
+        &oauth2_tenant_id,
         &inbox_server,
         &archive_server,
         &sent_server,
@@ -975,7 +1121,9 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
         "{} Microsoft 365 (Graph API) -- no IMAP/SMTP needed.",
         "\u{2139}".blue()
     );
-    println!("  Requires an Azure Entra ID app with Mail.Read, Mail.ReadWrite, Mail.Send permissions.");
+    println!(
+        "  Requires an Azure Entra ID app with Mail.Read, Mail.ReadWrite, Mail.Send permissions."
+    );
     println!("  See docs/exchange-setup.md for details.");
     println!();
 
@@ -983,7 +1131,11 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
     let account_name = loop {
         let name = prompt_input("Account name (unique slug)", "exchange")?;
         if existing_names.contains(&name.as_str()) {
-            println!("{} Account '{}' already exists. Choose a different name.", "\u{26a0}".yellow(), name);
+            println!(
+                "{} Account '{}' already exists. Choose a different name.",
+                "\u{26a0}".yellow(),
+                name
+            );
         } else {
             break name;
         }
@@ -1001,7 +1153,10 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
     println!();
 
     // -- Device code flow
-    println!("{} Running OAuth2 device code flow (Graph API)...", "\u{2139}".blue());
+    println!(
+        "{} Running OAuth2 device code flow (Graph API)...",
+        "\u{2139}".blue()
+    );
     {
         let cid = oauth2_client_id.clone();
         let tid = oauth2_tenant_id.clone();
@@ -1067,7 +1222,11 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
         available.retain(|m| m != &inbox);
         let archive = select_mailbox("Which folder is your Archive?", &available, &["Archive"])?;
         available.retain(|m| m != &archive);
-        let sent = select_mailbox("Which folder is your Sent folder?", &available, &["Sent Items"])?;
+        let sent = select_mailbox(
+            "Which folder is your Sent folder?",
+            &available,
+            &["Sent Items"],
+        )?;
         available.retain(|m| m != &sent);
         (inbox, archive, sent)
     } else {
@@ -1093,7 +1252,10 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
                 .items(&remaining)
                 .interact()
                 .unwrap_or_default();
-            selection.iter().map(|&i| remaining[i].to_string()).collect()
+            selection
+                .iter()
+                .map(|&i| remaining[i].to_string())
+                .collect()
         } else {
             Vec::new()
         }
@@ -1105,14 +1267,19 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
     print_account_data_paths(&account_name);
 
     // -- Append to config file
-    let block = format!("\n{}", build_graph_account_toml(
-        &account_name, &default_from,
-        &oauth2_client_id, &oauth2_tenant_id,
-        &inbox_server,
-        &archive_server,
-        &sent_server,
-        &extra_mailboxes,
-    ));
+    let block = format!(
+        "\n{}",
+        build_graph_account_toml(
+            &account_name,
+            &default_from,
+            &oauth2_client_id,
+            &oauth2_tenant_id,
+            &inbox_server,
+            &archive_server,
+            &sent_server,
+            &extra_mailboxes,
+        )
+    );
 
     let mut content = fs::read_to_string(path)?;
     content.push_str(&block);
@@ -1164,9 +1331,15 @@ pub(crate) fn ensure_config_parses(content: &str) -> Result<()> {
 /// `oauth2` is Some((client_id, tenant_id)) for OAuth2 accounts.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_init_toml(
-    account_name: &str, default_from: &str,
-    smtp_host: &str, smtp_port: u16, smtp_username: &str, accept_invalid_certs: bool,
-    imap_host_input: &str, imap_port: u16, imap_username_input: &str,
+    account_name: &str,
+    default_from: &str,
+    smtp_host: &str,
+    smtp_port: u16,
+    smtp_username: &str,
+    accept_invalid_certs: bool,
+    imap_host_input: &str,
+    imap_port: u16,
+    imap_username_input: &str,
     inbox_server: &str,
     archive_server: &str,
     sent_server: &str,
@@ -1174,7 +1347,9 @@ pub(crate) fn build_init_toml(
     oauth2: Option<(&str, &str)>,
 ) -> String {
     let mut out = String::new();
-    out.push_str("# TUI theme: catppuccin-mocha (default), catppuccin-latte, tokyo-night, terminal\n");
+    out.push_str(
+        "# TUI theme: catppuccin-mocha (default), catppuccin-latte, tokyo-night, terminal\n",
+    );
     out.push_str("theme = \"catppuccin-mocha\"\n\n");
     out.push_str("# Desktop notifications for new mail while the TUI runs (default: false)\n");
     out.push_str("notifications = false\n\n");
@@ -1239,9 +1414,15 @@ pub(crate) fn build_init_toml(
 /// `oauth2` is Some((client_id, tenant_id)) for OAuth2 accounts.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_add_account_toml(
-    account_name: &str, default_from: &str,
-    smtp_host: &str, smtp_port: u16, smtp_username: &str, accept_invalid_certs: bool,
-    imap_host_input: &str, imap_port: u16, imap_username_input: &str,
+    account_name: &str,
+    default_from: &str,
+    smtp_host: &str,
+    smtp_port: u16,
+    smtp_username: &str,
+    accept_invalid_certs: bool,
+    imap_host_input: &str,
+    imap_port: u16,
+    imap_username_input: &str,
     inbox_server: &str,
     archive_server: &str,
     sent_server: &str,
@@ -1264,13 +1445,21 @@ pub(crate) fn build_add_account_toml(
     block.push_str(&format!("host = {}\n", toml_str(smtp_host)));
     block.push_str(&format!("port = {}\n", smtp_port));
     block.push_str(&format!("username = {}\n", toml_str(smtp_username)));
-    if accept_invalid_certs { block.push_str("accept_invalid_certs = true\n"); }
+    if accept_invalid_certs {
+        block.push_str("accept_invalid_certs = true\n");
+    }
 
     block.push_str("\n[accounts.imap]\n");
-    if !imap_host_input.is_empty() { block.push_str(&format!("host = {}\n", toml_str(imap_host_input))); }
+    if !imap_host_input.is_empty() {
+        block.push_str(&format!("host = {}\n", toml_str(imap_host_input)));
+    }
     block.push_str(&format!("port = {}\n", imap_port));
-    if !imap_username_input.is_empty() { block.push_str(&format!("username = {}\n", toml_str(imap_username_input))); }
-    if accept_invalid_certs { block.push_str("accept_invalid_certs = true\n"); }
+    if !imap_username_input.is_empty() {
+        block.push_str(&format!("username = {}\n", toml_str(imap_username_input)));
+    }
+    if accept_invalid_certs {
+        block.push_str("accept_invalid_certs = true\n");
+    }
 
     block.push_str("\n[accounts.mailboxes.inbox]\n");
     block.push_str(&format!("server = {}\n", toml_str(inbox_server)));
@@ -1289,8 +1478,10 @@ pub(crate) fn build_add_account_toml(
 /// Build a Graph API account TOML block (no SMTP/IMAP sections).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_graph_account_toml(
-    account_name: &str, default_from: &str,
-    client_id: &str, tenant_id: &str,
+    account_name: &str,
+    default_from: &str,
+    client_id: &str,
+    tenant_id: &str,
     inbox_server: &str,
     archive_server: &str,
     sent_server: &str,

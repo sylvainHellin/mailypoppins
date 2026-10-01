@@ -112,7 +112,10 @@ impl SendResult {
     pub fn submit_outcome(&self) -> crate::outbox::SubmitOutcome {
         let mut verdicts = crate::outbox::RecipientVerdicts::default();
         for r in &self.results {
-            let reason = r.error.clone().unwrap_or_else(|| "unknown error".to_string());
+            let reason = r
+                .error
+                .clone()
+                .unwrap_or_else(|| "unknown error".to_string());
             match r.verdict {
                 RecipientVerdict::Delivered => verdicts.delivered.push(r.address.clone()),
                 RecipientVerdict::Rejected => verdicts.rejected.push((r.address.clone(), reason)),
@@ -230,7 +233,10 @@ pub fn markdown_to_html(
             // `<blockquote style="...">` would no longer match it.
             let quoted_part = if parts.len() > 1 { parts[1] } else { "" };
             let quoted_styled = quoted_part
-                .replace("<blockquote>", "<div style=\"margin:0;padding:0 0 0 1em;border-left:2px solid #ccc\">")
+                .replace(
+                    "<blockquote>",
+                    "<div style=\"margin:0;padding:0 0 0 1em;border-left:2px solid #ccc\">",
+                )
                 .replace("</blockquote>", "</div>");
             let quoted_styled =
                 inline_element_styles(&quoted_styled, &font_family_attr, &config.font_size);
@@ -447,7 +453,12 @@ mod tests {
 
     #[test]
     fn test_markdown_to_html_basic_paragraph() {
-        let html = markdown_to_html("Hello **world**!\n\nSecond paragraph.", &default_settings(), None, None);
+        let html = markdown_to_html(
+            "Hello **world**!\n\nSecond paragraph.",
+            &default_settings(),
+            None,
+            None,
+        );
         assert_snapshot!(html);
     }
 
@@ -498,8 +509,7 @@ mod tests {
         // process happens to be running the send: the daemon's cwd is nobody's
         // choice, so the anchor is passed in rather than read from the
         // environment.
-        let resolved =
-            resolve_attachment_paths(&["report.pdf".to_string()], dir.path()).unwrap();
+        let resolved = resolve_attachment_paths(&["report.pdf".to_string()], dir.path()).unwrap();
         assert_eq!(resolved, vec![file.clone()]);
         assert!(resolved.iter().all(|p| p.is_absolute()));
 
@@ -552,7 +562,8 @@ mod tests {
 
     #[test]
     fn test_markdown_to_html_tables_and_links() {
-        let md = "| A | B |\n|---|---|\n| 1 | 2 |\n\n[Link](https://example.com)\n\n~~strikethrough~~";
+        let md =
+            "| A | B |\n|---|---|\n| 1 | 2 |\n\n[Link](https://example.com)\n\n~~strikethrough~~";
         let html = markdown_to_html(md, &default_settings(), None, None);
         assert_snapshot!(html);
     }
@@ -706,7 +717,10 @@ mod tests {
             state: Some(crate::outbox::OutboxState::Done),
             row_id: Some(1),
         };
-        assert_eq!(report.status_line(), "partly delivered, see `mp outbox list`");
+        assert_eq!(
+            report.status_line(),
+            "partly delivered, see `mp outbox list`"
+        );
     }
 
     fn draft_with(id: Option<&str>, path: &str) -> EmailDraft {
@@ -778,8 +792,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .message_id;
-        let rows =
-            crate::store::read::find_by_message_id(&fx.store, "alice", &message_id).unwrap();
+        let rows = crate::store::read::find_by_message_id(&fx.store, "alice", &message_id).unwrap();
         let mailboxes = server_mailboxes_of(&crate::config::AccountConfig::default(), &rows);
         let outcome = crate::pending_ops::apply_post_send_flag(
             &fx.store,
@@ -791,7 +804,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.rows, 2, "both copies are found by Message-ID");
-        for row in crate::store::read::find_by_message_id(&fx.store, "alice", &message_id).unwrap() {
+        for row in crate::store::read::find_by_message_id(&fx.store, "alice", &message_id).unwrap()
+        {
             assert!(row.is_answered(), "{} was not flagged", row.mailbox);
             assert!(!row.is_forwarded());
         }
@@ -817,7 +831,11 @@ mod tests {
         let b = fx.ingest_plain("inbox", 2, "Two");
         let rows: Vec<_> = [a, b]
             .into_iter()
-            .map(|id| crate::store::read::find_by_id(&fx.store, id).unwrap().unwrap())
+            .map(|id| {
+                crate::store::read::find_by_id(&fx.store, id)
+                    .unwrap()
+                    .unwrap()
+            })
             .collect();
         let mailboxes = server_mailboxes_of(&crate::config::AccountConfig::default(), &rows);
         assert_eq!(mailboxes.len(), 1, "one server folder, one SELECT");
@@ -838,12 +856,16 @@ mod tests {
         crate::pending_ops::apply_post_send_flag(&fx.store, "alice", &message_id, false, &[])
             .unwrap();
 
-        let row = crate::store::read::find_by_id(&fx.store, id).unwrap().unwrap();
+        let row = crate::store::read::find_by_id(&fx.store, id)
+            .unwrap()
+            .unwrap();
         assert!(row.is_forwarded());
         assert!(!row.is_answered());
         assert!(row.is_read(), "the read bit survives a history write");
         assert!(
-            crate::pending_ops::queued_ops(&fx.store, "alice").unwrap().is_empty(),
+            crate::pending_ops::queued_ops(&fx.store, "alice")
+                .unwrap()
+                .is_empty(),
             "no server mailboxes (a Graph account) queues nothing"
         );
     }
@@ -864,7 +886,9 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.rows, 0);
         assert_eq!(outcome.op_id, None, "nothing local means nothing owed");
-        assert!(crate::pending_ops::queued_ops(&fx.store, "alice").unwrap().is_empty());
+        assert!(crate::pending_ops::queued_ops(&fx.store, "alice")
+            .unwrap()
+            .is_empty());
     }
 
     /// The key is the frontmatter id when there is one, because that is what
@@ -963,14 +987,20 @@ mod tests {
     fn strip_signature_marker_collapses_the_blank_lines_it_padded() {
         let body = "My reply\n\n-- \nBest, Alice\n\n{{SIGNATURE}}\n\nOn Mon wrote:\n> Quoted";
         let plain = strip_signature_marker(body);
-        assert!(!plain.contains("{{SIGNATURE}}"), "marker survived: {plain:?}");
+        assert!(
+            !plain.contains("{{SIGNATURE}}"),
+            "marker survived: {plain:?}"
+        );
         // The signature Markdown (spliced in at draft time, #0099) stays; only
         // the marker and its padding go.
         assert_eq!(
             plain,
             "My reply\n\n-- \nBest, Alice\n\nOn Mon wrote:\n> Quoted"
         );
-        assert!(!plain.contains("\n\n\n"), "double blank line left behind: {plain:?}");
+        assert!(
+            !plain.contains("\n\n\n"),
+            "double blank line left behind: {plain:?}"
+        );
     }
 
     /// The signature sentinels (#0106) never reach a recipient: the plain part
@@ -978,19 +1008,33 @@ mod tests {
     /// part carries no raw `<!-- mp:sig-... -->` comment.
     #[test]
     fn signature_sentinels_are_stripped_from_both_send_parts() {
-        let body =
-            "My note\n\n<!-- mp:sig-start -->\nBest,\nAlice\n<!-- mp:sig-end -->\n";
+        let body = "My note\n\n<!-- mp:sig-start -->\nBest,\nAlice\n<!-- mp:sig-end -->\n";
         let plain = plain_text_body(body);
-        assert!(!plain.contains("mp:sig-start"), "sentinel in plain: {plain:?}");
-        assert!(!plain.contains("mp:sig-end"), "sentinel in plain: {plain:?}");
-        assert!(plain.contains("Best,"), "signature dropped from plain: {plain:?}");
-        assert!(plain.contains("Alice"), "signature dropped from plain: {plain:?}");
+        assert!(
+            !plain.contains("mp:sig-start"),
+            "sentinel in plain: {plain:?}"
+        );
+        assert!(
+            !plain.contains("mp:sig-end"),
+            "sentinel in plain: {plain:?}"
+        );
+        assert!(
+            plain.contains("Best,"),
+            "signature dropped from plain: {plain:?}"
+        );
+        assert!(
+            plain.contains("Alice"),
+            "signature dropped from plain: {plain:?}"
+        );
 
         let html = markdown_to_html(body, &default_settings(), None, None);
         assert!(!html.contains("mp:sig-start"), "sentinel in html: {html}");
         assert!(!html.contains("mp:sig-end"), "sentinel in html: {html}");
         // The signature content still renders, on its own line (hard break).
-        assert!(html.contains("Alice"), "signature dropped from html: {html}");
+        assert!(
+            html.contains("Alice"),
+            "signature dropped from html: {html}"
+        );
     }
 
     /// A body with no marker is returned untouched, so the non-reply send
@@ -1021,9 +1065,18 @@ mod tests {
         )
         .expect("the reply draft builds");
         let raw = String::from_utf8_lossy(&built.raw);
-        assert!(!raw.contains("{{SIGNATURE}}"), "marker leaked into the message bytes");
-        assert!(raw.contains("My reply"), "reply text missing from the message");
-        assert!(raw.contains("Original text"), "quoted text missing from the message");
+        assert!(
+            !raw.contains("{{SIGNATURE}}"),
+            "marker leaked into the message bytes"
+        );
+        assert!(
+            raw.contains("My reply"),
+            "reply text missing from the message"
+        );
+        assert!(
+            raw.contains("Original text"),
+            "quoted text missing from the message"
+        );
 
         // Invite path: the same body feeds the invite alternative's plain part.
         let invited = build_draft_message(
@@ -1054,7 +1107,10 @@ mod tests {
 
         // Plain part: marker gone, signature exactly once.
         let plain = strip_signature_marker(body);
-        assert!(!plain.contains("{{SIGNATURE}}"), "marker in plain part: {plain:?}");
+        assert!(
+            !plain.contains("{{SIGNATURE}}"),
+            "marker in plain part: {plain:?}"
+        );
         assert_eq!(
             plain.matches("mailto:robin@example.com").count(),
             1,
@@ -1095,7 +1151,9 @@ mod tests {
     fn split_addresses_lettre_parses_quoted_name() {
         use lettre::message::Mailbox;
         let addr = "\"Doe, Jane\" <jane@example.com>";
-        let mbox: Mailbox = addr.parse().expect("lettre should parse quoted display name");
+        let mbox: Mailbox = addr
+            .parse()
+            .expect("lettre should parse quoted display name");
         assert_eq!(mbox.email.to_string(), "jane@example.com");
     }
 
@@ -1112,8 +1170,9 @@ mod tests {
             normalized,
             "\"CCBE_Researchers [TUBVCMS]\" <researchers.ccbe@ed.tum.de>"
         );
-        let _: lettre::message::Mailbox =
-            normalized.parse().expect("lettre must parse normalized form");
+        let _: lettre::message::Mailbox = normalized
+            .parse()
+            .expect("lettre must parse normalized form");
     }
 
     #[test]
@@ -1124,12 +1183,10 @@ mod tests {
         // entries), normalization must quote it so lettre accepts it.
         let raw = "Doe, Jane <jane@example.com>";
         let normalized = normalize_address_for_smtp(raw);
-        assert_eq!(
-            normalized,
-            "\"Doe, Jane\" <jane@example.com>"
-        );
-        let _: lettre::message::Mailbox =
-            normalized.parse().expect("lettre must parse normalized form");
+        assert_eq!(normalized, "\"Doe, Jane\" <jane@example.com>");
+        let _: lettre::message::Mailbox = normalized
+            .parse()
+            .expect("lettre must parse normalized form");
     }
 
     #[test]
@@ -1152,10 +1209,7 @@ mod tests {
         let normalized = normalize_address_for_smtp(raw);
         // backslash and inner double-quotes must be escaped inside the
         // resulting quoted-string.
-        assert_eq!(
-            normalized,
-            "\"Weird \\\\ \\\"name\\\"\" <w@x.com>"
-        );
+        assert_eq!(normalized, "\"Weird \\\\ \\\"name\\\"\" <w@x.com>");
         let _: lettre::message::Mailbox =
             normalized.parse().expect("lettre must parse escaped form");
     }
@@ -1273,7 +1327,10 @@ mod tests {
             None,
             Some(quoted),
         );
-        assert!(html.contains(quoted), "quoted section was rewritten: {html}");
+        assert!(
+            html.contains(quoted),
+            "quoted section was rewritten: {html}"
+        );
     }
 
     #[test]
@@ -1356,9 +1413,7 @@ pub fn build_invite_mime_body(plain: &str, html: String, ics: &str) -> MultiPart
 /// honouring the account's OAuth2/password auth and `accept_invalid_certs`
 /// opt-in. The single transport builder behind [`submit`], so every SMTP
 /// submission applies identical transport policy.
-fn build_smtp_transport(
-    smtp_config: &SmtpConfig,
-) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
+fn build_smtp_transport(smtp_config: &SmtpConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
     if smtp_config.accept_invalid_certs {
         crate::config::ensure_invalid_certs_allowed(&smtp_config.host)?;
     }
@@ -1368,32 +1423,39 @@ fn build_smtp_transport(
         // Implicit TLS (SMTPS)
         let mut transport = AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp_config.host)?;
         if smtp_config.accept_invalid_certs {
-            let tls_params = lettre::transport::smtp::client::TlsParameters::builder(smtp_config.host.clone())
-                .dangerous_accept_invalid_certs(true)
-                .build()?;
+            let tls_params =
+                lettre::transport::smtp::client::TlsParameters::builder(smtp_config.host.clone())
+                    .dangerous_accept_invalid_certs(true)
+                    .build()?;
             transport = transport.tls(lettre::transport::smtp::client::Tls::Wrapper(tls_params));
         }
         let transport = transport.port(smtp_config.port).credentials(creds);
         if smtp_config.auth_method == AuthMethod::OAuth2 {
             transport
-                .authentication(vec![lettre::transport::smtp::authentication::Mechanism::Xoauth2])
+                .authentication(vec![
+                    lettre::transport::smtp::authentication::Mechanism::Xoauth2,
+                ])
                 .build()
         } else {
             transport.build()
         }
     } else {
         // STARTTLS
-        let mut transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp_config.host)?;
+        let mut transport =
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp_config.host)?;
         if smtp_config.accept_invalid_certs {
-            let tls_params = lettre::transport::smtp::client::TlsParameters::builder(smtp_config.host.clone())
-                .dangerous_accept_invalid_certs(true)
-                .build()?;
+            let tls_params =
+                lettre::transport::smtp::client::TlsParameters::builder(smtp_config.host.clone())
+                    .dangerous_accept_invalid_certs(true)
+                    .build()?;
             transport = transport.tls(lettre::transport::smtp::client::Tls::Required(tls_params));
         }
         let transport = transport.port(smtp_config.port).credentials(creds);
         if smtp_config.auth_method == AuthMethod::OAuth2 {
             transport
-                .authentication(vec![lettre::transport::smtp::authentication::Mechanism::Xoauth2])
+                .authentication(vec![
+                    lettre::transport::smtp::authentication::Mechanism::Xoauth2,
+                ])
                 .build()
         } else {
             transport.build()
@@ -1453,7 +1515,10 @@ pub fn build_reply_message(
         .parse()
         .context("Invalid ORGANIZER address for RSVP reply")?;
 
-    info!("Building RSVP reply: subject=\"{}\", from={}, to={}", subject, from, organizer);
+    info!(
+        "Building RSVP reply: subject=\"{}\", from={}, to={}",
+        subject, from, organizer
+    );
 
     let message = Message::builder()
         .from(from_mailbox.clone())
@@ -1523,11 +1588,7 @@ pub async fn send_rsvp(
 
     let summary = ctx.summary.as_deref().unwrap_or("(no subject)");
     let subject = format!("{}: {}", rsvp.subject_verb(), summary);
-    let plain_body = format!(
-        "{} the invitation: {}",
-        rsvp.subject_verb(),
-        summary
-    );
+    let plain_body = format!("{} the invitation: {}", rsvp.subject_verb(), summary);
 
     let built = build_reply_message(
         &account_address,
@@ -1660,7 +1721,10 @@ impl DurableSend {
     }
 
     /// Record what the submission did, committing the transition immediately.
-    pub fn record(&self, outcome: &crate::outbox::SubmitOutcome) -> Result<crate::outbox::OutboxState> {
+    pub fn record(
+        &self,
+        outcome: &crate::outbox::SubmitOutcome,
+    ) -> Result<crate::outbox::OutboxState> {
         crate::outbox::record_submission(&self.store, &self.blobs, self.row_id, outcome)
     }
 
@@ -1986,8 +2050,8 @@ pub fn resolve_attachment_paths(entries: &[String], anchor: &Path) -> Result<Vec
             for dent in fs::read_dir(&path)
                 .with_context(|| format!("Failed to read attachment folder: {}", entry))?
             {
-                let dent = dent
-                    .with_context(|| format!("Failed to read attachment folder: {}", entry))?;
+                let dent =
+                    dent.with_context(|| format!("Failed to read attachment folder: {}", entry))?;
                 let file = dent.path();
                 if !file.is_file() {
                     continue;
@@ -2294,7 +2358,10 @@ pub async fn drain_account_at(
     let counts = match crate::outbox::counts(store, &account.name) {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("[outbox] could not read the outbox for {}: {e:#}", account.name);
+            log::warn!(
+                "[outbox] could not read the outbox for {}: {e:#}",
+                account.name
+            );
             return crate::outbox::DrainResult::default();
         }
     };
@@ -2377,7 +2444,10 @@ pub async fn resume_outbox_at(
     let store = match crate::store::Store::open(&path) {
         Ok(store) => store,
         Err(e) => {
-            log::warn!("[outbox] could not open the store for {}: {e:#}", account.name);
+            log::warn!(
+                "[outbox] could not open the store for {}: {e:#}",
+                account.name
+            );
             return crate::outbox::DrainResult::default();
         }
     };
@@ -2609,11 +2679,7 @@ pub fn build_draft_message(
         ));
     }
 
-    let from_address = draft
-        .frontmatter
-        .from
-        .as_deref()
-        .unwrap_or(default_from);
+    let from_address = draft.frontmatter.from.as_deref().unwrap_or(default_from);
 
     // Normalised once and carried on the built message: what is validated
     // here is what `submit` parses to derive `MAIL FROM`, so a `from:` like
@@ -2746,12 +2812,17 @@ pub fn build_draft_message(
             for path in resolve_attachment_paths(attachments, attachment_anchor(draft))? {
                 let (filename, file_content, content_type) = read_attachment(&path)?;
                 let content_type_parsed = content_type.parse().unwrap_or_else(|_| {
-                    "application/octet-stream".parse().expect("static MIME type")
+                    "application/octet-stream"
+                        .parse()
+                        .expect("static MIME type")
                 });
-                mixed = mixed.singlepart(Attachment::new(filename).body(file_content, content_type_parsed));
+                mixed = mixed
+                    .singlepart(Attachment::new(filename).body(file_content, content_type_parsed));
             }
         }
-        builder.multipart(mixed).context("Failed to build invite message")?
+        builder
+            .multipart(mixed)
+            .context("Failed to build invite message")?
     } else if let Some(attachments) = &draft.frontmatter.attachments {
         let files = resolve_attachment_paths(attachments, attachment_anchor(draft))?;
         if !files.is_empty() {
@@ -2759,18 +2830,27 @@ pub fn build_draft_message(
 
             for path in files {
                 let (filename, file_content, content_type) = read_attachment(&path)?;
-                let content_type_parsed = content_type.parse()
-                    .unwrap_or_else(|_| "application/octet-stream".parse().expect("static MIME type"));
+                let content_type_parsed = content_type.parse().unwrap_or_else(|_| {
+                    "application/octet-stream"
+                        .parse()
+                        .expect("static MIME type")
+                });
                 let attachment = Attachment::new(filename).body(file_content, content_type_parsed);
                 mixed = mixed.singlepart(attachment);
             }
 
-            builder.multipart(mixed).context("Failed to build email message")?
+            builder
+                .multipart(mixed)
+                .context("Failed to build email message")?
         } else {
-            builder.multipart(body_multipart).context("Failed to build email message")?
+            builder
+                .multipart(body_multipart)
+                .context("Failed to build email message")?
         }
     } else {
-        builder.multipart(body_multipart).context("Failed to build email message")?
+        builder
+            .multipart(body_multipart)
+            .context("Failed to build email message")?
     };
 
     // Get raw message bytes for send_raw and IMAP APPEND

@@ -100,10 +100,26 @@ fn ingest_fixture(mailbox: &str, uid: i64, email: &FetchedEmail) {
 #[test]
 fn counts_match_the_number_of_listable_messages() {
     let data = DataDir::new();
-    ingest_fixture("inbox", 1, &fixture_email("a", "Mon, 01 Jan 2024 09:00:00 +0000", false));
-    ingest_fixture("inbox", 2, &fixture_email("b", "Mon, 01 Jan 2024 10:00:00 +0000", true));
-    ingest_fixture("inbox", 3, &fixture_email("c", "Mon, 01 Jan 2024 11:00:00 +0000", true));
-    ingest_fixture("archive", 1, &fixture_email("old", "Mon, 01 Jan 2023 09:00:00 +0000", true));
+    ingest_fixture(
+        "inbox",
+        1,
+        &fixture_email("a", "Mon, 01 Jan 2024 09:00:00 +0000", false),
+    );
+    ingest_fixture(
+        "inbox",
+        2,
+        &fixture_email("b", "Mon, 01 Jan 2024 10:00:00 +0000", true),
+    );
+    ingest_fixture(
+        "inbox",
+        3,
+        &fixture_email("c", "Mon, 01 Jan 2024 11:00:00 +0000", true),
+    );
+    ingest_fixture(
+        "archive",
+        1,
+        &fixture_email("old", "Mon, 01 Jan 2023 09:00:00 +0000", true),
+    );
 
     let mailboxes = vec![
         data.mailbox("Inbox", "inbox", MailboxKind::Inbox),
@@ -164,8 +180,7 @@ fn the_drafts_mailbox_lists_from_the_drafts_index() {
         .map(|e| e.status.clone())
         .collect();
     assert!(statuses.contains("sent"), "{statuses:?}");
-    std::fs::remove_file(crate::config::drafts_dir("alice").join("2026-07-03-done.md"))
-        .unwrap();
+    std::fs::remove_file(crate::config::drafts_dir("alice").join("2026-07-03-done.md")).unwrap();
 
     // And the sidebar agrees with the list it is counting.
     let mailboxes = vec![mb(
@@ -215,11 +230,18 @@ fn a_fully_sent_draft_leaves_the_drafts_list_and_a_partial_one_stays() {
     let entries = load_emails("alice", "drafts");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].subject, "Later");
-    assert_eq!(entries[0].status, "sent", "a partial send stays addressable");
+    assert_eq!(
+        entries[0].status, "sent",
+        "a partial send stays addressable"
+    );
     assert_eq!(
         count_all_emails(
             "alice",
-            &[mb("Drafts", crate::selector::DRAFTS_MAILBOX, MailboxKind::Drafts)]
+            &[mb(
+                "Drafts",
+                crate::selector::DRAFTS_MAILBOX,
+                MailboxKind::Drafts
+            )]
         ),
         vec![1]
     );
@@ -266,8 +288,7 @@ fn a_draft_written_externally_appears_on_the_next_load() {
     external_draft("first.md", "a@example.com", "First", "draft");
     let before = load_emails("alice", "drafts");
     assert_eq!(before.len(), 1);
-    let fingerprint_before =
-        crate::store::drafts::fingerprint(&crate::config::drafts_dir("alice"));
+    let fingerprint_before = crate::store::drafts::fingerprint(&crate::config::drafts_dir("alice"));
 
     external_draft("second.md", "b@example.com", "Second", "draft");
 
@@ -287,7 +308,11 @@ fn a_draft_written_externally_appears_on_the_next_load() {
 #[test]
 fn counts_are_zero_for_unsynced_mailboxes_and_stay_index_aligned() {
     let data = DataDir::new();
-    ingest_fixture("inbox", 1, &fixture_email("a", "Mon, 01 Jan 2024 09:00:00 +0000", false));
+    ingest_fixture(
+        "inbox",
+        1,
+        &fixture_email("a", "Mon, 01 Jan 2024 09:00:00 +0000", false),
+    );
 
     let mailboxes = vec![
         data.mailbox("Never synced", "some-folder", MailboxKind::Extra),
@@ -343,8 +368,16 @@ fn counts_ignore_the_read_flag() {
 #[test]
 fn a_message_whose_body_blob_is_gone_still_lists_and_still_counts() {
     let data = DataDir::new();
-    ingest_fixture("inbox", 1, &fixture_email("good", "Mon, 01 Jan 2024 09:00:00 +0000", false));
-    ingest_fixture("inbox", 2, &fixture_email("broken", "Mon, 01 Jan 2024 10:00:00 +0000", false));
+    ingest_fixture(
+        "inbox",
+        1,
+        &fixture_email("good", "Mon, 01 Jan 2024 09:00:00 +0000", false),
+    );
+    ingest_fixture(
+        "inbox",
+        2,
+        &fixture_email("broken", "Mon, 01 Jan 2024 10:00:00 +0000", false),
+    );
 
     // Evict one body the way a retention sweep would: unlink the blob file
     // and leave the row pointing at it.
@@ -358,8 +391,7 @@ fn a_message_whose_body_blob_is_gone_still_lists_and_still_counts() {
         )
         .unwrap();
     let blobs = BlobStore::for_account("alice");
-    std::fs::remove_file(blobs.path_for(&crate::store::BlobHash::parse(&hash).unwrap()))
-        .unwrap();
+    std::fs::remove_file(blobs.path_for(&crate::store::BlobHash::parse(&hash).unwrap())).unwrap();
     drop(store);
 
     let mailboxes = vec![data.mailbox("Inbox", "inbox", MailboxKind::Inbox)];
@@ -392,9 +424,21 @@ fn a_message_whose_body_blob_is_gone_still_lists_and_still_counts() {
 #[test]
 fn the_list_is_newest_first_and_deterministic() {
     let _data = DataDir::new();
-    ingest_fixture("inbox", 1, &fixture_email("older", "Mon, 01 Jan 2024 09:00:00 +0000", false));
-    ingest_fixture("inbox", 2, &fixture_email("newest", "Mon, 01 Jan 2024 18:00:00 +0000", false));
-    ingest_fixture("inbox", 3, &fixture_email("middle", "Mon, 01 Jan 2024 12:00:00 +0000", false));
+    ingest_fixture(
+        "inbox",
+        1,
+        &fixture_email("older", "Mon, 01 Jan 2024 09:00:00 +0000", false),
+    );
+    ingest_fixture(
+        "inbox",
+        2,
+        &fixture_email("newest", "Mon, 01 Jan 2024 18:00:00 +0000", false),
+    );
+    ingest_fixture(
+        "inbox",
+        3,
+        &fixture_email("middle", "Mon, 01 Jan 2024 12:00:00 +0000", false),
+    );
 
     let subjects: Vec<String> = load_emails("alice", "inbox")
         .into_iter()
@@ -423,8 +467,14 @@ fn display_fields_follow_the_file_builds_rules() {
     let entry = &entries[0];
     assert_eq!(entry.subject, "(no subject)");
     assert_eq!(entry.from, "Ada Lovelace");
-    assert_eq!(entry.date_display, "2024-05-06", "display stays sender-local");
-    assert_eq!(entry.date_sort, "2024-05-06T08:00:00", "the sort key is UTC");
+    assert_eq!(
+        entry.date_display, "2024-05-06",
+        "display stays sender-local"
+    );
+    assert_eq!(
+        entry.date_sort, "2024-05-06T08:00:00",
+        "the sort key is UTC"
+    );
     assert!(entry.read);
     assert_eq!(entry.status, "inbox", "status comes from the mailbox now");
 }
@@ -441,11 +491,7 @@ fn app_on_inbox() -> App {
     // else since P5-U10e, so the fixture holds a session where it used to
     // lean on the store-backed fallback the `App` no longer has.
     app.session = Some(TestDaemon::new(&["alice"]).session());
-    app.mailboxes = vec![mb(
-        "Inbox",
-        "inbox",
-        MailboxKind::Inbox,
-    )];
+    app.mailboxes = vec![mb("Inbox", "inbox", MailboxKind::Inbox)];
     app.mailbox_counts = vec![0];
     app.email_cache = vec![None];
     app.emails = std::sync::Arc::new(load_emails("alice", "inbox"));
@@ -474,7 +520,10 @@ fn the_list_loads_with_every_body_blob_missing() {
     assert_eq!(entries.len(), 3, "the rows are all the list needs");
     assert!(entries.iter().all(|e| e.subject.starts_with('m')));
     assert_eq!(
-        count_all_emails("alice", &[data.mailbox("Inbox", "inbox", MailboxKind::Inbox)]),
+        count_all_emails(
+            "alice",
+            &[data.mailbox("Inbox", "inbox", MailboxKind::Inbox)]
+        ),
         vec![3]
     );
 
@@ -488,8 +537,16 @@ fn the_list_loads_with_every_body_blob_missing() {
 #[test]
 fn the_preview_loads_the_body_of_the_selected_message() {
     let _data = DataDir::new();
-    ingest_fixture("inbox", 1, &fixture_email("newest", "Mon, 01 Jan 2024 12:00:00 +0000", false));
-    ingest_fixture("inbox", 2, &fixture_email("older", "Mon, 01 Jan 2024 09:00:00 +0000", false));
+    ingest_fixture(
+        "inbox",
+        1,
+        &fixture_email("newest", "Mon, 01 Jan 2024 12:00:00 +0000", false),
+    );
+    ingest_fixture(
+        "inbox",
+        2,
+        &fixture_email("older", "Mon, 01 Jan 2024 09:00:00 +0000", false),
+    );
 
     let mut app = app_on_inbox();
     app.refresh_preview_body();
@@ -515,8 +572,16 @@ fn the_preview_loads_the_body_of_the_selected_message() {
 #[test]
 fn the_preview_query_span_is_entered_once_per_body_build() {
     let _data = DataDir::new();
-    ingest_fixture("inbox", 1, &fixture_email("newest", "Mon, 01 Jan 2024 12:00:00 +0000", false));
-    ingest_fixture("inbox", 2, &fixture_email("older", "Mon, 01 Jan 2024 09:00:00 +0000", false));
+    ingest_fixture(
+        "inbox",
+        1,
+        &fixture_email("newest", "Mon, 01 Jan 2024 12:00:00 +0000", false),
+    );
+    ingest_fixture(
+        "inbox",
+        2,
+        &fixture_email("older", "Mon, 01 Jan 2024 09:00:00 +0000", false),
+    );
 
     let spans = || crate::tui::app::PREVIEW_QUERY_SPANS.with(|n| n.get());
     let mut app = app_on_inbox();
@@ -528,7 +593,11 @@ fn the_preview_query_span_is_entered_once_per_body_build() {
 
     app.refresh_preview_body();
     app.refresh_preview_body();
-    assert_eq!(spans() - before, 1, "a memo hit reads nothing and times nothing");
+    assert_eq!(
+        spans() - before,
+        1,
+        "a memo hit reads nothing and times nothing"
+    );
 
     app.list_index = 1;
     app.refresh_preview_body();
@@ -543,7 +612,11 @@ fn the_preview_query_span_is_entered_once_per_body_build() {
 #[test]
 fn the_preview_body_follows_a_reingest() {
     let _data = DataDir::new();
-    ingest_fixture("inbox", 1, &fixture_email("subject", "Mon, 01 Jan 2024 12:00:00 +0000", false));
+    ingest_fixture(
+        "inbox",
+        1,
+        &fixture_email("subject", "Mon, 01 Jan 2024 12:00:00 +0000", false),
+    );
 
     let mut app = app_on_inbox();
     app.refresh_preview_body();

@@ -27,7 +27,14 @@ fn source(from: &str, to: &str, subject: &str, body: &str) -> SourceMessage {
     }
 }
 
-fn write_draft(dir: &std::path::Path, filename: &str, to: &str, subject: &str, body: &str, status: &str) -> std::path::PathBuf {
+fn write_draft(
+    dir: &std::path::Path,
+    filename: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    status: &str,
+) -> std::path::PathBuf {
     let path = dir.join(filename);
     let content = format!(
         "---\nfrom: \"me@example.com\"\nto: \"{to}\"\nsubject: \"{subject}\"\nstatus: {status}\n---\n\n{body}"
@@ -45,9 +52,20 @@ fn test_create_reply_draft() {
     let tmp = tempdir().unwrap();
     let drafts = tmp.path().join("drafts");
 
-    let source = source("alice@example.com", "me@example.com", "Hello", "Original body");
-    let draft_path =
-        create_reply_draft_from(&source, false, "me@example.com", Some(drafts.as_path()), None).unwrap();
+    let source = source(
+        "alice@example.com",
+        "me@example.com",
+        "Hello",
+        "Original body",
+    );
+    let draft_path = create_reply_draft_from(
+        &source,
+        false,
+        "me@example.com",
+        Some(drafts.as_path()),
+        None,
+    )
+    .unwrap();
 
     assert!(draft_path.exists());
     let content = fs::read_to_string(&draft_path).unwrap();
@@ -73,7 +91,12 @@ fn a_reply_draft_carries_the_account_signature_above_the_quote() {
     let tmp = tempdir().unwrap();
     let drafts = tmp.path().join("drafts");
 
-    let source = source("alice@example.com", "me@example.com", "Hello", "Original body");
+    let source = source(
+        "alice@example.com",
+        "me@example.com",
+        "Hello",
+        "Original body",
+    );
     let draft_path = create_reply_draft_from(
         &source,
         false,
@@ -90,7 +113,10 @@ fn a_reply_draft_carries_the_account_signature_above_the_quote() {
     // Signature sits above the quoted attribution, not below the thread.
     let sig_pos = content.find("-- \nSylvain").unwrap();
     let quote_pos = content.find("wrote:").unwrap();
-    assert!(sig_pos < quote_pos, "signature must precede the quote: {content}");
+    assert!(
+        sig_pos < quote_pos,
+        "signature must precede the quote: {content}"
+    );
 }
 
 /// A forward carries the signature the same way, above the forwarded block.
@@ -99,7 +125,12 @@ fn a_forward_draft_carries_the_account_signature_above_the_forwarded_block() {
     let tmp = tempdir().unwrap();
     let drafts = tmp.path().join("drafts");
 
-    let source = source("alice@example.com", "me@example.com", "Hello", "Original body");
+    let source = source(
+        "alice@example.com",
+        "me@example.com",
+        "Hello",
+        "Original body",
+    );
     let draft_path = create_forward_draft_from(
         &source,
         "me@example.com",
@@ -113,7 +144,10 @@ fn a_forward_draft_carries_the_account_signature_above_the_forwarded_block() {
     assert!(content.contains("{{SIGNATURE}}"), "{content}");
     let sig_pos = content.find("-- \nSylvain").unwrap();
     let fwd_pos = content.find("Forwarded message").unwrap();
-    assert!(sig_pos < fwd_pos, "signature must precede the forward: {content}");
+    assert!(
+        sig_pos < fwd_pos,
+        "signature must precede the forward: {content}"
+    );
 }
 
 /// No configured signature produces no signature block: the reply body is the
@@ -123,10 +157,20 @@ fn a_reply_draft_without_a_signature_has_no_signature_block() {
     let tmp = tempdir().unwrap();
     let drafts = tmp.path().join("drafts");
 
-    let source = source("alice@example.com", "me@example.com", "Hello", "Original body");
-    let draft_path =
-        create_reply_draft_from(&source, false, "me@example.com", Some(drafts.as_path()), None)
-            .unwrap();
+    let source = source(
+        "alice@example.com",
+        "me@example.com",
+        "Hello",
+        "Original body",
+    );
+    let draft_path = create_reply_draft_from(
+        &source,
+        false,
+        "me@example.com",
+        Some(drafts.as_path()),
+        None,
+    )
+    .unwrap();
 
     let content = fs::read_to_string(&draft_path).unwrap();
     // Only the placeholder anchors the (absent) signature; the body is the
@@ -143,9 +187,20 @@ fn a_reply_draft_records_the_message_it_answers() {
     let tmp = tempdir().unwrap();
     let drafts = tmp.path().join("drafts");
 
-    let source = source("alice@example.com", "me@example.com", "Hello", "Original body");
-    let draft_path =
-        create_reply_draft_from(&source, false, "me@example.com", Some(drafts.as_path()), None).unwrap();
+    let source = source(
+        "alice@example.com",
+        "me@example.com",
+        "Hello",
+        "Original body",
+    );
+    let draft_path = create_reply_draft_from(
+        &source,
+        false,
+        "me@example.com",
+        Some(drafts.as_path()),
+        None,
+    )
+    .unwrap();
 
     let content = fs::read_to_string(&draft_path).unwrap();
     assert!(content.contains("in_reply_to: \"<source@example.com>\""));
@@ -186,13 +241,22 @@ fn a_source_without_a_message_id_leaves_the_key_out() {
 
     let mut source = source("alice@example.com", "me@example.com", "Hello", "Body");
     source.message_id = None;
-    let draft_path =
-        create_reply_draft_from(&source, false, "me@example.com", Some(drafts.as_path()), None).unwrap();
+    let draft_path = create_reply_draft_from(
+        &source,
+        false,
+        "me@example.com",
+        Some(drafts.as_path()),
+        None,
+    )
+    .unwrap();
 
     let content = fs::read_to_string(&draft_path).unwrap();
     assert!(!content.contains("in_reply_to:"));
     assert_eq!(
-        parse_email_draft(&draft_path).unwrap().frontmatter.in_reply_to,
+        parse_email_draft(&draft_path)
+            .unwrap()
+            .frontmatter
+            .in_reply_to,
         None
     );
 }
@@ -207,13 +271,22 @@ fn a_message_id_with_a_backslash_leaves_the_key_out() {
 
     let mut source = source("alice@example.com", "me@example.com", "Hello", "Body");
     source.message_id = Some("<a\\qb@example.com>".to_string());
-    let draft_path =
-        create_reply_draft_from(&source, false, "me@example.com", Some(drafts.as_path()), None).unwrap();
+    let draft_path = create_reply_draft_from(
+        &source,
+        false,
+        "me@example.com",
+        Some(drafts.as_path()),
+        None,
+    )
+    .unwrap();
 
     let content = fs::read_to_string(&draft_path).unwrap();
     assert!(!content.contains("in_reply_to:"), "{content}");
     assert_eq!(
-        parse_email_draft(&draft_path).unwrap().frontmatter.in_reply_to,
+        parse_email_draft(&draft_path)
+            .unwrap()
+            .frontmatter
+            .in_reply_to,
         None
     );
 }
@@ -224,8 +297,14 @@ fn test_create_reply_draft_already_re_prefix() {
     let drafts = tmp.path().join("drafts");
 
     let source = source("alice@example.com", "me@example.com", "Re: Hello", "Body");
-    let draft_path =
-        create_reply_draft_from(&source, false, "me@example.com", Some(drafts.as_path()), None).unwrap();
+    let draft_path = create_reply_draft_from(
+        &source,
+        false,
+        "me@example.com",
+        Some(drafts.as_path()),
+        None,
+    )
+    .unwrap();
 
     let content = fs::read_to_string(&draft_path).unwrap();
     // Should not double the Re: prefix
@@ -247,8 +326,14 @@ fn test_create_reply_all_draft() {
     );
     source.cc = Some("carol@example.com".to_string());
 
-    let draft_path =
-        create_reply_draft_from(&source, true, "me@example.com", Some(drafts.as_path()), None).unwrap();
+    let draft_path = create_reply_draft_from(
+        &source,
+        true,
+        "me@example.com",
+        Some(drafts.as_path()),
+        None,
+    )
+    .unwrap();
     let draft_content = fs::read_to_string(&draft_path).unwrap();
 
     // Reply-all should have CC with bob and carol but not self
@@ -376,8 +461,14 @@ fn test_reply_with_companion_html() {
     );
     source.html = Some("<p>Rich HTML body</p>".to_string());
 
-    let draft_path =
-        create_reply_draft_from(&source, false, "me@example.com", Some(drafts.as_path()), None).unwrap();
+    let draft_path = create_reply_draft_from(
+        &source,
+        false,
+        "me@example.com",
+        Some(drafts.as_path()),
+        None,
+    )
+    .unwrap();
 
     // Draft should have a companion HTML with quoted content
     let draft_html = draft_path.with_extension("html");
@@ -394,7 +485,14 @@ fn test_reply_with_companion_html() {
 #[test]
 fn test_parse_and_validate_draft() {
     let tmp = tempdir().unwrap();
-    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body content", "draft");
+    let path = write_draft(
+        tmp.path(),
+        "draft.md",
+        "alice@example.com",
+        "Test",
+        "Body content",
+        "draft",
+    );
 
     let draft = parse_email_draft(&path).unwrap();
     assert_eq!(draft.frontmatter.to.as_deref(), Some("alice@example.com"));
@@ -413,7 +511,14 @@ fn test_parse_and_validate_draft() {
 #[test]
 fn test_mark_as_approved() {
     let tmp = tempdir().unwrap();
-    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", "draft");
+    let path = write_draft(
+        tmp.path(),
+        "draft.md",
+        "alice@example.com",
+        "Test",
+        "Body",
+        "draft",
+    );
 
     let msg = mark_as_approved(&path).unwrap();
     assert!(msg.contains("approved"));
@@ -425,7 +530,14 @@ fn test_mark_as_approved() {
 #[test]
 fn test_mark_as_approved_already_approved() {
     let tmp = tempdir().unwrap();
-    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", "approved");
+    let path = write_draft(
+        tmp.path(),
+        "draft.md",
+        "alice@example.com",
+        "Test",
+        "Body",
+        "approved",
+    );
 
     let msg = mark_as_approved(&path).unwrap();
     assert!(msg.contains("Already approved"));
@@ -434,7 +546,14 @@ fn test_mark_as_approved_already_approved() {
 #[test]
 fn test_mark_as_approved_sent_fails() {
     let tmp = tempdir().unwrap();
-    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", "sent");
+    let path = write_draft(
+        tmp.path(),
+        "draft.md",
+        "alice@example.com",
+        "Test",
+        "Body",
+        "sent",
+    );
 
     let result = mark_as_approved(&path);
     assert!(result.is_err());
@@ -462,7 +581,14 @@ fn test_mark_as_draft_demotes_approved() {
 #[test]
 fn test_mark_as_draft_already_draft() {
     let tmp = tempdir().unwrap();
-    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", "draft");
+    let path = write_draft(
+        tmp.path(),
+        "draft.md",
+        "alice@example.com",
+        "Test",
+        "Body",
+        "draft",
+    );
 
     let msg = mark_as_draft(&path).unwrap();
     assert!(msg.contains("Already a draft"));
@@ -475,7 +601,14 @@ fn test_mark_as_draft_already_draft() {
 #[test]
 fn test_mark_as_draft_sent_fails() {
     let tmp = tempdir().unwrap();
-    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", "sent");
+    let path = write_draft(
+        tmp.path(),
+        "draft.md",
+        "alice@example.com",
+        "Test",
+        "Body",
+        "sent",
+    );
 
     let result = mark_as_draft(&path);
     assert!(result.is_err());
@@ -490,12 +623,22 @@ fn test_mark_as_draft_sent_fails() {
 fn test_mark_as_draft_inbox_fails() {
     let tmp = tempdir().unwrap();
     for status in ["inbox", "archived"] {
-        let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", status);
+        let path = write_draft(
+            tmp.path(),
+            "draft.md",
+            "alice@example.com",
+            "Test",
+            "Body",
+            status,
+        );
 
         let result = mark_as_draft(&path);
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("Failed to parse frontmatter"), "unexpected error: {err}");
+        assert!(
+            err.contains("Failed to parse frontmatter"),
+            "unexpected error: {err}"
+        );
     }
 }
 
@@ -505,7 +648,14 @@ fn test_mark_draft_sent() {
     let drafts = tmp.path().join("drafts");
     fs::create_dir_all(&drafts).unwrap();
 
-    let path = write_draft(&drafts, "draft.md", "alice@example.com", "Test", "Body", "approved");
+    let path = write_draft(
+        &drafts,
+        "draft.md",
+        "alice@example.com",
+        "Test",
+        "Body",
+        "approved",
+    );
     let draft = parse_email_draft(&path).unwrap();
 
     mark_draft_sent(&draft, Some("<msg123@example.com>")).unwrap();
@@ -518,7 +668,10 @@ fn test_mark_draft_sent() {
     let sent_draft = parse_email_draft(&path).unwrap();
     assert_eq!(sent_draft.frontmatter.status, EmailStatus::Sent);
     assert!(sent_draft.frontmatter.sent_at.is_some());
-    assert_eq!(sent_draft.frontmatter.message_id, Some("<msg123@example.com>".to_string()));
+    assert_eq!(
+        sent_draft.frontmatter.message_id,
+        Some("<msg123@example.com>".to_string())
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -528,9 +681,30 @@ fn test_mark_draft_sent() {
 #[test]
 fn test_find_drafts_with_status_filter() {
     let tmp = tempdir().unwrap();
-    write_draft(tmp.path(), "a.md", "alice@example.com", "Draft A", "Body", "draft");
-    write_draft(tmp.path(), "b.md", "bob@example.com", "Draft B", "Body", "approved");
-    write_draft(tmp.path(), "c.md", "carol@example.com", "Draft C", "Body", "draft");
+    write_draft(
+        tmp.path(),
+        "a.md",
+        "alice@example.com",
+        "Draft A",
+        "Body",
+        "draft",
+    );
+    write_draft(
+        tmp.path(),
+        "b.md",
+        "bob@example.com",
+        "Draft B",
+        "Body",
+        "approved",
+    );
+    write_draft(
+        tmp.path(),
+        "c.md",
+        "carol@example.com",
+        "Draft C",
+        "Body",
+        "draft",
+    );
 
     let all = find_drafts(tmp.path(), None).unwrap();
     assert_eq!(all.len(), 3);
@@ -540,7 +714,10 @@ fn test_find_drafts_with_status_filter() {
 
     let approved_only = find_drafts(tmp.path(), Some(EmailStatus::Approved)).unwrap();
     assert_eq!(approved_only.len(), 1);
-    assert_eq!(approved_only[0].frontmatter.to.as_deref(), Some("bob@example.com"));
+    assert_eq!(
+        approved_only[0].frontmatter.to.as_deref(),
+        Some("bob@example.com")
+    );
 }
 
 #[test]
@@ -553,7 +730,14 @@ fn test_find_drafts_empty_dir() {
 #[test]
 fn test_find_drafts_ignores_non_md_files() {
     let tmp = tempdir().unwrap();
-    write_draft(tmp.path(), "a.md", "alice@example.com", "Draft", "Body", "draft");
+    write_draft(
+        tmp.path(),
+        "a.md",
+        "alice@example.com",
+        "Draft",
+        "Body",
+        "draft",
+    );
     fs::write(tmp.path().join("notes.txt"), "not a draft").unwrap();
     fs::write(tmp.path().join("data.html"), "<p>html</p>").unwrap();
 
@@ -568,7 +752,14 @@ fn test_find_drafts_ignores_non_md_files() {
 #[test]
 fn test_mark_draft_sent_without_message_id() {
     let tmp = tempdir().unwrap();
-    let path = write_draft(tmp.path(), "draft.md", "alice@example.com", "Test", "Body", "approved");
+    let path = write_draft(
+        tmp.path(),
+        "draft.md",
+        "alice@example.com",
+        "Test",
+        "Body",
+        "approved",
+    );
     let draft = parse_email_draft(&path).unwrap();
 
     mark_draft_sent(&draft, None).unwrap();
@@ -584,7 +775,14 @@ fn test_mark_draft_sent_cleans_companion_html() {
     let drafts = tmp.path().join("drafts");
     fs::create_dir_all(&drafts).unwrap();
 
-    let path = write_draft(&drafts, "draft.md", "alice@example.com", "Test", "Body", "approved");
+    let path = write_draft(
+        &drafts,
+        "draft.md",
+        "alice@example.com",
+        "Test",
+        "Body",
+        "approved",
+    );
     let html_path = drafts.join("draft.html");
     fs::write(&html_path, "<p>companion</p>").unwrap();
 
@@ -625,7 +823,12 @@ fn test_forward_draft_already_fwd_prefix() {
     let tmp = tempdir().unwrap();
     let drafts = tmp.path().join("drafts");
 
-    let source = source("alice@example.com", "me@example.com", "Fwd: Original", "Body");
+    let source = source(
+        "alice@example.com",
+        "me@example.com",
+        "Fwd: Original",
+        "Body",
+    );
     let draft_path =
         create_forward_draft_from(&source, "me@example.com", Some(drafts.as_path()), None).unwrap();
 
@@ -665,8 +868,14 @@ fn test_reply_all_excludes_self_from_cc() {
     // All recipients are self -- CC should be absent
     let source = source("alice@example.com", "me@example.com", "Solo", "Body");
 
-    let draft_path =
-        create_reply_draft_from(&source, true, "me@example.com", Some(drafts.as_path()), None).unwrap();
+    let draft_path = create_reply_draft_from(
+        &source,
+        true,
+        "me@example.com",
+        Some(drafts.as_path()),
+        None,
+    )
+    .unwrap();
     let draft_content = fs::read_to_string(&draft_path).unwrap();
 
     // No cc line should appear since the only other recipient is self
@@ -687,8 +896,14 @@ fn test_reply_deduplicates_cc_addresses() {
     );
     source.cc = Some("bob@example.com, carol@example.com".to_string());
 
-    let draft_path =
-        create_reply_draft_from(&source, true, "me@example.com", Some(drafts.as_path()), None).unwrap();
+    let draft_path = create_reply_draft_from(
+        &source,
+        true,
+        "me@example.com",
+        Some(drafts.as_path()),
+        None,
+    )
+    .unwrap();
     let draft_content = fs::read_to_string(&draft_path).unwrap();
 
     // bob should appear only once in cc
