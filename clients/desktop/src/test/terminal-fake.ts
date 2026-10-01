@@ -2,7 +2,10 @@
 // answers `spawn` with a fresh session id, and lets a test push output and the
 // exit frame through the same router the real Channel uses.
 
-import { frameRouter, type TerminalBridge, type TerminalExit, type TerminalSink, type TerminalSpawn, type TerminalStarted } from "@/lib/terminal";
+// Only types from `@/lib/terminal`, which imports `@/lib/tauri`: the mock of
+// that module holds a FakeBridge, and a value import here would be a cycle.
+import type { TerminalBridge, TerminalSpawn, TerminalStarted } from "@/lib/terminal";
+import { frameRouter, type TerminalExit, type TerminalSink } from "@/lib/terminal-frames";
 
 export type BridgeCall =
   | { cmd: "spawn"; req: TerminalSpawn }
