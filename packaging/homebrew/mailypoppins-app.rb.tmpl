@@ -1,0 +1,50 @@
+# Homebrew cask template for the desktop app (ticket #0132). A skeleton:
+# nothing renders or publishes it yet, on purpose.
+#
+# Gated on the signed build (#0012). A cask's download is quarantined, so
+# Gatekeeper refuses to open an unsigned app installed by one. Once the
+# release workflow signs and notarizes the DMGs:
+#   1. add a renderer beside scripts/update-homebrew-formula.sh that fills
+#      __VERSION__ and the two __SHA256_DESKTOP_*__ placeholders from the
+#      release's mailypoppins-desktop-<target>.dmg.sha256 assets;
+#   2. write the result to Casks/mailypoppins-app.rb in the tap
+#      (sylvainHellin/homebrew-mailypoppins) from the homebrew-tap job, after
+#      the desktop-macos job.
+#
+# The cask links the app's own `mp` into Homebrew's bin, so the CLI, the TUI
+# and the daemon the app starts are one binary of one version; that is why it
+# conflicts with the `mailypoppins` formula, which installs `mp` too.
+cask "mailypoppins-app" do
+  arch arm: "aarch64", intel: "x86_64"
+
+  version "__VERSION__"
+  sha256 arm:   "__SHA256_DESKTOP_ARM64__",
+         intel: "__SHA256_DESKTOP_X86_64__"
+
+  url "https://github.com/sylvainHellin/mailypoppins/releases/download/v#{version}/mailypoppins-desktop-#{arch}-apple-darwin.dmg"
+  name "mailypoppins"
+  desc "Mac client for email kept as Markdown files, with its own mp and daemon"
+  homepage "https://mailypoppins.dev"
+
+  conflicts_with formula: "mailypoppins"
+
+  app "mailypoppins.app"
+  binary "#{appdir}/mailypoppins.app/Contents/MacOS/mp"
+
+  # A daemon started from the bundle would go on running the deleted binary.
+  uninstall_preflight do
+    system_command "#{appdir}/mailypoppins.app/Contents/MacOS/mp",
+                   args:         ["daemon", "stop"],
+                   must_succeed: false
+  end
+
+  uninstall quit: "dev.mailypoppins.desktop"
+
+  # The app's own state only. The mail store, config.toml and the secrets are
+  # the CLI's too and stay; `mp config path` shows where they are.
+  zap trash: [
+    "~/Library/Caches/dev.mailypoppins.desktop",
+    "~/Library/Saved Application State/dev.mailypoppins.desktop.savedState",
+    "~/Library/WebKit/dev.mailypoppins.desktop",
+  ]
+end

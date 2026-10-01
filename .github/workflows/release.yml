@@ -5,7 +5,11 @@
 #      the matching `## [X.Y.Z]` section of CHANGELOG.md;
 #   2. build release binaries for macOS (arm64 + x86_64) and Linux
 #      (x86_64 gnu + static musl) and upload them as
-#      `mailypoppins-<target>.tar.gz` plus `.sha256` checksums.
+#      `mailypoppins-<target>.tar.gz` plus `.sha256` checksums;
+#   3. build the desktop app for macOS (arm64 + x86_64) with the matching
+#      `mp` inside it as a sidecar, and upload
+#      `mailypoppins-desktop-<target>.dmg` and `.app.tar.gz` plus `.sha256`
+#      checksums (ticket #0132; unsigned until #0012).
 #
 # See docs/release-process.md for the full release procedure.
 
@@ -94,6 +98,86 @@ jobs:
           features: ${{ matrix.features }}
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # The desktop app (ticket #0132): `pnpm bundle` in clients/desktop builds
+  # `mp` for the target, stages it as the `bundle.externalBin` sidecar
+  # (src-tauri/binaries/mp-<target>, which the bundler installs as
+  # Contents/MacOS/mp), and runs `tauri build` with the bundle's version set
+  # to mp's. Plain `tauri build` rather than tauri-apps/tauri-action: the
+  # release already exists with the changelog notes, the sidecar has to be
+  # staged first anyway, the asset names stay ours (the cask template in
+  # packaging/homebrew/ relies on them), and Tauri's bundler reads the Apple
+  # signing and notarization variables itself, so signing needs no action.
+  # Not a dependency of homebrew-tap: the formula is the CLI's.
+  desktop-macos:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+          # Cross-compiled on the arm64 runner, as the CLI archive is.
+          - target: x86_64-apple-darwin
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: clients/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          # 22.18 or later runs the .ts scripts directly.
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: clients/desktop/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Build the app bundle and DMG with the mp sidecar
+        # ---- Signing and notarization: #0012 --------------------------------
+        # Unsigned for now. Once the Developer ID certificate exists, add these
+        # repository secrets and uncomment the env block; `tauri build` then
+        # imports the certificate into a temporary keychain, signs the app and
+        # the sidecar, notarizes and staples, with no other change here:
+        #   APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
+        #   APPLE_CERTIFICATE_PASSWORD  the .p12's export password
+        #   APPLE_SIGNING_IDENTITY      "Developer ID Application: <name> (<team id>)"
+        #   APPLE_ID                    the Apple account's email, for notarytool
+        #   APPLE_PASSWORD              an app-specific password of that account
+        #   APPLE_TEAM_ID               the 10-character team id
+        # Then drop the "unsigned" note in docs/release-process.md and publish
+        # the cask (packaging/homebrew/mailypoppins-app.rb.tmpl).
+        # env:
+        #   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        #   APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        #   APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        #   APPLE_ID: ${{ secrets.APPLE_ID }}
+        #   APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # ---------------------------------------------------------------------
+        run: pnpm bundle --target ${{ matrix.target }} -- --ci --bundles app,dmg
+      - name: Upload the DMG and the app to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          bundle="src-tauri/target/$TARGET/release/bundle"
+          out="$RUNNER_TEMP/desktop"
+          mkdir -p "$out"
+          dmg=$(ls "$bundle"/dmg/*.dmg)
+          cp "$dmg" "$out/mailypoppins-desktop-$TARGET.dmg"
+          tar -czf "$out/mailypoppins-desktop-$TARGET.app.tar.gz" -C "$bundle/macos" mailypoppins.app
+          cd "$out"
+          for f in mailypoppins-desktop-$TARGET.dmg mailypoppins-desktop-$TARGET.app.tar.gz; do
+            shasum -a 256 "$f" > "$f.sha256"
+          done
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            mailypoppins-desktop-$TARGET.dmg mailypoppins-desktop-$TARGET.dmg.sha256 \
+            mailypoppins-desktop-$TARGET.app.tar.gz mailypoppins-desktop-$TARGET.app.tar.gz.sha256
 
   # Update the Homebrew tap (ticket #0013). Requires the TAP_DEPLOY_KEY
   # repository secret: the PRIVATE half of an ed25519 deploy key whose

@@ -9,6 +9,7 @@
     "prebuild": "node scripts/gen-keymap.ts --if-bin",
     "preview": "vite preview",
     "tauri": "tauri",
+    "bundle": "node scripts/bundle.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "gen:keymap": "node scripts/gen-keymap.ts",

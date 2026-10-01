@@ -8,6 +8,11 @@ All notable changes to this project are documented in this file.
 - **The desktop client checks that the daemon runs its own version of mailypoppins (#0132).**
   - A daemon left running by another install of `mp`, or by a `cargo install` not followed by `mp daemon restart`, now shows the restart screen naming both versions and the `mp` the app would start, instead of serving the window from an older engine; Restart replaces it with the matching one.
   - The same screen replaces the reconnecting banner when the daemon comes back as another version while the window is open.
+- **A tagged release builds the desktop app for the Mac, with its own `mp` inside (#0132).**
+  - Each release now carries `mailypoppins-desktop-aarch64-apple-darwin.dmg` and `mailypoppins-desktop-x86_64-apple-darwin.dmg`, with the `.app` as a `.tar.gz` beside them; drag `mailypoppins.app` to Applications and it starts its daemon with the `mp` it ships, so nothing else has to be installed.
+  - The app is not signed yet (#0012): open it once with Control-click and Open, or run `xattr -dr com.apple.quarantine /Applications/mailypoppins.app`.
+  - `ln -s /Applications/mailypoppins.app/Contents/MacOS/mp /usr/local/bin/mp` puts the app's `mp` on your `PATH`, so the CLI, the TUI and the app run one version.
+  - From a checkout, `cd clients/desktop && pnpm bundle` builds the same app and DMG.
 - **The desktop client has a light theme, a plain-text reader, a filter in the key help, and runs a terminal editor in a terminal (#0136).**
   - Settings' Theme buttons and the palette's "Theme: dark", "Theme: light" and "Theme: system" switch the window between the dark palette, a light one on cream, and whichever the system uses; dark stays the default.
   - `tt`, the reader toolbar's HTML and Text, Settings' Reader field and the palette show a message's stored plain text instead of its HTML, in a monospaced block with quoted lines muted, and the choice is remembered; in the TUI `tt` opens the thread, which the desktop does not have yet.

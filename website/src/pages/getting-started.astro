@@ -39,6 +39,38 @@ brew install mailypoppins`}
         <code>mp</code> binary somewhere on your <code>PATH</code>.
       </p>
 
+      <h3>Mac app</h3>
+      <p>
+        <em>From the first release after 0.10.0.</em> Download
+        <code>mailypoppins-desktop-aarch64-apple-darwin.dmg</code> (Apple
+        silicon) or <code>mailypoppins-desktop-x86_64-apple-darwin.dmg</code>
+        (Intel) from the Releases page and drag <code>mailypoppins.app</code>
+        to Applications. The app carries its own <code>mp</code> and starts
+        the daemon with it, so it needs nothing else installed. It is not
+        signed yet: Control-click the app and choose Open the first time, or
+        clear the quarantine flag:
+      </p>
+      <CodeBlock
+        lang="bash"
+        code={`xattr -dr com.apple.quarantine /Applications/mailypoppins.app`}
+      />
+      <p>
+        To use the app's <code>mp</code> from a terminal too, link it onto
+        your <code>PATH</code> instead of installing a second copy, so the
+        CLI, the TUI and the app share one version of the daemon:
+      </p>
+      <CodeBlock
+        lang="bash"
+        code={`ln -s /Applications/mailypoppins.app/Contents/MacOS/mp /usr/local/bin/mp`}
+      />
+      <p>
+        If a daemon of another version is already running, the app says so
+        and offers to restart it with its own. To uninstall, run
+        <code>mp daemon stop</code>, quit the app, and delete it and the
+        link; your mail and <code>config.toml</code> stay where
+        <code>mp config path</code> says.
+      </p>
+
       <h3>From source</h3>
       <p>
         You need the Rust toolchain installed. If you don't have it yet, install it from

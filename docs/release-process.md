@@ -35,6 +35,11 @@ Homebrew tap. The pipeline lives in
      | `x86_64-unknown-linux-gnu` | ubuntu-latest | links system OpenSSL |
      | `x86_64-unknown-linux-musl` | ubuntu-latest | fully static, `vendored-openssl` feature |
 
+   - builds the desktop app on macOS and attaches
+     `mailypoppins-desktop-<target>.dmg` and
+     `mailypoppins-desktop-<target>.app.tar.gz`, each with a `.sha256`, for
+     `aarch64-apple-darwin` and `x86_64-apple-darwin` (the `desktop-macos`
+     job, see [The desktop app](#the-desktop-app));
    - renders the Homebrew formula from the release checksums and pushes
      it to the tap repo (skipped with a notice while the
      `TAP_DEPLOY_KEY` secret is absent).
@@ -46,6 +51,85 @@ is not compiled into default builds.
 
 Plain `cargo test` also runs on every push / PR via
 [.github/workflows/ci.yml](../.github/workflows/ci.yml).
+
+## The desktop app
+
+The `desktop-macos` job runs `pnpm bundle --target <target>` in
+`clients/desktop` ([scripts/bundle.ts](../clients/desktop/scripts/bundle.ts)), the
+same command as a local build:
+
+1. it builds the root crate's `mp` in release for the target;
+2. it copies it to `clients/desktop/src-tauri/binaries/mp-<target>`, the
+   target-suffixed name Tauri's `bundle.externalBin` wants;
+3. it runs `tauri build --target <target>` with
+   [tauri.bundle.conf.json](../clients/desktop/src-tauri/tauri.bundle.conf.json),
+   which holds the `externalBin` entry, and with the bundle's version set to
+   `mp`'s.
+
+The bundler drops the suffix, so the app carries
+`mailypoppins.app/Contents/MacOS/mp` beside its own executable, which is the
+first place the app looks for the `mp` that starts its daemon (after
+`MP_DESKTOP_MP_BIN`). The `externalBin` entry is kept out of
+`tauri.conf.json` because tauri-build copies every sidecar on every build and
+fails when one is missing, which would make `pnpm tauri dev` and `cargo test`
+in `src-tauri` need a staged `mp`.
+
+The app checks the daemon it reaches against that `mp`: a daemon of another
+version is refused with the restart screen, whose Restart runs
+`mp daemon restart` with the bundled binary
+([rust-layer.md](../clients/desktop/docs/rust-layer.md), "Conventions").
+
+The job uses plain `tauri build` rather than `tauri-apps/tauri-action`: the
+release already exists with the changelog notes, the sidecar has to be staged
+first anyway, the asset names stay the ones the cask template expects, and
+Tauri's bundler reads the Apple signing and notarization variables itself.
+
+### Signing and notarization (#0012)
+
+The app and the DMGs are unsigned until
+[#0012](tickets/0012-apple-developer-id-signing.md). The workflow step has a
+marked, commented-out `env:` block; signing is adding these repository
+secrets and uncommenting it:
+
+| Secret | Holds |
+|---|---|
+| `APPLE_CERTIFICATE` | base64 of the Developer ID Application `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | the `.p12`'s export password |
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: <name> (<team id>)` |
+| `APPLE_ID` | the Apple account's email, for notarytool |
+| `APPLE_PASSWORD` | an app-specific password of that account |
+| `APPLE_TEAM_ID` | the 10-character team id |
+
+`tauri build` then imports the certificate into a temporary keychain, signs
+the app and the sidecar, notarizes and staples.
+
+### `mp` on PATH from the app
+
+The app's `mp` is a whole CLI. Until the cask exists, the supported way to use
+it from a shell is a symlink, which keeps the CLI, the TUI and the daemon the
+app starts on one binary of one version:
+
+```sh
+ln -s /Applications/mailypoppins.app/Contents/MacOS/mp /usr/local/bin/mp
+```
+
+Any directory on `PATH` works (`~/.local/bin`, `/opt/homebrew/bin`). Do not
+combine it with the Homebrew formula or a `cargo install`: two `mp` of two
+versions is the mismatch the app refuses. `mp daemon install-service` run
+through the symlink bakes the symlink's path, which survives an app update.
+
+### Local build
+
+```sh
+cd clients/desktop
+pnpm install
+pnpm bundle                                # builds mp, stages it, tauri build
+MP_SIDECAR_BIN=$CARGO_TARGET_DIR/release/mp pnpm bundle   # an existing mp instead
+```
+
+The bundle lands in `<target dir>/<target>/release/bundle/`, `macos/` for
+the `.app` and `dmg/` for the DMG, where `<target dir>` is
+`$CARGO_TARGET_DIR` or `clients/desktop/src-tauri/target`.
 
 ## Homebrew tap
 
@@ -118,6 +202,17 @@ with checksum assets):
 scripts/update-homebrew-formula.sh 0.9.0
 ```
 
+### The app's cask (not published yet)
+
+[packaging/homebrew/mailypoppins-app.rb.tmpl](../packaging/homebrew/mailypoppins-app.rb.tmpl)
+is a cask skeleton for the desktop app, for `Casks/mailypoppins-app.rb` in
+the tap. It installs the app, links its `mp` into Homebrew's `bin`, stops the
+daemon before an uninstall, and conflicts with the `mailypoppins` formula. It
+is gated on the signed build: a cask download is quarantined, so an unsigned
+app would not open. Once #0012 signs the DMGs, add a renderer for its
+placeholders beside `scripts/update-homebrew-formula.sh` and push the result
+from the `homebrew-tap` job; the template's header lists both steps.
+
 ## Installing the daemon at login
 
 A release installs a binary; it does not arrange for a daemon to be running when
@@ -183,5 +278,8 @@ An install whose `mp` is not on `PATH` keeps whatever `current_exe()` returned; 
 Release binaries are not yet codesigned/notarized. `brew install` works
 (Homebrew does not quarantine curl-downloaded bottles/binaries), but a
 manually downloaded archive from the Releases page will trip Gatekeeper;
-users can clear it with `xattr -d com.apple.quarantine mp`. Signing is
+users can clear it with `xattr -d com.apple.quarantine mp`. The desktop
+app's DMG is the same: after dragging the app to `/Applications`, either
+Control-click it and choose Open once, or clear the whole bundle with
+`xattr -dr com.apple.quarantine /Applications/mailypoppins.app`. Signing is
 tracked in [#0012](tickets/0012-apple-developer-id-signing.md).
