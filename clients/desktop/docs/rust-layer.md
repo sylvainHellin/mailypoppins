@@ -564,6 +564,7 @@ A value that carries its own `{path}` keeps it where it is.
 
 `EditorSetting.route` says where a draft opens, and the frontend reads it before every open.
 It is `embedded` exactly when `terminal_spawn` would accept the editor for an existing draft: `terminal::route` runs the same resolution and lookup as `terminal_spawn` (see Terminal sessions) without the draft file, so the two cannot disagree.
+Both read the setting through `editor::read_setting_or_none`, as `editor_open` does: a `desktop.json` that does not read is logged and counts as no setting, so a corrupt file never fails `editor_setting_get` while the spawn goes ahead without it.
 Anything else is `external`, and `effective` is what `editor_open` then runs: a GUI editor, a terminal editor found nowhere, or nothing found at all.
 In fixture mode a terminal editor found nowhere and an empty slot are `embedded` too, as `terminal_spawn` journals them, and a GUI editor stays `external`.
 The route needs the login shell's `PATH`, which the first call per process reads for up to 5 s, so `editor_setting_get` and `editor_setting_set` run off the main thread.

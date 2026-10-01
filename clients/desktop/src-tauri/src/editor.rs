@@ -648,6 +648,17 @@ pub fn read_setting(file: &Path) -> Result<Option<String>, GuiError> {
     settings::read(file, SettingKey::Editor)
 }
 
+/// [`read_setting`] as every command that runs or reports the editor reads
+/// it: a file that does not read is logged and counts as no setting, so
+/// `editor_open`, `terminal_spawn` and the route `editor_setting_get`
+/// reports all see the same value.
+pub fn read_setting_or_none(file: &Path) -> Option<String> {
+    read_setting(file).unwrap_or_else(|e| {
+        tracing::warn!("[editor] ignoring the setting: {e}");
+        None
+    })
+}
+
 /// Set (or, with `None` or a blank value, clear) the `editor` key, keeping
 /// every other key of the file; a template that does not split is `setup`.
 pub fn write_setting(file: &Path, editor: Option<&str>) -> Result<(), GuiError> {
@@ -668,13 +679,14 @@ pub fn setting_on(file: &Path, lookup: &Lookup, route: EditorRoute) -> EditorSet
     }
 }
 
-/// [`setting_on`] over the process's environment and the login shell's
-/// `PATH`, which the first call per process reads (up to 5 s), so the
-/// commands run it off the main thread.
-fn live_setting(file: &Path, fixture: bool) -> Result<EditorSetting, GuiError> {
-    let lookup = live_lookup(read_setting(file)?);
+/// [`setting_on`] over the process's environment, the setting as
+/// [`read_setting_or_none`] reads it, and the login shell's `PATH`, which the
+/// first call per process reads (up to 5 s), so the commands run it off the
+/// main thread.
+fn live_setting(file: &Path, fixture: bool) -> EditorSetting {
+    let lookup = live_lookup(read_setting_or_none(file));
     let route = crate::terminal::route(&lookup, crate::terminal::login_env(), fixture);
-    Ok(setting_on(file, &lookup, route))
+    setting_on(file, &lookup, route)
 }
 
 // ---------------------------------------------------------------------------
@@ -709,16 +721,9 @@ pub async fn editor_open(
     let file = settings_file(&app)?;
     let fixture = session.fixture();
     tauri::async_runtime::spawn_blocking(move || {
-        let setting = match read_setting(&file) {
-            Ok(setting) => setting,
-            Err(e) => {
-                tracing::warn!("[editor] ignoring the setting: {e}");
-                None
-            }
-        };
         open_on(
             fixture.as_deref(),
-            &live_lookup(setting),
+            &live_lookup(read_setting_or_none(&file)),
             &path,
             EXIT_WINDOW,
         )
@@ -735,7 +740,7 @@ pub async fn editor_setting_get(
 ) -> Result<EditorSetting, GuiError> {
     let file = settings_file(&app)?;
     let fixture = session.fixture().is_some();
-    tauri::async_runtime::spawn_blocking(move || live_setting(&file, fixture))
+    tauri::async_runtime::spawn_blocking(move || Ok(live_setting(&file, fixture)))
         .await
         .map_err(|e| GuiError::internal(format!("the command task failed: {e}")))?
 }
@@ -751,7 +756,7 @@ pub async fn editor_setting_set(
     let fixture = session.fixture().is_some();
     tauri::async_runtime::spawn_blocking(move || {
         write_setting(&file, editor.as_deref())?;
-        live_setting(&file, fixture)
+        Ok(live_setting(&file, fixture))
     })
     .await
     .map_err(|e| GuiError::internal(format!("the command task failed: {e}")))?
@@ -1234,6 +1239,11 @@ mod tests {
         ));
         std::fs::write(&file, "[1]").expect("write");
         assert!(matches!(read_setting(&file), Err(GuiError::Setup { .. })));
+        assert_eq!(
+            read_setting_or_none(&file),
+            None,
+            "the commands read a file that does not read as no setting"
+        );
         let env = env_of(&[]);
         let none = |_: &Path| false;
         let shown = setting_on(

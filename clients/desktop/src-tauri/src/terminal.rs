@@ -63,8 +63,8 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State};
 
 use crate::editor::{
-    self, command_line, live_lookup, quote, read_setting, settings_file, EditorRoute, EditorSource,
-    Lookup, Resolved, EDITOR_ENV, PROBE_DIRS, TERMINAL_EDITORS,
+    self, command_line, live_lookup, quote, read_setting_or_none, settings_file, EditorRoute,
+    EditorSource, Lookup, Resolved, EDITOR_ENV, PROBE_DIRS, TERMINAL_EDITORS,
 };
 use crate::error::GuiError;
 use crate::fixture::Fixture;
@@ -1056,11 +1056,8 @@ pub async fn terminal_spawn(
     let fixture = daemon.fixture();
     let terminals = terminals.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let setting = read_setting(&file).unwrap_or_else(|e| {
-            tracing::warn!("[terminal] ignoring the editor setting: {e}");
-            None
-        });
-        let launch = plan(&live_lookup(setting), login_env(), &path, fixture.is_some())?;
+        let lookup = live_lookup(read_setting_or_none(&file));
+        let launch = plan(&lookup, login_env(), &path, fixture.is_some())?;
         let draft = Draft { account, id, path };
         terminals.start(fixture.as_deref(), draft, launch, cols, rows, output)
     })
