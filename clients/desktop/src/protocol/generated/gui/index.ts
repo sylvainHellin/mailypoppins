@@ -30,6 +30,7 @@ export type { DraftStatusBatch } from "./DraftStatusBatch";
 export type { DraftStatusChanged } from "./DraftStatusChanged";
 export type { DraftStatusFailure } from "./DraftStatusFailure";
 export type { EditorLaunch } from "./EditorLaunch";
+export type { EditorRoute } from "./EditorRoute";
 export type { EditorSetting } from "./EditorSetting";
 export type { EditorSource } from "./EditorSource";
 export type { EffectiveConfig } from "./EffectiveConfig";

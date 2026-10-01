@@ -114,6 +114,7 @@ fn export_into(dir: &Path) -> usize {
         editor::EditorSource,
         editor::EditorLaunch,
         editor::EditorSetting,
+        editor::EditorRoute,
         settings::SettingKey,
         terminal::TerminalStarted,
         terminal::TerminalExit,

@@ -1402,6 +1402,8 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         env_override: null,
         effective: editor ?? "code --wait {path}",
         effective_source: editor ? "setting" : "probe",
+        // terminal.rs `route`: a terminal editor in the setting runs embedded; the probe found code.
+        route: editor && isTerminalEditor(editor) ? "embedded" : "external",
       };
     }
     // settings.rs: the known keys only, `null` or a blank value removes one.
@@ -1585,6 +1587,12 @@ function storeSetting(key: string, value: string | null): void {
   }
   if (v === "") mock.settings.delete(key);
   else mock.settings.set(key, v);
+}
+
+/** Whether a template's program is one of editor.rs's `TERMINAL_EDITORS`. */
+function isTerminalEditor(template: string): boolean {
+  const program = template.trim().split(/\s+/)[0] ?? "";
+  return ["vi", "vim", "nvim", "hx", "helix", "nano", "pico", "micro", "kak", "joe", "ne", "mg", "ed"].includes(program.split("/").pop() ?? "");
 }
 
 export const invoke = vi.fn(async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
