@@ -330,14 +330,23 @@ mod tests {
     #[test]
     fn the_runtime_paths_are_distinct_children_of_the_runtime_directory() {
         let dir = runtime_dir();
-        for path in [socket_path(), start_lock_path(), pid_path(), instance_path()] {
+        for path in [
+            socket_path(),
+            start_lock_path(),
+            pid_path(),
+            instance_path(),
+        ] {
             assert_eq!(path.parent(), Some(dir.as_path()));
         }
-        let names: std::collections::BTreeSet<_> =
-            [socket_path(), start_lock_path(), pid_path(), instance_path()]
-                .iter()
-                .map(|p| p.file_name().unwrap().to_owned())
-                .collect();
+        let names: std::collections::BTreeSet<_> = [
+            socket_path(),
+            start_lock_path(),
+            pid_path(),
+            instance_path(),
+        ]
+        .iter()
+        .map(|p| p.file_name().unwrap().to_owned())
+        .collect();
         assert_eq!(names.len(), 4);
     }
 

@@ -458,7 +458,11 @@ mod tests {
     fn truncate_cells_respects_wide_characters() {
         let wide = "\u{4f1a}\u{8b70}\u{4f1a}\u{8b70}\u{4f1a}\u{8b70}"; // 6 chars, 12 cells
         let out = truncate_cells(wide, 7);
-        assert!(display_width(&out) <= 7, "got {} cells", display_width(&out));
+        assert!(
+            display_width(&out) <= 7,
+            "got {} cells",
+            display_width(&out)
+        );
         assert!(out.ends_with('\u{2026}'));
         // Short strings pass through untouched.
         assert_eq!(truncate_cells("ok", 8), "ok");

@@ -81,7 +81,7 @@ pnpm tauri build                        # an unsigned app bundle; signing and no
 | `MP_DESKTOP_MP_BIN` | The `mp` binary that starts the daemon; else the one next to the executable, then `PATH`, then `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin` |
 | `MP_DESKTOP_WINDOW_SIZE=WxH` | The initial window size, e.g. `950x800` for the medium layout or `600x820` for the narrow one |
 | `MP_DESKTOP_STUB_OPENER=1` | "Open in browser" records the URL in the intercepted-URL log instead of opening it, and a file open only logs; automated runs set it |
-| `MP_DESKTOP_EDITOR` | The editor command for drafts and every other file the app opens in an editor, `{path}` standing for the file; else the `editor` key of `desktop.json`, `$VISUAL` or `$EDITOR` unless a terminal editor, a probed `code`, `zed`, `subl` or `cursor`, then `open -t` |
+| `MP_DESKTOP_EDITOR` | The editor command for drafts and every other file the app opens in an editor, `{path}` standing for the file; else the `editor` key of `desktop.json`, `$VISUAL` or `$EDITOR`, a probed `code`, `zed`, `subl` or `cursor`, then `open -t`; a terminal editor runs drafts in the reader pane and opens every other file in a terminal window |
 | `MP_DESKTOP_LOG` | `error` to `trace`, default `info`, to stderr and `<data>/logs/mp-desktop.log` |
 
 The daemon's own variables (`MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR`, `MAILYPOPPINS_DAEMON_AUTOSTART`) apply as they do to `mp`.

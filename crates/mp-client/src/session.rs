@@ -143,8 +143,7 @@ pub struct Connector {
 pub type OpenSession = fn() -> Pin<Box<dyn Future<Output = Connection> + Send>>;
 
 /// A reconnect: a connection and the instance id behind it, or nothing yet.
-pub type ReopenSession =
-    fn() -> Pin<Box<dyn Future<Output = Option<(Connection, String)>> + Send>>;
+pub type ReopenSession = fn() -> Pin<Box<dyn Future<Output = Option<(Connection, String)>> + Send>>;
 
 /// A live daemon session: the thread, and the door onto it.
 pub struct Session {

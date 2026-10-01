@@ -75,11 +75,8 @@ pub fn plan_invite(
         .start
         .as_deref()
         .ok_or_else(|| anyhow!("--invite requires --start"))?;
-    let (start_dt, end_dt) = resolve_times(
-        start,
-        request.end.as_deref(),
-        request.duration.as_deref(),
-    )?;
+    let (start_dt, end_dt) =
+        resolve_times(start, request.end.as_deref(), request.duration.as_deref())?;
 
     // Attendees from --to/--cc (deduplicated, bare addresses). The To/Cc
     // headers keep the full form; ATTENDEE lines take the extracted address.

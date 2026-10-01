@@ -206,7 +206,13 @@ pub(super) fn resolve_send_transport(
     account_config: &AccountConfig,
     graph: Option<mp_core::config::GraphConfig>,
     smtp: Option<mp_core::config::SmtpConfig>,
-) -> Result<(Option<mp_core::config::GraphConfig>, Option<mp_core::config::SmtpConfig>), &'static str> {
+) -> Result<
+    (
+        Option<mp_core::config::GraphConfig>,
+        Option<mp_core::config::SmtpConfig>,
+    ),
+    &'static str,
+> {
     if account_config.auth_method == mp_core::config::AuthMethod::Graph {
         match graph {
             Some(g) => Ok((Some(g), None)),
@@ -385,7 +391,10 @@ mod tests {
             panic!("a Graph account with a Graph config has a transport");
         };
         assert!(g.is_some());
-        assert!(s.is_none(), "the loaded SMTP config is not a Graph fallback");
+        assert!(
+            s.is_none(),
+            "the loaded SMTP config is not a Graph fallback"
+        );
     }
 
     /// The regression this guard exists for: `AccountState::new` loads the
@@ -461,8 +470,7 @@ mod tests {
             Some("Sylvain Hellin <SYLVAIN@Perso.Example>"),
         );
 
-        let (idx, _smtp, _imap, _graph, cfg, signature) =
-            resolve_send_account(&app, &path);
+        let (idx, _smtp, _imap, _graph, cfg, signature) = resolve_send_account(&app, &path);
         assert_eq!(idx, 1);
         assert_eq!(cfg.name, "perso");
         assert_eq!(signature.as_deref(), Some("-- \nperso"));
@@ -543,7 +551,10 @@ mod tests {
     fn resolve_send_account_empty_default_from_matches_every_draft() {
         let tmp = tempfile::tempdir().unwrap();
         let app = app_with(
-            vec![account("half-configured", ""), account("work", "sylvain@work.example")],
+            vec![
+                account("half-configured", ""),
+                account("work", "sylvain@work.example"),
+            ],
             1,
         );
         let path = draft(tmp.path(), "d.md", Some("sylvain@work.example"));

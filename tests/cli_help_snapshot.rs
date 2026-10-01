@@ -112,5 +112,8 @@ fn no_help_line_repeats_clap_default() {
         .lines()
         .filter(|l| l.contains("(default: ") && l.contains("[default: "))
         .collect();
-    assert!(doubled.is_empty(), "help repeats clap's default: {doubled:#?}");
+    assert!(
+        doubled.is_empty(),
+        "help repeats clap's default: {doubled:#?}"
+    );
 }

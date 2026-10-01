@@ -251,8 +251,8 @@ fn a_killed_daemon_is_survived_and_the_session_bootstraps_against_its_replacemen
     std::env::set_var("MAILYPOPPINS_DAEMON_AUTOSTART", "0");
 
     let first = DaemonFixture::start(&root);
-    let mut session =
-        Session::connect(mailypoppins::daemon::client::tui_connector()).expect("the session thread comes up");
+    let mut session = Session::connect(mailypoppins::daemon::client::tui_connector())
+        .expect("the session thread comes up");
     let before = instance_of(&session).expect("a live daemon bootstraps");
 
     let pid = daemon_pid_file(&root).expect("a running daemon writes its pid file");

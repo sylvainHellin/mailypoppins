@@ -172,8 +172,7 @@ pub fn delete(name: &str) -> Result<()> {
         bail!("no signature named '{name}'");
     }
     let path = signature_file(name);
-    fs::remove_file(&path)
-        .with_context(|| format!("deleting signature at {}", path.display()))?;
+    fs::remove_file(&path).with_context(|| format!("deleting signature at {}", path.display()))?;
     retarget_defaults(name, None)
 }
 
@@ -542,7 +541,9 @@ fn dead_signature_tables_notice(skipped: &[SkippedEntry]) -> String {
             s.account, s.entry, s.reason
         ));
     }
-    out.push_str("\nEverything else was copied out; delete the tables only once these are handled.");
+    out.push_str(
+        "\nEverything else was copied out; delete the tables only once these are handled.",
+    );
     out
 }
 
@@ -724,7 +725,14 @@ mod tests {
 
     #[test]
     fn ordinary_names_are_accepted() {
-        for good in ["work", "work-external", "work_de", "v1.2", "with space", "A1"] {
+        for good in [
+            "work",
+            "work-external",
+            "work_de",
+            "v1.2",
+            "with space",
+            "A1",
+        ] {
             validate_name(good).unwrap_or_else(|e| panic!("rejected {good:?}: {e}"));
         }
     }
@@ -867,7 +875,11 @@ mod tests {
     fn a_cross_account_name_collision_migrates_under_a_disambiguated_name() {
         let _fx = fixture();
         let config = config_with(vec![
-            named_account_with("work", Some("default"), &[("default", inline("-- \nAlice"))]),
+            named_account_with(
+                "work",
+                Some("default"),
+                &[("default", inline("-- \nAlice"))],
+            ),
             named_account_with("home", Some("default"), &[("default", inline("-- \nAl"))]),
         ]);
 
@@ -908,8 +920,16 @@ mod tests {
     fn identical_content_under_one_name_stays_one_file() {
         let _fx = fixture();
         let config = config_with(vec![
-            named_account_with("work", Some("default"), &[("default", inline("-- \nAlice"))]),
-            named_account_with("home", Some("default"), &[("default", inline("-- \nAlice"))]),
+            named_account_with(
+                "work",
+                Some("default"),
+                &[("default", inline("-- \nAlice"))],
+            ),
+            named_account_with(
+                "home",
+                Some("default"),
+                &[("default", inline("-- \nAlice"))],
+            ),
         ]);
 
         migrate_config_signatures(&config).unwrap();
@@ -925,7 +945,11 @@ mod tests {
     fn a_default_never_inherits_another_accounts_file() {
         let _fx = fixture();
         let config = config_with(vec![
-            named_account_with("work", Some("default"), &[("default", inline("-- \nAlice"))]),
+            named_account_with(
+                "work",
+                Some("default"),
+                &[("default", inline("-- \nAlice"))],
+            ),
             named_account_with(
                 "home",
                 Some("default"),
@@ -974,8 +998,14 @@ mod tests {
 
         assert_eq!(list(), vec!["kept".to_string()]);
         assert_eq!(report.skipped.len(), 2, "{:?}", report.skipped);
-        assert!(notice.contains("account 'work', signature '../escape'"), "{notice}");
-        assert!(notice.contains("account 'work', signature 'gone'"), "{notice}");
+        assert!(
+            notice.contains("account 'work', signature '../escape'"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("account 'work', signature 'gone'"),
+            "{notice}"
+        );
         assert!(notice.contains("/no/such/signature.md"), "{notice}");
         assert!(!notice.contains("can be deleted"), "{notice}");
         assert!(!notice.contains("kept"), "{notice}");

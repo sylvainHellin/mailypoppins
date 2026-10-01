@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-
 use crate::types::MailboxRole;
 
 // ---------------------------------------------------------------------------
@@ -261,7 +260,6 @@ impl AccountConfig {
             && self.imap.host.trim().is_empty()
             && self.smtp.host.trim().is_empty()
     }
-
 }
 
 /// Whether the client APPENDs its own copy of a sent message to the Sent
@@ -710,10 +708,9 @@ pub struct GraphConfig {
 
 impl GraphConfig {
     pub fn load(account: &AccountConfig) -> Result<Self> {
-        let oauth2_settings = account
-            .oauth2
-            .as_ref()
-            .context("Graph auth_method requires [accounts.oauth2] config with client_id and tenant_id")?;
+        let oauth2_settings = account.oauth2.as_ref().context(
+            "Graph auth_method requires [accounts.oauth2] config with client_id and tenant_id",
+        )?;
         if oauth2_settings.client_id.is_empty() || oauth2_settings.tenant_id.is_empty() {
             return Err(anyhow::anyhow!(
                 "Graph auth_method requires non-empty client_id and tenant_id in [accounts.oauth2]"
@@ -792,7 +789,9 @@ pub fn delete_secret(key: &str) -> Result<()> {
 /// Initialize the process-wide secrets backend from the loaded config.
 /// Idempotent. Logs (does not fail) if config is unreadable -- callers can
 /// still operate on a default `EncryptedFile` backend.
-pub fn init_secrets_backend(config: &GlobalConfig) -> std::result::Result<(), crate::secrets::SecretsError> {
+pub fn init_secrets_backend(
+    config: &GlobalConfig,
+) -> std::result::Result<(), crate::secrets::SecretsError> {
     crate::secrets::init(config.secrets_backend)
 }
 
@@ -879,7 +878,10 @@ pub fn migrate_legacy_config_dir() -> Result<()> {
     }
     if let Some(parent) = new.parent() {
         fs::create_dir_all(parent).with_context(|| {
-            format!("Failed to create config parent directory: {}", parent.display())
+            format!(
+                "Failed to create config parent directory: {}",
+                parent.display()
+            )
         })?;
     }
     match fs::rename(&old, &new) {
@@ -1027,8 +1029,7 @@ pub fn load_global_config() -> Result<GlobalConfig> {
         .with_context(|| format!("Invalid config file: {}", path.display()))?;
     validate_account_names(&config)
         .with_context(|| format!("Invalid config file: {}", path.display()))?;
-    validate_hooks(&config)
-        .with_context(|| format!("Invalid config file: {}", path.display()))?;
+    validate_hooks(&config).with_context(|| format!("Invalid config file: {}", path.display()))?;
     debug!("Loaded global config from {}", path.display());
     Ok(config)
 }
@@ -1078,9 +1079,7 @@ pub fn validate_account_names(config: &GlobalConfig) -> Result<()> {
 /// fail loud and instruct the user to re-run `mp config init`.
 pub fn reject_legacy_keys(content: &str, path: &Path) -> Result<()> {
     let mut hits: Vec<&'static str> = Vec::new();
-    if content.contains("[accounts.directories]")
-        || content.contains("[directories]")
-    {
+    if content.contains("[accounts.directories]") || content.contains("[directories]") {
         hits.push("[accounts.directories] / [directories]");
     }
     // Per-mailbox `local = "..."`. Be conservative: only flag when both
@@ -1113,7 +1112,9 @@ impl SmtpConfig {
         }
         let password = match account.auth_method {
             AuthMethod::OAuth2 => {
-                let oauth2_settings = account.oauth2.as_ref()
+                let oauth2_settings = account
+                    .oauth2
+                    .as_ref()
                     .context("OAuth2 auth_method requires [accounts.oauth2] config")?;
                 crate::oauth2::load_or_refresh_token_blocking(
                     &account.name,
@@ -1158,7 +1159,9 @@ impl ImapConfig {
 
         let password = match account.auth_method {
             AuthMethod::OAuth2 => {
-                let oauth2_settings = account.oauth2.as_ref()
+                let oauth2_settings = account
+                    .oauth2
+                    .as_ref()
                     .context("OAuth2 auth_method requires [accounts.oauth2] config")?;
                 crate::oauth2::load_or_refresh_token_blocking(
                     &account.name,
@@ -1375,7 +1378,10 @@ pub fn create_private_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
             Ok(())
         }
 
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
         tighten(path)?;
         let root = mailypoppins_data_dir();
         if path != root && path.starts_with(&root) {
@@ -1505,7 +1511,10 @@ pub fn resolve_sent_mailbox(account: &AccountConfig) -> String {
 /// The name is read as a [`MailboxRole`] first, so `inbox`, `INBOX` and
 /// `Inbox` all resolve to the configured inbox mapping; anything else is
 /// matched against the server names, case-insensitively.
-fn find_mailbox_mapping<'a>(account: &'a AccountConfig, mailbox: &str) -> Option<&'a MailboxMapping> {
+fn find_mailbox_mapping<'a>(
+    account: &'a AccountConfig,
+    mailbox: &str,
+) -> Option<&'a MailboxMapping> {
     let role = MailboxRole::from(mailbox);
     let named = match role {
         MailboxRole::Inbox => account.mailboxes.inbox.as_ref(),
@@ -1617,9 +1626,10 @@ pub fn find_sync_target(account: &AccountConfig, name: &str) -> Option<(MailboxR
 /// Find the AccountConfig whose default_from matches the given from address.
 pub fn find_account_by_from<'a>(config: &'a GlobalConfig, from: &str) -> Option<&'a AccountConfig> {
     let lower = from.to_lowercase();
-    config.accounts.iter().find(|a| {
-        lower.contains(&a.default_from.to_lowercase())
-    })
+    config
+        .accounts
+        .iter()
+        .find(|a| lower.contains(&a.default_from.to_lowercase()))
 }
 
 /// Return the first (default) account, or None if no accounts are configured.
@@ -1936,7 +1946,10 @@ name = "test"
             config.accounts[0].imap.clone()
         };
         assert_eq!(parse("").sync_interval_secs, 900);
-        assert_eq!(parse("[accounts.imap]\nport = 993\n").sync_interval_secs, 900);
+        assert_eq!(
+            parse("[accounts.imap]\nport = 993\n").sync_interval_secs,
+            900
+        );
         assert_eq!(ImapSettings::default().sync_interval_secs, 900);
         assert_eq!(parse("").sync_interval(), Some(Duration::from_secs(900)));
         assert_eq!(
@@ -2002,12 +2015,10 @@ name = "test"
         let unset: GlobalConfig = toml::from_str("[email]\n").unwrap();
         assert_eq!(unset.email.send_hold_secs, 20, "unset falls back to 20s");
 
-        let set: GlobalConfig =
-            toml::from_str("[email]\nsend_hold_secs = 5\n").unwrap();
+        let set: GlobalConfig = toml::from_str("[email]\nsend_hold_secs = 5\n").unwrap();
         assert_eq!(set.email.send_hold_secs, 5);
 
-        let opt_out: GlobalConfig =
-            toml::from_str("[email]\nsend_hold_secs = 0\n").unwrap();
+        let opt_out: GlobalConfig = toml::from_str("[email]\nsend_hold_secs = 0\n").unwrap();
         assert_eq!(opt_out.email.send_hold_secs, 0, "zero is send-immediately");
     }
 
@@ -2056,9 +2067,7 @@ name = "test"
     }
 
     fn hooks_config(hook: &str) -> Result<GlobalConfig> {
-        let text = format!(
-            "[[accounts]]\nname = \"assistant\"\n\n[[accounts.hooks]]\n{hook}\n"
-        );
+        let text = format!("[[accounts]]\nname = \"assistant\"\n\n[[accounts.hooks]]\n{hook}\n");
         let config: GlobalConfig = toml::from_str(&text)?;
         validate_hooks(&config)?;
         Ok(config)
@@ -2084,11 +2093,15 @@ name = "test"
     fn a_hook_the_daemon_could_not_run_is_refused() {
         let refused = |hook: &str| format!("{:#}", hooks_config(hook).unwrap_err());
         assert!(refused("name = \"pi\"\nmatch = { subject = \"x\" }").contains("exec"));
-        assert!(refused("name = \"p i\"\nexec = [\"x\"]\nmatch = { subject = \"x\" }")
-            .contains("hook name"));
+        assert!(
+            refused("name = \"p i\"\nexec = [\"x\"]\nmatch = { subject = \"x\" }")
+                .contains("hook name")
+        );
         assert!(refused("name = \"pi\"\nexec = [\"x\"]").contains("no criterion"));
-        assert!(refused("name = \"pi\"\nexec = [\"x\"]\nmatch = { subject = \"(\" }")
-            .contains("regular expression"));
+        assert!(
+            refused("name = \"pi\"\nexec = [\"x\"]\nmatch = { subject = \"(\" }")
+                .contains("regular expression")
+        );
         assert!(refused(
             "name = \"pi\"\nexec = [\"x\"]\nmatch = { authenticated_from = [\"a@b.c\"] }"
         )
@@ -2221,7 +2234,11 @@ name = "test"
         let legacy = seed_legacy_dir(tmp.path());
         let current = tmp.path().join(".config").join("mailypoppins");
         fs::create_dir_all(&current).unwrap();
-        fs::write(current.join("config.toml"), "[[accounts]]\nname = \"kept\"\n").unwrap();
+        fs::write(
+            current.join("config.toml"),
+            "[[accounts]]\nname = \"kept\"\n",
+        )
+        .unwrap();
 
         migrate_legacy_config_dir().unwrap();
 
@@ -2229,7 +2246,10 @@ name = "test"
             fs::read_to_string(current.join("config.toml")).unwrap(),
             "[[accounts]]\nname = \"kept\"\n"
         );
-        assert!(legacy.join("config.toml").exists(), "legacy dir was consumed");
+        assert!(
+            legacy.join("config.toml").exists(),
+            "legacy dir was consumed"
+        );
     }
 
     /// Nothing reads the old location. A config that failed to move must fail
@@ -2244,10 +2264,7 @@ name = "test"
         let expected = tmp.path().join(".config").join("mailypoppins");
         assert_eq!(config_dir(), expected);
         assert_eq!(config_path(), expected.join("config.toml"));
-        assert_eq!(
-            crate::secrets::secrets_path(),
-            expected.join("secrets.enc")
-        );
+        assert_eq!(crate::secrets::secrets_path(), expected.join("secrets.enc"));
     }
 
     /// The gap `fs::rename` leaves: the file moves, the strings inside it do
@@ -2281,7 +2298,10 @@ path = "/home/u/.config/email/signatures/plain.html"
         assert_eq!(hits[0].1, "~/.config/email/signatures/robin.html");
         assert_eq!(hits[0].2, "~/.config/mailypoppins/signatures/robin.html");
         assert_eq!(hits[1].0, "accounts.signatures.plain.path");
-        assert_eq!(hits[1].2, "/home/u/.config/mailypoppins/signatures/plain.html");
+        assert_eq!(
+            hits[1].2,
+            "/home/u/.config/mailypoppins/signatures/plain.html"
+        );
     }
 
     /// Directory prefix, not substring: a value that merely contains the words
@@ -2498,8 +2518,14 @@ server = "Newsletters"
     fn test_default_account() {
         let config = GlobalConfig {
             accounts: vec![
-                AccountConfig { name: "first".to_string(), ..Default::default() },
-                AccountConfig { name: "second".to_string(), ..Default::default() },
+                AccountConfig {
+                    name: "first".to_string(),
+                    ..Default::default()
+                },
+                AccountConfig {
+                    name: "second".to_string(),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
@@ -2530,10 +2556,16 @@ host = "smtp.example.com"
 
         let policy = retention_for(&config, &config.accounts[0]).unwrap();
         assert_eq!(policy, RetentionPolicy::default());
-        assert_eq!(policy.metadata_horizon_days, 0, "metadata defaults to keep-all");
+        assert_eq!(
+            policy.metadata_horizon_days, 0,
+            "metadata defaults to keep-all"
+        );
         assert_eq!(policy.body_horizon_days, 365);
         assert_eq!(policy.attachment_horizon_days, 90);
-        assert_eq!(policy.max_disk_bytes, 10_000_000_000, "#0060 signed-off 10 GB default");
+        assert_eq!(
+            policy.max_disk_bytes, 10_000_000_000,
+            "#0060 signed-off 10 GB default"
+        );
     }
 
     #[test]
@@ -2587,7 +2619,10 @@ max_disk_bytes = 500000000
 
         let inherits = retention_for(&config, &config.accounts[0]).unwrap();
         assert_eq!(inherits.body_horizon_days, 180);
-        assert_eq!(inherits.attachment_horizon_days, 90, "falls back to the default");
+        assert_eq!(
+            inherits.attachment_horizon_days, 90,
+            "falls back to the default"
+        );
         assert_eq!(inherits.max_disk_bytes, 2_000_000_000);
 
         let overrides = retention_for(&config, &config.accounts[1]).unwrap();
@@ -2627,7 +2662,10 @@ name = "test"
 "#;
         let config: GlobalConfig = toml::from_str(toml_str).unwrap();
         let err = validate_retention(&config).unwrap_err().to_string();
-        assert!(err.contains("body_horizon_days"), "missing field name: {err}");
+        assert!(
+            err.contains("body_horizon_days"),
+            "missing field name: {err}"
+        );
         assert!(err.contains("40000"), "missing offending value: {err}");
         assert!(err.contains("36500"), "missing allowed range: {err}");
     }
@@ -2653,7 +2691,9 @@ name = "test"
 [retention]
 body_horizon_days = -1
 "#;
-        let err = toml::from_str::<GlobalConfig>(toml_str).unwrap_err().to_string();
+        let err = toml::from_str::<GlobalConfig>(toml_str)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("body_horizon_days"),
             "parse error should name the field: {err}"
@@ -2803,7 +2843,10 @@ body_horizon_days = -1
             "<p>--<br>\nRobin<br>\n<a href=\"mailto:robin@example.com\">robin@example.com</a></p>",
         );
         let md = resolve_signature_markdown(&account, None).expect("signature resolves");
-        assert!(!md.contains('<'), "raw HTML leaked into the signature: {md:?}");
+        assert!(
+            !md.contains('<'),
+            "raw HTML leaked into the signature: {md:?}"
+        );
         assert!(
             md.contains("[robin@example.com](mailto:robin@example.com)"),
             "link not preserved as Markdown: {md:?}"

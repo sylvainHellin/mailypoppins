@@ -40,7 +40,13 @@ const PREFIX: &str = "mailypoppins-";
 const SUFFIX: &str = ".log";
 
 /// The crates whose `DEBUG` records are worth keeping.
-const OWN_CRATES: &[&str] = &["mailypoppins", "mp_core", "mp_tui", "mp_client", "mp_protocol"];
+const OWN_CRATES: &[&str] = &[
+    "mailypoppins",
+    "mp_core",
+    "mp_tui",
+    "mp_client",
+    "mp_protocol",
+];
 
 /// Whether `name` is one of the dated log files.
 pub fn is_log_name(name: &str) -> bool {
@@ -227,7 +233,10 @@ pub fn prune(dir: &Path, total_cap: u64, keep: &Path) -> io::Result<()> {
     delete_oldest(log_files(dir)?, total_cap, keep);
     let daemon_log = dir.join("daemon.log");
     if fs::metadata(&daemon_log).is_ok_and(|m| m.len() > DAEMON_LOG_CAP_BYTES) {
-        OpenOptions::new().write(true).open(&daemon_log)?.set_len(0)?;
+        OpenOptions::new()
+            .write(true)
+            .open(&daemon_log)?
+            .set_len(0)?;
     }
     Ok(())
 }
@@ -305,7 +314,10 @@ mod tests {
     #[test]
     fn own_crates_keep_debug_and_dependencies_keep_info() {
         assert_eq!(level_for("mailypoppins"), LevelFilter::Debug);
-        assert_eq!(level_for("mailypoppins::daemon::server"), LevelFilter::Debug);
+        assert_eq!(
+            level_for("mailypoppins::daemon::server"),
+            LevelFilter::Debug
+        );
         assert_eq!(level_for("mp_core::config"), LevelFilter::Debug);
         assert_eq!(level_for("mp_tui"), LevelFilter::Debug);
         assert_eq!(level_for("html5ever::tree_builder"), LevelFilter::Info);
@@ -316,11 +328,13 @@ mod tests {
     #[test]
     fn opens_the_dated_file_and_appends_to_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut log = RotatingLog::with_caps(tmp.path(), 1000, 10_000, at(2026, 9, 28, 10)).unwrap();
+        let mut log =
+            RotatingLog::with_caps(tmp.path(), 1000, 10_000, at(2026, 9, 28, 10)).unwrap();
         put(&mut log, b"one\n", at(2026, 9, 28, 10));
         assert_eq!(names(tmp.path()), ["mailypoppins-2026-09-28.log"]);
         drop(log);
-        let mut log = RotatingLog::with_caps(tmp.path(), 1000, 10_000, at(2026, 9, 28, 11)).unwrap();
+        let mut log =
+            RotatingLog::with_caps(tmp.path(), 1000, 10_000, at(2026, 9, 28, 11)).unwrap();
         put(&mut log, b"two\n", at(2026, 9, 28, 11));
         let text = fs::read_to_string(tmp.path().join("mailypoppins-2026-09-28.log")).unwrap();
         assert_eq!(text, "one\ntwo\n");
@@ -335,7 +349,10 @@ mod tests {
         let names = names(tmp.path());
         assert_eq!(names.len(), 2, "{names:?}");
         assert_eq!(names[0], "mailypoppins-2026-09-28.log");
-        assert!(names[1].starts_with("mailypoppins-2026-09-28T"), "{names:?}");
+        assert!(
+            names[1].starts_with("mailypoppins-2026-09-28T"),
+            "{names:?}"
+        );
         assert!(names[1].as_str() < "mailypoppins-2026-09-29.log");
         let rolled = fs::read_to_string(tmp.path().join(&names[1])).unwrap();
         assert_eq!(rolled, "next\n");
@@ -344,7 +361,8 @@ mod tests {
     #[test]
     fn a_new_utc_day_rolls_to_the_new_dated_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut log = RotatingLog::with_caps(tmp.path(), 1000, 10_000, at(2026, 9, 28, 23)).unwrap();
+        let mut log =
+            RotatingLog::with_caps(tmp.path(), 1000, 10_000, at(2026, 9, 28, 23)).unwrap();
         log.write_at(b"late\n", at(2026, 9, 28, 23)).unwrap();
         log.write_at(b"early\n", at(2026, 9, 29, 0)).unwrap();
         assert_eq!(
@@ -369,13 +387,21 @@ mod tests {
     fn opening_prunes_the_oldest_files_down_to_the_cap() {
         let tmp = tempfile::tempdir().unwrap();
         for day in ["01", "02", "03", "04"] {
-            fs::write(tmp.path().join(format!("mailypoppins-2026-09-{day}.log")), [b'x'; 100]).unwrap();
+            fs::write(
+                tmp.path().join(format!("mailypoppins-2026-09-{day}.log")),
+                [b'x'; 100],
+            )
+            .unwrap();
         }
         fs::write(tmp.path().join("unrelated.txt"), [b'x'; 1000]).unwrap();
         let log = RotatingLog::with_caps(tmp.path(), 1000, 250, at(2026, 9, 28, 10)).unwrap();
         assert_eq!(
             names(tmp.path()),
-            ["mailypoppins-2026-09-03.log", "mailypoppins-2026-09-04.log", "mailypoppins-2026-09-28.log"]
+            [
+                "mailypoppins-2026-09-03.log",
+                "mailypoppins-2026-09-04.log",
+                "mailypoppins-2026-09-28.log"
+            ]
         );
         assert_eq!(log.path(), tmp.path().join("mailypoppins-2026-09-28.log"));
         assert!(tmp.path().join("unrelated.txt").exists());
@@ -394,7 +420,11 @@ mod tests {
     fn a_file_another_process_deleted_first_counts_as_deleted() {
         let tmp = tempfile::tempdir().unwrap();
         for day in ["01", "02", "03"] {
-            fs::write(tmp.path().join(format!("mailypoppins-2026-09-{day}.log")), [b'x'; 100]).unwrap();
+            fs::write(
+                tmp.path().join(format!("mailypoppins-2026-09-{day}.log")),
+                [b'x'; 100],
+            )
+            .unwrap();
         }
         // A second process listed the files, then the first deleted `01`.
         let stale = log_files(tmp.path()).unwrap();

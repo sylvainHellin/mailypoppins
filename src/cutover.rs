@@ -219,10 +219,18 @@ pub fn scan_legacy(account_dir: &Path) -> Vec<LegacyRemnant> {
             }
             let (md_files, bytes) = tree_size(&path);
             if md_files > 0 {
-                out.push(LegacyRemnant { path, md_files, bytes });
+                out.push(LegacyRemnant {
+                    path,
+                    md_files,
+                    bytes,
+                });
             }
         } else if LEGACY_FILES.contains(&name.as_str()) {
-            out.push(LegacyRemnant { path, md_files: 0, bytes: meta.len() });
+            out.push(LegacyRemnant {
+                path,
+                md_files: 0,
+                bytes: meta.len(),
+            });
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -294,7 +302,12 @@ impl From<&AccountCutover> for CutoverReport {
             account: report.account.clone(),
             imported: report.drafts.imported.clone(),
             already_indexed: report.drafts.already_indexed,
-            skipped: report.drafts.skipped.iter().map(ToString::to_string).collect(),
+            skipped: report
+                .drafts
+                .skipped
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             collisions: report
                 .drafts
                 .collisions
@@ -368,7 +381,11 @@ pub fn print_report(report: &CutoverReport, dir: &Path, dry_run: bool) {
         }
 
         if report.remnants.is_empty() {
-            println!("  {} no file-era mailstore left in {}", "✓".green(), dir.display());
+            println!(
+                "  {} no file-era mailstore left in {}",
+                "✓".green(),
+                dir.display()
+            );
         } else {
             println!(
                 "  {} file-era mailstore still on disk ({}), unused by this build:",
@@ -416,7 +433,9 @@ pub fn print_footer(remnants: &[&LegacyRemnant]) {
 /// command than the one shown.
 fn shell_quote(path: &Path) -> String {
     let s = path.to_string_lossy();
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c)) {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c))
+    {
         s.into_owned()
     } else {
         format!("'{}'", s.replace('\'', r"'\''"))
@@ -443,7 +462,12 @@ mod tests {
         let drafts = account_dir.join("drafts");
         fs::create_dir_all(&drafts).unwrap();
         let store = Store::open(account_dir.join("store.sqlite3")).unwrap();
-        Fixture { _dir: dir, account_dir, drafts, store }
+        Fixture {
+            _dir: dir,
+            account_dir,
+            drafts,
+            store,
+        }
     }
 
     /// A file-era draft: no `id:` field anywhere in the frontmatter.
@@ -461,7 +485,10 @@ mod tests {
     }
 
     fn read_id(path: &Path) -> Option<String> {
-        crate::draft::parse_email_draft(path).unwrap().frontmatter.id
+        crate::draft::parse_email_draft(path)
+            .unwrap()
+            .frontmatter
+            .id
     }
 
     #[test]
@@ -478,8 +505,12 @@ mod tests {
         assert!(!id_a.is_empty() && id_a != id_b);
 
         // And each one resolves through the index the selector reads.
-        assert!(drafts_index::find(&fx.store, "acct", &id_a).unwrap().is_some());
-        assert!(drafts_index::find(&fx.store, "acct", &id_b).unwrap().is_some());
+        assert!(drafts_index::find(&fx.store, "acct", &id_a)
+            .unwrap()
+            .is_some());
+        assert!(drafts_index::find(&fx.store, "acct", &id_b)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -493,9 +524,17 @@ mod tests {
         let second = import_drafts(&fx.store, "acct", &fx.drafts, false).unwrap();
         assert!(second.imported.is_empty(), "second run must mint nothing");
         assert_eq!(second.already_indexed, 1);
-        assert_eq!(read_id(&a).unwrap(), first_id, "the id must not be reminted");
+        assert_eq!(
+            read_id(&a).unwrap(),
+            first_id,
+            "the id must not be reminted"
+        );
         assert_eq!(fs::read_to_string(&a).unwrap(), bytes_after_first);
-        assert_eq!(count_drafts(&fx.drafts), 1, "no file was copied or duplicated");
+        assert_eq!(
+            count_drafts(&fx.drafts),
+            1,
+            "no file was copied or duplicated"
+        );
 
         let rows = drafts_index::list(&fx.store, "acct", None).unwrap();
         assert_eq!(rows.len(), 1);
@@ -510,9 +549,15 @@ mod tests {
 
         let report = import_drafts(&fx.store, "acct", &fx.drafts, true).unwrap();
         assert_eq!(report.imported, vec![a.clone()]);
-        assert_eq!(fs::read_to_string(&a).unwrap(), before, "dry run touched the file");
+        assert_eq!(
+            fs::read_to_string(&a).unwrap(),
+            before,
+            "dry run touched the file"
+        );
         assert!(read_id(&a).is_none());
-        assert!(drafts_index::list(&fx.store, "acct", None).unwrap().is_empty());
+        assert!(drafts_index::list(&fx.store, "acct", None)
+            .unwrap()
+            .is_empty());
 
         // The real run then reports exactly what the dry run promised.
         let real = import_drafts(&fx.store, "acct", &fx.drafts, false).unwrap();
@@ -547,7 +592,11 @@ mod tests {
         assert_eq!(report.imported, vec![good], "the good draft still imports");
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].path, bad);
-        assert_eq!(fs::read_to_string(&bad).unwrap(), bytes, "the broken file was rewritten");
+        assert_eq!(
+            fs::read_to_string(&bad).unwrap(),
+            bytes,
+            "the broken file was rewritten"
+        );
     }
 
     #[test]
@@ -590,7 +639,13 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["archive", "inbox", "mailbox-states.json", "projekte", "sent"]
+            vec![
+                "archive",
+                "inbox",
+                "mailbox-states.json",
+                "projekte",
+                "sent"
+            ]
         );
     }
 

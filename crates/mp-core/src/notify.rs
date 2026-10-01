@@ -225,8 +225,7 @@ mod tests {
 
     #[test]
     fn format_single_email_without_subject() {
-        let (_, body) =
-            format_new_mail_notification("work", &[meta("a@example.com", "")]).unwrap();
+        let (_, body) = format_new_mail_notification("work", &[meta("a@example.com", "")]).unwrap();
         assert_eq!(body, "a@example.com: (no subject)");
     }
 

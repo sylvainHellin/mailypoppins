@@ -13,8 +13,6 @@ pub(super) fn pane_border_style(current_focus: Focus, pane: Focus) -> Style {
     }
 }
 
-
-
 /// Cut `s` to at most `max_width` display cells, ellipsising when it does not
 /// fit. Callers pass column counts, so the measure is display width and not a
 /// char count: a wide glyph (CJK, a boxed icon) otherwise overflows its column

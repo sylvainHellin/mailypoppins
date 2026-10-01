@@ -13,11 +13,11 @@ use log::{debug, info, warn};
 use serde::Deserialize;
 
 use crate::config::GraphConfig;
-use crate::sync::{FreshObservation, SyncResult, SyncTarget};
 use crate::ingest::pass_may_prune;
-use crate::types::MailboxRole;
 use crate::parse::{sanitize_attachment_filename, AttachmentData, FetchedEmail};
+use crate::sync::{FreshObservation, SyncResult, SyncTarget};
 use crate::timing::TimingSpan;
+use crate::types::MailboxRole;
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
@@ -531,7 +531,8 @@ impl GraphClient {
             return Err(anyhow!("List folders failed (HTTP {}): {}", status, body));
         }
 
-        let folders: GraphMailFolderList = resp.json().await.context("Failed to parse folder list")?;
+        let folders: GraphMailFolderList =
+            resp.json().await.context("Failed to parse folder list")?;
         Ok(folders.value)
     }
 }
@@ -542,11 +543,7 @@ impl GraphClient {
 
 impl GraphClient {
     /// Fetch messages from a folder, converting to FetchedEmail.
-    pub async fn fetch_messages(
-        &self,
-        folder: &str,
-        limit: usize,
-    ) -> Result<Vec<FetchedEmail>> {
+    pub async fn fetch_messages(&self, folder: &str, limit: usize) -> Result<Vec<FetchedEmail>> {
         let folder_path = resolve_folder_path(folder);
         let url = format!(
             "{}/me/mailFolders/{}/messages?\
@@ -713,7 +710,11 @@ impl GraphClient {
             );
         }
 
-        Ok(BatchFetch { requested: ids.len(), emails, gave_up })
+        Ok(BatchFetch {
+            requested: ids.len(),
+            emails,
+            gave_up,
+        })
     }
 
     /// Turn one Graph message into a [`FetchedEmail`], pulling its attachments
@@ -756,8 +757,10 @@ impl GraphClient {
             ));
         }
 
-        let att_list: GraphAttachmentList =
-            resp.json().await.context("Failed to parse attachment list")?;
+        let att_list: GraphAttachmentList = resp
+            .json()
+            .await
+            .context("Failed to parse attachment list")?;
 
         let mut result = Vec::new();
         for att in att_list.value {
@@ -791,11 +794,7 @@ impl GraphClient {
 }
 
 fn graph_message_to_fetched_email(msg: &GraphMessage) -> FetchedEmail {
-    let from = msg
-        .from
-        .as_ref()
-        .map(format_recipient)
-        .unwrap_or_default();
+    let from = msg.from.as_ref().map(format_recipient).unwrap_or_default();
 
     let to = format_recipients(&msg.to_recipients);
     let cc = if msg.cc_recipients.is_empty() {
@@ -872,17 +871,14 @@ fn populate_calendar_from_attachments(email: &mut FetchedEmail) {
     // payload parses as a VCALENDAR carrying a METHOD property). Every other
     // `.ics` (e.g. a plain calendar export the user shared) stays a regular
     // attachment with its original filename -- matching the IMAP path.
-    let invite_idx = email
-        .attachments
-        .iter()
-        .position(|att| {
-            crate::calendar::is_ics_filename(&att.filename)
-                && crate::calendar::is_imip_invite(&att.content)
-        });
+    let invite_idx = email.attachments.iter().position(|att| {
+        crate::calendar::is_ics_filename(&att.filename)
+            && crate::calendar::is_imip_invite(&att.content)
+    });
     if let Some(idx) = invite_idx {
         let ics = email.attachments.remove(idx).content;
-        email.event = crate::calendar::parse_ics(&ics)
-            .map(|ev| crate::calendar::event_frontmatter(&ev));
+        email.event =
+            crate::calendar::parse_ics(&ics).map(|ev| crate::calendar::event_frontmatter(&ev));
         email.calendar_ics = Some(ics);
     }
 }
@@ -970,8 +966,10 @@ impl GraphClient {
                 ));
             }
 
-            let page: GraphMessageIdList =
-                resp.json().await.context("Failed to parse message ID list")?;
+            let page: GraphMessageIdList = resp
+                .json()
+                .await
+                .context("Failed to parse message ID list")?;
 
             absorb_page(&mut result, page.value);
 
@@ -984,7 +982,10 @@ impl GraphClient {
             }
         }
 
-        Ok(FolderEnumeration { entries: result, complete })
+        Ok(FolderEnumeration {
+            entries: result,
+            complete,
+        })
     }
 
     /// Two-pass fetch: enumerate the folder, then download by id the messages
@@ -1232,7 +1233,9 @@ fn absorb_delta_page(
             *removed += 1;
             continue;
         }
-        let Some(mid) = entry.internet_message_id else { continue };
+        let Some(mid) = entry.internet_message_id else {
+            continue;
+        };
         let mid = mid.trim();
         if mid.is_empty() {
             continue;
@@ -1322,7 +1325,13 @@ impl GraphClient {
     /// pre-#0042 behaviour for good; no token is ever guessed.
     async fn mint_delta_token(&self, folder: &str) -> Option<String> {
         let url = delta_url(&resolve_folder_path(folder), true);
-        let resp = match self.client.get(&url).bearer_auth(self.bearer()).send().await {
+        let resp = match self
+            .client
+            .get(&url)
+            .bearer_auth(self.bearer())
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 warn!("Could not mint a delta token for '{folder}': {e}");
@@ -1395,7 +1404,12 @@ impl GraphClient {
             match (page.next_link, page.delta_link) {
                 (Some(next), _) => url = next,
                 (None, Some(delta_link)) => {
-                    return Ok(FolderDelta { changed, removed, delta_link, pages })
+                    return Ok(FolderDelta {
+                        changed,
+                        removed,
+                        delta_link,
+                        pages,
+                    })
                 }
                 (None, None) => return Err(DeltaDiscard::NoResumePoint),
             }
@@ -1501,7 +1515,9 @@ fn may_record_delta_token(covered: bool, download_incomplete: bool, ingest_faile
 /// [`GraphClient::enumerate_folder`] for why that is acceptable.
 fn absorb_page(result: &mut HashMap<String, FolderEntry>, page: Vec<GraphMessageIdEntry>) {
     for entry in page {
-        let Some(mid) = entry.internet_message_id else { continue };
+        let Some(mid) = entry.internet_message_id else {
+            continue;
+        };
         let mid = mid.trim();
         if mid.is_empty() {
             continue;
@@ -1551,9 +1567,7 @@ fn new_ids_newest_first<'a>(
         .map(|(mid, entry)| (mid.as_str(), entry))
         .collect();
     new.sort_by(|(a_mid, a), (b_mid, b)| {
-        b.received
-            .cmp(&a.received)
-            .then_with(|| a_mid.cmp(b_mid))
+        b.received.cmp(&a.received).then_with(|| a_mid.cmp(b_mid))
     });
     new.into_iter().map(|(_, entry)| entry).collect()
 }
@@ -1637,8 +1651,7 @@ pub async fn sync_mailboxes_graph(
     } else {
         "sync_mailboxes_graph:full"
     };
-    let mut span =
-        TimingSpan::with_context(span_label, format!("{} targets", targets.len()));
+    let mut span = TimingSpan::with_context(span_label, format!("{} targets", targets.len()));
 
     let client = GraphClient::new_async(config).await?;
     let store = crate::store::Store::open_account(account_name)?;
@@ -1675,8 +1688,7 @@ pub async fn sync_mailboxes_graph(
                 }
             }
         };
-        let identity_matches =
-            observed_identity.is_some() && observed_identity == stored_identity;
+        let identity_matches = observed_identity.is_some() && observed_identity == stored_identity;
         let identity = observed_identity.or(stored_identity);
 
         // A dry run writes nothing, and every delta branch below is a write:
@@ -1729,56 +1741,61 @@ pub async fn sync_mailboxes_graph(
         // What the pass saw, in the two shapes it can come in. `server` is a
         // whole folder listing and may be diffed against the store; `changed`
         // is a change set and may not.
-        let (new_emails, server, complete, download_incomplete, token, used_delta) = match delta_fetch
-        {
-            Some(d) => (
-                d.new_emails,
-                d.changed,
-                // A delta pass covers the folder in the sense the prune gate
-                // asks about: its token asserts the store held everything the
-                // folder listed at token time, and this walk brought in every
-                // change since, so nothing another target's prune might need
-                // is missing. It contributes no prunes of its own.
-                true,
-                d.download_incomplete,
-                Some(d.delta_link),
-                true,
-            ),
-            None => {
-                // Minted before the enumeration, never after: a token taken
-                // afterwards would silently swallow the window between the two.
-                let minted = if dry_run {
-                    None
-                } else {
-                    client.mint_delta_token(&target.server_name).await
-                };
-                let fetch = match client
-                    .fetch_new_messages(&target.server_name, limit, &known)
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!("Graph sync failed for {}: {}", target.role, e);
-                        // A target that did not sync at all is the strongest
-                        // form of partial pass: the copy that would justify
-                        // another target's deletion may be exactly what this
-                        // fetch failed to bring in.
-                        coverage.push((false, false));
-                        continue;
-                    }
-                };
-                let FolderFetch { new_emails, skipped, enumeration, download_incomplete } = fetch;
-                result.skipped += skipped;
-                (
-                    new_emails,
-                    enumeration.entries,
-                    enumeration.complete,
-                    download_incomplete,
-                    minted,
-                    false,
-                )
-            }
-        };
+        let (new_emails, server, complete, download_incomplete, token, used_delta) =
+            match delta_fetch {
+                Some(d) => (
+                    d.new_emails,
+                    d.changed,
+                    // A delta pass covers the folder in the sense the prune gate
+                    // asks about: its token asserts the store held everything the
+                    // folder listed at token time, and this walk brought in every
+                    // change since, so nothing another target's prune might need
+                    // is missing. It contributes no prunes of its own.
+                    true,
+                    d.download_incomplete,
+                    Some(d.delta_link),
+                    true,
+                ),
+                None => {
+                    // Minted before the enumeration, never after: a token taken
+                    // afterwards would silently swallow the window between the two.
+                    let minted = if dry_run {
+                        None
+                    } else {
+                        client.mint_delta_token(&target.server_name).await
+                    };
+                    let fetch = match client
+                        .fetch_new_messages(&target.server_name, limit, &known)
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("Graph sync failed for {}: {}", target.role, e);
+                            // A target that did not sync at all is the strongest
+                            // form of partial pass: the copy that would justify
+                            // another target's deletion may be exactly what this
+                            // fetch failed to bring in.
+                            coverage.push((false, false));
+                            continue;
+                        }
+                    };
+                    let FolderFetch {
+                        new_emails,
+                        skipped,
+                        enumeration,
+                        download_incomplete,
+                    } = fetch;
+                    result.skipped += skipped;
+                    (
+                        new_emails,
+                        enumeration.entries,
+                        enumeration.complete,
+                        download_incomplete,
+                        minted,
+                        false,
+                    )
+                }
+            };
         span.mark(&format!("fetch:{}", target.role));
 
         if dry_run {
@@ -1842,7 +1859,10 @@ pub async fn sync_mailboxes_graph(
                     });
                 }
                 Err(e) => {
-                    warn!("Failed to ingest {} from {}: {:#}", message_id, target.role, e);
+                    warn!(
+                        "Failed to ingest {} from {}: {:#}",
+                        message_id, target.role, e
+                    );
                     ingest_failed |= crate::ingest::note_ingest_failure(
                         &store,
                         account_name,
@@ -1914,7 +1934,11 @@ pub async fn sync_mailboxes_graph(
                     uidnext: None,
                     exists: Some(server.len() as i64),
                     highest_modseq: None,
-                    deltalink: if identity.is_some() { token_to_store } else { None },
+                    deltalink: if identity.is_some() {
+                        token_to_store
+                    } else {
+                        None
+                    },
                     // IMAP-only: the Graph pull downloads by id, so it has no
                     // positional window that can leave an arrival behind.
                     arrival_mark: None,
@@ -1945,8 +1969,13 @@ pub async fn sync_mailboxes_graph(
             // own copy shows up.
             let prunable =
                 crate::ingest::prunable_uids(&store, account_name, role.as_str(), vanished, now);
-            result.pruned +=
-                crate::ingest::prune_vanished(&store, &blobs, account_name, role.as_str(), &prunable);
+            result.pruned += crate::ingest::prune_vanished(
+                &store,
+                &blobs,
+                account_name,
+                role.as_str(),
+                &prunable,
+            );
         }
     } else {
         result.prunes_deferred = prunes.iter().map(|(_, v)| v.len()).sum();
@@ -1971,7 +2000,7 @@ impl GraphClient {
     /// Graph automatically places the message in Sent Items.
     pub async fn send_mail(
         &self,
-        to: &[(&str, &str)],       // (name, address) pairs
+        to: &[(&str, &str)], // (name, address) pairs
         cc: &[(&str, &str)],
         bcc: &[(&str, &str)],
         subject: &str,
@@ -2082,11 +2111,7 @@ impl GraphClient {
         } else {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            Err(anyhow!(
-                "Graph sendMail failed (HTTP {}): {}",
-                status,
-                body
-            ))
+            Err(anyhow!("Graph sendMail failed (HTTP {}): {}", status, body))
         }
     }
 }
@@ -2103,8 +2128,7 @@ impl GraphClient {
         internet_message_id: &str,
     ) -> Result<Option<String>> {
         // The $filter on internetMessageId needs the angle brackets escaped
-        let clean_id = internet_message_id
-            .trim_matches(|c| c == '<' || c == '>');
+        let clean_id = internet_message_id.trim_matches(|c| c == '<' || c == '>');
         let url = format!(
             "{}/me/messages?$filter=internetMessageId eq '<{}>'&$select=id",
             GRAPH_BASE, clean_id
@@ -2128,18 +2152,16 @@ impl GraphClient {
             ));
         }
 
-        let result: GraphMessageIdLookup =
-            resp.json().await.context("Failed to parse message lookup")?;
+        let result: GraphMessageIdLookup = resp
+            .json()
+            .await
+            .context("Failed to parse message lookup")?;
 
         Ok(result.value.first().map(|e| e.id.clone()))
     }
 
     /// Move a message to a different folder.
-    pub async fn move_message(
-        &self,
-        message_id: &str,
-        destination_folder: &str,
-    ) -> Result<()> {
+    pub async fn move_message(&self, message_id: &str, destination_folder: &str) -> Result<()> {
         let dest = resolve_folder_path(destination_folder);
         let url = format!("{}/me/messages/{}/move", GRAPH_BASE, message_id);
 
@@ -2157,11 +2179,7 @@ impl GraphClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "Move message failed (HTTP {}): {}",
-                status,
-                body
-            ));
+            return Err(anyhow!("Move message failed (HTTP {}): {}", status, body));
         }
 
         Ok(())
@@ -2182,22 +2200,14 @@ impl GraphClient {
         if !resp.status().is_success() && resp.status().as_u16() != 204 {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "Delete message failed (HTTP {}): {}",
-                status,
-                body
-            ));
+            return Err(anyhow!("Delete message failed (HTTP {}): {}", status, body));
         }
 
         Ok(())
     }
 
     /// Update the read status of a message.
-    pub async fn update_read_status(
-        &self,
-        message_id: &str,
-        is_read: bool,
-    ) -> Result<()> {
+    pub async fn update_read_status(&self, message_id: &str, is_read: bool) -> Result<()> {
         let url = format!("{}/me/messages/{}", GRAPH_BASE, message_id);
 
         let resp = self
@@ -2240,10 +2250,16 @@ pub async fn move_message_graph(
 ) -> Result<()> {
     let client = GraphClient::new_async(config).await?;
 
-    match client.find_message_by_internet_id(internet_message_id).await? {
+    match client
+        .find_message_by_internet_id(internet_message_id)
+        .await?
+    {
         Some(graph_id) => {
             client.move_message(&graph_id, dest_folder).await?;
-            info!("Graph: moved message {} to {}", internet_message_id, dest_folder);
+            info!(
+                "Graph: moved message {} to {}",
+                internet_message_id, dest_folder
+            );
         }
         None => warn!(
             "Graph: message {} not found on server, nothing to move",
@@ -2255,13 +2271,13 @@ pub async fn move_message_graph(
 
 /// Delete a message via Graph, naming it by its `Message-ID`. Same contract as
 /// [`move_message_graph`]: server only, and a missing message is not an error.
-pub async fn delete_message_graph(
-    config: &GraphConfig,
-    internet_message_id: &str,
-) -> Result<()> {
+pub async fn delete_message_graph(config: &GraphConfig, internet_message_id: &str) -> Result<()> {
     let client = GraphClient::new_async(config).await?;
 
-    match client.find_message_by_internet_id(internet_message_id).await? {
+    match client
+        .find_message_by_internet_id(internet_message_id)
+        .await?
+    {
         Some(graph_id) => {
             client.delete_message(&graph_id).await?;
             info!("Graph: deleted message {} from server", internet_message_id);
@@ -2372,7 +2388,12 @@ impl GraphClient {
             format!("{}/me/messages", GRAPH_BASE)
         };
 
-        let url = search_url(&base, limit, search_param.as_deref(), filter_param.as_deref())?;
+        let url = search_url(
+            &base,
+            limit,
+            search_param.as_deref(),
+            filter_param.as_deref(),
+        )?;
         debug!("Graph search URL: {}", url);
 
         let resp = self
@@ -2393,19 +2414,15 @@ impl GraphClient {
                     "Graph $search failed (HTTP {}), falling back to $filter only",
                     status
                 );
-                return self
-                    .search_messages_filter_only(query, folder, limit)
-                    .await;
+                return self.search_messages_filter_only(query, folder, limit).await;
             }
-            return Err(anyhow!(
-                "Graph search failed (HTTP {}): {}",
-                status,
-                body
-            ));
+            return Err(anyhow!("Graph search failed (HTTP {}): {}", status, body));
         }
 
-        let msg_list: GraphMessageList =
-            resp.json().await.context("Failed to parse search results")?;
+        let msg_list: GraphMessageList = resp
+            .json()
+            .await
+            .context("Failed to parse search results")?;
 
         let mut emails = Vec::with_capacity(msg_list.value.len());
         for msg in &msg_list.value {
@@ -2460,8 +2477,10 @@ impl GraphClient {
             ));
         }
 
-        let msg_list: GraphMessageList =
-            resp.json().await.context("Failed to parse search results")?;
+        let msg_list: GraphMessageList = resp
+            .json()
+            .await
+            .context("Failed to parse search results")?;
 
         let mut emails = Vec::with_capacity(msg_list.value.len());
         for msg in &msg_list.value {
@@ -2489,10 +2508,9 @@ fn retain_exact_message_id_graph(emails: &mut Vec<FetchedEmail>, message_id: Opt
     };
     let wanted = crate::imap_client::normalize_message_id(mid).to_string();
     emails.retain(|email| {
-        email
-            .message_id
-            .as_deref()
-            .is_some_and(|m| crate::imap_client::normalize_message_id(m).eq_ignore_ascii_case(&wanted))
+        email.message_id.as_deref().is_some_and(|m| {
+            crate::imap_client::normalize_message_id(m).eq_ignore_ascii_case(&wanted)
+        })
     });
 }
 
@@ -2555,7 +2573,10 @@ mod tests {
     fn graph_non_imip_ics_export_stays_a_plain_attachment() {
         let mut email = email_with(vec![att("schedule.ics", EXPORT_ICS)]);
         populate_calendar_from_attachments(&mut email);
-        assert!(email.calendar_ics.is_none(), "no sidecar for a plain export");
+        assert!(
+            email.calendar_ics.is_none(),
+            "no sidecar for a plain export"
+        );
         assert!(email.event.is_none());
         assert_eq!(email.attachments.len(), 1);
         assert_eq!(email.attachments[0].filename, "schedule.ics");
@@ -2597,7 +2618,10 @@ mod tests {
         ]);
         let selected = new_ids_newest_first(&server, &known(&["<recent@x>"]));
         assert_eq!(
-            selected.iter().map(|e| e.graph_id.as_str()).collect::<Vec<_>>(),
+            selected
+                .iter()
+                .map(|e| e.graph_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["BBB"],
         );
     }
@@ -2613,7 +2637,10 @@ mod tests {
         ]);
         let selected = new_ids_newest_first(&server, &HashSet::new());
         assert_eq!(
-            selected.iter().map(|e| e.graph_id.as_str()).collect::<Vec<_>>(),
+            selected
+                .iter()
+                .map(|e| e.graph_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["NEW", "OLD", "UND"],
         );
     }
@@ -2629,7 +2656,10 @@ mod tests {
         let first = new_ids_newest_first(&server, &HashSet::new());
         let second = new_ids_newest_first(&server, &HashSet::new());
         assert_eq!(
-            first.iter().map(|e| e.graph_id.as_str()).collect::<Vec<_>>(),
+            first
+                .iter()
+                .map(|e| e.graph_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["A", "B"],
         );
         assert_eq!(first, second);
@@ -2723,7 +2753,10 @@ mod tests {
         let (selected, found) = select_for_download(&server, &HashSet::new(), 2);
         assert_eq!(found, 3);
         assert_eq!(
-            selected.iter().map(|e| e.graph_id.as_str()).collect::<Vec<_>>(),
+            selected
+                .iter()
+                .map(|e| e.graph_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["A", "B"],
         );
         let (all, found) = select_for_download(&server, &HashSet::new(), usize::MAX);
@@ -2738,10 +2771,21 @@ mod tests {
     #[test]
     fn one_capped_target_suspends_the_prune_for_every_target() {
         // (enumeration complete, download truncated) per target.
-        assert!(pass_may_prune(&[(true, false), (true, false), (true, false)]));
-        assert!(!pass_may_prune(&[(true, false), (true, true), (true, false)]));
+        assert!(pass_may_prune(&[
+            (true, false),
+            (true, false),
+            (true, false)
+        ]));
+        assert!(!pass_may_prune(&[
+            (true, false),
+            (true, true),
+            (true, false)
+        ]));
         assert!(!pass_may_prune(&[(false, false), (true, false)]));
-        assert!(pass_may_prune(&[]), "a pass with no targets prunes nothing anyway");
+        assert!(
+            pass_may_prune(&[]),
+            "a pass with no targets prunes nothing anyway"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2823,9 +2867,10 @@ mod tests {
                 { "id": "1", "status": 200, "headers": { "Content-Type": "application/json" } },
             ]
         });
-        let parsed: GraphBatchResponse =
-            serde_json::from_value(raw).expect("a header shape this code does not read cannot \
-                                                be allowed to fail the whole chunk");
+        let parsed: GraphBatchResponse = serde_json::from_value(raw).expect(
+            "a header shape this code does not read cannot \
+                                                be allowed to fail the whole chunk",
+        );
         assert_eq!(parsed.responses.len(), 2);
         assert_eq!(
             parsed.responses[0].retry_after_secs(),
@@ -2842,7 +2887,10 @@ mod tests {
     #[test]
     fn a_throttle_is_not_a_failure_but_a_bare_503_is() {
         assert!(batch_entry(429, &[("Retry-After", "7")]).is_throttled());
-        assert!(batch_entry(429, &[]).is_throttled(), "429 throttles with or without the header");
+        assert!(
+            batch_entry(429, &[]).is_throttled(),
+            "429 throttles with or without the header"
+        );
         assert!(batch_entry(503, &[("Retry-After", "7")]).is_throttled());
         assert_eq!(
             batch_entry(503, &[("Retry-After", "7")]).retry_after_secs(),
@@ -2883,7 +2931,10 @@ mod tests {
     #[test]
     fn the_enumeration_url_can_drop_the_orderby() {
         let ordered = enumeration_url("inbox", true);
-        assert!(ordered.contains("$orderby=receivedDateTime%20desc"), "got {ordered}");
+        assert!(
+            ordered.contains("$orderby=receivedDateTime%20desc"),
+            "got {ordered}"
+        );
         let unordered = enumeration_url("inbox", false);
         assert!(!unordered.contains("$orderby"), "got {unordered}");
         for url in [&ordered, &unordered] {
@@ -2983,11 +3034,12 @@ mod tests {
         assert!(url.fragment().is_none(), "{raw}");
         let pairs: std::collections::HashMap<String, String> =
             url.query_pairs().into_owned().collect();
-        assert_eq!(
-            pairs["$filter"],
-            "from/emailAddress/address eq 'a+b@x.com'"
+        assert_eq!(pairs["$filter"], "from/emailAddress/address eq 'a+b@x.com'");
+        assert!(
+            pairs["$search"].contains("subject:R&D #1"),
+            "{}",
+            pairs["$search"]
         );
-        assert!(pairs["$search"].contains("subject:R&D #1"), "{}", pairs["$search"]);
         assert_eq!(pairs["$top"], "10");
     }
 
@@ -3036,7 +3088,12 @@ mod tests {
 
         for pass in 1..=2 {
             let ingest_failed = crate::ingest::note_ingest_failure(
-                &store, "acct", "inbox", "Inbox", uid, "the store will not take it",
+                &store,
+                "acct",
+                "inbox",
+                "Inbox",
+                uid,
+                "the store will not take it",
             );
             assert!(ingest_failed, "pass {pass} must still retry");
             assert!(
@@ -3046,14 +3103,22 @@ mod tests {
         }
 
         let ingest_failed = crate::ingest::note_ingest_failure(
-            &store, "acct", "inbox", "Inbox", uid, "the store will not take it",
+            &store,
+            "acct",
+            "inbox",
+            "Inbox",
+            uid,
+            "the store will not take it",
         );
         assert!(!ingest_failed, "the third failure gives up on the message");
         assert!(
             crate::ingest::pass_may_prune(&[(true, ingest_failed)]),
             "and the Graph account's prune runs again instead of being suspended for good"
         );
-        assert_eq!(crate::ingest::ingest_failure_attempts(&store, "acct", "inbox", uid), 3);
+        assert_eq!(
+            crate::ingest::ingest_failure_attempts(&store, "acct", "inbox", uid),
+            3
+        );
     }
 
     /// The other half of the bound: a success clears the count, so a message
@@ -3065,15 +3130,27 @@ mod tests {
         let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
         let uid = crate::ingest::graph_uid("<flaky@example.com>");
 
-        assert!(crate::ingest::note_ingest_failure(&store, "acct", "inbox", "Inbox", uid, "locked"));
-        assert!(crate::ingest::note_ingest_failure(&store, "acct", "inbox", "Inbox", uid, "locked"));
-        assert_eq!(crate::ingest::ingest_failure_attempts(&store, "acct", "inbox", uid), 2);
+        assert!(crate::ingest::note_ingest_failure(
+            &store, "acct", "inbox", "Inbox", uid, "locked"
+        ));
+        assert!(crate::ingest::note_ingest_failure(
+            &store, "acct", "inbox", "Inbox", uid, "locked"
+        ));
+        assert_eq!(
+            crate::ingest::ingest_failure_attempts(&store, "acct", "inbox", uid),
+            2
+        );
 
         // The success path of the loop's `match`.
         crate::ingest::clear_ingest_failure(&store, "acct", "inbox", uid);
-        assert_eq!(crate::ingest::ingest_failure_attempts(&store, "acct", "inbox", uid), 0);
+        assert_eq!(
+            crate::ingest::ingest_failure_attempts(&store, "acct", "inbox", uid),
+            0
+        );
 
-        assert!(crate::ingest::note_ingest_failure(&store, "acct", "inbox", "Inbox", uid, "locked"));
+        assert!(crate::ingest::note_ingest_failure(
+            &store, "acct", "inbox", "Inbox", uid, "locked"
+        ));
         assert_eq!(
             crate::ingest::ingest_failure_attempts(&store, "acct", "inbox", uid),
             1,
@@ -3190,7 +3267,9 @@ mod tests {
 
         assert_eq!(removed, 2, "both removal reasons count");
         assert_eq!(changed.len(), 1);
-        let entry = changed.get("<kept@example.com>").expect("keyed on the trimmed id");
+        let entry = changed
+            .get("<kept@example.com>")
+            .expect("keyed on the trimmed id");
         assert_eq!(entry.graph_id, "AAA");
         assert!(entry.is_read);
 
@@ -3247,7 +3326,12 @@ mod tests {
         // replays the same changes...
         for pass in 1..=2 {
             let ingest_failed = crate::ingest::note_ingest_failure(
-                &store, "acct", "inbox", "Inbox", uid, "the store will not take it",
+                &store,
+                "acct",
+                "inbox",
+                "Inbox",
+                uid,
+                "the store will not take it",
             );
             assert!(
                 !may_record_delta_token(true, false, ingest_failed),
@@ -3256,7 +3340,12 @@ mod tests {
         }
         // ...and once the message is given up on, the chain moves again.
         let ingest_failed = crate::ingest::note_ingest_failure(
-            &store, "acct", "inbox", "Inbox", uid, "the store will not take it",
+            &store,
+            "acct",
+            "inbox",
+            "Inbox",
+            uid,
+            "the store will not take it",
         );
         assert!(!ingest_failed);
         assert!(
@@ -3326,7 +3415,9 @@ mod tests {
     #[test]
     fn the_delta_url_has_a_listing_form_and_a_mint_form() {
         let listing = delta_url("inbox", false);
-        assert!(listing.starts_with(&format!("{GRAPH_BASE}/me/mailFolders/inbox/messages/delta?")));
+        assert!(listing.starts_with(&format!(
+            "{GRAPH_BASE}/me/mailFolders/inbox/messages/delta?"
+        )));
         assert!(listing.contains("$select=id,internetMessageId,isRead,receivedDateTime"));
         assert!(
             !listing.contains("$deltatoken"),
@@ -3346,7 +3437,10 @@ mod tests {
             "value": [],
             "@odata.nextLink": "https://graph.microsoft.com/v1.0/next"
         }));
-        assert_eq!(middle.next_link.as_deref(), Some("https://graph.microsoft.com/v1.0/next"));
+        assert_eq!(
+            middle.next_link.as_deref(),
+            Some("https://graph.microsoft.com/v1.0/next")
+        );
         assert_eq!(middle.delta_link, None);
 
         let last = delta_page(serde_json::json!({

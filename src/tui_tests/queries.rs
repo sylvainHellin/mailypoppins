@@ -123,13 +123,13 @@ use serde_json::{json, Value};
 use mp_protocol::{EventEnvelope, Request, RequestId, JSONRPC_VERSION};
 
 use super::oracle::{self, count_all_emails, load_emails};
-use crate::tui::app::{build_mailboxes, EmailEntry, MessageRef};
 use crate::config::{AccountConfig, GlobalConfig};
 use crate::daemon::config::{ConfigState, ConfigStore};
 use crate::daemon::dispatch::{ClientCtx, ClientKind};
 use crate::daemon::runtime::InstanceMeta;
 use crate::daemon::server::DaemonState;
 use crate::parse::FetchedEmail;
+use crate::tui::app::{build_mailboxes, EmailEntry, MessageRef};
 use crate::tui::queries::{
     apply_row_delta, list_emails, mailbox_counts, message_body, MessageRowDelta, Queries,
 };
@@ -815,10 +815,8 @@ fn a_preview_walk_leaves_no_handle_behind() {
 const TUI_APP_STORE_RESIDUE: [(&str, &str, &str); 0] = [];
 
 /// The two files this unit is accountable for.
-const QUERY_LAYER_SOURCES: [&str; 2] = [
-    "clients/tui/src/app/mod.rs",
-    "clients/tui/src/app/types.rs",
-];
+const QUERY_LAYER_SOURCES: [&str; 2] =
+    ["clients/tui/src/app/mod.rs", "clients/tui/src/app/types.rs"];
 
 /// P5-U3's gate, at zero: the TUI's app module opens no store at all, and
 /// every read it makes goes through [`crate::tui::queries`](crate::tui::queries)

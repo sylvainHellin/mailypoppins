@@ -1125,7 +1125,11 @@ fn the_help_surface_still_offers_every_pre_daemon_command() {
             .collect()
     };
     let ours = screens(&walked);
-    assert!(ours.len() > 20, "the help walk collected {} screens", ours.len());
+    assert!(
+        ours.len() > 20,
+        "the help walk collected {} screens",
+        ours.len()
+    );
 
     let baseline_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/baselines/pre-daemon/cli-help.txt");
@@ -1274,5 +1278,4 @@ async fn serving_reads_holds_no_engine_lock() {
         routed.contains("Bericht"),
         "a routed listing works while another process holds the engine lock: {routed}"
     );
-
 }

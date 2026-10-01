@@ -35,7 +35,11 @@ impl Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path().join("store.sqlite3")).unwrap();
         let blobs = BlobStore::new(tmp.path().join("blobs"));
-        Self { _tmp: tmp, store, blobs }
+        Self {
+            _tmp: tmp,
+            store,
+            blobs,
+        }
     }
 
     fn ingest_raw(&self, mailbox: &str, uid: i64, raw: &[u8]) -> IngestOutcome {
@@ -58,7 +62,13 @@ impl Fixture {
         ingest_message_with_policy(
             &self.store,
             &self.blobs,
-            &IngestInput { account: "acct", mailbox, uid, email: &email, raw: Some(raw) },
+            &IngestInput {
+                account: "acct",
+                mailbox,
+                uid,
+                email: &email,
+                raw: Some(raw),
+            },
             &RebindPolicy::UnlessListed(&listed),
         )
         .unwrap()
@@ -91,7 +101,13 @@ impl Fixture {
         ingest_message(
             &self.store,
             &self.blobs,
-            &IngestInput { account: "acct", mailbox, uid, email, raw },
+            &IngestInput {
+                account: "acct",
+                mailbox,
+                uid,
+                email,
+                raw,
+            },
         )
         .unwrap()
     }
@@ -266,7 +282,11 @@ fn non_utf8_bodies_decode_into_the_body_blob() {
             &b"\x93\xfa\x96{\x8c\xea\x82\xcc\x83\x81\x81[\x83\x8b\r\n"[..],
             "日本語のメール\r\n",
         ),
-        ("iso-8859-1", &b"\x93smart\x94\r\n"[..], "\u{201c}smart\u{201d}\r\n"),
+        (
+            "iso-8859-1",
+            &b"\x93smart\x94\r\n"[..],
+            "\u{201c}smart\u{201d}\r\n",
+        ),
     ];
 
     for (uid, (charset, body, expected)) in cases.iter().enumerate() {
@@ -313,7 +333,9 @@ fn truncated_multipart_keeps_the_partial_attachment_blob() {
     assert_eq!(attachments.len(), 1);
     assert_eq!(attachments[0].3, "doc.pdf");
     assert_eq!(
-        f.blobs.read(&BlobHash::parse(&attachments[0].2).unwrap()).unwrap(),
+        f.blobs
+            .read(&BlobHash::parse(&attachments[0].2).unwrap())
+            .unwrap(),
         b"trunc"
     );
 }
@@ -376,7 +398,9 @@ fn nested_message_rfc822_is_still_dropped() {
 #[test]
 fn headerless_input_still_yields_a_row() {
     let f = Fixture::new();
-    let row = f.ingest_raw("inbox", 1, b"just a body with no headers\r\n").row_id;
+    let row = f
+        .ingest_raw("inbox", 1, b"just a body with no headers\r\n")
+        .row_id;
     assert_eq!(f.text(row, "from_"), "(unknown)");
     assert_eq!(f.text(row, "subject"), "(no subject)");
     assert_eq!(f.text(row, "date_display"), "(unknown date)");
@@ -403,7 +427,10 @@ fn synthesised_message_ids_are_deterministic() {
     let b = second.ingest_raw("inbox", 99, &raw);
     let c = second.ingest_raw("inbox", 100, &other);
 
-    assert_eq!(a.message_id, b.message_id, "same bytes, same synthesised id");
+    assert_eq!(
+        a.message_id, b.message_id,
+        "same bytes, same synthesised id"
+    );
     assert_ne!(a.message_id, c.message_id, "different bytes, different id");
 
     let mid = a.message_id;
@@ -504,7 +531,10 @@ fn reingesting_a_uid_upserts_and_keeps_fts_in_step() {
 
     // FTS follows: the old terms are gone, the new ones hit, and there is
     // exactly one entry for the row.
-    assert!(f.fts_hits("original").is_empty(), "stale FTS entry survived");
+    assert!(
+        f.fts_hits("original").is_empty(),
+        "stale FTS entry survived"
+    );
     assert_eq!(f.fts_hits("corrected"), HashSet::from([row]));
     assert_eq!(f.fts_hits("\"second body text\""), HashSet::from([row]));
     let fts_rows: i64 = f
@@ -549,7 +579,12 @@ fn reingest_releases_only_the_references_that_changed() {
     let row = f.ingest_raw("inbox", 3, &with_attachment("first")).row_id;
     let before = f.blob_refs(row);
     let old_body = before.iter().find(|r| r.0 == "body").unwrap().2.clone();
-    let attachment = before.iter().find(|r| r.0 == "attachment").unwrap().2.clone();
+    let attachment = before
+        .iter()
+        .find(|r| r.0 == "attachment")
+        .unwrap()
+        .2
+        .clone();
     assert_eq!(f.refcount(&old_body), 1);
     assert_eq!(f.refcount(&attachment), 1);
 
@@ -573,7 +608,11 @@ fn reingest_releases_only_the_references_that_changed() {
         f.blobs.contains(&BlobHash::parse(&attachment).unwrap()),
         "an unchanged attachment blob must never be unlinked"
     );
-    assert_eq!(after.len(), before.len(), "the reference list must not grow");
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "the reference list must not grow"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -603,7 +642,10 @@ fn uidvalidity_reset_rebinds_the_row_and_keeps_thread_and_refs() {
 
     let root = f.ingest_raw("inbox", 10, &parent);
     let before = f.ingest_raw("inbox", 11, &reply);
-    assert_eq!(before.thread_id, root.message_id, "the reply joins its parent's thread");
+    assert_eq!(
+        before.thread_id, root.message_id,
+        "the reply joins its parent's thread"
+    );
     let refs_before = f.blob_refs(before.row_id);
 
     // The server renumbers: same message, new UID, nothing else changed.
@@ -612,19 +654,41 @@ fn uidvalidity_reset_rebinds_the_row_and_keeps_thread_and_refs() {
     assert!(after.uid_rebound, "the reset should have been absorbed");
     assert!(!after.inserted);
     assert_eq!(after.row_id, before.row_id, "the row identity must survive");
-    assert_eq!(f.message_rows(), 2, "renumbering must not duplicate the message");
-    assert_eq!(f.int(after.row_id, "uid"), 5001, "the uid must be updated in place");
-    assert_eq!(after.thread_id, root.message_id, "the thread assignment must survive");
-    assert_eq!(f.blob_refs(after.row_id), refs_before, "blob references must survive");
+    assert_eq!(
+        f.message_rows(),
+        2,
+        "renumbering must not duplicate the message"
+    );
+    assert_eq!(
+        f.int(after.row_id, "uid"),
+        5001,
+        "the uid must be updated in place"
+    );
+    assert_eq!(
+        after.thread_id, root.message_id,
+        "the thread assignment must survive"
+    );
+    assert_eq!(
+        f.blob_refs(after.row_id),
+        refs_before,
+        "blob references must survive"
+    );
     for (_, _, hash, _) in &refs_before {
-        assert_eq!(f.refcount(hash), 1, "a rebind must not double-count a reference");
+        assert_eq!(
+            f.refcount(hash),
+            1,
+            "a rebind must not double-count a reference"
+        );
     }
 
     // #0112: a reset pass reaches this same rebind through the gate, carrying
     // the empty listing that says "nothing the server lists can be trusted to
     // decline a rebind". It must still land on the same row.
     let again = f.ingest_raw_listed("inbox", 5002, &reply, &[]);
-    assert!(again.uid_rebound, "the reset policy must still absorb the renumbering");
+    assert!(
+        again.uid_rebound,
+        "the reset policy must still absorb the renumbering"
+    );
     assert!(!again.inserted);
     assert_eq!(again.row_id, before.row_id);
     assert_eq!(f.message_rows(), 2);
@@ -703,22 +767,43 @@ fn a_uidvalidity_reset_refetches_the_window_and_rebinds_what_moved() {
         "stranger body\r\n",
         "the recycled UID must carry the body that was refetched for it"
     );
-    assert!(moved.uid_rebound, "the moved message is rebound, not duplicated");
+    assert!(
+        moved.uid_rebound,
+        "the moved message is rebound, not duplicated"
+    );
     assert_eq!(moved.row_id, before.row_id);
     assert_eq!(moved.thread_id, before.thread_id, "the thread must survive");
-    assert_eq!(f.blob_refs(moved.row_id), refs_before, "and so must the blob refs");
+    assert_eq!(
+        f.blob_refs(moved.row_id),
+        refs_before,
+        "and so must the blob refs"
+    );
     // The recycled UID's old row belonged to `root`, a different message: the
     // stranger gets a row and a thread of its own, and `root`'s row is unbound
     // onto its `-id` sentinel to follow its own message if it comes back.
-    assert_ne!(recycled.row_id, root_row.row_id, "a recycled UID must not take over another message's row");
-    assert_ne!(recycled.thread_id, root_row.thread_id, "nor file the stranger in its thread");
+    assert_ne!(
+        recycled.row_id, root_row.row_id,
+        "a recycled UID must not take over another message's row"
+    );
+    assert_ne!(
+        recycled.thread_id, root_row.thread_id,
+        "nor file the stranger in its thread"
+    );
     let root_uid: i64 = f
         .store
         .conn()
-        .query_row("SELECT uid FROM messages WHERE id = ?1", [root_row.row_id], |r| r.get(0))
+        .query_row(
+            "SELECT uid FROM messages WHERE id = ?1",
+            [root_row.row_id],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(root_uid, -root_row.row_id);
-    assert_eq!(f.message_rows(), 3, "one row per message, and the moved reply is not duplicated");
+    assert_eq!(
+        f.message_rows(),
+        3,
+        "one row per message, and the moved reply is not duplicated"
+    );
 
     // Once the new cursor is recorded, the next sync skips normally again.
     mailypoppins::ingest::record_mailbox_cursor(
@@ -809,17 +894,27 @@ fn n_listed_copies_of_one_message_id_get_n_rows() {
         "a UID the server is still listing is not a renumbering"
     );
     assert_eq!(
-        f.mailbox_rows("sent").iter().map(|(_, uid)| *uid).collect::<Vec<_>>(),
+        f.mailbox_rows("sent")
+            .iter()
+            .map(|(_, uid)| *uid)
+            .collect::<Vec<_>>(),
         listed.to_vec(),
         "three listed copies, three rows, one per server UID"
     );
     assert_eq!(f.message_rows(), 3);
-    assert_eq!(second.thread_id, first.thread_id, "copies of one message are one thread");
+    assert_eq!(
+        second.thread_id, first.thread_id,
+        "copies of one message are one thread"
+    );
     assert_eq!(third.thread_id, first.thread_id);
     // The bodies are byte-identical, so the blob store holds one file per hash
     // and each of the three rows holds a reference to it.
     for (_, _, hash, _) in f.blob_refs(first.row_id) {
-        assert_eq!(f.refcount(&hash), 3, "one reference per row, not one per hash");
+        assert_eq!(
+            f.refcount(&hash),
+            3,
+            "one reference per row, not one per hash"
+        );
     }
 }
 
@@ -879,10 +974,16 @@ fn a_reset_pass_maps_n_copies_onto_n_rows() {
     assert!(moved_a.uid_rebound && !moved_a.inserted);
     assert!(moved_b.uid_rebound && !moved_b.inserted);
     assert_eq!(moved_a.row_id, first.row_id);
-    assert_eq!(moved_b.row_id, second.row_id, "the second copy must not land on the first row");
+    assert_eq!(
+        moved_b.row_id, second.row_id,
+        "the second copy must not land on the first row"
+    );
     assert_eq!(f.message_rows(), 2, "a renumbering must not lose a copy");
     assert_eq!(
-        f.mailbox_rows("sent").iter().map(|(_, uid)| *uid).collect::<Vec<_>>(),
+        f.mailbox_rows("sent")
+            .iter()
+            .map(|(_, uid)| *uid)
+            .collect::<Vec<_>>(),
         vec![11, 12]
     );
 }
@@ -913,9 +1014,15 @@ fn rows_parked_on_the_move_sentinel_are_all_rebound() {
     let b = f.ingest_raw_listed("archive", 8, &raw, &[7, 8]);
 
     assert!(a.uid_rebound && !a.inserted);
-    assert!(b.uid_rebound && !b.inserted, "the second sentinel row must not be stranded");
+    assert!(
+        b.uid_rebound && !b.inserted,
+        "the second sentinel row must not be stranded"
+    );
     assert_eq!(f.message_rows(), 2, "and no third row is invented for it");
-    assert_eq!(f.mailbox_rows("archive"), vec![(parked[0], 7), (parked[1], 8)]);
+    assert_eq!(
+        f.mailbox_rows("archive"),
+        vec![(parked[0], 7), (parked[1], 8)]
+    );
 }
 
 /// A sent-copy placeholder is written ahead of the server under a `graph_uid`,
@@ -931,13 +1038,19 @@ fn a_graph_uid_placeholder_is_still_rebound_onto_the_real_uid() {
         b"sent body\r\n",
     );
     let placeholder_uid = mailypoppins::ingest::graph_uid("<sent-copy@example.com>");
-    assert!(placeholder_uid > u32::MAX as i64, "the hash is far above any server UID");
+    assert!(
+        placeholder_uid > u32::MAX as i64,
+        "the hash is far above any server UID"
+    );
     let placeholder = f.ingest_raw_listed("sent", placeholder_uid, &raw, &[]);
 
     let filed = f.ingest_raw_listed("sent", 6600, &raw, &[6600]);
 
     assert!(filed.uid_rebound && !filed.inserted);
-    assert_eq!(filed.row_id, placeholder.row_id, "the placeholder row takes the real UID");
+    assert_eq!(
+        filed.row_id, placeholder.row_id,
+        "the placeholder row takes the real UID"
+    );
     assert_eq!(f.message_rows(), 1);
     assert_eq!(f.mailbox_rows("sent"), vec![(placeholder.row_id, 6600)]);
 }
@@ -985,7 +1098,9 @@ fn mailbox_cursors_round_trip() {
     };
     mailypoppins::ingest::record_mailbox_cursor(&f.store, "acct", "inbox", &cursor).unwrap();
 
-    let loaded = mailypoppins::ingest::load_mailbox_cursor(&f.store, "acct", "inbox").unwrap().unwrap();
+    let loaded = mailypoppins::ingest::load_mailbox_cursor(&f.store, "acct", "inbox")
+        .unwrap()
+        .unwrap();
     assert_eq!(loaded.uidvalidity, Some(42));
     assert_eq!(loaded.last_uid, Some(1234));
     assert_eq!(loaded.highest_modseq, Some(7));
@@ -1037,7 +1152,10 @@ fn mailbox_cursors_round_trip() {
         .unwrap();
     assert_eq!(cursors, 1);
     assert_eq!(
-        mailypoppins::ingest::load_mailbox_cursor(&f.store, "acct", "inbox").unwrap().unwrap().uidvalidity,
+        mailypoppins::ingest::load_mailbox_cursor(&f.store, "acct", "inbox")
+            .unwrap()
+            .unwrap()
+            .uidvalidity,
         Some(43)
     );
 
@@ -1050,12 +1168,18 @@ fn mailbox_cursors_round_trip() {
         .unwrap();
     assert_eq!(cursors, 2);
     assert_eq!(
-        mailypoppins::ingest::load_mailbox_cursor(&f.store, "other", "inbox").unwrap().unwrap().uidvalidity,
+        mailypoppins::ingest::load_mailbox_cursor(&f.store, "other", "inbox")
+            .unwrap()
+            .unwrap()
+            .uidvalidity,
         Some(42),
         "another account's cursor for the same mailbox name is a separate row"
     );
     assert_eq!(
-        mailypoppins::ingest::load_mailbox_cursor(&f.store, "acct", "inbox").unwrap().unwrap().uidvalidity,
+        mailypoppins::ingest::load_mailbox_cursor(&f.store, "acct", "inbox")
+            .unwrap()
+            .unwrap()
+            .uidvalidity,
         Some(43),
         "writing another account's cursor leaves the first account's row alone"
     );
@@ -1079,7 +1203,8 @@ fn the_arrival_mark_survives_the_cursor_round_trip() {
     };
 
     // A pass that came up short leaves its mark behind.
-    mailypoppins::ingest::record_mailbox_cursor(&f.store, "acct", "inbox", &cursor(Some(100))).unwrap();
+    mailypoppins::ingest::record_mailbox_cursor(&f.store, "acct", "inbox", &cursor(Some(100)))
+        .unwrap();
     let known = mailypoppins::ingest::known_uids_with_cursor(&f.store, "acct", "inbox").unwrap();
     assert_eq!(
         known.arrival_mark,
@@ -1188,7 +1313,9 @@ fn known_uids_reports_what_the_store_holds() {
         mailypoppins::ingest::known_uids(&f.store, "acct", "archive").unwrap(),
         HashSet::from([9])
     );
-    assert!(mailypoppins::ingest::known_uids(&f.store, "other", "inbox").unwrap().is_empty());
+    assert!(mailypoppins::ingest::known_uids(&f.store, "other", "inbox")
+        .unwrap()
+        .is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1224,7 +1351,11 @@ fn a_message_without_raw_bytes_ingests_and_upserts() {
     let outcome = f.ingest("inbox", uid, &email, None);
     assert!(outcome.inserted);
     assert_eq!(f.body(outcome.row_id), "graph body");
-    assert_eq!(f.text(outcome.row_id, "raw_blob"), "", "Graph has no RFC822");
+    assert_eq!(
+        f.text(outcome.row_id, "raw_blob"),
+        "",
+        "Graph has no RFC822"
+    );
     assert_eq!(f.text(outcome.row_id, "flags"), "\\Seen");
     assert!(f.blob_refs(outcome.row_id).iter().all(|r| r.0 != "raw"));
 
@@ -1262,7 +1393,12 @@ fn a_graph_message_keeps_its_html_body_as_a_blob() {
         event: None,
     };
 
-    let outcome = f.ingest("inbox", mailypoppins::ingest::graph_uid("<g-html@example.com>"), &email, None);
+    let outcome = f.ingest(
+        "inbox",
+        mailypoppins::ingest::graph_uid("<g-html@example.com>"),
+        &email,
+        None,
+    );
     let refs = f.blob_refs(outcome.row_id);
     let (_, _, hash, _) = refs
         .iter()
@@ -1277,7 +1413,12 @@ fn a_graph_message_keeps_its_html_body_as_a_blob() {
     // Re-ingesting with new HTML re-points the reference and releases the old.
     let old_hash = hash.clone();
     email.html_body = Some("<html><body><p>edited</p></body></html>".into());
-    let again = f.ingest("inbox", mailypoppins::ingest::graph_uid("<g-html@example.com>"), &email, None);
+    let again = f.ingest(
+        "inbox",
+        mailypoppins::ingest::graph_uid("<g-html@example.com>"),
+        &email,
+        None,
+    );
     let refs = f.blob_refs(again.row_id);
     let (_, _, new_hash, _) = refs.iter().find(|r| r.0 == "html").unwrap();
     assert_ne!(new_hash, &old_hash);
@@ -1347,16 +1488,31 @@ fn a_uid_missing_from_the_listing_loses_its_row_and_its_blob_refs() {
     assert_eq!(sync_prune(&f, "inbox", &[1, 3]), 1);
 
     assert_eq!(f.message_rows(), 2);
-    assert!(mailypoppins::store::read::find_by_id(&f.store, gone.row_id).unwrap().is_none());
-    assert!(mailypoppins::store::read::find_by_id(&f.store, stays.row_id).unwrap().is_some());
-    assert!(f.blob_refs(gone.row_id).is_empty(), "the reference list outlived its row");
-    assert_eq!(f.refcount(&gone_hash), 0, "the pruned row kept its blob alive");
+    assert!(mailypoppins::store::read::find_by_id(&f.store, gone.row_id)
+        .unwrap()
+        .is_none());
+    assert!(
+        mailypoppins::store::read::find_by_id(&f.store, stays.row_id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        f.blob_refs(gone.row_id).is_empty(),
+        "the reference list outlived its row"
+    );
+    assert_eq!(
+        f.refcount(&gone_hash),
+        0,
+        "the pruned row kept its blob alive"
+    );
     let fts: i64 = f
         .store
         .conn()
-        .query_row("SELECT COUNT(*) FROM messages_fts WHERE rowid = ?1", [gone.row_id], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM messages_fts WHERE rowid = ?1",
+            [gone.row_id],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(fts, 0);
 }
@@ -1486,7 +1642,11 @@ fn a_message_archived_elsewhere_ends_up_in_the_archive_only() {
     let archived = f.ingest_raw("archive", 31, &raw);
     assert!(archived.inserted);
     assert_eq!(rows_for_message(), 2);
-    assert_eq!(f.refcount(&hash), 2, "both rows reference the deduped body blob");
+    assert_eq!(
+        f.refcount(&hash),
+        2,
+        "both rows reference the deduped body blob"
+    );
     assert!(f.blobs.contains(&blob));
 
     // Prune pass, after every target has been ingested.
@@ -1495,14 +1655,28 @@ fn a_message_archived_elsewhere_ends_up_in_the_archive_only() {
         1
     );
     assert_eq!(
-        mailypoppins::ingest::prune_vanished(&f.store, &f.blobs, "acct", "archive", &archive_vanished),
+        mailypoppins::ingest::prune_vanished(
+            &f.store,
+            &f.blobs,
+            "acct",
+            "archive",
+            &archive_vanished
+        ),
         0
     );
-    assert_eq!(rows_for_message(), 1, "the archive row, and it never went to zero");
+    assert_eq!(
+        rows_for_message(),
+        1,
+        "the archive row, and it never went to zero"
+    );
     assert_eq!(f.refcount(&hash), 1, "the inbox row released its reference");
     assert!(f.blobs.contains(&blob), "the body blob was never unlinked");
 
-    assert_eq!(f.message_rows(), 2, "the archived message plus the untouched one");
+    assert_eq!(
+        f.message_rows(),
+        2,
+        "the archived message plus the untouched one"
+    );
     let mailboxes: Vec<String> = mailypoppins::store::read::list_mailbox(&f.store, "acct", "inbox")
         .unwrap()
         .iter()
@@ -1514,7 +1688,10 @@ fn a_message_archived_elsewhere_ends_up_in_the_archive_only() {
         .iter()
         .map(|e| e.message_id.clone())
         .collect();
-    assert_eq!(archive, vec!["<archived-elsewhere@example.com>".to_string()]);
+    assert_eq!(
+        archive,
+        vec!["<archived-elsewhere@example.com>".to_string()]
+    );
 }
 
 /// A Graph message, whose identity is its `Message-ID` and whose UID is the
@@ -1533,7 +1710,10 @@ fn the_answered_and_forwarded_flags_reach_the_row_and_the_read_path() {
     };
     let outcome = f.ingest("inbox", 11, &message, None);
 
-    assert_eq!(f.text(outcome.row_id, "flags"), "\\Seen \\Answered $Forwarded");
+    assert_eq!(
+        f.text(outcome.row_id, "flags"),
+        "\\Seen \\Answered $Forwarded"
+    );
     let row = mailypoppins::store::read::find_by_id(&f.store, outcome.row_id)
         .unwrap()
         .unwrap();
@@ -1593,7 +1773,10 @@ fn a_graph_pass_updates_the_read_bit_without_erasing_the_history_bits() {
     let updated = mailypoppins::ingest::apply_seen_flags(&f.store, "acct", "inbox", [(uid, true)]);
     assert_eq!(updated, 1);
     let row = mailypoppins::store::read::list_mailbox(&f.store, "acct", "inbox").unwrap();
-    assert_eq!(row[0].flags.as_deref(), Some("\\Seen \\Answered $Forwarded"));
+    assert_eq!(
+        row[0].flags.as_deref(),
+        Some("\\Seen \\Answered $Forwarded")
+    );
 }
 
 fn graph_email(message_id: &str, is_read: bool) -> FetchedEmail {
@@ -1632,7 +1815,10 @@ fn a_graph_message_archived_on_the_server_is_pruned_from_the_inbox() {
     f.ingest("inbox", stays_uid, &graph_email(stays, false), None);
 
     // Archive pass ingests the moved copy first, exactly as the sync does.
-    assert!(f.ingest("archive", moved_uid, &graph_email(moved, false), None).inserted);
+    assert!(
+        f.ingest("archive", moved_uid, &graph_email(moved, false), None)
+            .inserted
+    );
     assert_eq!(f.message_rows(), 3);
 
     // Inbox prune: the server enumeration no longer lists the moved message.
@@ -1679,23 +1865,32 @@ fn a_just_sent_graph_copy_survives_the_prune_that_never_listed_it() {
         ),
         b"sent body\r\n",
     );
-    mailypoppins::outbox::ingest_sent_copy(&f.store, &f.blobs, "acct", "sent", &raw, mid, None).unwrap();
+    mailypoppins::outbox::ingest_sent_copy(&f.store, &f.blobs, "acct", "sent", &raw, mid, None)
+        .unwrap();
 
     let uid = mailypoppins::ingest::graph_uid(mid);
     let row: i64 = f
         .store
         .conn()
-        .query_row("SELECT id FROM messages WHERE uid = ?1", [uid], |r| r.get(0))
+        .query_row("SELECT id FROM messages WHERE uid = ?1", [uid], |r| {
+            r.get(0)
+        })
         .unwrap();
     let raw_hash = f.text(row, "raw_blob");
-    assert!(!raw_hash.is_empty(), "the local copy is the only MIME there is");
+    assert!(
+        !raw_hash.is_empty(),
+        "the local copy is the only MIME there is"
+    );
 
     // The pass's diff: the folder listed the server's id, so our row is
     // "vanished" from it.
     let vanished = vec![uid];
     let now = mailypoppins::outbox::unix_now();
     let prunable = mailypoppins::ingest::prunable_uids(&f.store, "acct", "sent", &vanished, now);
-    assert!(prunable.is_empty(), "a copy the server may not have filed yet");
+    assert!(
+        prunable.is_empty(),
+        "a copy the server may not have filed yet"
+    );
     assert_eq!(
         mailypoppins::ingest::prune_vanished(&f.store, &f.blobs, "acct", "sent", &prunable),
         0
@@ -1730,10 +1925,23 @@ fn the_prune_age_guard_holds_back_only_the_fresh_row() {
     old_email.date = "Mon, 01 Jan 2024 12:00:00 +0000".into();
     let mut fresh_email = graph_email(fresh, false);
     fresh_email.date = chrono::Utc::now().to_rfc2822();
-    f.ingest("inbox", mailypoppins::ingest::graph_uid(old), &old_email, None);
-    f.ingest("inbox", mailypoppins::ingest::graph_uid(fresh), &fresh_email, None);
+    f.ingest(
+        "inbox",
+        mailypoppins::ingest::graph_uid(old),
+        &old_email,
+        None,
+    );
+    f.ingest(
+        "inbox",
+        mailypoppins::ingest::graph_uid(fresh),
+        &fresh_email,
+        None,
+    );
 
-    let vanished = vec![mailypoppins::ingest::graph_uid(old), mailypoppins::ingest::graph_uid(fresh)];
+    let vanished = vec![
+        mailypoppins::ingest::graph_uid(old),
+        mailypoppins::ingest::graph_uid(fresh),
+    ];
     let prunable = mailypoppins::ingest::prunable_uids(
         &f.store,
         "acct",
@@ -1757,8 +1965,18 @@ fn a_pass_of_server_read_flags_applies_in_one_transaction() {
     let f = Fixture::new();
     let read_already = "<read@example.com>";
     let unread = "<unread@example.com>";
-    f.ingest("inbox", mailypoppins::ingest::graph_uid(read_already), &graph_email(read_already, true), None);
-    f.ingest("inbox", mailypoppins::ingest::graph_uid(unread), &graph_email(unread, false), None);
+    f.ingest(
+        "inbox",
+        mailypoppins::ingest::graph_uid(read_already),
+        &graph_email(read_already, true),
+        None,
+    );
+    f.ingest(
+        "inbox",
+        mailypoppins::ingest::graph_uid(unread),
+        &graph_email(unread, false),
+        None,
+    );
 
     let updated = mailypoppins::ingest::apply_seen_flags(
         &f.store,
@@ -1767,7 +1985,10 @@ fn a_pass_of_server_read_flags_applies_in_one_transaction() {
         [
             (mailypoppins::ingest::graph_uid(read_already), true),
             (mailypoppins::ingest::graph_uid(unread), true),
-            (mailypoppins::ingest::graph_uid("<never-ingested@example.com>"), true),
+            (
+                mailypoppins::ingest::graph_uid("<never-ingested@example.com>"),
+                true,
+            ),
         ],
     );
     assert_eq!(updated, 1, "only the row whose flags changed");
@@ -1820,7 +2041,11 @@ fn a_full_window_cursor_does_not_wipe_the_modseq_a_delta_pass_recorded() {
         &f.store,
         "acct",
         "inbox",
-        &cursor(10, Some(90_060_115_205_545_359), Some("https://graph/delta?$t=abc")),
+        &cursor(
+            10,
+            Some(90_060_115_205_545_359),
+            Some("https://graph/delta?$t=abc"),
+        ),
     )
     .unwrap();
 
@@ -1842,7 +2067,11 @@ fn a_full_window_cursor_does_not_wipe_the_modseq_a_delta_pass_recorded() {
         Some("https://graph/delta?$t=abc"),
         "and the same for the Graph deltaLink (#0042)"
     );
-    assert_eq!(after.last_uid, Some(12), "the observed columns still advance");
+    assert_eq!(
+        after.last_uid,
+        Some(12),
+        "the observed columns still advance"
+    );
 
     // A later delta pass overwrites the token with its own value: carrying
     // forward must not mean freezing.
@@ -1850,14 +2079,21 @@ fn a_full_window_cursor_does_not_wipe_the_modseq_a_delta_pass_recorded() {
         &f.store,
         "acct",
         "inbox",
-        &cursor(12, Some(90_060_115_205_545_400), Some("https://graph/delta?$t=def")),
+        &cursor(
+            12,
+            Some(90_060_115_205_545_400),
+            Some("https://graph/delta?$t=def"),
+        ),
     )
     .unwrap();
     let after = mailypoppins::ingest::load_mailbox_cursor(&f.store, "acct", "inbox")
         .unwrap()
         .unwrap();
     assert_eq!(after.highest_modseq, Some(90_060_115_205_545_400));
-    assert_eq!(after.deltalink.as_deref(), Some("https://graph/delta?$t=def"));
+    assert_eq!(
+        after.deltalink.as_deref(),
+        Some("https://graph/delta?$t=def")
+    );
 }
 
 /// The only way out of the carry-forward, and why it has to exist: a modseq is

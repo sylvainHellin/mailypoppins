@@ -218,7 +218,7 @@ Every command that writes a draft answers the file's path, and the draft opens i
 `openInEditor` in `src/app/compose.ts` asks `editor_setting_get` for the route on every open ([rust-layer.md](rust-layer.md), "Drafts and the editor"):
 
 - The embedded route runs a terminal editor such as `nvim` on a PTY, drawn in the reader area (see "The embedded editor"). It applies exactly when `terminal_spawn` would accept the editor and finds it: a terminal editor named by `MP_DESKTOP_EDITOR` or the editor setting; else the first of `$VISUAL` and `$EDITOR` that names a terminal editor, so `VISUAL="code -w"` with `EDITOR=nvim` is embedded; else, when none of the four is set, the first of `nvim`, `vim` and `hx` the probe finds.
-- The external route is M3's: `editor_open` opens the file in the user's editor without waiting for it to exit. A GUI editor (`code -w`, `zed`, `subl`) named by `MP_DESKTOP_EDITOR` or the setting takes it, and so does one in `$VISUAL` or `$EDITOR` when neither of the two names a terminal editor, and a terminal editor the embedded route cannot find; one in `$VISUAL` or `$EDITOR` then opens in a new window of the first terminal emulator found: Ghostty, kitty, Alacritty, WezTerm, then Terminal.app.
+- The external route is M3's: `editor_open` opens the file in the user's editor without waiting for it to exit. A GUI editor (`code -w`, `zed`, `subl`) named by `MP_DESKTOP_EDITOR` or the setting takes it, and so does one in `$VISUAL` or `$EDITOR` when neither of the two names a terminal editor, and a terminal editor the embedded route cannot find, which then opens in a new window of the first terminal emulator found: Ghostty, kitty, Alacritty, WezTerm, then Terminal.app.
 
 A route that cannot be read is external.
 Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, whatever the route, so no action reloads anything itself.
@@ -761,6 +761,7 @@ In the Filter field Enter goes back to the lines with the filter kept, and Escap
 
 `sc` opens the daemon's `config.toml` in the external editor through `config_open`, and `sf` the daemon's log file through `log_open`; the palette's "Open config.toml in $EDITOR" and "Open log file in $EDITOR" run them too.
 Both work from every view, the TUI's view-agnostic GLOBAL keys, and take the path from the daemon ([rust-layer.md](rust-layer.md), "config.toml and the daemon log").
+Neither file is a draft, so neither opens in the embedded editor: they take the external route of Compose, and a terminal editor, such as the `nvim` of the setting that runs drafts embedded, opens them in a new window of the first terminal emulator found.
 The notice line says "Opened config.toml in <editor>" or "Opened the daemon log in <editor>".
 With no configuration it says "There is no config.toml yet; add an account first", and with no log file yet "No log file found at <path>", both logged as warnings; any other failure is "Open config failed: <why>" or "Open log failed: <why>", logged as an error.
 The handoff reloads nothing: a saved change reaches the daemon with its next `config.reload`, and the `config.changed` or `config.invalid` that publishes lands in the log.

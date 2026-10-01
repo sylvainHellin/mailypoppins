@@ -267,8 +267,18 @@ mod tests {
         let now = row_coordinates(&fx.store, id).unwrap().unwrap();
         assert_eq!(now.mailbox, "archive");
         assert_eq!(now.uid, -id, "a moved row parks on the negative sentinel");
-        assert_eq!(read::list_mailbox(&fx.store, "alice", "inbox").unwrap().len(), 0);
-        assert_eq!(read::list_mailbox(&fx.store, "alice", "archive").unwrap().len(), 2);
+        assert_eq!(
+            read::list_mailbox(&fx.store, "alice", "inbox")
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            read::list_mailbox(&fx.store, "alice", "archive")
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     /// A refused server op puts the row back exactly where it was, which is the
@@ -310,7 +320,11 @@ mod tests {
         let fts: i64 = fx
             .store
             .conn()
-            .query_row("SELECT COUNT(*) FROM messages_fts WHERE rowid = ?1", [id], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM messages_fts WHERE rowid = ?1",
+                [id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(fts, 0, "the FTS entry outlived its row");
         let refs: i64 = fx
@@ -367,7 +381,10 @@ mod tests {
 
         assert!(set_read(&fx.store, id, true).unwrap());
         assert!(read::find_by_id(&fx.store, id).unwrap().unwrap().is_read());
-        assert!(!set_read(&fx.store, id, true).unwrap(), "no change to report");
+        assert!(
+            !set_read(&fx.store, id, true).unwrap(),
+            "no change to report"
+        );
 
         assert!(set_read(&fx.store, id, false).unwrap());
         assert!(!read::find_by_id(&fx.store, id).unwrap().unwrap().is_read());

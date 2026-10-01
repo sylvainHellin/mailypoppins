@@ -61,7 +61,9 @@ pub fn parse_jump_date(input: &str, today: NaiveDate) -> Result<NaiveDate, Strin
         _ => {}
     }
 
-    Err(format!("Cannot read '{raw}' as a date. Try {JUMP_DATE_HELP}"))
+    Err(format!(
+        "Cannot read '{raw}' as a date. Try {JUMP_DATE_HELP}"
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,23 +148,56 @@ mod tests {
 
     #[test]
     fn absolute_forms_are_their_own_first_day() {
-        assert_eq!(parse("2024-03-07"), NaiveDate::from_ymd_opt(2024, 3, 7).unwrap());
-        assert_eq!(parse("2024-03"), NaiveDate::from_ymd_opt(2024, 3, 1).unwrap());
+        assert_eq!(
+            parse("2024-03-07"),
+            NaiveDate::from_ymd_opt(2024, 3, 7).unwrap()
+        );
+        assert_eq!(
+            parse("2024-03"),
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()
+        );
         assert_eq!(parse("2024"), NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
-        assert_eq!(parse("  2024-03-07 "), NaiveDate::from_ymd_opt(2024, 3, 7).unwrap());
+        assert_eq!(
+            parse("  2024-03-07 "),
+            NaiveDate::from_ymd_opt(2024, 3, 7).unwrap()
+        );
     }
 
     #[test]
     fn relative_forms_count_back_from_today() {
         assert_eq!(parse("today"), today());
-        assert_eq!(parse("yesterday"), NaiveDate::from_ymd_opt(2026, 8, 10).unwrap());
-        assert_eq!(parse("last week"), NaiveDate::from_ymd_opt(2026, 8, 4).unwrap());
-        assert_eq!(parse("2 weeks ago"), NaiveDate::from_ymd_opt(2026, 7, 28).unwrap());
-        assert_eq!(parse("3 days ago"), NaiveDate::from_ymd_opt(2026, 8, 8).unwrap());
-        assert_eq!(parse("2 months ago"), NaiveDate::from_ymd_opt(2026, 6, 11).unwrap());
-        assert_eq!(parse("last month"), NaiveDate::from_ymd_opt(2026, 7, 11).unwrap());
-        assert_eq!(parse("1 year ago"), NaiveDate::from_ymd_opt(2025, 8, 11).unwrap());
-        assert_eq!(parse("last year"), NaiveDate::from_ymd_opt(2025, 8, 11).unwrap());
+        assert_eq!(
+            parse("yesterday"),
+            NaiveDate::from_ymd_opt(2026, 8, 10).unwrap()
+        );
+        assert_eq!(
+            parse("last week"),
+            NaiveDate::from_ymd_opt(2026, 8, 4).unwrap()
+        );
+        assert_eq!(
+            parse("2 weeks ago"),
+            NaiveDate::from_ymd_opt(2026, 7, 28).unwrap()
+        );
+        assert_eq!(
+            parse("3 days ago"),
+            NaiveDate::from_ymd_opt(2026, 8, 8).unwrap()
+        );
+        assert_eq!(
+            parse("2 months ago"),
+            NaiveDate::from_ymd_opt(2026, 6, 11).unwrap()
+        );
+        assert_eq!(
+            parse("last month"),
+            NaiveDate::from_ymd_opt(2026, 7, 11).unwrap()
+        );
+        assert_eq!(
+            parse("1 year ago"),
+            NaiveDate::from_ymd_opt(2025, 8, 11).unwrap()
+        );
+        assert_eq!(
+            parse("last year"),
+            NaiveDate::from_ymd_opt(2025, 8, 11).unwrap()
+        );
         assert_eq!(parse("a week ago"), parse("last week"));
     }
 
@@ -187,7 +222,16 @@ mod tests {
 
     #[test]
     fn nonsense_is_refused_with_the_accepted_forms_named() {
-        for input in ["", "   ", "tomorrow", "24", "2024-13-01", "next week", "3 fortnights ago", "-1 days ago"] {
+        for input in [
+            "",
+            "   ",
+            "tomorrow",
+            "24",
+            "2024-13-01",
+            "next week",
+            "3 fortnights ago",
+            "-1 days ago",
+        ] {
             let err = parse_jump_date(input, today()).unwrap_err();
             assert!(err.contains("YYYY-MM-DD"), "{input}: {err}");
         }

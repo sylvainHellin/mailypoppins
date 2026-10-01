@@ -116,7 +116,11 @@ pub struct Selector {
 }
 
 impl Selector {
-    pub fn new(account: impl Into<String>, mailbox: impl Into<String>, key: impl Into<String>) -> Self {
+    pub fn new(
+        account: impl Into<String>,
+        mailbox: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Self {
         Self {
             account: account.into(),
             mailbox: mailbox.into(),
@@ -404,9 +408,9 @@ pub fn decode(segment: &str) -> Result<String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = bytes
-                .get(i + 1..i + 3)
-                .ok_or_else(|| anyhow!("selector segment {segment} ends in a truncated % escape"))?;
+            let hex = bytes.get(i + 1..i + 3).ok_or_else(|| {
+                anyhow!("selector segment {segment} ends in a truncated % escape")
+            })?;
             let hi = (hex[0] as char)
                 .to_digit(16)
                 .ok_or_else(|| anyhow!("selector segment {segment} has a non-hex % escape"))?;
@@ -502,11 +506,23 @@ mod tests {
         .unwrap();
         assert_eq!(q.mailbox.as_deref(), Some("archive"));
 
-        let q = parse_in("key@example.com", Namespace::Received, "work", Some("inbox")).unwrap();
+        let q = parse_in(
+            "key@example.com",
+            Namespace::Received,
+            "work",
+            Some("inbox"),
+        )
+        .unwrap();
         assert_eq!(q.mailbox.as_deref(), Some("inbox"));
 
         // Two segments after the scheme is account + key, not mailbox + key.
-        let q = parse_in("mp://home/key@example.com", Namespace::Received, "work", None).unwrap();
+        let q = parse_in(
+            "mp://home/key@example.com",
+            Namespace::Received,
+            "work",
+            None,
+        )
+        .unwrap();
         assert_eq!(q.account, "home");
         assert_eq!(q.mailbox, None);
         assert_eq!(q.key, "key@example.com");
@@ -556,10 +572,12 @@ mod tests {
     /// ccTLD Message-ID, a draft id) must survive its own canonical form.
     #[test]
     fn the_path_heuristic_does_not_run_on_qualified_selectors() {
-        let parts = parse("mp://work/inbox/newsletter@digital.md").expect("qualified .md key parses");
+        let parts =
+            parse("mp://work/inbox/newsletter@digital.md").expect("qualified .md key parses");
         assert_eq!(parts.key, "newsletter@digital.md");
 
-        let parts = parse("mp://work/drafts/2026-07-31-note.md").expect("qualified .md draft id parses");
+        let parts =
+            parse("mp://work/drafts/2026-07-31-note.md").expect("qualified .md draft id parses");
         assert_eq!(parts.mailbox.as_deref(), Some(DRAFTS_MAILBOX));
         assert_eq!(parts.key, "2026-07-31-note.md");
     }
@@ -568,7 +586,10 @@ mod tests {
     fn over_long_and_empty_selectors_are_rejected() {
         assert!(parse("").is_err());
         assert!(parse("a//b").is_err());
-        assert!(parse("a/b/c").is_err(), "three unqualified segments are not a form");
+        assert!(
+            parse("a/b/c").is_err(),
+            "three unqualified segments are not a form"
+        );
         assert!(parse("mp://a/b/c/d").is_err());
         assert!(parse("mp://a").is_err(), "the scheme needs at least a key");
     }

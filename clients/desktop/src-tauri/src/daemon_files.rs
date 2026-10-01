@@ -84,11 +84,7 @@ pub fn log_open_on(
 
 /// The editor lookup with the settings file's `editor`, as `editor_open` reads it.
 fn lookup_for(settings: &Path) -> Lookup<'static> {
-    let setting = editor::read_setting(settings).unwrap_or_else(|e| {
-        tracing::warn!("[editor] ignoring the setting: {e}");
-        None
-    });
-    editor::live_lookup(setting)
+    editor::live_lookup(editor::read_setting_or_none(settings))
 }
 
 /// `sc`: `not_found` when there is no `config.toml` yet.
@@ -199,6 +195,41 @@ mod tests {
             opens[0].command.last().map(String::as_str),
             Some(opens[0].path.as_str())
         );
+    }
+
+    fn ghostty_and_nvim(p: &Path) -> bool {
+        p == Path::new("/Applications/Ghostty.app/Contents/MacOS/ghostty")
+            || p == Path::new("/opt/homebrew/bin/nvim")
+    }
+
+    #[test]
+    fn a_terminal_editor_setting_opens_both_files_in_a_terminal() {
+        let (door, f) = fixture_door();
+        let nvim = Lookup {
+            env: &no_env,
+            setting: Some("nvim".to_string()),
+            is_file: &ghostty_and_nvim,
+            macos: true,
+        };
+        let launch = config_open_on(&door, &nvim, WINDOW).expect("config opened");
+        assert_eq!(launch.source, editor::EditorSource::Setting);
+        log_open_on(&door, &nvim, WINDOW).expect("log opened");
+        let opens = f.editor_opens();
+        assert_eq!(opens.len(), 2);
+        for open in opens {
+            assert_eq!(
+                open.command,
+                [
+                    "open",
+                    "-na",
+                    "/Applications/Ghostty.app",
+                    "--args",
+                    "-e",
+                    "/opt/homebrew/bin/nvim",
+                    open.path.as_str(),
+                ]
+            );
+        }
     }
 
     #[test]

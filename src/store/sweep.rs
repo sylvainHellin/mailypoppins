@@ -191,7 +191,9 @@ pub fn human_bytes(bytes: u64) -> String {
 /// disk without a filesystem walk.
 pub fn total_blob_bytes(conn: &Connection) -> Result<u64> {
     let total: i64 = conn
-        .query_row("SELECT COALESCE(SUM(size), 0) FROM blobs", [], |row| row.get(0))
+        .query_row("SELECT COALESCE(SUM(size), 0) FROM blobs", [], |row| {
+            row.get(0)
+        })
         .context("summing blob bytes")?;
     Ok(total.max(0) as u64)
 }
@@ -392,8 +394,8 @@ fn eviction_plan(
     // strictly older than the cutoff. `0` days means keep-all (no cutoff).
     let att_cutoff = (policy.attachment_horizon_days > 0)
         .then(|| now - policy.attachment_horizon_days as i64 * day);
-    let body_cutoff = (policy.body_horizon_days > 0)
-        .then(|| now - policy.body_horizon_days as i64 * day);
+    let body_cutoff =
+        (policy.body_horizon_days > 0).then(|| now - policy.body_horizon_days as i64 * day);
 
     let past = |c: &Candidate, cutoff: Option<i64>| cutoff.is_some_and(|t| c.newest_date < t);
 
@@ -503,13 +505,7 @@ mod tests {
 
     /// Write a blob of `size` bytes, acquire one reference for `message_row`
     /// under `kind`, and record the `message_blobs` row. Returns the hash.
-    fn add_blob(
-        f: &Fixture,
-        message_row: i64,
-        kind: &str,
-        size: usize,
-        seed: u8,
-    ) -> BlobHash {
+    fn add_blob(f: &Fixture, message_row: i64, kind: &str, size: usize, seed: u8) -> BlobHash {
         let bytes = vec![seed; size];
         let hash = f.blobs.write(&bytes).unwrap();
         let conn = f.store.conn();
@@ -550,7 +546,9 @@ mod tests {
         let out = sweep(&f.store, &f.blobs, &policy(10_000), SweepOptions::default()).unwrap();
         assert!(matches!(
             out.decision,
-            SweepDecision::UnderCap { cleared_marker: false }
+            SweepDecision::UnderCap {
+                cleared_marker: false
+            }
         ));
         assert!(out.evicted.is_empty());
         assert!(f.blobs.contains(&h), "nothing under cap is evicted");
@@ -625,7 +623,11 @@ mod tests {
         sweep(&f.store, &f.blobs, &pol, SweepOptions::default()).unwrap(); // warn
         let out = sweep(&f.store, &f.blobs, &pol, SweepOptions::default()).unwrap();
         assert_eq!(out.evicted.len(), 1);
-        assert_eq!(out.evicted[0].hash, att.to_string(), "attachment goes first");
+        assert_eq!(
+            out.evicted[0].hash,
+            att.to_string(),
+            "attachment goes first"
+        );
         assert!(!f.blobs.contains(&att));
         assert!(f.blobs.contains(&body));
     }
@@ -657,7 +659,10 @@ mod tests {
         assert_eq!(out.evicted[0].hash, old.to_string());
         assert!(out.evicted[0].past_horizon, "chosen for being past horizon");
         assert!(!f.blobs.contains(&old));
-        assert!(f.blobs.contains(&fresh), "a fresh blob survives the horizon");
+        assert!(
+            f.blobs.contains(&fresh),
+            "a fresh blob survives the horizon"
+        );
     }
 
     // -- a blob shared by two messages survives while one still references it -
@@ -698,7 +703,10 @@ mod tests {
         // the horizon query classified the shared blob as fresh.
         let out = sweep(&f.store, &f.blobs, &pol, SweepOptions::default()).unwrap();
         assert!(out.evicted.is_empty());
-        assert!(f.blobs.contains(&hash), "a blob a fresh message references survives");
+        assert!(
+            f.blobs.contains(&hash),
+            "a blob a fresh message references survives"
+        );
         assert_eq!(refcount(f.store.conn(), &hash).unwrap(), 2);
     }
 
@@ -778,7 +786,9 @@ mod tests {
         let body_bytes = b"the body that will be evicted and re-fetched".to_vec();
         let hash = f.blobs.write(&body_bytes).unwrap();
         let conn = f.store.conn();
-        f.blobs.acquire(conn, &hash, body_bytes.len() as u64).unwrap();
+        f.blobs
+            .acquire(conn, &hash, body_bytes.len() as u64)
+            .unwrap();
         conn.execute(
             "INSERT INTO message_blobs (message_row, kind, ordinal, hash, size) VALUES (?1,'body',0,?2,?3)",
             (m, hash.as_str(), body_bytes.len() as i64),
@@ -786,7 +796,8 @@ mod tests {
         conn.execute(
             "UPDATE messages SET body_blob = ?1 WHERE id = ?2",
             (hash.as_str(), m),
-        ).unwrap();
+        )
+        .unwrap();
 
         let pol = policy(10); // tiny cap
         sweep(&f.store, &f.blobs, &pol, SweepOptions::default()).unwrap(); // warn
@@ -864,7 +875,9 @@ mod tests {
                 "INSERT INTO messages (account, mailbox, uid, message_id, date_sort) VALUES ('a','inbox',9,'<f@x>',9000)",
                 [],
             ).unwrap();
-            let m_fresh: i64 = tx.query_row("SELECT id FROM messages WHERE uid = 9", [], |r| r.get(0)).unwrap();
+            let m_fresh: i64 = tx
+                .query_row("SELECT id FROM messages WHERE uid = 9", [], |r| r.get(0))
+                .unwrap();
             blobs.acquire(&tx, &fresh, 1000).unwrap();
             tx.execute(
                 "INSERT INTO message_blobs (message_row, kind, ordinal, hash, size) VALUES (?1,'body',0,?2,1000)",
@@ -882,6 +895,9 @@ mod tests {
         assert_eq!(out.evicted[1].hash, old[1].to_string());
         assert!(!blobs.contains(&old[0]));
         assert!(blobs.contains(&old[2]), "a newer committed blob survives");
-        assert!(blobs.contains(&fresh), "the committed ingest survives the sweep");
+        assert!(
+            blobs.contains(&fresh),
+            "the committed ingest survives the sweep"
+        );
     }
 }

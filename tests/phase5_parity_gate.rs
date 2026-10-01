@@ -111,8 +111,8 @@ use mailypoppins::tui::app::{KeyAction, KEYMAP};
 
 use support::admin_fixture;
 use support::parity::{
-    assert_byte_identical, mp_command, oracle, oracle_cache_dir, DaemonFixture,
-    ORACLE_BIN_ENV, ORACLE_TAG,
+    assert_byte_identical, mp_command, oracle, oracle_cache_dir, DaemonFixture, ORACLE_BIN_ENV,
+    ORACLE_TAG,
 };
 use support::send_fixture;
 
@@ -454,8 +454,8 @@ fn the_daemon_golden_frames_module_carries_at_least_twenty_two_tests() {
          account and the extra-mailbox bootstrap. Found: {names:?}",
         names.len()
     );
-    let tests_mod = fs::read_to_string(repo().join("src/tui_tests/mod.rs"))
-        .expect("read src/tui_tests/mod.rs");
+    let tests_mod =
+        fs::read_to_string(repo().join("src/tui_tests/mod.rs")).expect("read src/tui_tests/mod.rs");
     assert!(
         tests_mod.contains("golden_frames_daemon"),
         "`src/tui_tests/mod.rs` no longer declares the daemon golden-frame module, so none of \
@@ -604,7 +604,8 @@ fn dump_keys_json_of_this_runs_binary_keeps_the_phase_zero_capture() {
     // the post-cutover surface only adds (docs/baselines/pre-daemon/README.md).
     let baseline = repo().join("docs/baselines/pre-daemon/tui-keys.json");
     let parse = |bytes: &[u8], what: &Path| -> serde_json::Value {
-        serde_json::from_slice(bytes).unwrap_or_else(|e| panic!("{} is not JSON: {e}", what.display()))
+        serde_json::from_slice(bytes)
+            .unwrap_or_else(|e| panic!("{} is not JSON: {e}", what.display()))
     };
     let frozen = parse(
         &fs::read(&baseline).unwrap_or_else(|e| panic!("read {}: {e}", baseline.display())),
@@ -631,8 +632,7 @@ fn dump_keys_json_of_this_runs_binary_keeps_the_phase_zero_capture() {
 
     // The published key reference is this run's dump, byte for byte.
     let website = repo().join("website/src/data/tui-keys.json");
-    let expected =
-        fs::read(&website).unwrap_or_else(|e| panic!("read {}: {e}", website.display()));
+    let expected = fs::read(&website).unwrap_or_else(|e| panic!("read {}: {e}", website.display()));
     assert_bytes_equal(&out.stdout, &expected, &website);
 }
 

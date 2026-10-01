@@ -215,12 +215,8 @@ impl Chord {
             }
             Chord::CtrlChar(c) => ctrl && key.code == KeyCode::Char(c),
             Chord::Code(code) => code.matches(key.code),
-            Chord::CtrlDigit => {
-                ctrl && matches!(key.code, KeyCode::Char('1'..='9'))
-            }
-            Chord::Digit => {
-                !ctrl && matches!(key.code, KeyCode::Char('1'..='9'))
-            }
+            Chord::CtrlDigit => ctrl && matches!(key.code, KeyCode::Char('1'..='9')),
+            Chord::Digit => !ctrl && matches!(key.code, KeyCode::Char('1'..='9')),
             Chord::PrefixLeader(p) => {
                 prefix_pending.is_none() && !ctrl && key.code == KeyCode::Char(p)
             }
@@ -466,7 +462,17 @@ const fn row(
     desc: &'static str,
     hint: bool,
 ) -> KeyBinding {
-    KeyBinding { keys, chord, prefix, ctx, guard, action, desc, short: "", hint }
+    KeyBinding {
+        keys,
+        chord,
+        prefix,
+        ctx,
+        guard,
+        action,
+        desc,
+        short: "",
+        hint,
+    }
 }
 
 /// Give a binding a hint-bar-only short label (#0078). Wraps any of the
@@ -510,10 +516,20 @@ const fn p(
     desc: &'static str,
     hint: bool,
 ) -> KeyBinding {
-    row(keys, chord, Some(prefix), ctx, Guard::None, action, desc, hint)
+    row(
+        keys,
+        chord,
+        Some(prefix),
+        ctx,
+        Guard::None,
+        action,
+        desc,
+        hint,
+    )
 }
 
 /// Prefixed guarded live binding.
+#[allow(clippy::too_many_arguments)]
 const fn pg(
     keys: &'static str,
     chord: Chord,
@@ -529,7 +545,16 @@ const fn pg(
 
 /// A bare leader key that arms a family/prefix (`f`/`c`/`g`/`t`/`s`, Space).
 const fn leader(prefix: char, ctx: KeyCtx, action: KeyAction) -> KeyBinding {
-    row("", Chord::PrefixLeader(prefix), None, ctx, Guard::None, action, "", false)
+    row(
+        "",
+        Chord::PrefixLeader(prefix),
+        None,
+        ctx,
+        Guard::None,
+        action,
+        "",
+        false,
+    )
 }
 
 /// Whether a family leader stays live outside the Mail view: true iff the
@@ -543,13 +568,17 @@ pub fn leader_is_view_agnostic(leader: char) -> bool {
 }
 
 /// Hand-dispatched (documented-only) binding.
-const fn manual(
-    keys: &'static str,
-    ctx: KeyCtx,
-    desc: &'static str,
-    hint: bool,
-) -> KeyBinding {
-    row(keys, Chord::Manual, None, ctx, Guard::None, KeyAction::Manual, desc, hint)
+const fn manual(keys: &'static str, ctx: KeyCtx, desc: &'static str, hint: bool) -> KeyBinding {
+    row(
+        keys,
+        Chord::Manual,
+        None,
+        ctx,
+        Guard::None,
+        KeyAction::Manual,
+        desc,
+        hint,
+    )
 }
 
 /// The single source of truth for TUI key bindings.
@@ -569,23 +598,102 @@ pub static KEYMAP: &[KeyBinding] = &[
     // Exception: a family whose continuations include view-agnostic actions
     // (`s`, see `leader_is_view_agnostic`) arms in every view, so the config/
     // log/activity utilities stay reachable outside Mail.
-    b("q", Chord::Char('q'), KeyCtx::Global, KeyAction::Quit, "Quit", true),
-    b("1-9", Chord::Digit, KeyCtx::Global, KeyAction::JumpMailbox, "Jump to mailbox", true),
-    b("Tab", Chord::Code(SpecialCode::Tab), KeyCtx::Global, KeyAction::FocusForward, "Cycle focus forward", false),
-    b("Shift+Tab", Chord::Code(SpecialCode::BackTab), KeyCtx::Global, KeyAction::FocusBackward, "Cycle focus backward", false),
-    b("?", Chord::Char('?'), KeyCtx::Global, KeyAction::ToggleHelp, "Toggle this help", true),
+    b(
+        "q",
+        Chord::Char('q'),
+        KeyCtx::Global,
+        KeyAction::Quit,
+        "Quit",
+        true,
+    ),
+    b(
+        "1-9",
+        Chord::Digit,
+        KeyCtx::Global,
+        KeyAction::JumpMailbox,
+        "Jump to mailbox",
+        true,
+    ),
+    b(
+        "Tab",
+        Chord::Code(SpecialCode::Tab),
+        KeyCtx::Global,
+        KeyAction::FocusForward,
+        "Cycle focus forward",
+        false,
+    ),
+    b(
+        "Shift+Tab",
+        Chord::Code(SpecialCode::BackTab),
+        KeyCtx::Global,
+        KeyAction::FocusBackward,
+        "Cycle focus backward",
+        false,
+    ),
+    b(
+        "?",
+        Chord::Char('?'),
+        KeyCtx::Global,
+        KeyAction::ToggleHelp,
+        "Toggle this help",
+        true,
+    ),
     // Command palette (#0100): `:` or `Ctrl+p` opens a fuzzy finder over the
     // runnable KeyAction catalogue, the recall path for a forgotten chord.
-    short(b(":", Chord::Char(':'), KeyCtx::Global, KeyAction::OpenPalette, "Command palette (run an action by name)", true), "Palette"),
-    b("Ctrl+p", Chord::CtrlChar('p'), KeyCtx::Global, KeyAction::OpenPalette, "Command palette (run an action by name)", false),
+    short(
+        b(
+            ":",
+            Chord::Char(':'),
+            KeyCtx::Global,
+            KeyAction::OpenPalette,
+            "Command palette (run an action by name)",
+            true,
+        ),
+        "Palette",
+    ),
+    b(
+        "Ctrl+p",
+        Chord::CtrlChar('p'),
+        KeyCtx::Global,
+        KeyAction::OpenPalette,
+        "Command palette (run an action by name)",
+        false,
+    ),
     // Zoom is Global by context but Mail-only by action: `is_view_agnostic`
     // leaves it out, so the dispatcher swallows `z` in Contacts and Calendar,
     // where a two-pane split the user can zoom does not exist (#TKT-0044).
-    short(b("z", Chord::Char('z'), KeyCtx::Global, KeyAction::ToggleZoom, "Zoom / unzoom the focused pane", true), "Zoom pane"),
-    b("!", Chord::Char('!'), KeyCtx::Global, KeyAction::ToggleActivityLog, "Toggle activity log", false),
+    short(
+        b(
+            "z",
+            Chord::Char('z'),
+            KeyCtx::Global,
+            KeyAction::ToggleZoom,
+            "Zoom / unzoom the focused pane",
+            true,
+        ),
+        "Zoom pane",
+    ),
+    b(
+        "!",
+        Chord::Char('!'),
+        KeyCtx::Global,
+        KeyAction::ToggleActivityLog,
+        "Toggle activity log",
+        false,
+    ),
     // Send the current draft from any focus: one confirm, and an unapproved
     // draft is approved as part of the send (#0092, merges the old `A` + `x`).
-    short(b("x", Chord::Char('x'), KeyCtx::Global, KeyAction::Send, "Send current draft (approve + send)", true), "Send"),
+    short(
+        b(
+            "x",
+            Chord::Char('x'),
+            KeyCtx::Global,
+            KeyAction::Send,
+            "Send current draft (approve + send)",
+            true,
+        ),
+        "Send",
+    ),
     // Family leaders.
     leader('f', KeyCtx::Global, KeyAction::ArmPrefix),
     leader('c', KeyCtx::Global, KeyAction::ArmPrefix),
@@ -593,93 +701,544 @@ pub static KEYMAP: &[KeyBinding] = &[
     leader('t', KeyCtx::Global, KeyAction::ArmPrefix),
     leader('s', KeyCtx::Global, KeyAction::ArmPrefix),
     // `f` find family (global entry): one FTS-backed search over all mail.
-    p("ff", Chord::Char('f'), 'f', KeyCtx::Global, KeyAction::ServerSearch, "Search all mail (sender, subject, body)", true),
+    p(
+        "ff",
+        Chord::Char('f'),
+        'f',
+        KeyCtx::Global,
+        KeyAction::ServerSearch,
+        "Search all mail (sender, subject, body)",
+        true,
+    ),
     // `c` compose family (global entry).
-    p("cn", Chord::Char('n'), 'c', KeyCtx::Global, KeyAction::NewDraft, "New draft", true),
+    p(
+        "cn",
+        Chord::Char('n'),
+        'c',
+        KeyCtx::Global,
+        KeyAction::NewDraft,
+        "New draft",
+        true,
+    ),
     // Signature management (#0107): the compose family is where the user is
     // already thinking about what goes under their mail. `s` is free in the
     // family (`ss` is the sync leader's, a different prefix), so this collides
     // with nothing.
-    p("cs", Chord::Char('s'), 'c', KeyCtx::Global, KeyAction::OpenSignatures, "Manage signatures", false),
+    p(
+        "cs",
+        Chord::Char('s'),
+        'c',
+        KeyCtx::Global,
+        KeyAction::OpenSignatures,
+        "Manage signatures",
+        false,
+    ),
     // `g` go family (global jumps).
-    p("gm", Chord::Char('m'), 'g', KeyCtx::Global, KeyAction::GoMailbox, "Go to mailboxes (sidebar)", false),
-    pg("ga", Chord::Char('a'), 'g', KeyCtx::Global, Guard::MultiAccount, KeyAction::SwitchAccount, "Switch account", false),
+    p(
+        "gm",
+        Chord::Char('m'),
+        'g',
+        KeyCtx::Global,
+        KeyAction::GoMailbox,
+        "Go to mailboxes (sidebar)",
+        false,
+    ),
+    pg(
+        "ga",
+        Chord::Char('a'),
+        'g',
+        KeyCtx::Global,
+        Guard::MultiAccount,
+        KeyAction::SwitchAccount,
+        "Switch account",
+        false,
+    ),
     // `s` system / sync / accounts family.
-    p("ss", Chord::Char('s'), 's', KeyCtx::Global, KeyAction::QuickSync, "Quick sync", true),
-    p("sS", Chord::Char('S'), 's', KeyCtx::Global, KeyAction::FullSync, "Full sync", false),
-    p("sl", Chord::Char('l'), 's', KeyCtx::Global, KeyAction::OpenActivityOverlay, "Activity log overlay", false),
-    p("sc", Chord::Char('c'), 's', KeyCtx::Global, KeyAction::OpenConfigFile, "Open config.toml in $EDITOR", false),
-    p("sf", Chord::Char('f'), 's', KeyCtx::Global, KeyAction::OpenLogFile, "Open log file in $EDITOR", false),
+    p(
+        "ss",
+        Chord::Char('s'),
+        's',
+        KeyCtx::Global,
+        KeyAction::QuickSync,
+        "Quick sync",
+        true,
+    ),
+    p(
+        "sS",
+        Chord::Char('S'),
+        's',
+        KeyCtx::Global,
+        KeyAction::FullSync,
+        "Full sync",
+        false,
+    ),
+    p(
+        "sl",
+        Chord::Char('l'),
+        's',
+        KeyCtx::Global,
+        KeyAction::OpenActivityOverlay,
+        "Activity log overlay",
+        false,
+    ),
+    p(
+        "sc",
+        Chord::Char('c'),
+        's',
+        KeyCtx::Global,
+        KeyAction::OpenConfigFile,
+        "Open config.toml in $EDITOR",
+        false,
+    ),
+    p(
+        "sf",
+        Chord::Char('f'),
+        's',
+        KeyCtx::Global,
+        KeyAction::OpenLogFile,
+        "Open log file in $EDITOR",
+        false,
+    ),
     // View switcher leader (#0033): Space opens the leader, then m/c/a picks a
     // view. Manual (view-agnostic) so it works from every pane and view.
     leader(' ', KeyCtx::Global, KeyAction::Manual),
-    row("Space m", Chord::Char('m'), Some(' '), KeyCtx::Global, Guard::None, KeyAction::SwitchView, "Switch to Mail view", true),
-    row("Space c", Chord::Char('c'), Some(' '), KeyCtx::Global, Guard::None, KeyAction::SwitchView, "Switch to Contacts view", true),
-    row("Space a", Chord::Char('a'), Some(' '), KeyCtx::Global, Guard::None, KeyAction::SwitchView, "Switch to Calendar view", true),
+    row(
+        "Space m",
+        Chord::Char('m'),
+        Some(' '),
+        KeyCtx::Global,
+        Guard::None,
+        KeyAction::SwitchView,
+        "Switch to Mail view",
+        true,
+    ),
+    row(
+        "Space c",
+        Chord::Char('c'),
+        Some(' '),
+        KeyCtx::Global,
+        Guard::None,
+        KeyAction::SwitchView,
+        "Switch to Contacts view",
+        true,
+    ),
+    row(
+        "Space a",
+        Chord::Char('a'),
+        Some(' '),
+        KeyCtx::Global,
+        Guard::None,
+        KeyAction::SwitchView,
+        "Switch to Calendar view",
+        true,
+    ),
     // -- MESSAGE (list, headers, body) ------------------------------------
     // Actions on the current message, live in all three reading panes so
     // acting on what you are reading never needs a focus hop (#0092). The
     // dispatcher tries this context after the focused pane's own context, so a
     // pane keeps its scroll keys (`j`/`k`) while sharing every message action.
-    short(bg("J / K", Chord::Char('J'), KeyCtx::Message, Guard::NonEmptyList, KeyAction::NextMessage, "Next / previous message", true), "Next/prev"),
-    bg("", Chord::Char('K'), KeyCtx::Message, Guard::NonEmptyList, KeyAction::PrevMessage, "", false),
-    short(bg("Enter / e", Chord::CharOrCode('e', SpecialCode::Enter), KeyCtx::Message, Guard::NonEmptyList, KeyAction::OpenEditor, "Open in editor (mail read-only)", true), "Open (read-only)"),
-    bg("r", Chord::Char('r'), KeyCtx::Message, Guard::NonEmptyList, KeyAction::Reply, "Reply", true),
-    bg("a", Chord::Char('a'), KeyCtx::Message, Guard::NonEmptyList, KeyAction::Archive, "Archive", true),
-    bg("d", Chord::Char('d'), KeyCtx::Message, Guard::NonEmptyList, KeyAction::Delete, "Delete", true),
-    bg("u", Chord::Char('u'), KeyCtx::Message, Guard::NonEmptyList, KeyAction::ToggleRead, "Toggle read/unread", false),
-    bg("*", Chord::Char('*'), KeyCtx::Message, Guard::NonEmptyList, KeyAction::ToggleFlag, "Toggle flag/star", false),
-    bg("M", Chord::Char('M'), KeyCtx::Message, Guard::NonEmptyList, KeyAction::MovePicker, "Move to mailbox (fuzzy picker)", false),
-    bg("y", Chord::Char('y'), KeyCtx::Message, Guard::NonEmptyList, KeyAction::CopyMessageRef, "Copy selector (mp://)", false),
-    short(b("Esc", Chord::Code(SpecialCode::Esc), KeyCtx::Message, KeyAction::EscMessage, "Clear selection / return to list", true), "Back"),
+    short(
+        bg(
+            "J / K",
+            Chord::Char('J'),
+            KeyCtx::Message,
+            Guard::NonEmptyList,
+            KeyAction::NextMessage,
+            "Next / previous message",
+            true,
+        ),
+        "Next/prev",
+    ),
+    bg(
+        "",
+        Chord::Char('K'),
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::PrevMessage,
+        "",
+        false,
+    ),
+    short(
+        bg(
+            "Enter / e",
+            Chord::CharOrCode('e', SpecialCode::Enter),
+            KeyCtx::Message,
+            Guard::NonEmptyList,
+            KeyAction::OpenEditor,
+            "Open in editor (mail read-only)",
+            true,
+        ),
+        "Open (read-only)",
+    ),
+    bg(
+        "r",
+        Chord::Char('r'),
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::Reply,
+        "Reply",
+        true,
+    ),
+    bg(
+        "a",
+        Chord::Char('a'),
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::Archive,
+        "Archive",
+        true,
+    ),
+    bg(
+        "d",
+        Chord::Char('d'),
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::Delete,
+        "Delete",
+        true,
+    ),
+    bg(
+        "u",
+        Chord::Char('u'),
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::ToggleRead,
+        "Toggle read/unread",
+        false,
+    ),
+    bg(
+        "*",
+        Chord::Char('*'),
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::ToggleFlag,
+        "Toggle flag/star",
+        false,
+    ),
+    bg(
+        "M",
+        Chord::Char('M'),
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::MovePicker,
+        "Move to mailbox (fuzzy picker)",
+        false,
+    ),
+    bg(
+        "y",
+        Chord::Char('y'),
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::CopyMessageRef,
+        "Copy selector (mp://)",
+        false,
+    ),
+    short(
+        b(
+            "Esc",
+            Chord::Code(SpecialCode::Esc),
+            KeyCtx::Message,
+            KeyAction::EscMessage,
+            "Clear selection / return to list",
+            true,
+        ),
+        "Back",
+    ),
     // `g` go-family continuations that apply to every reading pane.
-    p("gj / gk", Chord::Char('j'), 'g', KeyCtx::Message, KeyAction::NextMessage, "Next / previous message", false),
-    p("", Chord::Char('k'), 'g', KeyCtx::Message, KeyAction::PrevMessage, "", false),
+    p(
+        "gj / gk",
+        Chord::Char('j'),
+        'g',
+        KeyCtx::Message,
+        KeyAction::NextMessage,
+        "Next / previous message",
+        false,
+    ),
+    p(
+        "",
+        Chord::Char('k'),
+        'g',
+        KeyCtx::Message,
+        KeyAction::PrevMessage,
+        "",
+        false,
+    ),
     // `f` find family: narrow the current list (metadata, incremental).
-    p("fm", Chord::Char('m'), 'f', KeyCtx::Message, KeyAction::FilterMetadata, "Filter the current list", false),
+    p(
+        "fm",
+        Chord::Char('m'),
+        'f',
+        KeyCtx::Message,
+        KeyAction::FilterMetadata,
+        "Filter the current list",
+        false,
+    ),
     // `c` compose family (message-scoped continuations).
-    pg("cr", Chord::Char('r'), 'c', KeyCtx::Message, Guard::NonEmptyList, KeyAction::Reply, "Reply", false),
-    pg("ca", Chord::Char('a'), 'c', KeyCtx::Message, Guard::NonEmptyList, KeyAction::ReplyAll, "Reply all", false),
-    pg("cf", Chord::Char('f'), 'c', KeyCtx::Message, Guard::NonEmptyList, KeyAction::Forward, "Forward", false),
+    pg(
+        "cr",
+        Chord::Char('r'),
+        'c',
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::Reply,
+        "Reply",
+        false,
+    ),
+    pg(
+        "ca",
+        Chord::Char('a'),
+        'c',
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::ReplyAll,
+        "Reply all",
+        false,
+    ),
+    pg(
+        "cf",
+        Chord::Char('f'),
+        'c',
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::Forward,
+        "Forward",
+        false,
+    ),
     // `t` thread / attachment family.
-    pg("tt", Chord::Char('t'), 't', KeyCtx::Message, Guard::NonEmptyList, KeyAction::OpenThread, "Show conversation (thread)", false),
-    pg("to", Chord::Char('o'), 't', KeyCtx::Message, Guard::NonEmptyList, KeyAction::OpenAttachment, "Open attachment", false),
-    pg("ts", Chord::Char('s'), 't', KeyCtx::Message, Guard::NonEmptyList, KeyAction::SaveAttachment, "Save attachment to disk", false),
-    pg("tb", Chord::Char('b'), 't', KeyCtx::Message, Guard::NonEmptyList, KeyAction::OpenInBrowser, "Open HTML in browser", false),
-    pg("tv", Chord::Char('v'), 't', KeyCtx::Message, Guard::NonEmptyList, KeyAction::Rsvp, "RSVP to invitation (Accept/Tentative/Decline)", false),
+    pg(
+        "tt",
+        Chord::Char('t'),
+        't',
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::OpenThread,
+        "Show conversation (thread)",
+        false,
+    ),
+    pg(
+        "to",
+        Chord::Char('o'),
+        't',
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::OpenAttachment,
+        "Open attachment",
+        false,
+    ),
+    pg(
+        "ts",
+        Chord::Char('s'),
+        't',
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::SaveAttachment,
+        "Save attachment to disk",
+        false,
+    ),
+    pg(
+        "tb",
+        Chord::Char('b'),
+        't',
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::OpenInBrowser,
+        "Open HTML in browser",
+        false,
+    ),
+    pg(
+        "tv",
+        Chord::Char('v'),
+        't',
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::Rsvp,
+        "RSVP to invitation (Accept/Tentative/Decline)",
+        false,
+    ),
     // -- SIDEBAR ----------------------------------------------------------
-    b("j/k", Chord::CharOrCode('j', SpecialCode::Down), KeyCtx::Sidebar, KeyAction::SidebarDown, "Navigate mailboxes", true),
-    b("", Chord::CharOrCode('k', SpecialCode::Up), KeyCtx::Sidebar, KeyAction::SidebarUp, "", false),
-    b("Enter", Chord::Code(SpecialCode::Enter), KeyCtx::Sidebar, KeyAction::SidebarSelect, "Select mailbox", true),
+    b(
+        "j/k",
+        Chord::CharOrCode('j', SpecialCode::Down),
+        KeyCtx::Sidebar,
+        KeyAction::SidebarDown,
+        "Navigate mailboxes",
+        true,
+    ),
+    b(
+        "",
+        Chord::CharOrCode('k', SpecialCode::Up),
+        KeyCtx::Sidebar,
+        KeyAction::SidebarUp,
+        "",
+        false,
+    ),
+    b(
+        "Enter",
+        Chord::Code(SpecialCode::Enter),
+        KeyCtx::Sidebar,
+        KeyAction::SidebarSelect,
+        "Select mailbox",
+        true,
+    ),
     // -- EMAIL LIST -------------------------------------------------------
     // List-only affordances: cursor motion, selection, the go-family jumps and
     // the two find-family list filters. Every message action lives in the
     // shared MESSAGE context above, so this section is just what only the list
     // can do. Most rows guard on a non-empty list (the old empty-list early
     // return); the flagged filter does not, since it can empty the list itself.
-    short(bg("j/k", Chord::CharOrCode('j', SpecialCode::Down), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListDown, "Navigate emails", true), "Navigate"),
-    bg("", Chord::CharOrCode('k', SpecialCode::Up), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListUp, "", false),
-    row("", Chord::Char('g'), Some('g'), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListTop, "", false),
-    bg("gg / G", Chord::Char('G'), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListBottom, "Jump to top / bottom", false),
+    short(
+        bg(
+            "j/k",
+            Chord::CharOrCode('j', SpecialCode::Down),
+            KeyCtx::List,
+            Guard::NonEmptyList,
+            KeyAction::ListDown,
+            "Navigate emails",
+            true,
+        ),
+        "Navigate",
+    ),
+    bg(
+        "",
+        Chord::CharOrCode('k', SpecialCode::Up),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::ListUp,
+        "",
+        false,
+    ),
+    row(
+        "",
+        Chord::Char('g'),
+        Some('g'),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::ListTop,
+        "",
+        false,
+    ),
+    bg(
+        "gg / G",
+        Chord::Char('G'),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::ListBottom,
+        "Jump to top / bottom",
+        false,
+    ),
     // Paging by the list pane's visible height. Ctrl+d / Ctrl+u match the body
     // pane's half-page keys; bare `d`/`u` stay delete / toggle-read (MESSAGE).
-    bg("Ctrl+d / Ctrl+u", Chord::CtrlChar('d'), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListHalfDown, "Half-page down / up", false),
-    bg("", Chord::CtrlChar('u'), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListHalfUp, "", false),
-    bg("PgDn / PgUp", Chord::Code(SpecialCode::PageDown), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListPageDown, "Page down / up", false),
-    bg("", Chord::Code(SpecialCode::PageUp), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListPageUp, "", false),
-    bg("", Chord::Code(SpecialCode::Home), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListTop, "", false),
-    bg("Home / End", Chord::Code(SpecialCode::End), KeyCtx::List, Guard::NonEmptyList, KeyAction::ListBottom, "Jump to top / bottom", false),
+    bg(
+        "Ctrl+d / Ctrl+u",
+        Chord::CtrlChar('d'),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::ListHalfDown,
+        "Half-page down / up",
+        false,
+    ),
+    bg(
+        "",
+        Chord::CtrlChar('u'),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::ListHalfUp,
+        "",
+        false,
+    ),
+    bg(
+        "PgDn / PgUp",
+        Chord::Code(SpecialCode::PageDown),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::ListPageDown,
+        "Page down / up",
+        false,
+    ),
+    bg(
+        "",
+        Chord::Code(SpecialCode::PageUp),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::ListPageUp,
+        "",
+        false,
+    ),
+    bg(
+        "",
+        Chord::Code(SpecialCode::Home),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::ListTop,
+        "",
+        false,
+    ),
+    bg(
+        "Home / End",
+        Chord::Code(SpecialCode::End),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::ListBottom,
+        "Jump to top / bottom",
+        false,
+    ),
     // `gt` ("go to date") rather than `gd`: `d` is delete in the message
     // context, and `gd` resolving against a mistyped delete is exactly what
     // `no_duplicate_live_dispatch_per_context` refuses.
-    row("gt", Chord::Char('t'), Some('g'), KeyCtx::List, Guard::NonEmptyList, KeyAction::JumpToDate, "Jump to date (e.g. last week)", false),
-    short(bg("v", Chord::Char('v'), KeyCtx::List, Guard::NonEmptyList, KeyAction::ToggleSelect, "Toggle selection", true), "Select"),
-    bg("Ctrl+a", Chord::CtrlChar('a'), KeyCtx::List, Guard::NonEmptyList, KeyAction::SelectAllVisible, "Select all visible", false),
+    row(
+        "gt",
+        Chord::Char('t'),
+        Some('g'),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::JumpToDate,
+        "Jump to date (e.g. last week)",
+        false,
+    ),
+    short(
+        bg(
+            "v",
+            Chord::Char('v'),
+            KeyCtx::List,
+            Guard::NonEmptyList,
+            KeyAction::ToggleSelect,
+            "Toggle selection",
+            true,
+        ),
+        "Select",
+    ),
+    bg(
+        "Ctrl+a",
+        Chord::CtrlChar('a'),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::SelectAllVisible,
+        "Select all visible",
+        false,
+    ),
     // `ce` edit recipients, Drafts only (the compose family's list-scoped tail).
-    pg("ce", Chord::Char('e'), 'c', KeyCtx::List, Guard::DraftsOnly, KeyAction::EditRecipients, "Edit recipients (Drafts only)", false),
+    pg(
+        "ce",
+        Chord::Char('e'),
+        'c',
+        KeyCtx::List,
+        Guard::DraftsOnly,
+        KeyAction::EditRecipients,
+        "Edit recipients (Drafts only)",
+        false,
+    ),
     // `ta` attach-file, Drafts only (the thread/attachment family's list tail,
     // #0098): prompts for a path and appends it to the draft's `attachments:`.
-    pg("ta", Chord::Char('a'), 't', KeyCtx::List, Guard::DraftsOnly, KeyAction::AttachFile, "Attach file to draft (Drafts only)", false),
+    pg(
+        "ta",
+        Chord::Char('a'),
+        't',
+        KeyCtx::List,
+        Guard::DraftsOnly,
+        KeyAction::AttachFile,
+        "Attach file to draft (Drafts only)",
+        false,
+    ),
     // The draft-status trio, restored to the compose family after #0092
     // dropped the flat `A`/`D`/`X` keys. Uppercase continuations so they stay
     // clear of the lowercase compose surface (`cn`/`cr`/`ca`/`cf`/`ce`) and
@@ -687,21 +1246,79 @@ pub static KEYMAP: &[KeyBinding] = &[
     // List + DraftsOnly: they act on the cursor draft (or, when a selection is
     // live, on the batch, via the confirm dialog in `keys.rs`), so they are
     // meaningless without the Drafts list focused.
-    pg("cA", Chord::Char('A'), 'c', KeyCtx::List, Guard::DraftsOnly, KeyAction::Approve, "Approve draft (Drafts only)", false),
-    pg("cD", Chord::Char('D'), 'c', KeyCtx::List, Guard::DraftsOnly, KeyAction::MarkDraft, "Unapprove, back to draft (Drafts only)", false),
-    pg("cX", Chord::Char('X'), 'c', KeyCtx::List, Guard::DraftsOnly, KeyAction::SendAll, "Send all approved drafts (Drafts only)", false),
+    pg(
+        "cA",
+        Chord::Char('A'),
+        'c',
+        KeyCtx::List,
+        Guard::DraftsOnly,
+        KeyAction::Approve,
+        "Approve draft (Drafts only)",
+        false,
+    ),
+    pg(
+        "cD",
+        Chord::Char('D'),
+        'c',
+        KeyCtx::List,
+        Guard::DraftsOnly,
+        KeyAction::MarkDraft,
+        "Unapprove, back to draft (Drafts only)",
+        false,
+    ),
+    pg(
+        "cX",
+        Chord::Char('X'),
+        'c',
+        KeyCtx::List,
+        Guard::DraftsOnly,
+        KeyAction::SendAll,
+        "Send all approved drafts (Drafts only)",
+        false,
+    ),
     // `fF` flagged-only filter (the find family's list-scoped tail). No
     // NonEmptyList guard: the filter can empty the list and must be able to
     // undo that.
-    p("fF", Chord::Char('F'), 'f', KeyCtx::List, KeyAction::ToggleFlaggedFilter, "Show flagged only (toggle)", false),
+    p(
+        "fF",
+        Chord::Char('F'),
+        'f',
+        KeyCtx::List,
+        KeyAction::ToggleFlaggedFilter,
+        "Show flagged only (toggle)",
+        false,
+    ),
     // -- SERVER SEARCH (overlay-internal; hand-dispatched) ----------------
     manual("j/k", KeyCtx::ServerSearch, "Navigate results", true),
-    manual("gg / G", KeyCtx::ServerSearch, "Jump to top / bottom", false),
+    manual(
+        "gg / G",
+        KeyCtx::ServerSearch,
+        "Jump to top / bottom",
+        false,
+    ),
     manual("d/u", KeyCtx::ServerSearch, "Half-page down / up", false),
-    short(manual("Enter", KeyCtx::ServerSearch, "Open in the mail list", true), "Open"),
-    manual("e", KeyCtx::ServerSearch, "Open read-only in $EDITOR", false),
-    manual("y", KeyCtx::ServerSearch, "Copy the Markdown rendition path", false),
-    manual("f", KeyCtx::ServerSearch, "Fetch a server-only hit into the store", false),
+    short(
+        manual("Enter", KeyCtx::ServerSearch, "Open in the mail list", true),
+        "Open",
+    ),
+    manual(
+        "e",
+        KeyCtx::ServerSearch,
+        "Open read-only in $EDITOR",
+        false,
+    ),
+    manual(
+        "y",
+        KeyCtx::ServerSearch,
+        "Copy the Markdown rendition path",
+        false,
+    ),
+    manual(
+        "f",
+        KeyCtx::ServerSearch,
+        "Fetch a server-only hit into the store",
+        false,
+    ),
     manual("r / R", KeyCtx::ServerSearch, "Reply / Reply-all", false),
     manual("w", KeyCtx::ServerSearch, "Forward", false),
     manual("a", KeyCtx::ServerSearch, "Archive", false),
@@ -714,45 +1331,259 @@ pub static KEYMAP: &[KeyBinding] = &[
     // Read-only list + fuzzy search + detail. Live only in the Contacts view;
     // dispatched via the pane context like the Mail list. The `/` search input
     // itself is hand-dispatched (free-text) once armed by ContactsSearch.
-    b("j/k", Chord::CharOrCode('j', SpecialCode::Down), KeyCtx::Contacts, KeyAction::ContactsDown, "Navigate contacts", true),
-    b("", Chord::CharOrCode('k', SpecialCode::Up), KeyCtx::Contacts, KeyAction::ContactsUp, "", false),
-    row("", Chord::PrefixLeader('g'), None, KeyCtx::Contacts, Guard::None, KeyAction::Manual, "", false),
-    row("", Chord::Char('g'), Some('g'), KeyCtx::Contacts, Guard::None, KeyAction::ContactsTop, "", false),
-    b("gg / G", Chord::Char('G'), KeyCtx::Contacts, KeyAction::ContactsBottom, "Jump to top / bottom", false),
-    b("/", Chord::Char('/'), KeyCtx::Contacts, KeyAction::ContactsSearch, "Fuzzy search", true),
-    short(b("Enter / n", Chord::Code(SpecialCode::Enter), KeyCtx::Contacts, KeyAction::ContactsCompose, "Compose to contact", true), "Compose"),
-    b("", Chord::Char('n'), KeyCtx::Contacts, KeyAction::ContactsCompose, "", false),
-    short(b("v", Chord::Char('v'), KeyCtx::Contacts, KeyAction::ContactsVcard, "Send contact as vCard", true), "Send vCard"),
+    b(
+        "j/k",
+        Chord::CharOrCode('j', SpecialCode::Down),
+        KeyCtx::Contacts,
+        KeyAction::ContactsDown,
+        "Navigate contacts",
+        true,
+    ),
+    b(
+        "",
+        Chord::CharOrCode('k', SpecialCode::Up),
+        KeyCtx::Contacts,
+        KeyAction::ContactsUp,
+        "",
+        false,
+    ),
+    row(
+        "",
+        Chord::PrefixLeader('g'),
+        None,
+        KeyCtx::Contacts,
+        Guard::None,
+        KeyAction::Manual,
+        "",
+        false,
+    ),
+    row(
+        "",
+        Chord::Char('g'),
+        Some('g'),
+        KeyCtx::Contacts,
+        Guard::None,
+        KeyAction::ContactsTop,
+        "",
+        false,
+    ),
+    b(
+        "gg / G",
+        Chord::Char('G'),
+        KeyCtx::Contacts,
+        KeyAction::ContactsBottom,
+        "Jump to top / bottom",
+        false,
+    ),
+    b(
+        "/",
+        Chord::Char('/'),
+        KeyCtx::Contacts,
+        KeyAction::ContactsSearch,
+        "Fuzzy search",
+        true,
+    ),
+    short(
+        b(
+            "Enter / n",
+            Chord::Code(SpecialCode::Enter),
+            KeyCtx::Contacts,
+            KeyAction::ContactsCompose,
+            "Compose to contact",
+            true,
+        ),
+        "Compose",
+    ),
+    b(
+        "",
+        Chord::Char('n'),
+        KeyCtx::Contacts,
+        KeyAction::ContactsCompose,
+        "",
+        false,
+    ),
+    short(
+        b(
+            "v",
+            Chord::Char('v'),
+            KeyCtx::Contacts,
+            KeyAction::ContactsVcard,
+            "Send contact as vCard",
+            true,
+        ),
+        "Send vCard",
+    ),
     // `c` is free in this context: the Global `c` is a leader continuation
     // (`Space c`), and the mail-list `c` (edit recipients) is KeyCtx::List.
-    short(b("c", Chord::Char('c'), KeyCtx::Contacts, KeyAction::ContactsCopyEmail, "Copy email address", true), "Copy email"),
-    short(b("r", Chord::Char('r'), KeyCtx::Contacts, KeyAction::ContactsRefresh, "Refresh contact index", true), "Refresh"),
+    short(
+        b(
+            "c",
+            Chord::Char('c'),
+            KeyCtx::Contacts,
+            KeyAction::ContactsCopyEmail,
+            "Copy email address",
+            true,
+        ),
+        "Copy email",
+    ),
+    short(
+        b(
+            "r",
+            Chord::Char('r'),
+            KeyCtx::Contacts,
+            KeyAction::ContactsRefresh,
+            "Refresh contact index",
+            true,
+        ),
+        "Refresh",
+    ),
     // -- CALENDAR (#0034) -------------------------------------------------
     // Local-first agenda over the invites on disk. Live only in the Calendar
     // view; dispatched via the pane context like the Contacts list. `V` is the
     // same RSVP mnemonic as the mail list / body panes (separate context row).
-    b("j/k", Chord::CharOrCode('j', SpecialCode::Down), KeyCtx::Calendar, KeyAction::CalendarDown, "Navigate events", true),
-    b("", Chord::CharOrCode('k', SpecialCode::Up), KeyCtx::Calendar, KeyAction::CalendarUp, "", false),
-    row("", Chord::PrefixLeader('g'), None, KeyCtx::Calendar, Guard::None, KeyAction::Manual, "", false),
-    row("", Chord::Char('g'), Some('g'), KeyCtx::Calendar, Guard::None, KeyAction::CalendarTop, "", false),
-    b("gg / G", Chord::Char('G'), KeyCtx::Calendar, KeyAction::CalendarBottom, "Jump to top / bottom", false),
-    short(b("Enter / e", Chord::CharOrCode('e', SpecialCode::Enter), KeyCtx::Calendar, KeyAction::CalendarOpenSource, "Open the invite email in $EDITOR", true), "Open invite email"),
-    short(b("V", Chord::Char('V'), KeyCtx::Calendar, KeyAction::CalendarRsvp, "RSVP to invitation (Accept/Tentative/Decline)", true), "RSVP"),
-    short(b("t", Chord::Char('t'), KeyCtx::Calendar, KeyAction::CalendarToggleScope, "Show past events / upcoming only", true), "Past / upcoming"),
-    short(b("r", Chord::Char('r'), KeyCtx::Calendar, KeyAction::CalendarRefresh, "Refresh events from disk", true), "Refresh"),
+    b(
+        "j/k",
+        Chord::CharOrCode('j', SpecialCode::Down),
+        KeyCtx::Calendar,
+        KeyAction::CalendarDown,
+        "Navigate events",
+        true,
+    ),
+    b(
+        "",
+        Chord::CharOrCode('k', SpecialCode::Up),
+        KeyCtx::Calendar,
+        KeyAction::CalendarUp,
+        "",
+        false,
+    ),
+    row(
+        "",
+        Chord::PrefixLeader('g'),
+        None,
+        KeyCtx::Calendar,
+        Guard::None,
+        KeyAction::Manual,
+        "",
+        false,
+    ),
+    row(
+        "",
+        Chord::Char('g'),
+        Some('g'),
+        KeyCtx::Calendar,
+        Guard::None,
+        KeyAction::CalendarTop,
+        "",
+        false,
+    ),
+    b(
+        "gg / G",
+        Chord::Char('G'),
+        KeyCtx::Calendar,
+        KeyAction::CalendarBottom,
+        "Jump to top / bottom",
+        false,
+    ),
+    short(
+        b(
+            "Enter / e",
+            Chord::CharOrCode('e', SpecialCode::Enter),
+            KeyCtx::Calendar,
+            KeyAction::CalendarOpenSource,
+            "Open the invite email in $EDITOR",
+            true,
+        ),
+        "Open invite email",
+    ),
+    short(
+        b(
+            "V",
+            Chord::Char('V'),
+            KeyCtx::Calendar,
+            KeyAction::CalendarRsvp,
+            "RSVP to invitation (Accept/Tentative/Decline)",
+            true,
+        ),
+        "RSVP",
+    ),
+    short(
+        b(
+            "t",
+            Chord::Char('t'),
+            KeyCtx::Calendar,
+            KeyAction::CalendarToggleScope,
+            "Show past events / upcoming only",
+            true,
+        ),
+        "Past / upcoming",
+    ),
+    short(
+        b(
+            "r",
+            Chord::Char('r'),
+            KeyCtx::Calendar,
+            KeyAction::CalendarRefresh,
+            "Refresh events from disk",
+            true,
+        ),
+        "Refresh",
+    ),
     // -- HEADERS ----------------------------------------------------------
     // The headers pane scrolls; every message action (open attachment, browser,
     // reply, triage, next/prev, Esc) comes from the shared MESSAGE context, so
     // there are no longer hidden pane-local rows here (#0092).
-    b("j/k", Chord::CharOrCode('j', SpecialCode::Down), KeyCtx::Headers, KeyAction::HeadersDown, "Scroll headers", true),
-    b("", Chord::CharOrCode('k', SpecialCode::Up), KeyCtx::Headers, KeyAction::HeadersUp, "", false),
+    b(
+        "j/k",
+        Chord::CharOrCode('j', SpecialCode::Down),
+        KeyCtx::Headers,
+        KeyAction::HeadersDown,
+        "Scroll headers",
+        true,
+    ),
+    b(
+        "",
+        Chord::CharOrCode('k', SpecialCode::Up),
+        KeyCtx::Headers,
+        KeyAction::HeadersUp,
+        "",
+        false,
+    ),
     // -- BODY -------------------------------------------------------------
     // Bare `j`/`k` scroll the body; bare `d`/`u` are delete / toggle-read from
     // the MESSAGE context, so half-page scroll moved to Ctrl+d / Ctrl+u (#0092).
-    b("j/k", Chord::CharOrCode('j', SpecialCode::Down), KeyCtx::Preview, KeyAction::PreviewDown, "Scroll line by line", true),
-    b("", Chord::CharOrCode('k', SpecialCode::Up), KeyCtx::Preview, KeyAction::PreviewUp, "", false),
-    b("Ctrl+d / Ctrl+u", Chord::CtrlChar('d'), KeyCtx::Preview, KeyAction::PreviewHalfDown, "Half-page down / up", false),
-    b("", Chord::CtrlChar('u'), KeyCtx::Preview, KeyAction::PreviewHalfUp, "", false),
+    b(
+        "j/k",
+        Chord::CharOrCode('j', SpecialCode::Down),
+        KeyCtx::Preview,
+        KeyAction::PreviewDown,
+        "Scroll line by line",
+        true,
+    ),
+    b(
+        "",
+        Chord::CharOrCode('k', SpecialCode::Up),
+        KeyCtx::Preview,
+        KeyAction::PreviewUp,
+        "",
+        false,
+    ),
+    b(
+        "Ctrl+d / Ctrl+u",
+        Chord::CtrlChar('d'),
+        KeyCtx::Preview,
+        KeyAction::PreviewHalfDown,
+        "Half-page down / up",
+        false,
+    ),
+    b(
+        "",
+        Chord::CtrlChar('u'),
+        KeyCtx::Preview,
+        KeyAction::PreviewHalfUp,
+        "",
+        false,
+    ),
     // -- ACTIVITY LOG (overlay-internal; hand-dispatched) -----------------
     manual("j/k", KeyCtx::Activity, "Scroll line by line", true),
     manual("d/u", KeyCtx::Activity, "Half-page down / up", false),
@@ -930,7 +1761,11 @@ pub fn dump_json() -> String {
             out.push_str(if bi + 1 < entries.len() { ",\n" } else { "\n" });
         }
         out.push_str("    ]\n");
-        out.push_str(if si + 1 < sections.len() { "  },\n" } else { "  }\n" });
+        out.push_str(if si + 1 < sections.len() {
+            "  },\n"
+        } else {
+            "  }\n"
+        });
     }
     out.push_str("]\n");
     out
@@ -955,7 +1790,14 @@ mod tests {
     /// rows that need one carry one and no row can end up label-less.
     #[test]
     fn a_binding_without_a_short_label_falls_back_to_its_description() {
-        let plain = b("q", Chord::Char('q'), KeyCtx::Global, KeyAction::Quit, "Quit", true);
+        let plain = b(
+            "q",
+            Chord::Char('q'),
+            KeyCtx::Global,
+            KeyAction::Quit,
+            "Quit",
+            true,
+        );
         assert_eq!(plain.short, "");
         assert_eq!(plain.hint_label(), "Quit");
 
@@ -967,7 +1809,11 @@ mod tests {
             if kb.desc.is_empty() {
                 continue;
             }
-            assert!(!kb.hint_label().is_empty(), "{:?} has no hint label", kb.keys);
+            assert!(
+                !kb.hint_label().is_empty(),
+                "{:?} has no hint label",
+                kb.keys
+            );
             assert!(
                 kb.short.is_empty() || kb.short.len() < kb.desc.len(),
                 "{:?}: the short label {:?} is not shorter than {:?}",
@@ -1086,7 +1932,11 @@ mod tests {
                     if let Some(second) = hits.next() {
                         panic!(
                             "key {:?} (pending {:?}) matches two rows in {:?}: {:?} and {:?}",
-                            ev, pending, ctx, first.unwrap().keys, second.keys
+                            ev,
+                            pending,
+                            ctx,
+                            first.unwrap().keys,
+                            second.keys
                         );
                     }
                 }
@@ -1120,7 +1970,10 @@ mod tests {
         assert!(dump.contains("## GLOBAL"));
         assert!(dump.contains("## EMAIL LIST"));
         let rows = dump.lines().filter(|l| l.starts_with("| `")).count();
-        assert!(rows >= 30, "expected the full keymap in the dump, got {rows} rows");
+        assert!(
+            rows >= 30,
+            "expected the full keymap in the dump, got {rows} rows"
+        );
         for line in dump.lines().filter(|l| l.starts_with("| `")) {
             assert_eq!(line.matches('|').count(), 3, "malformed table row: {line}");
         }
@@ -1149,8 +2002,10 @@ mod tests {
         // Both leaders (g for list jumps, Space for the view switcher) are
         // catalogued as prefixed continuation data plus a PrefixLeader row.
         for leader in [' ', 'f', 'c', 'g', 't', 's'] {
-            let combos: Vec<_> =
-                KEYMAP.iter().filter(|kb| kb.prefix == Some(leader)).collect();
+            let combos: Vec<_> = KEYMAP
+                .iter()
+                .filter(|kb| kb.prefix == Some(leader))
+                .collect();
             assert!(
                 !combos.is_empty(),
                 "leader {leader:?} must be represented as prefixed data"
@@ -1169,9 +2024,15 @@ mod tests {
     /// of the view-switcher-on-Space decision.)
     #[test]
     fn only_the_system_family_leader_is_view_agnostic() {
-        assert!(leader_is_view_agnostic('s'), "`s` carries config/log/activity");
+        assert!(
+            leader_is_view_agnostic('s'),
+            "`s` carries config/log/activity"
+        );
         for l in ['f', 'c', 'g', 't'] {
-            assert!(!leader_is_view_agnostic(l), "family `{l}` must stay Mail-only");
+            assert!(
+                !leader_is_view_agnostic(l),
+                "family `{l}` must stay Mail-only"
+            );
         }
     }
 
@@ -1303,7 +2164,10 @@ mod tests {
                 "{action:?} is not palette-runnable but was catalogued"
             );
             assert!(!label.is_empty(), "{action:?} has an empty palette label");
-            assert!(!seen.contains(action), "{action:?} appears twice in the palette");
+            assert!(
+                !seen.contains(action),
+                "{action:?} appears twice in the palette"
+            );
             seen.push(*action);
         }
 
@@ -1324,7 +2188,10 @@ mod tests {
 
         // A representative message action is present exactly once, labelled by
         // its flat row (not the `cr` compose chord).
-        let reply: Vec<_> = actions.iter().filter(|(a, _)| *a == KeyAction::Reply).collect();
+        let reply: Vec<_> = actions
+            .iter()
+            .filter(|(a, _)| *a == KeyAction::Reply)
+            .collect();
         assert_eq!(reply.len(), 1, "Reply must be catalogued once");
         assert_eq!(reply[0].1, "Reply");
     }
@@ -1342,13 +2209,20 @@ mod tests {
             (code(KeyCode::Home), KeyAction::ListTop),
             (code(KeyCode::End), KeyAction::ListBottom),
         ] {
-            assert_eq!(resolve(KeyCtx::List, ev, None, &allow), Some(want), "{ev:?}");
+            assert_eq!(
+                resolve(KeyCtx::List, ev, None, &allow),
+                Some(want),
+                "{ev:?}"
+            );
             // Nothing earlier in the dispatch order shadows them.
             assert_eq!(resolve(KeyCtx::Global, ev, None, &allow), None, "{ev:?}");
         }
         // An empty list leaves them inert like the other cursor keys.
         let non_empty_denied = |g: Guard| g != Guard::NonEmptyList;
-        assert_eq!(resolve(KeyCtx::List, ctrl('d'), None, &non_empty_denied), None);
+        assert_eq!(
+            resolve(KeyCtx::List, ctrl('d'), None, &non_empty_denied),
+            None
+        );
     }
 
     /// Guarded rows respect the live guard evaluation.

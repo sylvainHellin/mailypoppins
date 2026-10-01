@@ -128,8 +128,7 @@ pub fn view(app: &mut App, frame: &mut Frame) {
             // #0071 sync-failure block needs when there is a failure to show.
             // The headers pane on the right is sized from the same number,
             // which is what keeps the two panes aligned.
-            let sidebar_height =
-                (app.mailboxes.len() as u16) + 3 + sidebar::sync_health_rows(app);
+            let sidebar_height = (app.mailboxes.len() as u16) + 3 + sidebar::sync_health_rows(app);
             let left = split_left_column(app, left_col, sidebar_height);
 
             sidebar::render_sidebar(app, frame, left.sidebar);
@@ -153,7 +152,10 @@ pub fn view(app: &mut App, frame: &mut Frame) {
             // split, with only the view switcher pinned below.
             let left_rows = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(0), Constraint::Length(views::SWITCHER_HEIGHT)])
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Length(views::SWITCHER_HEIGHT),
+                ])
                 .split(left_col);
             if app.view == View::Contacts {
                 contacts::render_contacts_split(app, frame, left_rows[0], right_col);
@@ -163,8 +165,7 @@ pub fn view(app: &mut App, frame: &mut Frame) {
             views::render_view_switcher(app, frame, left_rows[1]);
         }
     } else if show_sidebar && app.view == View::Mail {
-        let sidebar_height =
-            (app.mailboxes.len() as u16) + 2 + sidebar::sync_health_rows(app);
+        let sidebar_height = (app.mailboxes.len() as u16) + 2 + sidebar::sync_health_rows(app);
         let left = split_left_column(app, main_area, sidebar_height);
 
         sidebar::render_sidebar(app, frame, left.sidebar);
@@ -240,17 +241,16 @@ fn render_overlays(app: &mut App, frame: &mut Frame, area: ratatui::layout::Rect
     // run while holding an immutable borrow of `app.overlay`. Dispatch those
     // via a discriminant check; the payload-carrying overlays render by ref.
     match &app.overlay {
-        Overlay::None | Overlay::Help | Overlay::Activity | Overlay::Search
+        Overlay::None
+        | Overlay::Help
+        | Overlay::Activity
+        | Overlay::Search
         | Overlay::Compose(_) => {}
         Overlay::Confirm(dialog) => overlays::render_confirm_dialog(dialog, frame, area),
-        Overlay::Attachment(picker) => {
-            overlays::render_attachment_picker(picker, frame, area)
-        }
+        Overlay::Attachment(picker) => overlays::render_attachment_picker(picker, frame, area),
         Overlay::Dir(picker) => overlays::render_dir_picker(picker, frame, area),
         Overlay::Mailbox(picker) => overlays::render_mailbox_picker(picker, frame, area),
-        Overlay::Signatures(overlay) => {
-            overlays::render_signatures_overlay(overlay, frame, area)
-        }
+        Overlay::Signatures(overlay) => overlays::render_signatures_overlay(overlay, frame, area),
         Overlay::Rsvp(overlay) => overlays::render_rsvp_overlay(overlay, frame, area),
         Overlay::Thread(overlay) => overlays::render_thread_overlay(overlay, frame, area),
         Overlay::Palette(palette) => overlays::render_command_palette(palette, frame, area),
@@ -291,7 +291,12 @@ fn render_prefix_popup(app: &App, frame: &mut Frame, area: ratatui::layout::Rect
     }
 
     let theme = super::theme::active();
-    let key_w = rows.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(3).max(3);
+    let key_w = rows
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(3)
+        .max(3);
     let inner_w = rows
         .iter()
         .map(|(k, d)| key_w.max(k.chars().count()) + 2 + d.chars().count())
@@ -332,7 +337,9 @@ fn render_prefix_popup(app: &App, frame: &mut Frame, area: ratatui::layout::Rect
             Line::from(vec![
                 Span::styled(
                     format!(" {keys:<key_w$}"),
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("  {desc}"), Style::default().fg(theme.text)),
             ])

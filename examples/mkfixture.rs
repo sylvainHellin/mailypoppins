@@ -37,9 +37,30 @@ const NEEDLE: &str = "zolvertrix";
 
 /// Fixed vocabulary the bodies are drawn from.
 const WORDS: [&str; 24] = [
-    "invoice", "schedule", "review", "tender", "concrete", "survey", "permit", "handover",
-    "budget", "revision", "contractor", "milestone", "sample", "defect", "warranty", "site",
-    "drawing", "estimate", "quantity", "steel", "insulation", "inspection", "signature", "ledger",
+    "invoice",
+    "schedule",
+    "review",
+    "tender",
+    "concrete",
+    "survey",
+    "permit",
+    "handover",
+    "budget",
+    "revision",
+    "contractor",
+    "milestone",
+    "sample",
+    "defect",
+    "warranty",
+    "site",
+    "drawing",
+    "estimate",
+    "quantity",
+    "steel",
+    "insulation",
+    "inspection",
+    "signature",
+    "ledger",
 ];
 
 #[derive(Parser)]
@@ -79,7 +100,11 @@ impl Lcg {
 }
 
 /// One mailbox to fill: its store key and how many messages it gets.
-struct Plan { account: &'static str, mailbox: &'static str, count: usize }
+struct Plan {
+    account: &'static str,
+    mailbox: &'static str,
+    count: usize,
+}
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -93,12 +118,36 @@ fn main() -> Result<()> {
     // N accounts, M mailboxes, K messages, fixed so the fixture is one artifact
     // rather than a family of them; only `--rows` and `--big-mb` move.
     let plans = [
-        Plan { account: "alpha", mailbox: "inbox", count: 200 },
-        Plan { account: "alpha", mailbox: "sent", count: 50 },
-        Plan { account: "alpha", mailbox: "archive", count: 100 },
-        Plan { account: "alpha", mailbox: "Bulk", count: args.rows },
-        Plan { account: "beta", mailbox: "inbox", count: 100 },
-        Plan { account: "beta", mailbox: "archive", count: 50 },
+        Plan {
+            account: "alpha",
+            mailbox: "inbox",
+            count: 200,
+        },
+        Plan {
+            account: "alpha",
+            mailbox: "sent",
+            count: 50,
+        },
+        Plan {
+            account: "alpha",
+            mailbox: "archive",
+            count: 100,
+        },
+        Plan {
+            account: "alpha",
+            mailbox: "Bulk",
+            count: args.rows,
+        },
+        Plan {
+            account: "beta",
+            mailbox: "inbox",
+            count: 100,
+        },
+        Plan {
+            account: "beta",
+            mailbox: "archive",
+            count: 50,
+        },
     ];
 
     // One store handle per account, opened in a fixed order.
@@ -124,7 +173,13 @@ fn main() -> Result<()> {
             ingest_message(
                 store,
                 blobs,
-                &IngestInput { account: plan.account, mailbox: plan.mailbox, uid, email: &email, raw: None },
+                &IngestInput {
+                    account: plan.account,
+                    mailbox: plan.mailbox,
+                    uid,
+                    email: &email,
+                    raw: None,
+                },
             )
             .with_context(|| format!("ingesting {}/{} uid {uid}", plan.account, plan.mailbox))?;
             total += 1;
@@ -137,7 +192,13 @@ fn main() -> Result<()> {
     ingest_message(
         store,
         blobs,
-        &IngestInput { account: "alpha", mailbox: "inbox", uid: 900_001, email: &big, raw: None },
+        &IngestInput {
+            account: "alpha",
+            mailbox: "inbox",
+            uid: 900_001,
+            email: &big,
+            raw: None,
+        },
     )
     .context("ingesting the oversized body")?;
     total += 1;
@@ -148,10 +209,16 @@ fn main() -> Result<()> {
     println!("fixture written to {}", args.out.display());
     println!("  accounts:  2 (alpha, beta)");
     println!("  mailboxes: {}", plans.len());
-    println!("  messages:  {total} ({} in alpha/Bulk, 1 body of {} MiB)", args.rows, args.big_mb);
+    println!(
+        "  messages:  {total} ({} in alpha/Bulk, 1 body of {} MiB)",
+        args.rows, args.big_mb
+    );
     println!("  needles:   {} bodies carry '{NEEDLE}'", args.rows / 250);
     println!("  build:     {:.2} s", elapsed.as_secs_f64());
-    println!("  store:     {bytes} bytes ({:.1} MiB)", bytes as f64 / (1024.0 * 1024.0));
+    println!(
+        "  store:     {bytes} bytes ({:.1} MiB)",
+        bytes as f64 / (1024.0 * 1024.0)
+    );
     println!();
     println!("export MAILYPOPPINS_CONFIG_DIR={}", config.display());
     println!("export MAILYPOPPINS_DATA_DIR={}", data.display());
@@ -214,7 +281,9 @@ fn message(rng: &mut Lcg, plan: &Plan, n: usize) -> FetchedEmail {
     FetchedEmail {
         from: format!("Sender {seq} <sender{seq}@fixture.invalid>"),
         to: format!("{}@fixture.invalid", plan.account),
-        cc: seq.is_multiple_of(11).then(|| "cc@fixture.invalid".to_string()),
+        cc: seq
+            .is_multiple_of(11)
+            .then(|| "cc@fixture.invalid".to_string()),
         reply_to: None,
         bcc: None,
         subject,
@@ -285,7 +354,9 @@ fn date_of(n: usize) -> String {
 
 fn title(word: &str) -> String {
     let mut c = word.chars();
-    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+    c.next()
+        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+        .unwrap_or_default()
 }
 
 fn tree_size(root: &Path) -> u64 {

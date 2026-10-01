@@ -94,8 +94,14 @@ mod tests {
     fn test_parse_date_to_imap_invalid_day() {
         // parse_date_to_imap only validates that day is a valid u32, not range.
         // Invalid days will be rejected by the IMAP server at query time.
-        assert_eq!(parse_date_to_imap("2024-12-00"), Some("0-Dec-2024".to_string()));
-        assert_eq!(parse_date_to_imap("2024-12-32"), Some("32-Dec-2024".to_string()));
+        assert_eq!(
+            parse_date_to_imap("2024-12-00"),
+            Some("0-Dec-2024".to_string())
+        );
+        assert_eq!(
+            parse_date_to_imap("2024-12-32"),
+            Some("32-Dec-2024".to_string())
+        );
         assert_eq!(parse_date_to_imap("2024-12-ab"), None);
     }
 
@@ -110,7 +116,10 @@ mod tests {
     fn test_normalize_message_id_strips_one_bracket_layer() {
         assert_eq!(normalize_message_id("<abc@example.com>"), "abc@example.com");
         assert_eq!(normalize_message_id("abc@example.com"), "abc@example.com");
-        assert_eq!(normalize_message_id("  <abc@example.com> "), "abc@example.com");
+        assert_eq!(
+            normalize_message_id("  <abc@example.com> "),
+            "abc@example.com"
+        );
         // Half-bracketed input is left alone rather than silently mangled.
         assert_eq!(normalize_message_id("<abc@example.com"), "<abc@example.com");
     }

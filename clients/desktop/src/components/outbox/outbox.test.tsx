@@ -43,6 +43,19 @@ const view = (account: string) => screen.findByRole("region", { name: `Outbox of
 const rowEl = (id: number) => document.querySelector(`[data-outbox-row="${id}"]`) as HTMLElement;
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd);
 
+/**
+ * Run a palette action by name. The name is pasted in one input event: typed
+ * a key at a time, every character re-filters the palette's whole catalog,
+ * which under a loaded full run took these tests past their 5 s.
+ */
+async function runAction(user: ReturnType<typeof renderApp>["user"], label: string) {
+  await user.keyboard(":");
+  const input = await screen.findByPlaceholderText("Run an action by name…");
+  await waitFor(() => expect(input).toHaveFocus());
+  await user.paste(label);
+  await user.keyboard("{Enter}");
+}
+
 describe("the outbox view", () => {
   it("opens from the sidebar line, which shows what waits, and lists the row with its notes", async () => {
     const { user } = renderApp();
@@ -182,14 +195,10 @@ describe("the outbox view", () => {
     ]);
     const { user } = renderApp(1400, seedWork);
     await shellReady();
-    await user.keyboard(":");
-    await user.keyboard("Open outbox");
-    await user.keyboard("{Enter}");
+    await runAction(user, "Open outbox");
     await view("work");
     await waitFor(() => expect(rowEl(5)).not.toBeNull());
-    await user.keyboard(":");
-    await user.keyboard("Retry outbox row");
-    await user.keyboard("{Enter}");
+    await runAction(user, "Retry outbox row");
     expect(await screen.findByRole("dialog", { name: "Send row 5 again?" })).toBeInTheDocument();
   });
 
@@ -309,25 +318,33 @@ describe("the outbox view hides the mailbox selection", () => {
     expect(callsOf("draft_create")[0].args).toMatchObject({ account: "home" });
   });
 
-  it("the palette's actions on the selection say to close the view first, and its outbox rows still run", async () => {
+  /** The outbox of `work` over a selected inbox row, its first row loaded. */
+  async function overTheSelection() {
     const { user } = renderApp(1400, seedWork);
     await shellReady();
     await user.keyboard("j");
     await user.keyboard("go");
     await view("work");
     await waitFor(() => expect(rowEl(5)).not.toBeNull());
-    for (const label of ["Archive", "Toggle flag/star", "Send all approved drafts", "Select all visible"]) {
-      await user.keyboard(":");
-      await user.keyboard(label);
-      await user.keyboard("{Enter}");
+    return user;
+  }
+
+  // One test per action: five palette runs in one test went past 5 s under a loaded full run.
+  it.each(["Archive", "Toggle flag/star", "Send all approved drafts", "Select all visible"])(
+    "the palette's %s on the selection says to close the view first",
+    async (label) => {
+      const user = await overTheSelection();
+      await runAction(user, label);
       expect(await screen.findByText("Close the outbox first (Escape): this acts on the mailbox selection")).toBeInTheDocument();
       expect(screen.queryByRole("dialog")).toBeNull();
-    }
-    expect(acted()).toEqual([]);
-    expect(await view("work")).toBeInTheDocument();
-    await user.keyboard(":");
-    await user.keyboard("Discard outbox row");
-    await user.keyboard("{Enter}");
+      expect(acted()).toEqual([]);
+      expect(await view("work")).toBeInTheDocument();
+    },
+  );
+
+  it("the palette's outbox rows still run over the selection", async () => {
+    const user = await overTheSelection();
+    await runAction(user, "Discard outbox row");
     expect(await screen.findByRole("dialog", { name: "Discard row 5?" })).toBeInTheDocument();
   });
 
@@ -337,9 +354,7 @@ describe("the outbox view hides the mailbox selection", () => {
     await user.keyboard("jv");
     await user.keyboard("go");
     await view("work");
-    await user.keyboard(":");
-    await user.keyboard("Clear selection");
-    await user.keyboard("{Enter}");
+    await runAction(user, "Clear selection");
     expect(await screen.findByRole("listbox", { name: "Inbox messages" })).toBeInTheDocument();
     expect(marked()).toBe("1 marked");
   });
