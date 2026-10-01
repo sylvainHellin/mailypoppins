@@ -26,6 +26,9 @@ pub const SETTINGS_FILE: &str = "desktop.json";
 /// The values the `theme` key takes.
 pub const THEMES: &[&str] = &["dark", "light", "system"];
 
+/// The values the `reader_mode` key takes.
+pub const READER_MODES: &[&str] = &["html", "text"];
+
 /// A key of `desktop.json`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -36,7 +39,8 @@ pub enum SettingKey {
     Editor,
     /// `dark`, `light` or `system`; unset is `dark`.
     Theme,
-    /// How the reader shows a message.
+    /// `html` (the message's own markup in the reader frame) or `text` (the
+    /// stored plain text); unset is `html`.
     ReaderMode,
 }
 
@@ -78,6 +82,9 @@ impl SettingKey {
                 .map_err(|message| GuiError::Setup { message }),
             SettingKey::Theme if !THEMES.contains(&value) => Err(GuiError::Setup {
                 message: format!("the theme `{value}` is none of dark, light or system"),
+            }),
+            SettingKey::ReaderMode if !READER_MODES.contains(&value) => Err(GuiError::Setup {
+                message: format!("the reader mode `{value}` is neither html nor text"),
             }),
             SettingKey::Theme | SettingKey::ReaderMode => Ok(()),
         }
@@ -273,7 +280,26 @@ mod tests {
             set_on(&file, "editor", Some("'unclosed")),
             Err(GuiError::Setup { .. })
         ));
-        assert_eq!(file_json(&file), json!({"theme": "system"}));
+        for mode in READER_MODES {
+            assert_eq!(
+                set_on(&file, "reader_mode", Some(mode))
+                    .expect("mode")
+                    .as_deref(),
+                Some(*mode)
+            );
+        }
+        for bad in ["markdown", "HTML", "plain"] {
+            match set_on(&file, "reader_mode", Some(bad)) {
+                Err(GuiError::Setup { message }) => {
+                    assert!(message.contains("neither html nor text"), "{message}")
+                }
+                other => panic!("{bad}: {other:?}"),
+            }
+        }
+        assert_eq!(
+            file_json(&file),
+            json!({"theme": "system", "reader_mode": "text"})
+        );
     }
 
     #[test]

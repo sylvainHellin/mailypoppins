@@ -507,7 +507,7 @@ type SettingKey = "editor" | "theme" | "reader_mode";
 
 - `editor` is the editor command template (see Drafts and the editor), refused with `setup` when it does not split.
 - `theme` is `dark`, `light` or `system`, refused with `setup` otherwise; unset means dark ([shell.md](shell.md), "Settings").
-- `reader_mode` is how the reader shows a message, stored as given.
+- `reader_mode` is `html` or `text`, refused with `setup` otherwise; unset means html ([reader.md](reader.md), "Text mode").
 
 `setting_get` and `setting_set` read and write one key, and `editor_setting_get` and `editor_setting_set` are the `editor` key with what it resolves to.
 A key outside `SettingKey` is `not_found` naming the known keys, and nothing is written.

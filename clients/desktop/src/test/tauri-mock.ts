@@ -1580,6 +1580,9 @@ function storeSetting(key: string, value: string | null): void {
   if (key === "theme" && v !== "" && !["dark", "light", "system"].includes(v)) {
     throw { kind: "setup", message: `the theme \`${v}\` is none of dark, light or system` };
   }
+  if (key === "reader_mode" && v !== "" && !["html", "text"].includes(v)) {
+    throw { kind: "setup", message: `the reader mode \`${v}\` is neither html nor text` };
+  }
   if (v === "") mock.settings.delete(key);
   else mock.settings.set(key, v);
 }
