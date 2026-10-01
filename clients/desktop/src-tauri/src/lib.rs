@@ -129,6 +129,7 @@ pub fn run() {
 
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(session)
         .menu(menu::build)
         .on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()))
@@ -191,6 +192,7 @@ pub fn run() {
             commands::search_local,
             commands::search_server_start,
             commands::search_server_cancel,
+            commands::operation_cancel,
             commands::message_archive,
             commands::message_delete,
             commands::message_move,
@@ -251,7 +253,6 @@ pub fn run() {
             configuration::config_init,
             configuration::config_add_account,
             configuration::config_oauth2_login,
-            configuration::config_oauth2_cancel,
             commands::sync_trigger,
             commands::restart_daemon,
             commands::intercepted_urls,

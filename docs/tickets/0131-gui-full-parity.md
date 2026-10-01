@@ -137,7 +137,7 @@ Known limits carried:
 
 Open for M4 and for Sylvain:
 
-- Install `tauri-plugin-dialog` to replace the path text fields in the Save and Attach file dialogs: the crate `tauri-plugin-dialog = "2"`, `.plugin(tauri_plugin_dialog::init())` in the builder, the npm package `@tauri-apps/plugin-dialog`, and the capability `dialog:allow-open` in `src-tauri/capabilities/default.json`.
+- `tauri-plugin-dialog` is installed (2026-10-01, approved by Sylvain): the Save and Attach file dialogs keep their path field and gain a Browse button for the native folder and file picker, with `dialog:allow-open` the only permission granted.
 - Check by eye with `MP_DESKTOP_FIXTURE=1 pnpm tauri dev`: the wizard, the editing banner, the draft preview, the hold card's outcomes, the outbox view and the attachment dialogs; nothing of M3 was run in a real window.
 - Confirm the editor resolution order above: `MP_DESKTOP_EDITOR`, `desktop.json`, `$VISUAL` and `$EDITOR` with terminal editors skipped, the `code`, `zed`, `subl` and `cursor` probes, `open -t`.
 - Confirm that the outbox's Retry and Discard sit behind a confirmation.
@@ -267,7 +267,7 @@ Open for M5 and for Sylvain:
 - The daemon door of the five signature commands has no Rust test, which needs `mp-core`'s test-support override of the config directory.
 - `EmptyView.tsx` is used by no view any more and is kept.
 - The daemon follow-ups M4 worked around are in `BACKLOG.md`: a `signature.*` family with `signature.removed`, `contact.vcard`, an event when a contact index changes (`CON-08`), and a signal for `contact.search`'s refused implicit build.
-- The Tauri layer calls `operation.cancel` through two dedicated commands, `search_server_cancel` and `config_oauth2_cancel`; a generic cancel command would serve a rebuild, an RSVP or an invitation too, and `BACKLOG.md` carries it as optional.
+- The Tauri layer's generic `operation_cancel` (2026-10-01) cancels a contact rebuild, an RSVP, an invitation send and a sign-in from the window, and replaced `config_oauth2_cancel`; `search_server_cancel` stays, since it also stops awaiting the search. The daemon's rebuild, RSVP and invitation workers ignore their token, so a cancel stops the wait and not the work, and the notice says so.
 
 ## Daemon gaps closed
 

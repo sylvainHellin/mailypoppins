@@ -162,6 +162,36 @@ describe("the Contacts view", () => {
   });
 });
 
+describe("cancelling a rebuild", () => {
+  it("the activity area's card cancels it through operation_cancel, and the end says the daemon may still finish it", async () => {
+    const { user } = await openContacts();
+    await user.keyboard("r");
+    const activity = screen.getByRole("region", { name: "Activity" });
+    const card = await within(activity).findByRole("group", { name: "Rebuilding the contact index of work…" });
+    await user.click(within(card).getByRole("button", { name: "Cancel the contact rebuild" }));
+    await waitFor(() => expect(callsOf("operation_cancel")).toEqual([{ operation_id: "fixture-rebuild-1" }]));
+    expect(
+      await within(activity).findByText("Stopped waiting for the contact index of work; the daemon may still finish the rebuild"),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(within(activity).queryByRole("group", { name: /Rebuilding/ })).toBeNull());
+    expect(status()).not.toHaveTextContent("Rebuilding");
+    // Nothing runs any more, so a new rebuild may start.
+    await user.keyboard("r");
+    await waitFor(() => expect(callsOf("contact_rebuild")).toHaveLength(2));
+  });
+
+  it("a cancel the daemon refuses says so and leaves the card", async () => {
+    const { user } = await openContacts();
+    await user.keyboard("r");
+    const activity = screen.getByRole("region", { name: "Activity" });
+    const card = await within(activity).findByRole("group", { name: "Rebuilding the contact index of work…" });
+    mock.failing.set("operation_cancel", { kind: "timeout", message: "the daemon did not answer in 5 s" });
+    await user.click(within(card).getByRole("button", { name: "Cancel the contact rebuild" }));
+    expect(await screen.findByText("The cancel failed: the daemon did not answer in 5 s")).toBeInTheDocument();
+    await waitFor(() => expect(within(card).getByRole("button", { name: "Cancel the contact rebuild" })).toBeEnabled());
+  });
+});
+
 describe("the Contacts view's empty states", () => {
   it("an empty index says to press r", async () => {
     await showContacts(() => {

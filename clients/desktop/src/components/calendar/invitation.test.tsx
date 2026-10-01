@@ -51,6 +51,21 @@ describe("the New invitation form", () => {
     expect(await screen.findByText("Sent the invitation Kick-off")).toBeInTheDocument();
   });
 
+  it("the activity area's card cancels a running send, whose end says it may still go out", async () => {
+    const { user, dialog } = await openForm();
+    await fill(user, dialog, { to: "Robin <robin@example.com>", subject: "Kick-off", start: "2099-12-01T10:00", duration: "1h" });
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New invitation" })).toBeNull());
+    const activity = screen.getByRole("region", { name: "Activity" });
+    const running = await within(activity).findByRole("group", { name: "Sending the invitation Kick-off…" });
+    await user.click(within(running).getByRole("button", { name: "Cancel the invitation" }));
+    await waitFor(() => expect(callsOf("operation_cancel")).toEqual([{ operation_id: "fixture-invite-1" }]));
+    expect(
+      await screen.findByText("Stopped waiting for the invitation Kick-off; the daemon may still send it, check the outbox"),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(within(activity).queryByRole("group", { name: /Sending the invitation/ })).toBeNull());
+  });
+
   it("End replaces Duration, and only the one shown is sent", async () => {
     const { user, dialog } = await openForm();
     await fill(user, dialog, { to: "robin@example.com", subject: "Kick-off", start: "2099-12-01T10:00" });

@@ -2443,3 +2443,12 @@ The bundler drops the triple: `binaries/mp-aarch64-apple-darwin` becomes `mailyp
 A blocking call's error now wraps `mp_client::session::Refused`, whose `Display` is the old text byte for byte, so `GuiError::from_call` and every `rpc_code` read stay as they were; `mp_client::session::refusal(&error)` reads the typed `RpcError` back.
 A fake that should look like the daemon (the desktop fixture's `refused`) has to build that same type: an `anyhow!` with the right text classifies correctly and still carries no `data`.
 A command that wants the payload reads it before turning the error into a `GuiError`, which keeps only the text.
+## `operation.cancel` settles an operation without stopping a worker that ignores its token
+
+The registry's `cancel` (`src/daemon/operations.rs`) shuts the token, marks the operation `cancelled` and publishes the finish before it answers, whatever the worker is doing.
+Only a worker that checks `handle.token` stops: `sync` does, while `contact.rebuild`, `calendar.rsvp` and `send.invite` never look after the start, so a cancelled rebuild still writes its index and a cancelled RSVP or invitation may still be submitted; the worker's later result is dropped as an invalid transition.
+A client that offers Cancel on such an operation must word the cancelled end as "stopped waiting", never as undone, which is what the desktop's generic `operation_cancel` does (`clients/desktop/docs/rust-layer.md`, "Cancelling").
+
+## `tauri-plugin-dialog` carries `tauri-plugin-fs` without granting it anything
+
+`tauri-plugin-dialog` 2.8 pulls `tauri-plugin-fs` in as a dependency and adds a picked path to the fs scope, but with no `fs:` permission in the capability the webview can read nothing through it; only `dialog:allow-open` is granted.

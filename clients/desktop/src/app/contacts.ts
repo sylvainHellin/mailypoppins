@@ -222,12 +222,22 @@ export function rebuildResult(settled: ContactRebuilt | null): { kind: "applied"
   }
 }
 
+/** What a cancelled rebuild says: the daemon's worker may still finish it. */
+export function rebuildCancelledText(account: string): string {
+  return `Stopped waiting for the contact index of ${account}; the daemon may still finish the rebuild`;
+}
+
 /** A rebuild of this window ended: say how; a written index is read again. */
 function rebuildEnded(s: AppState, run: RebuildRun, end: OperationEnd): AppState {
   const next: AppState = { ...s, rebuilds: s.rebuilds.filter((r) => r !== run) };
   const account = run.account;
   if ("dropped" in end) {
     return pushNotice(next, { kind: "failed", account, text: `Contacts refresh failed: ${end.dropped}` });
+  }
+  if (end.state === "cancelled") {
+    // The daemon's rebuild does not stop on a cancel, so it may still write
+    // the index: the next open of the view reads it again.
+    return pushNotice(staleContacts(next, account), { kind: "operation_cancelled", account, text: rebuildCancelledText(account) });
   }
   if (end.state !== "succeeded") {
     return pushNotice(next, { kind: "failed", account, text: `Contacts refresh failed: ${end.error ?? end.state}` });

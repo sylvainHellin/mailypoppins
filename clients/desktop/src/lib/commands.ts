@@ -95,6 +95,15 @@ export const searchServerCancel = (
 ): Promise<"cancelled" | "already_settled"> =>
   invoke<"cancelled" | "already_settled">("search_server_cancel", { operation_id });
 
+/**
+ * Cancel an operation this window awaits by id: a contact rebuild, an RSVP,
+ * an invitation send or a sign-in. It stays awaited until its `cancelled`
+ * finish, which ends it the way every other end does; one that already
+ * ended answers `already_settled`.
+ */
+export const operationCancel = (operation_id: string): Promise<CancelOutcome> =>
+  invoke<CancelOutcome>("operation_cancel", { operation_id });
+
 // Mutations take a list of row ids, one call per id in the list's order, all with
 // `settle: false`; a row the daemon refused is in `failed` and the rest go ahead.
 
@@ -270,9 +279,6 @@ export const configInit = (account: AccountDraft): Promise<ConfigInitialised> =>
 export const configOauth2Login = (account: string): Promise<OperationStarted> =>
   invoke<OperationStarted>("config_oauth2_login", { account });
 
-/** Cancel a sign-in; it stays awaited until its `cancelled` finish, and the provider may still complete it. */
-export const configOauth2Cancel = (operation_id: string): Promise<CancelOutcome> =>
-  invoke<CancelOutcome>("config_oauth2_cancel", { operation_id });
 
 export const editorSettingGet = (): Promise<EditorSetting> => invoke<EditorSetting>("editor_setting_get");
 

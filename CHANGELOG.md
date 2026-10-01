@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The desktop client's Save and Attach file dialogs open the system's folder and file picker (#0131).** Browse beside the Directory and File fields opens the macOS picker; what you pick fills the field, with your home directory written `~`, and typing a path still works.
+- **A contact rebuild, an RSVP or an invitation being sent can be cancelled from the desktop client (#0131).** While one runs, a card in the activity area shows it with Cancel; the daemon may still finish the rebuild or send the reply, and the notice says so.
 - **The daemon serves what the desktop client used to work out for itself (#0131).**
   - The desktop's Forward wizard picks a signature, as the New draft wizard does, and passes it to `draft.forward`, which always took one.
   - The desktop's New draft wizard has the TUI's inline Body: a body typed there is written above the signature and the draft is done without the editor. `draft.create` takes `body` and `headers`, so the daemon writes the whole file.

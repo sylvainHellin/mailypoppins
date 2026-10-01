@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window: core IPC, destroying itself once a close it asked about is confirmed, and opening http, https and mailto URLs only",
+  "description": "The main window: core IPC, destroying itself once a close it asked about is confirmed, opening http, https and mailto URLs only, and the native open picker for a file or a folder",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-destroy",
+    "dialog:allow-open",
     {
       "identifier": "opener:allow-open-url",
       "allow": [

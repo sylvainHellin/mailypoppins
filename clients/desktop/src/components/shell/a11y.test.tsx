@@ -319,7 +319,7 @@ describe("accessibility primitives", () => {
     expect(save).toHaveAccessibleDescription("Quarterly ledger review");
     const dir = within(save).getByRole("textbox", { name: "Directory" });
     await waitFor(() => expect(dir).toHaveFocus());
-    expect(dir).toHaveAccessibleDescription(/start.*~.*A native picker arrives with the dialog plugin/);
+    expect(dir).toHaveAccessibleDescription(/start.*~.*Browse opens the system picker/);
     const alert = within(save).getByRole("alert");
     expect(alert).toBeEmptyDOMElement();
     expect(within(save).getByRole("button", { name: "Save" })).toBeInTheDocument();
@@ -335,7 +335,7 @@ describe("accessibility primitives", () => {
     expect(attach).toHaveAccessibleDescription(/^To the draft /);
     const file = within(attach).getByRole("textbox", { name: "File" });
     await waitFor(() => expect(file).toHaveFocus());
-    expect(file).toHaveAccessibleDescription(/A native picker arrives with the dialog plugin/);
+    expect(file).toHaveAccessibleDescription(/Browse opens the system picker/);
     expect(within(attach).getByRole("alert")).toBeEmptyDOMElement();
     await user.keyboard("relative.pdf{Enter}");
     await waitFor(() => expect(within(attach).getByRole("alert")).toHaveTextContent("is not an absolute path"));

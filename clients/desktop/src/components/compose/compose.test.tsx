@@ -417,7 +417,7 @@ describe("a draft's attachments", () => {
     expect(dialog).toHaveAccessibleDescription("To the draft Re: Angebot Dachsanierung");
     const field = within(dialog).getByRole("textbox", { name: "File" });
     await waitFor(() => expect(field).toHaveFocus());
-    expect(field).toHaveAccessibleDescription(/A native picker arrives with the dialog plugin/);
+    expect(field).toHaveAccessibleDescription(/Browse opens the system picker/);
     await user.keyboard("~/nope.pdf{Enter}");
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("No such file: ~/nope.pdf");
     await user.clear(field);
@@ -432,6 +432,31 @@ describe("a draft's attachments", () => {
     // The watcher's draft.changed reads the list again.
     const list = await within(reader()).findByRole("list", { name: "Attachments" });
     expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["~/Documents/report.pdf"]);
+  });
+
+  it("Browse attaches a file the native picker chose, under ~ as the draft keeps it, and a path outside home as picked", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await drafts(user);
+    await user.keyboard("j");
+    await within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" });
+    await user.keyboard("ta");
+    const dialog = await screen.findByRole("dialog", { name: "Attach file" });
+    const field = within(dialog).getByRole("textbox", { name: "File" });
+    mock.picked = `${MOCK_HOME}/Documents/report.pdf`;
+    await user.click(within(dialog).getByRole("button", { name: "Browse for a file" }));
+    await waitFor(() => expect(field).toHaveValue("~/Documents/report.pdf"));
+    expect(mock.pickerCalls).toEqual([{ directory: false, multiple: false, title: "Attach file", defaultPath: undefined }]);
+    expect(within(dialog).getByRole("button", { name: "Attach" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(callsOf("draft_attach")).toEqual([{ account: "work", id: "angebot-antwort", path: "~/Documents/report.pdf" }]);
+
+    await user.keyboard("ta");
+    const again = await screen.findByRole("dialog", { name: "Attach file" });
+    mock.picked = "/gone/old.pdf";
+    await user.click(within(again).getByRole("button", { name: "Browse for a file" }));
+    await waitFor(() => expect(within(again).getByRole("textbox", { name: "File" })).toHaveValue("/gone/old.pdf"));
   });
 
   it("the preview lists the entries in order, opens one, flags a missing one and removes one", async () => {

@@ -191,7 +191,7 @@ export function signInOrShow(s: AppState, dispatch: Dispatch<Action>, account: s
 }
 
 /**
- * Cancel the running sign-in: `operation.cancel` settles it `cancelled`,
+ * Cancel the running sign-in: `operation_cancel` settles it `cancelled`,
  * whose finish ends it and says the provider may still complete it. One
  * whose start has not answered cannot be named yet; the dialog calls this
  * again once it has an id.
@@ -200,7 +200,7 @@ export async function cancelSignIn(dispatch: Dispatch<Action>, operationId: stri
   dispatch({ type: "sign_in_cancelling" });
   if (!operationId) return;
   try {
-    await cmd.configOauth2Cancel(operationId);
+    await cmd.operationCancel(operationId);
   } catch (e: unknown) {
     dispatch({ type: "notice", text: `The sign-in could not be cancelled: ${asGuiError(e).message}`, level: "error" });
   }

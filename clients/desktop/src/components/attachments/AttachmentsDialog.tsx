@@ -1,11 +1,12 @@
 // The attachment dialogs (clients/desktop/docs/reader.md, "Attachments"):
 // the TUI's `to` picker over several attachments, the Save dialog `ts` opens
 // with a directory field where the TUI has its directory picker, and the
-// path field `ta` opens. The two fields stand in for the native file and
-// folder pickers, which arrive with the dialog plugin.
+// path field `ta` opens. Each field has a Browse button beside it, the native
+// folder or file picker (tauri-plugin-dialog), which fills the field; the
+// typed path stays, for the keyboard and wherever no picker opens.
 
 import { useEffect, useId, useRef, useState } from "react";
-import { FileWarning, Paperclip } from "lucide-react";
+import { FileWarning, FolderOpen, Paperclip } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -18,11 +19,58 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { formatSize } from "@/components/list/format";
-import { attachPath, openItem, saveParts } from "@/app/attachments";
+import { attachPath, openItem, pickPath, saveParts } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
 import type { AttachmentDialog as Dialogs, AttachmentItem, AttachmentOwner } from "@/app/state";
 
-export const PICKER_NOTE = "A native picker arrives with the dialog plugin; until then, type the path.";
+export const PICKER_NOTE = "Browse opens the system picker.";
+
+/**
+ * Browse: the native picker, which fills the field and hands the focus to
+ * the dialog's submit button, so Enter or a click then saves or attaches.
+ * Closing the picker changes nothing; a picker that does not open says so
+ * in the dialog's alert and leaves the field to be typed.
+ */
+function BrowseButton({
+  kind,
+  current,
+  label,
+  onPicked,
+  onError,
+  submitRef,
+}: {
+  kind: "directory" | "file";
+  current: string;
+  label: string;
+  onPicked: (path: string) => void;
+  onError: (message: string) => void;
+  submitRef: React.RefObject<HTMLButtonElement | null>;
+}) {
+  const [picking, setPicking] = useState(false);
+  const browse = async () => {
+    if (picking) return;
+    setPicking(true);
+    try {
+      const picked = await pickPath(kind, current);
+      if (picked !== null) {
+        onPicked(picked);
+        submitRef.current?.focus();
+      }
+    } catch (e: unknown) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPicking(false);
+    }
+  };
+  return (
+    // Busy rather than disabled while the picker is open: a disabled button
+    // drops the focus, which a closed picker would then leave nowhere.
+    <Button type="button" variant="outline" aria-label={label} aria-busy={picking || undefined} onClick={() => void browse()}>
+      <FolderOpen aria-hidden="true" />
+      Browse…
+    </Button>
+  );
+}
 
 function Size({ item }: { item: AttachmentItem }) {
   if (item.missing) return <span className="text-destructive">missing</span>;
@@ -79,6 +127,7 @@ function SaveForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "save
   const [checked, setChecked] = useState<number[]>(() => dialog.items.map((i) => i.part));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const submitRef = useRef<HTMLButtonElement>(null);
 
   const submit = async () => {
     if (busy) return;
@@ -126,16 +175,29 @@ function SaveForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "save
         <label htmlFor={`${id}-dir`} className="text-sm text-muted-foreground">
           Directory
         </label>
-        <Input
-          id={`${id}-dir`}
-          ref={inputRef}
-          value={dir}
-          autoComplete="off"
-          spellCheck={false}
-          aria-describedby={`${id}-note`}
-          aria-invalid={error !== null ? true : undefined}
-          onChange={(e) => setDir(e.currentTarget.value)}
-        />
+        <div className="flex gap-2">
+          <Input
+            id={`${id}-dir`}
+            ref={inputRef}
+            value={dir}
+            autoComplete="off"
+            spellCheck={false}
+            aria-describedby={`${id}-note`}
+            aria-invalid={error !== null ? true : undefined}
+            onChange={(e) => setDir(e.currentTarget.value)}
+          />
+          <BrowseButton
+            kind="directory"
+            current={dir}
+            label="Browse for a directory"
+            submitRef={submitRef}
+            onPicked={(path) => {
+              setDir(path);
+              setError(null);
+            }}
+            onError={setError}
+          />
+        </div>
         <p id={`${id}-note`} className="text-xs text-muted-foreground">
           An absolute path, or one starting with ~. A name already there gets _1. {PICKER_NOTE}
         </p>
@@ -145,7 +207,7 @@ function SaveForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "save
       </p>
       <DialogFooter>
         <DialogClose render={<Button type="button" variant="outline" />}>Cancel</DialogClose>
-        <Button type="submit" disabled={busy || checked.length === 0}>
+        <Button type="submit" ref={submitRef} disabled={busy || checked.length === 0}>
           Save
         </Button>
       </DialogFooter>
@@ -153,13 +215,14 @@ function SaveForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "save
   );
 }
 
-/** The `ta` dialog: a path field until the native file picker is installed. */
+/** The `ta` dialog: a path field, which Browse fills from the native file picker. */
 function AttachForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "attach" }>; inputRef: React.RefObject<HTMLInputElement | null> }) {
   const dispatch = useDispatch();
   const id = useId();
   const [path, setPath] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const submitRef = useRef<HTMLButtonElement>(null);
 
   const submit = async () => {
     if (busy) return;
@@ -181,17 +244,30 @@ function AttachForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "at
         <label htmlFor={`${id}-path`} className="text-sm text-muted-foreground">
           File
         </label>
-        <Input
-          id={`${id}-path`}
-          ref={inputRef}
-          value={path}
-          placeholder="~/Documents/report.pdf"
-          autoComplete="off"
-          spellCheck={false}
-          aria-describedby={`${id}-note`}
-          aria-invalid={error !== null ? true : undefined}
-          onChange={(e) => setPath(e.currentTarget.value)}
-        />
+        <div className="flex gap-2">
+          <Input
+            id={`${id}-path`}
+            ref={inputRef}
+            value={path}
+            placeholder="~/Documents/report.pdf"
+            autoComplete="off"
+            spellCheck={false}
+            aria-describedby={`${id}-note`}
+            aria-invalid={error !== null ? true : undefined}
+            onChange={(e) => setPath(e.currentTarget.value)}
+          />
+          <BrowseButton
+            kind="file"
+            current={path}
+            label="Browse for a file"
+            submitRef={submitRef}
+            onPicked={(picked) => {
+              setPath(picked);
+              setError(null);
+            }}
+            onError={setError}
+          />
+        </div>
         <p id={`${id}-note`} className="text-xs text-muted-foreground">
           An absolute path, or one starting with ~, kept as typed in the draft&apos;s attachments. {PICKER_NOTE}
         </p>
@@ -201,7 +277,7 @@ function AttachForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "at
       </p>
       <DialogFooter>
         <DialogClose render={<Button type="button" variant="outline" />}>Cancel</DialogClose>
-        <Button type="submit" disabled={busy}>
+        <Button type="submit" ref={submitRef} disabled={busy}>
           Attach
         </Button>
       </DialogFooter>

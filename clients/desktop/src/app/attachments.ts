@@ -18,6 +18,7 @@ import {
 import { isOpenable } from "@/app/search";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type Attachment, type DraftAttachments } from "@/lib/gui-types";
+import { homeDir, openPicker } from "@/lib/tauri";
 
 /** What an attachment key acts on: the cursor's message, a server-only hit, or the Drafts cursor draft. */
 type Subject =
@@ -233,6 +234,49 @@ export async function saveParts(
     dispatch({ type: "activity", kind: "failed", account, text });
   }
   return null;
+}
+
+/** `path` with the home directory written `~`, the form the fields take and a draft keeps portable. */
+export function tildePath(path: string, home: string): string {
+  const h = home.replace(/\/+$/, "");
+  if (!h) return path;
+  if (path === h) return "~";
+  return path.startsWith(`${h}/`) ? `~${path.slice(h.length)}` : path;
+}
+
+/** A field's path with `~` expanded, for where the picker opens; null when it is not absolute. */
+function pickerStart(typed: string, home: string): string | null {
+  const t = typed.trim();
+  if (t === "~" || t.startsWith("~/")) return home ? `${home.replace(/\/+$/, "")}${t.slice(1)}` : null;
+  return t.startsWith("/") ? t : null;
+}
+
+/**
+ * The native picker (`tauri-plugin-dialog`'s `open`): a folder for the Save
+ * dialog, a file for Attach file, opened where the field points. Resolves to
+ * the path picked, under the home directory written with `~`, or null when
+ * the user closed the picker; rejects with a sentence when the window has no
+ * picker (a browser under `pnpm dev`), and the typed field remains.
+ */
+export async function pickPath(kind: "directory" | "file", typed: string): Promise<string | null> {
+  let home = "";
+  try {
+    home = await homeDir();
+  } catch {
+    // No home to start from or to shorten with: the picker still opens.
+  }
+  let picked: unknown;
+  try {
+    picked = await openPicker({
+      directory: kind === "directory",
+      multiple: false,
+      title: kind === "directory" ? "Save attachments to" : "Attach file",
+      defaultPath: pickerStart(typed, home) ?? undefined,
+    });
+  } catch (e: unknown) {
+    throw new Error(`The file picker did not open (${asGuiError(e).message}); type the path instead`);
+  }
+  return typeof picked === "string" && picked !== "" ? tildePath(picked, home) : null;
 }
 
 /** Attach `path` to the draft; resolves to why it was refused (the dialog stays open), or null. */

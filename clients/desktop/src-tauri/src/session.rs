@@ -1559,6 +1559,66 @@ mod tests {
         assert_eq!(dropped["operation_id"], started.operation_id.as_str());
     }
 
+    /// `operation_cancel` over each operation a dialog or a notice offers to
+    /// cancel: the operation stays awaited as its kind until its `cancelled`
+    /// finish reaches the webview, and a second cancel is `already_settled`.
+    #[test]
+    fn the_generic_cancel_keeps_a_rebuild_an_rsvp_and_an_invitation_awaited_until_their_finish() {
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.set_rebuild_delay(Duration::from_secs(5));
+        fixture.set_rsvp_delay(Duration::from_secs(5));
+        fixture.set_send_delay(Duration::from_secs(5));
+        let started = [
+            (
+                crate::contacts::contact_rebuild_on(&session, &door, "work")
+                    .expect("rebuild")
+                    .operation_id,
+                PendingKind::ContactRebuild,
+            ),
+            (
+                crate::calendar::calendar_rsvp_on(
+                    &session,
+                    &door,
+                    "work",
+                    crate::fixture::INVITE_ROW,
+                    "accept",
+                )
+                .expect("rsvp")
+                .operation_id,
+                PendingKind::Rsvp,
+            ),
+            (
+                crate::calendar::send_invite_on(&session, &door, "work", &invitation())
+                    .expect("invite")
+                    .operation_id,
+                PendingKind::SendInvite,
+            ),
+        ];
+        for (id, kind) in &started {
+            let outcome = crate::commands::operation_cancel_on(&door, id).expect("cancel");
+            assert_eq!(
+                outcome,
+                crate::commands::CancelOutcome::Cancelled,
+                "{kind:?}"
+            );
+            assert_eq!(session.pending_kind(id), Some(*kind));
+        }
+        drain(&session, &door, &rx);
+        for (id, kind) in &started {
+            let finished = events_of(&seen, id)
+                .into_iter()
+                .find(|e| e["kind"] == "operation.finished")
+                .unwrap_or_else(|| panic!("the cancelled finish of {kind:?}"));
+            assert_eq!(finished["payload"]["state"], "cancelled", "{kind:?}");
+            assert_eq!(
+                crate::commands::operation_cancel_on(&door, id).expect("again"),
+                crate::commands::CancelOutcome::AlreadySettled,
+                "{kind:?}"
+            );
+        }
+        assert!(session.pending().is_empty());
+    }
+
     /// The events among `seen` that name `id`.
     fn events_of(seen: &Seen, id: &str) -> Vec<Value> {
         lock(seen)
@@ -1665,7 +1725,7 @@ mod tests {
         let id = crate::configuration::config_oauth2_login_on(&session, &door, "home")
             .expect("started")
             .operation_id;
-        let outcome = crate::configuration::config_oauth2_cancel_on(&door, &id).expect("cancel");
+        let outcome = crate::commands::operation_cancel_on(&door, &id).expect("cancel");
         assert_eq!(outcome, crate::commands::CancelOutcome::Cancelled);
         assert_eq!(session.pending_kind(&id), Some(PendingKind::OAuth2Login));
         drain(&session, &door, &rx);
@@ -1675,7 +1735,7 @@ mod tests {
             .expect("the cancelled finish");
         assert_eq!(finished["payload"]["state"], "cancelled");
         assert!(session.pending().is_empty());
-        let again = crate::configuration::config_oauth2_cancel_on(&door, &id).expect("again");
+        let again = crate::commands::operation_cancel_on(&door, &id).expect("again");
         assert_eq!(again, crate::commands::CancelOutcome::AlreadySettled);
     }
 
