@@ -94,7 +94,10 @@ export type ActionId =
   | "open_log"
   | "copy_sender"
   | "copy_link"
-  | "copy_subject";
+  | "copy_subject"
+  | "theme_dark"
+  | "theme_light"
+  | "theme_system";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -286,6 +289,10 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   // The account wizard (ACC-01): the TUI has none, the CLI's `mp config
   // add-account` is its model; no key of its own (D11), as Settings.
   { section: "APP", label: "Add account", keys: [], id: "add_account", badge: null },
+  // The theme (Settings, src/app/theme.ts), stored in desktop.json; no key of its own, as Settings.
+  { section: "APP", label: "Theme: dark", keys: [], id: "theme_dark", badge: null },
+  { section: "APP", label: "Theme: light", keys: [], id: "theme_light", badge: null },
+  { section: "APP", label: "Theme: system", keys: [], id: "theme_system", badge: null },
   { section: "SEARCH", label: "Search server", keys: ["ff", "Shift+Enter"], id: "search_server", badge: null },
   { section: "SEARCH", label: "Cancel the server search", keys: [], id: "cancel_search", badge: null },
   { section: "READER", label: "Show intercepted links", keys: [], id: "show_intercepted", badge: null },

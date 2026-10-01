@@ -22,6 +22,7 @@ import { SetupScreen } from "@/components/screens/SetupScreen";
 import { MENU_ACTIONS, runDialog, useRunAction, type ListGeometry } from "@/app/actions";
 import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
+import { useStoredTheme } from "@/app/theme";
 import { screenFor } from "@/app/state";
 import { useAppState, useDispatch } from "@/app/store";
 import { useKeymap } from "@/keymap/useKeymap";
@@ -45,6 +46,7 @@ export function AppShell() {
   );
   useBoot(dispatch, onMenu);
   useVersionInfo(s, dispatch);
+  useStoredTheme(dispatch);
   useDataSync(s, dispatch);
   useKeymap(s, dispatch);
 

@@ -1,11 +1,12 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
-import { ArrowLeft, KeyRound, LogIn, Plus, RotateCw, SquarePen } from "lucide-react";
+import { ArrowLeft, KeyRound, LogIn, Monitor, Moon, Plus, RotateCw, SquarePen, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { openConfig } from "@/app/interop";
 import { kindLabel, reloadConfig, saveEditorSetting, usesPassword } from "@/app/settings";
 import { signInOrShow } from "@/app/signin";
+import { saveTheme, THEME_LABELS, THEMES, type Theme } from "@/app/theme";
 import { useAppState, useDispatch } from "@/app/store";
 import * as cmd from "@/lib/commands";
 import type { ConfigAccount, ConfigServer, EditorSetting, SecretKind } from "@/lib/gui-types";
@@ -82,6 +83,41 @@ function AccountCard({
         )}
       </div>
     </article>
+  );
+}
+
+const THEME_ICONS: Record<Theme, typeof Moon> = { dark: Moon, light: Sun, system: Monitor };
+
+/** The theme (`setting_get|set` of `theme`): three buttons, the current one pressed; a press paints at once and stores. */
+function ThemeField() {
+  const { theme } = useAppState();
+  const dispatch = useDispatch();
+  const id = useId();
+  return (
+    <div className="mt-3 flex flex-col gap-1">
+      <span id={`${id}-theme`} className="text-sm text-muted-foreground">
+        Theme
+      </span>
+      <div role="group" aria-labelledby={`${id}-theme`} className="flex gap-1">
+        {THEMES.map((t) => {
+          const Icon = THEME_ICONS[t];
+          return (
+            <Button
+              key={t}
+              size="sm"
+              variant="outline"
+              aria-pressed={theme === t}
+              className="aria-pressed:border-framing aria-pressed:bg-selection aria-pressed:text-selection-foreground"
+              onClick={() => void saveTheme(dispatch, t)}
+            >
+              <Icon aria-hidden="true" />
+              {THEME_LABELS[t]}
+            </Button>
+          );
+        })}
+      </div>
+      <p className="text-xs text-muted-foreground">System follows the light or dark appearance of the operating system.</p>
+    </div>
   );
 }
 
@@ -219,6 +255,7 @@ export function SettingsView() {
                   Reload
                 </Button>
               </div>
+              <ThemeField />
               <EditorSettingField />
             </section>
             <section aria-labelledby="settings-accounts">

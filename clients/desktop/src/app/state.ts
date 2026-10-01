@@ -1,6 +1,7 @@
 // The desktop shell's model: connection, bootstrap, the fetched lists, the
 // selection and the presentation state. Pure; the reducer is in reducer.ts.
 
+import type { Theme } from "@/app/theme";
 import type {
   AgendaEvent,
   Bootstrap,
@@ -551,6 +552,8 @@ export type AppState = {
   resync: string | null;
   shuttingDown: boolean;
   version: VersionInfo | null;
+  /** The colour theme as stored in desktop.json (src/app/theme.ts); dark until it is read. */
+  theme: Theme;
   bootstrap: Bootstrap | null;
   accounts: Loadable<AccountInfo[]>;
   mailboxes: Record<string, Loadable<MailboxListing>>;
@@ -723,6 +726,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     resync: null,
     shuttingDown: false,
     version: null,
+    // theme.ts's DEFAULT_THEME, spelled out so the model imports no command.
+    theme: "dark",
     bootstrap: null,
     accounts: emptyLoadable(),
     mailboxes: {},

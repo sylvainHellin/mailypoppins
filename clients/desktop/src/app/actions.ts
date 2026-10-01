@@ -15,6 +15,7 @@ import { composeToContact, copyContactAddress, rebuildContacts, sendVcard, CONTA
 import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
 import { copyFromMessage, openConfig, openLog, openMeta } from "@/app/interop";
 import { hiddenNotice, viewPanes } from "@/app/views";
+import { saveTheme } from "@/app/theme";
 import { actionTargets, type Action } from "@/app/reducer";
 import {
   draftItems,
@@ -296,6 +297,12 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return dispatch({ type: "switch_view", view: "settings" });
     case "add_account":
       return dispatch({ type: "open_account_wizard" });
+    case "theme_dark":
+      return void saveTheme(dispatch, "dark");
+    case "theme_light":
+      return void saveTheme(dispatch, "light");
+    case "theme_system":
+      return void saveTheme(dispatch, "system");
     case "calendar_open_source":
       return void openEventSource(s, dispatch);
     case "calendar_toggle_past":
