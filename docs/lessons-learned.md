@@ -2430,3 +2430,10 @@ cmdk 1.1 updates the store's `selectedItemId`, which its `Command.List` and `Com
 A controlled `value` prop sets the selected row (`aria-selected` follows) but leaves `selectedItemId` behind, and cmdk overwrites any `id` passed to a list or an item with its own `useId`.
 A field outside the `Command` that drives the selection itself (`clients/desktop/src/components/compose/RecipientsInput.tsx`) reads the list's id and the `[cmdk-item][aria-selected="true"]` row's id from the DOM through a `MutationObserver` and sets them on the input.
 A click on a row would also blur that field, since cmdk's root is focusable (`tabIndex=-1`): the panel prevents `mousedown`.
+
+## A whole-mailbox `message.list` is spent building the `Value`, not reading or parsing
+
+At 50 000 rows the method takes about 156 ms: 41 for the SQLite read, about 10 for building the rows, and about 115 for building and dropping a `serde_json::Value` object of sixteen keys per row.
+The same borrowed rows serialised straight to bytes take 31.5 ms, so a further cut has to skip the tree, which `Outcome::result: Value` does not allow today (`docs/baselines/message-list-unbounded.md`).
+The answer is also bigger than it looks: about 488 bytes a row, so a mailbox past about 34 000 rows is over the 16 MiB `MAX_RESPONSE_BYTES` and the daemon answers `frame_too_large` instead of a listing.
+Moving such a read onto `spawn_blocking` has to resolve `store_path` before the hop and hand the worker a path: a fixture's data root is a thread-local (see "The data-root override is thread-local" above), and a query fixture's runtime does not re-install it on the blocking pool the way a command fixture's does.
