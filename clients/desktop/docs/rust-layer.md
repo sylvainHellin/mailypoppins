@@ -688,11 +688,12 @@ type DraftAttachments = {
 };
 ```
 
-A write reaches the frontend as the watcher's `draft.changed`, like every other client-side rewrite.
+A write reaches the frontend as the watcher's `draft.changed`, like every other draft write.
 An editor open on the same file can overwrite the change with its own buffer, as it can in the TUI.
 
 `message_fetch` is the TUI search overlay's `f` (`LST-09`): `message.fetch {account, mailbox, message_id}` ingests a server-only message.
-It is an operation, and one message is quick, so the command reads `operation.status` every 100 ms until it ends and answers with its result; the frontend awaits one promise, and no `PendingKind` is registered.
+It is an operation, and one message is quick, so the command blocks on its end (`SessionHandle::await_operation`) and answers with its result; the frontend awaits one promise, and no `PendingKind` is registered.
+The start is registered under the pump lock, so its `operation.finished` cannot overtake it, and the pump hands that payload to the waiting command instead of the channel; a re-bootstrap settles it from `operation.status`, and a daemon restart ends it as `daemon_unavailable`.
 A fetch still running after 90 s is `timeout`, a `failed` operation is `protocol` with the daemon's reason, and a bad mailbox is `-32602` at the call.
 A message the store already holds answers at once with `already_present: true`.
 The new row reaches the lists through the counts `state.invalidate` the daemon publishes for its mailbox.

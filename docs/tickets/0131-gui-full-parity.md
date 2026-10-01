@@ -153,7 +153,7 @@ Open for M4 and for Sylvain:
 - The daemon's `SendOutcome.message_id` is empty: it is the built message's now ("Daemon gaps closed").
 - The daemon serves no `signature.list`, so `signature_list` reads the signatures directory itself: it serves one now ("Daemon gaps closed").
 - The daemon serves no `draft.attach` and no attachment removal, so the desktop rewrites the frontmatter itself: it serves both and a listing now ("Daemon gaps closed").
-- `message.fetch` is polled through `operation.status` every 100 ms rather than awaited as a pending operation.
+- `message.fetch` is polled through `operation.status` every 100 ms rather than awaited as a pending operation: it is awaited on its `operation.finished` now ("Daemon gaps closed").
 - The draft preview's Approve and Back to draft buttons acted on the marks the outbox view hides while it is open (the fix1 review), against `clients/desktop/docs/shell.md`, "What the view hides": fixed in `683bcfac`, they act on the draft shown.
 
 ## M4 landed
@@ -281,6 +281,9 @@ The daemon and Rust-layer gaps M3 and M4 worked around client-side, closed on th
 - The empty `SendOutcome.message_id`: `send.draft` and `send.approved` answer the `Message-ID` the build minted, which `send.invite` already did; the desktop's fixture always filled it, so no shim went.
 - `signature.list`: the daemon serves `{account}` -> `{account, names, default}`, `signature_list` calls it over the daemon as over the fixture, and it joined `REQUIRED_CAPABILITIES`; the rest of the `signature.*` family stays client-side.
 - `draft.attach` and an attachment removal: the daemon serves `draft.attachments`, `draft.attach` and `draft.detach` over `mp_core::draft`'s `attach_checked`, `remove_draft_attachment` and `resolve_attachment_entry`, which the desktop's line rewrite moved into; the four draft attachment commands and the vCard draft call them, and all three joined `REQUIRED_CAPABILITIES`.
+- An awaitable `message.fetch`: the daemon side needed nothing, since the fetch always published `operation.finished`; `message_fetch` blocks on that event through `SessionHandle::await_operation`, whose waiters the pump settles, a re-bootstrap re-queries and a restart drops, instead of polling `operation.status` every 100 ms.
+
+Left for later, from the same `BACKLOG.md` bullet: the rest of the `signature.*` family with a `signature.removed` event, `contact.vcard`, an event when a contact index changes (`CON-08`), and a signal for `contact.search`'s refused implicit build.
 
 ## Exit gate
 

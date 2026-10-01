@@ -55,8 +55,6 @@ const DRAFT_BUDGET: Duration = Duration::from_secs(20);
 const DRAFT_QUERY_BUDGET: Duration = Duration::from_secs(10);
 /// A fetch of one server-only message: a login, a SELECT and one FETCH.
 const FETCH_BUDGET: Duration = Duration::from_secs(90);
-/// How often a running fetch's `operation.status` is read.
-const FETCH_POLL: Duration = Duration::from_millis(100);
 
 /// `MP_DESKTOP_STUB_OPENER=1`: `open_external` records instead of opening.
 pub const STUB_OPENER_ENV: &str = "MP_DESKTOP_STUB_OPENER";
@@ -823,57 +821,34 @@ pub fn search_server_cancel_on(
 /// Fetch the server-only message `message_id` of `mailbox` (a sidebar label
 /// or a server name) into the store, the TUI search overlay's `f` (LST-09).
 ///
-/// `message.fetch` is an operation; one message is quick, so this waits for
-/// its end by reading `operation.status` rather than making the frontend
-/// await an id. A message the store already holds answers at once with
-/// `already_present`. The row it lands in reaches the lists through the
-/// counts invalidation the daemon publishes.
+/// `message.fetch` is an operation; one message is quick, so this blocks on
+/// its `operation.finished` through [`SessionHandle::await_operation`] rather
+/// than making the frontend await an id. A message the store already holds
+/// answers at once with `already_present`. The row it lands in reaches the
+/// lists through the counts invalidation the daemon publishes.
 pub fn message_fetch_on(
+    session: &SessionHandle,
     door: &Door,
     account: &str,
     mailbox: &str,
     message_id: &str,
 ) -> Result<FetchOutcome, GuiError> {
-    let answer = call(
+    let end = session.await_operation(
         door,
         "message.fetch",
         json!({"account": account, "mailbox": mailbox, "message_id": message_id}),
         START_BUDGET,
-        Addressing::Params,
+        FETCH_BUDGET,
     )?;
-    let id = answer["operation_id"]
-        .as_str()
-        .ok_or_else(|| GuiError::protocol("message.fetch answered no operation_id"))?
-        .to_string();
-    let deadline = std::time::Instant::now() + FETCH_BUDGET;
-    loop {
-        let status = call(
-            door,
-            "operation.status",
-            json!({"operation_id": id}),
-            CANCEL_BUDGET,
-            Addressing::Resource,
-        )?;
-        match status["state"].as_str() {
-            Some("succeeded") => return decode("message.fetch", status["result"].clone()),
-            Some("failed") => {
-                let why = status["error"]["message"]
-                    .as_str()
-                    .unwrap_or("no reason given");
-                return Err(GuiError::protocol(format!("The fetch failed: {why}")));
-            }
-            Some("cancelled") => return Err(GuiError::protocol("The fetch was cancelled")),
-            _ => {}
+    match end["state"].as_str() {
+        Some("succeeded") => decode("message.fetch", end["result"].clone()),
+        Some("cancelled") => Err(GuiError::protocol("The fetch was cancelled")),
+        _ => {
+            let why = end["error"]["message"]
+                .as_str()
+                .unwrap_or("no reason given");
+            Err(GuiError::protocol(format!("The fetch failed: {why}")))
         }
-        if std::time::Instant::now() >= deadline {
-            return Err(GuiError::Timeout {
-                message: format!(
-                    "the fetch of {message_id} did not finish in {} s",
-                    FETCH_BUDGET.as_secs()
-                ),
-            });
-        }
-        std::thread::sleep(FETCH_POLL);
     }
 }
 
@@ -1677,8 +1652,8 @@ pub async fn message_fetch(
     mailbox: String,
     message_id: String,
 ) -> Result<FetchOutcome, GuiError> {
-    with_door(&session, move |_, door| {
-        message_fetch_on(door, &account, &mailbox, &message_id)
+    with_door(&session, move |session, door| {
+        message_fetch_on(session, door, &account, &mailbox, &message_id)
     })
     .await
 }
@@ -2156,12 +2131,14 @@ mod tests {
 
     #[test]
     fn fetch_ingests_a_server_only_message_once_and_then_says_it_is_present() {
-        let (d, fixture) = fixture_door();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fixture = Arc::new(Fixture::load(tx).expect("fixture"));
+        let (session, d) = SessionHandle::pumping(Arc::clone(&fixture), rx);
         let id = "<server-only@fixture.example>";
         assert!(!rows_of(&d, "work", "archive")
             .iter()
             .any(|r| r.message_id == id));
-        let fetched = message_fetch_on(&d, "work", "Archive", id).expect("fetch");
+        let fetched = message_fetch_on(&session, &d, "work", "Archive", id).expect("fetch");
         assert!(!fetched.already_present);
         assert_eq!(fetched.mailbox, "archive");
         assert_eq!(
@@ -2173,7 +2150,7 @@ mod tests {
             .find(|r| r.id == fetched.row_id)
             .expect("the fetched row is listed");
         assert_eq!(row.message_id, id);
-        let again = message_fetch_on(&d, "work", "archive", id).expect("fetch again");
+        let again = message_fetch_on(&session, &d, "work", "archive", id).expect("fetch again");
         assert!(again.already_present);
         assert_eq!(again.row_id, fetched.row_id);
         let calls: Vec<Value> = fixture
@@ -2186,12 +2163,20 @@ mod tests {
             calls[0],
             json!({"account": "work", "mailbox": "Archive", "message_id": id})
         );
-        let gone = message_fetch_on(&d, "work", "Archive", "<nowhere@example.com>").unwrap_err();
+        let gone =
+            message_fetch_on(&session, &d, "work", "Archive", "<nowhere@example.com>").unwrap_err();
         assert!(
             gone.message().contains("The fetch failed: no message"),
             "{gone:?}"
         );
-        let bad = message_fetch_on(&d, "work", "Nowhere", id).unwrap_err();
+        assert!(
+            fixture
+                .calls()
+                .iter()
+                .all(|(method, _)| method != "operation.status"),
+            "the end is the operation.finished event, not a poll"
+        );
+        let bad = message_fetch_on(&session, &d, "work", "Nowhere", id).unwrap_err();
         assert!(
             matches!(
                 bad,
