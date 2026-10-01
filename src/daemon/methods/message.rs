@@ -1728,4 +1728,83 @@ mod tests {
         assert!(limit_param(&json!({"limit": "5"})).is_err());
         assert!(limit_param(&json!({"limit": -1})).is_err());
     }
+
+    /// `message.list` with `limit: null` over a large mailbox, timed in process:
+    /// the store read alone, the whole method, and the frame the server would
+    /// encode from its answer (`docs/baselines/message-list-unbounded.md`).
+    ///
+    /// Points at a fixture `examples/mkfixture.rs` built, named by
+    /// `MP_BENCH_FIXTURE`, and prints nothing but a skip line without one:
+    ///
+    /// ```sh
+    /// target/release/examples/mkfixture --out /var/tmp/mp-bench-50k --rows 50000
+    /// MP_BENCH_FIXTURE=/var/tmp/mp-bench-50k cargo test --release --lib \
+    ///   message_list_unbounded_bench -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a benchmark over a generated fixture; see the doc comment"]
+    fn message_list_unbounded_bench() {
+        use std::time::Instant;
+
+        let Some(root) = std::env::var_os("MP_BENCH_FIXTURE").map(std::path::PathBuf::from)
+        else {
+            eprintln!("MP_BENCH_FIXTURE is unset; nothing to measure");
+            return;
+        };
+        let mailbox = std::env::var("MP_BENCH_MAILBOX").unwrap_or_else(|_| "Bulk".to_string());
+        let _data = crate::config::test_env::DataDirOverride::set(root.join("data"));
+        let toml = fs::read_to_string(root.join("config/config.toml")).expect("fixture config");
+        let config: crate::config::GlobalConfig = toml::from_str(&toml).expect("parses");
+        let accounts = config.accounts;
+        let params = json!({"account": "alpha", "mailbox": mailbox, "limit": null});
+
+        // Median of eleven after one discarded warm-up, min and max beside it:
+        // the protocol of `docs/baselines/pre-daemon/workloads.md`.
+        fn sample(mut run: impl FnMut()) -> (f64, f64, f64) {
+            run();
+            let mut ms: Vec<f64> = (0..11)
+                .map(|_| {
+                    let started = Instant::now();
+                    run();
+                    started.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            ms.sort_by(f64::total_cmp);
+            (ms[5], ms[0], ms[10])
+        }
+
+        let path = crate::config::store_path("alpha");
+        let resolved = resolve_mailbox(
+            accounts.iter().find(|a| a.name == "alpha").expect("alpha"),
+            &mailbox,
+        )
+        .expect("mailbox");
+        let read_only = sample(|| {
+            let store = Store::open(&path).expect("store");
+            let rows = read::list_mailbox(&store, "alpha", &resolved).expect("rows");
+            std::hint::black_box(rows);
+        });
+        let method = sample(|| {
+            std::hint::black_box(list(&params, &accounts).expect("lists"));
+        });
+        let answer = list(&params, &accounts).expect("lists");
+        let rows = answer["messages"].as_array().map_or(0, Vec::len);
+        let reply = json!({"jsonrpc": "2.0", "id": 1, "result": answer});
+        let encode = sample(|| {
+            std::hint::black_box(mp_protocol::frame::encode(&reply).expect("encodes"));
+        });
+        let bytes = mp_protocol::frame::encode(&reply).expect("encodes").len();
+        let decode = sample(|| {
+            let bytes = mp_protocol::frame::encode(&reply).expect("encodes");
+            let value: Value = serde_json::from_slice(&bytes).expect("decodes");
+            std::hint::black_box(value);
+        });
+
+        let show = |(median, min, max): (f64, f64, f64)| format!("{median:.1} {min:.1} {max:.1}");
+        eprintln!("rows {rows}, frame {bytes} bytes, cap {}", mp_protocol::MAX_RESPONSE_BYTES);
+        eprintln!("store read (list_mailbox)   ms median min max: {}", show(read_only));
+        eprintln!("message.list (read + rows)  ms median min max: {}", show(method));
+        eprintln!("frame::encode of the reply  ms median min max: {}", show(encode));
+        eprintln!("encode + client-side parse  ms median min max: {}", show(decode));
+    }
 }
