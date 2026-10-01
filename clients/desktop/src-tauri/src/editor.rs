@@ -11,8 +11,9 @@
 //! The editor is a command template, resolved in this order:
 //!
 //! 1. `MP_DESKTOP_EDITOR`;
-//! 2. the `editor` key of `desktop.json` in the app config directory, which
-//!    `editor_setting_get` and `editor_setting_set` read and write;
+//! 2. the `editor` key of `desktop.json` in the app config directory
+//!    ([`crate::settings`]), which `editor_setting_get` and
+//!    `editor_setting_set` read and write;
 //! 3. `$VISUAL`, then `$EDITOR`; one naming a terminal-only editor
 //!    ([`TERMINAL_EDITORS`]) runs inside the first terminal emulator found
 //!    ([`terminal_template`]), and is skipped when there is none;
@@ -41,26 +42,21 @@
 //! In fixture mode nothing is spawned: the resolved command is journaled on
 //! the fixture, which `fixture_simulate("editor_save")` then plays against.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::{json, Map, Value};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 use crate::error::GuiError;
 use crate::fixture::Fixture;
 use crate::session::SessionHandle;
+pub(crate) use crate::settings::settings_file;
+use crate::settings::{self, SettingKey};
 
 /// The environment override of the editor command.
 pub const EDITOR_ENV: &str = "MP_DESKTOP_EDITOR";
-
-/// The desktop settings file, in the app config directory.
-pub const SETTINGS_FILE: &str = "desktop.json";
-
-/// The key of [`SETTINGS_FILE`] the editor template lives under.
-const SETTINGS_KEY: &str = "editor";
 
 /// GUI editors probed for when nothing names one, in this order.
 pub const PROBE_NAMES: &[&str] = &["code", "zed", "subl", "cursor"];
@@ -585,62 +581,19 @@ pub fn open_on(
 }
 
 // ---------------------------------------------------------------------------
-// The settings file
+// The setting
 // ---------------------------------------------------------------------------
-
-/// `desktop.json` in `config_dir`.
-pub fn settings_path(config_dir: &Path) -> PathBuf {
-    config_dir.join(SETTINGS_FILE)
-}
-
-fn read_settings(file: &Path) -> Result<Map<String, Value>, GuiError> {
-    match std::fs::read_to_string(file) {
-        Ok(text) if text.trim().is_empty() => Ok(Map::new()),
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => Ok(map),
-            Ok(_) | Err(_) => Err(GuiError::Setup {
-                message: format!("{} is not a JSON object", file.display()),
-            }),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Map::new()),
-        Err(e) => Err(GuiError::internal(format!(
-            "could not read {}: {e}",
-            file.display()
-        ))),
-    }
-}
 
 /// The `editor` key of the settings file, `None` when the file or the key is
 /// missing.
 pub fn read_setting(file: &Path) -> Result<Option<String>, GuiError> {
-    Ok(read_settings(file)?
-        .get(SETTINGS_KEY)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .filter(|v| !v.trim().is_empty()))
+    settings::read(file, SettingKey::Editor)
 }
 
 /// Set (or, with `None` or a blank value, clear) the `editor` key, keeping
-/// every other key of the file.
+/// every other key of the file; a template that does not split is `setup`.
 pub fn write_setting(file: &Path, editor: Option<&str>) -> Result<(), GuiError> {
-    let mut settings = read_settings(file)?;
-    match editor.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(editor) => {
-            split(editor).map_err(|message| GuiError::Setup { message })?;
-            settings.insert(SETTINGS_KEY.to_string(), json!(editor));
-        }
-        None => {
-            settings.remove(SETTINGS_KEY);
-        }
-    }
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| GuiError::internal(format!("could not create {}: {e}", dir.display())))?;
-    }
-    let text =
-        serde_json::to_string_pretty(&Value::Object(settings)).map_err(GuiError::internal)?;
-    std::fs::write(file, text + "\n")
-        .map_err(|e| GuiError::internal(format!("could not write {}: {e}", file.display())))
+    settings::write(file, SettingKey::Editor, editor)
 }
 
 /// The setting, and what an `editor_open` would run with it now.
@@ -665,14 +618,6 @@ fn process_env(name: &str) -> Option<String> {
 
 fn is_file(path: &Path) -> bool {
     path.is_file()
-}
-
-pub(crate) fn settings_file(app: &AppHandle) -> Result<PathBuf, GuiError> {
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| GuiError::internal(format!("no app config directory: {e}")))?;
-    Ok(settings_path(&dir))
 }
 
 /// The process's own lookup, over the settings file's current value.
@@ -735,6 +680,8 @@ pub fn editor_setting_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::settings_path;
+    use serde_json::{json, Value};
     use std::collections::BTreeMap;
 
     fn lookup<'a>(

@@ -151,8 +151,8 @@ export const mock = {
   draftExtra: {} as Record<string, { bcc: string; body: string }>,
   /** The next minted draft id's counter. */
   nextDraft: 1,
-  /** The `editor` key of the settings file. */
-  editorSetting: null as string | null,
+  /** `desktop.json`'s keys, as `setting_get|set` and `editor_setting_get|set` read and write them. */
+  settings: new Map<string, string>(),
   /**
    * Whether `send_draft` and `send_approved` arm a hold, as a daemon with
    * `email.send_hold_secs` above 0 does; the hold's first event is emitted
@@ -346,7 +346,7 @@ export function resetMock(): void {
   mock.editorFixture = false;
   mock.draftExtra = {};
   mock.nextDraft = 1;
-  mock.editorSetting = null;
+  mock.settings.clear();
   mock.sendHeld = true;
   mock.nextSend = 1;
   mock.outbox = seedOutbox();
@@ -1394,14 +1394,23 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     }
     case "editor_setting_get":
     case "editor_setting_set": {
-      if (cmd === "editor_setting_set") mock.editorSetting = (args.editor as string | null) ?? null;
+      if (cmd === "editor_setting_set") storeSetting("editor", (args.editor as string | null) ?? null);
+      const editor = mock.settings.get("editor") ?? null;
       return {
-        editor: mock.editorSetting,
+        editor,
         file: "/fixture/config/desktop.json",
         env_override: null,
-        effective: mock.editorSetting ?? "code --wait {path}",
-        effective_source: mock.editorSetting ? "setting" : "probe",
+        effective: editor ?? "code --wait {path}",
+        effective_source: editor ? "setting" : "probe",
       };
+    }
+    // settings.rs: the known keys only, `null` or a blank value removes one.
+    case "setting_get":
+      return mock.settings.get(settingKey(args.key)) ?? null;
+    case "setting_set": {
+      const key = settingKey(args.key);
+      storeSetting(key, (args.value as string | null) ?? null);
+      return mock.settings.get(key) ?? null;
     }
     case "send_hold_status": {
       const only = args.account as string | null;
@@ -1554,6 +1563,25 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     default:
       throw { kind: "internal", message: `the mock does not answer ${cmd}` };
   }
+}
+
+const SETTING_KEYS = ["editor", "theme", "reader_mode"];
+
+function settingKey(key: unknown): string {
+  const k = String(key);
+  if (!SETTING_KEYS.includes(k)) {
+    throw { kind: "not_found", message: `no desktop setting \`${k}\`; the settings are ${SETTING_KEYS.join(", ")}`, code: null };
+  }
+  return k;
+}
+
+function storeSetting(key: string, value: string | null): void {
+  const v = value?.trim() ?? "";
+  if (key === "theme" && v !== "" && !["dark", "light", "system"].includes(v)) {
+    throw { kind: "setup", message: `the theme \`${v}\` is none of dark, light or system` };
+  }
+  if (v === "") mock.settings.delete(key);
+  else mock.settings.set(key, v);
 }
 
 export const invoke = vi.fn(async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T> => {

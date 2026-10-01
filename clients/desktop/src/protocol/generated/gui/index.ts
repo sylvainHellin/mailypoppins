@@ -68,6 +68,7 @@ export type { SecretStored } from "./SecretStored";
 export type { SendRefusal } from "./SendRefusal";
 export type { SendStarted } from "./SendStarted";
 export type { ServerSearchParams } from "./ServerSearchParams";
+export type { SettingKey } from "./SettingKey";
 export type { SignatureFile } from "./SignatureFile";
 export type { SignatureListing } from "./SignatureListing";
 export type { SyncMode } from "./SyncMode";

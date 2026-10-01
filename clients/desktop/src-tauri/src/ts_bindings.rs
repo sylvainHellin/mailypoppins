@@ -16,7 +16,7 @@ use ts_rs::{Config, TS};
 
 use crate::{
     attachments, calendar, commands, configuration, connector, contacts, editor, error, session,
-    signatures,
+    settings, signatures,
 };
 
 /// Exports each listed type, and its dependencies, into `$cfg`'s directory.
@@ -114,6 +114,7 @@ fn export_into(dir: &Path) -> usize {
         editor::EditorSource,
         editor::EditorLaunch,
         editor::EditorSetting,
+        settings::SettingKey,
         connector::ConnectFailure,
         connector::ConnectError,
         connector::Hello,

@@ -13,6 +13,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `session.rs` | The one `Session`, the `StateTracker` watermark, the event pump, re-bootstrap, the awaited-operations table |
 | `commands.rs` | The Tauri commands and their result types |
 | `editor.rs` | The external editor a draft opens in, and the editor setting |
+| `settings.rs` | `desktop.json`, the desktop's own settings: the editor template, the theme and the reader mode |
 | `attachments.rs` | Attachments, a draft's `attachments:` list, and the browser rendition |
 | `calendar.rs` | The agenda, an agenda entry's `invite.ics` in the editor, a message's invitation, the RSVP, the Graph probe and a new invitation |
 | `contacts.rs` | The ranked contacts with their recipient, the index rebuild, and a contact's vCard draft |
@@ -44,7 +45,7 @@ type GuiError =
 
 `version_mismatch` is the blocking restart screen; its button calls `restart_daemon` after the user confirms.
 The handshake requires every daemon method the layer calls (`REQUIRED_CAPABILITIES` in `connector.rs`), so a daemon that lacks one lands on that screen instead of failing at the first call; under test the fixture door panics on a method missing from the list, less the methods only the fixture answers (`FIXTURE_ONLY_METHODS` in `fixture.rs`: `signature.list`, `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default`), whose work the layer does itself over a daemon.
-`setup` is the desktop's own configuration: an editor that did not start, or a settings file that does not read; its message names what to change.
+`setup` is the desktop's own configuration: an editor that did not start, a settings file that does not read, or a setting value its key cannot hold; its message names what to change.
 
 ## Types
 
@@ -104,6 +105,8 @@ The type blocks in this document are for reading, and the generated files are th
 | `editor_open` | `path` | `EditorLaunch` |
 | `editor_setting_get` | none | `EditorSetting` |
 | `editor_setting_set` | `editor` (or `null` to clear) | `EditorSetting` |
+| `setting_get` | `key` (`SettingKey`) | `string \| null`; an unknown key is `not_found` |
+| `setting_set` | `key` (`SettingKey`), `value` (or `null` to remove) | `string \| null`, the value the key holds afterwards; an unknown key is `not_found`, a value the key cannot hold `setup` |
 | `config_open` | none | `EditorLaunch`; `not_found` when the daemon has no `config.toml` |
 | `log_open` | none | `EditorLaunch`; `not_found` when the daemon's log file does not exist yet |
 | `config_get` | none | `ConfigSnapshot` |
@@ -491,6 +494,26 @@ type OAuth2Stored = { stored: boolean; account: string; kind: string; key: strin
 
 `config_oauth2_cancel` calls `operation.cancel` and keeps the sign-in awaited, so its `cancelled` finish ends it the usual way; one already over answers `already_settled`.
 The daemon never hands its cancel token to the provider's poll, so a sign-in finished in the browser after a cancel still caches its token.
+
+## Desktop settings
+
+`settings.rs` keeps the desktop's own settings in `desktop.json`, in the app config directory (`~/Library/Application Support/dev.mailypoppins.desktop/` on macOS).
+None of them reaches the daemon.
+The file is one JSON object, and each setting is a string under its key:
+
+```ts
+type SettingKey = "editor" | "theme" | "reader_mode";
+```
+
+- `editor` is the editor command template (see Drafts and the editor), refused with `setup` when it does not split.
+- `theme` is `dark`, `light` or `system`, refused with `setup` otherwise; unset means dark ([shell.md](shell.md), "Settings").
+- `reader_mode` is how the reader shows a message, stored as given.
+
+`setting_get` and `setting_set` read and write one key, and `editor_setting_get` and `editor_setting_set` are the `editor` key with what it resolves to.
+A key outside `SettingKey` is `not_found` naming the known keys, and nothing is written.
+A missing file, a missing key, a value that is not a string and a blank value all read as `null`.
+A write trims the value, removes the key on `null` or a blank value, keeps every other key of the file, unknown ones included, and creates the directory when it is missing.
+A file that is not a JSON object is `setup` for every read and write.
 
 ## Drafts and the editor
 

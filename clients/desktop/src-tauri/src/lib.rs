@@ -10,6 +10,7 @@
 //! - [`session`]: the one session, the ordered event pump, re-bootstrap.
 //! - [`commands`]: the narrow Tauri commands.
 //! - [`editor`]: the external editor a draft is opened in.
+//! - [`settings`]: `desktop.json`, the desktop's own settings.
 //! - [`attachments`]: attachments, a draft's list, the browser rendition.
 //! - [`calendar`]: the agenda and an entry's `invite.ics` in the editor.
 //! - [`daemon_files`]: `config.toml` and the daemon log in the editor.
@@ -35,6 +36,7 @@ pub mod navigation;
 pub mod paths;
 pub mod reader;
 pub mod session;
+pub mod settings;
 pub mod signatures;
 
 #[cfg(test)]
@@ -180,6 +182,8 @@ pub fn run() {
             editor::editor_open,
             editor::editor_setting_get,
             editor::editor_setting_set,
+            settings::setting_get,
+            settings::setting_set,
             commands::send_hold_status,
             commands::send_cancel_hold,
             commands::send_draft,

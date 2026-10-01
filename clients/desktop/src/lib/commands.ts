@@ -52,6 +52,7 @@ import type {
   SecretStored,
   SendStarted,
   ServerSearchParams,
+  SettingKey,
   SignatureFile,
   SignatureListing,
   SyncMode,
@@ -265,6 +266,13 @@ export const editorSettingGet = (): Promise<EditorSetting> => invoke<EditorSetti
 /** `null` clears the setting. */
 export const editorSettingSet = (editor: string | null): Promise<EditorSetting> =>
   invoke<EditorSetting>("editor_setting_set", { editor });
+
+/** One key of `desktop.json`, `null` when unset; an unknown key rejects with `not_found`. */
+export const settingGet = (key: SettingKey): Promise<string | null> => invoke<string | null>("setting_get", { key });
+
+/** Set one key of `desktop.json`, or remove it with `null`; answers the value it holds afterwards. */
+export const settingSet = (key: SettingKey, value: string | null): Promise<string | null> =>
+  invoke<string | null>("setting_set", { key, value });
 
 export const sendHoldStatus = (account?: string): Promise<HoldListing> =>
   invoke<HoldListing>("send_hold_status", { account: account ?? null });
