@@ -654,8 +654,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `draft.path`, then a client-side editor session on the canonical file
 - GUI location: clients/desktop: `e` on a draft, the palette and the draft preview's Edit in editor run `draft_path`, then `editor_open`, which starts the resolved external editor without waiting for it; the editing banner names the draft and the editor, with Reopen in editor and Done (M3, #0131; shell.md, "The editing banner", rust-layer.md, "Drafts and the editor")
 - Validation: `tests/daemon_draft_slice.rs`, with a stub editor that records the path it was handed; `clients/desktop/src/keymap/keymap.test.tsx` (`e on a draft resolves its path and opens the editor; on a message it opens the reader`), `clients/desktop/src/components/compose/compose.test.tsx` (`names the draft and the editor; Reopen runs the editor again and Done ends the session`, `an editor that did not start is a failure notice naming what to set`), `clients/desktop/src-tauri/src/editor.rs` (`the_env_and_the_setting_win_over_visual_editor_and_the_probes`, `a_terminal_editor_in_the_environment_falls_through_to_the_probes`)
-- Status: routed (P4-U6); GUI shipped (M3, #0131) through the external editor
-- Note: the GUI equivalent is the embedded Neovim session on the same file, which M5 (#0130) brings; until then the desktop hands the file to the editor `MP_DESKTOP_EDITOR`, `desktop.json`, `$VISUAL` or `$EDITOR`, a probed `code`, `zed`, `subl` or `cursor`, or `open -t` names, in that order.
+- Status: routed (P4-U6); GUI shipped (M3, #0131) through the external editor, and (M5, #0130) through the embedded session for a terminal editor
+- Note: a terminal editor (`nvim`, `vim`, `hx`, ...) named by `MP_DESKTOP_EDITOR`, the `editor` setting, `$VISUAL` or `$EDITOR` opens the draft in the embedded terminal pane on the same file (shell.md, "The embedded editor"; rust-layer.md, "Terminal sessions"); a GUI editor, a probed `code`, `zed`, `subl` or `cursor`, or `open -t` keeps the external route, in that order.
 
 ### DFT-08 Create a reply or a reply-all draft from a received message
 
@@ -1247,7 +1247,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: client-side
 - GUI location: clients/desktop: nothing is suspended; `editor_open` starts the resolved external editor and never waits for it to exit, and the editing banner names the draft and the editor until Done (M3, #0131; rust-layer.md, "Drafts and the editor", shell.md, "The editing banner")
 - Validation: unit tests in `clients/tui/src/app/types.rs`; `clients/desktop/src-tauri/src/editor.rs` (`the_env_and_the_setting_win_over_visual_editor_and_the_probes`, `a_nonzero_exit_inside_the_window_is_a_setup_error`), `clients/desktop/src/components/compose/compose.test.tsx` (`names the draft and the editor; Reopen runs the editor again and Done ends the session`)
-- Status: GUI shipped (M3, #0131) as the external-editor handoff, which M5 (#0130) replaces with the embedded session
+- Status: GUI shipped (M3, #0131) as the external-editor handoff for GUI editors, and (M5, #0130) as the embedded session for terminal editors
 - Note: the GUI replaces suspension with the embedded PTY session.
 
 ## Status, activity, logging, and help
