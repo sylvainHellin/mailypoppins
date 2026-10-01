@@ -282,6 +282,25 @@ pub fn run() {
 mod tests {
     use super::parse_window_size;
 
+    /// The registration domain is this process's alone and never stored, so
+    /// the test changes nothing outside it; it reads that domain, since a
+    /// user's own value elsewhere rightly wins over it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn press_and_hold_is_registered_off() {
+        use objc2_foundation::{ns_string, NSNumber, NSRegistrationDomain, NSUserDefaults};
+        super::key_repeat();
+        // SAFETY: an extern static Foundation defines.
+        let domain = unsafe { NSRegistrationDomain };
+        let registered = NSUserDefaults::standardUserDefaults().volatileDomainForName(domain);
+        let value = registered
+            .objectForKey(ns_string!("ApplePressAndHoldEnabled"))
+            .expect("registered")
+            .downcast::<NSNumber>()
+            .expect("a number");
+        assert!(!value.as_bool());
+    }
+
     #[test]
     fn a_window_size_parses_as_width_x_height() {
         assert_eq!(parse_window_size("950x800"), Some((950.0, 800.0)));
