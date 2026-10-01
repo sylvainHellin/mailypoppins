@@ -27,8 +27,8 @@ describe("the key help filter", () => {
     await user.keyboard("archive");
     const labels = rows().map((r) => r.getAttribute("data-label"));
     expect(labels).toContain("Archive");
-    expect(labels).not.toContain("Next message");
-    expect(labels.length).toBeLessThan(TOTAL / 4);
+    // A substring match, as the TUI's: no loose fuzzy hit such as "Navigate results".
+    expect(labels).toEqual(["Archive", "Archive"]);
     // A section with no match disappears, heading and all.
     expect(within(help).queryByRole("group", { name: "DESKTOP" })).toBeNull();
     expect(within(help).getByRole("group", { name: /MESSAGE/ })).toBeInTheDocument();
@@ -50,6 +50,32 @@ describe("the key help filter", () => {
     await user.clear(input);
     expect(rows()).toHaveLength(TOTAL);
     expect(screen.getByRole("group", { name: "DESKTOP" })).toBeInTheDocument();
+  });
+
+  it("keeps the sections in their order, DESKTOP last, after a filter is cleared", async () => {
+    const { user, help, input } = await openHelp();
+    const headings = () => [...help.querySelectorAll("[cmdk-group-heading]")].map((h) => h.textContent);
+    const original = [...SECTIONS.map((s) => s.title), "DESKTOP"];
+    expect(headings()).toEqual(original);
+    await user.keyboard("archive");
+    expect(headings()).toEqual(["MESSAGE (list, headers, body)", "SERVER SEARCH"]);
+    await user.clear(input);
+    expect(headings()).toEqual(original);
+    const firstRows = SECTIONS[0].bindings.map((b) => b.action);
+    const group = within(help).getByRole("group", { name: SECTIONS[0].title });
+    expect(within(group).getAllByTestId("help-item").map((r) => r.getAttribute("data-label"))).toEqual(firstRows);
+  });
+
+  it("matches a section title, and opens again with an empty filter", async () => {
+    const { user, help, rows } = await openHelp();
+    await user.keyboard("desktop");
+    expect([...help.querySelectorAll("[cmdk-group-heading]")].map((h) => h.textContent)).toEqual(["DESKTOP"]);
+    expect(rows()).toHaveLength(GUI_ENTRIES.filter((e) => e.keys.length > 0).length);
+    await user.keyboard("{Escape}");
+    await user.keyboard("?");
+    const again = await screen.findByRole("dialog", { name: "Keys" });
+    expect(within(again).getByRole("combobox", { name: "Filter keys" })).toHaveValue("");
+    expect(within(again).getAllByTestId("help-item")).toHaveLength(TOTAL);
   });
 
   it("Enter on a row runs nothing and Escape closes the help", async () => {

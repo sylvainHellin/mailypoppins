@@ -858,7 +858,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - The palette's and the View menu's "Widen list" and "Narrow list" move the splitter by 40 px, since Tab cycles panes and never lands on it.
 
 Keys are ignored while a text field has focus, except Escape, and while a dialog is open.
-The key help (`?`) opens with its filter focused and narrows its rows as the user types, by the palette's fuzzy match on section, description and key.
+The key help (`?`) opens with its filter focused and narrows its rows as the user types to those whose section, key or description contains the text, ignoring case, as the TUI's filter does.
 Outside Mail a view's own table comes first and most mail keys do nothing (Views, "Keys in a view").
 A KEYMAP key the desktop does not bind (such as `tt`, the TUI's thread view) shows a notice saying so; the palette lists the same actions disabled, with the badge.
 No row carries an M3 or M4 badge any more.
