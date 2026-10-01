@@ -59,6 +59,6 @@ Commits carry `(#0137)`.
 - A plugin that sets a colorscheme on `VimEnter` or lazily still overrides the app's.
 - Without `termguicolors` the light palette's surfaces are the nearest ANSI slot and `CursorLine` has no background.
 - The TUI's status-bar hint for a pending prefix (`clients/tui/src/ui/status.rs:48`) has no desktop counterpart.
-- The highlighted cmdk row (`data-selected:bg-muted`) is faint in the dark theme, shared with the palette and the key help; a tokens question, not this ticket's.
+- The highlighted cmdk row was `muted`, barely visible in the dark theme; it is now `selection`, the cursor-row token, in the palette, the key help and the recipient completion alike.
 - `src/components/outbox/outbox.test.tsx` ("the palette's actions on the selection" and "Clear selection") time out under a loaded full run, before this ticket as well; the test needs a longer timeout or more `findBy` waits.
 - `ActivityLogDialog.tsx:14` keeps its own copy of `PREFIX_TIMEOUT_MS`; import the exported one.

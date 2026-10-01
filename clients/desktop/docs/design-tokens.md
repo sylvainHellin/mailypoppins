@@ -101,6 +101,7 @@ The font is the host element's computed `font-mono` at `text-sm`: `@theme inline
 ## Row and notice patterns
 
 - The cursor row is `selection`; a marked row is `accent`, the hover colour at full strength, with its mark box filled in `link`.
+- The highlighted row of a cmdk list (the palette, the key help, the recipient completion) is `selection` as well, so the row the next Enter takes reads like the list's cursor row.
 - A change the daemon has not confirmed draws a spinning Lucide `LoaderCircle` in `muted-foreground` among the row's icons; it has no colour of its own.
 - The flag toggle is `warning` when set, and the unread dot `link`.
 - A notice is a `popover` surface: an applied one carries a `link` check, a failure a `destructive` alert icon.
