@@ -10,7 +10,9 @@
 //! named, [`TERMINAL_PROBES`] are probed in order. A bare program is located
 //! on the login shell's `PATH` ([`login_env`]), then in [`PROBE_DIRS`], then
 //! in [`BOB_DIR`] under `$HOME`, so a Finder launch finds Homebrew's or bob's
-//! Neovim; a program found nowhere is a `setup` error too.
+//! Neovim; a program found nowhere is a `setup` error too. [`route`] answers
+//! whether that resolution succeeds, which `editor_setting_get` reports as
+//! the route a draft takes, so the frontend picks this or `editor_open`.
 //!
 //! The child gets that `PATH`, `TERM=xterm-256color`, `COLORTERM=truecolor`
 //! and, when the app has none of [`LOCALE_VARS`], the login shell's `LANG` or
@@ -61,8 +63,8 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State};
 
 use crate::editor::{
-    self, command_line, live_lookup, quote, read_setting, settings_file, EditorSource, Lookup,
-    Resolved, EDITOR_ENV, PROBE_DIRS, TERMINAL_EDITORS,
+    self, command_line, live_lookup, quote, read_setting_or_none, settings_file, EditorRoute,
+    EditorSource, Lookup, Resolved, EDITOR_ENV, PROBE_DIRS, TERMINAL_EDITORS,
 };
 use crate::error::GuiError;
 use crate::fixture::Fixture;
@@ -526,8 +528,55 @@ pub fn plan(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("/"));
+    let (argv, source) = editor_argv(lookup, login, path, fixture)?;
+    let mut env = vec![
+        ("PATH".to_string(), login_path.to_string()),
+        ("TERM".to_string(), "xterm-256color".to_string()),
+        ("COLORTERM".to_string(), "truecolor".to_string()),
+    ];
+    if !LOCALE_VARS.iter().any(|v| lookup.var(v).is_some()) {
+        let lang = login
+            .lang
+            .clone()
+            .unwrap_or_else(|| DEFAULT_LANG.to_string());
+        env.push(("LANG".to_string(), lang));
+    }
+    Ok(Launch {
+        argv,
+        cwd,
+        env,
+        source,
+    })
+}
+
+/// Where a draft opens: [`EditorRoute::Embedded`] exactly when
+/// [`plan`] would accept the editor for an existing draft, so the frontend
+/// never starts an embedded session `terminal_spawn` then refuses. A GUI
+/// editor, a terminal editor found nowhere, and nothing found at all keep the
+/// external route of `editor_open`.
+pub fn route(lookup: &Lookup, login: &LoginEnv, fixture: bool) -> EditorRoute {
+    match editor_argv(lookup, login, ROUTE_PROBE_PATH, fixture) {
+        Ok(_) => EditorRoute::Embedded,
+        Err(e) => {
+            tracing::debug!("[terminal] the external route: {e}");
+            EditorRoute::External
+        }
+    }
+}
+
+/// The path [`route`] resolves against; only its shape matters.
+const ROUTE_PROBE_PATH: &str = "/draft.md";
+
+/// The located argv a session runs on `path`, and where its template came
+/// from: the half of [`plan`] that does not look at the draft file.
+fn editor_argv(
+    lookup: &Lookup,
+    login: &LoginEnv,
+    path: &str,
+    fixture: bool,
+) -> Result<(Vec<String>, EditorSource), GuiError> {
     let home = lookup.var("HOME");
-    let dirs = search_dirs(login_path, home.as_deref());
+    let dirs = search_dirs(&login.path, home.as_deref());
     let resolved = match editor::resolve_terminal_editor(lookup) {
         Ok(Some(r)) => r,
         Ok(None) => probe(&dirs, lookup.is_file, fixture)?,
@@ -565,24 +614,7 @@ pub fn plan(
             )))
         }
     }
-    let mut env = vec![
-        ("PATH".to_string(), login_path.to_string()),
-        ("TERM".to_string(), "xterm-256color".to_string()),
-        ("COLORTERM".to_string(), "truecolor".to_string()),
-    ];
-    if !LOCALE_VARS.iter().any(|v| lookup.var(v).is_some()) {
-        let lang = login
-            .lang
-            .clone()
-            .unwrap_or_else(|| DEFAULT_LANG.to_string());
-        env.push(("LANG".to_string(), lang));
-    }
-    Ok(Launch {
-        argv,
-        cwd,
-        env,
-        source: resolved.source,
-    })
+    Ok((argv, resolved.source))
 }
 
 /// Any of these set in the app's environment leaves the child's locale alone.
@@ -1024,11 +1056,8 @@ pub async fn terminal_spawn(
     let fixture = daemon.fixture();
     let terminals = terminals.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let setting = read_setting(&file).unwrap_or_else(|e| {
-            tracing::warn!("[terminal] ignoring the editor setting: {e}");
-            None
-        });
-        let launch = plan(&live_lookup(setting), login_env(), &path, fixture.is_some())?;
+        let lookup = live_lookup(read_setting_or_none(&file));
+        let launch = plan(&lookup, login_env(), &path, fixture.is_some())?;
         let draft = Draft { account, id, path };
         terminals.start(fixture.as_deref(), draft, launch, cols, rows, output)
     })

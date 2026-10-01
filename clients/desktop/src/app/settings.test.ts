@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { reducer, type Action } from "@/app/reducer";
 import { initialState, isStale, listKey, type AppState } from "@/app/state";
-import { storedLine, swapLine, usesPassword } from "@/app/settings";
+import { clearedNotice, editorHint, storedLine, swapLine, usesPassword } from "@/app/settings";
 import { fixtures, mailboxListing } from "@/test/tauri-mock";
-import type { AccountInfo, MessageList } from "@/lib/gui-types";
+import type { AccountInfo, EditorSetting, MessageList } from "@/lib/gui-types";
 import type { MessageListRow } from "@/protocol/types";
 
 const run = (s: AppState, ...actions: Action[]) => actions.reduce(reducer, s);
@@ -156,5 +156,32 @@ describe("the configuration in the model", () => {
   it("names the stored password without its value, and knows which accounts have passwords", () => {
     expect(storedLine("work", "smtp")).toBe("Stored the SMTP password for work");
     expect(fixtures.config.accounts.map(usesPassword)).toEqual([true, false]);
+  });
+});
+
+describe("the editor field's hint and the cleared notice", () => {
+  const setting = (route: "embedded" | "external", env_override: string | null = null): EditorSetting => ({
+    editor: null,
+    file: "/fixture/config/desktop.json",
+    env_override,
+    effective: "code --wait {path}",
+    effective_source: "probe",
+    route,
+  });
+
+  it("on the embedded route say drafts open in the terminal editor and effective opens config.toml and the log", () => {
+    expect(editorHint(setting("embedded"))).toBe(
+      "Drafts open in the embedded terminal editor; config.toml and the log open in code --wait {path}. {path} stands for the file.",
+    );
+    expect(clearedNotice(setting("embedded"))).toBe(
+      "The editor setting is cleared; drafts open in the embedded terminal editor, and config.toml and the log in code --wait {path}",
+    );
+  });
+
+  it("keep the external route's words, and the override wins either way", () => {
+    expect(editorHint(setting("external"))).toBe("Opens drafts, config.toml and the log; {path} stands for the file. Empty uses code --wait {path}.");
+    expect(clearedNotice(setting("external"))).toBe("The editor setting is cleared; code --wait {path} is used");
+    expect(editorHint(setting("embedded", "nvim"))).toBe("MP_DESKTOP_EDITOR is set and wins: nvim");
+    expect(editorHint(null)).toBe("Opens drafts, config.toml and the log; {path} stands for the file. Empty uses the first editor found.");
   });
 });

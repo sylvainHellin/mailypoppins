@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { openConfig } from "@/app/interop";
-import { kindLabel, reloadConfig, saveEditorSetting, usesPassword } from "@/app/settings";
+import { editorHint, kindLabel, reloadConfig, saveEditorSetting, usesPassword } from "@/app/settings";
 import { signInOrShow } from "@/app/signin";
 import { saveTheme, THEME_LABELS, THEMES, type Theme } from "@/app/theme";
 import { READER_MODE_LABELS, READER_MODES, saveReaderMode } from "@/app/readerMode";
@@ -204,9 +204,7 @@ function EditorSettingField() {
         </Button>
       </div>
       <p id={`${id}-editor-hint`} className="text-xs text-muted-foreground">
-        {setting?.env_override
-          ? `MP_DESKTOP_EDITOR is set and wins: ${setting.env_override}`
-          : `Opens drafts, config.toml and the log; {path} stands for the file. Empty uses ${setting?.effective ?? "the first editor found"}.`}
+        {editorHint(setting)}
       </p>
       <p role="alert" className="min-h-4 text-xs text-destructive">
         {error}

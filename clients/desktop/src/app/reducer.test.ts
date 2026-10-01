@@ -958,3 +958,127 @@ describe("mutations and pending state", () => {
     });
   });
 });
+
+describe("the embedded editor's sessions", () => {
+  const draft = { account: "work", draftId: "d1", path: "/fixture/work/drafts/d1.md" };
+  const key = "work#draft:d1";
+  const opened = () => run(booted(), { type: "compose_embedded", ...draft });
+  const started = () => run(opened(), { type: "compose_started", ...draft, spawn: 1, session: 7, editor: "nvim" });
+  const exited = (s: AppState, code: number | null, signal: number | null) =>
+    run(s, { type: "compose_exited", account: "work", draftId: "d1", spawn: 1, code, signal });
+  const firstRow = (s: AppState) => (s.messages.data?.kind === "messages" ? s.messages.data.rows : [])[0];
+
+  it("opens a running session the reader area shows, with no PTY until the spawn answers", () => {
+    const s = opened();
+    expect(s.compose[key]).toMatchObject({ kind: "embedded", session: null, status: { kind: "running" }, spawn: 1 });
+    expect(s.composeShown).toBe(key);
+    expect(s.focus).toBe("reader");
+    expect(started().compose[key]).toMatchObject({ session: 7, editor: "nvim" });
+  });
+
+  it("maps the exit: 0 ends the session and leaves its summary, a code is exited, a signal or no status crashed", () => {
+    const zero = exited(started(), 0, null);
+    expect(zero.compose[key]).toBeUndefined();
+    expect(zero.composeShown).toBe(key);
+    expect(exited(started(), 1, null).compose[key]?.status).toEqual({ kind: "exited", code: 1 });
+    expect(exited(started(), null, 9).compose[key]?.status).toEqual({ kind: "crashed", code: null, signal: 9 });
+    expect(exited(started(), null, null).compose[key]?.status).toEqual({ kind: "crashed", code: null, signal: null });
+  });
+
+  it("drops a frame of an older spawn, and Reopen spawns again on the same path", () => {
+    const dead = exited(started(), 1, null);
+    const again = run(dead, { type: "compose_embedded", ...draft });
+    expect(again.compose[key]).toMatchObject({ spawn: 2, session: null, status: { kind: "running" }, path: draft.path });
+    // The first pane's late frame names spawn 1.
+    expect(exited(again, 0, null).compose[key]?.status).toEqual({ kind: "running" });
+  });
+
+  it("holds a navigation away from a running editor and replays it on either answer", () => {
+    const s = started();
+    const row = firstRow(s);
+    const select: Action = { type: "select_message", message: { row_id: row.id, message_id: row.message_id, selector: row.selector } };
+    const held = run(s, select);
+    expect(held.overlay).toBe("compose_leave");
+    expect(held.composeLeave).toEqual({ kind: "navigate", action: select });
+    expect(held.selection.message).toBeNull();
+
+    const kept = run(held, { type: "compose_leave_keep" });
+    expect(kept.selection.message?.row_id).toBe(row.id);
+    expect(kept.compose[key]?.status).toEqual({ kind: "running" });
+    expect(kept.composeShown).toBeNull();
+    expect(kept.overlay).toBeNull();
+
+    const closed = run(held, { type: "compose_leave_close" });
+    expect(closed.selection.message?.row_id).toBe(row.id);
+    expect(closed.compose[key]).toBeUndefined();
+
+    const stayed = run(held, { type: "overlay", overlay: null });
+    expect(stayed.selection.message).toBeNull();
+    expect(stayed.composeShown).toBe(key);
+    expect(stayed.composeLeave).toBeNull();
+  });
+
+  it("asks nothing when the navigation changes nothing or the editor no longer runs", () => {
+    const s = started();
+    expect(run(s, { type: "toggle_zoom" }).overlay).toBeNull();
+    expect(run(s, { type: "focus", pane: "list" }).overlay).toBeNull();
+    const dead = exited(s, 1, null);
+    const row = firstRow(dead);
+    const moved = run(dead, { type: "select_message", message: { row_id: row.id, message_id: row.message_id, selector: row.selector } });
+    expect(moved.overlay).toBeNull();
+    expect(moved.composeShown).toBeNull();
+  });
+
+  const removed = (s: AppState): AppState =>
+    run(s, {
+      type: "gui_event",
+      event: {
+        type: "event",
+        event: { instance_id: fixtures.bootstrap.instance_id, revision: 5000, kind: "state.remove", payload: { resource: "draft:work/d1" } },
+      },
+    });
+
+  it("a removed draft keeps a running editor, which may be fixing its frontmatter", () => {
+    const s = removed(started());
+    expect(s.compose[key]).toMatchObject({ kind: "embedded", session: 7, status: { kind: "running" } });
+    expect(s.composeShown).toBe(key);
+  });
+
+  it("a removed draft ends an editor that already exited, and the summary of one that exited with 0", () => {
+    const dead = removed(exited(started(), 1, null));
+    expect(dead.compose[key]).toBeUndefined();
+    expect(dead.composeShown).toBeNull();
+    const summary = removed(exited(started(), 0, null));
+    expect(summary.composeShown).toBeNull();
+  });
+
+  it("an external open never replaces a running embedded editor: it shows it, over a view too", () => {
+    const background = { ...started(), composeShown: null };
+    const calendar = run(background, { type: "switch_view", view: "calendar" });
+    const s = run(calendar, { type: "compose_opening", ...draft });
+    expect(s.compose[key]).toMatchObject({ kind: "embedded", session: 7, status: { kind: "running" }, spawn: 1 });
+    expect(s.composeShown).toBe(key);
+    expect(s.view).toBe("mail");
+    expect(s.focus).toBe("reader");
+    // The external launch's answers leave the embedded session alone.
+    const after = run(s, { type: "compose_editing", ...draft, editor: "zed" }, { type: "compose_failed", ...draft, error: { kind: "setup", message: "x" } });
+    expect(after.compose[key]).toEqual(s.compose[key]);
+  });
+});
+
+describe("the embedded editor over a full-pane view", () => {
+  it("opening or showing an editor brings Mail back, since the editor lives in its reader area", () => {
+    const draft = { account: "work", draftId: "d1", path: "/fixture/work/drafts/d1.md" };
+    const calendar = run(booted(), { type: "switch_view", view: "calendar" });
+    const opened = run(calendar, { type: "compose_embedded", ...draft });
+    expect(opened.view).toBe("mail");
+    expect(opened.composeShown).toBe("work#draft:d1");
+    const background = run(opened, { type: "switch_view", view: "contacts" });
+    expect(background.overlay).toBe("compose_leave");
+    const kept = run(background, { type: "compose_leave_keep" });
+    expect(kept.view).toBe("contacts");
+    const shown = run(kept, { type: "compose_show", account: "work", draftId: "d1" });
+    expect(shown.view).toBe("mail");
+    expect(shown.composeShown).toBe("work#draft:d1");
+  });
+});

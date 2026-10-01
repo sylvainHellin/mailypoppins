@@ -43,7 +43,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/keymap/viewKeys.ts` | Each full-pane view's key table, read before any prefix arms |
 | `src/components/{shell,sidebar,list,search,reader,screens,palette}` | The views; `components/ui` is shadcn's; the reader frame is [reader.md](reader.md) |
 | `src/components/mutations` | The archive, delete, approve, demote and send confirmation, the move picker, and the activity area (notices and send holds) |
-| `src/components/compose` | The compose wizard and recipients dialog, the editing banner, and the draft preview |
+| `src/components/compose` | The compose wizard and recipients dialog, the editing banner, the draft preview, the embedded editor's terminal pane and host, and the leave question |
 | `src/components/outbox` | The outbox view |
 | `src/components/views` | The view host, and `EmptyView.tsx`, the placeholder no view uses any more |
 | `src/components/contacts` | The Contacts view, its list and rows |
@@ -74,7 +74,7 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `reconnected` | the banner turns to resync until the bootstrap lands |
 | `resync` | the resync banner |
 | `rebootstrapped` | the whole model, selection restored as above, every answer stale |
-| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes that account's agenda and invitation cards stale |
+| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended unless its embedded editor still runs; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes that account's agenda and invitation cards stale |
 | `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` its agenda and invitation cards and a line in the activity log |
 | `event` `config.changed` | a line in the activity log, the config.toml banner cleared, the configuration and the account list stale, each added or updated account's counts and list stale, and a removed account the window still knows removed (see Settings) |
 | `event` `config.invalid` | a line in the activity log, and the config.toml banner |
@@ -212,19 +212,23 @@ The fixture seeds one hold (`fixture-hold-seed`, 60 s), so `MP_DESKTOP_FIXTURE=1
 
 ## Compose
 
-Compose goes through the user's external editor, as in the TUI, until the embedded editor of M5.
-Every command that writes a draft answers the file's path, and `editor_open` opens it without waiting for the editor to exit ([rust-layer.md](rust-layer.md), "Drafts and the editor").
-A terminal editor in `$VISUAL` or `$EDITOR`, such as `nvim`, opens in a new window of the first terminal emulator found: Ghostty, kitty, Alacritty, WezTerm, then Terminal.app.
-Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, so no action reloads anything itself.
+Every command that writes a draft answers the file's path, and the draft opens in an editor by one of two routes.
+`openInEditor` in `src/app/compose.ts` asks `editor_setting_get` for the route on every open ([rust-layer.md](rust-layer.md), "Drafts and the editor"):
+
+- The embedded route runs a terminal editor such as `nvim` on a PTY, drawn in the reader area (see "The embedded editor"). It applies exactly when `terminal_spawn` would accept the editor and finds it: a terminal editor named by `MP_DESKTOP_EDITOR` or the editor setting; else the first of `$VISUAL` and `$EDITOR` that names a terminal editor, so `VISUAL="code -w"` with `EDITOR=nvim` is embedded; else, when none of the four is set, the first of `nvim`, `vim` and `hx` the probe finds.
+- The external route is M3's: `editor_open` opens the file in the user's editor without waiting for it to exit. A GUI editor (`code -w`, `zed`, `subl`) named by `MP_DESKTOP_EDITOR` or the setting takes it, and so does one in `$VISUAL` or `$EDITOR` when neither of the two names a terminal editor, and a terminal editor the embedded route cannot find; one in `$VISUAL` or `$EDITOR` then opens in a new window of the first terminal emulator found: Ghostty, kitty, Alacritty, WezTerm, then Terminal.app.
+
+A route that cannot be read is external.
+Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, whatever the route, so no action reloads anything itself.
 `src/app/compose.ts` holds the flows, which every path runs: the keys, the palette, the reader toolbar and the draft preview's buttons.
 
 | Key | Action | Where | Command |
 |---|---|---|---|
-| `cn` | New draft: the wizard | any pane | `signature_list`, then `draft_create` and `editor_open` |
-| `r`, `cr` | Reply | list, reader | `draft_reply` (`all: false`) or `draft_from_message` (`reply`), then `editor_open` |
-| `ca` | Reply all | list, reader | `draft_reply` (`all: true`) or `draft_from_message` (`reply_all`), then `editor_open` |
-| `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `draft_forward` with `headers`, or `draft_from_message` (`forward`), then `editor_open` |
-| `e` | Edit the draft in the editor; on a received message, open it in the reader | list, reader | `draft_path`, then `editor_open` |
+| `cn` | New draft: the wizard | any pane | `signature_list`, then `draft_create` and the editor |
+| `r`, `cr` | Reply | list, reader | `draft_reply` (`all: false`) or `draft_from_message` (`reply`), then the editor |
+| `ca` | Reply all | list, reader | `draft_reply` (`all: true`) or `draft_from_message` (`reply_all`), then the editor |
+| `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `draft_forward` with `headers`, or `draft_from_message` (`forward`), then the editor |
+| `e` | Edit the draft in the editor; on a received message, open it in the reader | list, reader | `draft_path`, then the editor |
 | `ce` | Edit recipients, Drafts only | list, reader | `draft_preview`, then `draft_set_recipients` |
 | `cA` | Approve, Drafts only | list, reader | `draft_approve` |
 | `cD` | Back to draft, Drafts only | list, reader | `draft_demote` |
@@ -259,18 +263,76 @@ A draft that does not parse cannot be edited this way, and says why.
 
 ### The editing banner
 
-`state.compose` holds one session per draft open in the editor, by row key: the account, the draft id, the path, the file name, the editor command, and a status of `opening`, `editing` or `error`.
-`EditingBanner.tsx` shows each above the panes: "Opening … in the editor", "Editing … in <editor>; each save updates the list", or that it did not open.
-"Reopen in editor" runs `editor_open` on the same file again, and "Done" ends the session; the editor process is not the app's to close.
-A discard or any `state.remove` of the draft ends its session too, and a `draft.changed` or `draft.invalid` leaves it alone.
+`state.compose` holds one session per draft open in an editor, by row key: the account, the draft id, the path, the file name, the editor command and the route, `kind`.
+An external session has a status of `opening`, `editing` or `error`.
+An embedded session has the PTY's `session` id once `terminal_spawn` answered, a `spawn` count that moves with every Reopen, and a status of `running`, `exited` with its nonzero code, `crashed` with the signal (or with neither, when the status could not be read), or `failed` when the spawn was refused.
+
+`EditingBanner.tsx` shows each above the panes, with its state in `data-status`:
+
+- "Opening … in the editor…" until the editor started;
+- "Editing … in <editor>; each save updates the list" for an external editor, and for an embedded one the reader area shows;
+- "… is open in <editor> in the background", with Show, for an embedded editor the reader area does not show;
+- "The editor of … exited with status N; the draft keeps what was saved", "… was ended by signal N; …" or "… ended with no status; …" for an embedded editor that ended without code 0;
+- "… did not open in the editor" for a launch or a spawn that failed.
+
+"Reopen in editor" runs the editor again on the same file: `editor_open` for an external session, a fresh embedded process for an embedded one, whatever the route says now.
+"Done" forgets the session: an external editor's process is not the app's to close, and an embedded one that ended has nothing left to run.
+A running embedded editor has neither button; it ends from inside the editor, through the navigate-away question, or with a discard.
+A discard ends its session too, killing an embedded child, and a `draft.changed` or `draft.invalid` leaves it alone.
+A `state.remove` of the draft ends an external session or an embedded one that already ended, and leaves a running embedded editor alone: the watcher also removes a draft whose saved frontmatter does not parse, which is what the user may be fixing in that editor.
 The banner is one `role="status"` region, "Drafts in the editor", mounted empty for the same reason as the activity area's.
-An editor that did not start is a `setup` error: its session turns to `error` and a failure notice in the activity area carries the Rust layer's message, which names `MP_DESKTOP_EDITOR` or the editor setting to fix.
-In fixture mode the Rust layer launches nothing and answers `fixture: true`, and the notice line says "Fixture mode: the editor was not launched; the command would have been <editor>."; the Signatures dialog, `sc`, `sf` and the Calendar's `invite.ics` show the same sentence in place of theirs.
+An editor that did not start is a `setup` error: its session turns to `error` or `failed` and a failure notice in the activity area carries the Rust layer's message, which names `MP_DESKTOP_EDITOR` or the editor setting to fix.
+In fixture mode the Rust layer launches nothing and answers `fixture: true`, and the notice line says "Fixture mode: the editor was not launched; the command would have been <editor>.", on either route; the Signatures dialog, `sc`, `sf` and the Calendar's `invite.ics` show the same sentence in place of theirs.
+
+### The embedded editor
+
+`components/compose/TerminalHost.tsx` mounts one terminal pane per embedded session and lays the shown one over the reader area.
+The panes live under `AppShell`, beside whatever the shell shows, because a pane spawns its editor when it mounts and loses its buffer when it unmounts: a full-pane view, the narrow layout's sidebar or the connecting screen of a daemon restart never unmounts one.
+The reader pane renders a slot, `TerminalSlot`, in place of its content, and the host sits `position: fixed` on the slot's rectangle, measured on every render and every resize; with no slot every pane is hidden and keeps running.
+Each pane is keyed by its draft and its `spawn`, so Reopen mounts a fresh pane and a fresh process.
+xterm and its addons load with the first embedded session, as a chunk of their own.
+
+`state.composeShown` names the draft whose editor the reader area shows.
+Opening a draft on the embedded route shows its editor and moves the focus to the reader; the pane takes the keyboard once the spawn answers.
+Opening a draft whose editor runs (`e`, the draft preview's Edit) shows that editor and starts nothing, whatever the route says now: an external open would replace the session, and the unmounted pane would kill the editor with its unsaved buffer.
+`openInEditor` checks `state.compose` before it asks for the route, and the reducer's `compose_opening` shows a running embedded session rather than replacing it.
+Opening another draft sends the editor the reader showed to the background without asking, since the user asked for the new one.
+Selecting a draft whose editor runs, in the Drafts list, shows that editor, and so does the banner's Show; either brings Mail back over a full-pane view.
+The list keeps working beside the editor: the watcher's events update it, and a click on a row selects it after the question below.
+
+The pane frees the PTY after the exit frame with `terminal_kill`, which the Rust layer needs to drop the session, and kills the child when it unmounts while the child may still run.
+So a session the model forgets, by "Close the editor", a discard or Done, takes its process with it; a `state.remove` never forgets a running one.
+What follows depends on how the editor ended:
+
+- Code 0 (`:wq`, `:q`) ends the session, and the reader area shows the draft's summary: `DraftPreview` over a fresh `draft_preview`, with Edit and Close, until a navigation or Close brings the selection back. When the selection is the draft already, the reader shows its usual preview. A draft that is gone (`draft_preview` refused) shows the selection, the message the reader showed before.
+- A nonzero code or a signal keeps the session and the pane, whose last output stays readable, and the banner shows the status with Reopen, which spawns again on the same path.
+- A spawn `terminal_spawn` refused turns the session to `failed` with a failure notice, and the reader shows the selection again.
+
+`:q!` writes nothing, so the canonical draft stays as last saved; no exit path deletes a file.
+
+Navigating away while the reader area shows a running editor asks first: another row, mailbox, account or search hit, a search or Escape out of one, a view, the outbox, or Show on another editor.
+`state.composeLeave` holds the navigation, and the dialog "Leave the editor?" says "<file> is still open in the editor. In the background it keeps running and the banner lists it; closed, the draft keeps what was last saved."
+
+- "Keep editing in the background", the initial focus: the navigation runs and the editor keeps running, hidden, with its buffer.
+- "Close the editor": the child is killed, the draft keeps what was last saved, then the navigation runs.
+- "Stay", or Escape: nothing moves.
+
+A navigation that changes nothing the reader area shows, such as a focus move, a zoom or `j` on the last row, asks nothing, and neither does one away from an editor that already ended.
+A daemon restart onto another instance drops a held navigation, since it names rows by id.
+
+`d` on a draft (Discard draft, Drafts only) confirms as before with "Delete this email?"; the OK then forgets the draft's editor session, waits for `terminal_kill`, and only then calls `draft_discard`, so the editor cannot write the file back after the daemon removed it.
+
+Closing the window while an embedded editor runs asks "Close the window?", naming the drafts, with "Close the editor", the initial focus, and "Stay".
+There is no keep answer, since the window is the editors' terminal.
+`useCloseGuard` in `src/app/compose.ts` listens through `getCurrentWindow().onCloseRequested`: Tauri prevents a close itself while the webview listens for it, and the API's wrapper destroys the window after the handler unless the handler called `preventDefault`.
+With no editor running the handler does nothing and the window closes as before; with one it prevents the close and asks.
+"Close the editor" kills every embedded editor, then calls `getCurrentWindow().destroy()`, which the capability `core:window:allow-destroy` allows; "Stay" leaves the window and the editors alone.
+The menu's Close Window (Cmd+W) asks the same way; its Quit (Cmd+Q) ends the app, and the Rust layer kills every child on `RunEvent::Exit`.
 
 ### The terminal pane
 
 The embedded editor of M5 (#0130) runs a terminal editor such as `nvim` on a PTY of the Rust layer and draws it with xterm.js in `components/compose/TerminalPane.tsx`.
-The pane exists and is tested; U3 wires it into the reader pane and `state.compose`, so no key or menu opens it yet.
+`TerminalHost.tsx` mounts one for each embedded session (see "The embedded editor").
 
 `src/lib/terminal.ts` puts the four commands and the output Channel behind a `TerminalBridge` (`spawn`, `write`, `resize`, `kill`), so the pane and its tests never touch Tauri; `src/test/terminal-fake.ts` is the fake.
 The Channel carries output as raw bytes (an `ArrayBuffer` per frame) that go to `term.write` undecoded, and its last frame is `{ "exit": { "code", "signal" } }`.
@@ -286,6 +348,8 @@ The Channel carries output as raw bytes (an `ArrayBuffer` per frame) that go to 
 
 While the terminal has the focus, every key is the editor's, Escape and Tab included: `isEditable` counts any element inside `[data-slot="terminal"]` as editable, and the keymap returns before its Escape rule.
 Cmd combinations pass to the browser and the menu, so copy, paste and the menu items keep working.
+Cmd+B among them toggles the sidebar, shadcn's own shortcut, while the terminal has the focus, and stays so: a terminal never passes Cmd to the editor, and the toggle only changes the reader area's width, which the pane follows with a resize.
+Ctrl+B is the editor's (Neovim's page up): xterm stops the propagation of every keydown it turns into input, so the sidebar's window listener never sees it.
 Leaving the pane is a click elsewhere or a menu item.
 
 A dev build shows the pane on an echo bridge at `#terminal-fixture` (`pnpm dev`, then `http://localhost:1420/#terminal-fixture`), with buttons to switch the theme, hide it and kill the session.
@@ -706,6 +770,7 @@ On a switch the focus follows into the view, on its "Mail" button, as in the oth
 - Theme: Dark, Light and System, the `theme` key of `desktop.json` (see Theme).
 - Reader: HTML and Text, the current one pressed, the `reader_mode` key of `desktop.json`; `tt` and the palette's "Reader: HTML" and "Reader: text" do the same ([reader.md](reader.md), "Text mode").
 - Editor command: the M3 editor setting through `editor_setting_get|set`, its placeholder the template in effect; Save with an empty field clears it, and the hint names `MP_DESKTOP_EDITOR` when that wins.
+  On the embedded route the hint and the notice of a cleared setting say that drafts open in the embedded terminal editor, and that the template in effect opens config.toml and the log.
 
 A reload says what the swap did on the notice line, in the activity log's words: "Configuration reloaded: no account changed" or "Configuration reloaded: added ...; updated ...; removed ...".
 A refused one says "config.toml was not reloaded: <the daemon's sentence>".

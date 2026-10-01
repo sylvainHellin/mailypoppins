@@ -73,10 +73,12 @@ import {
 import {
   accountNames,
   draftItems,
+  draftsShown,
   emptyLoadable,
   emptyReader,
   filteredDrafts,
   filteredRows,
+  isRunning,
   isStale,
   LIST_WIDTH_MAX,
   LIST_WIDTH_MIN,
@@ -92,6 +94,7 @@ import {
   type ActivityLevel,
   type AttachmentDialog,
   type ComposeDialog,
+  type ComposeSession,
   type Layout,
   type Loadable,
   type MessageRef,
@@ -267,7 +270,24 @@ export type Action =
   | { type: "compose_opening"; account: string; draftId: string; path: string }
   | { type: "compose_editing"; account: string; draftId: string; editor: string }
   | { type: "compose_failed"; account: string; draftId: string; error: GuiError }
+  /** Forget a session, of either route; the embedded child is killed by its pane's unmount. */
   | { type: "compose_done"; account: string; draftId: string }
+  // The embedded sessions (app/compose.ts and components/compose/TerminalHost.tsx).
+  /** Open the draft in the embedded editor, or show its running one; a dead one spawns again. */
+  | { type: "compose_embedded"; account: string; draftId: string; path: string }
+  | { type: "compose_started"; account: string; draftId: string; spawn: number; session: number; editor: string }
+  | { type: "compose_spawn_failed"; account: string; draftId: string; spawn: number; error: GuiError }
+  | { type: "compose_exited"; account: string; draftId: string; spawn: number; code: number | null; signal: number | null }
+  /** The banner's Show: bring a background session back to the reader area. */
+  | { type: "compose_show"; account: string; draftId: string }
+  /** The exit summary's draft is gone (or dismissed): the reader shows the selection again. */
+  | { type: "compose_summary_closed" }
+  /** The window's close was asked for while an embedded editor runs. */
+  | { type: "compose_close_requested" }
+  /** "Keep editing in the background": the held navigation runs, the editor keeps running. */
+  | { type: "compose_leave_keep" }
+  /** "Close the editor": the shown session is forgotten (its child killed), then the held navigation runs. */
+  | { type: "compose_leave_close" }
   /** A notice of the activity area from outside a mutation batch. */
   | { type: "activity"; kind: ActivityKind; account: string | null; text: string; rows?: { key: string; label: string; reason: string }[] }
   | { type: "filter"; text: string }
@@ -682,15 +702,155 @@ export function fileName(path: string): string {
 
 function composeOpening(s: AppState, account: string, draftId: string, path: string): AppState {
   const key = targetKey({ account, draft: draftId });
-  const session = { account, draftId, path, name: fileName(path), editor: s.compose[key]?.editor ?? null, status: "opening" as const, message: null };
-  return { ...s, compose: { ...s.compose, [key]: session } };
+  // A running embedded editor is never replaced, which would unmount its
+  // pane and kill it with its unsaved buffer: it is shown instead.
+  if (isRunning(s.compose[key])) return composeEmbedded(toMail(s), account, draftId, path);
+  const session: ComposeSession = {
+    kind: "external",
+    account,
+    draftId,
+    path,
+    name: fileName(path),
+    editor: s.compose[key]?.editor ?? null,
+    status: "opening",
+    message: null,
+  };
+  // An embedded editor of the same draft stays the reader's only while it is the session.
+  const composeShown = s.composeShown === key ? null : s.composeShown;
+  return { ...s, compose: { ...s.compose, [key]: session }, composeShown };
 }
 
-function composeUpdate(s: AppState, account: string, draftId: string, patch: Partial<AppState["compose"][string]>): AppState {
+/** Change an external session's status; an embedded one or none is left alone. */
+function composeExternal(s: AppState, account: string, draftId: string, status: "editing" | "error", patch: { editor?: string; message: string | null }): AppState {
   const key = targetKey({ account, draft: draftId });
   const prev = s.compose[key];
-  if (!prev) return s;
-  return { ...s, compose: { ...s.compose, [key]: { ...prev, ...patch } } };
+  if (prev?.kind !== "external") return s;
+  return { ...s, compose: { ...s.compose, [key]: { ...prev, ...patch, status } } };
+}
+
+/** Forget a session; the reader shows the selection again if it showed this one. */
+function composeForget(s: AppState, key: string): AppState {
+  if (!(key in s.compose) && s.composeShown !== key) return s;
+  const compose = { ...s.compose };
+  delete compose[key];
+  return { ...s, compose, composeShown: s.composeShown === key ? null : s.composeShown };
+}
+
+/** The embedded session of `key` at spawn `spawn`, which a late frame of an older pane does not match. */
+function embeddedAt(s: AppState, key: string, spawn: number) {
+  const c = s.compose[key];
+  return c?.kind === "embedded" && c.spawn === spawn ? c : null;
+}
+
+/**
+ * Open a draft in the embedded editor: its running session comes to the
+ * reader area, anything else (none, a dead one, an external one) becomes a
+ * fresh session whose pane spawns on mount. Another session the reader
+ * showed keeps running in the background.
+ */
+function composeEmbedded(s: AppState, account: string, draftId: string, path: string): AppState {
+  const key = targetKey({ account, draft: draftId });
+  const prev = s.compose[key];
+  if (isRunning(prev)) return withFocus({ ...s, composeShown: key }, "reader");
+  const session: ComposeSession = {
+    kind: "embedded",
+    account,
+    draftId,
+    path,
+    name: fileName(path),
+    editor: prev?.editor ?? null,
+    message: null,
+    session: null,
+    status: { kind: "running" },
+    spawn: (prev?.kind === "embedded" ? prev.spawn : 0) + 1,
+  };
+  return withFocus({ ...s, compose: { ...s.compose, [key]: session }, composeShown: key }, "reader");
+}
+
+/**
+ * The exit frame of an embedded session. Code 0 ends it: the reader shows
+ * the draft's summary, or the selection when that is the draft already.
+ * Anything else keeps the session, and its pane's last output, with the
+ * status the banner shows.
+ */
+function composeExited(s: AppState, a: Extract<Action, { type: "compose_exited" }>): AppState {
+  const key = targetKey({ account: a.account, draft: a.draftId });
+  const c = embeddedAt(s, key, a.spawn);
+  if (!c || c.status.kind !== "running") return s;
+  if (a.code === 0 && a.signal === null) {
+    const compose = { ...s.compose };
+    delete compose[key];
+    const selected = draftsShown(s) && s.selection.account === a.account && s.selection.draft === a.draftId;
+    const composeShown = s.composeShown === key && selected ? null : s.composeShown;
+    return { ...s, compose, composeShown };
+  }
+  const status: ComposeSession["status"] =
+    a.code !== null && a.signal === null ? { kind: "exited", code: a.code } : { kind: "crashed", code: a.code, signal: a.signal };
+  return { ...s, compose: { ...s.compose, [key]: { ...c, status } } };
+}
+
+/**
+ * What the reader area shows, as far as a navigation can change it: the
+ * view, the outbox, the search and the selection.
+ */
+function readerSubject(s: AppState): string {
+  const sel = s.selection;
+  const search = s.search ? `${s.search.mode}:${s.search.seq}` : "";
+  return [s.view, s.outboxView?.account ?? "", search, sel.account, sel.mailbox, sel.message?.row_id, sel.draft, sel.hit].join("|");
+}
+
+/** The intents that navigate: away from a running editor they ask first. */
+const LEAVES_EDITOR: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
+  "select_account",
+  "select_mailbox",
+  "select_message",
+  "select_draft",
+  "select_hit",
+  "move_selection",
+  "sidebar_enter",
+  "jump_mailbox",
+  "next_account",
+  "clear_selection",
+  "search_local",
+  "search_server",
+  "exit_search",
+  "switch_view",
+  "open_outbox",
+  "close_outbox",
+  "compose_show",
+]);
+
+/**
+ * After a navigation: the reader area shows the running editor of the draft
+ * now selected, or the selection. A navigation away from a running editor
+ * the reader shows is held instead, and the `compose_leave` overlay asks
+ * what to do with the editor.
+ */
+function composeFollow(prev: AppState, next: AppState, a: Action): AppState {
+  let target: string | null = null;
+  if (a.type === "compose_show") {
+    const key = targetKey({ account: a.account, draft: a.draftId });
+    if (!isRunning(next.compose[key])) return next;
+    target = key;
+  } else {
+    if (readerSubject(prev) === readerSubject(next)) return next;
+    const sel = next.selection;
+    if (next.view === "mail" && !next.search && !next.outboxView && sel.account && sel.draft) {
+      const key = targetKey({ account: sel.account, draft: sel.draft });
+      if (isRunning(next.compose[key])) target = key;
+    }
+  }
+  const shown = prev.composeShown;
+  if (target === shown) return next;
+  if (shown && isRunning(prev.compose[shown])) {
+    return { ...closeDialogs(prev), overlay: "compose_leave", composeLeave: { kind: "navigate", action: a } };
+  }
+  return { ...next, composeShown: target };
+}
+
+/** Every dialog's own state, as an overlay that replaces theirs leaves it. */
+function closeDialogs(s: AppState): AppState {
+  return { ...s, dialog: null, composeDialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null, signaturesDialog: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -839,14 +999,13 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
         if (next.selection.account === account && next.selection.draft === id) {
           next = { ...next, selection: { ...next.selection, draft: null } };
         }
-        // The file is gone: nothing is left to edit.
+        // The file is gone: nothing is left to edit, and no summary to show.
+        // A running embedded editor stays, pane and all: the watcher also
+        // removes a draft whose saved frontmatter does not parse, which is
+        // what the user may be fixing in that editor, and its exit summary
+        // falls back to the selection when the draft is still gone.
         const key = targetKey({ account, draft: id });
-        if (key in next.compose) {
-          const compose = { ...next.compose };
-          delete compose[key];
-          next = { ...next, compose };
-        }
-        return next;
+        return isRunning(next.compose[key]) ? next : composeForget(next, key);
       }
       if (family === "message") {
         const slug = parts[1] ?? "";
@@ -952,7 +1111,10 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       // it, and the forward wizard too; a draft keeps its id and file.
       const closeDialog = !sameInstance && next.dialog !== null;
       const closeCompose = !sameInstance && next.composeDialog?.kind === "forward";
-      const closeOverlay = (closeDialog && next.overlay === "mutation") || (closeCompose && next.overlay === "compose");
+      // A navigation held by the editor's question names rows by id too.
+      const closeLeave = !sameInstance && next.composeLeave?.kind === "navigate";
+      const closeOverlay =
+        (closeDialog && next.overlay === "mutation") || (closeCompose && next.overlay === "compose") || (closeLeave && next.overlay === "compose_leave");
       // The same daemon keeps the cards of holds that ended, so a settle
       // still finds the card it reports on; the snapshot's are the live ones.
       const ended = sameInstance ? Object.fromEntries(Object.entries(s.holds).filter(([, h]) => h.state === "fired" || h.state === "cancelled")) : {};
@@ -970,6 +1132,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         configProblem: sameInstance ? next.configProblem : null,
         dialog: closeDialog ? null : next.dialog,
         composeDialog: closeCompose ? null : next.composeDialog,
+        composeLeave: closeLeave ? null : next.composeLeave,
         overlay: closeOverlay ? null : next.overlay,
         },
         e.bootstrap,
@@ -1063,8 +1226,9 @@ const USER_SELECTION: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
 
 /**
  * The intents that bring Mail back over a full-pane view: each picks a
- * mailbox, searches it or opens an outbox. Another account keeps the view,
- * which follows the selection's account.
+ * mailbox, searches it, opens an outbox, or shows an embedded editor, which
+ * lives in Mail's reader area. Another account keeps the view, which
+ * follows the selection's account.
  */
 const LEAVES_VIEW: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "select_mailbox",
@@ -1073,6 +1237,8 @@ const LEAVES_VIEW: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "search_local",
   "search_server",
   "open_outbox",
+  "compose_embedded",
+  "compose_show",
 ]);
 
 /** A full-pane view is left for Mail: the list pane shows what it showed before. */
@@ -1092,7 +1258,8 @@ const LEAVES_OUTBOX: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
 
 /** The reducer; the Calendar and Contacts views follow the selection's account after every action. */
 export function reducer(s: AppState, a: Action): AppState {
-  return followContacts(followCalendar(reduce(s, a)));
+  const next = followContacts(followCalendar(reduce(s, a)));
+  return LEAVES_EDITOR.has(a.type) ? composeFollow(s, next, a) : next;
 }
 
 function reduce(s: AppState, a: Action): AppState {
@@ -1313,6 +1480,7 @@ function reduce(s: AppState, a: Action): AppState {
         signaturesDialog: a.overlay === "signatures" ? s.signaturesDialog : null,
         passwordDialog: a.overlay === "password" ? s.passwordDialog : null,
         accountWizard: a.overlay === "account_wizard" ? s.accountWizard : null,
+        composeLeave: a.overlay === "compose_leave" ? s.composeLeave : null,
       };
     case "open_dialog":
       return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null, signaturesDialog: null };
@@ -1336,19 +1504,50 @@ function reduce(s: AppState, a: Action): AppState {
     case "compose_opening":
       return composeOpening(s, a.account, a.draftId, a.path);
     case "compose_editing":
-      return composeUpdate(s, a.account, a.draftId, { status: "editing", editor: a.editor, message: null });
+      return composeExternal(s, a.account, a.draftId, "editing", { editor: a.editor, message: null });
     case "compose_failed": {
       const key = targetKey({ account: a.account, draft: a.draftId });
       const name = s.compose[key]?.name ?? a.draftId;
-      const next = composeUpdate(s, a.account, a.draftId, { status: "error", message: a.error.message });
+      const next = composeExternal(s, a.account, a.draftId, "error", { message: a.error.message });
       return pushNotice(next, { kind: "compose_failed", account: a.account, text: `The editor did not open ${name}: ${a.error.message}` });
     }
-    case "compose_done": {
+    case "compose_done":
+      return composeForget(s, targetKey({ account: a.account, draft: a.draftId }));
+    case "compose_embedded":
+      return composeEmbedded(s, a.account, a.draftId, a.path);
+    case "compose_started": {
       const key = targetKey({ account: a.account, draft: a.draftId });
-      if (!(key in s.compose)) return s;
-      const compose = { ...s.compose };
-      delete compose[key];
-      return { ...s, compose };
+      const c = embeddedAt(s, key, a.spawn);
+      if (!c) return s;
+      return { ...s, compose: { ...s.compose, [key]: { ...c, session: a.session, editor: a.editor } } };
+    }
+    case "compose_spawn_failed": {
+      const key = targetKey({ account: a.account, draft: a.draftId });
+      const c = embeddedAt(s, key, a.spawn);
+      if (!c) return s;
+      const next: AppState = {
+        ...s,
+        compose: { ...s.compose, [key]: { ...c, status: { kind: "failed" }, message: a.error.message } },
+        composeShown: s.composeShown === key ? null : s.composeShown,
+      };
+      return pushNotice(next, { kind: "compose_failed", account: a.account, text: `The editor did not open ${c.name}: ${a.error.message}` });
+    }
+    case "compose_exited":
+      return composeExited(s, a);
+    case "compose_show":
+      return withFocus(s, "reader");
+    case "compose_summary_closed":
+      return s.composeShown && !(s.composeShown in s.compose) ? { ...s, composeShown: null } : s;
+    case "compose_close_requested":
+      return { ...closeDialogs(s), overlay: "compose_leave", composeLeave: { kind: "close" } };
+    case "compose_leave_keep":
+    case "compose_leave_close": {
+      const leave = s.composeLeave;
+      let next: AppState = { ...s, overlay: null, composeLeave: null };
+      if (leave?.kind !== "navigate") return next;
+      const shown = next.composeShown;
+      next = a.type === "compose_leave_close" && shown ? composeForget(next, shown) : { ...next, composeShown: null };
+      return reducer(next, leave.action);
     }
     case "activity":
       return pushNotice(s, { kind: a.kind, account: a.account, text: a.text, rows: a.rows ?? [] });

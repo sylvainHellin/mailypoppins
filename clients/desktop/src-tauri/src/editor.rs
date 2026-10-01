@@ -208,6 +208,22 @@ pub struct EditorLaunch {
     pub fixture: bool,
 }
 
+/// Where a draft opens: in the embedded terminal (#0130) or in the external
+/// editor of [`resolve`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+#[serde(rename_all = "snake_case")]
+pub enum EditorRoute {
+    /// `terminal_spawn` would accept the editor: a terminal editor named by
+    /// `MP_DESKTOP_EDITOR`, the setting, `$VISUAL` or `$EDITOR`, or probed,
+    /// and found.
+    Embedded,
+    /// Anything else: a GUI editor, or a terminal editor `terminal_spawn`
+    /// would refuse; `editor_open` runs `effective`.
+    External,
+}
+
 /// The editor setting and what it resolves to now.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -222,6 +238,8 @@ pub struct EditorSetting {
     /// The template an `editor_open` would run now.
     pub effective: String,
     pub effective_source: EditorSource,
+    /// Where a draft opens now; `effective` is the external route's command.
+    pub route: EditorRoute,
 }
 
 /// A resolved editor template.
@@ -630,14 +648,26 @@ pub fn read_setting(file: &Path) -> Result<Option<String>, GuiError> {
     settings::read(file, SettingKey::Editor)
 }
 
+/// [`read_setting`] as every command that runs or reports the editor reads
+/// it: a file that does not read is logged and counts as no setting, so
+/// `editor_open`, `terminal_spawn` and the route `editor_setting_get`
+/// reports all see the same value.
+pub fn read_setting_or_none(file: &Path) -> Option<String> {
+    read_setting(file).unwrap_or_else(|e| {
+        tracing::warn!("[editor] ignoring the setting: {e}");
+        None
+    })
+}
+
 /// Set (or, with `None` or a blank value, clear) the `editor` key, keeping
 /// every other key of the file; a template that does not split is `setup`.
 pub fn write_setting(file: &Path, editor: Option<&str>) -> Result<(), GuiError> {
     settings::write(file, SettingKey::Editor, editor)
 }
 
-/// The setting, and what an `editor_open` would run with it now.
-pub fn setting_on(file: &Path, lookup: &Lookup) -> EditorSetting {
+/// The setting, what an `editor_open` would run with it now, and `route`,
+/// which [`crate::terminal::route`] decides.
+pub fn setting_on(file: &Path, lookup: &Lookup, route: EditorRoute) -> EditorSetting {
     let resolved = resolve(lookup);
     EditorSetting {
         editor: lookup.setting.clone(),
@@ -645,7 +675,18 @@ pub fn setting_on(file: &Path, lookup: &Lookup) -> EditorSetting {
         env_override: lookup.var(EDITOR_ENV),
         effective: resolved.template,
         effective_source: resolved.source,
+        route,
     }
+}
+
+/// [`setting_on`] over the process's environment, the setting as
+/// [`read_setting_or_none`] reads it, and the login shell's `PATH`, which the
+/// first call per process reads (up to 5 s), so the commands run it off the
+/// main thread.
+fn live_setting(file: &Path, fixture: bool) -> EditorSetting {
+    let lookup = live_lookup(read_setting_or_none(file));
+    let route = crate::terminal::route(&lookup, crate::terminal::login_env(), fixture);
+    setting_on(file, &lookup, route)
 }
 
 // ---------------------------------------------------------------------------
@@ -680,16 +721,9 @@ pub async fn editor_open(
     let file = settings_file(&app)?;
     let fixture = session.fixture();
     tauri::async_runtime::spawn_blocking(move || {
-        let setting = match read_setting(&file) {
-            Ok(setting) => setting,
-            Err(e) => {
-                tracing::warn!("[editor] ignoring the setting: {e}");
-                None
-            }
-        };
         open_on(
             fixture.as_deref(),
-            &live_lookup(setting),
+            &live_lookup(read_setting_or_none(&file)),
             &path,
             EXIT_WINDOW,
         )
@@ -698,23 +732,34 @@ pub async fn editor_open(
     .map_err(|e| GuiError::internal(format!("the command task failed: {e}")))?
 }
 
+/// The setting, what it resolves to, and the route a draft takes.
 #[tauri::command(rename_all = "snake_case")]
-pub fn editor_setting_get(app: AppHandle) -> Result<EditorSetting, GuiError> {
+pub async fn editor_setting_get(
+    app: AppHandle,
+    session: State<'_, SessionHandle>,
+) -> Result<EditorSetting, GuiError> {
     let file = settings_file(&app)?;
-    let setting = read_setting(&file)?;
-    Ok(setting_on(&file, &live_lookup(setting)))
+    let fixture = session.fixture().is_some();
+    tauri::async_runtime::spawn_blocking(move || Ok(live_setting(&file, fixture)))
+        .await
+        .map_err(|e| GuiError::internal(format!("the command task failed: {e}")))?
 }
 
 /// Set the editor command template, or clear it with `null`.
 #[tauri::command(rename_all = "snake_case")]
-pub fn editor_setting_set(
+pub async fn editor_setting_set(
     app: AppHandle,
+    session: State<'_, SessionHandle>,
     editor: Option<String>,
 ) -> Result<EditorSetting, GuiError> {
     let file = settings_file(&app)?;
-    write_setting(&file, editor.as_deref())?;
-    let setting = read_setting(&file)?;
-    Ok(setting_on(&file, &live_lookup(setting)))
+    let fixture = session.fixture().is_some();
+    tauri::async_runtime::spawn_blocking(move || {
+        write_setting(&file, editor.as_deref())?;
+        Ok(live_setting(&file, fixture))
+    })
+    .await
+    .map_err(|e| GuiError::internal(format!("the command task failed: {e}")))?
 }
 
 #[cfg(test)]
@@ -1194,9 +1239,18 @@ mod tests {
         ));
         std::fs::write(&file, "[1]").expect("write");
         assert!(matches!(read_setting(&file), Err(GuiError::Setup { .. })));
+        assert_eq!(
+            read_setting_or_none(&file),
+            None,
+            "the commands read a file that does not read as no setting"
+        );
         let env = env_of(&[]);
         let none = |_: &Path| false;
-        let shown = setting_on(&file, &lookup(&env, Some("subl"), &none));
+        let shown = setting_on(
+            &file,
+            &lookup(&env, Some("subl"), &none),
+            EditorRoute::External,
+        );
         assert_eq!(
             (shown.effective.as_str(), shown.effective_source),
             ("subl", EditorSource::Setting)

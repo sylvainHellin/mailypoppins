@@ -523,8 +523,18 @@ export function runMutation(
   }
 }
 
-/** What the confirmation's OK or the picker's choice runs. */
-export function runDialog(dialog: MutationDialog, dispatch: Dispatch<Action>, destination?: string): void {
+/**
+ * What the confirmation's OK or the picker's choice runs. A draft discarded
+ * while its embedded editor is open has that editor closed first, and its
+ * `draft_discard` waits for the kill, so the editor cannot write the file
+ * back after the daemon removed it; `sessions` is `state.compose` at the OK.
+ */
+export function runDialog(
+  dialog: MutationDialog,
+  dispatch: Dispatch<Action>,
+  destination?: string,
+  sessions: AppState["compose"] = {},
+): void {
   if (dialog.kind === "send" || dialog.kind === "send_approved") return send.runSend(dialog, dispatch);
   const m = createMutations(dispatch);
   dispatch({ type: "overlay", overlay: null });
@@ -546,7 +556,12 @@ export function runDialog(dialog: MutationDialog, dispatch: Dispatch<Action>, de
     if (msgs.length > 0) void m.remove(msgs);
     const byAccount = new Map<string, string[]>();
     for (const d of drafts) byAccount.set(d.account, [...(byAccount.get(d.account) ?? []), d.draft]);
-    for (const [account, ids] of byAccount) void m.discardDrafts(account, ids);
+    const editors = drafts.flatMap((d) => sessions[targetKey(d)] ?? []);
+    const discard = () => {
+      for (const [account, ids] of byAccount) void m.discardDrafts(account, ids);
+    };
+    if (editors.some((c) => c.kind === "embedded")) void compose.closeEditors(editors, dispatch).then(discard);
+    else discard();
   }
   dispatch({ type: "mark_set", keys: dialog.targets.map(targetKey), on: false });
 }

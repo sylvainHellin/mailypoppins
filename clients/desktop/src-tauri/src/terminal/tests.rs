@@ -453,6 +453,104 @@ fn a_named_editor_found_nowhere_is_a_setup_error() {
     ));
 }
 
+// ---------------------------------------------------------------------------
+// The route
+// ---------------------------------------------------------------------------
+
+/// The route for an environment and a setting, with nvim and code installed
+/// under /opt/homebrew/bin, and whether `plan` agrees on a real draft.
+fn route_of(pairs: &[(&str, &str)], setting: Option<&str>, fixture: bool) -> EditorRoute {
+    let files = |p: &Path| {
+        p == Path::new("/opt/homebrew/bin/nvim")
+            || p == Path::new("/opt/homebrew/bin/code")
+            || p.extension().is_some_and(|e| e == "md")
+    };
+    let env = env_of(pairs);
+    let l = lookup(&env, setting, &files);
+    let r = route(&l, &login("/x"), fixture);
+    let path = draft("route");
+    let accepted = plan(&l, &login("/x"), &path, fixture).is_ok();
+    assert_eq!(
+        r == EditorRoute::Embedded,
+        accepted,
+        "the route agrees with terminal_spawn for {pairs:?} / {setting:?}"
+    );
+    r
+}
+
+#[test]
+fn the_env_override_routes_a_terminal_editor_in_and_a_gui_editor_out() {
+    use EditorRoute::*;
+    assert_eq!(route_of(&[(EDITOR_ENV, "nvim")], None, false), Embedded);
+    assert_eq!(
+        route_of(&[(EDITOR_ENV, "nvim --clean {path}")], None, false),
+        Embedded
+    );
+    assert_eq!(route_of(&[(EDITOR_ENV, "code -w")], None, false), External);
+    assert_eq!(
+        route_of(&[(EDITOR_ENV, "code -w")], Some("nvim"), false),
+        External,
+        "the override wins over the setting"
+    );
+}
+
+#[test]
+fn the_setting_routes_a_terminal_editor_in_and_a_gui_editor_out() {
+    use EditorRoute::*;
+    assert_eq!(route_of(&[], Some("nvim"), false), Embedded);
+    assert_eq!(
+        route_of(&[], Some("/opt/homebrew/bin/nvim"), false),
+        Embedded
+    );
+    assert_eq!(route_of(&[], Some("zed {path}"), false), External);
+    assert_eq!(
+        route_of(&[("EDITOR", "nvim")], Some("code -w"), false),
+        External,
+        "an explicit GUI choice wins over a terminal $EDITOR"
+    );
+}
+
+#[test]
+fn visual_and_editor_route_the_first_terminal_editor_in() {
+    use EditorRoute::*;
+    assert_eq!(route_of(&[("VISUAL", "nvim")], None, false), Embedded);
+    assert_eq!(route_of(&[("EDITOR", "nvim")], None, false), Embedded);
+    assert_eq!(
+        route_of(&[("VISUAL", "code -w"), ("EDITOR", "nvim")], None, false),
+        Embedded,
+        "a terminal $EDITOR beats a GUI $VISUAL"
+    );
+    assert_eq!(route_of(&[("VISUAL", "code -w")], None, false), External);
+    assert_eq!(route_of(&[("EDITOR", "subl -w")], None, false), External);
+}
+
+#[test]
+fn the_probe_routes_in_when_it_finds_a_terminal_editor() {
+    use EditorRoute::*;
+    assert_eq!(route_of(&[], None, false), Embedded, "nvim is probed");
+    let none = |p: &Path| p.extension().is_some_and(|e| e == "md");
+    let env = env_of(&[]);
+    assert_eq!(
+        route(&lookup(&env, None, &none), &login("/x"), false),
+        External,
+        "nothing found keeps editor_open's probe and fallback"
+    );
+    assert_eq!(
+        route(&lookup(&env, None, &none), &login("/x"), true),
+        Embedded,
+        "the fixture journals a bare nvim"
+    );
+}
+
+#[test]
+fn a_terminal_editor_found_nowhere_stays_external_outside_the_fixture() {
+    use EditorRoute::*;
+    assert_eq!(route_of(&[("EDITOR", "hx")], None, false), External);
+    assert_eq!(route_of(&[], Some("/no/such/vim"), false), External);
+    assert_eq!(route_of(&[("EDITOR", "hx")], None, true), Embedded);
+    assert_eq!(route_of(&[], Some("zed"), true), External);
+}
+
 #[test]
 fn the_login_env_is_read_after_the_last_mark() {
     let env = |path: &str, lang: Option<&str>| LoginEnv {

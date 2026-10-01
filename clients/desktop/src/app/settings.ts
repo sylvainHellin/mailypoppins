@@ -11,7 +11,15 @@ import type { Action } from "@/app/reducer";
 import { configChangedLine } from "@/app/activity";
 import { accountNames, markStale, type AccountWizard, type AppState, type PasswordDialog } from "@/app/state";
 import * as cmd from "@/lib/commands";
-import { asGuiError, type ConfigAccount, type ConfigSnapshot, type ConfigSwap, type GuiError, type SecretKind } from "@/lib/gui-types";
+import {
+  asGuiError,
+  type ConfigAccount,
+  type ConfigSnapshot,
+  type ConfigSwap,
+  type EditorSetting,
+  type GuiError,
+  type SecretKind,
+} from "@/lib/gui-types";
 
 /** The daemon's `ConfigInvalid` code: the file did not load, and the daemon kept what it served. */
 export const CONFIG_INVALID_CODE = -32007;
@@ -178,12 +186,34 @@ export async function storePassword(dispatch: Dispatch<Action>, account: string,
   }
 }
 
+/**
+ * The editor field's hint. On the embedded route drafts open in the
+ * terminal editor inside the window, and `effective`, the external route's
+ * command, still opens config.toml and the log.
+ */
+export function editorHint(setting: EditorSetting | null): string {
+  if (setting?.env_override) return `MP_DESKTOP_EDITOR is set and wins: ${setting.env_override}`;
+  const effective = setting?.effective ?? "the first editor found";
+  if (setting?.route === "embedded") {
+    return `Drafts open in the embedded terminal editor; config.toml and the log open in ${effective}. {path} stands for the file.`;
+  }
+  return `Opens drafts, config.toml and the log; {path} stands for the file. Empty uses ${effective}.`;
+}
+
+/** What the notice line says once the setting is cleared. */
+export function clearedNotice(setting: EditorSetting): string {
+  if (setting.route === "embedded") {
+    return `The editor setting is cleared; drafts open in the embedded terminal editor, and config.toml and the log in ${setting.effective}`;
+  }
+  return `The editor setting is cleared; ${setting.effective} is used`;
+}
+
 /** Save the editor command template, or clear it with an empty field. */
 export async function saveEditorSetting(dispatch: Dispatch<Action>, template: string): Promise<string | null> {
   const editor = template.trim() === "" ? null : template.trim();
   try {
     const setting = await cmd.editorSettingSet(editor);
-    dispatch({ type: "notice", text: setting.editor ? `The editor is now ${setting.editor}` : `The editor setting is cleared; ${setting.effective} is used` });
+    dispatch({ type: "notice", text: setting.editor ? `The editor is now ${setting.editor}` : clearedNotice(setting) });
     return null;
   } catch (e: unknown) {
     return asGuiError(e).message;

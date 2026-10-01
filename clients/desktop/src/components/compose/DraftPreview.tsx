@@ -2,6 +2,8 @@
 // status and the body the dry run renders), `draft_validate`'s report and
 // the `attachments:` list `draft_attachments` reads from the file, read
 // again whenever the listing's row changes (a save in the editor).
+// `ComposeSummary` is the same preview after an embedded editor exited with
+// 0 on a draft the selection does not show.
 
 import { useEffect, useState } from "react";
 import { CircleAlert, CircleCheck, ExternalLink, FilePen, Paperclip, Stamp, Undo2, Users, X } from "lucide-react";
@@ -9,10 +11,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { runAction } from "@/app/actions";
-import { setShownStatus } from "@/app/compose";
+import { openInEditor, setShownStatus } from "@/app/compose";
 import { draftItemsOf, openItem, removeItem } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
-import { targetKey, type DraftItem } from "@/app/state";
+import { draftsShown, filteredDrafts, targetKey, type DraftItem } from "@/app/state";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type DraftAttachments } from "@/lib/gui-types";
 import type { DraftPreview as Preview, DraftReport } from "@/protocol/types";
@@ -45,8 +47,12 @@ export function StatusPill({ status, hidden }: { status: string; hidden?: boolea
   );
 }
 
-/** The selected draft, in place of a message body. */
-export function DraftPreview({ account, draft }: { account: string; draft: DraftItem }) {
+/**
+ * The selected draft, in place of a message body. `standalone` is the exit
+ * summary of a draft the Drafts list may not show: its actions are Edit,
+ * on the draft itself, and Close, which brings the selection back.
+ */
+export function DraftPreview({ account, draft, standalone = false }: { account: string; draft: DraftItem; standalone?: boolean }) {
   const s = useAppState();
   const dispatch = useDispatch();
   const [loaded, setLoaded] = useState<Loaded | null>(null);
@@ -90,11 +96,21 @@ export function DraftPreview({ account, draft }: { account: string; draft: Draft
   return (
     <article aria-label={`Draft: ${subject}`} data-slot="draft-preview" className="flex flex-col gap-3 px-5 py-4 text-sm">
       <div role="toolbar" aria-label="Draft actions" aria-busy={pending || undefined} className="flex flex-wrap items-center gap-1">
-        <Button size="sm" variant="ghost" title="Edit in the editor (e)" onClick={() => runAction("open_editor", s, dispatch)}>
+        <Button
+          size="sm"
+          variant="ghost"
+          title={standalone ? "Edit in the editor" : "Edit in the editor (e)"}
+          onClick={() => (standalone ? void openInEditor(dispatch, account, draft.id, draft.path, s.compose) : runAction("open_editor", s, dispatch))}
+        >
           <FilePen aria-hidden="true" />
           {editing ? "Reopen in editor" : "Edit in editor"}
         </Button>
-        {invalid ? null : (
+        {standalone ? (
+          <Button size="sm" variant="ghost" title="Show the selection again" onClick={() => dispatch({ type: "compose_summary_closed" })}>
+            <X aria-hidden="true" />
+            Close
+          </Button>
+        ) : invalid ? null : (
           <>
             <Button size="sm" variant="ghost" title="Edit recipients (ce)" onClick={() => runAction("edit_recipients", s, dispatch)}>
               <Users aria-hidden="true" />
@@ -219,4 +235,57 @@ export function DraftPreview({ account, draft }: { account: string; draft: Draft
       <p className="font-mono text-xs break-all text-muted-foreground">{draft.path}</p>
     </article>
   );
+}
+
+/**
+ * The draft an embedded editor just left with exit 0: its row when the
+ * Drafts list shows it, else a row built from a fresh `draft_preview`. A
+ * draft that is gone closes the summary, so the reader shows the selection,
+ * the message it showed before.
+ */
+export function ComposeSummary({ account, draftId }: { account: string; draftId: string }) {
+  const s = useAppState();
+  const dispatch = useDispatch();
+  const listed = draftsShown(s) && s.selection.account === account ? filteredDrafts(s.messages.data, "").find((d) => d.id === draftId) : undefined;
+  const [read, setRead] = useState<DraftItem | null>(null);
+  const known = listed !== undefined;
+
+  useEffect(() => {
+    if (known) return;
+    let live = true;
+    cmd.draftPreview(account, draftId).then(
+      (p) => {
+        if (!live) return;
+        setRead({
+          id: p.id,
+          selector: p.selector,
+          path: p.path,
+          status: p.status,
+          to: p.to,
+          cc: p.cc,
+          subject: p.subject,
+          date: null,
+          // `draft_preview` answered, so the file parses; its `valid` is whether it would send.
+          valid: true,
+          ready: p.valid,
+          diagnostic: null,
+        });
+      },
+      () => live && dispatch({ type: "compose_summary_closed" }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [account, draftId, known, dispatch]);
+
+  const draft = listed ?? read;
+  if (!draft) {
+    return (
+      <div className="flex flex-col gap-2 px-5 py-4" aria-busy="true" aria-label="Loading the draft">
+        <Skeleton className="h-6 w-2/3" />
+        <Skeleton className="mt-2 h-32 w-full" />
+      </div>
+    );
+  }
+  return <DraftPreview account={account} draft={draft} standalone />;
 }

@@ -1,7 +1,8 @@
 import { Cloud, CloudDownload, FileText, Forward, Globe, Reply, ReplyAll } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DraftPreview } from "@/components/compose/DraftPreview";
+import { ComposeSummary, DraftPreview } from "@/components/compose/DraftPreview";
+import { TerminalSlot } from "@/components/compose/TerminalHost";
 import { ReaderBody, ReaderText } from "@/components/reader/ReaderBody";
 import { ReaderHeader } from "@/components/reader/ReaderHeader";
 import { InviteCard } from "@/components/reader/InviteCard";
@@ -11,7 +12,7 @@ import { READER_SCROLL_ID } from "@/app/actions";
 import * as compose from "@/app/compose";
 import { fetchHit, openHtml } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
-import { filteredDrafts, isStale, readerKey, type SearchHit } from "@/app/state";
+import { draftOfKey, filteredDrafts, isStale, readerKey, type SearchHit } from "@/app/state";
 
 /**
  * A server-only search hit: the store holds no row, so there is no body to
@@ -84,6 +85,24 @@ export function ReaderPane() {
   const key = account && message ? readerKey(account, message.row_id) : null;
   const ready = key !== null && s.reader.key === key && s.reader.meta !== null;
   const loading = key !== null && (!ready || isStale(s.reader.load)) && !s.reader.load.error;
+  // The embedded editor the reader area shows in place of the selection, or
+  // its draft's summary once it exited with 0 (docs/shell.md, "Compose").
+  const shown = s.composeShown;
+  const editor = shown ? s.compose[shown] : undefined;
+  const summary = shown && !editor ? draftOfKey(shown) : null;
+
+  if (editor?.kind === "embedded") {
+    return (
+      <aside
+        aria-label="Reader"
+        data-pane="reader"
+        className="flex h-full min-h-0 min-w-0 flex-col"
+        onFocus={() => dispatch({ type: "pane_focused", pane: "reader" })}
+      >
+        <TerminalSlot />
+      </aside>
+    );
+  }
 
   return (
     <aside
@@ -100,7 +119,9 @@ export function ReaderPane() {
         aria-busy={loading}
         className="flex min-h-0 flex-1 flex-col overflow-y-auto outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
       >
-        {draft && account ? (
+        {summary ? (
+          <ComposeSummary key={shown} account={summary.account} draftId={summary.draft} />
+        ) : draft && account ? (
           draftRow ? <DraftPreview key={`${account}/${draft}`} account={account} draft={draftRow} /> : null
         ) : serverHit ? (
           <ServerHitSummary hit={serverHit} />
