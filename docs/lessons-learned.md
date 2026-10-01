@@ -2433,7 +2433,7 @@ A click on a row would also blur that field, since cmdk's root is focusable (`ta
 
 ## A whole-mailbox `message.list` is spent building the `Value`, not reading or parsing
 
-At 50 000 rows the method takes about 156 ms: 41 for the SQLite read, about 10 for building the rows, and about 115 for building and dropping a `serde_json::Value` object of sixteen keys per row.
+At 50 000 rows the method takes about 156 ms: 41 for the SQLite read, about 10 for building the rows, and the rest, about 105, for building and dropping a `serde_json::Value` object of fifteen keys per row.
 The same borrowed rows serialised straight to bytes take 31.5 ms, so a further cut has to skip the tree, which `Outcome::result: Value` does not allow today (`docs/baselines/message-list-unbounded.md`).
 The answer is also bigger than it looks: about 488 bytes a row, so a mailbox past about 34 000 rows is over the 16 MiB `MAX_RESPONSE_BYTES` and the daemon answers `frame_too_large` instead of a listing.
 Moving such a read onto `spawn_blocking` has to resolve `store_path` before the hop and hand the worker a path: a fixture's data root is a thread-local (see "The data-root override is thread-local" above), and a query fixture's runtime does not re-install it on the blocking pool the way a command fixture's does.

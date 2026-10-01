@@ -8,7 +8,7 @@ This file measures what that answer costs the daemon at ten times the 5000-row s
 | `rows` | 50 000, `alpha/Bulk` of `mkfixture --rows 50000` |
 | `frame_bytes` | 24 387 191, about 488 per row |
 | `response_cap` | 16 777 216 (`mp_protocol::MAX_RESPONSE_BYTES`) |
-| `before` | `3b442cea` (the bench on the old code) |
+| `before` | `legacy_row` inside the bench at `1a7bffdc`, the old `json!` code timed in the same run |
 | `after` | `1a7bffdc` |
 | `host` | macOS 26.6.2, Apple M4 Pro (12 cores), 48 GiB, APFS, `rustc 1.98.1` |
 
@@ -66,7 +66,7 @@ Two reference timings in the same run say where the rest of the time goes:
 
 The change saves 10 to 16% of the method, 19 to 35 ms at 50 000 rows across the three pairs, all of it per-row work: the RFC 2822 parse of `date_display` that ingest had already done into the `date_sort` column, and the two clones per string field the `json!` literal made.
 
-The rest of the method is the `serde_json::Value` tree, not the rows: about 115 ms of the 156 build and drop 50 000 objects of sixteen keys each, where serialising the same borrowed rows straight to bytes takes 31.5 ms.
+The rest of the method is the `serde_json::Value` tree, not the rows: about 115 ms of the 156 build and drop 50 000 objects of fifteen keys each, where serialising the same borrowed rows straight to bytes takes 31.5 ms.
 An answer that skipped the tree would cost about 41 + 32 = 73 ms and save the 22 ms of `frame::encode` on top, but `Outcome::result` is a `Value` that the server and twelve in-process test fixtures read, so that is a dispatcher change rather than a `message.list` one.
 
 The read no longer runs on a Tokio worker: the `list` projection's store read and row building run on the blocking pool (`list_off_thread`), so a large listing stops holding a worker every other connection shares.
