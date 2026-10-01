@@ -69,16 +69,37 @@ cd src-tauri
 export CARGO_TARGET_DIR=/var/tmp/mp-desktop-target
 cargo test                              # the Rust layer; add `-- --ignored live_daemon` with MP_DESKTOP_MP_BIN set for the live test
 cargo clippy --all-targets -- -D warnings
-
-pnpm tauri build                        # an unsigned app bundle; signing and notarisation are M6 (#0132)
 ```
+
+## Install from a local build
+
+```sh
+cd clients/desktop
+pnpm bundle                             # builds mp in release, bundles it as the sidecar, runs tauri build
+MP_SIDECAR_BIN=/path/to/mp pnpm bundle  # bundle an mp you already built
+```
+
+`pnpm bundle` ([scripts/bundle.ts](scripts/bundle.ts)) copies `mp` to `src-tauri/binaries/mp-<target>` and builds with [src-tauri/tauri.bundle.conf.json](src-tauri/tauri.bundle.conf.json), which names it in `bundle.externalBin`; plain `pnpm tauri build` makes an app without its own `mp`.
+The app lands in `<target dir>/<target>/release/bundle/macos/mailypoppins.app` and the DMG beside it in `dmg/`, the target dir being `$CARGO_TARGET_DIR` or `src-tauri/target`.
+The bundle is unsigned until #0012, so a downloaded copy needs one an allowance in System Settings > Privacy & Security ("Open Anyway" after the first blocked launch), or `xattr -dr com.apple.quarantine` on the app; a local build is not quarantined.
+
+```sh
+cp -R <target dir>/aarch64-apple-darwin/release/bundle/macos/mailypoppins.app /Applications/
+open /Applications/mailypoppins.app
+ln -s /Applications/mailypoppins.app/Contents/MacOS/mp /usr/local/bin/mp   # optional: the app's mp on PATH
+```
+
+The app starts its daemon with its own `Contents/MacOS/mp` unless `MP_DESKTOP_MP_BIN` names another, and refuses a running daemon of another version with the restart screen, whose Restart runs `mp daemon restart` with that binary.
+The symlink keeps the CLI, the TUI and the app's daemon on one version; with a Homebrew or `cargo` `mp` earlier on `PATH`, the two versions meet at the restart screen.
+To uninstall: `mp daemon stop`, quit the app, delete `/Applications/mailypoppins.app` and the symlink; the mail store and `config.toml` are the CLI's and stay (`mp config path`).
+[docs/release-process.md](../../docs/release-process.md), "The desktop app", has the release side.
 
 ## Environment
 
 | Variable | Effect |
 |---|---|
 | `MP_DESKTOP_FIXTURE=1` (or `--fixture`) | Serve the fixtures, no daemon |
-| `MP_DESKTOP_MP_BIN` | The `mp` binary that starts the daemon; else the one next to the executable, then `PATH`, then `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin` |
+| `MP_DESKTOP_MP_BIN` | The `mp` binary that starts the daemon and whose version the daemon must run; else the one next to the executable (the bundled sidecar), then `PATH`, then `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin` |
 | `MP_DESKTOP_WINDOW_SIZE=WxH` | The initial window size, e.g. `950x800` for the medium layout or `600x820` for the narrow one |
 | `MP_DESKTOP_STUB_OPENER=1` | "Open in browser" records the URL in the intercepted-URL log instead of opening it, and a file open only logs; automated runs set it |
 | `MP_DESKTOP_EDITOR` | The editor command for drafts and every other file the app opens in an editor, `{path}` standing for the file; else the `editor` key of `desktop.json`, `$VISUAL` or `$EDITOR`, a probed `code`, `zed`, `subl` or `cursor`, then `open -t`; a terminal editor runs drafts in the reader pane and opens every other file in a terminal window |

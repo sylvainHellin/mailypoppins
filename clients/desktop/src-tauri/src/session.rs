@@ -341,6 +341,10 @@ impl SessionHandle {
     }
 
     fn run_daemon(&self) {
+        // A reconnect refused for a version mismatch is pushed at once, as
+        // the restart screen (see `status`).
+        let this = self.clone();
+        connector::on_reopen_failure_change(Box::new(move || this.status_changed()));
         let preflight = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -458,9 +462,16 @@ impl SessionHandle {
             },
             ConnState::Ready {
                 down: Some(reason), ..
-            } => ConnectionStatus::Reconnecting {
-                reason: reason.clone(),
-                last_error: connector::last_reopen_failure(),
+            } => match connector::last_reopen_failure() {
+                // The daemon came back as another version: the session keeps
+                // retrying, and the restart screen offers the way out.
+                Some(error) if error.kind == ConnectFailure::VersionMismatch => {
+                    ConnectionStatus::Failed { error }
+                }
+                last_error => ConnectionStatus::Reconnecting {
+                    reason: reason.clone(),
+                    last_error,
+                },
             },
             ConnState::Ready { down: None, .. } => {
                 if self.shared.fixture {
@@ -1580,6 +1591,81 @@ mod tests {
         assert_eq!(dropped["operation_id"], started.operation_id.as_str());
     }
 
+    /// One scratch data and config directory for every live test of the
+    /// process, since the connector resolves its paths once.
+    fn live_dirs() {
+        static DIRS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        DIRS.get_or_init(|| {
+            let data = crate::test_support::scratch_dir("live-data");
+            let config = crate::test_support::scratch_dir("live-config");
+            std::env::set_var("MAILYPOPPINS_DATA_DIR", &data);
+            std::env::set_var("MAILYPOPPINS_CONFIG_DIR", &config);
+        });
+    }
+
+    /// The version handshake against a real daemon: the `mp` the app would
+    /// start reports another version than the running daemon, so the connect
+    /// is refused as a version mismatch naming the daemon's version; with the
+    /// matching binary it goes through. Run as `live_daemon_round_trip` is.
+    #[test]
+    #[ignore = "needs an `mp` binary in MP_DESKTOP_MP_BIN"]
+    fn live_daemon_version_handshake() {
+        let _lock = crate::test_support::env_lock();
+        let real = std::env::var_os(connector::MP_BIN_ENV).expect("set MP_DESKTOP_MP_BIN");
+        live_dirs();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let stop = || {
+            let _ = std::process::Command::new(&real)
+                .args(["daemon", "stop"])
+                .status();
+        };
+
+        let started = runtime.block_on(connector::connect_or_start(true));
+        let daemon_version = match &started {
+            Ok((_, hello)) => hello.app_version.clone(),
+            Err(e) => {
+                stop();
+                panic!("no daemon: {e:?}");
+            }
+        };
+        drop(started);
+
+        // The same binary under another version: `--version` lies, every
+        // other command is the real one.
+        let wrapper = crate::test_support::scratch_dir("live-wrapper").join("mp");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo mailypoppins 99.0.0; exit 0; fi\nexec '{}' \"$@\"\n",
+                std::path::Path::new(&real).display()
+            ),
+        )
+        .expect("wrapper");
+        std::fs::set_permissions(
+            &wrapper,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("chmod");
+        std::env::set_var(connector::MP_BIN_ENV, &wrapper);
+        let refused = runtime.block_on(connector::connect_or_start(true));
+        std::env::set_var(connector::MP_BIN_ENV, &real);
+        let matched = runtime.block_on(connector::connect_or_start(false));
+        stop();
+
+        match refused {
+            Err(e) => {
+                assert_eq!(e.kind, ConnectFailure::VersionMismatch, "{e:?}");
+                assert_eq!(e.daemon_version.as_deref(), Some(daemon_version.as_str()));
+                assert!(e.why.contains("99.0.0"), "{}", e.why);
+            }
+            Ok(_) => panic!("a daemon of another version was accepted"),
+        }
+        assert!(matched.is_ok(), "{:?}", matched.err());
+    }
+
     /// The real path against a real daemon in a scratch data directory:
     /// on-demand start through `mp daemon start`, the handshake with every
     /// required capability, the session, the first bootstrap, a command and
@@ -1595,10 +1681,7 @@ mod tests {
             std::env::var_os(connector::MP_BIN_ENV).is_some(),
             "set MP_DESKTOP_MP_BIN"
         );
-        let data = crate::test_support::scratch_dir("live-data");
-        let config = crate::test_support::scratch_dir("live-config");
-        std::env::set_var("MAILYPOPPINS_DATA_DIR", &data);
-        std::env::set_var("MAILYPOPPINS_CONFIG_DIR", &config);
+        live_dirs();
 
         let session = SessionHandle::new(false);
         session.start();
@@ -1670,6 +1753,8 @@ mod tests {
 
     #[test]
     fn a_disconnect_is_reconnecting_until_the_reconnect() {
+        // The reconnect failure is process-wide; see the mismatch test below.
+        let _lock = crate::test_support::env_lock();
         let (session, door, fixture, rx, _seen) = harness();
         fixture.simulate("disconnect").expect("down");
         drain(&session, &door, &rx);
@@ -1690,5 +1775,54 @@ mod tests {
             session.status(),
             ConnectionStatus::Connected { .. }
         ));
+    }
+
+    /// A reconnect refused because the daemon came back as another version
+    /// shows the restart screen, pushed when the refusal is recorded, and
+    /// the next successful reconnect clears it.
+    #[test]
+    fn a_reconnect_refused_for_its_version_is_the_restart_screen() {
+        let _lock = crate::test_support::env_lock();
+        let (session, door, fixture, rx, seen) = harness();
+        fixture.simulate("disconnect").expect("down");
+        drain(&session, &door, &rx);
+        let this = session.clone();
+        connector::on_reopen_failure_change(Box::new(move || this.status_changed()));
+        let expected = connector::ExpectedMp {
+            path: "/Applications/mailypoppins.app/Contents/MacOS/mp".into(),
+            version: "0.11.0".into(),
+        };
+        let mismatch = connector::version_mismatch("0.10.0", &expected).expect("mismatch");
+        connector::record_reopen_failure(Some(mismatch.clone()));
+        let refused = session.status();
+        let pushed = lock(&seen)
+            .iter()
+            .rev()
+            .find(|v| v["type"] == "connection")
+            .cloned()
+            .unwrap_or_default();
+        connector::record_reopen_failure(None);
+        let cleared = session.status();
+        connector::on_reopen_failure_change(Box::new(|| {}));
+
+        assert!(
+            matches!(&refused, ConnectionStatus::Failed { error } if *error == mismatch),
+            "{refused:?}"
+        );
+        assert_eq!(pushed["status"]["state"], "failed", "{pushed}");
+        assert_eq!(
+            pushed["status"]["error"]["kind"], "version_mismatch",
+            "{pushed}"
+        );
+        assert!(
+            matches!(
+                cleared,
+                ConnectionStatus::Reconnecting {
+                    last_error: None,
+                    ..
+                }
+            ),
+            "{cleared:?}"
+        );
     }
 }

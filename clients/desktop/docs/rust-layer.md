@@ -9,7 +9,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | Module | Owns |
 |---|---|
 | `paths.rs` | Data, config, runtime, socket and log paths, resolved through `mp_core::config` like the binary |
-| `connector.rs` | The handshake as `ClientKind::Gui`, the on-demand start through `mp daemon start`, `ConnectError`, `mp daemon restart` |
+| `connector.rs` | The handshake as `ClientKind::Gui`, the version check against the `mp` the app starts, the on-demand start through `mp daemon start`, `ConnectError`, `mp daemon restart` |
 | `session.rs` | The one `Session`, the `StateTracker` watermark, the event pump, re-bootstrap, the awaited-operations table |
 | `commands.rs` | The Tauri commands and their result types |
 | `editor.rs` | The external editor a draft opens in, and the editor setting |
@@ -45,6 +45,11 @@ type GuiError =
 ```
 
 `version_mismatch` is the blocking restart screen; its button calls `restart_daemon` after the user confirms.
+The connect also refuses a daemon whose `app_version` is not the version of the `mp` the layer would start one with (`MP_DESKTOP_MP_BIN`, else the bundled sidecar, else `PATH`; see Environment), read off that binary's `mp --version` and read again when the binary's size or modification time changes.
+That refusal is a `version_mismatch` too, its `why` naming both versions and the binary, so a daemon left by another install or by a `cargo install` with no `mp daemon restart` gets the same screen, and Restart replaces it with the matching one.
+A binary that is missing or prints no version skips the check, with a warning in the log.
+On a reconnect the same refusal turns `reconnecting` into `failed` with that error, pushed as soon as the session thread records it, while the thread keeps retrying; the next successful reconnect is `connected` again.
+The CLI and the TUI compare only the protocol range, since each is itself the `mp` that would start the daemon.
 The handshake requires every daemon method the layer calls (`REQUIRED_CAPABILITIES` in `connector.rs`), so a daemon that lacks one lands on that screen instead of failing at the first call; under test the fixture door panics on a method missing from the list, less the methods only the fixture answers (`FIXTURE_ONLY_METHODS` in `fixture.rs`: `signature.list`, `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default`), whose work the layer does itself over a daemon.
 `setup` is the desktop's own configuration: an editor that did not start, a settings file that does not read, or a setting value its key cannot hold; its message names what to change.
 
@@ -940,3 +945,5 @@ cargo test -p mp-protocol --features ts
 cargo build --manifest-path ../../../Cargo.toml --bin mp
 MP_DESKTOP_MP_BIN=$CARGO_TARGET_DIR/debug/mp cargo test -- --ignored live_daemon
 ```
+
+`live_daemon_version_handshake` starts a daemon with that binary, then points `MP_DESKTOP_MP_BIN` at a wrapper whose `--version` says `99.0.0` and expects the connect refused as a `version_mismatch` carrying the daemon's version, then accepted again with the real binary.

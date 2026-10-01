@@ -9,9 +9,13 @@ export type VersionMismatchProps = {
   onRestart: () => void;
 };
 
-/** Blocking: the running daemon speaks a protocol this app does not. */
+/**
+ * Blocking: the running daemon speaks a protocol this app does not, or runs
+ * another version than the `mp` the app starts. The refusal's own daemon
+ * version comes first, since the last handshake may be an older daemon's.
+ */
 export function VersionMismatchScreen({ error, version, onRestart }: VersionMismatchProps) {
-  const daemon = version?.daemon?.daemon_version ?? error.daemon_version ?? "unknown";
+  const daemon = error.daemon_version ?? version?.daemon?.daemon_version ?? "unknown";
   const range = version ? `${version.protocol_min} to ${version.protocol_max}` : "unknown";
   return (
     <ScreenFrame

@@ -2430,3 +2430,10 @@ cmdk 1.1 updates the store's `selectedItemId`, which its `Command.List` and `Com
 A controlled `value` prop sets the selected row (`aria-selected` follows) but leaves `selectedItemId` behind, and cmdk overwrites any `id` passed to a list or an item with its own `useId`.
 A field outside the `Command` that drives the selection itself (`clients/desktop/src/components/compose/RecipientsInput.tsx`) reads the list's id and the `[cmdk-item][aria-selected="true"]` row's id from the DOM through a `MutationObserver` and sets them on the input.
 A click on a row would also blur that field, since cmdk's root is focusable (`tabIndex=-1`): the panel prevents `mousedown`.
+
+## `bundle.externalBin` in tauri.conf.json makes every cargo build need the sidecar
+
+tauri-build (2.7) copies each `bundle.externalBin` entry, suffixed with the target triple, next to the compiled executable on every build of the crate, `cargo test`, `cargo clippy` and `tauri dev` included, and fails the build when `binaries/mp-<triple>` is missing.
+So the entry lives in `clients/desktop/src-tauri/tauri.bundle.conf.json`, merged only by `pnpm bundle` (`tauri build --config <file>`), and a checkout builds and tests without a staged `mp`.
+The bundler drops the triple: `binaries/mp-aarch64-apple-darwin` becomes `mailypoppins.app/Contents/MacOS/mp`, beside the main executable `mp-desktop`, which is where `connector.rs` looks first.
+`tauri build --config '{"version":"X"}'` sets `CFBundleShortVersionString` and the DMG's name (`mailypoppins_X_aarch64.dmg`, `_x64` for Intel) but not the crate's `CARGO_PKG_VERSION`, so the app's own `app_version` stays the `mp-desktop` crate's.

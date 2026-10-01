@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The desktop client checks that the daemon runs its own version of mailypoppins (#0132).**
+  - A daemon left running by another install of `mp`, or by a `cargo install` not followed by `mp daemon restart`, now shows the restart screen naming both versions and the `mp` the app would start, instead of serving the window from an older engine; Restart replaces it with the matching one.
+  - The same screen replaces the reconnecting banner when the daemon comes back as another version while the window is open.
+- **A tagged release builds the desktop app for the Mac, with its own `mp` inside (#0132).**
+  - Each release now carries `mailypoppins-desktop-aarch64-apple-darwin.dmg` and `mailypoppins-desktop-x86_64-apple-darwin.dmg`, with the `.app` as a `.tar.gz` beside them; drag `mailypoppins.app` to Applications and it starts its daemon with the `mp` it ships, so nothing else has to be installed.
+  - The app is not signed yet (#0012): allow it once under System Settings > Privacy & Security ("Open Anyway" after the first blocked launch), or run `xattr -dr com.apple.quarantine /Applications/mailypoppins.app`.
+  - `ln -s /Applications/mailypoppins.app/Contents/MacOS/mp /usr/local/bin/mp` puts the app's `mp` on your `PATH`, so the CLI, the TUI and the app run one version.
+  - From a checkout, `cd clients/desktop && pnpm bundle` builds the same app and DMG.
 - **The desktop client repeats a held key, keeps its colours in the editor, shows what a prefix key continues with, and completes recipients (#0137).**
   - A held `j` or `k` repeats in the list and in the embedded editor alike; a value you set yourself with `defaults write` still wins.
   - Neovim and Vim in the embedded editor take the app's own colours in the dark and the light theme, and follow a theme change at the next editor started; Settings' "Editor colours" keeps your own colorscheme instead, and every editor gets `MP_DESKTOP_THEME` for a config of your own.

@@ -71,7 +71,7 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 
 | GuiEvent | Effect |
 |---|---|
-| `connection` | the screen: connecting, unavailable, version mismatch, first run, or the shell |
+| `connection` | the screen: connecting, unavailable, version mismatch, first run, or the shell; a `failed` with `version_mismatch` while the shell shows (a daemon that came back as another version) swaps in the restart screen, whose daemon version is the refusal's, and the next `connected` brings the shell back |
 | `disconnected` | the reconnecting banner |
 | `reconnected` | the banner turns to resync until the bootstrap lands |
 | `resync` | the resync banner |
