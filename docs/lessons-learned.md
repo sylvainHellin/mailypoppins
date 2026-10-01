@@ -2452,6 +2452,7 @@ A client that offers Cancel on such an operation must word the cancelled end as 
 ## `tauri-plugin-dialog` carries `tauri-plugin-fs` without granting it anything
 
 `tauri-plugin-dialog` 2.8 pulls `tauri-plugin-fs` in as a dependency and adds a picked path to the fs scope, but with no `fs:` permission in the capability the webview can read nothing through it; only `dialog:allow-open` is granted.
+
 ## A whole-mailbox `message.list` is spent building the `Value`, not reading or parsing
 
 At 50 000 rows the method takes about 156 ms: 41 for the SQLite read, about 10 for building the rows, and the rest, about 105, for building and dropping a `serde_json::Value` object of fifteen keys per row.
