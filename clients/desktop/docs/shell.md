@@ -254,7 +254,7 @@ The text after the last comma, trimmed and at least one character, asks `contact
 The rows, name and address, best first, open under the field with the first highlighted: ArrowDown and ArrowUp move, Enter or Tab accepts, a click accepts, and Escape closes the list and keeps the text, which leaves the dialog open.
 Accepting replaces the text after the last comma with `Name <addr>`, the name quoted when it holds a comma, or the bare address when no message named one, then `, `, and the focus stays in the field.
 A closed list stays closed until the text changes, and with no list open Enter moves on as above.
-When a query finds nothing and the account's index is empty (a `contact_search` for the empty query answers no row), the list shows one row, "No contacts yet: rebuild the index in Contacts", once per focus of the field; it takes no key, and Enter still moves on.
+When a query finds nothing and the account's index is empty (a `contact_search` for the empty query answers no row), the list shows one row, "No contacts yet: rebuild the index in Contacts", once per focus of the field; it takes no key but Escape, which closes it; Enter still moves on.
 A draft needs at least one recipient across To, Cc and Bcc, the TUI's rule, and trailing separators are trimmed from each field.
 The new draft's file name is the TUI wizard's, `draft-<local time>-<subject slug>`.
 The submit calls `draft_create` with the wizard's `headers`, and `signature` or `no_signature`, then closes the dialog and opens the file in the editor.

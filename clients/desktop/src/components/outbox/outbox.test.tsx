@@ -301,6 +301,8 @@ describe("the outbox view hides the mailbox selection", () => {
     await user.keyboard("cn");
     const wizard = await screen.findByRole("dialog", { name: "New draft" });
     await waitFor(() => expect(within(wizard).getByRole("combobox", { name: "To" })).toHaveFocus());
+    // Completion off: the test types a recipient and is not about it.
+    mock.failing.set("contact_search", new Error("off"));
     await user.keyboard("kim@example.com");
     await user.keyboard("{Meta>}{Enter}{/Meta}");
     await waitFor(() => expect(callsOf("draft_create")).toHaveLength(1));
