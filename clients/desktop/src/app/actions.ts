@@ -16,6 +16,7 @@ import { cursorRow, discardDialog, retryDialog } from "@/app/outbox";
 import { copyFromMessage, openConfig, openLog, openMeta } from "@/app/interop";
 import { hiddenNotice, viewPanes } from "@/app/views";
 import { saveTheme } from "@/app/theme";
+import { saveReaderMode, toggleReaderMode } from "@/app/readerMode";
 import { actionTargets, type Action } from "@/app/reducer";
 import {
   draftItems,
@@ -303,6 +304,12 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return void saveTheme(dispatch, "light");
     case "theme_system":
       return void saveTheme(dispatch, "system");
+    case "toggle_reader_mode":
+      return void toggleReaderMode(s, dispatch);
+    case "reader_html":
+      return void saveReaderMode(dispatch, "html");
+    case "reader_text":
+      return void saveReaderMode(dispatch, "text");
     case "calendar_open_source":
       return void openEventSource(s, dispatch);
     case "calendar_toggle_past":

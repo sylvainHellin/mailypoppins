@@ -2,7 +2,7 @@ import { Cloud, CloudDownload, FileText, Forward, Globe, Reply, ReplyAll } from 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DraftPreview } from "@/components/compose/DraftPreview";
-import { ReaderBody } from "@/components/reader/ReaderBody";
+import { ReaderBody, ReaderText } from "@/components/reader/ReaderBody";
 import { ReaderHeader } from "@/components/reader/ReaderHeader";
 import { InviteCard } from "@/components/reader/InviteCard";
 import { ReaderToolbar } from "@/components/reader/ReaderToolbar";
@@ -119,7 +119,16 @@ export function ReaderPane() {
             <ReaderToolbar meta={s.reader.meta} />
             <ReaderHeader meta={s.reader.meta} />
             {s.reader.meta.invite ? <InviteCard meta={s.reader.meta} /> : null}
-            <ReaderBody htmlUrl={s.reader.meta.html_url} subject={s.reader.meta.subject} />
+            {s.readerMode === "text" ? (
+              <ReaderText
+                account={s.reader.meta.account}
+                rowId={s.reader.meta.row_id}
+                version={s.reader.load.loadedGen}
+                subject={s.reader.meta.subject}
+              />
+            ) : (
+              <ReaderBody htmlUrl={s.reader.meta.html_url} subject={s.reader.meta.subject} />
+            )}
           </article>
         ) : (
           <div className="flex flex-col gap-3 p-5" aria-label="Loading message">

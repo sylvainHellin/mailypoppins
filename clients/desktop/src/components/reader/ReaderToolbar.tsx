@@ -5,6 +5,7 @@ import { copyFromMessage } from "@/app/interop";
 import { openMessageTarget, runMutation, type MutationActionId } from "@/app/actions";
 import * as compose from "@/app/compose";
 import { openHtml } from "@/app/attachments";
+import { READER_MODE_LABELS, READER_MODES, saveReaderMode } from "@/app/readerMode";
 import { useAppState, useDispatch } from "@/app/store";
 import { targetKey } from "@/app/state";
 import type { MessageMeta } from "@/lib/gui-types";
@@ -15,7 +16,8 @@ import type { MessageMeta } from "@/lib/gui-types";
  * Archive and Delete ask first, Move opens the picker. They act on this
  * message only, whatever the list has marked. Open in browser hands the
  * daemon's rendition to the default browser. Copy is a menu of the sender's
- * address, the `mp://` link (what `y` copies) and the subject.
+ * address, the `mp://` link (what `y` copies) and the subject. HTML | Text
+ * is the reader mode (`tt`), the current one pressed.
  */
 export function ReaderToolbar({ meta }: { meta: MessageMeta }) {
   const s = useAppState();
@@ -69,6 +71,21 @@ export function ReaderToolbar({ meta }: { meta: MessageMeta }) {
         <Globe aria-hidden="true" />
         Open in browser
       </Button>
+      <div role="group" aria-label="Reader mode" className="flex">
+        {READER_MODES.map((mode, i) => (
+          <Button
+            key={mode}
+            size="sm"
+            variant="outline"
+            title={`${mode === "html" ? "Show the HTML version" : "Show the plain text"} (t t)`}
+            aria-pressed={s.readerMode === mode}
+            className={`aria-pressed:border-framing aria-pressed:bg-selection aria-pressed:text-selection-foreground ${i === 0 ? "rounded-r-none" : "-ml-px rounded-l-none"}`}
+            onClick={() => void saveReaderMode(dispatch, mode)}
+          >
+            {READER_MODE_LABELS[mode]}
+          </Button>
+        ))}
+      </div>
       <DropdownMenu>
         <DropdownMenuTrigger render={<Button size="sm" variant="ghost" title="Copy from this message" />}>
           <Copy aria-hidden="true" />

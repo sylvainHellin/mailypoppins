@@ -7,6 +7,7 @@ import { openConfig } from "@/app/interop";
 import { kindLabel, reloadConfig, saveEditorSetting, usesPassword } from "@/app/settings";
 import { signInOrShow } from "@/app/signin";
 import { saveTheme, THEME_LABELS, THEMES, type Theme } from "@/app/theme";
+import { READER_MODE_LABELS, READER_MODES, saveReaderMode } from "@/app/readerMode";
 import { useAppState, useDispatch } from "@/app/store";
 import * as cmd from "@/lib/commands";
 import type { ConfigAccount, ConfigServer, EditorSetting, SecretKind } from "@/lib/gui-types";
@@ -117,6 +118,35 @@ function ThemeField() {
         })}
       </div>
       <p className="text-xs text-muted-foreground">System follows the light or dark appearance of the operating system.</p>
+    </div>
+  );
+}
+
+/** The reader mode (`setting_get|set` of `reader_mode`): two buttons, the current one pressed; `tt` toggles it. */
+function ReaderModeField() {
+  const { readerMode } = useAppState();
+  const dispatch = useDispatch();
+  const id = useId();
+  return (
+    <div className="mt-3 flex flex-col gap-1">
+      <span id={`${id}-reader`} className="text-sm text-muted-foreground">
+        Reader
+      </span>
+      <div role="group" aria-labelledby={`${id}-reader`} className="flex gap-1">
+        {READER_MODES.map((mode) => (
+          <Button
+            key={mode}
+            size="sm"
+            variant="outline"
+            aria-pressed={readerMode === mode}
+            className="aria-pressed:border-framing aria-pressed:bg-selection aria-pressed:text-selection-foreground"
+            onClick={() => void saveReaderMode(dispatch, mode)}
+          >
+            {READER_MODE_LABELS[mode]}
+          </Button>
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">Text shows the stored plain text in the app's theme; t t switches from the list or the reader.</p>
     </div>
   );
 }
@@ -256,6 +286,7 @@ export function SettingsView() {
                 </Button>
               </div>
               <ThemeField />
+              <ReaderModeField />
               <EditorSettingField />
             </section>
             <section aria-labelledby="settings-accounts">

@@ -113,9 +113,9 @@ describe("keyboard routing", () => {
   it("a key for a later milestone says so instead of doing nothing", async () => {
     const { user } = renderApp();
     await shellReady();
-    // `tt`, the TUI's thread view, which the desktop client does not have yet.
-    await user.keyboard("tt");
-    expect(await screen.findByText(/Show conversation \(thread\) is not in the desktop client yet/)).toBeInTheDocument();
+    // `gt`, the TUI's jump to date, which the desktop client does not have yet.
+    await user.keyboard("gt");
+    expect(await screen.findByText(/Jump to date \(e\.g\. last week\) arrives in the next M1 unit/)).toBeInTheDocument();
   });
 });
 

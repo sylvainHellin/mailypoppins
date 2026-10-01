@@ -178,6 +178,12 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           // Mail only: a view never arms `c`, as the TUI's do not.
           case "cs":
             return run("manage_signatures");
+          // Desktop only: the reader's text mode, from the list or the
+          // reader; the TUI's `tt` is its thread view, which the desktop
+          // does not have yet.
+          case "tt":
+            if (s.focus !== "sidebar") run("toggle_reader_mode");
+            return;
           default:
             if (COMPOSE_ROW_KEYS[combo]) {
               if (s.focus !== "sidebar") run(COMPOSE_ROW_KEYS[combo]);

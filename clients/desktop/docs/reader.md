@@ -15,15 +15,34 @@ The rendering rule and its reasons are in the plan, `docs/plans/native-gui.md`, 
 - The URL is used as the Rust layer hands it over, so a Windows spelling (`http://mpmsg.localhost/…`) needs no frontend change.
 - A skeleton covers the frame until its `load` event; the frame is keyed on the URL, so every message starts with the skeleton.
 - The frame draws on `--reader-canvas` (white), because mail is authored for a white page and a message that sets no background would put default black text on the dark shell.
-- A message without markup comes back on the same URL as a plain-text document (`X-Mp-Rendition: text`), so React has one path and no longer fetches `message_text`.
+- A message without markup comes back on the same URL as a plain-text document (`X-Mp-Rendition: text`), so in html mode React has one path and fetches no `message_text`.
 - Remote content stays blocked by the reader CSP; M1 has no "load remote images" toggle.
 - The body scrolls inside the frame; the header block above it is unchanged.
+
+## Text mode
+
+The reader shows a message in one of two modes, `html` (the frame above, the default) or `text`.
+Text mode shows the stored plain text, what the TUI's preview shows, as `ReaderText` in `src/components/reader/ReaderBody.tsx`, with no frame.
+It reads `message_text` once per message and reader load, caches the answer in `src/app/readerMode.ts`, and drops an answer whose message is no longer open.
+The text sits in a `<pre>` named "Message text: <subject>", on `bg-background` in `text-foreground` and the mono font, so it follows the app's theme.
+Line breaks stay as stored, long lines wrap, and a line whose first non-blank character is `>` is `text-muted-foreground`.
+The text flows in `#mp-reader-scroll`, so `j`/`k`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`, `G` and `Home`/`End` scroll the body itself, and `z` zooms the reader as in html mode.
+A message whose store holds no text says "No text body" with a hint that `t t` shows the HTML version, and the mode stays text.
+A read that fails says "The text did not load: <why>".
+
+`tt` from the list or the reader toggles the mode, and from the sidebar does nothing.
+The toolbar's "Reader mode" group holds HTML and Text, the current one pressed, and Settings has the same pair under "Reader".
+The palette's READER rows are "Toggle reader text mode" (`tt`), "Reader: HTML" and "Reader: text".
+The mode is the `reader_mode` key of `desktop.json` ([rust-layer.md](rust-layer.md), "Desktop settings"), read once at startup into `state.readerMode`, which is html until the read answers.
+A change shows at once and is then stored; a refused write keeps the mode for this window and says "The reader mode was not saved: <why>".
+`tb` still opens the HTML in the browser from text mode.
+The TUI's `tt` is its thread view, which the desktop does not have yet; the KEYMAP row "Show conversation (thread)" stays badged and lists no key.
 
 ## The toolbar
 
 The open message's toolbar (`ReaderToolbar.tsx`, `role="toolbar"`, "Message actions") runs the same actions as the keys, on this message only, whatever the list has marked.
 Reply and Reply all write the reply with `draft_reply` and open it in the editor, Forward opens the forward wizard, and Archive, Delete, Move, Flag and Mark read or unread follow ([shell.md](shell.md), "Compose" and "Actions, dialogs and the activity area").
-Open in browser (`tb`) comes next, and the Copy menu is last (INT-03).
+Open in browser (`tb`) comes next, then the reader mode's HTML and Text (`tt`, see Text mode), and the Copy menu is last (INT-03).
 
 The Copy menu (`ui/dropdown-menu.tsx`) has three items, each copying through `copyText` from its click:
 
@@ -151,6 +170,7 @@ Also observed in the same run:
 Once focus is inside the reader frame (a click in the message body), the app's keys no longer reach the app: the frame is cross-origin to it and runs no script, so its key events stay in its own document and the keymap never hears them.
 Escape, `j`/`k`, `:` and every other app key do nothing until focus returns to the app, by a click on the header, the list or the sidebar.
 `j`/`k` on the reader pane scroll `#mp-reader-scroll`, which holds the header block and the frame; the body scrolls inside the frame, so from the keyboard only the header area moves.
+Text mode has no frame, so neither limit applies there (see Text mode).
 
 ## Manual verification
 

@@ -23,6 +23,7 @@ import { MENU_ACTIONS, runDialog, useRunAction, type ListGeometry } from "@/app/
 import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
 import { useStoredTheme } from "@/app/theme";
+import { useStoredReaderMode } from "@/app/readerMode";
 import { screenFor } from "@/app/state";
 import { useAppState, useDispatch } from "@/app/store";
 import { useKeymap } from "@/keymap/useKeymap";
@@ -47,6 +48,7 @@ export function AppShell() {
   useBoot(dispatch, onMenu);
   useVersionInfo(s, dispatch);
   useStoredTheme(dispatch);
+  useStoredReaderMode(dispatch);
   useDataSync(s, dispatch);
   useKeymap(s, dispatch);
 

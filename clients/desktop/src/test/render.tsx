@@ -2,11 +2,13 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "@/App";
 import { resetMock } from "@/test/tauri-mock";
+import { forgetTexts } from "@/app/readerMode";
 import { setWidth } from "@/test/setup";
 
 /** Render the whole app against the fixture mock, at a window width. */
 export function renderApp(width = 1400, before?: () => void) {
   resetMock();
+  forgetTexts();
   before?.();
   setWidth(width);
   const user = userEvent.setup();

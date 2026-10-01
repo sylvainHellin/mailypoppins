@@ -97,7 +97,10 @@ export type ActionId =
   | "copy_subject"
   | "theme_dark"
   | "theme_light"
-  | "theme_system";
+  | "theme_system"
+  | "toggle_reader_mode"
+  | "reader_html"
+  | "reader_text";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -106,8 +109,11 @@ export type ActionId =
  */
 export type Badge = "M3" | "M4" | "soon" | "key" | "menu" | "later";
 
-/** `keys` replaces the KEYMAP's where the desktop binds the action to another key. */
-type Binding = { id: ActionId; keys?: string[] } | { badge: Badge };
+/**
+ * `keys` replaces the KEYMAP's where the desktop binds the action to another
+ * key, or to none where the desktop gives the TUI's key to another action.
+ */
+type Binding = { id: ActionId; keys?: string[] } | { badge: Badge; keys?: string[] };
 
 /** By the KEYMAP description, whatever the section. */
 const BY_ACTION: Record<string, Binding> = {
@@ -148,7 +154,9 @@ const BY_ACTION: Record<string, Binding> = {
   "Copy selector (mp://)": { id: "copy_selector" },
   "Clear selection / return to list": { id: "clear_selection" },
   "Filter the current list": { id: "focus_filter" },
-  "Show conversation (thread)": { badge: "later" },
+  // The desktop has no thread view yet, and its `tt` toggles the reader's
+  // text mode (GUI_ENTRIES), so the row lists no key.
+  "Show conversation (thread)": { badge: "later", keys: [] },
   "Open attachment": { id: "open_attachment" },
   "Save attachment to disk": { id: "save_attachment" },
   "Open HTML in browser": { id: "open_html" },
@@ -296,6 +304,11 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "SEARCH", label: "Search server", keys: ["ff", "Shift+Enter"], id: "search_server", badge: null },
   { section: "SEARCH", label: "Cancel the server search", keys: [], id: "cancel_search", badge: null },
   { section: "READER", label: "Show intercepted links", keys: [], id: "show_intercepted", badge: null },
+  // The reader mode (src/app/readerMode.ts), stored in desktop.json: `tt`
+  // toggles it, as the TUI's thread key, which the desktop does not have yet.
+  { section: "READER", label: "Toggle reader text mode", keys: ["tt"], id: "toggle_reader_mode", badge: null },
+  { section: "READER", label: "Reader: HTML", keys: [], id: "reader_html", badge: null },
+  { section: "READER", label: "Reader: text", keys: [], id: "reader_text", badge: null },
   // The reader toolbar's Copy menu (INT-03); no key of their own (D14), `y`
   // stays the selection's selector, which is the open message's link.
   { section: "READER", label: "Copy sender address", keys: [], id: "copy_sender", badge: null },

@@ -37,7 +37,7 @@ describe("the reader frame", () => {
     expect(reader().querySelector('[data-slot="reader-body-loading"]')).toBeNull();
   });
 
-  it("no longer fetches a plain-text body: the frame is the only path", async () => {
+  it("in html mode fetches no plain-text body: the frame is the only path", async () => {
     const { user } = renderApp();
     await shellReady();
     await openHostile(user);

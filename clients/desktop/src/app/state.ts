@@ -2,6 +2,7 @@
 // selection and the presentation state. Pure; the reducer is in reducer.ts.
 
 import type { Theme } from "@/app/theme";
+import type { ReaderMode } from "@/app/readerMode";
 import type {
   AgendaEvent,
   Bootstrap,
@@ -152,7 +153,8 @@ export type Overlay =
 
 /**
  * The reader's headers. The body is the `mpmsg` document the iframe loads
- * itself, so the model holds no body.
+ * itself, or in text mode the plain text `ReaderText` reads and caches
+ * (src/app/readerMode.ts), so the model holds no body.
  */
 export type ReaderState = {
   key: string | null;
@@ -554,6 +556,8 @@ export type AppState = {
   version: VersionInfo | null;
   /** The colour theme as stored in desktop.json (src/app/theme.ts); dark until it is read. */
   theme: Theme;
+  /** How the reader shows a message, as stored in desktop.json (src/app/readerMode.ts); html until it is read. */
+  readerMode: ReaderMode;
   bootstrap: Bootstrap | null;
   accounts: Loadable<AccountInfo[]>;
   mailboxes: Record<string, Loadable<MailboxListing>>;
@@ -728,6 +732,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     version: null,
     // theme.ts's DEFAULT_THEME, spelled out so the model imports no command.
     theme: "dark",
+    // readerMode.ts's DEFAULT_READER_MODE, spelled out for the same reason.
+    readerMode: "html",
     bootstrap: null,
     accounts: emptyLoadable(),
     mailboxes: {},

@@ -1,6 +1,7 @@
 // The one reducer: GuiEvents, fetched answers and user intents.
 
 import type { Theme } from "@/app/theme";
+import type { ReaderMode } from "@/app/readerMode";
 import type {
   AccountStateChangedPayload,
   Bootstrap,
@@ -214,6 +215,7 @@ export type Action =
   | { type: "connection_status"; status: ConnectionStatus }
   | { type: "version_info"; info: VersionInfo }
   | { type: "theme_set"; theme: Theme }
+  | { type: "reader_mode_set"; mode: ReaderMode }
   | { type: "accounts_loaded"; gen: number; accounts: AccountInfo[] }
   | { type: "accounts_failed"; gen: number; error: GuiError }
   | { type: "mailboxes_loaded"; account: string; gen: number; listing: MailboxListing }
@@ -1108,6 +1110,8 @@ function reduce(s: AppState, a: Action): AppState {
       return { ...s, version: a.info };
     case "theme_set":
       return s.theme === a.theme ? s : { ...s, theme: a.theme };
+    case "reader_mode_set":
+      return s.readerMode === a.mode ? s : { ...s, readerMode: a.mode };
 
     case "accounts_loaded": {
       let next: AppState = { ...s, accounts: loaded(s.accounts, a.gen, a.accounts) };
