@@ -1905,6 +1905,9 @@ impl Drop for SendAdmission {
 pub struct SentDraft {
     /// Where the submission got to, per recipient and in the outbox.
     pub report: SendReport,
+    /// The `Message-ID` the build minted, the one the outbox row and the
+    /// retired draft record (#0131).
+    pub message_id: String,
     /// The bookkeeping error a submission that did go out nevertheless hit
     /// while retiring the draft file. The message is on the server either
     /// way, so this is a line for the caller to word, never a failed send.
@@ -2143,6 +2146,7 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
     }
     Ok(SentDraft {
         report,
+        message_id: built.message_id.clone(),
         settle_error,
     })
 }

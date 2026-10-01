@@ -150,7 +150,7 @@ Open for M4 and for Sylvain:
 - `DraftEntry` has no `bcc`, so the recipients dialog reads the draft through `draft_preview`: it has one now, and `ce` fills its dialog from the listed row ("Daemon gaps closed").
 - `DraftCreated` has no `subject`: it has one now ("Daemon gaps closed").
 - `mp_client` drops a refusal's `data`, so the layer rebuilds the `draft.invalid` payload from the listing's skipped file: it keeps it now, and the layer decodes it ("Daemon gaps closed").
-- The daemon's `SendOutcome.message_id` is empty.
+- The daemon's `SendOutcome.message_id` is empty: it is the built message's now ("Daemon gaps closed").
 - The daemon serves no `signature.list`, so `signature_list` reads the signatures directory itself.
 - The daemon serves no `draft.attach` and no attachment removal, so the desktop rewrites the frontmatter itself.
 - `message.fetch` is polled through `operation.status` every 100 ms rather than awaited as a pending operation.
@@ -278,6 +278,7 @@ The daemon and Rust-layer gaps M3 and M4 worked around client-side, closed on th
 - `bcc` on `DraftEntry`: a `draft.list` row carries the file's `bcc:`, and `ce` fills the recipients dialog from the listed row instead of a `draft_preview` read.
 - `subject` on `DraftCreated`: every writer answers the subject the file was written with; the desktop had no workaround for it, and decodes it with the rest.
 - The refusal `data` `mp_client` dropped: a blocking session call that the daemon refused answers an `anyhow::Error` wrapping `mp_client::session::Refused`, whose text is unchanged and whose `RpcError` keeps `data`; `draft_approve`, `draft_demote` and `send_draft` decode the `draft.invalid` payload from it instead of reading `draft.list` for the skipped file, and the fixture's refusals carry the same type.
+- The empty `SendOutcome.message_id`: `send.draft` and `send.approved` answer the `Message-ID` the build minted, which `send.invite` already did; the desktop's fixture always filled it, so no shim went.
 
 ## Exit gate
 
