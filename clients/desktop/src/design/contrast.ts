@@ -1,4 +1,4 @@
-// WCAG 2.x contrast over the semantic tokens in src/index.css.
+// WCAG 2.x contrast over the semantic tokens of both palettes in src/index.css.
 // Pure functions, shared by scripts/contrast.ts (which writes
 // docs/design-tokens.md) and by the token test, so the documented ratios and
 // the enforced ones are computed by one implementation.
@@ -41,11 +41,12 @@ export function contrast(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-/** The `--name: #hex;` declarations of the first `:root { … }` block. */
-export function rootTokens(css: string): Record<string, string> {
-  const start = css.indexOf(":root");
-  if (start < 0) return {};
-  const open = css.indexOf("{", start);
+/** The `--name: #hex;` declarations of the block whose selector is exactly `selector`. */
+export function blockTokens(css: string, selector: string): Record<string, string> {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const at = new RegExp(`(?:^|[\\n}])\\s*${escaped}\\s*\\{`).exec(css);
+  if (!at) return {};
+  const open = css.indexOf("{", at.index + at[0].length - 1);
   const close = css.indexOf("}", open);
   const block = css.slice(open + 1, close);
   const out: Record<string, string> = {};
@@ -53,6 +54,29 @@ export function rootTokens(css: string): Record<string, string> {
     out[m[1]] = m[2];
   }
   return out;
+}
+
+/** The dark palette, the `:root` block. */
+export function rootTokens(css: string): Record<string, string> {
+  return blockTokens(css, ":root");
+}
+
+/** The palettes index.css defines, each by the block that declares it. */
+export type Palette = "dark" | "light";
+
+export const PALETTES: { name: Palette; title: string; selector: string }[] = [
+  { name: "dark", title: "Dark", selector: ":root" },
+  { name: "light", title: "Light", selector: ":root.light" },
+];
+
+/**
+ * A palette's tokens as the page resolves them: `:root`, with the light
+ * block's declarations over it for the light palette.
+ */
+export function paletteTokens(css: string, palette: Palette): Record<string, string> {
+  const dark = rootTokens(css);
+  if (palette === "dark") return dark;
+  return { ...dark, ...blockTokens(css, ":root.light") };
 }
 
 /** What a pair has to reach: body text 4.5:1, large text and UI parts 3:1. */

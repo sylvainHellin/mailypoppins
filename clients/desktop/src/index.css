@@ -5,15 +5,26 @@
 /*
  * The mailypoppins desktop design system (#0129).
  *
- * Dark only, from the dark inverse of Basenord Palette D:
+ * Two palettes from Basenord Palette D. The first release was dark only
+ * (OBS-07); the light theme followed (#0136), chosen in Settings as dark,
+ * light or the system's (src/app/theme.ts sets the `light` or `dark` class
+ * on <html>).
+ *
+ * Dark, `:root`, the dark inverse of Palette D:
  *   Prussian blue #0C1B33  outer canvas and dominant background
  *   Cream         #F4F1E8  primary foreground
  *   Ocean blue    #2E86AB  selection, focus, links, framing (lighter variants for text)
  *   Pumpkin       #FF6700  primary actions, attention warnings, deltas only
  *
+ * Light, `:root.light`, Palette D itself:
+ *   Cream         #F4F1E8  outer canvas, lifted to off-white for the surfaces
+ *   Prussian blue #0C1B33  primary foreground, tinted for muted text, borders, inputs
+ *   Ocean blue    #2E86AB  framing; a pale tint for selection, darker shades for focus and links
+ *   Pumpkin       #FF6700  primary actions; a darker shade for attention text
+ *
  * This file is the only place a palette value may appear (the colour-guard
- * test greps src/components and src/app). Every pair's WCAG ratio is in
- * docs/design-tokens.md, written by `pnpm contrast`.
+ * test greps src/components and src/app). Every pair's WCAG ratio, in both
+ * palettes, is in docs/design-tokens.md, written by `pnpm contrast`.
  */
 
 @custom-variant dark (&:is(.dark *));
@@ -71,7 +82,7 @@
     --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-/* One theme, dark; the shadcn semantic names stay so a light theme can follow. */
+/* The dark palette, the default; `:root.light` below overrides every colour but the reader canvas. */
 :root {
     color-scheme: dark;
     --radius: 0.625rem;
@@ -131,6 +142,65 @@
     --sidebar-accent-foreground: #F4F1E8;
     --sidebar-border: #1E3558;
     --sidebar-ring: #4BA3CC;
+}
+
+/* The light palette, on <html class="light">. */
+:root.light {
+    color-scheme: light;
+
+    /* Surfaces: the cream canvas, the panes lifted towards white, the
+       hovered and muted ones a shade under cream. */
+    --sidebar: #F4F1E8;             /* Cream: the outer canvas */
+    --background: #FBFAF6;          /* the inset pane, cream lifted */
+    --card: #FFFFFF;
+    --popover: #FFFFFF;
+    --muted: #ECE8DD;
+    --secondary: #E6E1D3;
+    --accent: #E4DFD0;
+
+    /* Text: Prussian, and Prussian tints. */
+    --foreground: #0C1B33;          /* Prussian */
+    --card-foreground: #0C1B33;
+    --popover-foreground: #0C1B33;
+    --secondary-foreground: #0C1B33;
+    --accent-foreground: #0C1B33;
+    --muted-foreground: #46546C;
+    --disabled-foreground: #77839A;
+
+    /* Ocean: a pale tint under Prussian text for selection, darker shades
+       for the ring (3:1) and links (4.5:1) on every surface. */
+    --selection: #CFE3EE;
+    --selection-foreground: #0C1B33;
+    --framing: #2E86AB;             /* Ocean itself, for rules and outlines */
+    --ring: #1F6F93;
+    --link: #1A6385;
+
+    /* Pumpkin: primary actions as in dark; attention text in a darker
+       shade, since #FF6700 reaches only 2.6:1 on cream. */
+    --primary: #FF6700;
+    --primary-foreground: #0C1B33;
+    --warning: #B34700;
+
+    /* The scrim: the Prussian ink at 40%, lighter than dark's over a light page. */
+    --overlay: #0C1B3366;
+
+    --destructive: #B4232E;
+    --border: #D3D6DC;
+    --input: #7D889B;
+
+    --chart-1: #FF6700;
+    --chart-2: #2E86AB;
+    --chart-3: #1A6385;
+    --chart-4: #0C1B33;
+    --chart-5: #46546C;
+
+    --sidebar-foreground: #0C1B33;
+    --sidebar-primary: #1F6F93;
+    --sidebar-primary-foreground: #F4F1E8;
+    --sidebar-accent: #CFE3EE;
+    --sidebar-accent-foreground: #0C1B33;
+    --sidebar-border: #DCDAD0;
+    --sidebar-ring: #1F6F93;
 }
 
 @layer base {
