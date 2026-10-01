@@ -60,6 +60,6 @@ Commits carry `(#0137)`.
 - Without `termguicolors` the light palette's surfaces are the nearest ANSI slot and `CursorLine` has no background.
 - The TUI's status-bar hint for a pending prefix (`clients/tui/src/ui/status.rs:48`) has no desktop counterpart.
 - The highlighted cmdk row was `muted`, barely visible in the dark theme; it is now `selection`, the cursor-row token, in the palette, the key help and the recipient completion alike.
-- `src/components/outbox/outbox.test.tsx` ("the palette's actions on the selection" and "Clear selection") timed out under a loaded full run: typing each action's name re-filtered the palette's whole catalog per key, so the tests now paste the name in one input event (836 ms to 409 ms for the first alone).
+- `src/components/outbox/outbox.test.tsx` ("the palette's actions on the selection" and "Clear selection") timed out under a loaded full run: typing each action's name re-filtered the palette's whole catalog per key, and the first ran five actions in one test. The tests now paste the name in one input event, and the first is one test per action; three full runs in parallel pass, where the old test took 5.1 s.
 - `ActivityLogDialog.tsx` imports `PREFIX_TIMEOUT_MS` from `useKeymap.ts` instead of keeping its own copy.
 - A terminal editor in `MP_DESKTOP_EDITOR` or the setting, the one that runs drafts embedded, ran with no terminal for `config.toml`, the daemon's log, a signature and an `invite.ics`; it now opens them in a window of the first terminal emulator found, as `$EDITOR` does.

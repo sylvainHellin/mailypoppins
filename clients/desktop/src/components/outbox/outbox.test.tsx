@@ -318,20 +318,32 @@ describe("the outbox view hides the mailbox selection", () => {
     expect(callsOf("draft_create")[0].args).toMatchObject({ account: "home" });
   });
 
-  it("the palette's actions on the selection say to close the view first, and its outbox rows still run", async () => {
+  /** The outbox of `work` over a selected inbox row, its first row loaded. */
+  async function overTheSelection() {
     const { user } = renderApp(1400, seedWork);
     await shellReady();
     await user.keyboard("j");
     await user.keyboard("go");
     await view("work");
     await waitFor(() => expect(rowEl(5)).not.toBeNull());
-    for (const label of ["Archive", "Toggle flag/star", "Send all approved drafts", "Select all visible"]) {
+    return user;
+  }
+
+  // One test per action: five palette runs in one test went past 5 s under a loaded full run.
+  it.each(["Archive", "Toggle flag/star", "Send all approved drafts", "Select all visible"])(
+    "the palette's %s on the selection says to close the view first",
+    async (label) => {
+      const user = await overTheSelection();
       await runAction(user, label);
       expect(await screen.findByText("Close the outbox first (Escape): this acts on the mailbox selection")).toBeInTheDocument();
       expect(screen.queryByRole("dialog")).toBeNull();
-    }
-    expect(acted()).toEqual([]);
-    expect(await view("work")).toBeInTheDocument();
+      expect(acted()).toEqual([]);
+      expect(await view("work")).toBeInTheDocument();
+    },
+  );
+
+  it("the palette's outbox rows still run over the selection", async () => {
+    const user = await overTheSelection();
     await runAction(user, "Discard outbox row");
     expect(await screen.findByRole("dialog", { name: "Discard row 5?" })).toBeInTheDocument();
   });
