@@ -689,6 +689,16 @@ fn the_runtime_path_is_escaped_for_set_and_its_list() {
     assert_eq!(launch.argv[4], want);
 }
 
+/// A known limit (see `set_value`): `\$` does not stop `:set` expanding
+/// `$HOME` in Neovim 0.12 or Vim 9.1, and a literal `$` fails the runtime
+/// search, so a `$` goes through as it is rather than behind an escape that
+/// changes nothing.
+#[test]
+fn a_dollar_in_the_runtime_path_is_left_as_it_is() {
+    assert_eq!(set_value("/Apps/$HOME/nvim"), "/Apps/$HOME/nvim");
+    assert_eq!(set_value("/a b/$x,y"), r"/a\ b/$x\\,y");
+}
+
 #[test]
 fn vim_is_known_by_its_file_name_or_its_link() {
     assert!(is_vim("/opt/homebrew/bin/nvim"));

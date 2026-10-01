@@ -525,9 +525,17 @@ pub fn is_vim(program: &str) -> bool {
     named(path) || std::fs::canonicalize(path).is_ok_and(|p| named(&p))
 }
 
-/// `value` as a `:set` value of a comma list such as 'runtimepath': a
-/// backslash, a space, `|` and `"` escaped for `:set`, and a comma escaped
-/// once more for the list.
+/// `value` as a `:set` value of a comma list such as 'runtimepath': a space,
+/// `|` and `"` escaped for `:set`, and a comma escaped once more for the
+/// list; a directory holding those works in Neovim and Vim.
+///
+/// Some characters cannot work, escaped or not, and are known limits: a
+/// backslash is escaped and reaches the runtime path, but the runtime search
+/// globs it away; a `$` is left as it is, since `:set` expands `$NAME` even
+/// after `\$` and the runtime search expands it again (E79); `'`, a
+/// backtick, `[...]` and `{...}` are glob syntax to the runtime search.
+/// With one of them in the path the editor still starts, in its own colours,
+/// after an "Error in command line" prompt (E185).
 fn set_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
