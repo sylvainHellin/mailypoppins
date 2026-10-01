@@ -702,6 +702,9 @@ export function fileName(path: string): string {
 
 function composeOpening(s: AppState, account: string, draftId: string, path: string): AppState {
   const key = targetKey({ account, draft: draftId });
+  // A running embedded editor is never replaced, which would unmount its
+  // pane and kill it with its unsaved buffer: it is shown instead.
+  if (isRunning(s.compose[key])) return composeEmbedded(toMail(s), account, draftId, path);
   const session: ComposeSession = {
     kind: "external",
     account,
@@ -997,7 +1000,12 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
           next = { ...next, selection: { ...next.selection, draft: null } };
         }
         // The file is gone: nothing is left to edit, and no summary to show.
-        return composeForget(next, targetKey({ account, draft: id }));
+        // A running embedded editor stays, pane and all: the watcher also
+        // removes a draft whose saved frontmatter does not parse, which is
+        // what the user may be fixing in that editor, and its exit summary
+        // falls back to the selection when the draft is still gone.
+        const key = targetKey({ account, draft: id });
+        return isRunning(next.compose[key]) ? next : composeForget(next, key);
       }
       if (family === "message") {
         const slug = parts[1] ?? "";

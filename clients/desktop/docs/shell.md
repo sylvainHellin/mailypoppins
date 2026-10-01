@@ -74,7 +74,7 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `reconnected` | the banner turns to resync until the bootstrap lands |
 | `resync` | the resync banner |
 | `rebootstrapped` | the whole model, selection restored as above, every answer stale |
-| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes that account's agenda and invitation cards stale |
+| `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended unless its embedded editor still runs; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes that account's agenda and invitation cards stale |
 | `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` its agenda and invitation cards and a line in the activity log |
 | `event` `config.changed` | a line in the activity log, the config.toml banner cleared, the configuration and the account list stale, each added or updated account's counts and list stale, and a removed account the window still knows removed (see Settings) |
 | `event` `config.invalid` | a line in the activity log, and the config.toml banner |
@@ -278,7 +278,8 @@ An embedded session has the PTY's `session` id once `terminal_spawn` answered, a
 "Reopen in editor" runs the editor again on the same file: `editor_open` for an external session, a fresh embedded process for an embedded one, whatever the route says now.
 "Done" forgets the session: an external editor's process is not the app's to close, and an embedded one that ended has nothing left to run.
 A running embedded editor has neither button; it ends from inside the editor, through the navigate-away question, or with a discard.
-A discard or any `state.remove` of the draft ends its session too, killing an embedded child, and a `draft.changed` or `draft.invalid` leaves it alone.
+A discard ends its session too, killing an embedded child, and a `draft.changed` or `draft.invalid` leaves it alone.
+A `state.remove` of the draft ends an external session or an embedded one that already ended, and leaves a running embedded editor alone: the watcher also removes a draft whose saved frontmatter does not parse, which is what the user may be fixing in that editor.
 The banner is one `role="status"` region, "Drafts in the editor", mounted empty for the same reason as the activity area's.
 An editor that did not start is a `setup` error: its session turns to `error` or `failed` and a failure notice in the activity area carries the Rust layer's message, which names `MP_DESKTOP_EDITOR` or the editor setting to fix.
 In fixture mode the Rust layer launches nothing and answers `fixture: true`, and the notice line says "Fixture mode: the editor was not launched; the command would have been <editor>.", on either route; the Signatures dialog, `sc`, `sf` and the Calendar's `invite.ics` show the same sentence in place of theirs.
@@ -293,13 +294,14 @@ xterm and its addons load with the first embedded session, as a chunk of their o
 
 `state.composeShown` names the draft whose editor the reader area shows.
 Opening a draft on the embedded route shows its editor and moves the focus to the reader; the pane takes the keyboard once the spawn answers.
-Opening a draft whose editor runs (`e`, the draft preview's Edit) shows that editor and starts nothing.
+Opening a draft whose editor runs (`e`, the draft preview's Edit) shows that editor and starts nothing, whatever the route says now: an external open would replace the session, and the unmounted pane would kill the editor with its unsaved buffer.
+`openInEditor` checks `state.compose` before it asks for the route, and the reducer's `compose_opening` shows a running embedded session rather than replacing it.
 Opening another draft sends the editor the reader showed to the background without asking, since the user asked for the new one.
 Selecting a draft whose editor runs, in the Drafts list, shows that editor, and so does the banner's Show; either brings Mail back over a full-pane view.
 The list keeps working beside the editor: the watcher's events update it, and a click on a row selects it after the question below.
 
 The pane frees the PTY after the exit frame with `terminal_kill`, which the Rust layer needs to drop the session, and kills the child when it unmounts while the child may still run.
-So a session the model forgets, by "Close the editor", a discard, a `state.remove` or Done, takes its process with it.
+So a session the model forgets, by "Close the editor", a discard or Done, takes its process with it; a `state.remove` never forgets a running one.
 What follows depends on how the editor ended:
 
 - Code 0 (`:wq`, `:q`) ends the session, and the reader area shows the draft's summary: `DraftPreview` over a fresh `draft_preview`, with Edit and Close, until a navigation or Close brings the selection back. When the selection is the draft already, the reader shows its usual preview. A draft that is gone (`draft_preview` refused) shows the selection, the message the reader showed before.

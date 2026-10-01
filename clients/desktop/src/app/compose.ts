@@ -12,8 +12,10 @@ import { createMutations } from "@/app/mutations";
 import {
   draftsShown,
   filteredDrafts,
+  isRunning,
   readerKey,
   sendingRefusal,
+  targetKey,
   type AppState,
   type ComposeDialog,
   type ComposeSession,
@@ -81,13 +83,26 @@ function failed(dispatch: Dispatch<Action>, account: string, what: string, e: un
  * Open a draft file in the editor, by the route `editor_setting_get`
  * reports. The embedded route starts a session the reader area's terminal
  * pane spawns (`components/compose/TerminalHost.tsx`), or shows the draft's
- * running one. The external route is M3's: the session shows `opening`
+ * running one. A draft whose embedded editor runs (`sessions` is
+ * `state.compose` when asked) shows that editor whatever the route says:
+ * the setting may have changed meanwhile, and replacing the session would
+ * kill the editor with its unsaved buffer. The external route is M3's: the session shows `opening`
  * until `editor_open` answers; a launch that fails (`setup`: the command did
  * not start or exited at once) is a failure notice whose text names
  * `MP_DESKTOP_EDITOR` or the editor setting. In fixture mode a notice says
  * that no editor was launched. A route that cannot be read is external.
  */
-export async function openInEditor(dispatch: Dispatch<Action>, account: string, draftId: string, path: string): Promise<void> {
+export async function openInEditor(
+  dispatch: Dispatch<Action>,
+  account: string,
+  draftId: string,
+  path: string,
+  sessions: AppState["compose"] = {},
+): Promise<void> {
+  if (isRunning(sessions[targetKey({ account, draft: draftId })])) {
+    dispatch({ type: "compose_embedded", account, draftId, path });
+    return;
+  }
   let embedded = false;
   try {
     embedded = (await cmd.editorSettingGet()).route === "embedded";
@@ -290,7 +305,7 @@ export async function editDraft(s: AppState, dispatch: Dispatch<Action>): Promis
       return;
     }
   }
-  await openInEditor(dispatch, account, row.id, path);
+  await openInEditor(dispatch, account, row.id, path, s.compose);
 }
 
 /**

@@ -100,7 +100,7 @@ export function DraftPreview({ account, draft, standalone = false }: { account: 
           size="sm"
           variant="ghost"
           title={standalone ? "Edit in the editor" : "Edit in the editor (e)"}
-          onClick={() => (standalone ? void openInEditor(dispatch, account, draft.id, draft.path) : runAction("open_editor", s, dispatch))}
+          onClick={() => (standalone ? void openInEditor(dispatch, account, draft.id, draft.path, s.compose) : runAction("open_editor", s, dispatch))}
         >
           <FilePen aria-hidden="true" />
           {editing ? "Reopen in editor" : "Edit in editor"}

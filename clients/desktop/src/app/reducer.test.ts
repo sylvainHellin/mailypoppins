@@ -1029,16 +1029,40 @@ describe("the embedded editor's sessions", () => {
     expect(moved.composeShown).toBeNull();
   });
 
-  it("a removed draft ends its session and its summary", () => {
-    const s = run(started(), {
+  const removed = (s: AppState): AppState =>
+    run(s, {
       type: "gui_event",
       event: {
         type: "event",
         event: { instance_id: fixtures.bootstrap.instance_id, revision: 5000, kind: "state.remove", payload: { resource: "draft:work/d1" } },
       },
     });
-    expect(s.compose[key]).toBeUndefined();
-    expect(s.composeShown).toBeNull();
+
+  it("a removed draft keeps a running editor, which may be fixing its frontmatter", () => {
+    const s = removed(started());
+    expect(s.compose[key]).toMatchObject({ kind: "embedded", session: 7, status: { kind: "running" } });
+    expect(s.composeShown).toBe(key);
+  });
+
+  it("a removed draft ends an editor that already exited, and the summary of one that exited with 0", () => {
+    const dead = removed(exited(started(), 1, null));
+    expect(dead.compose[key]).toBeUndefined();
+    expect(dead.composeShown).toBeNull();
+    const summary = removed(exited(started(), 0, null));
+    expect(summary.composeShown).toBeNull();
+  });
+
+  it("an external open never replaces a running embedded editor: it shows it, over a view too", () => {
+    const background = { ...started(), composeShown: null };
+    const calendar = run(background, { type: "switch_view", view: "calendar" });
+    const s = run(calendar, { type: "compose_opening", ...draft });
+    expect(s.compose[key]).toMatchObject({ kind: "embedded", session: 7, status: { kind: "running" }, spawn: 1 });
+    expect(s.composeShown).toBe(key);
+    expect(s.view).toBe("mail");
+    expect(s.focus).toBe("reader");
+    // The external launch's answers leave the embedded session alone.
+    const after = run(s, { type: "compose_editing", ...draft, editor: "zed" }, { type: "compose_failed", ...draft, error: { kind: "setup", message: "x" } });
+    expect(after.compose[key]).toEqual(s.compose[key]);
   });
 });
 

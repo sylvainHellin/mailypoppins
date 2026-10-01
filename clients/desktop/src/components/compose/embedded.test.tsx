@@ -6,7 +6,7 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { mock, requestClose } from "@/test/tauri-mock";
+import { emitEnvelope, mock, requestClose } from "@/test/tauri-mock";
 import { terms } from "@/test/xterm-fake";
 
 vi.mock("@xterm/xterm", () => import("@/test/xterm-fake"));
@@ -251,6 +251,65 @@ describe("navigating away from a running editor", () => {
     await waitFor(() => expect(shownPane()).not.toBeNull());
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(mock.terminal.of("spawn")).toHaveLength(1);
+  });
+});
+
+describe("a running editor is never replaced", () => {
+  it("e on its draft after the setting turned to a GUI editor shows the running editor and launches nothing", async () => {
+    const { user } = renderApp(1400, nvim);
+    await shellReady();
+    await editDraftEmbedded(user, "j");
+    const draft = selectedRow()!;
+    mock.settings.set("editor", "zed {path}");
+    // The list takes the keys back; the editor keeps the reader area.
+    await user.click(rowOf(draft)!);
+    await user.keyboard("e");
+    await waitFor(() => expect(mock.calls.filter((c) => c.cmd === "draft_path")).toHaveLength(2));
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(mock.editorOpens).toEqual([]);
+    expect(kills()).toEqual([]);
+    expect(panes()).toHaveLength(1);
+    expect(shownPane()).not.toBeNull();
+    expect(line()).toHaveAttribute("data-route", "embedded");
+    expect(line()).toHaveAttribute("data-status", "editing");
+    expect(mock.terminal.of("spawn")).toHaveLength(1);
+  });
+
+  it("the same e from the background brings the editor back", async () => {
+    const { user } = renderApp(1400, nvim);
+    await shellReady();
+    await editDraftEmbedded(user, "j");
+    const draft = selectedRow()!;
+    await clickOtherRow(user);
+    const dialog = await screen.findByRole("dialog", { name: "Leave the editor?" });
+    await user.click(within(dialog).getByRole("button", { name: "Keep editing in the background" }));
+    await waitFor(() => expect(shownPane()).toBeNull());
+    mock.settings.set("editor", "zed {path}");
+    // Selecting the draft shows its editor; the list then takes the keys again.
+    await user.click(rowOf(draft)!);
+    await waitFor(() => expect(shownPane()).not.toBeNull());
+    await user.click(rowOf(draft)!);
+    await user.keyboard("e");
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(mock.editorOpens).toEqual([]);
+    expect(kills()).toEqual([]);
+    expect(shownPane()).not.toBeNull();
+  });
+});
+
+describe("a removed draft", () => {
+  it("keeps a running editor mounted and kills nothing, as when a save broke the frontmatter", async () => {
+    const { user } = renderApp(1400, nvim);
+    await shellReady();
+    await editDraftEmbedded(user, "j");
+    const draft = selectedRow()!;
+    act(() => emitEnvelope("state.remove", { resource: `draft:work/${draft}` }));
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(kills()).toEqual([]);
+    expect(panes()).toHaveLength(1);
+    expect(shownPane()).not.toBeNull();
+    expect(line()).toHaveAttribute("data-status", "editing");
+    expect(terms.filter((t) => t.disposed)).toEqual([]);
   });
 });
 
