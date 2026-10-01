@@ -6,6 +6,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { RecipientsInput } from "@/components/compose/RecipientsInput";
 import { Kbd } from "@/components/ui/kbd";
 import {
   Dialog,
@@ -134,21 +135,35 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
     order[order.indexOf(target) + 1]?.focus();
   };
 
+  // To, Cc and Bcc complete contacts; the subject is a plain field.
   const field = (name: keyof Omit<ComposeFields, "signature">, label: string) => (
     <div className="grid grid-cols-[4.5rem_1fr] items-center gap-2">
       <label htmlFor={`${id}-${name}`} className="text-sm text-muted-foreground">
         {label}
       </label>
-      <Input
-        id={`${id}-${name}`}
-        ref={name === "to" ? toRef : name === "subject" ? subjectRef : undefined}
-        data-field={name}
-        value={fields[name] ?? ""}
-        autoComplete="off"
-        spellCheck={name === "subject"}
-        aria-invalid={error !== null && name !== "subject" ? true : undefined}
-        onChange={(e) => setFields({ ...fields, [name]: e.currentTarget.value })}
-      />
+      {name === "subject" ? (
+        <Input
+          id={`${id}-${name}`}
+          ref={subjectRef}
+          data-field={name}
+          value={fields[name] ?? ""}
+          autoComplete="off"
+          spellCheck
+          onChange={(e) => setFields({ ...fields, [name]: e.currentTarget.value })}
+        />
+      ) : (
+        <RecipientsInput
+          id={`${id}-${name}`}
+          ref={name === "to" ? toRef : undefined}
+          account={account}
+          data-field={name}
+          value={fields[name] ?? ""}
+          autoComplete="off"
+          spellCheck={false}
+          aria-invalid={error !== null ? true : undefined}
+          onValueChange={(v) => setFields((f) => ({ ...f, [name]: v }))}
+        />
+      )}
     </div>
   );
 

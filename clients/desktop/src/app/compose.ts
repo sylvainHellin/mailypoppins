@@ -384,6 +384,24 @@ export function normalizeRecipients(field: string): string {
   return field.trim().replace(/[\s,;]+$/, "");
 }
 
+/** What a recipient field completes: the text after its last comma, trimmed. */
+export function recipientQuery(field: string): string {
+  return field.slice(field.lastIndexOf(",") + 1).trim();
+}
+
+/**
+ * The TUI's `accept_suggestion`: the text after the last comma becomes
+ * `Name <addr>`, the name quoted when it holds a comma, or the bare address
+ * with no name, then `, ` for the next recipient.
+ */
+export function acceptRecipient(field: string, contact: { display_name: string; address: string }): string {
+  let head = field.slice(0, field.lastIndexOf(",") + 1);
+  if (head && !head.endsWith(" ")) head += " ";
+  const name = contact.display_name;
+  const one = name ? `${name.includes(",") ? `"${name}"` : name} <${contact.address}>` : contact.address;
+  return `${head}${one}, `;
+}
+
 function normalized(f: ComposeFields): DraftHeaders {
   return { to: normalizeRecipients(f.to), cc: normalizeRecipients(f.cc), bcc: normalizeRecipients(f.bcc), subject: f.subject.trim() };
 }

@@ -300,7 +300,7 @@ describe("the outbox view hides the mailbox selection", () => {
     await view("home");
     await user.keyboard("cn");
     const wizard = await screen.findByRole("dialog", { name: "New draft" });
-    await waitFor(() => expect(within(wizard).getByRole("textbox", { name: "To" })).toHaveFocus());
+    await waitFor(() => expect(within(wizard).getByRole("combobox", { name: "To" })).toHaveFocus());
     await user.keyboard("kim@example.com");
     await user.keyboard("{Meta>}{Enter}{/Meta}");
     await waitFor(() => expect(callsOf("draft_create")).toHaveLength(1));
