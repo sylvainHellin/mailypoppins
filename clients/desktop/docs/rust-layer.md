@@ -546,15 +546,15 @@ A spawn failure or a nonzero exit within 2 s rejects with `setup`, whose message
 
 The terminals are probed in this order, each on `PATH`, in the three directories above and, on macOS, as `/Applications/<App>.app/Contents/MacOS/<program>`:
 
-1. WezTerm, as `wezterm start -- <editor> {path}`;
-2. Ghostty, as `open -na /Applications/Ghostty.app --args -e <editor> {path}` on macOS, whose `ghostty` binary refuses to start a terminal from the command line, and `ghostty -e <editor> {path}` elsewhere;
-3. kitty, as `kitty -- <editor> {path}`;
-4. Alacritty, as `alacritty -e <editor> {path}`;
+1. Ghostty, as `open -na /Applications/Ghostty.app --args -e <editor> {path}` on macOS, whose `ghostty` binary refuses to start a terminal from the command line, and `ghostty -e <editor> {path}` elsewhere;
+2. kitty, as `kitty -- <editor> {path}`;
+3. Alacritty, as `alacritty -e <editor> {path}`;
+4. WezTerm, as `wezterm start -- <editor> {path}`, last among the emulators since it is in maintenance and slow on macOS;
 5. Terminal.app on macOS, found as `/System/Applications/Utilities/Terminal.app`, through `osascript` with a script that runs its arguments in a new window, each in single quotes with every backslash outside them so that sh, bash, zsh and fish all read it as one literal word, and `x-terminal-emulator -e <editor> {path}` elsewhere.
 
 `<editor>` is the variable's value with its own arguments, as in `nvim --clean`, and its program is looked up on `PATH` and in the three directories, since the terminal may not see the shell's `PATH`.
 A value that carries its own `{path}` keeps it where it is.
-`MP_DESKTOP_EDITOR` and the setting are taken verbatim and never wrapped: a terminal editor there names its terminal itself, for example `MP_DESKTOP_EDITOR="wezterm start -- hx {path}"`.
+`MP_DESKTOP_EDITOR` and the setting are taken verbatim and never wrapped: a terminal editor there names its terminal itself, for example `MP_DESKTOP_EDITOR="open -na Ghostty --args -e hx {path}"`.
 
 ## Attachments
 

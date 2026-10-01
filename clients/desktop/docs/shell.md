@@ -214,7 +214,7 @@ The fixture seeds one hold (`fixture-hold-seed`, 60 s), so `MP_DESKTOP_FIXTURE=1
 
 Compose goes through the user's external editor, as in the TUI, until the embedded editor of M5.
 Every command that writes a draft answers the file's path, and `editor_open` opens it without waiting for the editor to exit ([rust-layer.md](rust-layer.md), "Drafts and the editor").
-A terminal editor in `$VISUAL` or `$EDITOR`, such as `nvim`, opens in a new window of the first terminal emulator found: WezTerm, Ghostty, kitty, Alacritty, then Terminal.app.
+A terminal editor in `$VISUAL` or `$EDITOR`, such as `nvim`, opens in a new window of the first terminal emulator found: Ghostty, kitty, Alacritty, WezTerm, then Terminal.app.
 Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, so no action reloads anything itself.
 `src/app/compose.ts` holds the flows, which every path runs: the keys, the palette, the reader toolbar and the draft preview's buttons.
 

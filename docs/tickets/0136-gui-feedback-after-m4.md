@@ -25,7 +25,7 @@ Commits `26a58be6` and `9f6d5a37`.
 
 Commits `a51f80b3`, `8698834b`, `ff9bede3`, `12005208` and `28cd59e2`.
 
-- A terminal editor in `$VISUAL` or `$EDITOR` (nvim, vim, hx and the like) runs inside the first terminal found as `EditorSource::Terminal`: WezTerm, Ghostty through `open -na`, kitty, Alacritty, then Terminal.app through `osascript` or `x-terminal-emulator`.
+- A terminal editor in `$VISUAL` or `$EDITOR` (nvim, vim, hx and the like) runs inside the first terminal found as `EditorSource::Terminal`: Ghostty through `open -na`, kitty, Alacritty, WezTerm, then Terminal.app through `osascript` or `x-terminal-emulator`.
 - With no terminal found the editor is skipped as before, and `MP_DESKTOP_EDITOR` and the `editor` setting are still used verbatim.
 - Terminal.app's script quotes each word with every backslash outside the single quotes, so fish, bash, zsh and sh all read a path containing `\'` as one word; an ignored live test reads the words back in all four shells.
 - `EditorLaunch` carries `fixture`, and in fixture mode an editor handoff says "Fixture mode: the editor was not launched" and names the command it would have run, for compose, signatures, `sc`, `sf` and the `invite.ics`.

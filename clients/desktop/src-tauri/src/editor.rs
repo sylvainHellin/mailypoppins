@@ -22,7 +22,7 @@
 //!
 //! `MP_DESKTOP_EDITOR` and the setting are taken verbatim and never wrapped:
 //! a terminal editor there names its terminal itself, as in
-//! `wezterm start -- nvim {path}`.
+//! `open -na Ghostty --args -e nvim {path}`.
 //!
 //! A template is split with shell-words rules (quotes and backslashes, no
 //! expansion, no shell). `{path}` in any word is replaced by the draft's path;
@@ -93,12 +93,6 @@ pub struct TerminalApp {
 /// `x-terminal-emulator -e`.
 pub const TERMINALS: &[TerminalApp] = &[
     TerminalApp {
-        program: "wezterm",
-        bundle: "WezTerm",
-        args: &["start", "--"],
-        macos_open: false,
-    },
-    TerminalApp {
         program: "ghostty",
         bundle: "Ghostty",
         args: &["-e"],
@@ -114,6 +108,13 @@ pub const TERMINALS: &[TerminalApp] = &[
         program: "alacritty",
         bundle: "Alacritty",
         args: &["-e"],
+        macos_open: false,
+    },
+    // Last: WezTerm is in maintenance and slow on macOS, but better than Terminal.app.
+    TerminalApp {
+        program: "wezterm",
+        bundle: "WezTerm",
+        args: &["start", "--"],
         macos_open: false,
     },
 ];
@@ -526,11 +527,11 @@ fn setup_error(why: &str, source: EditorSource) -> GuiError {
         EditorSource::Setting => "check the editor setting".to_string(),
         EditorSource::Terminal => format!(
             "the terminal comes from $VISUAL or $EDITOR naming a terminal editor; \
-             set {EDITOR_ENV} or the editor setting to another, e.g. \"wezterm start -- nvim {{path}}\""
+             set {EDITOR_ENV} or the editor setting to another, e.g. \"open -na Ghostty --args -e nvim {{path}}\""
         ),
         _ => format!(
             "set {EDITOR_ENV} or the editor setting, e.g. \"code --wait {{path}}\"; \
-             a terminal editor needs a terminal command such as \"wezterm start -- hx {{path}}\""
+             a terminal editor needs a terminal command such as \"open -na Ghostty --args -e hx {{path}}\""
         ),
     };
     GuiError::Setup {
@@ -766,7 +767,7 @@ mod tests {
     fn a_terminal_editor_in_the_environment_runs_in_the_first_terminal_found() {
         let files = files_at(&[
             "/opt/homebrew/bin/nvim",
-            "/opt/homebrew/bin/wezterm",
+            "/Applications/Ghostty.app/Contents/MacOS/ghostty",
             "/opt/homebrew/bin/kitty",
             "/usr/local/bin/code",
             TERMINAL_APP,
@@ -776,17 +777,19 @@ mod tests {
         assert_eq!(
             (r.template.as_str(), r.source),
             (
-                "/opt/homebrew/bin/wezterm start -- /opt/homebrew/bin/nvim {path}",
+                "open -na /Applications/Ghostty.app --args -e /opt/homebrew/bin/nvim {path}",
                 EditorSource::Terminal
             ),
-            "a terminal wins over the GUI probes, and wezterm over kitty"
+            "a terminal wins over the GUI probes, and Ghostty over kitty"
         );
         assert_eq!(
             command_line(&r.template, "/d/a b.md").expect("line"),
             [
-                "/opt/homebrew/bin/wezterm",
-                "start",
-                "--",
+                "open",
+                "-na",
+                "/Applications/Ghostty.app",
+                "--args",
+                "-e",
                 "/opt/homebrew/bin/nvim",
                 "/d/a b.md"
             ]
@@ -801,25 +804,32 @@ mod tests {
             resolve(&lookup(&env, None, &is)).template
         };
         assert_eq!(
-            template(&["/Applications/WezTerm.app/Contents/MacOS/wezterm"]),
-            "/Applications/WezTerm.app/Contents/MacOS/wezterm start -- hx {path}",
-            "an app bundle counts when nothing is on PATH"
-        );
-        assert_eq!(
             template(&[
                 "/Applications/Ghostty.app/Contents/MacOS/ghostty",
                 "/x/kitty"
             ]),
             "open -na /Applications/Ghostty.app --args -e hx {path}",
-            "Ghostty starts through open on macOS, and before kitty"
+            "an app bundle counts when nothing is on PATH; Ghostty starts through open on macOS, and before kitty"
         );
         assert_eq!(
             template(&["/x/kitty", "/opt/homebrew/bin/alacritty"]),
             "/x/kitty -- hx {path}"
         );
         assert_eq!(
-            template(&["/Applications/Alacritty.app/Contents/MacOS/alacritty"]),
-            "/Applications/Alacritty.app/Contents/MacOS/alacritty -e hx {path}"
+            template(&[
+                "/Applications/Alacritty.app/Contents/MacOS/alacritty",
+                "/opt/homebrew/bin/wezterm"
+            ]),
+            "/Applications/Alacritty.app/Contents/MacOS/alacritty -e hx {path}",
+            "Alacritty before WezTerm"
+        );
+        assert_eq!(
+            template(&[
+                "/Applications/WezTerm.app/Contents/MacOS/wezterm",
+                TERMINAL_APP
+            ]),
+            "/Applications/WezTerm.app/Contents/MacOS/wezterm start -- hx {path}",
+            "WezTerm is the last emulator, still ahead of Terminal.app"
         );
     }
 
