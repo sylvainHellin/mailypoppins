@@ -3,7 +3,7 @@ id: 0137
 title: Feedback after M5, the embedded editor in use
 type: feature
 priority: now
-status: in-progress
+status: done
 created: 2026-10-01
 ---
 
@@ -40,6 +40,25 @@ Commits carry `(#0137)`.
 - Enter without an open list keeps moving to the next field as today.
 - Tests: typing opens the list with the fake command's rows, accepting rewrites only the text after the last comma, Escape leaves the text, Enter with no list moves on, the empty cache hint.
 
+## Landed
+
+- U1 and U2 in `49f03ffa` (branch `gui-0137-a`): `key_repeat()` in `lib.rs` registers `ApplePressAndHoldEnabled = false` in the registration domain before the window exists, so a per-bundle or global `defaults write` still wins; `objc2-foundation` 0.3.2 is a macOS-only direct dependency.
+- `resources/nvim/colors/mailypoppins.vim` works in Neovim and Vim, both `gui*` and `cterm*`, and `src/design/colorscheme.test.ts` keeps its 24 hex values equal to `index.css`.
+- `terminal_spawn` takes `theme`; for a program whose file name (or link target) is `nvim` or `vim` the argv gets `--cmd "set runtimepath^=<resources>/nvim"`, the same again as the first `-c` (lazy.nvim resets the runtime path during startup), then with the setting `editor_colors = app` (the default) `-c "set background=<theme>"` and `-c "colorscheme mailypoppins"`, all before the template's arguments and the draft path; every editor gets `MP_DESKTOP_THEME`.
+- The setting is a flat `editor_colors` key in `desktop.json` through `setting_get|set`, with the Settings row "Editor colours" ("Follow the app" / "The editor's own"); a theme change applies at the next spawn.
+- A debug build falls back to the source tree's `resources/nvim` since `resource_dir()` only resolves under a directory named `target`.
+- U3 in `d91e94f6` (branch `gui-0137-b`): `src/keymap/pendingPrefix.ts` publishes the armed prefix through `useSyncExternalStore`; a timer clears it after `PREFIX_TIMEOUT_MS`, and so do window blur, focus into a field or the terminal and unmount; the next non-modifier key consumes it whether it resolves or not.
+- The big `switch` in `useKeymap.ts` became data (`MAIL_COMBOS`, `COMPOSE_ROW_KEYS`) behind `resolvePrefix`, and `prefixRuns` filters the catalog rows for `PrefixPopup.tsx`, fixed at the bottom centre above the notice line, titled by the family as the TUI's `prefix_family_name`, two columns past 8 rows.
+- U4 in `608d8b51` (branch `gui-0137-c`): `RecipientsInput.tsx` wraps the To, Cc and Bcc inputs of every compose dialog with a cmdk list under the field, `contact_search(account, query, 12)` debounced 120 ms with a sequence counter against stale answers; ArrowUp/Down, Enter or Tab or a click accept as `Name <addr>, ` (`acceptRecipient` copies the TUI's `accept_suggestion`), Escape closes the list and keeps the text; an empty index shows "No contacts yet: rebuild the index in Contacts" once per focus.
+- Counts on main: 256 cargo (3 ignored), 603 vitest, tsc clean.
+
 ## Follow-ups
 
-- Filled in as the units land.
+- Key repeat and the two themes were verified outside the app (headless nvim and vim with the exact argv, a Rust test for the registration), not in the running window: Sylvain's run.
+- A resource path containing a backslash, `$`, `'`, a backtick, `[...]` or `{...}` breaks the runtimepath glob in both editors (E185 and an "Error in command line" prompt, the editor runs in its own colours); `Launch::dressed` could leave the colorscheme words out in that case.
+- A plugin that sets a colorscheme on `VimEnter` or lazily still overrides the app's.
+- Without `termguicolors` the light palette's surfaces are the nearest ANSI slot and `CursorLine` has no background.
+- The TUI's status-bar hint for a pending prefix (`clients/tui/src/ui/status.rs:48`) has no desktop counterpart.
+- The highlighted cmdk row (`data-selected:bg-muted`) is faint in the dark theme, shared with the palette and the key help; a tokens question, not this ticket's.
+- `src/components/outbox/outbox.test.tsx` ("the palette's actions on the selection" and "Clear selection") time out under a loaded full run, before this ticket as well; the test needs a longer timeout or more `findBy` waits.
+- `ActivityLogDialog.tsx:14` keeps its own copy of `PREFIX_TIMEOUT_MS`; import the exported one.
