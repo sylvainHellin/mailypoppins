@@ -3,12 +3,19 @@ id: 0130
 title: M5 of the native GUI, embedded Neovim composition
 type: feature
 priority: now
-status: in-progress
+status: done
 created: 2026-09-25
 ---
 
 Fourth ticket of the [native GUI plan](../plans/native-gui.md), milestone "M5: embedded Neovim", designed in the section "Embedded Neovim".
 M1 to M4 landed under #0129 and #0131, and #0136 closed the first feedback round, so M5 started on 2026-10-01.
+
+## Landed
+
+- U1 to U3 landed on `main` on 2026-10-01 in the commits tagged `(#0130)`, from `5e167a27` to `630b9051`, with 245 Rust and 573 vitest tests.
+- U4 was verified by hand on the Mac the same day, Sylvain running the embedded editor with his own Neovim configuration; the rows were not ticked one by one here.
+- What shipped is described in `clients/desktop/docs/shell.md` ("Compose", "The embedded editor", "The terminal pane") and `clients/desktop/docs/rust-layer.md` ("Terminal sessions").
+- The feedback from using it is #0137: key repeat, the editor's colours, the pending-prefix popup and contact completion.
 
 ## Work
 

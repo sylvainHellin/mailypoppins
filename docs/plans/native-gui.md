@@ -12,6 +12,9 @@ M1, the read-only shell (#0129), landed on the `gui-m1` branch on 2026-09-30 as 
 M2, mutations with the undo hold (#0131), landed on the `gui-m2` branch on 2026-09-30.
 M3, compose through the external editor (#0131), landed on the `gui-m3` branch on 2026-09-30.
 M4, calendar, contacts, signatures and config (#0131), landed on the `gui-m4` branch on 2026-09-30; #0131 stays open until M2 to M4 have run in a real window and every parity row that ships in part has a path or a recorded deferral.
+#0136, the feedback after M4, landed on `main` on 2026-10-01.
+M5, embedded Neovim (#0130), landed on `main` on 2026-10-01, was verified by hand on the Mac the same day, and is done; #0137, the feedback after M5, followed the same day.
+M6, distribution and release (#0132), is what remains.
 The work needs a macOS host, since the first GUI release is macOS-only and the Tauri toolchain, signing and a real Neovim under Finder cannot be exercised on the headless Linux server.
 
 The wire contract is [daemon-protocol.md](../daemon-protocol.md), the crate shape is [architecture.md](../architecture.md), and the capability list the GUI has to cover is [parity-matrix.md](../parity-matrix.md).
@@ -92,8 +95,8 @@ Composition replaces the reader pane.
 
 ### Composition
 
-- Until the embedded-Neovim ticket (#0130) lands, compose opens the draft file in the user's external editor, mirroring the TUI.
-- Once #0130 lands, each composition session starts one real Neovim process in a PTY-backed terminal, using the user's configuration and plugins.
+- A terminal editor such as Neovim runs each composition session as one real process in a PTY-backed terminal over the reader pane, with the user's configuration and plugins (M5, #0130).
+- A GUI editor named in the setting or the environment opens the draft file in its own window instead, as M3 did.
 - Exiting the editor preserves the draft, and draft deletion requires an explicit discard action through `draft.discard`.
 
 ## Performance targets
@@ -217,7 +220,7 @@ The GUI therefore resolves the editor through an explicit editor-path setting, t
 
 ## Embedded Neovim
 
-This section is the design for #0130, which follows the read-only shell and the mutations.
+This section is the design #0130 implemented; what shipped is in [shell.md](../../clients/desktop/docs/shell.md), "The embedded editor".
 
 ### Architecture
 
@@ -348,6 +351,9 @@ No plugin was installed: the copies go through `navigator.clipboard.writeText` f
 The signatures and the vCard are client-side over `mp-core`, since the daemon serves no `signature.*` method and no `contact.vcard`.
 
 ### M5: embedded Neovim (#0130)
+
+M5 landed on `main` on 2026-10-01 in the commits tagged `(#0130)`, from `5e167a27` to `630b9051`, with 245 Rust and 573 vitest tests, and was verified by hand on the Mac the same day.
+The feedback round that followed is #0137.
 
 - Land the PTY and terminal dependencies M0 validated.
 - Batch PTY reads in Rust before sending them on the Channel: the spike's release build delivered 1.2 MB/s in sub-KiB chunks against 7.2 MB/s in dev, because each chunk costs Tauri a separate `webview.eval`.

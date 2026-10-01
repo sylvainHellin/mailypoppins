@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The desktop client repeats a held key, keeps its colours in the editor, shows what a prefix key continues with, and completes recipients (#0137).**
+  - A held `j` or `k` repeats in the list and in the embedded editor alike; a value you set yourself with `defaults write` still wins.
+  - Neovim and Vim in the embedded editor take the app's own colours in the dark and the light theme, and follow a theme change at the next editor started; Settings' "Editor colours" keeps your own colorscheme instead, and every editor gets `MP_DESKTOP_THEME` for a config of your own.
+  - After a prefix key such as `c` or `g`, a small popup at the bottom lists the keys that can follow, titled by the family as in the TUI, and goes away on the next key or after 1.2 s.
+  - To, Cc and Bcc in the compose dialogs complete your contacts as you type, as the TUI's wizard does.
+  - The highlighted row in the palette, the key help and the completion list is visible in the dark theme, and the app menu has Settings… on Cmd+,.
+  - A terminal editor in `MP_DESKTOP_EDITOR` or the editor setting, such as `nvim`, opens `config.toml`, the daemon's log, a signature and an `invite.ics` in a terminal window, where before it started with no terminal at all.
+- **The desktop client runs your terminal editor inside the window (#0130).** A draft you create, reply to, forward or edit opens in Neovim, Vim or Helix in the reader pane, with your own configuration and plugins, while the message list stays usable beside it; the editor comes from `MP_DESKTOP_EDITOR`, the editor setting, `$VISUAL` or `$EDITOR`, else the first of `nvim`, `vim` and `hx` found, also in the Homebrew directories, so a launch from the Finder finds them. Every save updates the list at once. Quitting with `:wq` shows the draft's preview, `:q!` drops only the unsaved changes and never the file, and an editor that crashes leaves the draft as last saved with a Reopen button. Selecting another message while the editor runs asks whether to keep editing in the background, close the editor or stay, and closing the window asks whether to close the editor or stay. A GUI editor such as VS Code or Zed still opens the draft in its own window.
 - **The desktop client has a light theme, a plain-text reader, a filter in the key help, and runs a terminal editor in a terminal (#0136).**
   - Settings' Theme buttons and the palette's "Theme: dark", "Theme: light" and "Theme: system" switch the window between the dark palette, a light one on cream, and whichever the system uses; dark stays the default.
   - `tt`, the reader toolbar's HTML and Text, Settings' Reader field and the palette show a message's stored plain text instead of its HTML, in a monospaced block with quoted lines muted, and the choice is remembered; in the TUI `tt` opens the thread, which the desktop does not have yet.
