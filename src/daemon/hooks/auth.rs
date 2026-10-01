@@ -606,11 +606,16 @@ mod tests {
         let mut c = criteria(&["s.hellin@evoqs.com"]);
         let refused = verdict(&c, &raw);
         assert!(!refused.matched(), "{refused:?}");
-        assert!(refused.checks[0].detail.contains("no DKIM pass"), "{refused:?}");
+        assert!(
+            refused.checks[0].detail.contains("no DKIM pass"),
+            "{refused:?}"
+        );
         c.accept_spf = true;
         let accepted = verdict(&c, &raw);
         assert!(accepted.matched(), "{accepted:?}");
-        assert!(accepted.checks[0].detail.starts_with("s.hellin@evoqs.com, spf=pass"));
+        assert!(accepted.checks[0]
+            .detail
+            .starts_with("s.hellin@evoqs.com, spf=pass"));
     }
 
     #[test]

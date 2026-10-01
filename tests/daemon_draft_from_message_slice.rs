@@ -330,8 +330,14 @@ async fn a_reply_goes_to_the_reply_to_the_payload_names() {
     let created = create(&mut conn, fixture::ACCOUNT, "reply", with_reply_to).await;
     let draft = parse_email_draft(Path::new(&created.path)).expect("the written draft parses");
     let to = draft.frontmatter.to.clone().unwrap_or_default();
-    assert!(to.contains("office@example.com"), "a reply goes to Reply-To, got {to:?}");
-    assert!(!to.contains("ivana@example.com"), "and not to From, got {to:?}");
+    assert!(
+        to.contains("office@example.com"),
+        "a reply goes to Reply-To, got {to:?}"
+    );
+    assert!(
+        !to.contains("ivana@example.com"),
+        "and not to From, got {to:?}"
+    );
 }
 
 /// A reply-all keeps every other recipient, which is the difference the `kind`

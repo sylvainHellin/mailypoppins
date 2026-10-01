@@ -182,9 +182,9 @@ pub fn queue_flag(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agenda;
     use crate::reconcile::tests::{fixture, invite_ics, Fixture};
     use crate::store::read;
-    use crate::agenda;
 
     fn refs(ids: &[i64]) -> Vec<i64> {
         ids.to_vec()
@@ -215,7 +215,14 @@ mod tests {
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 1, "Receipt");
 
-        let moved = queue_move(&fx.store, "alice", &refs(&[id]), "archive", "INBOX", "Archive");
+        let moved = queue_move(
+            &fx.store,
+            "alice",
+            &refs(&[id]),
+            "archive",
+            "INBOX",
+            "Archive",
+        );
 
         assert_eq!(mailbox_of(&fx, id).as_deref(), Some("archive"));
         assert_eq!(rows(&moved), vec![id]);
@@ -302,14 +309,29 @@ mod tests {
             .map(|uid| fx.ingest_plain("inbox", uid, &format!("Mail {uid}")))
             .collect();
 
-        let moved = queue_move(&fx.store, "alice", &refs(&ids), "archive", "INBOX", "Archive");
+        let moved = queue_move(
+            &fx.store,
+            "alice",
+            &refs(&ids),
+            "archive",
+            "INBOX",
+            "Archive",
+        );
 
         assert_eq!(moved.len(), 3);
         for id in &ids {
             assert_eq!(mailbox_of(&fx, *id).as_deref(), Some("archive"));
         }
-        assert_eq!(read::list_mailbox(&fx.store, "alice", "inbox").unwrap().len(), 0);
-        assert_eq!(pending_ops::queued_ops(&fx.store, "alice").unwrap().len(), 3);
+        assert_eq!(
+            read::list_mailbox(&fx.store, "alice", "inbox")
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            pending_ops::queued_ops(&fx.store, "alice").unwrap().len(),
+            3
+        );
     }
 
     /// Moving an invite is what the Calendar view has to hear about: the
@@ -325,7 +347,14 @@ mod tests {
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].row_id, id);
 
-        queue_move(&fx.store, "alice", &refs(&[id]), "archive", "INBOX", "Archive");
+        queue_move(
+            &fx.store,
+            "alice",
+            &refs(&[id]),
+            "archive",
+            "INBOX",
+            "Archive",
+        );
         let rebuilt = agenda::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
 
         assert_eq!(rebuilt.len(), 1, "the invite is still on the agenda");
@@ -355,10 +384,20 @@ mod tests {
     #[test]
     fn a_dead_reference_queues_nothing() {
         let fx = fixture();
-        assert!(queue_move(&fx.store, "alice", &refs(&[404]), "archive", "INBOX", "Archive").is_empty());
+        assert!(queue_move(
+            &fx.store,
+            "alice",
+            &refs(&[404]),
+            "archive",
+            "INBOX",
+            "Archive"
+        )
+        .is_empty());
         assert!(queue_delete(&fx.store, &fx.blobs, "alice", &refs(&[404]), "INBOX").is_empty());
         assert!(queue_read_flag(&fx.store, "alice", &refs(&[404]), true, "INBOX").is_empty());
         assert!(queue_flag(&fx.store, "alice", &refs(&[404]), true, "INBOX").is_empty());
-        assert!(pending_ops::queued_ops(&fx.store, "alice").unwrap().is_empty());
+        assert!(pending_ops::queued_ops(&fx.store, "alice")
+            .unwrap()
+            .is_empty());
     }
 }

@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    Action, App, AttachmentPicker, AttachmentPickerMode, CommandPalette, ComposeField,
-    ComposeMode, ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker,
-    DirPickerMode, EmailEntry, Focus, MailboxKind, MailboxPicker, Message, MessageRef, Overlay,
-    RsvpChoice, RsvpOverlay, SearchField, SearchOverlayFocus, SearchScope, SignaturesMode,
-    SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
+    Action, App, AttachmentPicker, AttachmentPickerMode, CommandPalette, ComposeField, ComposeMode,
+    ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker, DirPickerMode,
+    EmailEntry, Focus, MailboxKind, MailboxPicker, Message, MessageRef, Overlay, RsvpChoice,
+    RsvpOverlay, SearchField, SearchOverlayFocus, SearchScope, SignaturesMode, SignaturesOverlay,
+    StatusLevel, ThreadEntry, ThreadOverlay,
 };
 
 impl App {
@@ -340,9 +340,7 @@ impl App {
                 // `Space m/c/a`: the continuation key selects the target view.
                 // `switch_view` clears the pending leader itself.
                 if let KeyCode::Char(c) = key.code {
-                    if let Some(&target) =
-                        super::View::ALL.iter().find(|v| v.switch_key() == c)
-                    {
+                    if let Some(&target) = super::View::ALL.iter().find(|v| v.switch_key() == c) {
                         self.switch_view(target);
                     }
                 }
@@ -404,8 +402,7 @@ impl App {
             }
             A::ContactsUp => {
                 self.pending_prefix = None;
-                self.contacts_view.list_index =
-                    self.contacts_view.list_index.saturating_sub(1);
+                self.contacts_view.list_index = self.contacts_view.list_index.saturating_sub(1);
             }
             A::ContactsTop => {
                 // Reached only with `g` pending (the leader continuation).
@@ -414,8 +411,7 @@ impl App {
             }
             A::ContactsBottom => {
                 self.pending_prefix = None;
-                self.contacts_view.list_index =
-                    self.contacts_view.matches.len().saturating_sub(1);
+                self.contacts_view.list_index = self.contacts_view.matches.len().saturating_sub(1);
             }
             A::ContactsSearch => {
                 self.pending_prefix = None;
@@ -463,8 +459,7 @@ impl App {
             }
             A::CalendarUp => {
                 self.pending_prefix = None;
-                self.calendar_view.list_index =
-                    self.calendar_view.list_index.saturating_sub(1);
+                self.calendar_view.list_index = self.calendar_view.list_index.saturating_sub(1);
             }
             A::CalendarTop => {
                 // Reached only with `g` pending (the leader continuation).
@@ -473,8 +468,7 @@ impl App {
             }
             A::CalendarBottom => {
                 self.pending_prefix = None;
-                self.calendar_view.list_index =
-                    self.calendar_view.visible.len().saturating_sub(1);
+                self.calendar_view.list_index = self.calendar_view.visible.len().saturating_sub(1);
             }
             A::CalendarOpenSource => {
                 self.pending_prefix = None;
@@ -593,17 +587,17 @@ impl App {
                 // grow, so arming the prompt outside Drafts would be a lie.
                 self.pending_prefix = None;
                 if self.active_kind() == MailboxKind::Drafts {
-                    if self.selected_email().and_then(|e| e.draft_id.as_ref()).is_some() {
+                    if self
+                        .selected_email()
+                        .and_then(|e| e.draft_id.as_ref())
+                        .is_some()
+                    {
                         self.attach_file_input = Some(String::new());
                     } else {
-                        self.set_status(
-                            "Attach needs a draft; this row has none".to_string(),
-                        );
+                        self.set_status("Attach needs a draft; this row has none".to_string());
                     }
                 } else {
-                    self.set_status(
-                        "Attach file (t a) is only available in Drafts".to_string(),
-                    );
+                    self.set_status("Attach file (t a) is only available in Drafts".to_string());
                 }
             }
             A::OpenEditor => {
@@ -638,14 +632,10 @@ impl App {
                     // happens to sit at: the wizard resolves it through the
                     // drafts index when it opens and again when it submits.
                     if let Some(id) = self.selected_email().and_then(|e| e.draft_id.clone()) {
-                        self.push_action(Action::OpenComposeWizard(ComposeMode::EditDraft {
-                            id,
-                        }));
+                        self.push_action(Action::OpenComposeWizard(ComposeMode::EditDraft { id }));
                     }
                 } else {
-                    self.set_status(
-                        "Edit recipients (c) is only available in Drafts".to_string(),
-                    );
+                    self.set_status("Edit recipients (c) is only available in Drafts".to_string());
                 }
             }
             A::SelectAllVisible => {
@@ -828,9 +818,7 @@ impl App {
                 // file on demand and that is what the browser opens (#0052
                 // scope item 9).
                 if let Some(msg) = self.selected_email_ref() {
-                    if let Some(path) =
-                        crate::actions::html_rendition_for_row(self, msg.row_id())
-                    {
+                    if let Some(path) = crate::actions::html_rendition_for_row(self, msg.row_id()) {
                         self.push_action(Action::OpenHtmlInBrowser(path));
                     }
                 }
@@ -1050,9 +1038,7 @@ impl App {
         // them when cycling so Tab lands only on Scope / Attachment / Advanced,
         // and refuse edits to a greyed field.
         let advanced_active = self.search_form.advanced_active();
-        let field_enabled = |f: SearchField| {
-            !advanced_active || matches!(f, SearchField::Advanced)
-        };
+        let field_enabled = |f: SearchField| !advanced_active || matches!(f, SearchField::Advanced);
 
         match key.code {
             KeyCode::Esc => {
@@ -1169,7 +1155,11 @@ impl App {
 
         self.server_search_scope_label = scope_label;
         self.server_search_generation = self.server_search_generation.wrapping_add(1);
-        self.push_action(Action::ServerSearch { query, targets, local_mailbox });
+        self.push_action(Action::ServerSearch {
+            query,
+            targets,
+            local_mailbox,
+        });
     }
 
     fn handle_search_overlay_list_key(&mut self, key: KeyEvent) -> Option<Message> {
@@ -1592,9 +1582,7 @@ impl App {
             return;
         }
         if self.active_kind() == MailboxKind::Sent {
-            self.set_status(
-                "You are the organizer of this invite — nothing to RSVP".to_string(),
-            );
+            self.set_status("You are the organizer of this invite — nothing to RSVP".to_string());
             return;
         }
         let subject = email.subject.clone();
@@ -1610,9 +1598,7 @@ impl App {
             self.set_status(refusal);
             return;
         }
-        let summary = event
-            .and_then(|e| e.summary)
-            .unwrap_or(subject);
+        let summary = event.and_then(|e| e.summary).unwrap_or(subject);
         self.overlay = Overlay::Rsvp(RsvpOverlay {
             msg,
             summary,
@@ -1637,9 +1623,7 @@ impl App {
             return;
         }
         if event.is_organizer {
-            self.set_status(
-                "You are the organizer of this invite — nothing to RSVP".to_string(),
-            );
+            self.set_status("You are the organizer of this invite — nothing to RSVP".to_string());
             return;
         }
         let is_request = event
@@ -1648,9 +1632,7 @@ impl App {
             .as_deref()
             .is_some_and(|m| m.eq_ignore_ascii_case("REQUEST"));
         if !is_request {
-            self.set_status(
-                "Only received invitations (REQUEST) can be RSVP'd".to_string(),
-            );
+            self.set_status("Only received invitations (REQUEST) can be RSVP'd".to_string());
             return;
         }
         let summary = event
@@ -1803,8 +1785,7 @@ impl App {
                     1 => RsvpChoice::Tentative,
                     _ => RsvpChoice::Decline,
                 };
-                let Overlay::Rsvp(overlay) =
-                    std::mem::replace(&mut self.overlay, Overlay::None)
+                let Overlay::Rsvp(overlay) = std::mem::replace(&mut self.overlay, Overlay::None)
                 else {
                     return None;
                 };
@@ -1889,8 +1870,7 @@ impl App {
                     let sources: Vec<PathBuf> = if picker.selected_set.is_empty() {
                         vec![picker.files[picker.selected].clone()]
                     } else {
-                        let mut indices: Vec<usize> =
-                            picker.selected_set.iter().copied().collect();
+                        let mut indices: Vec<usize> = picker.selected_set.iter().copied().collect();
                         indices.sort();
                         indices
                             .iter()
@@ -1982,8 +1962,7 @@ impl App {
                     picker.selected = picker.dir_entries.len(); // last entry (save-here is 0)
                 }
                 KeyCode::Char('~') => {
-                    let home =
-                        PathBuf::from(shellexpand::tilde("~").into_owned());
+                    let home = PathBuf::from(shellexpand::tilde("~").into_owned());
                     picker.current_dir = home;
                     picker.selected = 0;
                     refresh_browser_entries(picker);
@@ -2012,10 +1991,7 @@ impl App {
                         let sources = picker.sources.clone();
                         let dest_dir = picker.current_dir.clone();
                         self.close_overlay();
-                        self.push_action(Action::SaveAttachments {
-                            sources,
-                            dest_dir,
-                        });
+                        self.push_action(Action::SaveAttachments { sources, dest_dir });
                     } else {
                         // Descend into selected directory
                         let idx = picker.selected - 1;
@@ -2095,9 +2071,7 @@ impl App {
 
         match key.code {
             KeyCode::Down | KeyCode::Tab => {
-                if !picker.filtered.is_empty()
-                    && picker.selected < picker.filtered.len() - 1
-                {
+                if !picker.filtered.is_empty() && picker.selected < picker.filtered.len() - 1 {
                     picker.selected += 1;
                 }
             }
@@ -2184,14 +2158,10 @@ impl App {
                 }
             }
             KeyCode::Enter => self.toggle_selected_signature_default(),
-            KeyCode::Char('e') => {
-                match self.selected_signature_name() {
-                    Some(name) => self.push_action(Action::EditSignatureFile { name }),
-                    None => self.set_status(
-                        "No signature to edit; press n to create one".to_string(),
-                    ),
-                }
-            }
+            KeyCode::Char('e') => match self.selected_signature_name() {
+                Some(name) => self.push_action(Action::EditSignatureFile { name }),
+                None => self.set_status("No signature to edit; press n to create one".to_string()),
+            },
             KeyCode::Char('n') => {
                 if let Some(overlay) = self.signatures_overlay_mut() {
                     overlay.mode = SignaturesMode::New;
@@ -2280,7 +2250,11 @@ impl App {
             return;
         };
 
-        let target = if already_default { None } else { Some(name.as_str()) };
+        let target = if already_default {
+            None
+        } else {
+            Some(name.as_str())
+        };
         match mp_core::signatures::set_default_signature(&account, target) {
             Ok(()) => {
                 if let Some(overlay) = self.signatures_overlay_mut() {
@@ -2321,9 +2295,7 @@ impl App {
                 self.push_action(Action::EditSignatureFile { name: name.clone() });
                 self.set_status(format!("Created signature '{name}'"));
             }
-            Err(e) => {
-                self.set_status_level(format!("Cannot create: {e:#}"), StatusLevel::Error)
-            }
+            Err(e) => self.set_status_level(format!("Cannot create: {e:#}"), StatusLevel::Error),
         }
     }
 
@@ -2354,9 +2326,7 @@ impl App {
                 self.refresh_signature_content();
                 self.set_status(format!("Renamed '{old}' to '{new}'"));
             }
-            Err(e) => {
-                self.set_status_level(format!("Cannot rename: {e:#}"), StatusLevel::Error)
-            }
+            Err(e) => self.set_status_level(format!("Cannot rename: {e:#}"), StatusLevel::Error),
         }
     }
 
@@ -2368,14 +2338,15 @@ impl App {
             self.set_status("No signature to delete".to_string());
             return;
         };
-        let Overlay::Signatures(overlay) =
-            std::mem::replace(&mut self.overlay, Overlay::None)
+        let Overlay::Signatures(overlay) = std::mem::replace(&mut self.overlay, Overlay::None)
         else {
             return;
         };
         self.overlay = Overlay::Confirm(ConfirmDialog {
             title: format!("Delete signature '{name}'?"),
-            detail: mp_core::signatures::signature_file(&name).display().to_string(),
+            detail: mp_core::signatures::signature_file(&name)
+                .display()
+                .to_string(),
             action: ConfirmAction::DeleteSignature(overlay),
         });
     }
@@ -2393,9 +2364,7 @@ impl App {
         };
         match key.code {
             KeyCode::Down | KeyCode::Tab => {
-                if !palette.filtered.is_empty()
-                    && palette.selected < palette.filtered.len() - 1
-                {
+                if !palette.filtered.is_empty() && palette.selected < palette.filtered.len() - 1 {
                     palette.selected += 1;
                 }
             }
@@ -2850,11 +2819,14 @@ fn rsvp_refusal(event: Option<&mp_core::types::EventFrontmatter>) -> Option<Stri
         return Some("Only received invitations (REQUEST) can be RSVP'd".to_string());
     }
     if event.is_some_and(|e| e.cancelled) {
-        return Some("This event was cancelled by the organizer \u{2014} nothing to RSVP".to_string());
+        return Some(
+            "This event was cancelled by the organizer \u{2014} nothing to RSVP".to_string(),
+        );
     }
     if event.is_some_and(|e| e.superseded) {
         return Some(
-            "A newer version of this invitation has arrived \u{2014} RSVP from that one".to_string(),
+            "A newer version of this invitation has arrived \u{2014} RSVP from that one"
+                .to_string(),
         );
     }
     None
@@ -3083,9 +3055,9 @@ fn refresh_browser_entries(picker: &mut DirPicker) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::PersistentError;
     use super::*;
     use crate::app::{AttachmentPicker, EntryKey};
-    use super::super::PersistentError;
     use std::path::PathBuf;
 
     /// A `MessageRef` derived from the subject, so the same fixture email
@@ -3175,10 +3147,7 @@ mod tests {
         let emails = vec![outbound];
         // Sent shows `to` (board@...), so the displayed contact never contains
         // "cfo"; the match can only come from the sender path.
-        assert_eq!(
-            filter_visible(&emails, "cfo", MailboxKind::Sent),
-            vec![0]
-        );
+        assert_eq!(filter_visible(&emails, "cfo", MailboxKind::Sent), vec![0]);
     }
 
     #[test]
@@ -3202,10 +3171,7 @@ mod tests {
         // Simulate typing "inv" then "invo": narrow from the "inv" view.
         let mut visible = filter_visible(&emails, "inv", MailboxKind::Inbox);
         narrow_visible(&emails, &mut visible, "invo", MailboxKind::Inbox);
-        assert_eq!(
-            visible,
-            filter_visible(&emails, "invo", MailboxKind::Inbox)
-        );
+        assert_eq!(visible, filter_visible(&emails, "invo", MailboxKind::Inbox));
     }
 
     #[test]
@@ -3274,7 +3240,10 @@ mod tests {
         app.pending_select = Some(target);
         app.consume_pending_select();
         assert_eq!(app.list_index, 2, "the cursor moved onto the parked target");
-        assert!(app.pending_select.is_none(), "the target cleared once it landed");
+        assert!(
+            app.pending_select.is_none(),
+            "the target cleared once it landed"
+        );
     }
 
     /// A target the current list does not hold is left parked (the async load
@@ -3287,14 +3256,20 @@ mod tests {
         app.pending_select = Some(absent);
         app.consume_pending_select();
         assert_eq!(app.list_index, 1, "the cursor did not move");
-        assert_eq!(app.pending_select, Some(absent), "the target is still parked");
+        assert_eq!(
+            app.pending_select,
+            Some(absent),
+            "the target is still parked"
+        );
     }
 
     /// The list paging keys move by the rendered list height (half of it for
     /// Ctrl+d / Ctrl+u) and clamp at both ends of the list.
     #[test]
     fn list_paging_moves_by_the_viewport_height_and_clamps() {
-        let emails = (0..25).map(|i| entry(&format!("Message {i}"), "Alice")).collect();
+        let emails = (0..25)
+            .map(|i| entry(&format!("Message {i}"), "Alice"))
+            .collect();
         let mut app = app_with_emails(emails);
         app.list_viewport_rows = 10;
         let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
@@ -3430,7 +3405,10 @@ mod tests {
         let mut app = app_with_emails(sample());
         app.handle_key(KeyEvent::from(KeyCode::Char('y')));
         assert!(
-            matches!(app.pending_actions.pop_front(), Some(Action::CopyMessageRef)),
+            matches!(
+                app.pending_actions.pop_front(),
+                Some(Action::CopyMessageRef)
+            ),
             "y must queue CopyMessageRef"
         );
     }
@@ -3779,10 +3757,8 @@ mod tests {
     #[test]
     fn batch_removal_drops_every_removed_reference_from_the_selection() {
         let mut app = app_with_emails(sample());
-        let batch: std::collections::HashSet<MessageRef> = app.emails[..2]
-            .iter()
-            .filter_map(|e| e.msg)
-            .collect();
+        let batch: std::collections::HashSet<MessageRef> =
+            app.emails[..2].iter().filter_map(|e| e.msg).collect();
         app.selection = app.emails.iter().filter_map(|e| e.key()).collect();
 
         app.remove_selected_from_list_batch(&batch);
@@ -3792,7 +3768,10 @@ mod tests {
             .selection
             .iter()
             .all(|k| !k.msg().is_some_and(|m| batch.contains(&m))));
-        assert!(app.emails.iter().all(|e| !e.msg.is_some_and(|m| batch.contains(&m))));
+        assert!(app
+            .emails
+            .iter()
+            .all(|e| !e.msg.is_some_and(|m| batch.contains(&m))));
     }
 
     // -----------------------------------------------------------------------
@@ -3860,7 +3839,12 @@ mod tests {
         assert!(picker.filtered.is_empty());
     }
 
-    fn mb_info(label: &str, id: &str, kind: MailboxKind, server: Option<&str>) -> super::super::MailboxInfo {
+    fn mb_info(
+        label: &str,
+        id: &str,
+        kind: MailboxKind,
+        server: Option<&str>,
+    ) -> super::super::MailboxInfo {
         super::super::MailboxInfo {
             label: label.to_string(),
             icon: "",
@@ -3890,11 +3874,7 @@ mod tests {
             panic!("picker should open");
         };
         // Active mailbox (Inbox) and local-only Drafts are excluded.
-        let labels: Vec<&str> = picker
-            .candidates
-            .iter()
-            .map(|(_, l)| l.as_str())
-            .collect();
+        let labels: Vec<&str> = picker.candidates.iter().map(|(_, l)| l.as_str()).collect();
         assert_eq!(labels, vec!["Sent", "Archive"]);
         // Cursor email is carried as the move target.
         assert_eq!(picker.msgs.len(), 1);
@@ -3903,8 +3883,10 @@ mod tests {
     #[test]
     fn open_picker_uses_selection_when_present() {
         let mut app = app_with_mailboxes();
-        app.selection.insert(EntryKey::Msg(app.emails[0].msg.unwrap()));
-        app.selection.insert(EntryKey::Msg(app.emails[2].msg.unwrap()));
+        app.selection
+            .insert(EntryKey::Msg(app.emails[0].msg.unwrap()));
+        app.selection
+            .insert(EntryKey::Msg(app.emails[2].msg.unwrap()));
         app.handle_key(KeyEvent::from(KeyCode::Char('M')));
         let Overlay::Mailbox(picker) = &app.overlay else {
             panic!("picker should open");
@@ -4017,7 +3999,10 @@ mod tests {
         let Overlay::Signatures(overlay) = &app.overlay else {
             panic!("`cs` should open the signatures overlay");
         };
-        assert_eq!(overlay.names, vec!["casual".to_string(), "work".to_string()]);
+        assert_eq!(
+            overlay.names,
+            vec!["casual".to_string(), "work".to_string()]
+        );
         assert_eq!(overlay.account, "work");
         assert_eq!(overlay.default, None);
 
@@ -4055,7 +4040,10 @@ mod tests {
         assert_eq!(app.signatures_overlay_mut().unwrap().selected, 1);
         press(&mut app, 'j'); // already at the bottom
         assert_eq!(app.signatures_overlay_mut().unwrap().selected, 1);
-        assert_eq!(app.signatures_overlay_mut().unwrap().selected_name(), Some("work"));
+        assert_eq!(
+            app.signatures_overlay_mut().unwrap().selected_name(),
+            Some("work")
+        );
     }
 
     /// Enter records the cursor signature as the account default; Enter on the
@@ -4184,7 +4172,10 @@ mod tests {
         type_text(&mut app, "-external");
         app.handle_key(KeyEvent::from(KeyCode::Enter));
 
-        assert_eq!(mp_core::signatures::list(), vec!["work-external".to_string()]);
+        assert_eq!(
+            mp_core::signatures::list(),
+            vec!["work-external".to_string()]
+        );
         assert_eq!(
             mp_core::signatures::default_signature_name("work").as_deref(),
             Some("work-external")
@@ -4248,7 +4239,11 @@ mod tests {
         };
         assert_eq!(overlay.names, vec!["casual".to_string()]);
         assert_eq!(overlay.default, None);
-        assert_eq!(overlay.selected_name(), Some("casual"), "the cursor stays in range");
+        assert_eq!(
+            overlay.selected_name(),
+            Some("casual"),
+            "the cursor stays in range"
+        );
     }
 
     /// A minimal `AccountState` for `name`, carrying `content` as its cached
@@ -4296,7 +4291,10 @@ mod tests {
         mp_core::signatures::set_default_signature("work", Some("shared")).unwrap();
         mp_core::signatures::set_default_signature("home", Some("shared")).unwrap();
         let cached = mp_core::config::resolve_signature_markdown(&app.account_config, None);
-        assert!(cached.is_some(), "the fixture starts with a resolved signature");
+        assert!(
+            cached.is_some(),
+            "the fixture starts with a resolved signature"
+        );
         app.signature_content = cached.clone();
         app.accounts = vec![
             account_state("work", cached.as_deref()),
@@ -4398,7 +4396,10 @@ mod tests {
         let mut app = app_with_emails(sample());
         app.handle_key(KeyEvent::from(KeyCode::Char(':')));
         app.handle_key(KeyEvent::from(KeyCode::Char('f')));
-        assert!(app.pending_prefix.is_none(), "`f` must not arm a leader here");
+        assert!(
+            app.pending_prefix.is_none(),
+            "`f` must not arm a leader here"
+        );
         let Overlay::Palette(palette) = &app.overlay else {
             panic!("palette should still be open");
         };
@@ -4740,7 +4741,9 @@ mod tests {
             mode: AttachmentPickerMode::Save,
             selected_set: std::collections::HashSet::new(),
         });
-        app.pending_error = Some(PersistentError { message: "bg boom".to_string() });
+        app.pending_error = Some(PersistentError {
+            message: "bg boom".to_string(),
+        });
 
         // Enter triggers the attachment -> dir picker handoff.
         app.handle_key(KeyEvent::from(KeyCode::Enter));
@@ -4791,10 +4794,17 @@ mod tests {
     fn v_toggles_list_selection_and_space_does_not() {
         let mut app = app_with_mailboxes();
         app.focus = Focus::List;
-        assert!(!app.visible.is_empty(), "fixture must have selectable emails");
+        assert!(
+            !app.visible.is_empty(),
+            "fixture must have selectable emails"
+        );
         let before = app.selection.len();
         app.handle_key(KeyEvent::from(KeyCode::Char('v')));
-        assert_eq!(app.selection.len(), before + 1, "v must add to the selection");
+        assert_eq!(
+            app.selection.len(),
+            before + 1,
+            "v must add to the selection"
+        );
 
         // Space with a non-empty list arms the view leader instead of toggling.
         let sel_after_v = app.selection.len();
@@ -4907,7 +4917,10 @@ mod tests {
 
             // Digit jump (a Global mail action) is swallowed.
             app.handle_key(KeyEvent::from(KeyCode::Char('2')));
-            assert_eq!(app.active_mailbox, before, "digit jump must not fire in {view:?}");
+            assert_eq!(
+                app.active_mailbox, before,
+                "digit jump must not fire in {view:?}"
+            );
 
             // A List-context key (archive) does nothing: the Mail pane contexts
             // are not consulted outside Mail, and it is not rebound there.
@@ -5095,8 +5108,7 @@ mod tests {
         assert_eq!(app.view, View::Mail);
         app.handle_key(KeyEvent::from(KeyCode::Char('v')));
         assert!(
-            !app
-                .pending_actions
+            !app.pending_actions
                 .iter()
                 .any(|a| matches!(a, Action::SendContactVcard { .. })),
             "v must not queue a vCard export in Mail"
@@ -5105,8 +5117,7 @@ mod tests {
         app.pending_actions.clear();
         app.handle_key(KeyEvent::from(KeyCode::Char('n')));
         assert!(
-            app
-                .pending_actions
+            app.pending_actions
                 .iter()
                 .all(|a| !matches!(a, Action::ComposeToContact { .. })),
             "n in Mail must be NewDraft, not ComposeToContact"
@@ -5223,7 +5234,11 @@ mod tests {
         let Overlay::Rsvp(overlay) = &app.overlay else {
             panic!("V on a received agenda invite must open the RSVP overlay");
         };
-        assert_eq!(overlay.msg, ref_for("Standup"), "the agenda row's own message");
+        assert_eq!(
+            overlay.msg,
+            ref_for("Standup"),
+            "the agenda row's own message"
+        );
         assert_eq!(overlay.summary, "Standup");
         assert_eq!(overlay.selected, 0);
     }
@@ -5255,21 +5270,16 @@ mod tests {
             ev
         };
         assert!(super::rsvp_refusal(Some(&request(|_| {}))).is_none());
-        assert!(super::rsvp_refusal(None)
-            .is_some_and(|m| m.contains("Only received invitations")));
+        assert!(super::rsvp_refusal(None).is_some_and(|m| m.contains("Only received invitations")));
         assert!(super::rsvp_refusal(Some(&mp_core::types::EventFrontmatter {
             method: Some("CANCEL".into()),
             ..Default::default()
         }))
         .is_some_and(|m| m.contains("Only received invitations")));
-        assert!(
-            super::rsvp_refusal(Some(&request(|e| e.cancelled = true)))
-                .is_some_and(|m| m.contains("cancelled")),
-        );
-        assert!(
-            super::rsvp_refusal(Some(&request(|e| e.superseded = true)))
-                .is_some_and(|m| m.contains("newer version")),
-        );
+        assert!(super::rsvp_refusal(Some(&request(|e| e.cancelled = true)))
+            .is_some_and(|m| m.contains("cancelled")),);
+        assert!(super::rsvp_refusal(Some(&request(|e| e.superseded = true)))
+            .is_some_and(|m| m.contains("newer version")),);
     }
 
     /// `V` on a cancelled row refuses: the organizer already called the
@@ -5392,8 +5402,12 @@ mod tests {
     #[test]
     fn calendar_keys_do_not_fire_in_mail() {
         let mut app = app_with_mailboxes();
-        app.calendar_view.events =
-            vec![cal_event("Standup", "2099-08-01T09:00:00", false, "REQUEST")];
+        app.calendar_view.events = vec![cal_event(
+            "Standup",
+            "2099-08-01T09:00:00",
+            false,
+            "REQUEST",
+        )];
         app.calendar_view.loaded = true;
         app.recompute_calendar_visible();
         assert_eq!(app.view, View::Mail);
@@ -5442,7 +5456,11 @@ mod tests {
     fn app_on_dates() -> App {
         let mut app = App::default_for_tests();
         app.emails = std::sync::Arc::new(dated_emails(&[
-            "2026-08-10", "2026-08-01", "2026-07-15", "2026-06-30", "2025-12-24",
+            "2026-08-10",
+            "2026-08-01",
+            "2026-07-15",
+            "2026-06-30",
+            "2025-12-24",
         ]));
         app.email_cache = vec![Some(std::sync::Arc::clone(&app.emails))];
         app.mailbox_counts = vec![app.emails.len()];
@@ -5462,7 +5480,10 @@ mod tests {
         let before = app.visible.clone();
 
         app.jump_to_date(day("2026-07-20"));
-        assert_eq!(app.list_index, 2, "2026-07-15 is the newest row on or before it");
+        assert_eq!(
+            app.list_index, 2,
+            "2026-07-15 is the newest row on or before it"
+        );
         assert_eq!(app.visible, before, "nothing is filtered out");
 
         // An exact hit lands on that row, not past it.
@@ -5482,7 +5503,10 @@ mod tests {
         app.jump_to_date(day("2020-01-01"));
         assert_eq!(app.list_index, 4);
         let status = app.status_message.clone().unwrap();
-        assert!(status.contains("Nothing on or before 2020-01-01"), "{status}");
+        assert!(
+            status.contains("Nothing on or before 2020-01-01"),
+            "{status}"
+        );
     }
 
     /// `g t` arms the prompt, typing edits it, Enter jumps and disarms, and a
@@ -5492,7 +5516,11 @@ mod tests {
         let mut app = app_on_dates();
         app.handle_key(KeyEvent::from(KeyCode::Char('g')));
         app.handle_key(KeyEvent::from(KeyCode::Char('t')));
-        assert_eq!(app.jump_date_input.as_deref(), Some(""), "the prompt is armed");
+        assert_eq!(
+            app.jump_date_input.as_deref(),
+            Some(""),
+            "the prompt is armed"
+        );
 
         for c in "2026-07-20".chars() {
             app.handle_key(KeyEvent::from(KeyCode::Char(c)));
@@ -5503,7 +5531,10 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('0')));
 
         app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert!(app.jump_date_input.is_none(), "committing disarms the prompt");
+        assert!(
+            app.jump_date_input.is_none(),
+            "committing disarms the prompt"
+        );
         assert_eq!(app.list_index, 2);
     }
 
@@ -5561,7 +5592,11 @@ mod tests {
         let mut app = app_in_drafts();
         app.handle_key(KeyEvent::from(KeyCode::Char('t')));
         app.handle_key(KeyEvent::from(KeyCode::Char('a')));
-        assert_eq!(app.attach_file_input.as_deref(), Some(""), "the prompt is armed");
+        assert_eq!(
+            app.attach_file_input.as_deref(),
+            Some(""),
+            "the prompt is armed"
+        );
 
         // A path that is not on disk is surfaced, not stored: the prompt stays.
         for c in "/no/such/file".chars() {
@@ -5574,7 +5609,11 @@ mod tests {
             "a missing path keeps the prompt armed"
         );
         assert!(app.pending_actions.is_empty(), "nothing was queued");
-        assert!(app.status_message.as_deref().unwrap().contains("No such file"));
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("No such file"));
 
         // A path that exists: Enter disarms and queues the append verbatim.
         let tmp = std::env::temp_dir().join(format!("mp-attach-test-{}.txt", std::process::id()));
@@ -5582,7 +5621,10 @@ mod tests {
         let tmp_str = tmp.to_string_lossy().into_owned();
         app.attach_file_input = Some(tmp_str.clone());
         app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert!(app.attach_file_input.is_none(), "an on-disk path disarms the prompt");
+        assert!(
+            app.attach_file_input.is_none(),
+            "an on-disk path disarms the prompt"
+        );
         assert!(
             matches!(
                 app.pending_actions.front(),
@@ -5668,10 +5710,7 @@ mod tests {
         app.focus = Focus::ComposeWizard;
         app.toggle_zoom();
         assert!(!app.zoomed, "the flag must not arm for a later pane");
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some("Nothing to zoom here.")
-        );
+        assert_eq!(app.status_message.as_deref(), Some("Nothing to zoom here."));
     }
 
     #[test]

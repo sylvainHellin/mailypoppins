@@ -254,7 +254,11 @@ pub fn list(store: &Store, account: &str, status: Option<&str>) -> Result<Vec<Dr
         "SELECT id, slug, path, mtime, size, status, to_, cc, subject, date, snippet
          FROM drafts WHERE account = ?1 {}
          ORDER BY mtime DESC, id ASC",
-        if status.is_some() { "AND status = ?2" } else { "" }
+        if status.is_some() {
+            "AND status = ?2"
+        } else {
+            ""
+        }
     );
     let mut stmt = store.conn().prepare(&sql)?;
     let mapped = |row: &rusqlite::Row<'_>| -> rusqlite::Result<DraftRow> {
@@ -322,14 +326,21 @@ pub fn find(store: &Store, account: &str, id: &str) -> Result<Option<DraftRow>> 
 pub fn fingerprint(dir: &Path) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut entries: Vec<(String, i64, u64)> = Vec::new();
-    for entry in WalkDir::new(dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(dir)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         let path = entry.path();
         if !is_draft_file(path) {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
         entries.push((
-            path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
             mtime_secs(&meta),
             meta.len(),
         ));
@@ -348,7 +359,11 @@ pub fn fingerprint(dir: &Path) -> u64 {
 fn scan(dir: &Path) -> (Vec<DraftRow>, Vec<SkippedDraft>) {
     let mut rows = Vec::new();
     let mut skipped = Vec::new();
-    for entry in WalkDir::new(dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(dir)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         let path = entry.path();
         if !is_draft_file(path) {
             continue;
@@ -372,7 +387,10 @@ fn scan(dir: &Path) -> (Vec<DraftRow>, Vec<SkippedDraft>) {
 /// newlines (a `serde_yaml` message can carry one) are flattened to spaces so
 /// the whole reason fits on one line.
 fn concise_error(e: &anyhow::Error) -> String {
-    format!("{e:#}").split_whitespace().collect::<Vec<_>>().join(" ")
+    format!("{e:#}")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn is_draft_file(path: &Path) -> bool {
@@ -382,7 +400,13 @@ fn is_draft_file(path: &Path) -> bool {
 /// Index one file, writing an `id:` back into it when it has none.
 fn row_for(path: &Path) -> Result<DraftRow> {
     let draft = parse_email_draft(path)?;
-    let id = match draft.frontmatter.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let id = match draft
+        .frontmatter
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(id) => id.to_string(),
         None => {
             let id = new_id();
@@ -391,8 +415,7 @@ fn row_for(path: &Path) -> Result<DraftRow> {
         }
     };
     // Stat *after* a possible write-back, so the indexed mtime matches the file.
-    let meta = std::fs::metadata(path)
-        .with_context(|| format!("stat {}", path.display()))?;
+    let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
     Ok(DraftRow {
         id,
         slug: path
@@ -480,7 +503,9 @@ mod tests {
         let path = dir.join(name);
         fs::write(
             &path,
-            format!("---\nto: a@example.com\nsubject: Hello\nstatus: draft\n{extra}---\n\nBody here\n"),
+            format!(
+                "---\nto: a@example.com\nsubject: Hello\nstatus: draft\n{extra}---\n\nBody here\n"
+            ),
         )
         .unwrap();
         path
@@ -562,24 +587,39 @@ mod tests {
         let float_shaped = write_draft(&dir, "float.md", "id: 8808e70039225152\n");
         let err = parse_email_draft(&float_shaped).unwrap_err();
         let message = format!("{err:#}");
-        assert!(message.contains("id"), "the error names the field: {message}");
+        assert!(
+            message.contains("id"),
+            "the error names the field: {message}"
+        );
 
         let int_shaped = write_draft(&dir, "int.md", "id: 1234567890123456\n");
-        assert!(parse_email_draft(&int_shaped).is_err(), "an int-shaped id fails to deserialise");
+        assert!(
+            parse_email_draft(&int_shaped).is_err(),
+            "an int-shaped id fails to deserialise"
+        );
 
         // The index skips both and names both, and neither file is rewritten.
         let before_float = fs::read_to_string(&float_shaped).unwrap();
         let before_int = fs::read_to_string(&int_shaped).unwrap();
         let (_tmp2, store) = store();
         let (rows, _collisions, skipped) = refresh_reporting(&store, "work", &dir).unwrap();
-        assert!(rows.is_empty(), "neither draft is indexed under a minted id: {rows:?}");
+        assert!(
+            rows.is_empty(),
+            "neither draft is indexed under a minted id: {rows:?}"
+        );
         assert_eq!(skipped.len(), 2, "both drafts are skipped: {skipped:?}");
         let named: Vec<PathBuf> = skipped.iter().map(|s| s.path.clone()).collect();
-        assert!(named.contains(&float_shaped) && named.contains(&int_shaped), "{named:?}");
+        assert!(
+            named.contains(&float_shaped) && named.contains(&int_shaped),
+            "{named:?}"
+        );
         for skip in &skipped {
             let line = skip.to_string();
             assert!(line.contains(&skip.path.display().to_string()), "{line}");
-            assert!(line.contains("string"), "the reason says a string was expected: {line}");
+            assert!(
+                line.contains("string"),
+                "the reason says a string was expected: {line}"
+            );
         }
 
         assert_eq!(fs::read_to_string(&float_shaped).unwrap(), before_float);
@@ -610,7 +650,9 @@ mod tests {
         fs::rename(&path, &renamed).unwrap();
         refresh(&store, "work", &dir).unwrap();
 
-        let row = find(&store, "work", &id).unwrap().expect("id survives the rename");
+        let row = find(&store, "work", &id)
+            .unwrap()
+            .expect("id survives the rename");
         assert_eq!(row.path, renamed);
         assert_eq!(row.slug, "after");
     }
@@ -633,7 +675,11 @@ mod tests {
         let indexed = find(&store, "work", "shared").unwrap().unwrap().path;
         assert_eq!(indexed, rows[0].path);
 
-        assert_eq!(collisions.len(), 1, "the shadowed file is reported, not dropped");
+        assert_eq!(
+            collisions.len(),
+            1,
+            "the shadowed file is reported, not dropped"
+        );
         assert_eq!(collisions[0].id, "shared");
         assert_eq!(collisions[0].kept, indexed);
         assert_ne!(collisions[0].shadowed, indexed);
@@ -672,15 +718,22 @@ mod tests {
         assert_eq!(collisions[0].shadowed, PathBuf::from("b.md"));
 
         let (kept, collisions) = dedupe_by_id(vec![row("b.md", 10), row("a.md", 10)]);
-        assert_eq!(kept[0].path, PathBuf::from("a.md"), "equal mtime breaks by path");
+        assert_eq!(
+            kept[0].path,
+            PathBuf::from("a.md"),
+            "equal mtime breaks by path"
+        );
         assert_eq!(collisions[0].shadowed, PathBuf::from("b.md"));
 
         // A third file claiming the id names the final winner, not an
         // intermediate one.
-        let (kept, collisions) = dedupe_by_id(vec![row("c.md", 5), row("b.md", 10), row("a.md", 20)]);
+        let (kept, collisions) =
+            dedupe_by_id(vec![row("c.md", 5), row("b.md", 10), row("a.md", 20)]);
         assert_eq!(kept.len(), 1);
         assert_eq!(collisions.len(), 2);
-        assert!(collisions.iter().all(|c| c.kept == std::path::Path::new("a.md")));
+        assert!(collisions
+            .iter()
+            .all(|c| c.kept == std::path::Path::new("a.md")));
     }
 
     #[test]
@@ -698,11 +751,17 @@ mod tests {
     fn the_index_carries_the_list_columns_and_filters_by_status() {
         let (tmp, store) = store();
         let dir = tmp.path().join("drafts");
-        write_draft(&dir, "one.md", "id: aaa\ncc: c@example.com\ndate: Mon, 1 Jan 2026\n");
+        write_draft(
+            &dir,
+            "one.md",
+            "id: aaa\ncc: c@example.com\ndate: Mon, 1 Jan 2026\n",
+        );
         write_draft(&dir, "two.md", "id: bbb\n");
         // `two` is approved.
         let two = dir.join("two.md");
-        let content = fs::read_to_string(&two).unwrap().replace("status: draft", "status: approved");
+        let content = fs::read_to_string(&two)
+            .unwrap()
+            .replace("status: draft", "status: approved");
         fs::write(&two, content).unwrap();
 
         refresh(&store, "work", &dir).unwrap();
@@ -745,7 +804,9 @@ mod tests {
 
         // And validation, not the index, is what refuses it.
         let draft = parse_email_draft(&path).unwrap();
-        let err = crate::draft::validate_draft(&draft).unwrap_err().to_string();
+        let err = crate::draft::validate_draft(&draft)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("No recipients"), "{err}");
     }
 
@@ -773,7 +834,10 @@ mod tests {
         // back in front of the user (#0080).
         assert_eq!(skipped.len(), 1, "the unparseable draft is reported");
         assert_eq!(skipped[0].path, dir.join("broken.md"));
-        assert!(!skipped[0].error.is_empty(), "the skip carries a parse error");
+        assert!(
+            !skipped[0].error.is_empty(),
+            "the skip carries a parse error"
+        );
         assert!(!skipped[0].error.contains('\n'), "the error is one line");
     }
 
@@ -817,11 +881,14 @@ mod tests {
         assert_ne!(empty, one);
         assert_eq!(one, fingerprint(&dir), "a stable directory is stable");
 
-        fs::write(&path, "---\nsubject: Hello\nstatus: draft\nid: aaa\n---\n\nLonger body\n").unwrap();
+        fs::write(
+            &path,
+            "---\nsubject: Hello\nstatus: draft\nid: aaa\n---\n\nLonger body\n",
+        )
+        .unwrap();
         assert_ne!(one, fingerprint(&dir), "a rewrite changes the size");
 
         fs::remove_file(&path).unwrap();
         assert_eq!(empty, fingerprint(&dir));
     }
 }
-

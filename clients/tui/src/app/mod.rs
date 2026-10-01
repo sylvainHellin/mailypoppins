@@ -6,15 +6,13 @@ mod types;
 
 pub use keymap::{
     dump_json, dump_markdown, help_sections, hint_bindings, leader_is_view_agnostic,
-    palette_actions, prefix_continuations, resolve, Guard, KeyAction, KeyBinding, KeyCtx,
-    KEYMAP,
+    palette_actions, prefix_continuations, resolve, Guard, KeyAction, KeyBinding, KeyCtx, KEYMAP,
 };
 pub use types::*;
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-
 
 /// Top-level application state.
 pub struct App {
@@ -622,7 +620,10 @@ impl App {
     /// The `Contact` currently selected in the Contacts list, if any.
     pub fn selected_contact(&self) -> Option<&mp_core::contacts::Contact> {
         let index = self.contacts_view.index.as_ref()?;
-        let addr = self.contacts_view.matches.get(self.contacts_view.list_index)?;
+        let addr = self
+            .contacts_view
+            .matches
+            .get(self.contacts_view.list_index)?;
         index.contacts.get(addr)
     }
 
@@ -985,10 +986,7 @@ impl App {
         // The cursor identity to restore is the INCOMING account's own,
         // saved when it was last parked -- the outgoing account's path
         // can never appear in this account's list.
-        let anchor = self
-            .accounts
-            .get(idx)
-            .and_then(|acct| acct.cursor_ref);
+        let anchor = self.accounts.get(idx).and_then(|acct| acct.cursor_ref);
         let am = self.active_mailbox;
         let target_opening = self.accounts.get(idx).is_some_and(|a| a.opening);
         if let Some(cached) = self.email_cache.get(am).and_then(|c| c.as_ref()) {
@@ -1190,7 +1188,9 @@ impl App {
             // this mailbox goes, so land there and say why it is not the date
             // that was asked for.
             self.list_index = self.visible.len() - 1;
-            self.set_status(format!("Nothing on or before {human}; oldest message instead"));
+            self.set_status(format!(
+                "Nothing on or before {human}; oldest message instead"
+            ));
         } else {
             self.list_index = lo;
             let landed = self
@@ -1411,10 +1411,7 @@ impl App {
     /// `None` when the row is gone, carries no iMIP payload, or the payload
     /// does not parse; the preview then shows no card, which is what a
     /// non-invite looks like.
-    pub fn load_message_invite(
-        &self,
-        msg: MessageRef,
-    ) -> Option<mp_core::types::EventFrontmatter> {
+    pub fn load_message_invite(&self, msg: MessageRef) -> Option<mp_core::types::EventFrontmatter> {
         let account = self.account_config.name.clone();
         let queries = self.queries()?;
         super::queries::message_invite(queries, &account, msg).unwrap_or_else(|e| {
@@ -1507,10 +1504,7 @@ impl App {
     /// most once per such sharing. If the slot was `None` (invalidated /
     /// load in flight) it stays `None`, matching the old semantics of
     /// skipping the cache update.
-    pub(crate) fn with_emails_mut<R>(
-        &mut self,
-        f: impl FnOnce(&mut Vec<EmailEntry>) -> R,
-    ) -> R {
+    pub(crate) fn with_emails_mut<R>(&mut self, f: impl FnOnce(&mut Vec<EmailEntry>) -> R) -> R {
         let slot_populated = self
             .email_cache
             .get(self.active_mailbox)
@@ -1835,9 +1829,10 @@ impl App {
     /// Push an action only if no equivalent variant is already queued.
     /// Used for watcher-triggered fetches to avoid duplicates.
     pub fn push_action_dedup(&mut self, action: Action) {
-        let dominated = self.pending_actions.iter().any(|a| {
-            std::mem::discriminant(a) == std::mem::discriminant(&action)
-        });
+        let dominated = self
+            .pending_actions
+            .iter()
+            .any(|a| std::mem::discriminant(a) == std::mem::discriminant(&action));
         if !dominated {
             self.pending_actions.push_back(action);
         }
@@ -1907,10 +1902,7 @@ impl App {
                 // previous mailbox's entries.
                 self.emails = Arc::new(Vec::new());
                 self.rebuild_visible();
-                self.set_status_level(
-                    format!("Loading {label}..."),
-                    StatusLevel::Progress,
-                );
+                self.set_status_level(format!("Loading {label}..."), StatusLevel::Progress);
             }
             // else: same-mailbox reload -- keep the stale list (and its
             // view) visible until the fresh entries arrive (no flicker,

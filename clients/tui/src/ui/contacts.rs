@@ -80,7 +80,9 @@ fn render_list(app: &App, frame: &mut Frame, area: Rect) {
     let cursor = if cv.searching { "_" } else { "" };
     let (prompt_style, query_style) = if cv.searching {
         (
-            Style::default().fg(theme::active().accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::active().accent)
+                .add_modifier(Modifier::BOLD),
             Style::default().fg(theme::active().text),
         )
     } else {
@@ -96,7 +98,11 @@ fn render_list(app: &App, frame: &mut Frame, area: Rect) {
     let query_text = if cv.query.is_empty() && !cv.searching {
         "type / to search".to_string()
     } else {
-        format!("{}{}", super::util::scrolled_input_value(&cv.query, avail), cursor)
+        format!(
+            "{}{}",
+            super::util::scrolled_input_value(&cv.query, avail),
+            cursor
+        )
     };
     let search_line = Line::from(vec![
         Span::styled("/ ", prompt_style),

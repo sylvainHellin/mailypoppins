@@ -792,7 +792,8 @@ mod tests {
     #[test]
     fn a_changed_sync_interval_updates_the_account() {
         let previous = parse("[[accounts]]\nname = \"alpha\"\n");
-        let next = parse("[[accounts]]\nname = \"alpha\"\n\n[accounts.imap]\nsync_interval_secs = 0\n");
+        let next =
+            parse("[[accounts]]\nname = \"alpha\"\n\n[accounts.imap]\nsync_interval_secs = 0\n");
         assert_eq!(
             effective_account(&previous, &previous.accounts[0])["imap"]["sync_interval_secs"],
             json!(900),
@@ -824,7 +825,10 @@ mod tests {
         );
         let broken = hook("a").replace("subject = \"x\"", "subject = \"(\"");
         let refused = validate_document(&broken, Path::new("config.toml")).unwrap_err();
-        assert!(refused.message.contains("regular expression"), "{refused:?}");
+        assert!(
+            refused.message.contains("regular expression"),
+            "{refused:?}"
+        );
     }
 
     /// A reformatted file is not a change.
@@ -898,7 +902,11 @@ mod tests {
             start_configured(&store, &runtimes, &canonical, "zz-startup-parallel"),
         )
         .await;
-        assert_eq!(started, Ok(true), "a second startup start waited on the first");
+        assert_eq!(
+            started,
+            Ok(true),
+            "a second startup start waited on the first"
+        );
         let swap = tokio::time::timeout(std::time::Duration::from_millis(50), store.lock_swap());
         assert!(swap.await.is_err(), "a swap ran beside a startup start");
         drop(in_flight);
@@ -978,7 +986,10 @@ mod tests {
             "the replacement took the lock the retired runtime gave up"
         );
         let (outcome, _clone) = tick.await.expect("the tick task");
-        assert!(!outcome.blocked, "the tick that was running finished normally");
+        assert!(
+            !outcome.blocked,
+            "the tick that was running finished normally"
+        );
 
         // And the retired runtime refuses a tick it is asked for afterwards.
         let other = tempfile::tempdir().expect("tempdir");

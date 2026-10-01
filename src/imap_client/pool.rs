@@ -210,7 +210,9 @@ impl PooledSession {
     /// mailbox: the previous borrower left the connection selected on
     /// something else.
     pub fn session(&mut self) -> &mut ImapSession {
-        self.session.as_mut().expect("a borrowed session is present")
+        self.session
+            .as_mut()
+            .expect("a borrowed session is present")
     }
 
     /// Do not return this connection to the pool: its state is unknown.
@@ -241,7 +243,9 @@ impl PooledSession {
 
 impl Drop for PooledSession {
     fn drop(&mut self) {
-        let Some(session) = self.session.take() else { return };
+        let Some(session) = self.session.take() else {
+            return;
+        };
         if self.poisoned {
             debug!("IMAP pool: dropping a poisoned session for {}", self.key);
             return;
@@ -272,7 +276,9 @@ pub async fn checkout(config: &ImapConfig) -> Result<PooledSession> {
     // Take candidates out under the lock and probe them outside it: the probe
     // is a network round trip and the lock is held by `Drop` on other tasks.
     loop {
-        let Some(mut idle) = take_idle(&key) else { break };
+        let Some(mut idle) = take_idle(&key) else {
+            break;
+        };
         if idle.since.elapsed() > IDLE_MAX {
             debug!("IMAP pool: {key} session idle too long, reconnecting");
             continue;
@@ -429,8 +435,14 @@ mod tests {
             key_of(&base("a@x", 993, "refreshed-token")),
             "an OAuth2 refresh must not orphan a live session"
         );
-        assert_ne!(key_of(&base("a@x", 993, "t")), key_of(&base("b@x", 993, "t")));
-        assert_ne!(key_of(&base("a@x", 993, "t")), key_of(&base("a@x", 143, "t")));
+        assert_ne!(
+            key_of(&base("a@x", 993, "t")),
+            key_of(&base("b@x", 993, "t"))
+        );
+        assert_ne!(
+            key_of(&base("a@x", 993, "t")),
+            key_of(&base("a@x", 143, "t"))
+        );
     }
 
     /// The gate is an exact token match and nothing is inferred, including the
@@ -444,7 +456,12 @@ mod tests {
         let dovecot = parse("IMAP4rev1 CONDSTORE QRESYNC UIDPLUS IDLE MOVE");
         assert_eq!(
             dovecot,
-            ServerCaps { condstore: true, qresync: true, uidplus: true, idle: true }
+            ServerCaps {
+                condstore: true,
+                qresync: true,
+                uidplus: true,
+                idle: true
+            }
         );
         assert_eq!(dovecot.summary(), "CONDSTORE QRESYNC UIDPLUS IDLE");
 

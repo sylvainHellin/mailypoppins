@@ -25,14 +25,24 @@ impl Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path().join("store.sqlite3")).unwrap();
         let blobs = BlobStore::new(tmp.path().join("blobs"));
-        Self { _tmp: tmp, store, blobs }
+        Self {
+            _tmp: tmp,
+            store,
+            blobs,
+        }
     }
 
     fn ingest(&self, mailbox: &str, uid: i64, email: &FetchedEmail) -> i64 {
         ingest_message(
             &self.store,
             &self.blobs,
-            &IngestInput { account: "acct", mailbox, uid, email, raw: None },
+            &IngestInput {
+                account: "acct",
+                mailbox,
+                uid,
+                email,
+                raw: None,
+            },
         )
         .unwrap()
         .row_id
@@ -45,7 +55,13 @@ impl Fixture {
         ingest_message_with_policy(
             &self.store,
             &self.blobs,
-            &IngestInput { account: "acct", mailbox, uid, email, raw: None },
+            &IngestInput {
+                account: "acct",
+                mailbox,
+                uid,
+                email,
+                raw: None,
+            },
             &RebindPolicy::UnlessListed(&listed),
         )
         .unwrap()
@@ -97,9 +113,18 @@ fn a_word_in_the_body_is_found() {
     let row = f.ingest(
         "inbox",
         1,
-        &email("a", "Ada <ada@example.com>", "Hello", "the quarterly ledger is attached"),
+        &email(
+            "a",
+            "Ada <ada@example.com>",
+            "Hello",
+            "the quarterly ledger is attached",
+        ),
     );
-    f.ingest("inbox", 2, &email("b", "Bob <bob@example.com>", "Lunch", "pizza?"));
+    f.ingest(
+        "inbox",
+        2,
+        &email("b", "Bob <bob@example.com>", "Lunch", "pizza?"),
+    );
     assert_eq!(f.hits("ledger"), vec![row]);
     assert!(f.hits("aardvark").is_empty());
 }
@@ -112,13 +137,23 @@ fn subject_and_sender_are_searchable_and_addressable() {
     let row = f.ingest(
         "inbox",
         1,
-        &email("a", "Ada Lovelace <ada@example.com>", "Quarterly report", "nothing here"),
+        &email(
+            "a",
+            "Ada Lovelace <ada@example.com>",
+            "Quarterly report",
+            "nothing here",
+        ),
     );
     // A decoy whose *body* says the word the subject filter must not match.
     let decoy = f.ingest(
         "inbox",
         2,
-        &email("b", "Bob <bob@example.com>", "Lunch", "quarterly pizza budget"),
+        &email(
+            "b",
+            "Bob <bob@example.com>",
+            "Lunch",
+            "quarterly pizza budget",
+        ),
     );
 
     assert_eq!(f.hits("subject:quarterly"), vec![row]);
@@ -133,8 +168,16 @@ fn subject_and_sender_are_searchable_and_addressable() {
 #[test]
 fn several_terms_all_have_to_match() {
     let f = Fixture::new();
-    let both = f.ingest("inbox", 1, &email("a", "a@example.com", "Trip", "berlin in october"));
-    f.ingest("inbox", 2, &email("b", "b@example.com", "Trip", "berlin in march"));
+    let both = f.ingest(
+        "inbox",
+        1,
+        &email("a", "a@example.com", "Trip", "berlin in october"),
+    );
+    f.ingest(
+        "inbox",
+        2,
+        &email("b", "b@example.com", "Trip", "berlin in march"),
+    );
     assert_eq!(f.hits("berlin october"), vec![both]);
 }
 
@@ -145,7 +188,12 @@ fn a_phrase_matches_adjacent_words_only() {
     let phrase = f.ingest(
         "inbox",
         1,
-        &email("a", "a@example.com", "One", "please sign the lease agreement today"),
+        &email(
+            "a",
+            "a@example.com",
+            "One",
+            "please sign the lease agreement today",
+        ),
     );
     f.ingest(
         "inbox",
@@ -181,7 +229,12 @@ fn unicode_terms_round_trip() {
     let row = f.ingest(
         "inbox",
         1,
-        &email("a", "Émile <emile@example.com>", "Réunion d'équipe", "on se réunit à Zürich"),
+        &email(
+            "a",
+            "Émile <emile@example.com>",
+            "Réunion d'équipe",
+            "on se réunit à Zürich",
+        ),
     );
     assert_eq!(f.hits("Zürich"), vec![row]);
     assert_eq!(f.hits("réunit"), vec![row]);
@@ -195,7 +248,11 @@ fn unicode_terms_round_trip() {
 #[test]
 fn punctuation_in_a_query_is_not_a_syntax_error() {
     let f = Fixture::new();
-    f.ingest("inbox", 1, &email("a", "a@example.com", "Build", "we ship c++ and rust"));
+    f.ingest(
+        "inbox",
+        1,
+        &email("a", "a@example.com", "Build", "we ship c++ and rust"),
+    );
     for query in ["c++", "(c++)", "rust -", "ship AND", "ship\" OR rust"] {
         assert!(
             search(&f.store, "acct", query, None, 20).is_ok(),
@@ -216,9 +273,18 @@ fn a_subject_hit_outranks_a_body_hit() {
     let buried = f.ingest(
         "inbox",
         1,
-        &email("a", "a@example.com", "Lunch", "somewhere in the thread: invoice"),
+        &email(
+            "a",
+            "a@example.com",
+            "Lunch",
+            "somewhere in the thread: invoice",
+        ),
     );
-    let titled = f.ingest("inbox", 2, &email("b", "b@example.com", "Invoice 42", "attached"));
+    let titled = f.ingest(
+        "inbox",
+        2,
+        &email("b", "b@example.com", "Invoice 42", "attached"),
+    );
     assert_eq!(f.hits("invoice"), vec![titled, buried]);
 }
 
@@ -226,8 +292,16 @@ fn a_subject_hit_outranks_a_body_hit() {
 #[test]
 fn search_spans_mailboxes_and_can_be_scoped_to_one() {
     let f = Fixture::new();
-    let inbox = f.ingest("inbox", 1, &email("a", "a@example.com", "Contract", "signed"));
-    let archive = f.ingest("archive", 1, &email("b", "b@example.com", "Contract", "signed"));
+    let inbox = f.ingest(
+        "inbox",
+        1,
+        &email("a", "a@example.com", "Contract", "signed"),
+    );
+    let archive = f.ingest(
+        "archive",
+        1,
+        &email("b", "b@example.com", "Contract", "signed"),
+    );
     let mut all = f.hits("contract");
     all.sort_unstable();
     assert_eq!(all, vec![inbox, archive].tap_sorted());
@@ -272,10 +346,18 @@ fn hits_are_scoped_to_the_account() {
 #[test]
 fn reingesting_a_uid_replaces_what_is_indexed() {
     let f = Fixture::new();
-    let row = f.ingest("inbox", 1, &email("a", "a@example.com", "First", "original wording"));
+    let row = f.ingest(
+        "inbox",
+        1,
+        &email("a", "a@example.com", "First", "original wording"),
+    );
     assert_eq!(f.hits("original"), vec![row]);
 
-    let same = f.ingest("inbox", 1, &email("a", "a@example.com", "Second", "corrected wording"));
+    let same = f.ingest(
+        "inbox",
+        1,
+        &email("a", "a@example.com", "Second", "corrected wording"),
+    );
     assert_eq!(same, row, "the UPSERT must keep the row id");
     assert!(f.hits("original").is_empty(), "stale text still matches");
     assert_eq!(f.hits("corrected"), vec![row]);
@@ -288,8 +370,16 @@ fn reingesting_a_uid_replaces_what_is_indexed() {
 #[test]
 fn a_uidvalidity_rebind_keeps_one_indexed_entry() {
     let f = Fixture::new();
-    let row = f.ingest("inbox", 7, &email("a", "a@example.com", "Renumbered", "same content"));
-    let rebound = f.ingest("inbox", 9001, &email("a", "a@example.com", "Renumbered", "same content"));
+    let row = f.ingest(
+        "inbox",
+        7,
+        &email("a", "a@example.com", "Renumbered", "same content"),
+    );
+    let rebound = f.ingest(
+        "inbox",
+        9001,
+        &email("a", "a@example.com", "Renumbered", "same content"),
+    );
     assert_eq!(rebound, row);
     assert_eq!(f.hits("renumbered"), vec![row]);
     assert_eq!(index_drift(&f.store).unwrap(), (0, 0));
@@ -318,8 +408,16 @@ fn a_second_copy_of_one_message_is_indexed_as_its_own_entry() {
 #[test]
 fn a_pruned_message_leaves_the_index() {
     let f = Fixture::new();
-    let stays = f.ingest("inbox", 1, &email("a", "a@example.com", "Keep", "shared word"));
-    let goes = f.ingest("inbox", 2, &email("b", "b@example.com", "Drop", "shared word"));
+    let stays = f.ingest(
+        "inbox",
+        1,
+        &email("a", "a@example.com", "Keep", "shared word"),
+    );
+    let goes = f.ingest(
+        "inbox",
+        2,
+        &email("b", "b@example.com", "Drop", "shared word"),
+    );
     assert_eq!(f.hits("shared").len(), 2);
 
     let pruned = prune_vanished(&f.store, &f.blobs, "acct", "inbox", &[2i64]);
@@ -334,7 +432,11 @@ fn a_pruned_message_leaves_the_index() {
 #[test]
 fn a_deleted_row_leaves_the_index() {
     let f = Fixture::new();
-    let row = f.ingest("inbox", 1, &email("a", "a@example.com", "Doomed", "delete me"));
+    let row = f.ingest(
+        "inbox",
+        1,
+        &email("a", "a@example.com", "Doomed", "delete me"),
+    );
     mailypoppins::store::write::delete_row(&f.store, &f.blobs, row).unwrap();
     assert!(f.hits("doomed").is_empty());
     assert_eq!(index_drift(&f.store).unwrap(), (0, 0));
@@ -345,7 +447,11 @@ fn a_deleted_row_leaves_the_index() {
 #[test]
 fn a_moved_row_is_found_under_its_new_mailbox() {
     let f = Fixture::new();
-    let row = f.ingest("inbox", 1, &email("a", "a@example.com", "Filed", "keep this one"));
+    let row = f.ingest(
+        "inbox",
+        1,
+        &email("a", "a@example.com", "Filed", "keep this one"),
+    );
     mailypoppins::store::write::move_row(&f.store, row, "archive").unwrap();
     assert!(f.hits_in("filed", "inbox").is_empty());
     assert_eq!(f.hits_in("filed", "archive"), vec![row]);
@@ -361,10 +467,19 @@ fn the_limit_caps_the_ranked_hits() {
         f.ingest(
             "inbox",
             uid,
-            &email(&format!("m{uid}"), "a@example.com", "Body hit", "common term here"),
+            &email(
+                &format!("m{uid}"),
+                "a@example.com",
+                "Body hit",
+                "common term here",
+            ),
         );
     }
-    let best = f.ingest("inbox", 6, &email("m6", "a@example.com", "Common", "subject hit"));
+    let best = f.ingest(
+        "inbox",
+        6,
+        &email("m6", "a@example.com", "Common", "subject hit"),
+    );
     let hits = search(&f.store, "acct", "common", None, 2).unwrap();
     assert_eq!(hits.len(), 2);
     assert_eq!(hits[0].row.id, best);

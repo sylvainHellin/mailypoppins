@@ -51,8 +51,8 @@ pub mod blobs;
 pub mod drafts;
 pub mod read;
 pub mod rebuild;
-pub mod search;
 pub mod schema;
+pub mod search;
 pub mod sweep;
 pub mod write;
 
@@ -411,7 +411,9 @@ mod tests {
         let store = Store::open_account("alpha").unwrap();
         let blobs = super::blobs::BlobStore::for_account("alpha");
         blobs.write(b"hello").unwrap();
-        let attachments = crate::config::account_dir("alpha").join("attachments").join("1");
+        let attachments = crate::config::account_dir("alpha")
+            .join("attachments")
+            .join("1");
         super::read::materialise_attachments(&store, &blobs, 1, &attachments).unwrap();
         crate::config::create_private_dir_all(crate::config::tokens_dir()).unwrap();
 
@@ -419,7 +421,13 @@ mod tests {
         let mut seen = 0;
         while let Some(dir) = dirs.pop() {
             let mode = fs::metadata(&dir).unwrap().permissions().mode();
-            assert_eq!(mode & 0o077, 0, "{} is {:04o}", dir.display(), mode & 0o7777);
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{} is {:04o}",
+                dir.display(),
+                mode & 0o7777
+            );
             seen += 1;
             for entry in fs::read_dir(&dir).unwrap() {
                 let path = entry.unwrap().path();
@@ -517,7 +525,10 @@ mod tests {
         };
         {
             let store = Store::open(&path).unwrap();
-            assert!(has_index(&store, schema::THREAD_INDEX), "a fresh store is created with it");
+            assert!(
+                has_index(&store, schema::THREAD_INDEX),
+                "a fresh store is created with it"
+            );
             store
                 .conn()
                 .execute_batch(&format!("DROP INDEX {}", schema::THREAD_INDEX))
@@ -525,7 +536,10 @@ mod tests {
             assert!(has_index(&store, schema::INVITE_INDEX));
         }
         let store = Store::open(&path).unwrap();
-        assert!(has_index(&store, schema::THREAD_INDEX), "the reopen added it back");
+        assert!(
+            has_index(&store, schema::THREAD_INDEX),
+            "the reopen added it back"
+        );
         assert!(has_index(&store, schema::INVITE_INDEX));
     }
 
@@ -571,7 +585,11 @@ mod tests {
         );
 
         drop(Store::open(&path).unwrap());
-        assert_eq!(integrity_check_count(&path), 1, "the first reopen validates");
+        assert_eq!(
+            integrity_check_count(&path),
+            1,
+            "the first reopen validates"
+        );
 
         for _ in 0..5 {
             drop(Store::open(&path).unwrap());
@@ -596,13 +614,20 @@ mod tests {
         {
             let store = Store::open(path).unwrap();
             for uid in 0..400 {
-                insert_message(&store, "alice", "inbox", uid, &format!("<m{uid}@example.com>"))
-                    .unwrap();
+                insert_message(
+                    &store,
+                    "alice",
+                    "inbox",
+                    uid,
+                    &format!("<m{uid}@example.com>"),
+                )
+                .unwrap();
             }
         }
         let page_size: i64 = {
             let conn = Connection::open(path).unwrap();
-            conn.query_row("PRAGMA page_size", [], |row| row.get(0)).unwrap()
+            conn.query_row("PRAGMA page_size", [], |row| row.get(0))
+                .unwrap()
         };
         let mut f = fs::OpenOptions::new().write(true).open(path).unwrap();
         let len = f.metadata().unwrap().len();
@@ -651,7 +676,10 @@ mod tests {
         let path = dir.path().join("store.sqlite3");
         store_with_a_corrupted_page(&path);
 
-        assert!(open_validated(&path).is_err(), "a corrupted file must not validate");
+        assert!(
+            open_validated(&path).is_err(),
+            "a corrupted file must not validate"
+        );
         assert_eq!(
             integrity_check_count(&path),
             0,

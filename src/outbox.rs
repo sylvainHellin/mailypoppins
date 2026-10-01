@@ -198,7 +198,10 @@ impl OutboxState {
 
     /// True for the two states that still need work from the driver.
     pub fn is_open(self) -> bool {
-        matches!(self, OutboxState::PendingSend | OutboxState::SentPendingAppend)
+        matches!(
+            self,
+            OutboxState::PendingSend | OutboxState::SentPendingAppend
+        )
     }
 }
 
@@ -416,7 +419,9 @@ impl Envelope {
         Some(format!(
             "delivered to {} of {} recipient(s); never delivered to {refused}",
             self.delivered.len(),
-            self.recipients.len().max(self.delivered.len() + self.rejected.len()),
+            self.recipients
+                .len()
+                .max(self.delivered.len() + self.rejected.len()),
         ))
     }
 }
@@ -1161,7 +1166,11 @@ pub fn open_rows(store: &Store, account: &str) -> Result<Vec<OutboxRow>> {
 /// exactly what an operator has to be told, and there is nowhere else to tell
 /// them, so it stays listed until it is discarded.
 pub fn unfinished_rows(store: &Store, account: &str) -> Result<Vec<OutboxRow>> {
-    rows_in_states(store, account, "(state <> 'done' OR last_error IS NOT NULL)")
+    rows_in_states(
+        store,
+        account,
+        "(state <> 'done' OR last_error IS NOT NULL)",
+    )
 }
 
 fn rows_in_states(store: &Store, account: &str, predicate: &str) -> Result<Vec<OutboxRow>> {
@@ -1255,7 +1264,10 @@ pub fn retry(store: &Store, id: i64) -> Result<()> {
             rusqlite::params![id, unix_now()],
         )
         .context("re-arming a failed outbox row")?;
-    info!("[outbox] row {id} ({}) re-armed for one more send", row.message_id);
+    info!(
+        "[outbox] row {id} ({}) re-armed for one more send",
+        row.message_id
+    );
     Ok(())
 }
 

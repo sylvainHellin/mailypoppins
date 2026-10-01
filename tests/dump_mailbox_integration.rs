@@ -165,14 +165,24 @@ default_from = "beta@example.com"
         "alpha",
         "inbox",
         4,
-        &email("b@example.com", "sylvain@example.com", "Same second", "Sat, 4 Jul 2026 10:00:00 +0000"),
+        &email(
+            "b@example.com",
+            "sylvain@example.com",
+            "Same second",
+            "Sat, 4 Jul 2026 10:00:00 +0000",
+        ),
     );
     ingest(
         &data,
         "alpha",
         "inbox",
         3,
-        &email("a@example.com", "sylvain@example.com", "Same second", "Sat, 4 Jul 2026 10:00:00 +0000"),
+        &email(
+            "a@example.com",
+            "sylvain@example.com",
+            "Same second",
+            "Sat, 4 Jul 2026 10:00:00 +0000",
+        ),
     );
 
     // No usable `Date:` header at all.
@@ -183,7 +193,12 @@ default_from = "beta@example.com"
         "alpha",
         "inbox",
         5,
-        &email("undated@example.com", "sylvain@example.com", "No date header", "(unknown date)"),
+        &email(
+            "undated@example.com",
+            "sylvain@example.com",
+            "No date header",
+            "(unknown date)",
+        ),
     );
 
     // Sent, with an attachment. The file build stored the *source* path of an
@@ -313,20 +328,46 @@ fn dump_mailbox_honours_account_and_mailbox_selectors() {
     assert_eq!(beta.lines().count(), 1);
     assert!(beta.contains(r#""account":"beta""#));
 
-    let inbox = dump(&tmp, &["-A", "alpha", "dump-mailbox", "--json", "--mailbox", "INBOX"]);
+    let inbox = dump(
+        &tmp,
+        &[
+            "-A",
+            "alpha",
+            "dump-mailbox",
+            "--json",
+            "--mailbox",
+            "INBOX",
+        ],
+    );
     assert_eq!(inbox.lines().count(), 5);
     assert!(inbox.lines().all(|l| l.contains(r#""mailbox":"inbox""#)));
 
     let extra = dump(
         &tmp,
-        &["-A", "alpha", "dump-mailbox", "--json", "--mailbox", "Team/Reports"],
+        &[
+            "-A",
+            "alpha",
+            "dump-mailbox",
+            "--json",
+            "--mailbox",
+            "Team/Reports",
+        ],
     );
     assert_eq!(extra.lines().count(), 1);
     assert!(extra.contains(r#""mailbox":"Team/Reports""#));
 
     let two = dump(
         &tmp,
-        &["-A", "alpha", "dump-mailbox", "--json", "--mailbox", "sent", "--mailbox", "drafts"],
+        &[
+            "-A",
+            "alpha",
+            "dump-mailbox",
+            "--json",
+            "--mailbox",
+            "sent",
+            "--mailbox",
+            "drafts",
+        ],
     );
     assert_eq!(two.lines().count(), 1, "drafts have no rows until #0050");
 }
@@ -343,13 +384,15 @@ fn dump_mailbox_reports_the_answered_and_forwarded_flags() {
     let tmp = fixture_tree();
     let account_dir = tmp.path().join("data").join("accounts").join("alpha");
     let store = Store::open(account_dir.join("store.sqlite3")).expect("store");
-    let answered = mailypoppins::store::read::find_by_message_id(&store, "alpha", "<f7ef260c@example.com>")
-        .expect("lookup")
-        .remove(0);
+    let answered =
+        mailypoppins::store::read::find_by_message_id(&store, "alpha", "<f7ef260c@example.com>")
+            .expect("lookup")
+            .remove(0);
     mailypoppins::store::write::set_answered(&store, answered.id).expect("set answered");
-    let forwarded = mailypoppins::store::read::find_by_message_id(&store, "alpha", "<weekly-1@example.com>")
-        .expect("lookup")
-        .remove(0);
+    let forwarded =
+        mailypoppins::store::read::find_by_message_id(&store, "alpha", "<weekly-1@example.com>")
+            .expect("lookup")
+            .remove(0);
     mailypoppins::store::write::set_forwarded(&store, forwarded.id).expect("set forwarded");
     drop(store);
 

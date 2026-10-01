@@ -52,7 +52,8 @@ pub(super) fn render_compose_wizard(app: &mut App, frame: &mut Frame, area: Rect
     };
 
     let hint = if wizard.focus == ComposeField::Signature {
-        " ↑↓/Ctrl+n/Ctrl+p: pick signature | e: edit in $EDITOR | Tab: next field | Esc: cancel ".to_string()
+        " ↑↓/Ctrl+n/Ctrl+p: pick signature | e: edit in $EDITOR | Tab: next field | Esc: cancel "
+            .to_string()
     } else if wizard.focus == ComposeField::Body {
         " Enter: newline | Ctrl+g: submit | Tab: next field | Esc: cancel ".to_string()
     } else if wizard.focus == ComposeField::Subject {
@@ -270,8 +271,7 @@ fn render_suggestions(wizard: &ComposeWizard, frame: &mut Frame, area: Rect) {
 
     if wizard.focus == ComposeField::Signature {
         let text = if wizard.available_signatures.is_empty() {
-            "  No signatures yet (add one as a .md file in the signatures directory)"
-                .to_string()
+            "  No signatures yet (add one as a .md file in the signatures directory)".to_string()
         } else {
             format!(
                 "  ↑↓ to pick among {} signature(s), e to edit the selected one in $EDITOR",

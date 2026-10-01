@@ -73,11 +73,7 @@ static PROCESS_ENGINES: LazyLock<Mutex<HashMap<PathBuf, Arc<AtomicBool>>>> =
 
 /// The gate for a path this process is the engine for, if it is.
 fn gate_for(path: &Path) -> Option<Arc<AtomicBool>> {
-    PROCESS_ENGINES
-        .lock()
-        .ok()?
-        .get(path)
-        .map(Arc::clone)
+    PROCESS_ENGINES.lock().ok()?.get(path).map(Arc::clone)
 }
 
 /// A held advisory lock on an account's `store.lock`. The engine may drain the
@@ -244,10 +240,7 @@ impl Drop for EngineLock {
 /// another process is the engine. `Ok(None)` is "someone else is draining",
 /// which every caller treats as success: the work still happens, in the other
 /// process.
-pub fn with_engine_lock<T>(
-    account: &str,
-    f: impl FnOnce() -> Result<T>,
-) -> Result<Option<T>> {
+pub fn with_engine_lock<T>(account: &str, f: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
     match EngineLock::take_turn(account) {
         Ok(Some(_lock)) => f().map(Some),
         Ok(None) => Ok(None),
@@ -337,7 +330,9 @@ mod tests {
             "one pass at a time, which is the invariant #0116 needs"
         );
         assert!(
-            EngineLock::try_acquire_at(&path, "alice").unwrap().is_none(),
+            EngineLock::try_acquire_at(&path, "alice")
+                .unwrap()
+                .is_none(),
             "and taking the lock itself is still refused, gate or no gate"
         );
         drop(pass);
@@ -362,10 +357,14 @@ mod tests {
         let path = dir.path().join("store.lock");
         let elsewhere = EngineLock::try_acquire_at(&path, "alice").unwrap().unwrap();
 
-        assert!(EngineLock::hold_for_runtime(&path, "alice").unwrap().is_none());
+        assert!(EngineLock::hold_for_runtime(&path, "alice")
+            .unwrap()
+            .is_none());
         drop(elsewhere);
         assert!(
-            EngineLock::try_acquire_at(&path, "alice").unwrap().is_some(),
+            EngineLock::try_acquire_at(&path, "alice")
+                .unwrap()
+                .is_some(),
             "and nothing was left registered behind it"
         );
     }
@@ -381,8 +380,12 @@ mod tests {
         // A direct second attempt at the same path is refused; the closure form
         // resolves against the account dir, so here we assert the primitive it
         // is built on: a live holder blocks a second acquire.
-        assert!(EngineLock::try_acquire_at(&path, "alice").unwrap().is_none());
+        assert!(EngineLock::try_acquire_at(&path, "alice")
+            .unwrap()
+            .is_none());
         drop(held);
-        assert!(EngineLock::try_acquire_at(&path, "alice").unwrap().is_some());
+        assert!(EngineLock::try_acquire_at(&path, "alice")
+            .unwrap()
+            .is_some());
     }
 }

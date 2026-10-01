@@ -574,7 +574,8 @@ fn tui_engine_paths_match_the_allow_list() {
         return;
     }
 
-    let expected = parse_allow_list(&fs::read_to_string(&fixture).expect("read the path allow-list"));
+    let expected =
+        parse_allow_list(&fs::read_to_string(&fixture).expect("read the path allow-list"));
 
     let added: Vec<_> = actual.difference(&expected).collect();
     let removed: Vec<_> = expected.difference(&actual).collect();

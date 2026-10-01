@@ -475,7 +475,11 @@ pub fn get(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError
 /// is on by `messages.id` and nothing else, and resolving it back through
 /// `"<mailbox>/<uid>"` would make the client carry a second identity for the
 /// same row and re-derive it on every cursor move.
-pub(super) fn address(params: &Value, store: &Store, account: &str) -> Result<MessageRow, RpcError> {
+pub(super) fn address(
+    params: &Value,
+    store: &Store,
+    account: &str,
+) -> Result<MessageRow, RpcError> {
     let addressed = |key: &str| !matches!(params.get(key), None | Some(Value::Null));
     if addressed("row_id") {
         if addressed("id") || addressed("selector") {
@@ -562,8 +566,11 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
         .thread_id
         .clone()
         .unwrap_or_else(|| row.message_id.clone());
-    let mut rows = read::thread_messages(&store, &name, &thread_id)
-        .map_err(|e| internal(format!("folding the conversation {thread_id} of {name}: {e:#}")))?;
+    let mut rows = read::thread_messages(&store, &name, &thread_id).map_err(|e| {
+        internal(format!(
+            "folding the conversation {thread_id} of {name}: {e:#}"
+        ))
+    })?;
     // The addressed message is always in its own conversation. The fold reads
     // the `thread_id` column, so a row ingest left `NULL` there matches
     // nothing and would answer an empty array, which is the different claim
@@ -1937,12 +1944,20 @@ mod tests {
         for (index, date) in dates.iter().enumerate() {
             let odd = index % 2 == 1;
             let email = FetchedEmail {
-                from: if index == 6 { String::new() } else { format!("Sender {index} <s{index}@example.com>") },
+                from: if index == 6 {
+                    String::new()
+                } else {
+                    format!("Sender {index} <s{index}@example.com>")
+                },
                 to: "me@example.com".into(),
                 cc: odd.then(|| "cc@example.com".to_string()),
                 reply_to: (index % 3 == 0).then(|| "reply@example.com".to_string()),
                 bcc: (index == 4).then(|| "hidden@example.com".to_string()),
-                subject: if index == 5 { String::new() } else { format!("subject {index}") },
+                subject: if index == 5 {
+                    String::new()
+                } else {
+                    format!("subject {index}")
+                },
                 date: (*date).into(),
                 body_text: format!("body {index}"),
                 html_body: None,
@@ -2021,8 +2036,7 @@ mod tests {
     fn message_list_unbounded_bench() {
         use std::time::Instant;
 
-        let Some(root) = std::env::var_os("MP_BENCH_FIXTURE").map(std::path::PathBuf::from)
-        else {
+        let Some(root) = std::env::var_os("MP_BENCH_FIXTURE").map(std::path::PathBuf::from) else {
             eprintln!("MP_BENCH_FIXTURE is unset; nothing to measure");
             return;
         };
@@ -2079,8 +2093,7 @@ mod tests {
         // no JSON at all, and the rows serialised straight to bytes, which is
         // the floor an answer that skipped the `Value` tree would reach.
         let store = Store::open(&path).expect("store");
-        let (dated, _) =
-            read::list_mailbox_dated(&store, "alpha", &resolved, None).expect("rows");
+        let (dated, _) = read::list_mailbox_dated(&store, "alpha", &resolved, None).expect("rows");
         let wire_only = sample(|| {
             for (row, stamped) in &dated {
                 std::hint::black_box(WireRow::new("alpha", row, wire_date_sort(row, *stamped)));
@@ -2107,13 +2120,37 @@ mod tests {
         });
 
         let show = |(median, min, max): (f64, f64, f64)| format!("{median:.1} {min:.1} {max:.1}");
-        eprintln!("rows {rows}, frame {bytes} bytes, cap {}", mp_protocol::MAX_RESPONSE_BYTES);
-        eprintln!("store read (list_mailbox)   ms median min max: {}", show(read_only));
-        eprintln!("legacy json! rows (before)  ms median min max: {}", show(legacy));
-        eprintln!("message.list (read + rows)  ms median min max: {}", show(method));
-        eprintln!("  WireRow::new only (ref)    ms median min max: {}", show(wire_only));
-        eprintln!("  rows straight to bytes(ref) ms median min max: {}", show(to_bytes));
-        eprintln!("frame::encode of the reply  ms median min max: {}", show(encode));
-        eprintln!("encode + client-side parse  ms median min max: {}", show(decode));
+        eprintln!(
+            "rows {rows}, frame {bytes} bytes, cap {}",
+            mp_protocol::MAX_RESPONSE_BYTES
+        );
+        eprintln!(
+            "store read (list_mailbox)   ms median min max: {}",
+            show(read_only)
+        );
+        eprintln!(
+            "legacy json! rows (before)  ms median min max: {}",
+            show(legacy)
+        );
+        eprintln!(
+            "message.list (read + rows)  ms median min max: {}",
+            show(method)
+        );
+        eprintln!(
+            "  WireRow::new only (ref)    ms median min max: {}",
+            show(wire_only)
+        );
+        eprintln!(
+            "  rows straight to bytes(ref) ms median min max: {}",
+            show(to_bytes)
+        );
+        eprintln!(
+            "frame::encode of the reply  ms median min max: {}",
+            show(encode)
+        );
+        eprintln!(
+            "encode + client-side parse  ms median min max: {}",
+            show(decode)
+        );
     }
 }

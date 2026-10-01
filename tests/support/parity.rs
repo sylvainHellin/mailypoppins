@@ -565,10 +565,13 @@ pub fn process_is_alive(pid: u32) -> bool {
 /// `[email]`: call this only on a `config.toml` that does not carry one yet.
 pub fn pin_font_size(root: &Path) {
     let path = root.join("config.toml");
-    let existing = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    fs::write(&path, format!("[email]\nfont_size = \"16px\"\n\n{existing}"))
-        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    let existing =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    fs::write(
+        &path,
+        format!("[email]\nfont_size = \"16px\"\n\n{existing}"),
+    )
+    .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
 /// Run the pre-daemon binary against `tmp` and collect its output.

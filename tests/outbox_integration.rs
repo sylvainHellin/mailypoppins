@@ -480,10 +480,17 @@ fn retrying_a_failed_row_re_arms_it_as_never_attempted() {
 
     let row = outbox::load(&store, id).unwrap().unwrap();
     assert_eq!(row.state, OutboxState::PendingSend);
-    assert_eq!(row.submission_started_at, None, "the marker must be cleared");
+    assert_eq!(
+        row.submission_started_at, None,
+        "the marker must be cleared"
+    );
     assert_eq!(row.last_error, None);
     let sweep = outbox::sweep_pending_sends(&store, ACCOUNT).unwrap();
-    assert_eq!(sweep.resubmittable.len(), 1, "the next resume submits it once");
+    assert_eq!(
+        sweep.resubmittable.len(),
+        1,
+        "the next resume submits it once"
+    );
 
     // Only from `failed`: a row that is mid-flight cannot be re-armed under the
     // send path's feet.
@@ -544,7 +551,11 @@ async fn a_crash_between_smtp_and_append_completes_the_append_on_resume() {
 
     assert_eq!(drained.completed, 1);
     assert_eq!(state_of(&account, id), OutboxState::Done);
-    assert_eq!(sent.copies(mid), 1, "the Sent mailbox holds exactly one copy");
+    assert_eq!(
+        sent.copies(mid),
+        1,
+        "the Sent mailbox holds exactly one copy"
+    );
 
     // The sent message is in the local store too, so Sent shows it without
     // waiting for the next sync.
@@ -635,7 +646,11 @@ async fn the_appended_uid_is_stored_on_the_row() {
 
     let row = outbox::load(&store, id).unwrap().unwrap();
     assert_eq!(row.state, OutboxState::Done);
-    assert_eq!(row.appended_uid, Some(100), "APPENDUID must land on the row");
+    assert_eq!(
+        row.appended_uid,
+        Some(100),
+        "APPENDUID must land on the row"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -751,8 +766,9 @@ async fn a_drain_killed_mid_append_leaves_the_row_reclaimable_and_deduped() {
     let now = outbox::unix_now() + 5;
 
     {
-        let mut drain =
-            Box::pin(outbox::drain_guarded_at(&lock, &store, &blobs, ACCOUNT, &mut dying, now));
+        let mut drain = Box::pin(outbox::drain_guarded_at(
+            &lock, &store, &blobs, ACCOUNT, &mut dying, now,
+        ));
         tokio::select! {
             _ = &mut drain => panic!("the drain should still be inside its APPEND"),
             _ = started.notified() => {}
@@ -787,7 +803,10 @@ async fn a_drain_killed_mid_append_leaves_the_row_reclaimable_and_deduped() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reclaimed.deduped, 1, "the reclaim must look before it appends");
+    assert_eq!(
+        reclaimed.deduped, 1,
+        "the reclaim must look before it appends"
+    );
     assert_eq!(ledger.searches(), 1);
     assert_eq!(ledger.appends(), 1);
     assert_eq!(ledger.copies(mid), 1, "exactly one copy in Sent");
@@ -888,7 +907,10 @@ fn a_clean_pre_submission_failure_stays_submittable_and_backs_off() {
     assert_eq!(row.attempts, 1);
     assert!(outbox::backoff_secs(row.attempts) > 0);
     assert_eq!(
-        outbox::sweep_pending_sends(&store, ACCOUNT).unwrap().resubmittable.len(),
+        outbox::sweep_pending_sends(&store, ACCOUNT)
+            .unwrap()
+            .resubmittable
+            .len(),
         1
     );
 }
@@ -1079,7 +1101,11 @@ fn a_row_with_no_target_mailbox_completes_on_the_250() {
 #[test]
 fn save_to_sent_auto_skips_the_accounts_whose_server_saves() {
     // Gmail, Graph and Proton file their own copy.
-    for host in ["imap.gmail.com", "smtp.googlemail.com", "127.0.0.1.protonmail"] {
+    for host in [
+        "imap.gmail.com",
+        "smtp.googlemail.com",
+        "127.0.0.1.protonmail",
+    ] {
         let account = imap_account(host);
         assert!(server_saves_to_sent(&account), "{host} should be detected");
         assert!(!appends_to_sent(&account), "{host} must not be appended to");
@@ -1099,7 +1125,10 @@ fn save_to_sent_auto_skips_the_accounts_whose_server_saves() {
 fn save_to_sent_overrides_win_over_the_detection() {
     let mut gmail = imap_account("imap.gmail.com");
     gmail.save_to_sent = SaveToSent::Always;
-    assert!(appends_to_sent(&gmail), "always must override the detection");
+    assert!(
+        appends_to_sent(&gmail),
+        "always must override the detection"
+    );
 
     let mut generic = imap_account("mail.example.com");
     generic.save_to_sent = SaveToSent::Never;
@@ -1167,7 +1196,11 @@ async fn a_rejected_recipient_is_named_on_the_row_and_survives_a_restart() {
         &store,
         &blobs,
         id,
-        &one_of_two("bob@example.com", "blind@example.com", "550 no such mailbox"),
+        &one_of_two(
+            "bob@example.com",
+            "blind@example.com",
+            "550 no such mailbox",
+        ),
     )
     .unwrap();
 
@@ -1484,8 +1517,13 @@ fn a_second_submission_of_the_same_draft_is_refused_while_the_first_is_open() {
     // Once the first row is out of the outbox's hands, a deliberate re-send is
     // the user's business again.
     let (store, blobs) = account.open();
-    outbox::record_submission(&store, &blobs, first, &SubmitOutcome::Ambiguous("lost".into()))
-        .unwrap();
+    outbox::record_submission(
+        &store,
+        &blobs,
+        first,
+        &SubmitOutcome::Ambiguous("lost".into()),
+    )
+    .unwrap();
     enqueue_draft(&account, "<third-build@example.com>", "id:note-1")
         .expect("a failed row is a human's problem, not a lock");
 }
@@ -1515,8 +1553,8 @@ fn active_submission_for_draft_finds_the_pending_row_and_only_it() {
     let id = enqueue_draft(&account, "<queued@example.com>", "id:note-1").unwrap();
     let (store, _) = account.open();
 
-    let held = outbox::active_submission_for_draft(&store, ACCOUNT, &["id:note-1".to_string()])
-        .unwrap();
+    let held =
+        outbox::active_submission_for_draft(&store, ACCOUNT, &["id:note-1".to_string()]).unwrap();
     assert_eq!(held, Some((id, OutboxState::PendingSend)));
 
     // A different draft is not held by this row.

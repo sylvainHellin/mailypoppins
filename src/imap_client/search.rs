@@ -48,7 +48,10 @@ pub(crate) fn message_id_search_term(message_id: &str) -> String {
 /// `$filter` is rejected. Comparison ignores ASCII case because servers are not
 /// consistent about the domain part; it is still equality, never a substring.
 /// A no-op when no Message-ID was requested.
-pub fn retain_exact_message_id(emails: &mut Vec<crate::parse::FetchedEmail>, criteria: &FetchCriteria) {
+pub fn retain_exact_message_id(
+    emails: &mut Vec<crate::parse::FetchedEmail>,
+    criteria: &FetchCriteria,
+) {
     let Some(ref wanted) = criteria.message_id else {
         return;
     };
@@ -114,11 +117,6 @@ pub(crate) fn build_imap_search_query(criteria: &FetchCriteria) -> String {
 mod tests {
     use super::*;
 
-
-
-
-
-
     #[test]
     fn test_build_imap_search_query_empty() {
         let criteria = FetchCriteria {
@@ -148,10 +146,7 @@ mod tests {
             subject: Some("invoice".to_string()),
             ..Default::default()
         };
-        assert_eq!(
-            build_imap_search_query(&criteria),
-            "SUBJECT \"invoice\""
-        );
+        assert_eq!(build_imap_search_query(&criteria), "SUBJECT \"invoice\"");
     }
 
     #[test]
@@ -194,7 +189,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn a_search_term_escapes_the_two_characters_a_quoted_string_has() {
         assert_eq!(
@@ -216,7 +210,6 @@ mod tests {
             "HEADER Message-ID \"<a\\\\\\\"b@x>\""
         );
     }
-
 
     #[test]
     fn test_build_imap_search_query_message_id_always_bracketed() {
@@ -275,10 +268,7 @@ mod tests {
         retain_exact_message_id(&mut emails, &criteria);
 
         assert_eq!(emails.len(), 1);
-        assert_eq!(
-            emails[0].message_id,
-            Some("<abc@example.com>".to_string())
-        );
+        assert_eq!(emails[0].message_id, Some("<abc@example.com>".to_string()));
     }
 
     #[test]

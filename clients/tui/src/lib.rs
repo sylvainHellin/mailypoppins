@@ -1,5 +1,5 @@
-pub mod app;
 pub mod actions;
+pub mod app;
 pub mod bg;
 pub mod commands;
 #[cfg(test)]
@@ -162,12 +162,11 @@ fn run_loop(
             // the opens overlap, none of them gates the paint, and the account
             // reports `AccountOpened` when its counts land.
             let counts = match &queries {
-                Some(queries) => {
-                    queries::mailbox_counts(queries, &account_name, &mailboxes).unwrap_or_else(|e| {
+                Some(queries) => queries::mailbox_counts(queries, &account_name, &mailboxes)
+                    .unwrap_or_else(|e| {
                         log::warn!("[queries] counting the mailboxes of {account_name}: {e:#}");
                         vec![0; mailboxes.len()]
-                    })
-                }
+                    }),
                 None => {
                     log::warn!(
                         "[queries] no daemon session: the counts of {account_name} stay zero"

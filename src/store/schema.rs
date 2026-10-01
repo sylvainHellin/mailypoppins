@@ -8,9 +8,9 @@
 //! `outbox`, is carried across that rebuild rather than recreated from a
 //! server that never had it; [`super::rebuild`] owns that half.
 
+use crate::parse::CALENDAR_SIDECAR_NAME;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use crate::parse::CALENDAR_SIDECAR_NAME;
 
 /// Version stamped into `meta.schema_version`. Bump this whenever any
 /// statement in [`SCHEMA_SQL`] changes; every existing store is then dropped

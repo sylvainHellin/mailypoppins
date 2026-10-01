@@ -177,9 +177,9 @@ impl Theme {
     ///   the `DarkGray` surface on both light and dark terminals.
     pub const fn terminal() -> Self {
         Self {
-            bg: Color::Reset,             // terminal default background
-            surface: Color::DarkGray,     // must contrast with bg (cursor row)
-            text: Color::Reset,           // terminal default foreground
+            bg: Color::Reset,         // terminal default background
+            surface: Color::DarkGray, // must contrast with bg (cursor row)
+            text: Color::Reset,       // terminal default foreground
             text_muted: Color::Gray,
             text_faint: Color::Gray, // stays legible on the DarkGray status bar
             border: Color::Blue,
@@ -321,10 +321,26 @@ mod tests {
         assert_eq!(t.success, Color::Green);
         // No RGB anywhere: the whole palette follows the terminal.
         for slot in [
-            t.bg, t.surface, t.text, t.text_muted, t.text_faint, t.border,
-            t.border_focused, t.panel_bg, t.selection, t.unread, t.unread_count,
-            t.accent, t.accent_alt, t.heading, t.emphasis, t.code, t.success,
-            t.warning, t.error, t.info,
+            t.bg,
+            t.surface,
+            t.text,
+            t.text_muted,
+            t.text_faint,
+            t.border,
+            t.border_focused,
+            t.panel_bg,
+            t.selection,
+            t.unread,
+            t.unread_count,
+            t.accent,
+            t.accent_alt,
+            t.heading,
+            t.emphasis,
+            t.code,
+            t.success,
+            t.warning,
+            t.error,
+            t.info,
         ] {
             assert!(
                 !matches!(slot, Color::Rgb(..) | Color::Indexed(_)),

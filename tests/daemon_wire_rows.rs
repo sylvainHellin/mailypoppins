@@ -67,15 +67,15 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use mp_client::{ClientInfo, ClientKind, Connection, Identity};
-use mp_protocol::listing::{MessageListRow, MessageListing};
 use mp_protocol::draft::DraftListing;
+use mp_protocol::listing::{MessageListRow, MessageListing};
 
 use mailypoppins::selector::Selector;
 use mailypoppins::store::read;
 use mailypoppins::tui::app::resolve_date;
 
-use support::parity::{socket_path, DaemonFixture};
 use support::draft_fixture;
+use support::parity::{socket_path, DaemonFixture};
 use support::read_fixture as fixture;
 
 const DEADLINE: Duration = Duration::from_secs(20);
@@ -133,8 +133,8 @@ impl Slice {
     fn drafts() -> Slice {
         let tmp = TempDir::new().expect("a temporary wire-row root");
         draft_fixture::seed(tmp.path());
-        let path = draft_fixture::drafts_dir(tmp.path(), draft_fixture::ACCOUNT)
-            .join("mit-kopie.md");
+        let path =
+            draft_fixture::drafts_dir(tmp.path(), draft_fixture::ACCOUNT).join("mit-kopie.md");
         std::fs::write(
             &path,
             "---\n\
@@ -240,7 +240,10 @@ async fn every_listed_row_carries_the_selector_the_cli_would_print() {
         keys.sort_unstable();
         let mut want = ROW_FIELDS.to_vec();
         want.sort_unstable();
-        assert_eq!(keys, want, "messages[{index}] carries the documented fields");
+        assert_eq!(
+            keys, want,
+            "messages[{index}] carries the documented fields"
+        );
     }
 
     let listing: MessageListing =

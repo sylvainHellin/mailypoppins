@@ -51,7 +51,11 @@ impl BlobHash {
     /// Parse a stored hash (a `body_blob` / `raw_blob` column, a CLI argument).
     /// Rejects anything that is not 64 lowercase hex characters.
     pub fn parse(s: &str) -> Result<Self> {
-        if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if s.len() != 64
+            || !s
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             return Err(anyhow!(
                 "'{s}' is not a blob hash (expected 64 lowercase hex characters)"
             ));
@@ -159,9 +163,8 @@ impl BlobStore {
             file.sync_all()
                 .with_context(|| format!("syncing blob temp file {}", tmp.display()))?;
             drop(file);
-            fs::rename(&tmp, &final_path).with_context(|| {
-                format!("renaming {} to {}", tmp.display(), final_path.display())
-            })
+            fs::rename(&tmp, &final_path)
+                .with_context(|| format!("renaming {} to {}", tmp.display(), final_path.display()))
         })();
         if write_result.is_err() {
             let _ = fs::remove_file(&tmp);
@@ -181,8 +184,7 @@ impl BlobStore {
     /// truth).
     pub fn read(&self, hash: &BlobHash) -> Result<Vec<u8>> {
         let path = self.path_for(hash);
-        let bytes =
-            fs::read(&path).with_context(|| format!("reading blob {}", path.display()))?;
+        let bytes = fs::read(&path).with_context(|| format!("reading blob {}", path.display()))?;
         let actual = BlobHash::of(&bytes);
         if actual != *hash {
             return Err(anyhow!(
@@ -330,7 +332,13 @@ mod tests {
 
     #[test]
     fn hash_parsing_rejects_non_hashes() {
-        for bad in ["", "../../etc/passwd", "ZZ", &"a".repeat(63), &"A".repeat(64)] {
+        for bad in [
+            "",
+            "../../etc/passwd",
+            "ZZ",
+            &"a".repeat(63),
+            &"A".repeat(64),
+        ] {
             assert!(
                 BlobHash::parse(bad).is_err(),
                 "{bad:?} should not parse as a blob hash"
@@ -360,7 +368,11 @@ mod tests {
 
         let second = blobs.write(b"the same bytes").unwrap();
         assert_eq!(first, second, "identical bytes must hash the same");
-        assert_eq!(count_blob_files(blobs.root()), 1, "dedup wrote a second file");
+        assert_eq!(
+            count_blob_files(blobs.root()),
+            1,
+            "dedup wrote a second file"
+        );
         assert_eq!(
             fs::metadata(&path).unwrap().modified().unwrap(),
             mtime,
@@ -414,7 +426,10 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(format!(".{hash}.tmp.4242.0")), &bytes[..4]).unwrap();
 
-        assert!(!blobs.contains(&hash), "a partial write must not be visible");
+        assert!(
+            !blobs.contains(&hash),
+            "a partial write must not be visible"
+        );
         assert!(blobs.read(&hash).is_err());
 
         // The retry completes normally and the blob reads back whole.
@@ -429,7 +444,11 @@ mod tests {
         let bytes = b"shared attachment";
         let hash = blobs.write(bytes).unwrap();
 
-        assert_eq!(refcount(conn, &hash).unwrap(), 0, "write takes no reference");
+        assert_eq!(
+            refcount(conn, &hash).unwrap(),
+            0,
+            "write takes no reference"
+        );
 
         assert_eq!(blobs.acquire(conn, &hash, bytes.len() as u64).unwrap(), 1);
         assert_eq!(blobs.acquire(conn, &hash, bytes.len() as u64).unwrap(), 2);
@@ -444,7 +463,11 @@ mod tests {
         assert_eq!(blobs.release(conn, &hash).unwrap(), 0);
         assert!(!blobs.contains(&hash), "the last release must unlink");
         assert_eq!(refcount(conn, &hash).unwrap(), 0);
-        assert_eq!(size(conn, &hash).unwrap(), None, "the row goes with the file");
+        assert_eq!(
+            size(conn, &hash).unwrap(),
+            None,
+            "the row goes with the file"
+        );
     }
 
     #[test]

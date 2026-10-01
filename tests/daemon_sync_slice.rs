@@ -1512,10 +1512,17 @@ fn the_subcommand_helps_keep_the_pre_daemon_flag_set() {
         let routed = slice.routed(&[command, "--help"]);
         let direct = slice.oracle(&[command, "--help"]);
         assert_eq!(routed.status.code(), Some(0), "`mp {command} --help`");
-        assert_eq!(direct.status.code(), Some(0), "oracle `mp {command} --help`");
+        assert_eq!(
+            direct.status.code(),
+            Some(0),
+            "oracle `mp {command} --help`"
+        );
         let ours = flags(&stdout(&routed));
         let theirs = flags(&stdout(&direct));
-        assert!(theirs.len() > 2, "the oracle's `mp {command} --help` lists its flags");
+        assert!(
+            theirs.len() > 2,
+            "the oracle's `mp {command} --help` lists its flags"
+        );
         let missing: Vec<&String> = theirs.difference(&ours).collect();
         assert!(
             missing.is_empty(),
@@ -1556,7 +1563,11 @@ fn mp_list_mailboxes_json_refuses_with_a_clean_stdout() {
     for account in [fixture::ACCOUNT, fixture::SERVER_ACCOUNT] {
         let out = slice.routed(&["list-mailboxes", "--json", "-A", account]);
         assert_refused(&out, &fixture::secret_refusal(account));
-        assert!(stdout(&out).is_empty(), "printed a listing it never got:\n{}", stdout(&out));
+        assert!(
+            stdout(&out).is_empty(),
+            "printed a listing it never got:\n{}",
+            stdout(&out)
+        );
     }
 }
 

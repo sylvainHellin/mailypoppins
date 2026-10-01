@@ -96,7 +96,11 @@ impl SyncHealth {
     /// truncates the reason away, which is the only part that says what to do.
     pub fn failure_lines(&self) -> Option<(String, String)> {
         match self {
-            Self::Failed { reason, at, consecutive } => {
+            Self::Failed {
+                reason,
+                at,
+                consecutive,
+            } => {
                 let time = at.format("%H:%M");
                 let repeat = if *consecutive > 1 {
                     format!(" x{consecutive}")
@@ -200,7 +204,8 @@ mod tests {
 
     #[test]
     fn a_first_failure_records_the_reason_the_time_and_one_occurrence() {
-        let health = SyncHealth::default().updated(Err("IMAP login failed: no such user"), at(15, 42));
+        let health =
+            SyncHealth::default().updated(Err("IMAP login failed: no such user"), at(15, 42));
         assert_eq!(
             health,
             SyncHealth::Failed {
@@ -243,7 +248,8 @@ mod tests {
 
     #[test]
     fn the_failure_lines_carry_the_time_and_the_reason() {
-        let health = SyncHealth::default().updated(Err("IMAP login failed: no such user"), at(15, 42));
+        let health =
+            SyncHealth::default().updated(Err("IMAP login failed: no such user"), at(15, 42));
         assert_eq!(
             health.failure_lines().unwrap(),
             (
@@ -256,7 +262,10 @@ mod tests {
     #[test]
     fn the_failure_headline_shows_the_repeat_count_only_once_it_is_above_one() {
         let mut health = SyncHealth::default().updated(Err("nope"), at(15, 42));
-        assert_eq!(health.failure_lines().unwrap().0, "\u{26a0} sync failed 15:42");
+        assert_eq!(
+            health.failure_lines().unwrap().0,
+            "\u{26a0} sync failed 15:42"
+        );
         health = health.updated(Err("nope"), at(15, 43));
         assert_eq!(
             health.failure_lines().unwrap().0,

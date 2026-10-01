@@ -851,7 +851,10 @@ fn restart_yields_a_new_instance_id() {
     // Each command says what it did: a start its one line, a restart the
     // stop's line and then the start's, so a restart that worked reads as one.
     let lines = |out: &std::process::Output| -> Vec<String> {
-        String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect()
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
     };
     assert_eq!(
         lines(&start),
