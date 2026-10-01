@@ -44,6 +44,11 @@ pub struct DraftCreated {
     pub path: String,
     /// The message it answers, absent for a draft made from nothing.
     pub source: Option<DraftSource>,
+    /// The `subject:` the file was written with (#0131): the builder's
+    /// `Re:` or `Fwd:` subject, the override `headers` gave, or `""` for a
+    /// skeleton. Defaulted, so an answer from an older daemon still decodes.
+    #[serde(default)]
+    pub subject: String,
 }
 
 /// One row of `draft.list`, which is the index projection `mp list` prints.
@@ -352,6 +357,7 @@ mod tests {
             created.source, None,
             "a message the store does not hold has no id and no selector to answer with"
         );
+        assert_eq!(created.subject, "Re: Angebot", "the subject the file was written with");
     }
 
     /// A message with no `Message-ID` and no Cc decodes, which is the hit a

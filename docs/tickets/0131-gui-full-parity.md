@@ -148,7 +148,7 @@ Open for M4 and for Sylvain:
 - `draft.reply` and `draft.forward` take no signature arguments, so a reply or a forward gets no signature choice: they always took `signature` and `no_signature`, and the forward wizard passes its choice now ("Daemon gaps closed").
 - `draft.create` takes no body, so the wizard cannot write one: it takes `body` and `headers` now, and the wizard has the TUI's inline body ("Daemon gaps closed").
 - `DraftEntry` has no `bcc`, so the recipients dialog reads the draft through `draft_preview`: it has one now, and `ce` fills its dialog from the listed row ("Daemon gaps closed").
-- `DraftCreated` has no `subject`.
+- `DraftCreated` has no `subject`: it has one now ("Daemon gaps closed").
 - `mp_client` drops a refusal's `data`, so the layer rebuilds the `draft.invalid` payload from the listing's skipped file.
 - The daemon's `SendOutcome.message_id` is empty.
 - The daemon serves no `signature.list`, so `signature_list` reads the signatures directory itself.
@@ -276,6 +276,7 @@ The daemon and Rust-layer gaps M3 and M4 worked around client-side, closed on th
 - Signatures for a reply and a forward: `draft.reply` and `draft.forward` always took `signature` and `no_signature`, which `tests/daemon_gui_gaps.rs` now pins; `draft_reply` and `draft_forward` pass them, and the forward wizard has the new-draft wizard's Signature select.
 - A body on `draft.create`: it takes `body` and `headers`, so the new-draft wizard's draft is written whole by the daemon, the client-side recipients rewrite is gone, and the wizard has the TUI's inline Body, which skips the editor when filled.
 - `bcc` on `DraftEntry`: a `draft.list` row carries the file's `bcc:`, and `ce` fills the recipients dialog from the listed row instead of a `draft_preview` read.
+- `subject` on `DraftCreated`: every writer answers the subject the file was written with; the desktop had no workaround for it, and decodes it with the rest.
 
 ## Exit gate
 

@@ -2822,6 +2822,10 @@ mod tests {
             .as_deref()
             .is_some_and(|v| v.contains("quarterly-ledger-review-1001@fixture.example")));
         assert_eq!(draft.frontmatter.subject, "Re: Quarterly ledger review");
+        assert_eq!(
+            created.subject, draft.frontmatter.subject,
+            "the answer names the subject"
+        );
         assert_eq!(draft.frontmatter.to.as_deref(), Some("ivana@example.com"));
         assert!(draft.body_markdown.contains("quarterly ledger is attached"));
         assert!(

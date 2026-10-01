@@ -1623,6 +1623,9 @@ impl State {
             selector: Selector::for_draft(account, id).to_string(),
             path: path.display().to_string(),
             source,
+            subject: mp_core::draft::parse_email_draft(path)
+                .map(|draft| draft.frontmatter.subject)
+                .unwrap_or_default(),
         };
         Ok((serde_json::to_value(answer)?, self.watch_events(path)))
     }

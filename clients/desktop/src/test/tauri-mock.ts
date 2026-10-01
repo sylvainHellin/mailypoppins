@@ -877,7 +877,7 @@ function writeDraft(
   draftsOf(account).drafts.unshift(entry);
   mock.draftExtra[`${account}/${id}`] = { body: fields.body ?? "" };
   draftChanged(account, entry);
-  return { account, id, selector: entry.selector, path, source };
+  return { account, id, selector: entry.selector, path, source, subject: fields.subject };
 }
 
 function findDraft(method: string, account: string, id: string): DraftEntry {

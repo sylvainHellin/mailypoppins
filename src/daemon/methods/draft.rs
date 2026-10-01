@@ -698,7 +698,8 @@ fn recipient_headers(params: &Value) -> Result<Option<DraftRecipientEdit>, RpcEr
     }))
 }
 
-/// The answer of the three methods that write a new draft.
+/// The answer of the four methods that write a new draft, with the subject
+/// read back from the file so it is the one written, override included.
 fn created(
     account: &str,
     id: &str,
@@ -713,6 +714,9 @@ fn created(
             selector: Selector::for_draft(account, id).to_string(),
             path: path.display().to_string(),
             source,
+            subject: crate::draft::parse_email_draft(path)
+                .map(|draft| draft.frontmatter.subject)
+                .unwrap_or_default(),
         },
     )
 }

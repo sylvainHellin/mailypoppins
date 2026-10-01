@@ -277,3 +277,45 @@ async fn a_listed_draft_carries_its_bcc() {
         "the seeded draft has an empty bcc:"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 4. The subject on DraftCreated
+// ---------------------------------------------------------------------------
+
+/// Every writer answers the subject the file was written with: the builder's
+/// `Re:` for a reply, the override for a forward with `headers`, and `""`
+/// for a bare skeleton.
+#[tokio::test]
+async fn a_created_draft_names_the_subject_it_was_written_with() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let source = json!({"selector": support::read_fixture::BERICHT});
+
+    let reply = created(
+        &mut conn,
+        "draft.reply",
+        json!({"account": fixture::ACCOUNT, "source": source}),
+    )
+    .await;
+    assert_eq!(reply.subject, "Re: Bericht über Anträge");
+
+    let forward = created(
+        &mut conn,
+        "draft.forward",
+        json!({
+            "account": fixture::ACCOUNT,
+            "source": source,
+            "headers": {"to": "x@example.com", "cc": "", "bcc": "", "subject": "Zur Info"},
+        }),
+    )
+    .await;
+    assert_eq!(forward.subject, "Zur Info");
+
+    let bare = created(
+        &mut conn,
+        "draft.create",
+        json!({"account": fixture::ACCOUNT, "name": "ohne"}),
+    )
+    .await;
+    assert_eq!(bare.subject, "");
+}
