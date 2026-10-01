@@ -2430,3 +2430,10 @@ cmdk 1.1 updates the store's `selectedItemId`, which its `Command.List` and `Com
 A controlled `value` prop sets the selected row (`aria-selected` follows) but leaves `selectedItemId` behind, and cmdk overwrites any `id` passed to a list or an item with its own `useId`.
 A field outside the `Command` that drives the selection itself (`clients/desktop/src/components/compose/RecipientsInput.tsx`) reads the list's id and the `[cmdk-item][aria-selected="true"]` row's id from the DOM through a `MutationObserver` and sets them on the input.
 A click on a row would also blur that field, since cmdk's root is focusable (`tabIndex=-1`): the panel prevents `mousedown`.
+
+## A refusal's `data` survives the session only as `mp_client::session::Refused`
+
+`mp_client::session` used to flatten every daemon refusal into its text before the answer crossed the call channel, so a `-32010` `draft_invalid` reached the desktop without the `draft.invalid` payload the daemon had put in `data`, and the Tauri layer rebuilt it from a `draft.list` read (#0131).
+A blocking call's error now wraps `mp_client::session::Refused`, whose `Display` is the old text byte for byte, so `GuiError::from_call` and every `rpc_code` read stay as they were; `mp_client::session::refusal(&error)` reads the typed `RpcError` back.
+A fake that should look like the daemon (the desktop fixture's `refused`) has to build that same type: an `anyhow!` with the right text classifies correctly and still carries no `data`.
+A command that wants the payload reads it before turning the error into a `GuiError`, which keeps only the text.
