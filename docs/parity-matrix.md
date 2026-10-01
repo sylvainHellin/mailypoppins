@@ -169,9 +169,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the `{{SIGNATURE}}` marker handling in `src/send.rs:185-268`, the file and default lookup in `src/signatures.rs`
 - Daemon surface: `draft.create`, `draft.reply`, `draft.forward`, and `draft.set_recipients` all re-splice
-- GUI location: clients/desktop: `draft_create` passes the wizard's `signature` or `no_signature`, and the daemon splices it into the new draft (M3, #0131)
-- Validation: `tests/draft_integration.rs`, plus the marker assertions in `clients/tui/src/actions.rs` unit tests; `clients/desktop/src-tauri/src/commands.rs` (`validate_preview_and_signatures_answer_from_the_files`)
-- Status: GUI shipped (M3, #0131) for a new draft; the desktop's `ce` rewrites the recipients and never re-splices, since its recipients dialog has no signature select, where the TUI's re-splices a changed signature
+- GUI location: clients/desktop: `draft_create` and `draft_forward` pass the new-draft and forward wizards' `signature` or `no_signature`, and the daemon splices it into the draft; a reply carries the account's default (M3, #0131)
+- Validation: `tests/draft_integration.rs`, `tests/daemon_gui_gaps.rs` (`a_reply_and_a_forward_carry_the_signature_they_name_or_none`), plus the marker assertions in `clients/tui/src/actions.rs` unit tests; `clients/desktop/src-tauri/src/commands.rs` (`validate_preview_and_signatures_answer_from_the_files`, `a_reply_and_a_forward_carry_the_signature_chosen_or_none`), `clients/desktop/src/components/compose/compose.test.tsx` (`the forward wizard picks a signature too, and none forwards without one`)
+- Status: GUI shipped (M3, #0131) for a new draft and a forward; the desktop's `ce` rewrites the recipients and never re-splices, since its recipients dialog has no signature select, where the TUI's re-splices a changed signature
 - Note: editing recipients re-splices the block, which is what makes this its own capability.
 
 ### ACC-12 Multi-account operation
@@ -685,7 +685,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the compose wizard variants in `clients/tui/src/app/types.rs`, `clients/tui/src/ui/compose.rs`
 - Daemon surface: `draft.create`, `draft.forward` with `headers`, `signature.list`; the wizard itself is client-side
-- GUI location: clients/desktop: `ComposeWizard`, a dialog opened by `cn` ("New draft") and `cf` ("Forward"), with To, Cc, Bcc and Subject, a Signature select for a new draft, Enter to the next field, Cmd+Enter or Ctrl+Enter to submit and Escape to cancel; it needs one recipient, as the TUI's does (M3, #0131; shell.md, "The wizard")
+- GUI location: clients/desktop: `ComposeWizard`, a dialog opened by `cn` ("New draft") and `cf` ("Forward"), with To, Cc, Bcc and Subject, a Signature select, Enter to the next field, Cmd+Enter or Ctrl+Enter to submit and Escape to cancel; it needs one recipient, as the TUI's does (M3, #0131; shell.md, "The wizard")
 - Validation: TUI golden frames; `clients/desktop/src/components/compose/compose.test.tsx` (`has the TUI's fields, the default signature preselected, and a none option`, `Enter moves to the next field, and Cmd+Enter creates the draft and opens it in the editor`, `refuses a draft with no recipient, as the TUI does, and stays open`, `Escape cancels and writes nothing`), `clients/desktop/src/components/shell/a11y.test.tsx` (`names the new-draft wizard, starts it in To, and keeps Tab inside it`)
 - Status: routed (P5-U6) for its forward mode; GUI shipped (M3, #0131) without the inline body, since `draft.create` takes none and the body is written in the editor
 - Note: an inline body field, a signature picker, and a submit chord; the overlay-internal keys go into `docs/baselines/pre-daemon/manual-keys.md`, the P0-U2 inventory (`ANO-2`).

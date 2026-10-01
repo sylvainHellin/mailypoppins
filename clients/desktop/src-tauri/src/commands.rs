@@ -1090,12 +1090,7 @@ pub fn draft_create_on(
     headers: Option<&DraftHeaders>,
 ) -> Result<DraftCreated, GuiError> {
     let mut params = json!({"account": account, "name": name});
-    if let Some(signature) = signature {
-        params["signature"] = json!(signature);
-    }
-    if no_signature {
-        params["no_signature"] = json!(true);
-    }
+    with_signature(&mut params, signature, no_signature);
     let answer = call(
         door,
         "draft.create",
@@ -1110,7 +1105,20 @@ pub fn draft_create_on(
     Ok(created)
 }
 
+/// The signature a written draft carries: the one named, none with
+/// `no_signature`, and the account's default when neither is given, which the
+/// daemon resolves.
+fn with_signature(params: &mut Value, signature: Option<&str>, no_signature: bool) {
+    if let Some(signature) = signature {
+        params["signature"] = json!(signature);
+    }
+    if no_signature {
+        params["no_signature"] = json!(true);
+    }
+}
+
 /// `draft.reply` or `draft.forward` of the stored message `row_id`.
+#[allow(clippy::too_many_arguments)]
 fn draft_from_row_on(
     door: &Door,
     method: &str,
@@ -1118,6 +1126,8 @@ fn draft_from_row_on(
     row_id: i64,
     all: Option<bool>,
     headers: Option<&DraftHeaders>,
+    signature: Option<&str>,
+    no_signature: bool,
 ) -> Result<DraftCreated, GuiError> {
     let mut params = json!({"account": account, "source": {"row_id": row_id}});
     if let Some(all) = all {
@@ -1126,6 +1136,7 @@ fn draft_from_row_on(
     if let Some(headers) = headers {
         params["headers"] = headers.wire();
     }
+    with_signature(&mut params, signature, no_signature);
     let answer = call(door, method, params, DRAFT_BUDGET, Addressing::Resource)?;
     decode(method, answer)
 }
@@ -1137,8 +1148,19 @@ pub fn draft_reply_on(
     row_id: i64,
     all: bool,
     headers: Option<&DraftHeaders>,
+    signature: Option<&str>,
+    no_signature: bool,
 ) -> Result<DraftCreated, GuiError> {
-    draft_from_row_on(door, "draft.reply", account, row_id, Some(all), headers)
+    draft_from_row_on(
+        door,
+        "draft.reply",
+        account,
+        row_id,
+        Some(all),
+        headers,
+        signature,
+        no_signature,
+    )
 }
 
 /// A forward of the stored message `row_id`, carrying its attachments.
@@ -1147,8 +1169,19 @@ pub fn draft_forward_on(
     account: &str,
     row_id: i64,
     headers: Option<&DraftHeaders>,
+    signature: Option<&str>,
+    no_signature: bool,
 ) -> Result<DraftCreated, GuiError> {
-    draft_from_row_on(door, "draft.forward", account, row_id, None, headers)
+    draft_from_row_on(
+        door,
+        "draft.forward",
+        account,
+        row_id,
+        None,
+        headers,
+        signature,
+        no_signature,
+    )
 }
 
 /// A reply, reply-all or forward of a message the store holds no row for (a
@@ -1795,9 +1828,19 @@ pub async fn draft_reply(
     row_id: i64,
     all: bool,
     headers: Option<DraftHeaders>,
+    signature: Option<String>,
+    no_signature: Option<bool>,
 ) -> Result<DraftCreated, GuiError> {
     with_door(&session, move |_, door| {
-        draft_reply_on(door, &account, row_id, all, headers.as_ref())
+        draft_reply_on(
+            door,
+            &account,
+            row_id,
+            all,
+            headers.as_ref(),
+            signature.as_deref(),
+            no_signature.unwrap_or(false),
+        )
     })
     .await
 }
@@ -1808,9 +1851,18 @@ pub async fn draft_forward(
     account: String,
     row_id: i64,
     headers: Option<DraftHeaders>,
+    signature: Option<String>,
+    no_signature: Option<bool>,
 ) -> Result<DraftCreated, GuiError> {
     with_door(&session, move |_, door| {
-        draft_forward_on(door, &account, row_id, headers.as_ref())
+        draft_forward_on(
+            door,
+            &account,
+            row_id,
+            headers.as_ref(),
+            signature.as_deref(),
+            no_signature.unwrap_or(false),
+        )
     })
     .await
 }
@@ -2696,7 +2748,7 @@ mod tests {
     #[test]
     fn a_reply_carries_in_reply_to_and_the_subject() {
         let (d, f) = fixture_door();
-        let created = draft_reply_on(&d, "work", 1001, false, None).expect("reply");
+        let created = draft_reply_on(&d, "work", 1001, false, None, None, false).expect("reply");
         let (method, params) = f.calls().last().cloned().expect("call");
         assert_eq!(method, "draft.reply");
         assert_eq!(
@@ -2729,6 +2781,8 @@ mod tests {
             1001,
             true,
             Some(&headers("x@example.com", "y@example.com", "Custom")),
+            None,
+            false,
         )
         .expect("reply-all");
         let (_, params) = f.calls().last().cloned().expect("call");
@@ -2751,7 +2805,7 @@ mod tests {
         );
 
         assert!(matches!(
-            draft_reply_on(&d, "work", 424242, false, None),
+            draft_reply_on(&d, "work", 424242, false, None, None, false),
             Err(GuiError::NotFound {
                 code: Some(-32602),
                 ..
@@ -2760,10 +2814,40 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_and_a_forward_carry_the_signature_chosen_or_none() {
+        let (d, f) = fixture_door();
+        let reply =
+            draft_reply_on(&d, "work", 1001, false, None, Some("short"), false).expect("reply");
+        let (_, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(params["signature"], "short");
+        assert!(!parsed(&reply.path).body_markdown.contains("Fixture GmbH"));
+
+        let forward = draft_forward_on(
+            &d,
+            "work",
+            1001,
+            Some(&headers("x@example.com", "", "Fwd: x")),
+            None,
+            true,
+        )
+        .expect("forward");
+        let (method, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(method, "draft.forward");
+        assert_eq!(params["no_signature"], true);
+        assert!(params.get("signature").is_none());
+        let body = parsed(&forward.path).body_markdown;
+        assert!(!body.contains(mp_core::draft::SIG_START), "{body}");
+    }
+
+    #[test]
     fn a_forward_carries_the_attachments_and_a_hit_is_built_from_itself() {
         let (d, _f) = fixture_door();
-        let forward = draft_forward_on(&d, "work", 1001, None).expect("forward");
+        let forward = draft_forward_on(&d, "work", 1001, None, None, false).expect("forward");
         let draft = parsed(&forward.path);
+        assert!(
+            draft.body_markdown.contains("Fixture GmbH"),
+            "no choice is the account's default signature"
+        );
         assert!(draft.frontmatter.subject.starts_with("Fwd:"));
         assert!(draft.frontmatter.forwarded_from.is_some());
         let attachments = draft.frontmatter.attachments.unwrap_or_default();

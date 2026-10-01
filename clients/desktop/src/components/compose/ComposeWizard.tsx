@@ -1,7 +1,8 @@
 // The compose dialogs: the new-draft wizard (`cn`), the forward wizard
 // (`cf` on a stored message) and the recipients edit (`ce`). The TUI's
 // wizard fields, less its inline body: `draft_create` takes no body, so the
-// body is written in the editor the draft opens in.
+// body is written in the editor the draft opens in. A new draft and a
+// forward pick their signature.
 
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
@@ -84,12 +85,13 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
     picked.current = false;
   }, [dialog]);
 
-  // Only a new draft picks a signature, from the account's listing in the
+  // A new draft and a forward pick a signature, from the account's listing in the
   // store, which the open wizard reads again on every `signature.changed`
   // and every change the Signatures dialog makes. A listing that failed
   // offers none.
   const loadable = useAppState().signatures;
-  const entry = kind === "new" && account ? loadable[account] : undefined;
+  const signs = kind === "new" || kind === "forward";
+  const entry = signs && account ? loadable[account] : undefined;
   const data = entry?.data ?? null;
   const failed = entry?.error != null;
   const signatures = useMemo<SignatureListing | null>(
@@ -112,7 +114,7 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
     if (!dialog || busy) return;
     setBusy(true);
     const withSignature: ComposeFields =
-      kind === "new" && signatures && signatures.names.length > 0
+      signs && signatures && signatures.names.length > 0
         ? { ...fields, signature: signature === NONE ? null : signature }
         : fields;
     const refusal = await submitCompose(dialog, withSignature, dispatch);
@@ -187,7 +189,7 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
           {field("cc", "Cc")}
           {field("bcc", "Bcc")}
           {field("subject", "Subject")}
-          {kind === "new" && signatures && signatures.names.length > 0 ? (
+          {signs && signatures && signatures.names.length > 0 ? (
             <div className="grid grid-cols-[4.5rem_1fr] items-center gap-2">
               <label htmlFor={`${id}-signature`} className="text-sm text-muted-foreground">
                 Signature

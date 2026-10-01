@@ -82,7 +82,7 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `event` `config.invalid` | a line in the activity log, and the config.toml banner |
 | `event` `draft.*` | the account's counts and, when shown, its list stale; an editing session stays |
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
-| `event` `signature.changed` | every account's signature listing stale, read again while the Signatures dialog or the new-draft wizard is open |
+| `event` `signature.changed` | every account's signature listing stale, read again while the Signatures dialog or a new-draft or forward wizard is open |
 | `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds`, and a line in the activity log when it fires or is cancelled |
 | `event` `operation.finished` of a send | the send settles: its card or a notice says how it ended |
 | `event` `operation.finished` of an outbox retry | the retry settles: a notice says how the row ended, and the outbox is read again |
@@ -229,7 +229,7 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `cn` | New draft: the wizard | any pane | `signature_list`, then `draft_create` and the editor |
 | `r`, `cr` | Reply | list, reader | `draft_reply` (`all: false`) or `draft_from_message` (`reply`), then the editor |
 | `ca` | Reply all | list, reader | `draft_reply` (`all: true`) or `draft_from_message` (`reply_all`), then the editor |
-| `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `draft_forward` with `headers`, or `draft_from_message` (`forward`), then the editor |
+| `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `signature_list`, then `draft_forward` with `headers` and the signature, or `draft_from_message` (`forward`), then the editor |
 | `e` | Edit the draft in the editor; on a received message, open it in the reader | list, reader | `draft_path`, then the editor |
 | `ce` | Edit recipients, Drafts only | list, reader | `draft_preview`, then `draft_set_recipients` |
 | `cA` | Approve, Drafts only | list, reader | `draft_approve` |
@@ -246,7 +246,7 @@ On a draft, reply and forward say that a draft has nothing to quote.
 ### The wizard
 
 `cn` and `cf` on a stored message open `ComposeWizard.tsx`, a dialog titled "New draft" or "Forward" with To, Cc, Bcc and Subject.
-A new draft also has a Signature select, filled from `signature_list`, with the account's default preselected and "none" last; the forward has none, since `draft_forward` takes no signature.
+Both have a Signature select, filled from `signature_list`, with the account's default preselected and "none" last; a reply has no wizard and carries the account's default, as in the TUI.
 The select reads the account's listing in `state.signatures`, which a `signature.changed` or a change in the Signatures dialog makes stale, so it follows while the wizard is open: until the user picks, it shows the default, and a pick stays while its name is listed and falls back to the default when it goes.
 The forward's Subject starts as the forward will write it (`Fwd: `, the rule of `mp_core::draft::fwd_subject`); the TUI asks for the forward's recipients first too, and a reply goes straight to the editor.
 Enter in a field moves to the next one and, after the last, to the submit button; Cmd+Enter or Ctrl+Enter submits from anywhere in the dialog; Escape cancels and writes nothing.
@@ -259,7 +259,7 @@ A closed list stays closed until the text changes, and with no list open Enter m
 When a query finds nothing and the account's index is empty (a `contact_search` for the empty query answers no row), the list shows one row, "No contacts yet: rebuild the index in Contacts", once per focus of the field; it takes no key but Escape, which closes it; Enter still moves on.
 A draft needs at least one recipient across To, Cc and Bcc, the TUI's rule, and trailing separators are trimmed from each field.
 The new draft's file name is the TUI wizard's, `draft-<local time>-<subject slug>`.
-The submit calls `draft_create` with the wizard's `headers`, and `signature` or `no_signature`, then closes the dialog and opens the file in the editor.
+The submit calls `draft_create`, or `draft_forward` for a forward, with the wizard's `headers`, and `signature` or `no_signature`, then closes the dialog and opens the file in the editor.
 A refusal, such as a file name already taken, shows in the dialog, which stays open.
 The TUI wizard's inline body is left out: `draft_create` takes no body, so the body is written in the editor.
 

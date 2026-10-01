@@ -385,11 +385,12 @@ describe("compose keys (the TUI's)", () => {
     // Completion off: the test types a recipient and is not about it.
     mock.failing.set("contact_search", new Error("off"));
     await user.keyboard("kim@example.com{Control>}{Enter}{/Control}");
-    await waitFor(() =>
-      expect(callsOf("draft_forward")).toEqual([
-        { account: "work", row_id: 1002, headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: Angebot Dachsanierung" } },
-      ]),
-    );
+    await waitFor(() => expect(callsOf("draft_forward")).toHaveLength(1));
+    expect(callsOf("draft_forward")[0]).toMatchObject({
+      account: "work",
+      row_id: 1002,
+      headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: Angebot Dachsanierung" },
+    });
     await waitFor(() => expect(mock.editorOpens).toHaveLength(1));
   });
 

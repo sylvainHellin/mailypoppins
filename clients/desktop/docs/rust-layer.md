@@ -88,8 +88,8 @@ The type blocks in this document are for reading, and the generated files are th
 | `message_set_read` | `account`, `row_ids`, `read` | `MutationBatch` |
 | `draft_discard` | `account`, `ids` | `DraftDiscardBatch` |
 | `draft_create` | `account`, `name`, `signature?`, `no_signature?`, `headers?: DraftHeaders` | `DraftCreated` |
-| `draft_reply` | `account`, `row_id`, `all`, `headers?` | `DraftCreated` |
-| `draft_forward` | `account`, `row_id`, `headers?` | `DraftCreated` |
+| `draft_reply` | `account`, `row_id`, `all`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
+| `draft_forward` | `account`, `row_id`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
 | `draft_from_message` | `account`, `kind: DraftKind`, `message: DraftMessage` | `DraftCreated` |
 | `draft_path` | `account`, `id` | `DraftLocation` |
 | `draft_approve` | `account`, `ids` | `DraftStatusBatch` |
@@ -529,6 +529,7 @@ A draft is a Markdown file with YAML frontmatter in the account's drafts directo
 `draft_create` takes the file name; a name already taken is refused with `protocol` code `-32602`, and the message names the existing path.
 `draft.create` itself takes no recipients, so `headers` are written into the new file client-side.
 `draft_reply` and `draft_forward` address the source by `row_id` and pass `headers` to the daemon, which then needs all four fields; an empty string clears one.
+They pass `signature` and `no_signature` as `draft_create` does, and neither means the account's default, which the daemon resolves.
 `draft_from_message` builds a reply, reply-all or forward from a server-only search hit (`DraftMessage`, the hit's own field names), with no attachments.
 
 `draft_set_recipients` is client-side, like the TUI's `ce`: it resolves the file through `draft.path` and rewrites the `to`, `cc`, `bcc` and `subject` lines with `mp_core::draft::rewrite_draft_recipients`, which leaves the body and every other field byte for byte.

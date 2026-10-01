@@ -154,8 +154,20 @@ export const draftReply = (
 ): Promise<DraftCreated> =>
   invoke<DraftCreated>("draft_reply", { account, row_id, all, headers: headers ?? null });
 
-export const draftForward = (account: string, row_id: number, headers?: DraftHeaders): Promise<DraftCreated> =>
-  invoke<DraftCreated>("draft_forward", { account, row_id, headers: headers ?? null });
+/** `signature` names one, `no_signature` asks for none, and neither is the account's default. */
+export const draftForward = (
+  account: string,
+  row_id: number,
+  headers?: DraftHeaders,
+  opts: { signature?: string; no_signature?: boolean } = {},
+): Promise<DraftCreated> =>
+  invoke<DraftCreated>("draft_forward", {
+    account,
+    row_id,
+    headers: headers ?? null,
+    signature: opts.signature ?? null,
+    no_signature: opts.no_signature ?? null,
+  });
 
 /** A reply, reply-all or forward of a server-only search hit, with no attachments. */
 export const draftFromMessage = (account: string, kind: DraftKind, message: DraftMessage): Promise<DraftCreated> =>

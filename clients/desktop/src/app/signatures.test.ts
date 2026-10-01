@@ -52,13 +52,19 @@ describe("the signature listings", () => {
     expect(isStale(s.signatures.work)).toBe(true);
   });
 
-  it("the new-draft wizard asks for its account's listing; forward and recipients do not", () => {
+  it("the new-draft and forward wizards ask for their account's listing; the recipients dialog does not", () => {
     const s = run(booted(), { type: "open_compose", dialog: { kind: "new", account: "home" } });
     expect(signaturesWanted(s)).toBe("home");
     expect(isStale(s.signatures.home)).toBe(true);
     const fwd = run(booted(), { type: "open_compose", dialog: { kind: "forward", account: "work", row_id: 1001, subject: "Fwd: x" } });
-    expect(signaturesWanted(fwd)).toBeNull();
-    expect(fwd.signatures).toEqual({});
+    expect(signaturesWanted(fwd)).toBe("work");
+    expect(isStale(fwd.signatures.work)).toBe(true);
+    const edit = run(booted(), {
+      type: "open_compose",
+      dialog: { kind: "recipients", account: "work", draftId: "d1", to: "", cc: "", bcc: "", subject: "" },
+    });
+    expect(signaturesWanted(edit)).toBeNull();
+    expect(edit.signatures).toEqual({});
   });
 
   it("signature.changed, the dialog's own change and a bootstrap make every listing stale", () => {

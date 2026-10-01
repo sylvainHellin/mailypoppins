@@ -450,14 +450,12 @@ export async function submitCompose(dialog: ComposeDialog, fields: ComposeFields
       dispatch({ type: "activity", kind: "applied", account, text: `Recipients updated: ${loc.selector}` });
       return null;
     }
+    const sig = fields.signature;
+    const signature = sig === null ? { no_signature: true } : sig ? { signature: sig } : {};
     if (dialog.kind === "forward") {
-      draft = await cmd.draftForward(account, dialog.row_id, headers);
+      draft = await cmd.draftForward(account, dialog.row_id, headers, signature);
     } else {
-      const sig = fields.signature;
-      draft = await cmd.draftCreate(account, draftName(headers.subject), {
-        ...(sig === null ? { no_signature: true } : sig ? { signature: sig } : {}),
-        headers,
-      });
+      draft = await cmd.draftCreate(account, draftName(headers.subject), { ...signature, headers });
     }
   } catch (e: unknown) {
     return asGuiError(e).message;

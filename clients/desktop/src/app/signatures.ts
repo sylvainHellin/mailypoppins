@@ -15,11 +15,12 @@ import { asGuiError, fixtureNotice, type GuiError, type SignatureFile, type Sign
 
 /**
  * The account whose listing an open overlay reads: the Signatures dialog's,
- * or the new-draft wizard's; null when neither is open.
+ * or the new-draft or forward wizard's; null when neither is open.
  */
 export function signaturesWanted(s: AppState): string | null {
   if (s.overlay === "signatures" && s.signaturesDialog) return s.signaturesDialog.account;
-  if (s.overlay === "compose" && s.composeDialog?.kind === "new") return s.composeDialog.account;
+  const kind = s.composeDialog?.kind;
+  if (s.overlay === "compose" && s.composeDialog && (kind === "new" || kind === "forward")) return s.composeDialog.account;
   return null;
 }
 
