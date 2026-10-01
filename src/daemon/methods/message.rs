@@ -125,15 +125,17 @@ impl Method for MessageReadMethod {
         params: Value,
         _cancel: CancelToken,
     ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
-        // The store read is synchronous, as it was when the server called this
-        // method directly. Moving it onto a blocking thread is a change to how
-        // the daemon schedules work, not to how it dispatches, so it belongs
-        // with the account runtimes of Phase 5.
+        // The store reads are synchronous and, but for a whole-mailbox
+        // `message.list`, finish in milliseconds on the task that called them.
+        // That one listing is the exception: at tens of thousands of rows it is
+        // over a hundred milliseconds of SQLite and row building, which would
+        // hold a runtime worker every other connection shares, so
+        // [`list_off_thread`] moves its `list` projection to the blocking pool.
         Box::pin(async move {
             let accounts = self.config.accounts();
             let result = match self.spec.name {
                 "message.get" => get(&params, &accounts),
-                "message.list" => list(&params, &accounts),
+                "message.list" => list_off_thread(&params, &accounts).await,
                 "message.thread" => thread(&params, &accounts),
                 mp_protocol::rendition::METHOD_MESSAGE_HTML => html(&params, &accounts),
                 _ => search(&params, &accounts),
@@ -159,46 +161,138 @@ pub fn register_reads(dispatcher: &mut Dispatcher, config: Arc<super::super::con
 
 /// The `result` of `message.list`, in whichever projection was asked for.
 pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    if is_envelope_projection(params)? {
+        envelopes(params, accounts)
+    } else {
+        list_read(params, accounts)?.run()
+    }
+}
+
+/// [`list`] as the dispatcher runs it: the `list` projection's store read on
+/// the blocking pool, everything else where it was called.
+///
+/// Only the read moves. The parameters, the account gate and the store path
+/// are resolved here, on the calling thread, so the worker is handed a path
+/// rather than resolving one: a test fixture points the data root at a
+/// tempdir for its own thread only (`docs/lessons-learned.md`, "The
+/// data-root override is thread-local"), and a worker that resolved
+/// `store_path` itself would read the developer's own tree. The envelope
+/// projection stays on the calling thread for the same reason, since
+/// [`crate::dump::collect_records`] resolves its own paths.
+async fn list_off_thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    if is_envelope_projection(params)? {
+        return envelopes(params, accounts);
+    }
+    let read = list_read(params, accounts)?;
+    tokio::task::spawn_blocking(move || read.run())
+        .await
+        .map_err(|e| internal(format!("the listing worker did not finish: {e}")))?
+}
+
+/// Whether `projection` asks for envelopes rather than rows; an unknown one is
+/// the caller's mistake.
+fn is_envelope_projection(params: &Value) -> Result<bool, RpcError> {
     match params.get("projection") {
-        None | Some(Value::Null) => list_rows(params, accounts),
-        Some(Value::String(name)) if name == "list" => list_rows(params, accounts),
-        Some(Value::String(name)) if name == "envelope" => envelopes(params, accounts),
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::String(name)) if name == "list" => Ok(false),
+        Some(Value::String(name)) if name == "envelope" => Ok(true),
         Some(other) => Err(invalid_params(format!(
             "projection {other} is neither \"list\" nor \"envelope\""
         ))),
     }
 }
 
-/// The `list` projection: one mailbox of one account, newest first.
-fn list_rows(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+/// The `list` projection, resolved and not yet read: one mailbox of one
+/// account, newest first.
+struct ListRead {
+    name: String,
+    mailbox: String,
+    limit: Option<usize>,
+    path: std::path::PathBuf,
+}
+
+/// Validate the `list` projection's parameters and gate the account.
+fn list_read(params: &Value, accounts: &[AccountConfig]) -> Result<ListRead, RpcError> {
     let name = string_param(params, "account")?;
     let wanted = string_param(params, "mailbox")?;
     let limit = limit_param(params)?;
 
     let account = super::account::ready_account(accounts, &name)?;
     let mailbox = resolve_mailbox(account, &wanted)?;
-
     let path = crate::config::store_path(&name);
-    let store =
-        Store::open(&path).map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
-    // A `limit` pages in SQL and counts separately; `null`, which is what the
-    // TUI sends, is the whole mailbox, whose length is the total.
-    let (rows, total) = match limit {
-        Some(limit) => read::list_mailbox_page(&store, &name, &mailbox, limit),
-        None => read::list_mailbox(&store, &name, &mailbox).map(|rows| {
-            let total = rows.len();
-            (rows, total)
-        }),
-    }
-    .map_err(|e| internal(format!("listing {name}/{mailbox}: {e:#}")))?;
+    Ok(ListRead {
+        name,
+        mailbox,
+        limit,
+        path,
+    })
+}
 
-    let messages: Vec<Value> = rows.iter().map(|row| to_json(&name, row)).collect();
-    Ok(json!({
-        "account": name,
-        "mailbox": mailbox,
-        "total": total,
-        "messages": messages,
-    }))
+impl ListRead {
+    /// Read the rows and build the answer.
+    ///
+    /// A `limit` pages in SQL and counts separately; `null`, which is what the
+    /// TUI sends, is the whole mailbox, whose length is the total. Each row is
+    /// serialised from a [`WireRow`] borrowing the stored one, with its
+    /// `date_sort` formatted from the column ingest stamped rather than parsed
+    /// out of `date_display` again.
+    fn run(self) -> Result<Value, RpcError> {
+        let ListRead {
+            name,
+            mailbox,
+            limit,
+            path,
+        } = self;
+        let store = Store::open(&path)
+            .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+        let (rows, total) = read::list_mailbox_dated(&store, &name, &mailbox, limit)
+            .map_err(|e| internal(format!("listing {name}/{mailbox}: {e:#}")))?;
+        let messages = rows
+            .iter()
+            .map(|(row, stamped)| {
+                serde_json::to_value(WireRow::new(&name, row, wire_date_sort(row, *stamped)))
+            })
+            .collect::<Result<Vec<Value>, _>>()
+            .map_err(|e| internal(format!("serialising {name}/{mailbox}: {e}")))?;
+        Ok(json!({
+            "account": name,
+            "mailbox": mailbox,
+            "total": total,
+            "messages": messages,
+        }))
+    }
+}
+
+/// The wire `date_sort` of a listed row, from the `date_sort` column.
+///
+/// The column is the unix time ingest derived from the `Date:` header with
+/// the RFC 2822 parser [`resolve_date`] uses, so formatting it in UTC is the
+/// string `resolve_date` would have returned, without the parse. `0` and
+/// `NULL` are the column's "no parsable date" (and the one real date that
+/// stamps as `0`, the epoch itself), so those rows, rare by construction, take
+/// `resolve_date` and keep its answer exactly.
+fn wire_date_sort(row: &MessageRow, stamped: Option<i64>) -> String {
+    use chrono::{Datelike, Timelike};
+
+    let at = stamped
+        .filter(|secs| *secs != 0)
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
+    match at {
+        // `%Y` pads to four digits inside this range and signs outside it, so
+        // the plain integer format is chrono's own spelling here and is several
+        // times cheaper than interpreting a strftime string per row.
+        Some(at) if (0..=9999).contains(&at.year()) => format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            at.year(),
+            at.month(),
+            at.day(),
+            at.hour(),
+            at.minute(),
+            at.second()
+        ),
+        Some(at) => at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        None => resolve_date(&row.date_display, &None, Path::new("")).1,
+    }
 }
 
 /// One stored row on the wire.
@@ -234,31 +328,85 @@ fn list_rows(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErr
 /// of `message_key`'s normalisation, and `tests/cli_selector_contract.rs` pins
 /// only the CLI's spelling. The cost is the sixteenth key of a row, about
 /// forty bytes of ASCII, paid once per listing rather than once per copy.
+///
+/// A row read without its `date_sort` column, which is what a search hit is,
+/// takes it from [`resolve_date`]; a listing formats the column instead
+/// ([`ListRead::run`]). Both serialise the one [`WireRow`].
 pub fn to_json(account: &str, row: &MessageRow) -> Value {
     let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
-    let flags = row.flags();
-    json!({
-        "id": row.id,
-        "uid": row.uid,
-        "message_id": row.message_id,
-        "from": row.from.clone().unwrap_or_default(),
-        "to": row.to.clone().unwrap_or_default(),
-        "cc": row.cc,
-        "reply_to": row.reply_to,
-        "bcc": row.bcc,
-        "subject": row.subject.clone().unwrap_or_default(),
-        "date_sort": date_sort,
-        "date_display": row.date_display.clone().unwrap_or_default(),
-        "flags": {
-            "seen": flags.seen,
-            "answered": flags.answered,
-            "forwarded": flags.forwarded,
-            "flagged": flags.flagged,
-        },
-        "has_attachments": row.has_attachments,
-        "is_invite": row.is_invite,
-        "selector": Selector::for_message(account, row).to_string(),
-    })
+    serde_json::to_value(WireRow::new(account, row, date_sort))
+        .expect("a row of strings, integers and booleans serialises")
+}
+
+/// [`to_json`]'s row, borrowing the stored one rather than cloning it.
+///
+/// The fields are declared in key order on purpose: `serde_json` without
+/// `preserve_order` sorts an object's keys, which is the order the `json!`
+/// literal this replaced put on the wire, so a row serialises to the same
+/// bytes whichever way it is built (`a_wire_row_is_the_json_literal_it_replaced`).
+#[derive(serde::Serialize)]
+struct WireRow<'a> {
+    bcc: Option<&'a str>,
+    cc: Option<&'a str>,
+    date_display: &'a str,
+    date_sort: String,
+    flags: WireFlags,
+    from: &'a str,
+    has_attachments: bool,
+    id: i64,
+    is_invite: bool,
+    message_id: &'a str,
+    reply_to: Option<&'a str>,
+    #[serde(serialize_with = "serialize_display")]
+    selector: Selector,
+    subject: &'a str,
+    to: &'a str,
+    uid: i64,
+}
+
+/// The four flag axes of a [`WireRow`], in key order for the same reason.
+#[derive(serde::Serialize)]
+struct WireFlags {
+    answered: bool,
+    flagged: bool,
+    forwarded: bool,
+    seen: bool,
+}
+
+impl<'a> WireRow<'a> {
+    fn new(account: &str, row: &'a MessageRow, date_sort: String) -> Self {
+        let flags = row.flags();
+        WireRow {
+            bcc: row.bcc.as_deref(),
+            cc: row.cc.as_deref(),
+            date_display: row.date_display.as_deref().unwrap_or_default(),
+            date_sort,
+            flags: WireFlags {
+                answered: flags.answered,
+                flagged: flags.flagged,
+                forwarded: flags.forwarded,
+                seen: flags.seen,
+            },
+            from: row.from.as_deref().unwrap_or_default(),
+            has_attachments: row.has_attachments,
+            id: row.id,
+            is_invite: row.is_invite,
+            message_id: &row.message_id,
+            reply_to: row.reply_to.as_deref(),
+            selector: Selector::for_message(account, row),
+            subject: row.subject.as_deref().unwrap_or_default(),
+            to: row.to.as_deref().unwrap_or_default(),
+            uid: row.uid,
+        }
+    }
+}
+
+/// A field serialised as its `Display` string, without a `String` in between.
+fn serialize_display<S: serde::Serializer>(
+    value: &impl std::fmt::Display,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(value)
 }
 
 /// The `envelope` projection: `mp dump-mailbox --json` for one account.
@@ -1729,6 +1877,133 @@ mod tests {
         assert!(limit_param(&json!({"limit": -1})).is_err());
     }
 
+    /// The `json!` literal [`WireRow`] replaced, kept as the oracle it is
+    /// checked against: the wire row of every listing before (perf) 2026-10-01.
+    fn legacy_row(account: &str, row: &MessageRow) -> Value {
+        let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
+        let flags = row.flags();
+        json!({
+            "id": row.id,
+            "uid": row.uid,
+            "message_id": row.message_id,
+            "from": row.from.clone().unwrap_or_default(),
+            "to": row.to.clone().unwrap_or_default(),
+            "cc": row.cc,
+            "reply_to": row.reply_to,
+            "bcc": row.bcc,
+            "subject": row.subject.clone().unwrap_or_default(),
+            "date_sort": date_sort,
+            "date_display": row.date_display.clone().unwrap_or_default(),
+            "flags": {
+                "seen": flags.seen,
+                "answered": flags.answered,
+                "forwarded": flags.forwarded,
+                "flagged": flags.flagged,
+            },
+            "has_attachments": row.has_attachments,
+            "is_invite": row.is_invite,
+            "selector": Selector::for_message(account, row).to_string(),
+        })
+    }
+
+    /// A listing built from [`WireRow`] and the `date_sort` column is the
+    /// listing the `json!` literal and a fresh `resolve_date` parse built, to
+    /// the byte, over the dates that could tell them apart: offsets that cross
+    /// midnight in UTC, the epoch itself (which stamps as the column's "no
+    /// date" `0`), a pre-epoch date, an unparsable and an empty header, and a
+    /// far-future year; plus absent and present Cc/Reply-To/Bcc, every flag,
+    /// an empty subject and a `Message-ID` the selector has to percent-encode.
+    #[test]
+    fn a_wire_row_is_the_json_literal_it_replaced() {
+        use crate::ingest::{ingest_message, IngestInput};
+        use crate::parse::FetchedEmail;
+        use crate::types::MessageFlags;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.sqlite3");
+        let store = Store::open(&path).expect("store");
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        let dates = [
+            "Mon, 01 Jan 2024 09:00:00 +0000",
+            "Tue, 02 Jan 2024 01:30:00 +0530",
+            "Tue, 02 Jan 2024 22:15:07 -0800",
+            "Thu, 01 Jan 1970 00:00:00 +0000",
+            "Wed, 31 Dec 1969 23:00:00 +0000",
+            "not a date at all",
+            "",
+            "Fri, 31 Dec 2100 23:59:59 +1400",
+            "2 Jan 2024 08:00:00 GMT",
+        ];
+        for (index, date) in dates.iter().enumerate() {
+            let odd = index % 2 == 1;
+            let email = FetchedEmail {
+                from: if index == 6 { String::new() } else { format!("Sender {index} <s{index}@example.com>") },
+                to: "me@example.com".into(),
+                cc: odd.then(|| "cc@example.com".to_string()),
+                reply_to: (index % 3 == 0).then(|| "reply@example.com".to_string()),
+                bcc: (index == 4).then(|| "hidden@example.com".to_string()),
+                subject: if index == 5 { String::new() } else { format!("subject {index}") },
+                date: (*date).into(),
+                body_text: format!("body {index}"),
+                html_body: None,
+                has_attachments: index == 2,
+                message_id: Some(format!("<odd {index}/%?#@example.com>")),
+                attachments: Vec::new(),
+                flags: MessageFlags {
+                    seen: odd,
+                    answered: index % 3 == 1,
+                    forwarded: index % 4 == 2,
+                    flagged: index == 7,
+                },
+                calendar_ics: None,
+                event: None,
+            };
+            let input = IngestInput {
+                account: "alpha",
+                mailbox: "inbox",
+                uid: index as i64 + 1,
+                email: &email,
+                raw: None,
+            };
+            ingest_message(&store, &blobs, &input).expect("ingests");
+        }
+
+        for limit in [None, Some(4), Some(0)] {
+            let rows = read::list_mailbox(&store, "alpha", "inbox").expect("rows");
+            let shown: Vec<Value> = rows
+                .iter()
+                .take(limit.unwrap_or(usize::MAX))
+                .map(|row| legacy_row("alpha", row))
+                .collect();
+            let legacy = json!({
+                "account": "alpha",
+                "mailbox": "inbox",
+                "total": rows.len(),
+                "messages": shown,
+            });
+            let built = ListRead {
+                name: "alpha".into(),
+                mailbox: "inbox".into(),
+                limit,
+                path: path.clone(),
+            }
+            .run()
+            .expect("lists");
+            assert_eq!(
+                serde_json::to_string(&built).unwrap(),
+                serde_json::to_string(&legacy).unwrap(),
+                "limit {limit:?}"
+            );
+            // `to_json`, which search answers through, is the same row too.
+            for row in &rows {
+                assert_eq!(
+                    serde_json::to_string(&to_json("alpha", row)).unwrap(),
+                    serde_json::to_string(&legacy_row("alpha", row)).unwrap()
+                );
+            }
+        }
+    }
+
     /// `message.list` with `limit: null` over a large mailbox, timed in process:
     /// the store read alone, the whole method, and the frame the server would
     /// encode from its answer (`docs/baselines/message-list-unbounded.md`).
@@ -1784,8 +2059,39 @@ mod tests {
             let rows = read::list_mailbox(&store, "alpha", &resolved).expect("rows");
             std::hint::black_box(rows);
         });
+        // The pre-(perf) answer, rebuilt from the oracle in the same run, so a
+        // before/after pair is taken under the same host load.
+        let legacy = sample(|| {
+            let store = Store::open(&path).expect("store");
+            let rows = read::list_mailbox(&store, "alpha", &resolved).expect("rows");
+            let messages: Vec<Value> = rows.iter().map(|row| legacy_row("alpha", row)).collect();
+            std::hint::black_box(json!({
+                "account": "alpha",
+                "mailbox": resolved,
+                "total": rows.len(),
+                "messages": messages,
+            }));
+        });
         let method = sample(|| {
             std::hint::black_box(list(&params, &accounts).expect("lists"));
+        });
+        // Two references for what the remaining time is: the rows alone with
+        // no JSON at all, and the rows serialised straight to bytes, which is
+        // the floor an answer that skipped the `Value` tree would reach.
+        let store = Store::open(&path).expect("store");
+        let (dated, _) =
+            read::list_mailbox_dated(&store, "alpha", &resolved, None).expect("rows");
+        let wire_only = sample(|| {
+            for (row, stamped) in &dated {
+                std::hint::black_box(WireRow::new("alpha", row, wire_date_sort(row, *stamped)));
+            }
+        });
+        let to_bytes = sample(|| {
+            let rows: Vec<WireRow<'_>> = dated
+                .iter()
+                .map(|(row, stamped)| WireRow::new("alpha", row, wire_date_sort(row, *stamped)))
+                .collect();
+            std::hint::black_box(serde_json::to_vec(&rows).expect("encodes"));
         });
         let answer = list(&params, &accounts).expect("lists");
         let rows = answer["messages"].as_array().map_or(0, Vec::len);
@@ -1803,7 +2109,10 @@ mod tests {
         let show = |(median, min, max): (f64, f64, f64)| format!("{median:.1} {min:.1} {max:.1}");
         eprintln!("rows {rows}, frame {bytes} bytes, cap {}", mp_protocol::MAX_RESPONSE_BYTES);
         eprintln!("store read (list_mailbox)   ms median min max: {}", show(read_only));
+        eprintln!("legacy json! rows (before)  ms median min max: {}", show(legacy));
         eprintln!("message.list (read + rows)  ms median min max: {}", show(method));
+        eprintln!("  WireRow::new only (ref)    ms median min max: {}", show(wire_only));
+        eprintln!("  rows straight to bytes(ref) ms median min max: {}", show(to_bytes));
         eprintln!("frame::encode of the reply  ms median min max: {}", show(encode));
         eprintln!("encode + client-side parse  ms median min max: {}", show(decode));
     }
