@@ -280,6 +280,8 @@ Release binaries are not yet codesigned/notarized. `brew install` works
 manually downloaded archive from the Releases page will trip Gatekeeper;
 users can clear it with `xattr -d com.apple.quarantine mp`. The desktop
 app's DMG is the same: after dragging the app to `/Applications`, either
-Control-click it and choose Open once, or clear the whole bundle with
+allow it once under System Settings > Privacy & Security ("Open Anyway"
+after the first blocked launch; Control-click > Open no longer bypasses
+Gatekeeper since macOS 15), or clear the whole bundle with
 `xattr -dr com.apple.quarantine /Applications/mailypoppins.app`. Signing is
 tracked in [#0012](tickets/0012-apple-developer-id-signing.md).

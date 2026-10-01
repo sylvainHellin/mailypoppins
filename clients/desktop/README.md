@@ -81,7 +81,7 @@ MP_SIDECAR_BIN=/path/to/mp pnpm bundle  # bundle an mp you already built
 
 `pnpm bundle` ([scripts/bundle.ts](scripts/bundle.ts)) copies `mp` to `src-tauri/binaries/mp-<target>` and builds with [src-tauri/tauri.bundle.conf.json](src-tauri/tauri.bundle.conf.json), which names it in `bundle.externalBin`; plain `pnpm tauri build` makes an app without its own `mp`.
 The app lands in `<target dir>/<target>/release/bundle/macos/mailypoppins.app` and the DMG beside it in `dmg/`, the target dir being `$CARGO_TARGET_DIR` or `src-tauri/target`.
-The bundle is unsigned until #0012, so a downloaded copy needs one Control-click Open, or `xattr -dr com.apple.quarantine` on the app; a local build is not quarantined.
+The bundle is unsigned until #0012, so a downloaded copy needs one an allowance in System Settings > Privacy & Security ("Open Anyway" after the first blocked launch), or `xattr -dr com.apple.quarantine` on the app; a local build is not quarantined.
 
 ```sh
 cp -R <target dir>/aarch64-apple-darwin/release/bundle/macos/mailypoppins.app /Applications/

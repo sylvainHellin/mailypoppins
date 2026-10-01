@@ -252,7 +252,10 @@ pub fn last_reopen_failure() -> Option<ConnectError> {
 pub(crate) fn record_reopen_failure(failure: Option<ConnectError>) {
     let changed = match LAST_REOPEN_FAILURE.lock() {
         Ok(mut slot) => {
-            let changed = slot.as_ref().map(|f| f.kind) != failure.as_ref().map(|f| f.kind);
+            let changed = slot.as_ref().map(|f| (f.kind, f.daemon_version.as_deref()))
+                != failure
+                    .as_ref()
+                    .map(|f| (f.kind, f.daemon_version.as_deref()));
             *slot = failure;
             changed
         }
@@ -268,7 +271,7 @@ pub(crate) fn record_reopen_failure(failure: Option<ConnectError>) {
     }
 }
 
-/// Register what runs when the kind of the reconnect failure changes,
+/// Register what runs when the kind or the daemon version of the reconnect failure changes,
 /// replacing an earlier listener.
 pub fn on_reopen_failure_change(listener: ReopenListener) {
     if let Ok(mut slot) = REOPEN_LISTENER.lock() {

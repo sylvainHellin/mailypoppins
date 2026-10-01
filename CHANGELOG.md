@@ -10,7 +10,7 @@ All notable changes to this project are documented in this file.
   - The same screen replaces the reconnecting banner when the daemon comes back as another version while the window is open.
 - **A tagged release builds the desktop app for the Mac, with its own `mp` inside (#0132).**
   - Each release now carries `mailypoppins-desktop-aarch64-apple-darwin.dmg` and `mailypoppins-desktop-x86_64-apple-darwin.dmg`, with the `.app` as a `.tar.gz` beside them; drag `mailypoppins.app` to Applications and it starts its daemon with the `mp` it ships, so nothing else has to be installed.
-  - The app is not signed yet (#0012): open it once with Control-click and Open, or run `xattr -dr com.apple.quarantine /Applications/mailypoppins.app`.
+  - The app is not signed yet (#0012): allow it once under System Settings > Privacy & Security ("Open Anyway" after the first blocked launch), or run `xattr -dr com.apple.quarantine /Applications/mailypoppins.app`.
   - `ln -s /Applications/mailypoppins.app/Contents/MacOS/mp /usr/local/bin/mp` puts the app's `mp` on your `PATH`, so the CLI, the TUI and the app run one version.
   - From a checkout, `cd clients/desktop && pnpm bundle` builds the same app and DMG.
 - **The desktop client has a light theme, a plain-text reader, a filter in the key help, and runs a terminal editor in a terminal (#0136).**
