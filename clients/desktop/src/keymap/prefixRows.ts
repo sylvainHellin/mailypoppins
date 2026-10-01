@@ -33,8 +33,9 @@ let entries: PaletteEntry[] | null = null;
 /**
  * One row per continuation of `prefix` that runs here, in catalog order (the
  * KEYMAP rows, then the desktop's own), deduplicated by key. A row such as
- * `gj / gk` shows when either of its keys runs; a KEYMAP row whose action the
- * desktop leaves to a notice is left out.
+ * `gj / gk` shows when either of its keys runs, under the catalog's whole key
+ * as the TUI shows it (`gg / G`, though `G` is no continuation of `g`); a
+ * KEYMAP row whose action the desktop leaves to a notice is left out.
  */
 export function prefixPopupRows(s: AppState, prefix: string): PrefixRow[] {
   entries ??= [...paletteEntries(), ...GUI_ENTRIES];
@@ -50,7 +51,7 @@ export function prefixPopupRows(s: AppState, prefix: string): PrefixRow[] {
         .filter((k) => k.length > lead.length && k.startsWith(lead) && !seen.has(k));
       if (!combos.some((k) => prefixRuns(s, k))) continue;
       for (const k of combos) seen.add(k);
-      rows.push({ key: combos.join(" / "), label: entry.label });
+      rows.push({ key: keys, label: entry.label });
     }
   }
   return rows;

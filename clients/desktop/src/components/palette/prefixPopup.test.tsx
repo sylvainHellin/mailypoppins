@@ -5,7 +5,8 @@
 import { act, fireEvent, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { PREFIX_TIMEOUT_MS } from "@/keymap/useKeymap";
+import { getPendingPrefix } from "@/keymap/pendingPrefix";
+import { isEditable, PREFIX_TIMEOUT_MS } from "@/keymap/useKeymap";
 
 const popup = () => document.querySelector('[data-slot="prefix-popup"]') as HTMLElement;
 const title = () => popup().querySelector('[data-testid="prefix-title"]')?.textContent ?? null;
@@ -68,12 +69,12 @@ describe("the prefix popup", () => {
     await shellReady();
     await user.keyboard("g");
     expect(title()).toBe("go");
-    expect(rows().map(([k]) => k)).toEqual(["gm", "ga", "gj / gk", "gg", "go"]);
+    expect(rows().map(([k]) => k)).toEqual(["gm", "ga", "gj / gk", "gg / G", "go"]);
     await user.keyboard("{Escape}");
     await user.keyboard(" c");
     await screen.findByRole("region", { name: "Contacts" });
     await user.keyboard("g");
-    expect(rows()).toEqual([["gg", "Jump to top / bottom"]]);
+    expect(rows()).toEqual([["gg / G", "Jump to top / bottom"]]);
   });
 
   it("Space lists the view family", async () => {
@@ -170,12 +171,16 @@ describe("the prefix popup", () => {
     }
   });
 
-  it("an open dialog hides it", async () => {
+  it("a dialog opened over an armed prefix hides it", async () => {
     const { user } = renderApp();
     await shellReady();
-    await user.keyboard("?");
-    await screen.findByRole("dialog", { name: "Keys" });
-    await user.keyboard("c");
+    await user.keyboard("g");
+    expect(rows()).not.toEqual([]);
+    // A click opens the dialog, so no key resolves or drops the prefix.
+    act(() => void fireEvent.click(screen.getByRole("button", { name: "Activity log, key s l" })));
+    await screen.findByRole("dialog", { name: "Activity log" });
+    expect(getPendingPrefix()?.key).toBe("g");
+    expect(isEditable(document.activeElement)).toBe(false);
     expect(rows()).toEqual([]);
   });
 });

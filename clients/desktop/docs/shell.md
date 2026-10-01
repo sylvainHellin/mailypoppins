@@ -976,7 +976,7 @@ No row carries an M3 or M4 badge any more.
 An armed prefix (`g`, `f`, `c`, `t`, `s`, Space) shows a which-key popup above the bottom centre of the window, the TUI's (`render_prefix_popup`): titled by the family as the TUI's `prefix_family_name` (go, find, compose, thread, system, view), one row per continuation with its key in `link` and the catalog's label beside it, in two columns past eight rows (`components/palette/PrefixPopup.tsx`).
 Its rows are the catalog's keys under the prefix that `prefixRuns` accepts in this view and focus: the keymap's own `resolvePrefix`, less what the run would only answer with a notice (an action on the hidden mailbox selection, `ce`, `cA`, `cD`, `cX` and `ta` outside Drafts), so a full-pane view lists only its own combos and the view-agnostic ones, and a KEYMAP row the desktop does not bind (`gt`, `fF`) is left out.
 The prefix expires after 1200 ms on a timer, so a late continuation never resolves; the next key, resolved or not, leaving the window, or moving the focus into a field or the embedded editor also drop it, and the popup with it.
-An open dialog hides it, and only the popup re-renders on a prefix (`src/keymap/pendingPrefix.ts`, a `useSyncExternalStore` module), not the shell.
+An open dialog hides it, and a prefix re-renders the popup alone (`src/keymap/pendingPrefix.ts`, a `useSyncExternalStore` module).
 
 ## Tests
 
