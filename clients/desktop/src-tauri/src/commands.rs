@@ -25,7 +25,7 @@ use mp_protocol::draft::{
     DraftCreated, DraftKind, DraftListing, DraftLocation, DraftMessage, DraftPreview,
     DraftValidation,
 };
-use mp_protocol::events::{Diagnostic, DraftInvalid};
+use mp_protocol::events::DraftInvalid;
 use mp_protocol::listing::MessageListRow;
 use mp_protocol::send::{HoldListing, OutboxListing};
 use mp_protocol::state::{AccountState, Bootstrap, OutboxCounts, SyncHealthState};
@@ -55,8 +55,6 @@ const DRAFT_BUDGET: Duration = Duration::from_secs(20);
 const DRAFT_QUERY_BUDGET: Duration = Duration::from_secs(10);
 /// A fetch of one server-only message: a login, a SELECT and one FETCH.
 const FETCH_BUDGET: Duration = Duration::from_secs(90);
-/// How often a running fetch's `operation.status` is read.
-const FETCH_POLL: Duration = Duration::from_millis(100);
 
 /// `MP_DESKTOP_STUB_OPENER=1`: `open_external` records instead of opening.
 pub const STUB_OPENER_ENV: &str = "MP_DESKTOP_STUB_OPENER";
@@ -516,7 +514,9 @@ pub struct DraftStatusBatch {
     pub failed: Vec<DraftStatusFailure>,
 }
 
-/// The signatures a draft can carry, and the account's default.
+/// The signatures a draft can carry, and the account's default: the shape of
+/// `mp_protocol::signature::SignatureListing`, kept under this name for the
+/// frontend's generated types.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
@@ -821,57 +821,34 @@ pub fn search_server_cancel_on(
 /// Fetch the server-only message `message_id` of `mailbox` (a sidebar label
 /// or a server name) into the store, the TUI search overlay's `f` (LST-09).
 ///
-/// `message.fetch` is an operation; one message is quick, so this waits for
-/// its end by reading `operation.status` rather than making the frontend
-/// await an id. A message the store already holds answers at once with
-/// `already_present`. The row it lands in reaches the lists through the
-/// counts invalidation the daemon publishes.
+/// `message.fetch` is an operation; one message is quick, so this blocks on
+/// its `operation.finished` through [`SessionHandle::await_operation`] rather
+/// than making the frontend await an id. A message the store already holds
+/// answers at once with `already_present`. The row it lands in reaches the
+/// lists through the counts invalidation the daemon publishes.
 pub fn message_fetch_on(
+    session: &SessionHandle,
     door: &Door,
     account: &str,
     mailbox: &str,
     message_id: &str,
 ) -> Result<FetchOutcome, GuiError> {
-    let answer = call(
+    let end = session.await_operation(
         door,
         "message.fetch",
         json!({"account": account, "mailbox": mailbox, "message_id": message_id}),
         START_BUDGET,
-        Addressing::Params,
+        FETCH_BUDGET,
     )?;
-    let id = answer["operation_id"]
-        .as_str()
-        .ok_or_else(|| GuiError::protocol("message.fetch answered no operation_id"))?
-        .to_string();
-    let deadline = std::time::Instant::now() + FETCH_BUDGET;
-    loop {
-        let status = call(
-            door,
-            "operation.status",
-            json!({"operation_id": id}),
-            CANCEL_BUDGET,
-            Addressing::Resource,
-        )?;
-        match status["state"].as_str() {
-            Some("succeeded") => return decode("message.fetch", status["result"].clone()),
-            Some("failed") => {
-                let why = status["error"]["message"]
-                    .as_str()
-                    .unwrap_or("no reason given");
-                return Err(GuiError::protocol(format!("The fetch failed: {why}")));
-            }
-            Some("cancelled") => return Err(GuiError::protocol("The fetch was cancelled")),
-            _ => {}
+    match end["state"].as_str() {
+        Some("succeeded") => decode("message.fetch", end["result"].clone()),
+        Some("cancelled") => Err(GuiError::protocol("The fetch was cancelled")),
+        _ => {
+            let why = end["error"]["message"]
+                .as_str()
+                .unwrap_or("no reason given");
+            Err(GuiError::protocol(format!("The fetch failed: {why}")))
         }
-        if std::time::Instant::now() >= deadline {
-            return Err(GuiError::Timeout {
-                message: format!(
-                    "the fetch of {message_id} did not finish in {} s",
-                    FETCH_BUDGET.as_secs()
-                ),
-            });
-        }
-        std::thread::sleep(FETCH_POLL);
     }
 }
 
@@ -1077,10 +1054,10 @@ fn rewrite_recipients(door: &Door, path: &str, edit: &DraftRecipientEdit) -> Res
     Ok(())
 }
 
-/// `draft.create`: a skeleton named `name` in the account's drafts
-/// directory. A name already taken is the daemon's `-32602`, a `protocol`
-/// error whose message names the path. `headers` are written into the new
-/// file client-side, since `draft.create` takes none.
+/// `draft.create`: a draft named `name` in the account's drafts directory,
+/// written whole by the daemon with the wizard's `headers` and its inline
+/// `body` above the signature. A name already taken is the daemon's
+/// `-32602`, a `protocol` error whose message names the path.
 pub fn draft_create_on(
     door: &Door,
     account: &str,
@@ -1088,13 +1065,15 @@ pub fn draft_create_on(
     signature: Option<&str>,
     no_signature: bool,
     headers: Option<&DraftHeaders>,
+    body: Option<&str>,
 ) -> Result<DraftCreated, GuiError> {
     let mut params = json!({"account": account, "name": name});
-    if let Some(signature) = signature {
-        params["signature"] = json!(signature);
+    with_signature(&mut params, signature, no_signature);
+    if let Some(headers) = headers {
+        params["headers"] = headers.wire();
     }
-    if no_signature {
-        params["no_signature"] = json!(true);
+    if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
+        params["body"] = json!(body);
     }
     let answer = call(
         door,
@@ -1103,14 +1082,23 @@ pub fn draft_create_on(
         DRAFT_QUERY_BUDGET,
         Addressing::Params,
     )?;
-    let created: DraftCreated = decode("draft.create", answer)?;
-    if let Some(headers) = headers {
-        rewrite_recipients(door, &created.path, &headers.edit())?;
+    decode("draft.create", answer)
+}
+
+/// The signature a written draft carries: the one named, none with
+/// `no_signature`, and the account's default when neither is given, which the
+/// daemon resolves.
+fn with_signature(params: &mut Value, signature: Option<&str>, no_signature: bool) {
+    if let Some(signature) = signature {
+        params["signature"] = json!(signature);
     }
-    Ok(created)
+    if no_signature {
+        params["no_signature"] = json!(true);
+    }
 }
 
 /// `draft.reply` or `draft.forward` of the stored message `row_id`.
+#[allow(clippy::too_many_arguments)]
 fn draft_from_row_on(
     door: &Door,
     method: &str,
@@ -1118,6 +1106,8 @@ fn draft_from_row_on(
     row_id: i64,
     all: Option<bool>,
     headers: Option<&DraftHeaders>,
+    signature: Option<&str>,
+    no_signature: bool,
 ) -> Result<DraftCreated, GuiError> {
     let mut params = json!({"account": account, "source": {"row_id": row_id}});
     if let Some(all) = all {
@@ -1126,6 +1116,7 @@ fn draft_from_row_on(
     if let Some(headers) = headers {
         params["headers"] = headers.wire();
     }
+    with_signature(&mut params, signature, no_signature);
     let answer = call(door, method, params, DRAFT_BUDGET, Addressing::Resource)?;
     decode(method, answer)
 }
@@ -1137,8 +1128,19 @@ pub fn draft_reply_on(
     row_id: i64,
     all: bool,
     headers: Option<&DraftHeaders>,
+    signature: Option<&str>,
+    no_signature: bool,
 ) -> Result<DraftCreated, GuiError> {
-    draft_from_row_on(door, "draft.reply", account, row_id, Some(all), headers)
+    draft_from_row_on(
+        door,
+        "draft.reply",
+        account,
+        row_id,
+        Some(all),
+        headers,
+        signature,
+        no_signature,
+    )
 }
 
 /// A forward of the stored message `row_id`, carrying its attachments.
@@ -1147,8 +1149,19 @@ pub fn draft_forward_on(
     account: &str,
     row_id: i64,
     headers: Option<&DraftHeaders>,
+    signature: Option<&str>,
+    no_signature: bool,
 ) -> Result<DraftCreated, GuiError> {
-    draft_from_row_on(door, "draft.forward", account, row_id, None, headers)
+    draft_from_row_on(
+        door,
+        "draft.forward",
+        account,
+        row_id,
+        None,
+        headers,
+        signature,
+        no_signature,
+    )
 }
 
 /// A reply, reply-all or forward of a message the store holds no row for (a
@@ -1225,49 +1238,22 @@ fn about_one_draft(error: &GuiError) -> bool {
         )
 }
 
-/// The daemon's own sentence out of a refusal's text.
-fn refusal_message(text: &str) -> &str {
-    const MARK: &str = "the daemon refused the call: ";
-    let tail = text.find(MARK).map_or(text, |at| &text[at + MARK.len()..]);
-    tail.rfind(" (").map_or(tail, |at| &tail[..at])
-}
-
-/// The `draft.invalid` payload of a `-32010` refusal. The session keeps the
-/// refusal's text but not its `data`, so the path comes from the listing's
-/// skipped files, where an unparseable draft sits under its file stem.
-fn invalid_payload(door: &Door, account: &str, id: &str, error: &GuiError) -> Option<DraftInvalid> {
-    if !matches!(
-        error,
-        GuiError::Protocol {
-            code: Some(-32010),
-            ..
-        }
-    ) {
-        return None;
-    }
-    let listing = call(
-        door,
-        "draft.list",
-        json!({"account": account}),
-        DRAFT_QUERY_BUDGET,
-        Addressing::Resource,
-    )
-    .ok()
-    .and_then(|answer| decode::<DraftListing>("draft.list", answer).ok())?;
-    let skip = listing.skipped.into_iter().find(|skip| {
-        std::path::Path::new(&skip.path)
-            .file_stem()
-            .is_some_and(|stem| stem.to_string_lossy() == id)
-    })?;
-    Some(DraftInvalid {
-        account: account.to_string(),
-        id: id.to_string(),
-        path: skip.path,
-        diagnostics: vec![Diagnostic {
-            line: None,
-            message: refusal_message(error.message()).to_string(),
-        }],
-    })
+/// One call that keeps a `-32010` refusal's `draft.invalid` payload, its
+/// `data`, beside the error the rest of the layer classifies.
+fn call_keeping_invalid(
+    door: &Door,
+    method: &str,
+    params: Value,
+) -> Result<Value, (GuiError, Option<Box<DraftInvalid>>)> {
+    door.call_within(method, params, DRAFT_QUERY_BUDGET)
+        .map_err(|e| {
+            let invalid = mp_client::session::refusal(&e)
+                .filter(|refused| refused.code == mp_protocol::ErrorCode::DraftInvalid.code())
+                .and_then(|refused| refused.data.clone())
+                .and_then(|data| serde_json::from_value(data).ok())
+                .map(Box::new);
+            (GuiError::from_call(&e, Addressing::Resource), invalid)
+        })
 }
 
 /// `draft.approve` or `draft.demote` over `ids`, one call per id in order.
@@ -1277,14 +1263,15 @@ fn draft_status_on(
     account: &str,
     ids: &[String],
 ) -> Result<DraftStatusBatch, GuiError> {
+    let mut invalid = std::collections::BTreeMap::new();
     let (done, failed) = each_of_by(ids, about_one_draft, |id| {
-        let answer = call(
-            door,
-            method,
-            json!({"account": account, "id": id}),
-            DRAFT_QUERY_BUDGET,
-            Addressing::Resource,
-        )?;
+        let answer = call_keeping_invalid(door, method, json!({"account": account, "id": id}))
+            .map_err(|(error, payload)| {
+                if let Some(payload) = payload {
+                    invalid.insert(id.clone(), *payload);
+                }
+                error
+            })?;
         decode::<DraftStatusChanged>(method, answer)
     })?;
     Ok(DraftStatusBatch {
@@ -1292,7 +1279,7 @@ fn draft_status_on(
         failed: failed
             .into_iter()
             .map(|(id, error)| DraftStatusFailure {
-                invalid: invalid_payload(door, account, &id, &error),
+                invalid: invalid.remove(&id),
                 id,
                 error,
             })
@@ -1318,29 +1305,17 @@ pub fn draft_demote_on(
     draft_status_on(door, "draft.demote", account, ids)
 }
 
-/// The signatures a draft of `account` can carry.
-///
-/// The daemon serves no `signature.list`: the TUI reads the signatures
-/// directory itself (`mp_core::signatures`), and so does this over a daemon.
-/// The fixture answers a `signature.list` of its own.
+/// The signatures a draft of `account` can carry, and its default:
+/// `signature.list`, which the fixture answers too.
 pub fn signature_list_on(door: &Door, account: &str) -> Result<SignatureListing, GuiError> {
-    match door {
-        Door::Fixture(_) => {
-            let answer = call(
-                door,
-                "signature.list",
-                json!({"account": account}),
-                DRAFT_QUERY_BUDGET,
-                Addressing::Resource,
-            )?;
-            decode("signature.list", answer)
-        }
-        Door::Daemon(_) => Ok(SignatureListing {
-            account: account.to_string(),
-            names: mp_core::signatures::list(),
-            default: mp_core::signatures::default_signature_name(account),
-        }),
-    }
+    let answer = call(
+        door,
+        "signature.list",
+        json!({"account": account}),
+        DRAFT_QUERY_BUDGET,
+        Addressing::Resource,
+    )?;
+    decode("signature.list", answer)
 }
 
 /// Rewrite the recipients (and, when given, the subject) of the draft `id`
@@ -1455,18 +1430,10 @@ pub fn send_draft_on(
     // refusal says whether it does not parse (`-32010`) or does not exist.
     let approve = entry.as_ref().is_none_or(|e| e.status != "approved");
     if approve {
-        let approved = call(
-            door,
-            "draft.approve",
-            json!({"account": account, "id": id}),
-            DRAFT_QUERY_BUDGET,
-            Addressing::Resource,
-        );
-        if let Err(error) = approved {
-            return Err(SendRefusal {
-                invalid: invalid_payload(door, account, id, &error).map(Box::new),
-                error,
-            });
+        let approved =
+            call_keeping_invalid(door, "draft.approve", json!({"account": account, "id": id}));
+        if let Err((error, invalid)) = approved {
+            return Err(SendRefusal { invalid, error });
         }
     }
     let (operation_id, answer) = session.start_operation_answer(
@@ -1685,8 +1652,8 @@ pub async fn message_fetch(
     mailbox: String,
     message_id: String,
 ) -> Result<FetchOutcome, GuiError> {
-    with_door(&session, move |_, door| {
-        message_fetch_on(door, &account, &mailbox, &message_id)
+    with_door(&session, move |session, door| {
+        message_fetch_on(session, door, &account, &mailbox, &message_id)
     })
     .await
 }
@@ -1774,6 +1741,7 @@ pub async fn draft_create(
     signature: Option<String>,
     no_signature: Option<bool>,
     headers: Option<DraftHeaders>,
+    body: Option<String>,
 ) -> Result<DraftCreated, GuiError> {
     with_door(&session, move |_, door| {
         draft_create_on(
@@ -1783,6 +1751,7 @@ pub async fn draft_create(
             signature.as_deref(),
             no_signature.unwrap_or(false),
             headers.as_ref(),
+            body.as_deref(),
         )
     })
     .await
@@ -1795,9 +1764,19 @@ pub async fn draft_reply(
     row_id: i64,
     all: bool,
     headers: Option<DraftHeaders>,
+    signature: Option<String>,
+    no_signature: Option<bool>,
 ) -> Result<DraftCreated, GuiError> {
     with_door(&session, move |_, door| {
-        draft_reply_on(door, &account, row_id, all, headers.as_ref())
+        draft_reply_on(
+            door,
+            &account,
+            row_id,
+            all,
+            headers.as_ref(),
+            signature.as_deref(),
+            no_signature.unwrap_or(false),
+        )
     })
     .await
 }
@@ -1808,9 +1787,18 @@ pub async fn draft_forward(
     account: String,
     row_id: i64,
     headers: Option<DraftHeaders>,
+    signature: Option<String>,
+    no_signature: Option<bool>,
 ) -> Result<DraftCreated, GuiError> {
     with_door(&session, move |_, door| {
-        draft_forward_on(door, &account, row_id, headers.as_ref())
+        draft_forward_on(
+            door,
+            &account,
+            row_id,
+            headers.as_ref(),
+            signature.as_deref(),
+            no_signature.unwrap_or(false),
+        )
     })
     .await
 }
@@ -2143,12 +2131,14 @@ mod tests {
 
     #[test]
     fn fetch_ingests_a_server_only_message_once_and_then_says_it_is_present() {
-        let (d, fixture) = fixture_door();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fixture = Arc::new(Fixture::load(tx).expect("fixture"));
+        let (session, d) = SessionHandle::pumping(Arc::clone(&fixture), rx);
         let id = "<server-only@fixture.example>";
         assert!(!rows_of(&d, "work", "archive")
             .iter()
             .any(|r| r.message_id == id));
-        let fetched = message_fetch_on(&d, "work", "Archive", id).expect("fetch");
+        let fetched = message_fetch_on(&session, &d, "work", "Archive", id).expect("fetch");
         assert!(!fetched.already_present);
         assert_eq!(fetched.mailbox, "archive");
         assert_eq!(
@@ -2160,7 +2150,7 @@ mod tests {
             .find(|r| r.id == fetched.row_id)
             .expect("the fetched row is listed");
         assert_eq!(row.message_id, id);
-        let again = message_fetch_on(&d, "work", "archive", id).expect("fetch again");
+        let again = message_fetch_on(&session, &d, "work", "archive", id).expect("fetch again");
         assert!(again.already_present);
         assert_eq!(again.row_id, fetched.row_id);
         let calls: Vec<Value> = fixture
@@ -2173,12 +2163,20 @@ mod tests {
             calls[0],
             json!({"account": "work", "mailbox": "Archive", "message_id": id})
         );
-        let gone = message_fetch_on(&d, "work", "Archive", "<nowhere@example.com>").unwrap_err();
+        let gone =
+            message_fetch_on(&session, &d, "work", "Archive", "<nowhere@example.com>").unwrap_err();
         assert!(
             gone.message().contains("The fetch failed: no message"),
             "{gone:?}"
         );
-        let bad = message_fetch_on(&d, "work", "Nowhere", id).unwrap_err();
+        assert!(
+            fixture
+                .calls()
+                .iter()
+                .all(|(method, _)| method != "operation.status"),
+            "the end is the operation.finished event, not a poll"
+        );
+        let bad = message_fetch_on(&session, &d, "work", "Nowhere", id).unwrap_err();
         assert!(
             matches!(
                 bad,
@@ -2485,7 +2483,19 @@ mod tests {
     fn the_drafts_mailbox_branches_to_the_draft_listing() {
         let d = door();
         match list_messages_on(&d, "work", "drafts").expect("drafts") {
-            MessageList::Drafts { listing, .. } => assert_eq!(listing.drafts.len(), 2),
+            MessageList::Drafts { listing, .. } => {
+                assert_eq!(listing.drafts.len(), 2);
+                // The row carries the file's bcc, which `ce` fills its dialog from.
+                let bcc = |id: &str| {
+                    listing
+                        .drafts
+                        .iter()
+                        .find(|r| r.id == id)
+                        .and_then(|r| r.bcc.clone())
+                };
+                assert_eq!(bcc("angebot-antwort"), None);
+                assert_eq!(bcc("offsite-note"), None);
+            }
             other => panic!("expected drafts, got {other:?}"),
         }
         match list_messages_on(&d, "work", "inbox").expect("inbox") {
@@ -2636,8 +2646,9 @@ mod tests {
 
     #[test]
     fn a_created_draft_is_a_file_with_frontmatter_and_a_taken_name_is_refused() {
-        let (d, _f, rx) = fixture_with_events();
-        let created = draft_create_on(&d, "work", "note", None, false, None).expect("created");
+        let (d, f, rx) = fixture_with_events();
+        let created =
+            draft_create_on(&d, "work", "note", None, false, None, None).expect("created");
         assert!(
             created.path.ends_with("/drafts/work/note.md"),
             "{}",
@@ -2658,7 +2669,7 @@ mod tests {
         assert_eq!(events[0].0, "draft.changed");
         assert_eq!(events[0].1["id"], created.id.as_str());
 
-        match draft_create_on(&d, "work", "note", None, false, None) {
+        match draft_create_on(&d, "work", "note", None, false, None, None) {
             Err(GuiError::Protocol {
                 code: Some(-32602),
                 message,
@@ -2666,7 +2677,7 @@ mod tests {
             other => panic!("expected the collision, got {other:?}"),
         }
         assert!(matches!(
-            draft_create_on(&d, "nobody", "x", None, false, None),
+            draft_create_on(&d, "nobody", "x", None, false, None, None),
             Err(GuiError::NotFound {
                 code: Some(-32005),
                 ..
@@ -2674,7 +2685,8 @@ mod tests {
         ));
 
         let wizard = headers("robin@example.com, ", "", " Hello ");
-        let bare = draft_create_on(&d, "work", "bare", None, true, Some(&wizard)).expect("bare");
+        let bare =
+            draft_create_on(&d, "work", "bare", None, true, Some(&wizard), None).expect("bare");
         let draft = parsed(&bare.path);
         assert_eq!(draft.frontmatter.to.as_deref(), Some("robin@example.com"));
         assert_eq!(draft.frontmatter.subject, "Hello");
@@ -2682,12 +2694,47 @@ mod tests {
             !draft.body_markdown.contains("Fixture GmbH"),
             "no_signature"
         );
-        let short = draft_create_on(&d, "work", "short", Some("short"), false, None).expect("s");
+        let (_, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(
+            params["headers"],
+            json!({"to": "robin@example.com", "cc": "", "bcc": "", "subject": "Hello"}),
+            "the daemon writes the headers, normalised"
+        );
+        assert!(params.get("body").is_none(), "an empty body is not sent");
+        let short =
+            draft_create_on(&d, "work", "short", Some("short"), false, None, None).expect("s");
         assert!(!parsed(&short.path).body_markdown.contains("Fixture GmbH"));
+        let typed = draft_create_on(
+            &d,
+            "work",
+            "typed",
+            None,
+            false,
+            Some(&wizard),
+            Some("Kurze Frage\n"),
+        )
+        .expect("typed");
+        let (_, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(params["body"], "Kurze Frage\n");
+        let body = parsed(&typed.path).body_markdown;
+        let (text, signature) = (body.find("Kurze Frage"), body.find("Fixture GmbH"));
+        assert!(text.is_some() && text < signature, "{body}");
+        let blind = DraftHeaders {
+            bcc: "chef@example.com".into(),
+            ..headers("robin@example.com", "", "Blind")
+        };
+        let blind =
+            draft_create_on(&d, "work", "blind", None, true, Some(&blind), None).expect("blind");
         match list_messages_on(&d, "work", "drafts").expect("drafts") {
             MessageList::Drafts { listing, .. } => {
-                assert_eq!(listing.drafts.len(), 5);
+                assert_eq!(listing.drafts.len(), 7);
                 assert!(listing.drafts.iter().any(|r| r.id == bare.id && r.ready));
+                let row = listing.drafts.iter().find(|r| r.id == blind.id);
+                assert_eq!(
+                    row.and_then(|r| r.bcc.as_deref()),
+                    Some("chef@example.com"),
+                    "the row carries the bcc `ce` fills its dialog from"
+                );
             }
             other => panic!("expected drafts, got {other:?}"),
         }
@@ -2696,7 +2743,7 @@ mod tests {
     #[test]
     fn a_reply_carries_in_reply_to_and_the_subject() {
         let (d, f) = fixture_door();
-        let created = draft_reply_on(&d, "work", 1001, false, None).expect("reply");
+        let created = draft_reply_on(&d, "work", 1001, false, None, None, false).expect("reply");
         let (method, params) = f.calls().last().cloned().expect("call");
         assert_eq!(method, "draft.reply");
         assert_eq!(
@@ -2716,6 +2763,10 @@ mod tests {
             .as_deref()
             .is_some_and(|v| v.contains("quarterly-ledger-review-1001@fixture.example")));
         assert_eq!(draft.frontmatter.subject, "Re: Quarterly ledger review");
+        assert_eq!(
+            created.subject, draft.frontmatter.subject,
+            "the answer names the subject"
+        );
         assert_eq!(draft.frontmatter.to.as_deref(), Some("ivana@example.com"));
         assert!(draft.body_markdown.contains("quarterly ledger is attached"));
         assert!(
@@ -2729,6 +2780,8 @@ mod tests {
             1001,
             true,
             Some(&headers("x@example.com", "y@example.com", "Custom")),
+            None,
+            false,
         )
         .expect("reply-all");
         let (_, params) = f.calls().last().cloned().expect("call");
@@ -2751,7 +2804,7 @@ mod tests {
         );
 
         assert!(matches!(
-            draft_reply_on(&d, "work", 424242, false, None),
+            draft_reply_on(&d, "work", 424242, false, None, None, false),
             Err(GuiError::NotFound {
                 code: Some(-32602),
                 ..
@@ -2760,10 +2813,40 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_and_a_forward_carry_the_signature_chosen_or_none() {
+        let (d, f) = fixture_door();
+        let reply =
+            draft_reply_on(&d, "work", 1001, false, None, Some("short"), false).expect("reply");
+        let (_, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(params["signature"], "short");
+        assert!(!parsed(&reply.path).body_markdown.contains("Fixture GmbH"));
+
+        let forward = draft_forward_on(
+            &d,
+            "work",
+            1001,
+            Some(&headers("x@example.com", "", "Fwd: x")),
+            None,
+            true,
+        )
+        .expect("forward");
+        let (method, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(method, "draft.forward");
+        assert_eq!(params["no_signature"], true);
+        assert!(params.get("signature").is_none());
+        let body = parsed(&forward.path).body_markdown;
+        assert!(!body.contains(mp_core::draft::SIG_START), "{body}");
+    }
+
+    #[test]
     fn a_forward_carries_the_attachments_and_a_hit_is_built_from_itself() {
         let (d, _f) = fixture_door();
-        let forward = draft_forward_on(&d, "work", 1001, None).expect("forward");
+        let forward = draft_forward_on(&d, "work", 1001, None, None, false).expect("forward");
         let draft = parsed(&forward.path);
+        assert!(
+            draft.body_markdown.contains("Fixture GmbH"),
+            "no choice is the account's default signature"
+        );
         assert!(draft.frontmatter.subject.starts_with("Fwd:"));
         assert!(draft.frontmatter.forwarded_from.is_some());
         let attachments = draft.frontmatter.attachments.unwrap_or_default();
@@ -2866,6 +2949,10 @@ mod tests {
         assert!(!invalid.diagnostics[0].message.contains("-32010"));
         assert_eq!(batch.failed[1].id, "missing");
         assert!(batch.failed[1].invalid.is_none());
+        assert!(
+            f.calls().iter().all(|(method, _)| method != "draft.list"),
+            "the payload is the refusal's data, not a listing read"
+        );
         let value = serde_json::to_value(&batch).expect("json");
         assert!(
             value["failed"][1].get("invalid").is_none(),

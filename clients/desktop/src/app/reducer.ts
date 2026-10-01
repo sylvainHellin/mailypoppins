@@ -1486,8 +1486,8 @@ function reduce(s: AppState, a: Action): AppState {
       return { ...s, overlay: "mutation", dialog: a.dialog, composeDialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null, signaturesDialog: null };
     case "open_compose": {
       const next: AppState = { ...s, overlay: "compose", composeDialog: a.dialog, dialog: null, attachDialog: null, rsvpDialog: null, inviteDialog: null, signaturesDialog: null };
-      // The new-draft wizard's signature select reads the listing again.
-      return a.dialog.kind === "new" ? wantSignatures(next, a.dialog.account) : next;
+      // The new-draft and forward wizards' signature select reads the listing again.
+      return a.dialog.kind === "new" || a.dialog.kind === "forward" ? wantSignatures(next, a.dialog.account) : next;
     }
     case "open_attachments":
       return { ...s, overlay: "attachments", attachDialog: a.dialog, dialog: null, composeDialog: null, rsvpDialog: null, inviteDialog: null, signaturesDialog: null };

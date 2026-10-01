@@ -145,15 +145,15 @@ Open for M4 and for Sylvain:
 - Confirm that `ts` on a draft is declined.
 - Confirm that `d` on a draft file that does not parse shows a notice instead of deleting the file, as the TUI does.
 - `REQUIRED_CAPABILITIES` in `clients/desktop/src-tauri/src/connector.rs` lacked the M3 methods, so a daemon without them connected and failed at the first call: fixed in `30a9f51c`.
-- `draft.reply` and `draft.forward` take no signature arguments, so a reply or a forward gets no signature choice.
-- `draft.create` takes no body, so the wizard cannot write one.
-- `DraftEntry` has no `bcc`, so the recipients dialog reads the draft through `draft_preview`.
-- `DraftCreated` has no `subject`.
-- `mp_client` drops a refusal's `data`, so the layer rebuilds the `draft.invalid` payload from the listing's skipped file.
-- The daemon's `SendOutcome.message_id` is empty.
-- The daemon serves no `signature.list`, so `signature_list` reads the signatures directory itself.
-- The daemon serves no `draft.attach` and no attachment removal, so the desktop rewrites the frontmatter itself.
-- `message.fetch` is polled through `operation.status` every 100 ms rather than awaited as a pending operation.
+- `draft.reply` and `draft.forward` take no signature arguments, so a reply or a forward gets no signature choice: they always took `signature` and `no_signature`, and the forward wizard passes its choice now ("Daemon gaps closed").
+- `draft.create` takes no body, so the wizard cannot write one: it takes `body` and `headers` now, and the wizard has the TUI's inline body ("Daemon gaps closed").
+- `DraftEntry` has no `bcc`, so the recipients dialog reads the draft through `draft_preview`: it has one now, and `ce` fills its dialog from the listed row ("Daemon gaps closed").
+- `DraftCreated` has no `subject`: it has one now ("Daemon gaps closed").
+- `mp_client` drops a refusal's `data`, so the layer rebuilds the `draft.invalid` payload from the listing's skipped file: it keeps it now, and the layer decodes it ("Daemon gaps closed").
+- The daemon's `SendOutcome.message_id` is empty: it is the built message's now ("Daemon gaps closed").
+- The daemon serves no `signature.list`, so `signature_list` reads the signatures directory itself: it serves one now ("Daemon gaps closed").
+- The daemon serves no `draft.attach` and no attachment removal, so the desktop rewrites the frontmatter itself: it serves both and a listing now ("Daemon gaps closed").
+- `message.fetch` is polled through `operation.status` every 100 ms rather than awaited as a pending operation: it is awaited on its `operation.finished` now ("Daemon gaps closed").
 - The draft preview's Approve and Back to draft buttons acted on the marks the outbox view hides while it is open (the fix1 review), against `clients/desktop/docs/shell.md`, "What the view hides": fixed in `683bcfac`, they act on the draft shown.
 
 ## M4 landed
@@ -263,11 +263,27 @@ Open for M5 and for Sylvain:
 - The fixture's bootstrap sends an empty `operations`, so the device code after a re-bootstrap is covered by TypeScript tests only; an account the fixture adds has no Drafts mailbox; the daemon's `state.invalidate` after `config.add_account` is not modelled.
 - Timed notices do not expire while `!` hides them, so up to 20 reappear, and clipboard refusals and older failure notices are logged at `info`.
 - A failed `operation.cancel` (a timeout) leaves the sign-in dialog's cancelling state set until the operation ends.
-- `ACC-11`'s signature choice for a reply or a forward stays blocked, since `draft.reply` and `draft.forward` take no signature; `ACC-03`'s question whether a password or a token is stored has no answer in `config.get`.
+- `ACC-11`'s signature choice for a forward shipped with the daemon gaps ("Daemon gaps closed"), and a reply carries the default as in the TUI; `ACC-03`'s question whether a password or a token is stored has no answer in `config.get`.
 - The daemon door of the five signature commands has no Rust test, which needs `mp-core`'s test-support override of the config directory.
 - `EmptyView.tsx` is used by no view any more and is kept.
 - The daemon follow-ups M4 worked around are in `BACKLOG.md`: a `signature.*` family with `signature.removed`, `contact.vcard`, an event when a contact index changes (`CON-08`), and a signal for `contact.search`'s refused implicit build.
 - The Tauri layer calls `operation.cancel` through two dedicated commands, `search_server_cancel` and `config_oauth2_cancel`; a generic cancel command would serve a rebuild, an RSVP or an invitation too, and `BACKLOG.md` carries it as optional.
+
+## Daemon gaps closed
+
+The daemon and Rust-layer gaps M3 and M4 worked around client-side, closed on the `p-2026-10-01` branch on 2026-10-01, one commit each, tagged `(#0131)`, with the TUI unaffected.
+
+- Signatures for a reply and a forward: `draft.reply` and `draft.forward` always took `signature` and `no_signature`, which `tests/daemon_gui_gaps.rs` now pins; `draft_reply` and `draft_forward` pass them, and the forward wizard has the new-draft wizard's Signature select.
+- A body on `draft.create`: it takes `body` and `headers`, so the new-draft wizard's draft is written whole by the daemon, the client-side recipients rewrite is gone, and the wizard has the TUI's inline Body, which skips the editor when filled.
+- `bcc` on `DraftEntry`: a `draft.list` row carries the file's `bcc:`, and `ce` fills the recipients dialog from the listed row instead of a `draft_preview` read.
+- `subject` on `DraftCreated`: every writer answers the subject the file was written with; the desktop had no workaround for it, and decodes it with the rest.
+- The refusal `data` `mp_client` dropped: a blocking session call that the daemon refused answers an `anyhow::Error` wrapping `mp_client::session::Refused`, whose text is unchanged and whose `RpcError` keeps `data`; `draft_approve`, `draft_demote` and `send_draft` decode the `draft.invalid` payload from it instead of reading `draft.list` for the skipped file, and the fixture's refusals carry the same type.
+- The empty `SendOutcome.message_id`: `send.draft` and `send.approved` answer the `Message-ID` the build minted, which `send.invite` already did; the desktop's fixture always filled it, so no shim went.
+- `signature.list`: the daemon serves `{account}` -> `{account, names, default}`, `signature_list` calls it over the daemon as over the fixture, and it joined `REQUIRED_CAPABILITIES`; the rest of the `signature.*` family stays client-side.
+- `draft.attach` and an attachment removal: the daemon serves `draft.attachments`, `draft.attach` and `draft.detach` over `mp_core::draft`'s `attach_checked`, `remove_draft_attachment` and `resolve_attachment_entry`, which the desktop's line rewrite moved into; the four draft attachment commands and the vCard draft call them, and all three joined `REQUIRED_CAPABILITIES`.
+- An awaitable `message.fetch`: the daemon side needed nothing, since the fetch always published `operation.finished`; `message_fetch` blocks on that event through `SessionHandle::await_operation`, whose waiters the pump settles, a re-bootstrap re-queries and a restart drops, instead of polling `operation.status` every 100 ms.
+
+Left for later, from the same `BACKLOG.md` bullet: the rest of the `signature.*` family with a `signature.removed` event, `contact.vcard`, an event when a contact index changes (`CON-08`), and a signal for `contact.search`'s refused implicit build.
 
 ## Exit gate
 

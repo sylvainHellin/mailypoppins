@@ -139,6 +139,10 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "config.init",
     "config.add_account",
     "config.oauth2_login",
+    "signature.list",
+    "draft.attachments",
+    "draft.attach",
+    "draft.detach",
 ];
 
 /// Why a connect failed, for the connection screen.

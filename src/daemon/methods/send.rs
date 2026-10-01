@@ -802,7 +802,9 @@ async fn send_one(
     crate::draft::validate_draft(&draft)?;
     let ctx = context_for(account, email)?;
     let sent = crate::send::send_draft(&draft, &ctx).await?;
-    Ok(outcome_of(account, None, &sent.report, sent.settle_error))
+    let mut outcome = outcome_of(account, None, &sent.report, sent.settle_error);
+    outcome.message_id = sent.message_id;
+    Ok(outcome)
 }
 
 /// The transport one account sends through, fake included.
@@ -844,7 +846,8 @@ pub(crate) fn smtp_config(account: &AccountConfig) -> anyhow::Result<SmtpConfig>
     }
 }
 
-/// One send's report as the payload a client renders.
+/// One send's report as the payload a client renders. `message_id` is the
+/// caller's to fill, since the report does not carry the built message.
 fn outcome_of(
     account: &AccountConfig,
     selector: Option<String>,

@@ -385,11 +385,12 @@ describe("compose keys (the TUI's)", () => {
     // Completion off: the test types a recipient and is not about it.
     mock.failing.set("contact_search", new Error("off"));
     await user.keyboard("kim@example.com{Control>}{Enter}{/Control}");
-    await waitFor(() =>
-      expect(callsOf("draft_forward")).toEqual([
-        { account: "work", row_id: 1002, headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: Angebot Dachsanierung" } },
-      ]),
-    );
+    await waitFor(() => expect(callsOf("draft_forward")).toHaveLength(1));
+    expect(callsOf("draft_forward")[0]).toMatchObject({
+      account: "work",
+      row_id: 1002,
+      headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: Angebot Dachsanierung" },
+    });
     await waitFor(() => expect(mock.editorOpens).toHaveLength(1));
   });
 
@@ -491,16 +492,18 @@ describe("compose keys (the TUI's)", () => {
     );
   });
 
-  it("ce opens the recipients dialog filled from the draft file", async () => {
-    const { user } = renderApp();
+  it("ce opens the recipients dialog filled from the listed draft, Bcc included", async () => {
+    const { user } = renderApp(1400, () => {
+      mock.drafts.work.drafts[0].bcc = "chef@example.com";
+    });
     await shellReady();
     await drafts(user);
     await user.keyboard("j");
     await user.keyboard("ce");
     const dialog = await screen.findByRole("dialog", { name: "Edit recipients" });
     expect(within(dialog).getByLabelText("To")).toHaveValue("robin@example.com");
+    expect(within(dialog).getByLabelText("Bcc")).toHaveValue("chef@example.com");
     expect(within(dialog).getByLabelText("Subject")).toHaveValue("Re: Angebot Dachsanierung");
-    expect(callsOf("draft_preview")).toContainEqual({ account: "work", id: "angebot-antwort" });
   });
 
   it("the compose row keys do nothing from the sidebar", async () => {

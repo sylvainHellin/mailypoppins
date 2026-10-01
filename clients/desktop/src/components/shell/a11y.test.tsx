@@ -199,7 +199,7 @@ describe("accessibility primitives", () => {
     await shellReady();
     await user.keyboard("cn");
     const wizard = await screen.findByRole("dialog", { name: "New draft" });
-    expect(wizard).toHaveAccessibleDescription(/opens in your editor/);
+    expect(wizard).toHaveAccessibleDescription(/write it in your editor/);
     await waitFor(() => expect(within(wizard).getByRole("combobox", { name: "To" })).toHaveFocus());
     // Base UI traps focus with a guard on each side and makes the rest of
     // the window inert. Tab onto a guard moves focus back into the dialog on
@@ -217,7 +217,7 @@ describe("accessibility primitives", () => {
     const settled = () => waitFor(() => expect(wizard).toContainElement(document.activeElement as HTMLElement));
     const visited: Element[] = [];
     // Cycle until To comes round again; the bound only stops a broken trap
-    // from looping forever, the wizard has seven controls.
+    // from looping forever, the wizard has eight controls.
     for (let i = 0; i < 40; i++) {
       await user.tab();
       await settled();

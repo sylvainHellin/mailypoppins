@@ -25,4 +25,10 @@ path: string,
 /**
  * The message it answers, absent for a draft made from nothing.
  */
-source: DraftSource | null, };
+source: DraftSource | null,
+/**
+ * The `subject:` the file was written with (#0131): the builder's
+ * `Re:` or `Fwd:` subject, the override `headers` gave, or `""` for a
+ * skeleton. Defaulted, so an answer from an older daemon still decodes.
+ */
+subject: string, };

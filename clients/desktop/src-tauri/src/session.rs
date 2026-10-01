@@ -26,7 +26,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -262,8 +262,16 @@ enum ConnState {
 struct Pump {
     tracker: Option<StateTracker>,
     pending: BTreeMap<String, PendingKind>,
+    /// Operations a command blocks on ([`SessionHandle::await_operation`]):
+    /// their end goes to the waiting command, never to the frontend.
+    waiters: BTreeMap<String, SyncSender<OperationEnd>>,
     last_bootstrap: Option<Bootstrap>,
 }
+
+/// How an awaited operation ended: its `operation.finished` payload (or the
+/// `operation.status` a re-bootstrap read), `{state, result?, error?}`, or
+/// why it can no longer be settled.
+pub type OperationEnd = Result<Value, String>;
 
 struct Shared {
     fixture: bool,
@@ -624,6 +632,30 @@ impl SessionHandle {
     /// The TUI's `requery_operations`: settle what finished in the gap, drop
     /// what the daemon no longer knows.
     fn requery_locked(&self, pump: &mut Pump, door: &Door) {
+        let waited: Vec<String> = pump.waiters.keys().cloned().collect();
+        for id in waited {
+            let answer = door
+                .call_within(
+                    "operation.status",
+                    json!({"operation_id": id}),
+                    STATUS_BUDGET,
+                )
+                .map_err(|e| format!("{e:#}"));
+            let end = match answer {
+                Ok(status) => {
+                    let terminal = serde_json::from_value::<OperationStatus>(status.clone())
+                        .is_ok_and(|s| s.state.is_terminal());
+                    if !terminal {
+                        continue;
+                    }
+                    Ok(status)
+                }
+                Err(reason) => Err(reason),
+            };
+            if let Some(waiter) = pump.waiters.remove(&id) {
+                let _ = waiter.send(end);
+            }
+        }
         let ids: Vec<(String, PendingKind)> =
             pump.pending.iter().map(|(k, v)| (k.clone(), *v)).collect();
         for (id, kind) in ids {
@@ -700,6 +732,51 @@ impl SessionHandle {
         Ok((id, answer))
     }
 
+    /// Start an operation and block until it ends, for a command that answers
+    /// the operation's result rather than its id (`message.fetch`): the start
+    /// is registered under the pump lock, as [`SessionHandle::start_operation`]
+    /// does, so its `operation.finished` cannot overtake it, and the pump hands
+    /// that payload to this call instead of the frontend. A re-bootstrap
+    /// settles it from `operation.status`, and a daemon restart drops it.
+    ///
+    /// The payload is `{state, result?, error?}`; a wait past `wait` is a
+    /// `timeout`, and the operation is no longer awaited.
+    pub fn await_operation(
+        &self,
+        door: &Door,
+        method: &str,
+        params: Value,
+        budget: Duration,
+        wait: Duration,
+    ) -> Result<Value, GuiError> {
+        let (tx, rx) = sync_channel(1);
+        let id = {
+            let mut pump = lock(&self.shared.pump);
+            let answer = door
+                .call_within(method, params, budget)
+                .map_err(|e| GuiError::from_call(&e, Addressing::Params))?;
+            let id = answer["operation_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| GuiError::protocol(format!("{method} answered no operation_id")))?
+                .to_string();
+            pump.waiters.insert(id.clone(), tx);
+            id
+        };
+        match rx.recv_timeout(wait) {
+            Ok(Ok(end)) => Ok(end),
+            Ok(Err(reason)) => Err(GuiError::unavailable(format!(
+                "{method} {id} can no longer be settled: {reason}"
+            ))),
+            Err(_) => {
+                lock(&self.shared.pump).waiters.remove(&id);
+                Err(GuiError::Timeout {
+                    message: format!("{method} did not finish in {} s", wait.as_secs()),
+                })
+            }
+        }
+    }
+
     /// Stop awaiting an operation.
     pub fn forget_operation(&self, id: &str) {
         lock(&self.shared.pump).pending.remove(id);
@@ -708,6 +785,19 @@ impl SessionHandle {
     /// The operations awaited, for tests and diagnostics.
     pub fn pending(&self) -> Vec<String> {
         lock(&self.shared.pump).pending.keys().cloned().collect()
+    }
+
+    /// A fixture session with its pump on a thread of its own, for a test of
+    /// a command that blocks on an operation's end.
+    #[cfg(test)]
+    pub fn pumping(fixture: Arc<Fixture>, events: Receiver<Incoming>) -> (SessionHandle, Door) {
+        let session = SessionHandle::new(true);
+        *lock(&session.shared.fixture_door) = Some(Arc::clone(&fixture));
+        let door = Door::Fixture(fixture);
+        session.ready(door.clone());
+        let (pump, pump_door) = (session.clone(), door.clone());
+        std::thread::spawn(move || pump.pump(&pump_door, events));
+        (session, door)
     }
 
     /// The kind `id` is awaited as, for tests.
@@ -750,6 +840,14 @@ impl SessionHandle {
                         );
                         if operation {
                             let id = event.payload["operation_id"].as_str().unwrap_or_default();
+                            if pump.waiters.contains_key(id) {
+                                if event.kind == KIND_OPERATION_FINISHED {
+                                    if let Some(waiter) = pump.waiters.remove(id) {
+                                        let _ = waiter.send(Ok(event.payload.clone()));
+                                    }
+                                }
+                                return;
+                            }
                             if !pump.pending.contains_key(id) {
                                 tracing::debug!(
                                     "[session] dropped {} for operation `{id}`, not awaited",
@@ -800,6 +898,9 @@ impl SessionHandle {
                     .is_some_and(|t| t.instance_id() != instance_id);
                 if restarted {
                     // Operation ids belong to the instance that issued them.
+                    for (_, waiter) in std::mem::take(&mut pump.waiters) {
+                        let _ = waiter.send(Err("the daemon restarted".into()));
+                    }
                     let dropped = std::mem::take(&mut pump.pending);
                     for (operation_id, kind) in dropped {
                         self.emit(GuiEvent::OperationDropped {
@@ -876,6 +977,37 @@ mod tests {
         while let Ok(incoming) = rx.recv_timeout(Duration::from_millis(100)) {
             session.handle(door, incoming);
         }
+    }
+
+    /// An awaited operation's end goes to the command that waits on it, and
+    /// the frontend hears nothing of it; an id nothing settles times out and
+    /// is forgotten.
+    #[test]
+    fn an_awaited_operation_ends_in_the_waiting_call_and_not_on_the_channel() {
+        let (tx, rx) = channel();
+        let fixture = Arc::new(Fixture::load(tx).expect("fixture"));
+        let (session, door) = SessionHandle::pumping(fixture, rx);
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        session.subscribe(recording(&seen));
+        let end = session
+            .await_operation(
+                &door,
+                "message.fetch",
+                json!({"account": "work", "mailbox": "Archive",
+                       "message_id": "<server-only@fixture.example>"}),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )
+            .expect("settled");
+        assert_eq!(end["state"], "succeeded");
+        assert_eq!(end["result"]["already_present"], false);
+        assert!(lock(&session.shared.pump).waiters.is_empty());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !types(&seen).contains(&"event:operation.finished".to_string()),
+            "{:?}",
+            types(&seen)
+        );
     }
 
     #[test]

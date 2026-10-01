@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The daemon serves what the desktop client used to work out for itself (#0131).**
+  - The desktop's Forward wizard picks a signature, as the New draft wizard does, and passes it to `draft.forward`, which always took one.
+  - The desktop's New draft wizard has the TUI's inline Body: a body typed there is written above the signature and the draft is done without the editor. `draft.create` takes `body` and `headers`, so the daemon writes the whole file.
+  - A `draft.list` row carries the draft's `bcc:`, and the desktop's `ce` fills its dialog from the listed row.
+  - `draft.create`, `draft.reply`, `draft.forward` and `draft.create_from_message` answer the subject the draft was written with.
+  - `mp_client`'s session keeps a refusal's `data` (`mp_client::session::refusal`), so the desktop shows a broken draft's diagnostics as the daemon sent them.
+  - A sent draft's outcome names its `Message-ID`, which `send.draft` and `send.approved` answered empty.
+  - The daemon lists the signatures and an account's default (`signature.list`), which the desktop's wizards read instead of the directory.
+  - The daemon lists, attaches and removes a draft's attachments (`draft.attachments`, `draft.attach`, `draft.detach`), with the checks the TUI's `ta` makes; the desktop's Attach file dialog and the preview's Remove go through it.
+  - The desktop's Fetch of a server-only hit waits on the daemon's end-of-operation event instead of asking every 100 ms.
 - **The desktop client checks that the daemon runs its own version of mailypoppins (#0132).**
   - A daemon left running by another install of `mp`, or by a `cargo install` not followed by `mp daemon restart`, now shows the restart screen naming both versions and the `mp` the app would start, instead of serving the window from an older engine; Restart replaces it with the matching one.
   - The same screen replaces the reconnecting banner when the daemon comes back as another version while the window is open.

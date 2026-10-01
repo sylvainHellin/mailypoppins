@@ -45,8 +45,27 @@ describe("the compose wizard", () => {
     const signature = within(dialog).getByLabelText("Signature") as HTMLSelectElement;
     expect(signature.value).toBe("work");
     expect([...signature.options].map((o) => o.textContent)).toEqual(["short", "work (default)", "none"]);
-    // No inline body: draft_create takes none, so the body is written in the editor.
-    expect(within(dialog).queryByRole("textbox", { name: /body/i })).toBeNull();
+    // The TUI's inline body, empty: the draft then opens in the editor.
+    expect(within(dialog).getByRole("textbox", { name: "Body" })).toHaveValue("");
+  });
+
+  it("an inline body is written by the daemon and the draft does not open in the editor", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    noCompletion();
+    const dialog = await openWizard(user);
+    await user.keyboard("kim@example.com");
+    await user.click(within(dialog).getByRole("textbox", { name: "Body" }));
+    await user.keyboard("Kurze Frage:{Enter}morgen um zehn?");
+    expect(within(dialog).getByRole("textbox", { name: "Body" })).toHaveValue("Kurze Frage:\nmorgen um zehn?");
+    expect(callsOf("draft_create")).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: /^Create/ }));
+    await waitFor(() => expect(callsOf("draft_create")).toHaveLength(1));
+    const args = callsOf("draft_create")[0] as Record<string, unknown>;
+    expect(args).toMatchObject({ body: "Kurze Frage:\nmorgen um zehn?", headers: { to: "kim@example.com" } });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New draft" })).toBeNull());
+    expect(await screen.findByText(`Created: ${String(args.name)}.md`)).toBeInTheDocument();
+    expect(mock.editorOpens).toEqual([]);
   });
 
   it("Enter moves to the next field, and Cmd+Enter creates the draft and opens it in the editor", async () => {
@@ -84,6 +103,39 @@ describe("the compose wizard", () => {
     await user.click(within(dialog).getByRole("button", { name: /Create and edit/ }));
     await waitFor(() => expect(callsOf("draft_create")).toHaveLength(1));
     expect(callsOf("draft_create")[0]).toMatchObject({ signature: null, no_signature: true });
+  });
+
+  it("the forward wizard picks a signature too, and none forwards without one", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    noCompletion();
+    await user.keyboard("jj");
+    await user.keyboard("cf");
+    const dialog = await screen.findByRole("dialog", { name: "Forward" });
+    const signature = (await within(dialog).findByLabelText("Signature")) as HTMLSelectElement;
+    await waitFor(() => expect(signature.value).toBe("work"));
+    await user.click(within(dialog).getByLabelText("To"));
+    await user.keyboard("kim@example.com");
+    await user.selectOptions(signature, "none");
+    await user.click(within(dialog).getByRole("button", { name: /Forward and edit/ }));
+    await waitFor(() => expect(callsOf("draft_forward")).toHaveLength(1));
+    expect(callsOf("draft_forward")[0]).toMatchObject({ account: "work", row_id: 1002, signature: null, no_signature: true });
+  });
+
+  it("an untouched signature select sends neither field, so the daemon resolves the account default", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    noCompletion();
+    await user.keyboard("jj");
+    await user.keyboard("cf");
+    const dialog = await screen.findByRole("dialog", { name: "Forward" });
+    const signature = (await within(dialog).findByLabelText("Signature")) as HTMLSelectElement;
+    await waitFor(() => expect(signature.value).toBe("work"));
+    await user.click(within(dialog).getByLabelText("To"));
+    await user.keyboard("kim@example.com");
+    await user.click(within(dialog).getByRole("button", { name: /Forward and edit/ }));
+    await waitFor(() => expect(callsOf("draft_forward")).toHaveLength(1));
+    expect(callsOf("draft_forward")[0]).toMatchObject({ account: "work", row_id: 1002, signature: null, no_signature: null });
   });
 
   it("refuses a draft with no recipient, as the TUI does, and stays open", async () => {

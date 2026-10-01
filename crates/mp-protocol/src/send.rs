@@ -64,7 +64,8 @@ pub struct SendOutcome {
     /// The draft it was built from, absent for an invitation.
     pub selector: Option<String>,
     /// The `Message-ID` the build minted, which is what an operator matches an
-    /// outbox row by.
+    /// outbox row by; `""` only for a draft of a `send.approved` batch that
+    /// failed before a message was built.
     pub message_id: String,
     /// The one honest line about where the message actually is, which the CLI
     /// prints in brackets (`SendReport::status_line`).

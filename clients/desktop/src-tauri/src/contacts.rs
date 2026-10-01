@@ -26,7 +26,7 @@ use tauri::State;
 use mp_core::contacts::{contact_to_vcard, vcard_file_stem, Contact, ContactSource};
 use mp_protocol::draft::DraftCreated;
 
-use crate::attachments::{draft_attach_on, home_dir};
+use crate::attachments::draft_attach_on;
 use crate::commands::{call, decode, draft_create_on, with_door, DraftHeaders, OperationStarted};
 use crate::error::{Addressing, GuiError};
 use crate::session::{Door, PendingKind, SessionHandle};
@@ -204,7 +204,6 @@ pub fn contact_vcard_draft_on(
     name: &str,
     address: &str,
     display_name: &str,
-    home: Option<&Path>,
 ) -> Result<VcardDraft, GuiError> {
     let address = address.trim();
     if address.is_empty() {
@@ -226,7 +225,7 @@ pub fn contact_vcard_draft_on(
         bcc: String::new(),
         subject: format!("Contact: {}", vcard_name(&contact.display_name, address)),
     };
-    let draft = draft_create_on(door, account, name, None, true, Some(&headers))?;
+    let draft = draft_create_on(door, account, name, None, true, Some(&headers), None)?;
     let drafts = Path::new(&draft.path)
         .parent()
         .ok_or_else(|| GuiError::protocol(format!("{} has no directory", draft.path)))?;
@@ -237,7 +236,7 @@ pub fn contact_vcard_draft_on(
     std::fs::write(&vcf, contact_to_vcard(&contact))
         .map_err(|e| GuiError::protocol(format!("could not write {}: {e}", vcf.display())))?;
     let vcf = vcf.display().to_string();
-    draft_attach_on(door, account, &draft.id, &vcf, home)?;
+    draft_attach_on(door, account, &draft.id, &vcf)?;
     Ok(VcardDraft { draft, vcf })
 }
 
@@ -280,14 +279,7 @@ pub async fn contact_vcard_draft(
     display_name: String,
 ) -> Result<VcardDraft, GuiError> {
     with_door(&session, move |_, door| {
-        contact_vcard_draft_on(
-            door,
-            &account,
-            &name,
-            &address,
-            &display_name,
-            home_dir().as_deref(),
-        )
+        contact_vcard_draft_on(door, &account, &name, &address, &display_name)
     })
     .await
 }
@@ -366,7 +358,6 @@ mod tests {
             "draft-vcard-one",
             "jane.doe@example.com",
             "Doe, Jane",
-            None,
         )
         .expect("drafted");
         let drafts = Path::new(&first.draft.path).parent().expect("dir");
@@ -404,20 +395,19 @@ mod tests {
             "draft-vcard-two",
             "jane.doe@example.com",
             "Doe, Jane",
-            None,
         )
         .expect("drafted again");
         assert_eq!(
             Path::new(&second.vcf),
             drafts.join(VCARD_DIR).join("doe-jane-1.vcf")
         );
-        // A draft, its path and its attachment list: nothing else is asked,
-        // and no editor opens; the frontend opens the draft.
+        // A draft and its attachment, both written by the daemon: nothing
+        // else is asked, and no editor opens; the frontend opens the draft.
         let methods: std::collections::BTreeSet<String> =
             f.calls().into_iter().map(|(m, _)| m).collect();
         assert_eq!(
             methods.into_iter().collect::<Vec<_>>(),
-            ["draft.create", "draft.path"]
+            ["draft.attach", "draft.create"]
         );
         assert!(f.editor_opens().is_empty());
     }
@@ -425,8 +415,8 @@ mod tests {
     #[test]
     fn a_vcard_draft_without_an_address_asks_nothing() {
         let (door, f) = fixture_door();
-        let err = contact_vcard_draft_on(&door, "work", "draft-x", "  ", "Nobody", None)
-            .expect_err("refused");
+        let err =
+            contact_vcard_draft_on(&door, "work", "draft-x", "  ", "Nobody").expect_err("refused");
         assert!(matches!(err, GuiError::Protocol { .. }), "{err:?}");
         assert!(f.calls().is_empty());
     }

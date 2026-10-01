@@ -64,11 +64,11 @@
 //!
 //! The signatures are `signatures.json`'s, held in memory and mirrored to
 //! `<temp>/mp-desktop-fixture-<pid>/signatures/<name>.md` so an Edit opens a
-//! real file. `signature.list` and the pseudo-methods `signature.read`,
-//! `signature.create`, `signature.rename`, `signature.delete` and
-//! `signature.set_default` answer what the Rust layer answers from
-//! `mp_core::signatures` over a daemon ([`FIXTURE_ONLY_METHODS`]), with its
-//! sentences; a create and a rename publish the watcher's
+//! real file. `signature.list` answers as the daemon does, and the
+//! pseudo-methods `signature.read`, `signature.create`, `signature.rename`,
+//! `signature.delete` and `signature.set_default` answer what the Rust layer
+//! answers from `mp_core::signatures` over a daemon ([`FIXTURE_ONLY_METHODS`]),
+//! with its sentences; a create and a rename publish the watcher's
 //! `signature.changed` for the new file, a delete publishes nothing, and
 //! `signature_changed` edits `work` as another window would.
 //!
@@ -224,11 +224,10 @@ const ARCHIVE_MAILBOX: &str = "archive";
 const FIXTURE_ONLY_KEYS: &[&str] = &["body", "attachments"];
 
 /// Methods only the fixture answers, which the handshake never asks a daemon
-/// for: over a daemon the Rust layer does their work itself (`signature.list`
-/// and [`crate::signatures`] call `mp_core::signatures`), so they stay out of
+/// for: over a daemon the Rust layer does their work itself
+/// ([`crate::signatures`] calls `mp_core::signatures`), so they stay out of
 /// [`crate::connector::REQUIRED_CAPABILITIES`].
 pub const FIXTURE_ONLY_METHODS: &[&str] = &[
-    "signature.list",
     "signature.read",
     "signature.create",
     "signature.rename",
@@ -416,6 +415,8 @@ struct State {
     editor_opens: Vec<EditorOpen>,
     /// Every file the system opener was asked to open, oldest first.
     opened: Vec<String>,
+    /// What `~` means to `draft.attach*`, the daemon's `$HOME`.
+    home: Option<PathBuf>,
     next_draft: u64,
     html: BTreeMap<i64, String>,
     instance: u32,
@@ -1338,7 +1339,22 @@ impl State {
             .get(account)
             .and_then(|l| l.skipped.iter().find(|s| stem_of(&s.path) == id))
         {
-            return Err(refused(method, -32010, &skip.error));
+            // The daemon's `draft.invalid` payload, as `draft_invalid` carries it.
+            let payload = DraftInvalid {
+                account: account.to_string(),
+                id: id.to_string(),
+                path: skip.path.clone(),
+                diagnostics: vec![Diagnostic {
+                    line: None,
+                    message: skip.error.clone(),
+                }],
+            };
+            return Err(refused_with(
+                method,
+                -32010,
+                &skip.error,
+                serde_json::to_value(payload).ok(),
+            ));
         }
         self.draft(method, account, id).cloned()
     }
@@ -1623,6 +1639,9 @@ impl State {
             selector: Selector::for_draft(account, id).to_string(),
             path: path.display().to_string(),
             source,
+            subject: mp_core::draft::parse_email_draft(path)
+                .map(|draft| draft.frontmatter.subject)
+                .unwrap_or_default(),
         };
         Ok((serde_json::to_value(answer)?, self.watch_events(path)))
     }
@@ -1634,6 +1653,8 @@ impl State {
         match method {
             "draft.create" => {
                 let name = param_str(method, params, "name")?;
+                let headers = recipient_headers(method, params)?;
+                let body = params["body"].as_str().unwrap_or_default();
                 let file_name = match Path::new(name).extension() {
                     Some(_) => name.to_string(),
                     None => format!("{name}.md"),
@@ -1648,13 +1669,17 @@ impl State {
                     ));
                 }
                 let id = self.mint_id();
-                let skeleton = mp_core::draft::new_draft_skeleton_with_id(
+                let skeleton = mp_core::draft::new_draft_with_body(
                     FIXTURE_FROM,
                     &rfc3339_in(Duration::ZERO),
                     &id,
+                    body,
                     self.signature_for(&account, params).as_deref(),
                 );
                 fs::write(&path, skeleton)?;
+                if let Some(headers) = headers {
+                    mp_core::draft::rewrite_draft_recipients(&path, &headers)?;
+                }
                 self.created(&account, &id, &path, None)
             }
             "draft.reply" | "draft.forward" => {
@@ -1739,6 +1764,53 @@ impl State {
                 };
                 let (id, path) = self.finish_built(&built, None)?;
                 self.created(&account, &id, &path, None)
+            }
+            "draft.attachments" | "draft.attach" | "draft.detach" => {
+                let id = param_str(method, params, "id")?;
+                let path = PathBuf::from(self.parseable(method, &account, id)?.path);
+                let home = self.home.clone();
+                let mut events = Vec::new();
+                if method != "draft.attachments" {
+                    let changed = if method == "draft.attach" {
+                        let input = param_str(method, params, "path")?;
+                        mp_core::draft::attach_checked(&path, input, home.as_deref())
+                    } else {
+                        let index = params["index"].as_u64().ok_or_else(|| {
+                            refused(method, -32602, "index is the entry's zero-based position")
+                        })?;
+                        mp_core::draft::remove_draft_attachment(&path, index as usize)
+                    };
+                    changed.map_err(|e| refused(method, -32602, &format!("{e:#}")))?;
+                    self.rescan();
+                    events = self.watch_events(&path);
+                }
+                let draft = mp_core::draft::parse_email_draft(&path)
+                    .map_err(|e| refused(method, -32010, &one_line(&e)))?;
+                let dir = path.parent().unwrap_or(Path::new("/"));
+                let attachments: Vec<Value> = draft
+                    .frontmatter
+                    .attachments
+                    .unwrap_or_default()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        let resolved =
+                            mp_core::draft::resolve_attachment_entry(&entry, dir, home.as_deref());
+                        json!({
+                            "index": index,
+                            "entry": entry,
+                            "path": resolved.display().to_string(),
+                            "exists": resolved.is_file(),
+                        })
+                    })
+                    .collect();
+                let answer = json!({
+                    "account": account,
+                    "id": id,
+                    "path": path.display().to_string(),
+                    "attachments": attachments,
+                });
+                Ok((answer, events))
             }
             "draft.path" => {
                 let id = param_str(method, params, "id")?;
@@ -2249,8 +2321,22 @@ pub struct Fixture {
     calls: Mutex<Vec<(String, Value)>>,
 }
 
+/// A daemon refusal as the session answers it: the same text, and the typed
+/// error `mp_client::session::refusal` reads back.
 fn refused(method: &str, code: i32, message: &str) -> anyhow::Error {
-    anyhow!("{method}: the daemon refused the call: {message} ({code})")
+    refused_with(method, code, message, None)
+}
+
+/// [`refused`] with the refusal's `data`.
+fn refused_with(method: &str, code: i32, message: &str, data: Option<Value>) -> anyhow::Error {
+    anyhow::Error::new(mp_client::session::Refused {
+        method: method.to_string(),
+        error: mp_protocol::RpcError {
+            code,
+            message: message.to_string(),
+            data,
+        },
+    })
 }
 
 fn param_str<'a>(method: &str, params: &'a Value, key: &str) -> Result<&'a str> {
@@ -2383,6 +2469,7 @@ impl Fixture {
             signatures,
             editor_opens: Vec::new(),
             opened: Vec::new(),
+            home: crate::attachments::home_dir(),
             next_draft: 0,
             html,
             instance: 1,
@@ -2882,6 +2969,9 @@ impl Fixture {
                 Ok(serde_json::to_value(listing)?)
             }
             "draft.create"
+            | "draft.attach"
+            | "draft.attachments"
+            | "draft.detach"
             | "draft.reply"
             | "draft.forward"
             | "draft.create_from_message"
@@ -4404,6 +4494,12 @@ impl Fixture {
         self.state().opened.push(path.to_string());
     }
 
+    /// What `~` means to `draft.attach*` from now on, for a test.
+    #[cfg(test)]
+    pub fn set_home(&self, home: &Path) {
+        self.state().home = Some(home.to_path_buf());
+    }
+
     /// Every stubbed open of a file, oldest first.
     pub fn opened(&self) -> Vec<String> {
         self.state().opened.clone()
@@ -4631,7 +4727,7 @@ fn seed_drafts(
                 &DraftRecipientEdit {
                     to: text(&row.to),
                     cc: text(&row.cc),
-                    bcc: String::new(),
+                    bcc: text(&row.bcc),
                     subject: text(&row.subject),
                 },
             )?;
@@ -4759,6 +4855,7 @@ fn scan_drafts(account: &str, dir: &Path) -> (Vec<DraftEntry>, Vec<DraftSkip>) {
                         status: fm.status.to_string(),
                         to: filled(&fm.to),
                         cc: filled(&fm.cc),
+                        bcc: filled(&fm.bcc),
                         subject: Some(fm.subject.clone()),
                         date: fm.date.clone(),
                         valid: true,

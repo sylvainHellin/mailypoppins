@@ -1,11 +1,13 @@
 // The compose dialogs: the new-draft wizard (`cn`), the forward wizard
 // (`cf` on a stored message) and the recipients edit (`ce`). The TUI's
-// wizard fields, less its inline body: `draft_create` takes no body, so the
-// body is written in the editor the draft opens in.
+// wizard fields: a new draft and a forward pick their signature, and a new
+// draft takes an inline body, which the daemon writes above the signature;
+// a draft created with one does not open the editor, as in the TUI.
 
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { RecipientsInput } from "@/components/compose/RecipientsInput";
 import { Kbd } from "@/components/ui/kbd";
 import {
@@ -32,7 +34,7 @@ const TITLE: Record<ComposeDialog["kind"], string> = {
 };
 
 const DESCRIPTION: Record<ComposeDialog["kind"], string> = {
-  new: "The draft opens in your editor for the body.",
+  new: "Type a short body here, or leave it empty and write it in your editor.",
   forward: "The forward keeps these recipients and this subject, then opens in your editor.",
   recipients: "Rewrites the recipient and subject lines of the draft file; the body stays as it is.",
 };
@@ -45,15 +47,15 @@ const SUBMIT: Record<ComposeDialog["kind"], string> = {
 
 function initialFields(dialog: ComposeDialog | null): ComposeFields {
   if (dialog?.kind === "recipients") return { to: dialog.to, cc: dialog.cc, bcc: dialog.bcc, subject: dialog.subject };
-  if (dialog?.kind === "new") return { to: dialog.to ?? "", cc: "", bcc: "", subject: "" };
+  if (dialog?.kind === "new") return { to: dialog.to ?? "", cc: "", bcc: "", subject: "", body: "" };
   return { to: "", cc: "", bcc: "", subject: dialog?.kind === "forward" ? dialog.subject : "" };
 }
 
 export type ComposeWizardProps = { dialog: ComposeDialog | null; onOpenChange: (open: boolean) => void };
 
 /**
- * Enter in a field moves to the next one, Cmd+Enter or Ctrl+Enter submits,
- * Escape cancels. A refusal (a name already taken, an unknown row) shows in
+ * Enter in a field moves to the next one (in the body it starts a new line),
+ * Cmd+Enter or Ctrl+Enter submits, Escape cancels. A refusal (a name already taken, an unknown row) shows in
  * the dialog, which stays open.
  */
 export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
@@ -84,12 +86,13 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
     picked.current = false;
   }, [dialog]);
 
-  // Only a new draft picks a signature, from the account's listing in the
+  // A new draft and a forward pick a signature, from the account's listing in the
   // store, which the open wizard reads again on every `signature.changed`
   // and every change the Signatures dialog makes. A listing that failed
   // offers none.
   const loadable = useAppState().signatures;
-  const entry = kind === "new" && account ? loadable[account] : undefined;
+  const signs = kind === "new" || kind === "forward";
+  const entry = signs && account ? loadable[account] : undefined;
   const data = entry?.data ?? null;
   const failed = entry?.error != null;
   const signatures = useMemo<SignatureListing | null>(
@@ -111,8 +114,11 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
   const submit = async () => {
     if (!dialog || busy) return;
     setBusy(true);
+    // An untouched select sends neither field, so the daemon resolves the
+    // account default and honours `include_signature = false`, as the TUI's
+    // wizard does; an explicit pick, the default included, names it.
     const withSignature: ComposeFields =
-      kind === "new" && signatures && signatures.names.length > 0
+      signs && signatures && signatures.names.length > 0 && picked.current
         ? { ...fields, signature: signature === NONE ? null : signature }
         : fields;
     const refusal = await submitCompose(dialog, withSignature, dispatch);
@@ -136,7 +142,7 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
   };
 
   // To, Cc and Bcc complete contacts; the subject is a plain field.
-  const field = (name: keyof Omit<ComposeFields, "signature">, label: string) => (
+  const field = (name: keyof Omit<ComposeFields, "signature" | "body">, label: string) => (
     <div className="grid grid-cols-[4.5rem_1fr] items-center gap-2">
       <label htmlFor={`${id}-${name}`} className="text-sm text-muted-foreground">
         {label}
@@ -187,7 +193,7 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
           {field("cc", "Cc")}
           {field("bcc", "Bcc")}
           {field("subject", "Subject")}
-          {kind === "new" && signatures && signatures.names.length > 0 ? (
+          {signs && signatures && signatures.names.length > 0 ? (
             <div className="grid grid-cols-[4.5rem_1fr] items-center gap-2">
               <label htmlFor={`${id}-signature`} className="text-sm text-muted-foreground">
                 Signature
@@ -211,13 +217,29 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
               </select>
             </div>
           ) : null}
+          {kind === "new" ? (
+            <div className="grid grid-cols-[4.5rem_1fr] items-start gap-2">
+              <label htmlFor={`${id}-body`} className="pt-1.5 text-sm text-muted-foreground">
+                Body
+              </label>
+              <Textarea
+                id={`${id}-body`}
+                data-field="body"
+                value={fields.body ?? ""}
+                rows={5}
+                spellCheck
+                placeholder="Leave empty to write the body in your editor"
+                onChange={(e) => setFields({ ...fields, body: e.currentTarget.value })}
+              />
+            </div>
+          ) : null}
           <p role="alert" data-slot="compose-error" className="min-h-5 text-sm text-destructive">
             {error}
           </p>
           <DialogFooter>
             <DialogClose render={<Button type="button" variant="outline" />}>Cancel</DialogClose>
             <Button type="submit" data-submit="" disabled={busy}>
-              {SUBMIT[kind]} <Kbd aria-hidden="true">⌘↵</Kbd>
+              {kind === "new" && fields.body?.trim() ? "Create" : SUBMIT[kind]} <Kbd aria-hidden="true">⌘↵</Kbd>
             </Button>
           </DialogFooter>
         </form>

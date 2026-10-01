@@ -501,9 +501,12 @@ mod tests {
                 "diagnostic.store_gc".to_string(),
                 "diagnostic.support_bundle".to_string(),
                 "draft.approve".to_string(),
+                "draft.attach".to_string(),
+                "draft.attachments".to_string(),
                 "draft.create".to_string(),
                 "draft.create_from_message".to_string(),
                 "draft.demote".to_string(),
+                "draft.detach".to_string(),
                 "draft.discard".to_string(),
                 "draft.forward".to_string(),
                 "draft.list".to_string(),
@@ -545,6 +548,7 @@ mod tests {
                 "send.outbox_discard".to_string(),
                 "send.outbox_list".to_string(),
                 "send.outbox_retry".to_string(),
+                "signature.list".to_string(),
                 "state.bootstrap".to_string(),
                 "sync.full".to_string(),
                 "sync.quick".to_string(),
@@ -561,7 +565,7 @@ mod tests {
         assert!(session.client_ctx().is_none());
         session
             .initialize(
-                &params_with(1, 1, &["account.list"], &["message.list", "signature.list"]),
+                &params_with(1, 1, &["account.list"], &["message.list", "signature.read"]),
                 &state(),
             )
             .expect("ok");

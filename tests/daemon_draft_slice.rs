@@ -48,7 +48,7 @@
 //!
 //! pub struct DraftEntry {
 //!     pub id: String, pub selector: String, pub path: String, pub status: String,
-//!     pub to: Option<String>, pub cc: Option<String>,
+//!     pub to: Option<String>, pub cc: Option<String>, pub bcc: Option<String>,
 //!     pub subject: Option<String>, pub date: Option<String>,
 //!     pub valid: bool, pub ready: bool,
 //! }
@@ -313,8 +313,11 @@ const DRAFT_COMMANDS: [&str; 6] = [
 /// renders the same row a mailbox listing renders: it prints the Cc line and
 /// sorts by the `date:` field. `mp list` reads neither, so its output did not
 /// move; the protocol changelog carries the entry.
-const ENTRY_FIELDS: [&str; 10] = [
-    "cc", "date", "id", "path", "ready", "selector", "status", "subject", "to", "valid",
+///
+/// `bcc` joined it in #0131, for a client's recipients dialog that edits all
+/// three recipient fields from the listed row; `mp list` reads it neither.
+const ENTRY_FIELDS: [&str; 11] = [
+    "bcc", "cc", "date", "id", "path", "ready", "selector", "status", "subject", "to", "valid",
 ];
 
 // ---------------------------------------------------------------------------

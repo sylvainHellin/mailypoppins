@@ -17,7 +17,8 @@ account: string,
 selector: string | null,
 /**
  * The `Message-ID` the build minted, which is what an operator matches an
- * outbox row by.
+ * outbox row by; `""` only for a draft of a `send.approved` batch that
+ * failed before a message was built.
  */
 message_id: string,
 /**

@@ -984,6 +984,7 @@ export function draftItems(list: MessageList | null): DraftItem[] {
         status: "invalid",
         to: null,
         cc: null,
+        bcc: null,
         subject: null,
         date: null,
         valid: false,

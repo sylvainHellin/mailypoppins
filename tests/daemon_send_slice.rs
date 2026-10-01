@@ -2481,6 +2481,15 @@ async fn a_send_result_renders_through_the_shared_wordings() {
     let outcome: SendOutcome = serde_json::from_value(settled["result"].clone())
         .expect("send.draft answers with a SendOutcome");
     assert_eq!(outcome.account, fixture::ACCOUNT);
+    // The Message-ID the build minted, which is the one the transport took
+    // and the one an outbox row is matched by (#0131: it used to be "").
+    let submitted = fixture::transport_events(&slice.log())
+        .into_iter()
+        .find_map(|event| match event {
+            fixture::TransportEvent::Submit { message_id, .. } => Some(message_id),
+            _ => None,
+        });
+    assert_eq!(Some(outcome.message_id.clone()), submitted);
     assert_eq!(
         outcome.selector.as_deref(),
         Some(fixture::selector(fixture::ACCOUNT, fixture::APPROVED).as_str())

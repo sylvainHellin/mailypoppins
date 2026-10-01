@@ -50,7 +50,7 @@ That refusal is a `version_mismatch` too, its `why` naming both versions and the
 A binary that is missing or prints no version skips the check, with a warning in the log.
 On a reconnect the same refusal turns `reconnecting` into `failed` with that error, pushed as soon as the session thread records it, while the thread keeps retrying; the next successful reconnect is `connected` again.
 The CLI and the TUI compare only the protocol range, since each is itself the `mp` that would start the daemon.
-The handshake requires every daemon method the layer calls (`REQUIRED_CAPABILITIES` in `connector.rs`), so a daemon that lacks one lands on that screen instead of failing at the first call; under test the fixture door panics on a method missing from the list, less the methods only the fixture answers (`FIXTURE_ONLY_METHODS` in `fixture.rs`: `signature.list`, `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default`), whose work the layer does itself over a daemon.
+The handshake requires every daemon method the layer calls (`REQUIRED_CAPABILITIES` in `connector.rs`), so a daemon that lacks one lands on that screen instead of failing at the first call; under test the fixture door panics on a method missing from the list, less the methods only the fixture answers (`FIXTURE_ONLY_METHODS` in `fixture.rs`: `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default`), whose work the layer does itself over a daemon.
 `setup` is the desktop's own configuration: an editor that did not start, a settings file that does not read, or a setting value its key cannot hold; its message names what to change.
 
 ## Types
@@ -92,9 +92,9 @@ The type blocks in this document are for reading, and the generated files are th
 | `message_set_flag` | `account`, `row_ids`, `flagged` | `MutationBatch` |
 | `message_set_read` | `account`, `row_ids`, `read` | `MutationBatch` |
 | `draft_discard` | `account`, `ids` | `DraftDiscardBatch` |
-| `draft_create` | `account`, `name`, `signature?`, `no_signature?`, `headers?: DraftHeaders` | `DraftCreated` |
-| `draft_reply` | `account`, `row_id`, `all`, `headers?` | `DraftCreated` |
-| `draft_forward` | `account`, `row_id`, `headers?` | `DraftCreated` |
+| `draft_create` | `account`, `name`, `signature?`, `no_signature?`, `headers?: DraftHeaders`, `body?` | `DraftCreated` |
+| `draft_reply` | `account`, `row_id`, `all`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
+| `draft_forward` | `account`, `row_id`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
 | `draft_from_message` | `account`, `kind: DraftKind`, `message: DraftMessage` | `DraftCreated` |
 | `draft_path` | `account`, `id` | `DraftLocation` |
 | `draft_approve` | `account`, `ids` | `DraftStatusBatch` |
@@ -275,7 +275,7 @@ Once the drain runs, each mailbox whose counts moved gets a `state.invalidate` w
 `draft_discard` is followed by `state.remove` for `draft:<account>/<id>`.
 
 `draft_approve` and `draft_demote` follow the same batch rules, and a draft whose file does not parse (`-32010` `draft_invalid`) also fails alone.
-Its failure carries `invalid`, the `draft.invalid` payload: the session keeps a refusal's text but not its `data`, so the path comes from `draft.list`'s skipped file under that stem and the one diagnostic is the refusal's message.
+Its failure carries `invalid`, the `draft.invalid` payload the daemon sends as the refusal's `data`, the file and the parser's diagnostics, which `mp_client::session::refusal` reads off the call's error.
 
 `send_cancel_hold` stops a hold whichever client armed it; a hold that already fired, or never existed, is `not_found`.
 The countdown itself comes from the bootstrap's `holds` and the `send.hold_started`, `send.hold_tick`, `send.hold_fired` and `send.hold_cancelled` events, each carrying one `HoldStatus` with the daemon's `remaining_secs`.
@@ -291,7 +291,7 @@ The countdown itself comes from the bootstrap's `holds` and the `send.hold_start
 4. `send.draft {account, id, hold}`, awaited as `kind: "send"`.
 
 A refused approve stops the send.
-Its `SendRefusal` is the `GuiError`, and for a file that does not parse (`-32010` `draft_invalid`) `invalid` carries the `draft.invalid` payload, rebuilt from the listing's skipped file as `draft_approve` does.
+Its `SendRefusal` is the `GuiError`, and for a file that does not parse (`-32010` `draft_invalid`) `invalid` carries the `draft.invalid` payload, the refusal's `data`, as `draft_approve` does.
 A `send.draft` the daemon refuses leaves the approval in place, as the TUI's does, and `approved` in the answer says whether this call approved the draft.
 `send_approved` starts `send.approved {account, hold}`, awaited as `kind: "send_approved"`.
 
@@ -357,7 +357,7 @@ The daemon refuses nothing about the invitation itself: an RSVP to the user's ow
 
 `invite_refusal` answers whether an account can reply to or send invitations at all.
 The daemon refuses both on a Graph account (`ANO-4`) before it looks at anything else, so the layer reads `account.list`, and for an account whose `backend` is `graph` it calls `calendar.rsvp {account}` alone.
-That call is refused before an operation id exists, and `refusal` is the daemon's sentence, taken off the refusal text by `error::refusal_sentence` (the session keeps a refusal's text and drops its `data`).
+That call is refused before an operation id exists, and `refusal` is the daemon's sentence, taken off the refusal text by `error::refusal_sentence` (the session keeps a refusal's `data` too, behind `mp_client::session::refusal`, and this one carries none a client needs).
 An `imap` account answers `refusal: null` without that call, and an unknown one is `not_found`.
 
 `send_invite` is `mp send --invite`: `send.invite` builds the `VEVENT` and the iMIP message and submits it through the durable outbox, awaited as `kind: "send_invite"` with a `SendOutcome`.
@@ -384,7 +384,7 @@ No event says that an index changed, so the frontend reads the list again after 
 
 1. `draft.create` of `name` with the headers `to: recipient` and `subject: "Contact: <name>"` (the display name, else the address's local part) and `no_signature`, the TUI's vCard draft carrying none;
 2. `mp_core::contacts::contact_to_vcard` of the contact into `_vcards/` beside the new draft, named by `vcard_file_stem` (`doe-jane.vcf`), then `-1`, `-2` and on while the name is taken, the TUI's rule;
-3. the `.vcf`'s absolute path appended to the draft's `attachments:` through `draft_attach`'s code, which reads the file back through `draft.path`.
+3. the `.vcf`'s absolute path appended to the draft's `attachments:` through `draft.attach`.
 
 It answers the `DraftCreated` and the `.vcf`'s path, and opens nothing: the frontend hands the draft to the editor as a new draft's.
 An empty address is a `protocol` refusal before any call.
@@ -399,7 +399,7 @@ type SignatureListing = { account: string; names: string[]; default: string | nu
 type SignatureFile = { name: string; path: string; content: string };
 ```
 
-- `signature_list` lists every valid name, sorted, and the account's default when its file still exists.
+- `signature_list` lists every valid name, sorted, and the account's default when its file still exists, through the daemon's `signature.list`.
 - `signature_read` answers the file's path and content.
 - `signature_create` writes an empty file and answers it; the frontend opens `path` in the editor next, as the TUI's `n` does.
 - `signature_rename` moves the file and points every account default that named it at the new name.
@@ -533,13 +533,14 @@ A file that is not a JSON object is `setup` for every read and write.
 
 A draft is a Markdown file with YAML frontmatter in the account's drafts directory, and every command that writes one answers its absolute `path`.
 `draft_create` takes the file name; a name already taken is refused with `protocol` code `-32602`, and the message names the existing path.
-`draft.create` itself takes no recipients, so `headers` are written into the new file client-side.
+It passes `headers` and a non-blank `body` to `draft.create`, which writes the file whole: the recipients and subject in the frontmatter, the body above the signature.
 `draft_reply` and `draft_forward` address the source by `row_id` and pass `headers` to the daemon, which then needs all four fields; an empty string clears one.
+They pass `signature` and `no_signature` as `draft_create` does, and neither means the account's default, which the daemon resolves.
 `draft_from_message` builds a reply, reply-all or forward from a server-only search hit (`DraftMessage`, the hit's own field names), with no attachments.
 
 `draft_set_recipients` is client-side, like the TUI's `ce`: it resolves the file through `draft.path` and rewrites the `to`, `cc`, `bcc` and `subject` lines with `mp_core::draft::rewrite_draft_recipients`, which leaves the body and every other field byte for byte.
 An absent `subject` keeps the draft's own, and the signature is not re-spliced.
-The daemon serves no `signature.list`, so `signature_list` reads the signatures directory through `mp_core::signatures`, as the TUI does; `default` is the account's default whether or not `include_signature` is on (see Signatures).
+`signature_list` calls `signature.list`, which lists the signatures directory through `mp_core::signatures`, as the TUI does; `default` is the account's default whether or not `include_signature` is on (see Signatures).
 
 Every change to a draft file, from the daemon, an editor or a client-side rewrite, reaches the frontend as the watcher's `draft.changed` or `draft.invalid`, and the commands publish nothing of their own.
 
@@ -681,14 +682,14 @@ The app cache is Tauri's `app_cache_dir`, `~/Library/Caches/dev.mailypoppins.des
 On unix `renditions/` and each `hit-<hash>/` are 0700, tightened if found wider (`mp_core::config::create_private_dir_all`), and `message.html` is 0600, as the daemon's handles and the TUI's temp files are.
 Each write first removes the renditions older than a day.
 
-A draft's attachments are the paths its `attachments:` frontmatter lists, and the daemon serves neither `draft.attach` nor a removal, so all four draft commands work on the file, which `draft.path` resolves fresh:
+A draft's attachments are the paths its `attachments:` frontmatter lists, and the daemon reads and rewrites them (#0131), so no command here writes the file:
 
-- `draft_attachments` parses the file and answers each entry as typed, where the send path finds it, and whether a file is there: `~` expands against `$HOME`, and a relative entry resolves against the draft's own directory (`ATT-03`).
-- `draft_attach` appends with `mp_core::draft::append_draft_attachment`, the TUI's `ta`, which keeps the body and every other line byte for byte and stores the path as typed, `~` included.
-  It refuses a blank or relative path and a directory with `protocol`, a path with no file behind it with `not_found` ("No such file: <path>", the TUI's words), and a file the list already names with `protocol` ("<entry> is already attached").
-- `draft_attachment_remove` drops item `index` of the block list and leaves the file it named alone.
-  The rewrite is this layer's own, line by line, and it first checks that the list has one line per parsed entry, so a flow-style list or an entry that spans lines is refused rather than rewritten; an emptied list keeps its bare `attachments:` key, the skeleton's shape.
-- `draft_attachment_open` opens entry `index` with the opener (`ATT-04`), and a missing file is `not_found`.
+- `draft_attachments` is `draft.attachments`: each entry as typed, where the send path finds it, and whether a file is there: `~` expands against the daemon's `$HOME`, and a relative entry resolves against the draft's own directory (`ATT-03`).
+- `draft_attach` is `draft.attach`, the TUI's `ta`: `mp_core::draft::attach_checked` keeps the body and every other line byte for byte and stores the path as typed, `~` included.
+  A blank path is refused here, before any call; the daemon refuses a relative path, a directory, a path with no file behind it ("No such file: <path>", the TUI's words) and a file the list already names ("<entry> is already attached"), each a `protocol` error carrying the daemon's sentence without the refusal's frame.
+- `draft_attachment_remove` is `draft.detach`: item `index` of the block list goes and the file it named stays.
+  `mp_core::draft::remove_draft_attachment` first checks that the list has one line per parsed entry, so a flow-style list or an entry that spans lines is refused rather than rewritten; an emptied list keeps its bare `attachments:` key, the skeleton's shape.
+- `draft_attachment_open` opens entry `index` where `draft.attachments` resolved it, with the opener (`ATT-04`), and a missing file is `not_found`.
 
 ```ts
 type DraftAttachments = {
@@ -697,11 +698,12 @@ type DraftAttachments = {
 };
 ```
 
-A write reaches the frontend as the watcher's `draft.changed`, like every other client-side rewrite.
+A write reaches the frontend as the watcher's `draft.changed`, like every other draft write.
 An editor open on the same file can overwrite the change with its own buffer, as it can in the TUI.
 
 `message_fetch` is the TUI search overlay's `f` (`LST-09`): `message.fetch {account, mailbox, message_id}` ingests a server-only message.
-It is an operation, and one message is quick, so the command reads `operation.status` every 100 ms until it ends and answers with its result; the frontend awaits one promise, and no `PendingKind` is registered.
+It is an operation, and one message is quick, so the command blocks on its end (`SessionHandle::await_operation`) and answers with its result; the frontend awaits one promise, and no `PendingKind` is registered.
+The start is registered under the pump lock, so its `operation.finished` cannot overtake it, and the pump hands that payload to the waiting command instead of the channel; a re-bootstrap settles it from `operation.status`, and a daemon restart ends it as `daemon_unavailable`.
 A fetch still running after 90 s is `timeout`, a `failed` operation is `protocol` with the daemon's reason, and a bad mailbox is `-32602` at the call.
 A message the store already holds answers at once with `already_present: true`.
 The new row reaches the lists through the counts `state.invalidate` the daemon publishes for its mailbox.

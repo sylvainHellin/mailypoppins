@@ -309,11 +309,11 @@ export async function editDraft(s: AppState, dispatch: Dispatch<Action>): Promis
 }
 
 /**
- * `ce`, Drafts only: the recipients dialog, filled from the draft. The
- * listing has no Bcc, so the fields come from `draft_preview`, which reads
- * the file; a draft that does not parse cannot be edited this way.
+ * `ce`, Drafts only: the recipients dialog, filled from the draft's listed
+ * row, which carries To, Cc, Bcc and the subject; a draft that does not
+ * parse cannot be edited this way.
  */
-export async function editRecipients(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
+export function editRecipients(s: AppState, dispatch: Dispatch<Action>): void {
   if (!draftsShown(s)) {
     notice(dispatch, "Edit recipients (c e) is only available in Drafts");
     return;
@@ -323,15 +323,14 @@ export async function editRecipients(s: AppState, dispatch: Dispatch<Action>): P
   const { account, row } = cur;
   const busy = sendingRefusal(s, [{ account, draft: row.id }]);
   if (busy) return notice(dispatch, busy);
-  try {
-    const p = await cmd.draftPreview(account, row.id);
-    dispatch({
-      type: "open_compose",
-      dialog: { kind: "recipients", account, draftId: row.id, to: p.to ?? "", cc: p.cc ?? "", bcc: p.bcc ?? "", subject: p.subject },
-    });
-  } catch (e: unknown) {
-    failed(dispatch, account, `Cannot edit ${row.id}`, e);
+  if (!row.valid) {
+    dispatch({ type: "activity", kind: "compose_failed", account, text: `Cannot edit ${row.id}: ${row.diagnostic ?? "it does not parse"}` });
+    return;
   }
+  dispatch({
+    type: "open_compose",
+    dialog: { kind: "recipients", account, draftId: row.id, to: row.to ?? "", cc: row.cc ?? "", bcc: row.bcc ?? "", subject: row.subject ?? "" },
+  });
 }
 
 /**
@@ -376,8 +375,8 @@ export function setShownStatus(s: AppState, dispatch: Dispatch<Action>, account:
 // The wizard's and the recipients dialog's submit
 // ---------------------------------------------------------------------------
 
-/** The wizard's fields; `signature` is a name, or null for none. */
-export type ComposeFields = DraftHeaders & { signature?: string | null };
+/** The wizard's fields; `signature` is a name, or null for none, and `body` the new draft's inline body. */
+export type ComposeFields = DraftHeaders & { signature?: string | null; body?: string };
 
 /** A recipient field as the TUI normalises it: no trailing separators. */
 export function normalizeRecipients(field: string): string {
@@ -429,8 +428,10 @@ export const NO_RECIPIENT = "Add a recipient in To, Cc or Bcc";
 
 /**
  * Submit a compose dialog. Resolves to null once the draft is written (and,
- * for a new draft or a forward, the editor asked to open it), or to the
- * reason it was not, which the dialog shows while it stays open.
+ * for a forward or a new draft with no inline body, the editor asked to open
+ * it), or to the reason it was not, which the dialog shows while it stays
+ * open. A new draft with a body is complete: the TUI's "Created: <file>" and
+ * no editor.
  */
 export async function submitCompose(dialog: ComposeDialog, fields: ComposeFields, dispatch: Dispatch<Action>): Promise<string | null> {
   const headers = normalized(fields);
@@ -450,14 +451,18 @@ export async function submitCompose(dialog: ComposeDialog, fields: ComposeFields
       dispatch({ type: "activity", kind: "applied", account, text: `Recipients updated: ${loc.selector}` });
       return null;
     }
+    const sig = fields.signature;
+    const signature = sig === null ? { no_signature: true } : sig ? { signature: sig } : {};
     if (dialog.kind === "forward") {
-      draft = await cmd.draftForward(account, dialog.row_id, headers);
+      draft = await cmd.draftForward(account, dialog.row_id, headers, signature);
     } else {
-      const sig = fields.signature;
-      draft = await cmd.draftCreate(account, draftName(headers.subject), {
-        ...(sig === null ? { no_signature: true } : sig ? { signature: sig } : {}),
-        headers,
-      });
+      const body = fields.body?.trim() ? fields.body : undefined;
+      draft = await cmd.draftCreate(account, draftName(headers.subject), { ...signature, headers, ...(body ? { body } : {}) });
+      if (body) {
+        dispatch({ type: "overlay", overlay: null });
+        notice(dispatch, `Created: ${draft.path.slice(draft.path.lastIndexOf("/") + 1)}`);
+        return null;
+      }
     }
   } catch (e: unknown) {
     return asGuiError(e).message;

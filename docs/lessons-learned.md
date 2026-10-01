@@ -2437,3 +2437,9 @@ tauri-build (2.7) copies each `bundle.externalBin` entry, suffixed with the targ
 So the entry lives in `clients/desktop/src-tauri/tauri.bundle.conf.json`, merged only by `pnpm bundle` (`tauri build --config <file>`), and a checkout builds and tests without a staged `mp`.
 The bundler drops the triple: `binaries/mp-aarch64-apple-darwin` becomes `mailypoppins.app/Contents/MacOS/mp`, beside the main executable `mp-desktop`, which is where `connector.rs` looks first.
 `tauri build --config '{"version":"X"}'` sets `CFBundleShortVersionString` and the DMG's name (`mailypoppins_X_aarch64.dmg`, `_x64` for Intel) but not the crate's `CARGO_PKG_VERSION`, so the app's own `app_version` stays the `mp-desktop` crate's.
+## A refusal's `data` survives the session only as `mp_client::session::Refused`
+
+`mp_client::session` used to flatten every daemon refusal into its text before the answer crossed the call channel, so a `-32010` `draft_invalid` reached the desktop without the `draft.invalid` payload the daemon had put in `data`, and the Tauri layer rebuilt it from a `draft.list` read (#0131).
+A blocking call's error now wraps `mp_client::session::Refused`, whose `Display` is the old text byte for byte, so `GuiError::from_call` and every `rpc_code` read stay as they were; `mp_client::session::refusal(&error)` reads the typed `RpcError` back.
+A fake that should look like the daemon (the desktop fixture's `refused`) has to build that same type: an `anyhow!` with the right text classifies correctly and still carries no `data`.
+A command that wants the payload reads it before turning the error into a `GuiError`, which keeps only the text.

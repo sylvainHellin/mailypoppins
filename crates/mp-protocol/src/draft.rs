@@ -44,6 +44,11 @@ pub struct DraftCreated {
     pub path: String,
     /// The message it answers, absent for a draft made from nothing.
     pub source: Option<DraftSource>,
+    /// The `subject:` the file was written with (#0131): the builder's
+    /// `Re:` or `Fwd:` subject, the override `headers` gave, or `""` for a
+    /// skeleton. Defaulted, so an answer from an older daemon still decodes.
+    #[serde(default)]
+    pub subject: String,
 }
 
 /// One row of `draft.list`, which is the index projection `mp list` prints.
@@ -70,6 +75,14 @@ pub struct DraftEntry {
     /// Here because a TUI drafts list renders the same row a mailbox listing
     /// renders, and that row prints the Cc line; the CLI listing ignores it.
     pub cc: Option<String>,
+    /// The `bcc:` field, absent when the draft blind-copies nobody (#0131).
+    ///
+    /// Here because a client's recipients dialog edits To, Cc, Bcc and the
+    /// subject from the row it lists, and would otherwise read the file or
+    /// the preview for the one field the row lacked. Defaulted, so a row from
+    /// an older daemon still decodes.
+    #[serde(default)]
+    pub bcc: Option<String>,
     /// The `subject:` field, absent when the file has none.
     pub subject: Option<String>,
     /// The `date:` frontmatter field, absent when the file has none (P5-U4).
@@ -221,6 +234,37 @@ pub struct DraftPreview {
     pub signature: Option<String>,
 }
 
+/// One entry of a draft's `attachments:` list (#0131).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct DraftAttachment {
+    /// Zero-based, the list's order, which is what `draft.detach` takes.
+    pub index: u32,
+    /// The entry as the file spells it, `~` kept.
+    pub entry: String,
+    /// Where the send path finds it: `~` against the daemon's home, a
+    /// relative entry against the draft file's directory.
+    pub path: String,
+    /// Whether something is there now: a file, or a directory whose regular
+    /// files the send path attaches. A send fails on a missing one.
+    pub exists: bool,
+}
+
+/// The `result` of `draft.attachments`, `draft.attach` and `draft.detach`:
+/// a draft's attachment list, read from its file after the change (#0131).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct DraftAttachments {
+    /// The account the draft belongs to.
+    pub account: String,
+    /// The draft id.
+    pub id: String,
+    /// The draft file.
+    pub path: String,
+    /// The entries, in the list's order.
+    pub attachments: Vec<DraftAttachment>,
+}
+
 /// Which draft `draft.create_from_message` builds (P5-U10d, #0126).
 ///
 /// The wire spelling of `mailypoppins::draft::DraftFromSource`, which is
@@ -343,6 +387,10 @@ mod tests {
         assert_eq!(
             created.source, None,
             "a message the store does not hold has no id and no selector to answer with"
+        );
+        assert_eq!(
+            created.subject, "Re: Angebot",
+            "the subject the file was written with"
         );
     }
 

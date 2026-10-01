@@ -49,8 +49,9 @@ use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
 use mp_protocol::draft::{
-    DraftCollision, DraftCreated, DraftEntry, DraftKind, DraftListing, DraftLocation, DraftMessage,
-    DraftPreview, DraftReport, DraftSkip, DraftSource, DraftValidation,
+    DraftAttachment, DraftAttachments, DraftCollision, DraftCreated, DraftEntry, DraftKind,
+    DraftListing, DraftLocation, DraftMessage, DraftPreview, DraftReport, DraftSkip, DraftSource,
+    DraftValidation,
 };
 use mp_protocol::events::{DraftInvalid, KIND_DRAFT_INVALID};
 use mp_protocol::{ErrorCode, RpcError};
@@ -106,6 +107,18 @@ pub const DRAFT_FROM_MESSAGE_METHOD_SPECS: [MethodSpec; 1] = [MethodSpec::new(
     1,
 )];
 
+/// A draft's attachment list (#0131): read it, append a file, remove an entry.
+///
+/// What the TUI's `ta` and the desktop's attach dialog and preview did by
+/// rewriting the file behind the daemon's back. In an array of its own for
+/// the reason [`DRAFT_FROM_MESSAGE_METHOD_SPECS`] is one; `draft.attachments`
+/// is a query and the other two are durable commands, like the family.
+pub const DRAFT_ATTACHMENT_METHOD_SPECS: [MethodSpec; 3] = [
+    MethodSpec::new("draft.attach", MethodKind::Command, 1),
+    MethodSpec::new("draft.attachments", MethodKind::Query, 1),
+    MethodSpec::new("draft.detach", MethodKind::Command, 1),
+];
+
 /// One of the ten, selected by its own [`MethodSpec`].
 ///
 /// One type for the family because they share every dependency and differ only
@@ -132,6 +145,7 @@ pub fn register(
     for spec in DRAFT_METHOD_SPECS
         .into_iter()
         .chain(DRAFT_FROM_MESSAGE_METHOD_SPECS)
+        .chain(DRAFT_ATTACHMENT_METHOD_SPECS)
     {
         dispatcher.register(Arc::new(DraftMethod {
             spec,
@@ -159,6 +173,9 @@ impl Method for DraftMethod {
             let email = &snapshot.config.email;
             let result = match self.spec.name {
                 "draft.approve" => self.set_status(&params, accounts, true),
+                "draft.attach" => attach(&params, accounts),
+                "draft.attachments" => attachments(&params, accounts),
+                "draft.detach" => detach(&params, accounts),
                 "draft.create" => create(&params, accounts, email),
                 "draft.create_from_message" => create_from_message(&params, accounts, email),
                 "draft.demote" => self.set_status(&params, accounts, false),
@@ -317,6 +334,10 @@ fn entry(account: &str, row: &DraftRow) -> DraftEntry {
         status: row.status.clone(),
         to: row.to.clone(),
         cc: row.cc.clone(),
+        bcc: draft
+            .as_ref()
+            .ok()
+            .and_then(|draft| draft.frontmatter.bcc.clone()),
         subject: draft
             .as_ref()
             .ok()
@@ -438,6 +459,12 @@ fn preview(
 /// The `.md` suffixing rule is the daemon's, because the daemon owns the
 /// directory the file lands in: `mp new note` writes `note.md` and
 /// `mp new note.txt` writes `note.txt`.
+///
+/// `body` and `headers` are the compose wizard's (#0131): the text typed
+/// inline, above the signature, and the recipients and subject, with
+/// `draft.forward`'s contract. Both are optional, so `mp new` and the TUI write
+/// the skeleton as before; with them the file is complete in one call rather
+/// than rewritten by the client behind the daemon's back.
 fn create(
     params: &Value,
     accounts: &[AccountConfig],
@@ -445,6 +472,12 @@ fn create(
 ) -> Result<Value, RpcError> {
     let account = configured(accounts, &string_param(params, "account")?)?;
     let name = string_param(params, "name")?;
+    let body = match params.get("body") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(body)) => body.clone(),
+        Some(_) => return Err(invalid_params("body is the draft's text, a string")),
+    };
+    let headers = recipient_headers(params)?;
     let file_name = match Path::new(&name).extension() {
         Some(_) => name.clone(),
         None => format!("{name}.md"),
@@ -469,14 +502,19 @@ fn create(
     // The id is minted here rather than by a later index pass, so the selector
     // handed out is the one in the file from its first byte.
     let id = crate::store::drafts::new_id();
-    let skeleton = crate::draft::new_draft_skeleton_with_id(
+    let skeleton = crate::draft::new_draft_with_body(
         &account.default_from,
         &chrono::Utc::now().to_rfc2822(),
         &id,
+        &body,
         signature_of(account, params, email).as_deref(),
     );
     std::fs::write(&path, skeleton)
         .map_err(|e| internal(format!("writing {}: {e}", path.display())))?;
+    if let Some(headers) = headers {
+        crate::draft::rewrite_draft_recipients(&path, &headers)
+            .map_err(|e| internal(format!("writing the headers of {}: {e:#}", path.display())))?;
+    }
 
     created(&account.name, &id, &path, None)
 }
@@ -632,8 +670,9 @@ fn from_source(
     )
 }
 
-/// The `headers` override of `draft.reply` and `draft.forward` (P5-U6), which
-/// rewrites the built draft's `to`, `cc`, `bcc` and `subject` in place.
+/// The `headers` override of `draft.reply`, `draft.forward` (P5-U6) and
+/// `draft.create` (#0131), which rewrites the built draft's `to`, `cc`, `bcc`
+/// and `subject` in place.
 ///
 /// Additive and absent by default, so every existing caller writes the draft
 /// the builder derived. It exists for the compose wizard's forward, which asks
@@ -676,7 +715,8 @@ fn recipient_headers(params: &Value) -> Result<Option<DraftRecipientEdit>, RpcEr
     }))
 }
 
-/// The answer of the three methods that write a new draft.
+/// The answer of the four methods that write a new draft, with the subject
+/// read back from the file so it is the one written, override included.
 fn created(
     account: &str,
     id: &str,
@@ -691,6 +731,9 @@ fn created(
             selector: Selector::for_draft(account, id).to_string(),
             path: path.display().to_string(),
             source,
+            subject: crate::draft::parse_email_draft(path)
+                .map(|draft| draft.frontmatter.subject)
+                .unwrap_or_default(),
         },
     )
 }
@@ -788,6 +831,86 @@ fn reindex(store: &Store, account: &str) {
     if let Err(e) = crate::store::drafts::refresh(store, account, &dir) {
         log::warn!("[draft] could not refresh the drafts index of {account}: {e:#}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+
+/// The draft a `draft.attach*` call names, as its row, refused with the
+/// family's `-32010` when the file does not parse.
+fn attachment_draft(
+    params: &Value,
+    accounts: &[AccountConfig],
+) -> Result<(String, DraftRow), RpcError> {
+    let account = configured(accounts, &string_param(params, "account")?)?;
+    let row = resolve(&account.name, &addressed_one(params, &account.name)?)?;
+    crate::draft::parse_email_draft(&row.path)
+        .map_err(|_| refuse_unparseable(&account.name, &row.id, &row.path))?;
+    Ok((account.name.clone(), row))
+}
+
+/// The `result` of the three: the list as the file has it now, each entry
+/// resolved as the send path resolves it, against the daemon's home.
+fn attachment_list(account: &str, row: &DraftRow) -> Result<Value, RpcError> {
+    let draft = crate::draft::parse_email_draft(&row.path)
+        .map_err(|_| refuse_unparseable(account, &row.id, &row.path))?;
+    let dir = row.path.parent().unwrap_or(Path::new("/"));
+    let home = dirs::home_dir();
+    let attachments = draft
+        .frontmatter
+        .attachments
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let resolved = crate::draft::resolve_attachment_entry(&entry, dir, home.as_deref());
+            DraftAttachment {
+                index: index as u32,
+                exists: resolved.is_file() || resolved.is_dir(),
+                path: resolved.display().to_string(),
+                entry,
+            }
+        })
+        .collect();
+    to_value(
+        "a draft's attachments",
+        &DraftAttachments {
+            account: account.to_string(),
+            id: row.id.clone(),
+            path: row.path.display().to_string(),
+            attachments,
+        },
+    )
+}
+
+/// `draft.attachments` `{account, id|selector}`.
+fn attachments(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    let (account, row) = attachment_draft(params, accounts)?;
+    attachment_list(&account, &row)
+}
+
+/// `draft.attach` `{account, id|selector, path}`: the TUI prompt's checks,
+/// then one more `attachments:` entry, stored as typed.
+fn attach(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    let (account, row) = attachment_draft(params, accounts)?;
+    let input = string_param(params, "path")?;
+    crate::draft::attach_checked(&row.path, &input, dirs::home_dir().as_deref())
+        .map_err(|e| invalid_params(format!("{e:#}")))?;
+    attachment_list(&account, &row)
+}
+
+/// `draft.detach` `{account, id|selector, index}`: entry `index` leaves the
+/// list and the file it named stays where it is.
+fn detach(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+    let (account, row) = attachment_draft(params, accounts)?;
+    let index = params
+        .get("index")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_params("index is the entry's zero-based position"))?;
+    crate::draft::remove_draft_attachment(&row.path, index as usize)
+        .map_err(|e| invalid_params(format!("{e:#}")))?;
+    attachment_list(&account, &row)
 }
 
 // ---------------------------------------------------------------------------

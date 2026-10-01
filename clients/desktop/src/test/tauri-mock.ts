@@ -158,7 +158,7 @@ export const mock = {
   /** Whether the editor commands answer as the Rust layer's fixture mode does: journaled, nothing launched. */
   editorFixture: false,
   /** A draft's fields the listing does not carry, by `<account>/<id>`. */
-  draftExtra: {} as Record<string, { bcc: string; body: string }>,
+  draftExtra: {} as Record<string, { body: string }>,
   /** The next minted draft id's counter. */
   nextDraft: 1,
   /** `desktop.json`'s keys, as `setting_get|set` and `editor_setting_get|set` read and write them. */
@@ -868,15 +868,16 @@ function writeDraft(
     status: "draft",
     to: fields.to || null,
     cc: fields.cc || null,
+    bcc: fields.bcc || null,
     subject: fields.subject,
     date: "2026-09-30T12:00:00",
     valid: true,
     ready: Boolean(fields.to) && fields.subject !== "",
   };
   draftsOf(account).drafts.unshift(entry);
-  mock.draftExtra[`${account}/${id}`] = { bcc: fields.bcc ?? "", body: fields.body ?? "" };
+  mock.draftExtra[`${account}/${id}`] = { body: fields.body ?? "" };
   draftChanged(account, entry);
-  return { account, id, selector: entry.selector, path, source };
+  return { account, id, selector: entry.selector, path, source, subject: fields.subject };
 }
 
 function findDraft(method: string, account: string, id: string): DraftEntry {
@@ -923,7 +924,7 @@ function draftPreview(account: string, id: string): DraftPreview {
     from: "Me <me@example.com>",
     to: d.to,
     cc: d.cc,
-    bcc: extra?.bcc || null,
+    bcc: d.bcc,
     subject: d.subject ?? "",
     body,
     body_truncated: false,
@@ -1101,7 +1102,9 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       }
       const headers = (args.headers as { to: string; cc: string; bcc: string; subject: string } | null) ?? null;
       const sig = args.no_signature ? null : ((args.signature as string | null) ?? mock.signatures.defaults[account] ?? null);
-      const body = sig ? `\n\n${mock.signatures.signatures[sig] ?? ""}\n` : "";
+      const typed = typeof args.body === "string" ? args.body.trim() : "";
+      const block = sig ? `${mock.signatures.signatures[sig] ?? ""}\n` : "";
+      const body = typed ? `${typed}\n${block ? `\n${block}` : ""}` : block ? `\n\n${block}` : "";
       return writeDraft(
         account,
         { name, to: headers?.to ?? null, cc: headers?.cc ?? null, bcc: headers?.bcc ?? "", subject: headers?.subject ?? "", body },
@@ -1151,10 +1154,11 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const d = findDraft("draft.path", account, String(args.id));
       d.to = String(args.to) || null;
       d.cc = String(args.cc) || null;
+      d.bcc = String(args.bcc) || null;
       if (typeof args.subject === "string") d.subject = args.subject;
       d.ready = Boolean(d.to) && Boolean(d.subject);
       const key = `${account}/${d.id}`;
-      mock.draftExtra[key] = { body: mock.draftExtra[key]?.body ?? fixtures.draftBodies[d.id] ?? "", bcc: String(args.bcc) };
+      mock.draftExtra[key] = { body: mock.draftExtra[key]?.body ?? fixtures.draftBodies[d.id] ?? "" };
       draftChanged(account, d);
       return { account, id: d.id, selector: d.selector, path: d.path, status: d.status };
     }

@@ -10,7 +10,7 @@
 //! crate and re-exports this module whole, so `crate::draft::…` resolves
 //! unchanged on both sides of the seam.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use colored::*;
 use gray_matter::{engine::YAML, Matter};
@@ -39,11 +39,30 @@ pub fn new_draft_skeleton_with_id(
     id: &str,
     signature: Option<&str>,
 ) -> String {
+    new_draft_with_body(from, date, id, "", signature)
+}
+
+/// [`new_draft_skeleton_with_id`] with a body already typed, the compose
+/// wizard's inline body (#0097): the trimmed text, then the signature block
+/// after one blank line, the layout the TUI wizard writes. An empty or
+/// whitespace-only body is the skeleton exactly.
+pub fn new_draft_with_body(
+    from: &str,
+    date: &str,
+    id: &str,
+    body: &str,
+    signature: Option<&str>,
+) -> String {
     // The signature (#0099) is appended to the body at creation so it is
     // visible and editable; a blank line separates it from the empty body the
     // user types into. No configured signature leaves the body empty, exactly
     // as before.
-    let body = signature_block(signature).unwrap_or_default();
+    let block = signature_block(signature);
+    let body = match (body.trim(), block) {
+        ("", block) => block.unwrap_or_default(),
+        (text, None) => format!("{text}\n"),
+        (text, Some(block)) => format!("{text}\n\n{block}"),
+    };
     format!("---\nid: {id}\nto:\ncc:\nbcc:\nsubject: \"\"\nstatus: draft\nfrom: {from}\ndate: {date}\nreply_to:\nattachments:\n---\n\n{body}")
 }
 
@@ -1032,6 +1051,186 @@ pub fn append_draft_attachment(path: &Path, entry: &str) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// A draft's attachment list (#0131): one implementation for the daemon's
+// `draft.attachments`, `draft.attach` and `draft.detach`, and every client.
+// ---------------------------------------------------------------------------
+
+/// `~` and `~/rest` against `home`; anything else as typed.
+pub fn expand_home(input: &str, home: Option<&Path>) -> PathBuf {
+    match (input, home) {
+        ("~", Some(home)) => home.to_path_buf(),
+        (_, Some(home)) if input.starts_with("~/") => home.join(&input[2..]),
+        _ => PathBuf::from(input),
+    }
+}
+
+/// Where the send path finds one entry of a draft's `attachments:` list: `~`
+/// against `home`, an absolute path as it is, and a relative one against the
+/// draft file's own directory (ATT-03's accepted divergence).
+pub fn resolve_attachment_entry(entry: &str, draft_dir: &Path, home: Option<&Path>) -> PathBuf {
+    let expanded = expand_home(entry.trim(), home);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        draft_dir.join(expanded)
+    }
+}
+
+/// Two paths name one file: compared canonically when both exist.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Append the file the user typed to the draft at `path` (the TUI's `ta`),
+/// with checks stricter than its prompt, which only asks that the path
+/// exists: the path is absolute or `~`-relative, names a file rather than a
+/// directory, and is not attached already. The
+/// entry is stored as typed, trimmed, so a `~` path stays portable; the
+/// error is the sentence a user reads.
+pub fn attach_checked(path: &Path, input: &str, home: Option<&Path>) -> Result<()> {
+    let typed = input.trim();
+    if typed.is_empty() {
+        bail!("Type the path of the file to attach");
+    }
+    let file = expand_home(typed, home);
+    if !file.is_absolute() {
+        bail!("`{typed}` is not an absolute path; start it with / or ~");
+    }
+    if file.is_dir() {
+        bail!("{typed} is a directory; attach a file");
+    }
+    if !file.is_file() {
+        bail!("No such file: {typed}");
+    }
+    let draft = crate::draft::parse_email_draft(path)
+        .with_context(|| format!("{} does not parse", path.display()))?;
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    if let Some(dup) = draft
+        .frontmatter
+        .attachments
+        .unwrap_or_default()
+        .iter()
+        .find(|e| same_file(&resolve_attachment_entry(e, dir, home), &file))
+    {
+        bail!("{dup} is already attached");
+    }
+    append_draft_attachment(path, typed)
+}
+
+/// Remove entry `index` from the `attachments:` list of the draft at `path`;
+/// the file it named is not touched. The body and every other line stay byte
+/// for byte, and a list whose lines do not read one entry each is refused
+/// rather than rewritten.
+pub fn remove_draft_attachment(path: &Path, index: usize) -> Result<()> {
+    let draft = crate::draft::parse_email_draft(path)
+        .with_context(|| format!("{} does not parse", path.display()))?;
+    let entries = draft.frontmatter.attachments.unwrap_or_default();
+    if index >= entries.len() {
+        bail!(
+            "the draft lists {} attachments, no number {}",
+            entries.len(),
+            index + 1
+        );
+    }
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read file: {}", path.display()))?;
+    let (rewritten, count) = remove_attachment_line(&content, index).map_err(|e| anyhow!(e))?;
+    if count != entries.len() {
+        bail!(
+            "the attachments list of {} does not read one entry per line; edit the draft file",
+            path.display()
+        );
+    }
+    write_atomic(path, rewritten.as_bytes())
+        .with_context(|| format!("Failed to write file: {}", path.display()))
+}
+
+/// `content` with item `index` of its top-level `attachments:` block list
+/// removed, and the number of items the list had. The body and every other
+/// line stay byte for byte; an emptied list keeps its bare key, as a new
+/// draft's skeleton has it. A flow-style value or an item that spans lines
+/// is refused, as `append_draft_attachment` refuses one.
+fn remove_attachment_line(content: &str, index: usize) -> Result<(String, usize), String> {
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let after_open = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))
+        .ok_or("No frontmatter found (file does not start with '---')")?;
+    let mut lines: Vec<&str> = Vec::new();
+    let mut body = None;
+    let mut cursor = 0usize;
+    while cursor < after_open.len() {
+        let rest = &after_open[cursor..];
+        let (line, advance) = match rest.find('\n') {
+            Some(nl) => (&rest[..nl], nl + 1),
+            None => (rest, rest.len()),
+        };
+        let line = line.trim_end_matches('\r');
+        if line == "---" {
+            body = Some(&after_open[cursor + advance..]);
+            break;
+        }
+        lines.push(line);
+        cursor += advance;
+    }
+    let body = body.ok_or("Malformed frontmatter: no closing '---' fence")?;
+    let indented = |l: &str| l.starts_with(' ') || l.starts_with('\t');
+    let key = lines
+        .iter()
+        .position(|l| !indented(l) && l.starts_with("attachments:"))
+        .ok_or("the draft lists no attachments")?;
+    let value = lines[key]["attachments:".len()..].trim();
+    if !value.is_empty() && !value.starts_with('#') {
+        return Err(format!(
+            "attachments uses an inline value ({value}); edit the draft file to the block list form first"
+        ));
+    }
+    let mut end = key + 1;
+    while end < lines.len() && indented(lines[end]) {
+        end += 1;
+    }
+    let block = key + 1..end;
+    let items: Vec<usize> = block
+        .clone()
+        .filter(|&i| {
+            let t = lines[i].trim_start();
+            t == "-" || t.starts_with("- ")
+        })
+        .collect();
+    if items.len() != block.len() {
+        return Err(
+            "an attachment entry spans several lines; edit the draft file to remove it".into(),
+        );
+    }
+    let at = *items.get(index).ok_or_else(|| {
+        format!(
+            "the draft lists {} attachments, no number {}",
+            items.len(),
+            index + 1
+        )
+    })?;
+    lines.remove(at);
+    let mut out = String::with_capacity(content.len());
+    out.push_str("---");
+    out.push_str(newline);
+    for line in lines {
+        out.push_str(line);
+        out.push_str(newline);
+    }
+    out.push_str("---");
+    out.push_str(newline);
+    out.push_str(body);
+    Ok((out, items.len()))
+}
+
 /// Atomically overwrite `path` by writing to a `.tmp` sibling then renaming
 /// over the destination. Mirrors `secrets::write_secret_file_atomic` minus the
 /// fixed 0600 mode — drafts are plain files, so this preserves the permission
@@ -1704,6 +1903,130 @@ mod tests {
     use super::*;
     use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus};
     use std::path::PathBuf;
+
+    /// An entry resolves as the send path resolves it.
+    #[test]
+    fn a_draft_entry_resolves_as_the_send_path_resolves_it() {
+        let home = Path::new("/home/me");
+        let dir = Path::new("/data/drafts");
+        assert_eq!(
+            resolve_attachment_entry("~/a.pdf", dir, Some(home)),
+            home.join("a.pdf")
+        );
+        assert_eq!(
+            resolve_attachment_entry("/abs/b.pdf", dir, Some(home)),
+            PathBuf::from("/abs/b.pdf")
+        );
+        assert_eq!(
+            resolve_attachment_entry("rel/c.pdf", dir, Some(home)),
+            dir.join("rel/c.pdf")
+        );
+    }
+
+    /// The prompt's checks, then an append, and a removal by index.
+    #[test]
+    fn attach_checks_what_the_prompt_checks_and_remove_rewrites_one_line() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("a.pdf"), b"a").unwrap();
+        fs::write(home.join("b.pdf"), b"b").unwrap();
+        let draft = dir.path().join("d.md");
+        fs::write(&draft, "---\nid: d1\nto: x@example.com\nsubject: s\nstatus: draft\nattachments:\n---\n\nBody\n").unwrap();
+        let entries = |p: &Path| {
+            parse_email_draft(p)
+                .unwrap()
+                .frontmatter
+                .attachments
+                .unwrap_or_default()
+        };
+
+        attach_checked(&draft, " ~/a.pdf ", Some(&home)).unwrap();
+        let b = home.join("b.pdf").display().to_string();
+        attach_checked(&draft, &b, Some(&home)).unwrap();
+        assert_eq!(entries(&draft), vec!["~/a.pdf".to_string(), b.clone()]);
+        let refused = |input: &str| {
+            attach_checked(&draft, input, Some(&home))
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            refused(&home.join("a.pdf").display().to_string()),
+            "~/a.pdf is already attached"
+        );
+        assert_eq!(refused("~/nope.pdf"), "No such file: ~/nope.pdf");
+        assert!(refused("a.pdf").contains("not an absolute path"));
+        assert!(refused("~").contains("is a directory"));
+        assert_eq!(refused("  "), "Type the path of the file to attach");
+
+        remove_draft_attachment(&draft, 0).unwrap();
+        assert_eq!(entries(&draft), vec![b]);
+        assert!(fs::read_to_string(&draft)
+            .unwrap()
+            .ends_with("---\n\nBody\n"));
+        assert!(remove_draft_attachment(&draft, 5)
+            .unwrap_err()
+            .to_string()
+            .contains("no number 6"));
+    }
+
+    const DRAFT: &str = "---\nid: x\nto: a@example.com\nattachments:\n  - \"/one.pdf\"\n  - \"~/two.pdf\"\n  - \"three.pdf\"\nstatus: draft\n---\n\nBody line\n---\nnot a fence of the frontmatter\n";
+
+    #[test]
+    fn removing_an_entry_keeps_the_order_the_other_lines_and_the_body() {
+        let (out, count) = remove_attachment_line(DRAFT, 1).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(
+            out,
+            "---\nid: x\nto: a@example.com\nattachments:\n  - \"/one.pdf\"\n  - \"three.pdf\"\nstatus: draft\n---\n\nBody line\n---\nnot a fence of the frontmatter\n"
+        );
+        // The last one out leaves the bare key a new draft's skeleton has.
+        let (one, _) = remove_attachment_line(&out, 0).unwrap();
+        let (none, count) = remove_attachment_line(&one, 0).unwrap();
+        assert_eq!(count, 1);
+        assert!(none.contains("\nattachments:\nstatus: draft\n"));
+        assert!(remove_attachment_line(&none, 0)
+            .unwrap_err()
+            .contains("no number 1"));
+    }
+
+    #[test]
+    fn removing_keeps_crlf_and_refuses_what_it_cannot_rewrite_line_by_line() {
+        let crlf = DRAFT.replace('\n', "\r\n");
+        let (out, _) = remove_attachment_line(&crlf, 0).unwrap();
+        assert!(out.starts_with("---\r\nid: x\r\n"));
+        assert!(!out.contains("/one.pdf"));
+        assert!(out.ends_with("Body line\r\n---\r\nnot a fence of the frontmatter\r\n"));
+        let inline = "---\nattachments: [\"/a\"]\n---\nb\n";
+        assert!(remove_attachment_line(inline, 0)
+            .unwrap_err()
+            .contains("inline value"));
+        let folded = "---\nattachments:\n  - \"/a\n    b\"\n---\nb\n";
+        assert!(remove_attachment_line(folded, 0)
+            .unwrap_err()
+            .contains("spans several lines"));
+        assert!(remove_attachment_line("no frontmatter", 0).is_err());
+        assert!(remove_attachment_line("---\nid: x\n---\n", 0)
+            .unwrap_err()
+            .contains("lists no attachments"));
+    }
+
+    /// The wizard's inline body goes above the signature, a blank line
+    /// between, and an empty one is the skeleton byte for byte.
+    #[test]
+    fn a_typed_body_sits_above_the_signature_and_an_empty_one_is_the_skeleton() {
+        let with = new_draft_with_body("a@x", "d", "i1", "  Hallo\nzusammen \n", Some("Gruss"));
+        assert!(with.ends_with(
+            "---\n\nHallo\nzusammen\n\n<!-- mp:sig-start -->\nGruss\n<!-- mp:sig-end -->\n"
+        ));
+        let bare = new_draft_with_body("a@x", "d", "i1", "Hallo", None);
+        assert!(bare.ends_with("---\n\nHallo\n"));
+        assert_eq!(
+            new_draft_with_body("a@x", "d", "i1", " \n", Some("Gruss")),
+            new_draft_skeleton_with_id("a@x", "d", "i1", Some("Gruss"))
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Signature sentinels + set_signature_block (#0106)
     // -----------------------------------------------------------------------

@@ -263,6 +263,7 @@ export function ComposeSummary({ account, draftId }: { account: string; draftId:
           status: p.status,
           to: p.to,
           cc: p.cc,
+          bcc: p.bcc,
           subject: p.subject,
           date: null,
           // `draft_preview` answered, so the file parses; its `valid` is whether it would send.

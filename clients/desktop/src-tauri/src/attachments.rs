@@ -9,8 +9,8 @@
 //! name already taken, then releases the handle.
 //!
 //! A draft's attachments are the paths its `attachments:` frontmatter lists.
-//! The daemon serves neither `draft.attach` nor a way to remove an entry, so
-//! the list is rewritten client-side, as the TUI's `ta` appends to it. An
+//! The daemon reads, appends and removes them (`draft.attachments`,
+//! `draft.attach`, `draft.detach`, #0131), with the TUI prompt's checks. An
 //! entry is stored as typed (`~` kept), and resolves the way the send path
 //! resolves it: `~` against the home directory, a relative entry against the
 //! draft file's own directory (ATT-03).
@@ -29,13 +29,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, State};
 
-use crate::commands::{call, draft_path_on, with_door, written, STUB_OPENER_ENV};
-use crate::error::{Addressing, GuiError};
+use crate::commands::{call, with_door, STUB_OPENER_ENV};
+use crate::error::{refusal_sentence, Addressing, GuiError};
 use crate::session::{Door, SessionHandle};
 
 /// One materialisation: a store read and a file write in the daemon.
 const HANDLE_BUDGET: Duration = Duration::from_secs(20);
 const RELEASE_BUDGET: Duration = Duration::from_secs(5);
+/// A draft's attachment list read or rewritten by the daemon.
+const DRAFT_BUDGET: Duration = Duration::from_secs(10);
 
 /// The directory the Save dialog offers first.
 pub const DEFAULT_SAVE_DIR: &str = "~/Downloads";
@@ -91,8 +93,9 @@ pub struct SavedAttachments {
     pub failed: Vec<SaveFailure>,
 }
 
-/// One entry of a draft's `attachments:` list.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// One entry of a draft's `attachments:` list, as the daemon's
+/// `mp_protocol::draft::DraftAttachment` answers it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct DraftAttachment {
@@ -106,8 +109,8 @@ pub struct DraftAttachment {
     pub exists: bool,
 }
 
-/// A draft's attachments, from its file.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// A draft's attachments, from its file: `mp_protocol::draft::DraftAttachments`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct DraftAttachments {
@@ -148,15 +151,6 @@ pub fn safe_file_name(name: &str) -> Result<&str, GuiError> {
     Ok(name)
 }
 
-/// `~` and `~/rest` against `home`; anything else as typed.
-pub fn expand_home(input: &str, home: Option<&Path>) -> PathBuf {
-    match (input, home) {
-        ("~", Some(home)) => home.to_path_buf(),
-        (_, Some(home)) if input.starts_with("~/") => home.join(&input[2..]),
-        _ => PathBuf::from(input),
-    }
-}
-
 /// The save directory the user typed, as an absolute path. A relative one
 /// is refused: the app has no working directory a user could mean.
 pub fn resolve_dir(input: &str, home: Option<&Path>) -> Result<PathBuf, GuiError> {
@@ -164,7 +158,7 @@ pub fn resolve_dir(input: &str, home: Option<&Path>) -> Result<PathBuf, GuiError
     if typed.is_empty() {
         return Err(GuiError::protocol("Name the directory to save into"));
     }
-    let dir = expand_home(typed, home);
+    let dir = mp_core::draft::expand_home(typed, home);
     if !dir.is_absolute() {
         return Err(GuiError::protocol(format!(
             "`{typed}` is not an absolute path; start it with / or ~"
@@ -174,25 +168,6 @@ pub fn resolve_dir(input: &str, home: Option<&Path>) -> Result<PathBuf, GuiError
         return Err(GuiError::protocol(format!("`{typed}` is not a directory")));
     }
     Ok(dir)
-}
-
-/// Where the send path finds a draft's entry: `~` against the home
-/// directory, a relative entry against the draft's own directory.
-pub fn resolve_entry(entry: &str, draft_dir: &Path, home: Option<&Path>) -> PathBuf {
-    let expanded = expand_home(entry.trim(), home);
-    if expanded.is_absolute() {
-        expanded
-    } else {
-        draft_dir.join(expanded)
-    }
-}
-
-/// Two paths name one file: compared canonically when both exist.
-fn same_file(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -437,236 +412,112 @@ pub(crate) fn write_private(cache_dir: &Path, path: &Path, bytes: &[u8]) -> Resu
 // A draft's attachments
 // ---------------------------------------------------------------------------
 
-/// The draft file of `id` and its parsed `attachments:` list.
-fn draft_list(door: &Door, account: &str, id: &str) -> Result<(PathBuf, Vec<String>), GuiError> {
-    let location = draft_path_on(door, account, id)?;
-    let path = PathBuf::from(&location.path);
-    let draft = mp_core::draft::parse_email_draft(&path)
-        .map_err(|e| GuiError::protocol(format!("{} does not parse: {e:#}", location.path)))?;
-    Ok((path, draft.frontmatter.attachments.unwrap_or_default()))
+/// The daemon's answer to a `draft.attach*` call, under this layer's type.
+fn draft_call(
+    door: &Door,
+    method: &str,
+    params: Value,
+    how: Addressing,
+) -> Result<DraftAttachments, GuiError> {
+    let answer = door
+        .call_within(method, params, DRAFT_BUDGET)
+        .map_err(|e| {
+            let error = GuiError::from_call(&e, how);
+            // The dialog shows the daemon's own sentence, the one the TUI's
+            // prompt says, without the refusal's frame and code.
+            match (&error, refusal_sentence(&format!("{e:#}"))) {
+                (GuiError::Protocol { code, .. }, Some(sentence)) => GuiError::Protocol {
+                    message: sentence.to_string(),
+                    code: *code,
+                },
+                (GuiError::NotFound { code, .. }, Some(sentence)) => GuiError::NotFound {
+                    message: sentence.to_string(),
+                    code: *code,
+                },
+                _ => error,
+            }
+        })?;
+    serde_json::from_value(answer)
+        .map_err(|e| GuiError::protocol(format!("{method} did not decode: {e}")))
 }
 
-fn listing(
-    account: &str,
-    id: &str,
-    path: &Path,
-    entries: &[String],
-    home: Option<&Path>,
-) -> DraftAttachments {
-    let dir = path.parent().unwrap_or(Path::new("/"));
-    DraftAttachments {
-        account: account.to_string(),
-        id: id.to_string(),
-        path: path.display().to_string(),
-        attachments: entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| {
-                let resolved = resolve_entry(entry, dir, home);
-                DraftAttachment {
-                    index: index as u32,
-                    entry: entry.clone(),
-                    exists: resolved.is_file(),
-                    path: resolved.display().to_string(),
-                }
-            })
-            .collect(),
-    }
-}
-
-/// The attachments the draft `id` lists, resolved.
+/// The attachments the draft `id` lists, resolved: `draft.attachments`.
 pub fn draft_attachments_on(
     door: &Door,
     account: &str,
     id: &str,
-    home: Option<&Path>,
 ) -> Result<DraftAttachments, GuiError> {
-    let (path, entries) = draft_list(door, account, id)?;
-    Ok(listing(account, id, &path, &entries, home))
+    draft_call(
+        door,
+        "draft.attachments",
+        json!({"account": account, "id": id}),
+        Addressing::Resource,
+    )
 }
 
 /// Append `input` to the draft's `attachments:` list (ATT-03, the TUI's
-/// `ta`), through `mp_core::draft::append_draft_attachment`: the body and
-/// every other field stay byte for byte. The path must be absolute (or
-/// `~`-relative) and name a file; one the list already names is refused.
-/// The entry is stored as typed, so a `~` path stays portable.
+/// `ta`): `draft.attach`, which refuses what the TUI's prompt refuses (a
+/// relative path, a directory, a missing file, one already attached) and
+/// stores the entry as typed, so a `~` path stays portable.
 pub fn draft_attach_on(
     door: &Door,
     account: &str,
     id: &str,
     input: &str,
-    home: Option<&Path>,
 ) -> Result<DraftAttachments, GuiError> {
     let typed = input.trim();
     if typed.is_empty() {
         return Err(GuiError::protocol("Type the path of the file to attach"));
     }
-    let file = expand_home(typed, home);
-    if !file.is_absolute() {
-        return Err(GuiError::protocol(format!(
-            "`{typed}` is not an absolute path; start it with / or ~"
-        )));
-    }
-    if file.is_dir() {
-        return Err(GuiError::protocol(format!(
-            "{typed} is a directory; attach a file"
-        )));
-    }
-    if !file.is_file() {
-        return Err(GuiError::not_found(format!("No such file: {typed}")));
-    }
-    let (path, entries) = draft_list(door, account, id)?;
-    let dir = path.parent().unwrap_or(Path::new("/"));
-    if let Some(dup) = entries
-        .iter()
-        .find(|e| same_file(&resolve_entry(e, dir, home), &file))
-    {
-        return Err(GuiError::protocol(format!("{dup} is already attached")));
-    }
-    mp_core::draft::append_draft_attachment(&path, typed).map_err(|e| {
-        GuiError::protocol(format!("could not attach to {}: {e:#}", path.display()))
-    })?;
-    written(door, &path.display().to_string());
-    draft_attachments_on(door, account, id, home)
+    draft_call(
+        door,
+        "draft.attach",
+        json!({"account": account, "id": id, "path": typed}),
+        Addressing::Params,
+    )
 }
 
-/// `content` with item `index` of its top-level `attachments:` block list
-/// removed, and the number of items the list had. The body and every other
-/// line stay byte for byte; an emptied list keeps its bare key, as a new
-/// draft's skeleton has it. A flow-style value or an item that spans lines
-/// is refused, as `append_draft_attachment` refuses one.
-pub fn remove_attachment_line(content: &str, index: usize) -> Result<(String, usize), String> {
-    let newline = if content.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
-    let after_open = content
-        .strip_prefix("---\n")
-        .or_else(|| content.strip_prefix("---\r\n"))
-        .ok_or("No frontmatter found (file does not start with '---')")?;
-    let mut lines: Vec<&str> = Vec::new();
-    let mut body = None;
-    let mut cursor = 0usize;
-    while cursor < after_open.len() {
-        let rest = &after_open[cursor..];
-        let (line, advance) = match rest.find('\n') {
-            Some(nl) => (&rest[..nl], nl + 1),
-            None => (rest, rest.len()),
-        };
-        let line = line.trim_end_matches('\r');
-        if line == "---" {
-            body = Some(&after_open[cursor + advance..]);
-            break;
-        }
-        lines.push(line);
-        cursor += advance;
-    }
-    let body = body.ok_or("Malformed frontmatter: no closing '---' fence")?;
-    let indented = |l: &str| l.starts_with(' ') || l.starts_with('\t');
-    let key = lines
-        .iter()
-        .position(|l| !indented(l) && l.starts_with("attachments:"))
-        .ok_or("the draft lists no attachments")?;
-    let value = lines[key]["attachments:".len()..].trim();
-    if !value.is_empty() && !value.starts_with('#') {
-        return Err(format!(
-            "attachments uses an inline value ({value}); edit the draft file to the block list form first"
-        ));
-    }
-    let mut end = key + 1;
-    while end < lines.len() && indented(lines[end]) {
-        end += 1;
-    }
-    let block = key + 1..end;
-    let items: Vec<usize> = block
-        .clone()
-        .filter(|&i| {
-            let t = lines[i].trim_start();
-            t == "-" || t.starts_with("- ")
-        })
-        .collect();
-    if items.len() != block.len() {
-        return Err(
-            "an attachment entry spans several lines; edit the draft file to remove it".into(),
-        );
-    }
-    let at = *items.get(index).ok_or_else(|| {
-        format!(
-            "the draft lists {} attachments, no number {}",
-            items.len(),
-            index + 1
-        )
-    })?;
-    lines.remove(at);
-    let mut out = String::with_capacity(content.len());
-    out.push_str("---");
-    out.push_str(newline);
-    for line in lines {
-        out.push_str(line);
-        out.push_str(newline);
-    }
-    out.push_str("---");
-    out.push_str(newline);
-    out.push_str(body);
-    Ok((out, items.len()))
-}
-
-/// Remove entry `index` from the draft's `attachments:` list; the file it
-/// named is not touched. The line count is checked against the parsed list
-/// first, so a list YAML reads differently is never rewritten.
+/// Remove entry `index` from the draft's `attachments:` list:
+/// `draft.detach`; the file it named is not touched.
 pub fn draft_attachment_remove_on(
     door: &Door,
     account: &str,
     id: &str,
     index: u32,
-    home: Option<&Path>,
 ) -> Result<DraftAttachments, GuiError> {
-    let (path, entries) = draft_list(door, account, id)?;
-    let index = index as usize;
-    if index >= entries.len() {
-        return Err(GuiError::not_found(format!(
-            "the draft lists {} attachments, no number {}",
-            entries.len(),
-            index + 1
-        )));
-    }
-    let content = fs::read_to_string(&path)
-        .map_err(|e| GuiError::internal(format!("could not read {}: {e}", path.display())))?;
-    let (rewritten, count) = remove_attachment_line(&content, index).map_err(GuiError::protocol)?;
-    if count != entries.len() {
-        return Err(GuiError::protocol(format!(
-            "the attachments list of {} does not read one entry per line; edit the draft file",
-            path.display()
-        )));
-    }
-    mp_core::draft::write_atomic(&path, rewritten.as_bytes())
-        .map_err(|e| GuiError::internal(format!("could not write {}: {e:#}", path.display())))?;
-    written(door, &path.display().to_string());
-    draft_attachments_on(door, account, id, home)
+    draft_call(
+        door,
+        "draft.detach",
+        json!({"account": account, "id": id, "index": index}),
+        Addressing::Params,
+    )
 }
 
 /// Open entry `index` of the draft's list with the system opener (ATT-04):
-/// the very file a send would attach.
+/// the very file a send would attach, where the daemon resolved it.
 pub fn draft_attachment_open_on(
     door: &Door,
     account: &str,
     id: &str,
     index: u32,
-    home: Option<&Path>,
 ) -> Result<OpenedFile, GuiError> {
-    let (path, entries) = draft_list(door, account, id)?;
-    let entry = entries.get(index as usize).ok_or_else(|| {
-        GuiError::not_found(format!(
-            "the draft lists {} attachments, no number {}",
-            entries.len(),
-            index + 1
-        ))
-    })?;
-    let file = resolve_entry(entry, path.parent().unwrap_or(Path::new("/")), home);
-    if !file.is_file() {
+    let listing = draft_attachments_on(door, account, id)?;
+    let count = listing.attachments.len();
+    let entry = listing
+        .attachments
+        .into_iter()
+        .find(|a| a.index == index)
+        .ok_or_else(|| {
+            GuiError::not_found(format!(
+                "the draft lists {count} attachments, no number {}",
+                index + 1
+            ))
+        })?;
+    let file = PathBuf::from(&entry.path);
+    if !entry.exists || !file.is_file() {
         return Err(GuiError::not_found(format!(
-            "{entry} is missing: no file at {}",
+            "{} is missing: no file at {}",
+            entry.entry,
             file.display()
         )));
     }
@@ -757,7 +608,7 @@ pub async fn draft_attachments(
     id: String,
 ) -> Result<DraftAttachments, GuiError> {
     with_door(&session, move |_, door| {
-        draft_attachments_on(door, &account, &id, home_dir().as_deref())
+        draft_attachments_on(door, &account, &id)
     })
     .await
 }
@@ -770,7 +621,7 @@ pub async fn draft_attach(
     path: String,
 ) -> Result<DraftAttachments, GuiError> {
     with_door(&session, move |_, door| {
-        draft_attach_on(door, &account, &id, &path, home_dir().as_deref())
+        draft_attach_on(door, &account, &id, &path)
     })
     .await
 }
@@ -783,7 +634,7 @@ pub async fn draft_attachment_remove(
     index: u32,
 ) -> Result<DraftAttachments, GuiError> {
     with_door(&session, move |_, door| {
-        draft_attachment_remove_on(door, &account, &id, index, home_dir().as_deref())
+        draft_attachment_remove_on(door, &account, &id, index)
     })
     .await
 }
@@ -796,7 +647,7 @@ pub async fn draft_attachment_open(
     index: u32,
 ) -> Result<OpenedFile, GuiError> {
     with_door(&session, move |_, door| {
-        draft_attachment_open_on(door, &account, &id, index, home_dir().as_deref())
+        draft_attachment_open_on(door, &account, &id, index)
     })
     .await
 }
@@ -875,24 +726,6 @@ mod tests {
     }
 
     #[test]
-    fn a_draft_entry_resolves_as_the_send_path_resolves_it() {
-        let home = Path::new("/home/me");
-        let dir = Path::new("/data/drafts/work");
-        assert_eq!(
-            resolve_entry("~/a.pdf", dir, Some(home)),
-            home.join("a.pdf")
-        );
-        assert_eq!(
-            resolve_entry("/abs/b.pdf", dir, Some(home)),
-            PathBuf::from("/abs/b.pdf")
-        );
-        assert_eq!(
-            resolve_entry("rel/c.pdf", dir, Some(home)),
-            dir.join("rel/c.pdf")
-        );
-    }
-
-    #[test]
     fn a_hit_rendition_lands_in_the_cache_directory_one_directory_per_markup() {
         let cache = Path::new("/cache/dev.mailypoppins.desktop");
         let a = rendition_path(cache, "<p>a</p>");
@@ -912,47 +745,6 @@ mod tests {
         assert!(path.exists());
         sweep_renditions(&cache, SystemTime::now() + RENDITION_MAX_AGE * 2);
         assert!(!path.exists());
-    }
-
-    const DRAFT: &str = "---\nid: x\nto: a@example.com\nattachments:\n  - \"/one.pdf\"\n  - \"~/two.pdf\"\n  - \"three.pdf\"\nstatus: draft\n---\n\nBody line\n---\nnot a fence of the frontmatter\n";
-
-    #[test]
-    fn removing_an_entry_keeps_the_order_the_other_lines_and_the_body() {
-        let (out, count) = remove_attachment_line(DRAFT, 1).unwrap();
-        assert_eq!(count, 3);
-        assert_eq!(
-            out,
-            "---\nid: x\nto: a@example.com\nattachments:\n  - \"/one.pdf\"\n  - \"three.pdf\"\nstatus: draft\n---\n\nBody line\n---\nnot a fence of the frontmatter\n"
-        );
-        // The last one out leaves the bare key a new draft's skeleton has.
-        let (one, _) = remove_attachment_line(&out, 0).unwrap();
-        let (none, count) = remove_attachment_line(&one, 0).unwrap();
-        assert_eq!(count, 1);
-        assert!(none.contains("\nattachments:\nstatus: draft\n"));
-        assert!(remove_attachment_line(&none, 0)
-            .unwrap_err()
-            .contains("no number 1"));
-    }
-
-    #[test]
-    fn removing_keeps_crlf_and_refuses_what_it_cannot_rewrite_line_by_line() {
-        let crlf = DRAFT.replace('\n', "\r\n");
-        let (out, _) = remove_attachment_line(&crlf, 0).unwrap();
-        assert!(out.starts_with("---\r\nid: x\r\n"));
-        assert!(!out.contains("/one.pdf"));
-        assert!(out.ends_with("Body line\r\n---\r\nnot a fence of the frontmatter\r\n"));
-        let inline = "---\nattachments: [\"/a\"]\n---\nb\n";
-        assert!(remove_attachment_line(inline, 0)
-            .unwrap_err()
-            .contains("inline value"));
-        let folded = "---\nattachments:\n  - \"/a\n    b\"\n---\nb\n";
-        assert!(remove_attachment_line(folded, 0)
-            .unwrap_err()
-            .contains("spans several lines"));
-        assert!(remove_attachment_line("no frontmatter", 0).is_err());
-        assert!(remove_attachment_line("---\nid: x\n---\n", 0)
-            .unwrap_err()
-            .contains("lists no attachments"));
     }
 
     #[test]
@@ -1056,10 +848,11 @@ mod tests {
     fn attach_appends_in_order_refuses_duplicates_and_missing_files_and_remove_rewrites() {
         let (door, fixture) = fixture_door();
         let home = scratch("attach");
+        fixture.set_home(&home);
         let (a, b) = (home.join("a.pdf"), home.join("b.pdf"));
         fs::write(&a, "a").unwrap();
         fs::write(&b, "b").unwrap();
-        let draft = draft_path_on(&door, "work", "angebot-antwort")
+        let draft = crate::commands::draft_path_on(&door, "work", "angebot-antwort")
             .unwrap()
             .path;
         let body = |p: &str| {
@@ -1069,61 +862,55 @@ mod tests {
         };
         let before = body(&draft);
 
-        let one = draft_attach_on(
-            &door,
-            "work",
-            "angebot-antwort",
-            &a.display().to_string(),
-            Some(&home),
-        )
-        .unwrap();
+        let one =
+            draft_attach_on(&door, "work", "angebot-antwort", &a.display().to_string()).unwrap();
         assert_eq!(one.attachments.len(), 1);
-        let two =
-            draft_attach_on(&door, "work", "angebot-antwort", " ~/b.pdf ", Some(&home)).unwrap();
+        let two = draft_attach_on(&door, "work", "angebot-antwort", " ~/b.pdf ").unwrap();
         let entries: Vec<&str> = two.attachments.iter().map(|x| x.entry.as_str()).collect();
         assert_eq!(entries, [a.display().to_string().as_str(), "~/b.pdf"]);
         assert_eq!(two.attachments[1].path, b.display().to_string());
         assert!(two.attachments.iter().all(|x| x.exists));
         assert_eq!(body(&draft), before);
+        let (method, params) = fixture.calls().last().cloned().expect("call");
+        assert_eq!(method, "draft.attach", "the daemon writes the file");
+        assert_eq!(params["path"], "~/b.pdf", "as typed, trimmed");
 
-        let dup =
-            draft_attach_on(&door, "work", "angebot-antwort", "~/a.pdf", Some(&home)).unwrap_err();
-        assert!(dup.message().contains("already attached"), "{dup:?}");
-        let gone = draft_attach_on(&door, "work", "angebot-antwort", "~/nope.pdf", Some(&home))
-            .unwrap_err();
-        assert!(matches!(gone, GuiError::NotFound { .. }));
-        assert!(gone.message().contains("No such file: ~/nope.pdf"));
-        assert!(draft_attach_on(&door, "work", "angebot-antwort", "a.pdf", Some(&home)).is_err());
-        assert!(
-            draft_attach_on(&door, "work", "angebot-antwort", "~", Some(&home))
+        let dup = draft_attach_on(&door, "work", "angebot-antwort", "~/a.pdf").unwrap_err();
+        assert_eq!(
+            dup.message(),
+            format!("{} is already attached", a.display()),
+            "the entry the list already has, without the refusal's frame"
+        );
+        let gone = draft_attach_on(&door, "work", "angebot-antwort", "~/nope.pdf").unwrap_err();
+        assert_eq!(gone.message(), "No such file: ~/nope.pdf");
+        assert!(draft_attach_on(&door, "work", "angebot-antwort", "a.pdf").is_err());
+        assert!(draft_attach_on(&door, "work", "angebot-antwort", "~")
+            .unwrap_err()
+            .message()
+            .contains("is a directory"));
+        assert_eq!(
+            draft_attach_on(&door, "work", "angebot-antwort", "  ")
                 .unwrap_err()
-                .message()
-                .contains("is a directory")
+                .message(),
+            "Type the path of the file to attach"
         );
 
-        let opened =
-            draft_attachment_open_on(&door, "work", "angebot-antwort", 1, Some(&home)).unwrap();
+        let opened = draft_attachment_open_on(&door, "work", "angebot-antwort", 1).unwrap();
         assert_eq!(fixture.opened(), vec![b.display().to_string()]);
         assert_eq!(opened.name, "b.pdf");
 
-        let left =
-            draft_attachment_remove_on(&door, "work", "angebot-antwort", 0, Some(&home)).unwrap();
+        let left = draft_attachment_remove_on(&door, "work", "angebot-antwort", 0).unwrap();
         let entries: Vec<&str> = left.attachments.iter().map(|x| x.entry.as_str()).collect();
         assert_eq!(entries, ["~/b.pdf"]);
         assert!(a.exists(), "a remove leaves the file alone");
         assert_eq!(body(&draft), before);
-        assert!(
-            draft_attachment_remove_on(&door, "work", "angebot-antwort", 5, Some(&home)).is_err()
-        );
-        assert!(
-            draft_attachment_open_on(&door, "work", "angebot-antwort", 5, Some(&home)).is_err()
-        );
+        assert!(draft_attachment_remove_on(&door, "work", "angebot-antwort", 5).is_err());
+        assert!(draft_attachment_open_on(&door, "work", "angebot-antwort", 5).is_err());
 
         fs::remove_file(&b).unwrap();
-        let listed = draft_attachments_on(&door, "work", "angebot-antwort", Some(&home)).unwrap();
+        let listed = draft_attachments_on(&door, "work", "angebot-antwort").unwrap();
         assert!(!listed.attachments[0].exists);
-        let missing =
-            draft_attachment_open_on(&door, "work", "angebot-antwort", 0, Some(&home)).unwrap_err();
+        let missing = draft_attachment_open_on(&door, "work", "angebot-antwort", 0).unwrap_err();
         assert!(missing.message().contains("is missing"));
     }
 }
