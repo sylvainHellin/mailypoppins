@@ -155,12 +155,12 @@ describe("the command palette", () => {
     await shellReady();
     await user.keyboard("?");
     const help = await screen.findByRole("dialog", { name: "Keys" });
-    const desktop = within(help).getByRole("region", { name: "DESKTOP" });
+    const desktop = within(help).getByRole("group", { name: "DESKTOP" });
     expect(desktop).toHaveTextContent("Cancel the held send");
     expect(desktop).toHaveTextContent("Mark range");
     expect(desktop).toHaveTextContent("Dismiss the newest notice");
     // The M2 rows lost their badge.
-    const archive = within(help).getAllByText("Archive")[0].closest("tr");
+    const archive = within(help).getAllByText("Archive")[0].closest("[cmdk-item]");
     expect(archive).not.toHaveTextContent("M2");
   });
 

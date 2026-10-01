@@ -170,14 +170,14 @@ describe("the Calendar view", () => {
     const { user } = await openCalendar();
     await user.keyboard("?");
     const help = await screen.findByRole("dialog", { name: "Keys" });
-    const section = within(help).getByRole("region", { name: "CALENDAR" });
+    const section = within(help).getByRole("group", { name: "CALENDAR" });
     for (const label of [
       "Open the invite email in $EDITOR",
       "RSVP to invitation (Accept/Tentative/Decline)",
       "Show past events / upcoming only",
       "Refresh events from disk",
     ]) {
-      expect(within(section).getByText(label).closest("tr")).not.toHaveTextContent("M4");
+      expect(within(section).getByText(label).closest("[cmdk-item]")).not.toHaveTextContent("M4");
     }
   });
 });
