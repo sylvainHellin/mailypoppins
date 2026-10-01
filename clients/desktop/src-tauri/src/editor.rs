@@ -244,7 +244,7 @@ pub struct Lookup<'a> {
 }
 
 impl Lookup<'_> {
-    fn var(&self, name: &str) -> Option<String> {
+    pub(crate) fn var(&self, name: &str) -> Option<String> {
         (self.env)(name).filter(|v| !v.trim().is_empty())
     }
 }
@@ -284,6 +284,45 @@ pub fn resolve(lookup: &Lookup) -> Resolved {
     }
     let fallback = if lookup.macos { "open -t" } else { "xdg-open" };
     found(fallback.to_string(), EditorSource::Fallback)
+}
+
+/// What names the editor of an embedded terminal session (#0130), before any
+/// wrapping in a terminal emulator: `MP_DESKTOP_EDITOR`, then the setting,
+/// then the first of `$VISUAL` and `$EDITOR` that names a terminal editor.
+///
+/// `Ok(Some)` is a terminal editor's bare template, `Ok(None)` means nothing
+/// names an editor and the caller probes, and `Err` is the GUI editor that was
+/// named: an explicit `MP_DESKTOP_EDITOR` or setting, or `$VISUAL` / `$EDITOR`
+/// when neither names a terminal editor (the first set one is reported).
+pub fn resolve_terminal_editor(lookup: &Lookup) -> Result<Option<Resolved>, Resolved> {
+    let found = |template: String, source| Resolved { template, source };
+    let explicit = lookup
+        .var(EDITOR_ENV)
+        .map(|v| found(v, EditorSource::Env))
+        .or_else(|| {
+            let setting = lookup.setting.clone().filter(|v| !v.trim().is_empty());
+            setting.map(|v| found(v, EditorSource::Setting))
+        });
+    if let Some(r) = explicit {
+        return if needs_terminal(&r.template) {
+            Ok(Some(r))
+        } else {
+            Err(r)
+        };
+    }
+    let mut gui = None;
+    for (name, source) in [
+        ("VISUAL", EditorSource::Visual),
+        ("EDITOR", EditorSource::Editor),
+    ] {
+        if let Some(v) = lookup.var(name) {
+            if needs_terminal(&v) {
+                return Ok(Some(found(v, source)));
+            }
+            gui.get_or_insert(found(v, source));
+        }
+    }
+    gui.map_or(Ok(None), Err)
 }
 
 /// `editor` (a `$VISUAL` or `$EDITOR` value, with its own arguments) run
@@ -353,7 +392,7 @@ pub fn terminal_template(lookup: &Lookup, editor: &str) -> Option<String> {
 }
 
 /// Whether a template's program is a terminal-only editor.
-fn needs_terminal(template: &str) -> bool {
+pub(crate) fn needs_terminal(template: &str) -> bool {
     split(template)
         .ok()
         .and_then(|w| w.into_iter().next())

@@ -19,6 +19,7 @@
 //! - [`navigation`]: the webview's navigation allowlist and intercept log.
 //! - [`fixture`]: the daemon stand-in behind `MP_DESKTOP_FIXTURE=1`.
 //! - [`menu`]: the native macOS menus, forwarded to the frontend's actions.
+//! - [`terminal`]: the embedded terminal editor's PTY sessions.
 
 pub mod attachments;
 pub mod calendar;
@@ -38,15 +39,17 @@ pub mod reader;
 pub mod session;
 pub mod settings;
 pub mod signatures;
+pub mod terminal;
 
 #[cfg(test)]
 mod ts_bindings;
 
 use tauri::webview::NewWindowResponse;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::navigation::{intercepted, navigation_allowed, InterceptLog};
 use crate::session::{GuiEvent, InterceptSource, SessionHandle};
+use crate::terminal::Terminals;
 
 /// `MP_DESKTOP_FIXTURE=1` or `--fixture`: serve the fixtures, no daemon.
 pub const FIXTURE_ENV: &str = "MP_DESKTOP_FIXTURE";
@@ -107,6 +110,14 @@ pub fn run() {
         .menu(menu::build)
         .on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()))
         .manage(InterceptLog::default())
+        .manage(Terminals::default())
+        // Destroyed, not CloseRequested: a close the webview listens for is
+        // prevented and decided there, and the user may choose to stay.
+        .on_window_event(|window, event| {
+            if let WindowEvent::Destroyed = event {
+                window.state::<Terminals>().kill_all();
+            }
+        })
         .register_asynchronous_uri_scheme_protocol("mpmsg", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             let method = request.method().as_str().to_string();
@@ -224,12 +235,23 @@ pub fn run() {
             commands::open_external,
             commands::version_info,
             commands::fixture_simulate,
+            terminal::terminal_spawn,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_kill,
         ])
-        .run(tauri::generate_context!());
-    if let Err(e) = result {
-        tracing::error!("[app] the application failed: {e}");
-        eprintln!("mp-desktop: {e}");
-        std::process::exit(1);
+        .build(tauri::generate_context!());
+    match result {
+        Ok(app) => app.run(|app, event| {
+            if let RunEvent::Exit = event {
+                app.state::<Terminals>().kill_all();
+            }
+        }),
+        Err(e) => {
+            tracing::error!("[app] the application failed: {e}");
+            eprintln!("mp-desktop: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
