@@ -11,12 +11,18 @@
 import { Channel, invoke } from "@/lib/tauri";
 import { frameRouter, type TerminalExit, type TerminalFrame, type TerminalSink } from "@/lib/terminal-frames";
 import type { TerminalStarted } from "@/protocol/generated/gui";
+import type { Scheme } from "@/app/theme";
 
 /** What `terminal_spawn` answers, generated from `src-tauri/src/terminal.rs`. */
 export type { TerminalStarted };
 export type { TerminalExit, TerminalSink };
 
-export type TerminalSpawn = { account: string; id: string; path: string; cols: number; rows: number };
+/**
+ * `theme` is the palette painted at spawn (`currentScheme`): Neovim and Vim
+ * take it as their `background` and colorscheme, and every editor as
+ * `MP_DESKTOP_THEME`; a later theme change reaches the next spawn.
+ */
+export type TerminalSpawn = { account: string; id: string; path: string; cols: number; rows: number; theme: Scheme };
 
 export interface TerminalBridge {
   spawn(req: TerminalSpawn, sink: TerminalSink): Promise<TerminalStarted>;

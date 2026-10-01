@@ -2,7 +2,8 @@
 //! (#0136).
 //!
 //! The file is a JSON object of string values, one per [`SettingKey`]: the
-//! editor template ([`crate::editor`]), the theme, and the reader's mode.
+//! editor template ([`crate::editor`]), the theme, the reader's mode, and
+//! whose colours the embedded editor shows ([`crate::terminal`]).
 //! `setting_get` and `setting_set` read and write one key and keep every
 //! other key of the file, unknown ones included; a key outside
 //! [`SettingKey`] is refused with `not_found`. A missing file, a missing key
@@ -29,6 +30,9 @@ pub const THEMES: &[&str] = &["dark", "light", "system"];
 /// The values the `reader_mode` key takes.
 pub const READER_MODES: &[&str] = &["html", "text"];
 
+/// The values the `editor_colors` key takes.
+pub const EDITOR_COLORS: &[&str] = &["app", "editor"];
+
 /// A key of `desktop.json`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -42,13 +46,17 @@ pub enum SettingKey {
     /// `html` (the message's own markup in the reader frame) or `text` (the
     /// stored plain text); unset is `html`.
     ReaderMode,
+    /// `app` (Neovim and Vim take the app's colorscheme, `mailypoppins`) or
+    /// `editor` (the editor's own); unset is `app`.
+    EditorColors,
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 3] = [
+    pub const ALL: [SettingKey; 4] = [
         SettingKey::Editor,
         SettingKey::Theme,
         SettingKey::ReaderMode,
+        SettingKey::EditorColors,
     ];
 
     /// The key as the file spells it.
@@ -57,6 +65,7 @@ impl SettingKey {
             SettingKey::Editor => "editor",
             SettingKey::Theme => "theme",
             SettingKey::ReaderMode => "reader_mode",
+            SettingKey::EditorColors => "editor_colors",
         }
     }
 
@@ -86,7 +95,34 @@ impl SettingKey {
             SettingKey::ReaderMode if !READER_MODES.contains(&value) => Err(GuiError::Setup {
                 message: format!("the reader mode `{value}` is neither html nor text"),
             }),
-            SettingKey::Theme | SettingKey::ReaderMode => Ok(()),
+            SettingKey::EditorColors if !EDITOR_COLORS.contains(&value) => Err(GuiError::Setup {
+                message: format!("the editor colours `{value}` are neither app nor editor"),
+            }),
+            SettingKey::Theme | SettingKey::ReaderMode | SettingKey::EditorColors => Ok(()),
+        }
+    }
+}
+
+/// Whose colours the embedded editor shows: the `editor_colors` key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditorColors {
+    /// Neovim and Vim take the `mailypoppins` colorscheme, in the app's
+    /// palette; the default.
+    #[default]
+    App,
+    /// The editor keeps its own colorscheme.
+    Editor,
+}
+
+/// The `editor_colors` key as a spawn reads it: unset, unknown or a file
+/// that does not read (logged) is [`EditorColors::App`].
+pub fn editor_colors(file: &Path) -> EditorColors {
+    match read(file, SettingKey::EditorColors) {
+        Ok(Some(v)) if v.trim() == "editor" => EditorColors::Editor,
+        Ok(_) => EditorColors::App,
+        Err(e) => {
+            tracing::warn!("[settings] the editor colours follow the app: {e}");
+            EditorColors::App
         }
     }
 }
@@ -248,7 +284,10 @@ mod tests {
         for key in ["colour", "", "Theme", "later"] {
             match get_on(&file, key) {
                 Err(GuiError::NotFound { message, .. }) => {
-                    assert!(message.contains("editor, theme, reader_mode"), "{message}")
+                    assert!(
+                        message.contains("editor, theme, reader_mode, editor_colors"),
+                        "{message}"
+                    )
                 }
                 other => panic!("{key}: {other:?}"),
             }
@@ -300,6 +339,44 @@ mod tests {
             file_json(&file),
             json!({"theme": "system", "reader_mode": "text"})
         );
+    }
+
+    #[test]
+    fn the_editor_colours_round_trip_and_default_to_the_app() {
+        let dir = crate::test_support::scratch_dir("settings-colors");
+        let file = settings_path(&dir);
+        assert_eq!(editor_colors(&file), EditorColors::App, "no file");
+        std::fs::write(&file, r#"{"editor": "nvim"}"#).expect("write");
+        assert_eq!(get_on(&file, "editor_colors").expect("get"), None);
+        assert_eq!(editor_colors(&file), EditorColors::App, "unset");
+        assert_eq!(
+            set_on(&file, "editor_colors", Some("editor"))
+                .expect("set")
+                .as_deref(),
+            Some("editor")
+        );
+        assert_eq!(editor_colors(&file), EditorColors::Editor);
+        assert_eq!(
+            file_json(&file),
+            json!({"editor": "nvim", "editor_colors": "editor"})
+        );
+        assert_eq!(
+            set_on(&file, "editor_colors", Some("app"))
+                .expect("set")
+                .as_deref(),
+            Some("app")
+        );
+        assert_eq!(editor_colors(&file), EditorColors::App);
+        match set_on(&file, "editor_colors", Some("theme")) {
+            Err(GuiError::Setup { message }) => {
+                assert!(message.contains("neither app nor editor"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(set_on(&file, "editor_colors", None).expect("clear"), None);
+        assert_eq!(file_json(&file), json!({"editor": "nvim"}));
+        std::fs::write(&file, "[1]").expect("write");
+        assert_eq!(editor_colors(&file), EditorColors::App, "a broken file");
     }
 
     #[test]

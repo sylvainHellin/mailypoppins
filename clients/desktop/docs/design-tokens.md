@@ -81,6 +81,11 @@ Where a palette token fits, the ANSI colour is that token; the other hues (green
 | bright white | `#F4F1E8` (`foreground`, Cream) | `#FFFFFF` (`card`) |
 
 Black and white sit close to the background in each palette, as terminal themes place them, so the contrast pass does not check the ANSI colours; a Neovim colour scheme with `termguicolors` draws in its own truecolour anyway.
+
+That is why the embedded Neovim or Vim gets a colour scheme of the app's own, `src-tauri/resources/nvim/colors/mailypoppins.vim` (ticket 0137; [rust-layer.md](rust-layer.md), "Terminal sessions", "The look").
+It reads the same tokens: `background`, `foreground`, `muted`, `accent`, `primary`, `border`, `destructive`, `selection` and the sixteen `terminal-*` colours, copied as hex values into one dictionary per palette, picked by Vim's `background`.
+Each group sets the hex value for `termguicolors` and an ANSI index from 0 to 15 for a terminal without it: a `terminal-*` colour takes its own slot, a surface the nearest slot of its palette (`muted`, `accent`, `border` and `selection` take black in dark and white in light), and Normal takes `NONE`, the pane's own `background` and `foreground`, so the editor's background is the app's in both modes.
+`src/design/colorscheme.test.ts` fails when a hex value there differs from `index.css` or sits outside the two dictionaries, and when a `terminal-*` colour takes another slot's index; a token change is copied there by hand.
 The font is the host element's computed `font-mono` at `text-sm`: `@theme inline` emits no `--font-mono` variable, so the class is the only place the stack resolves.
 
 ## Rules

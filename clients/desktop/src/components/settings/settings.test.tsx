@@ -16,6 +16,11 @@ const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c)
 /** The app with a probe that reads the model, so a test can look for what must not be in it. */
 async function openSettings() {
   resetMock();
+  return openSettingsKeeping();
+}
+
+/** `openSettings` over the mock as the test left it. */
+async function openSettingsKeeping() {
   setWidth(1400);
   const probe = {} as { state: AppState };
   function Probe() {
@@ -69,6 +74,31 @@ describe("the Settings view", () => {
         "Drafts open in the embedded terminal editor; config.toml and the log open in nvim. {path} stands for the file.",
       ),
     );
+  });
+
+  it("the editor colours follow the app until set, and the choice round-trips through desktop.json", async () => {
+    const { user, view } = await openSettings();
+    const group = within(view).getByRole("group", { name: "Editor colours" });
+    const app = within(group).getByRole("button", { name: "Follow the app" });
+    const own = within(group).getByRole("button", { name: "The editor's own" });
+    await waitFor(() => expect(app).toHaveAttribute("aria-pressed", "true"));
+    expect(own).toHaveAttribute("aria-pressed", "false");
+    await user.click(own);
+    await waitFor(() => expect(mock.settings.get("editor_colors")).toBe("editor"));
+    expect(own).toHaveAttribute("aria-pressed", "true");
+    expect(callsOf("setting_set")).toContainEqual({ key: "editor_colors", value: "editor" });
+    await user.click(app);
+    await waitFor(() => expect(mock.settings.get("editor_colors")).toBe("app"));
+    expect(app).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("a stored choice of the editor's own colours shows pressed on open", async () => {
+    resetMock();
+    mock.settings.set("editor_colors", "editor");
+    const { view } = await openSettingsKeeping();
+    const group = within(view).getByRole("group", { name: "Editor colours" });
+    await waitFor(() => expect(within(group).getByRole("button", { name: "The editor's own" })).toHaveAttribute("aria-pressed", "true"));
+    expect(within(group).getByRole("button", { name: "Follow the app" })).toHaveAttribute("aria-pressed", "false");
   });
 
   it("offers Sign in on the OAuth2 and Graph cards and Add account below them, both live", async () => {

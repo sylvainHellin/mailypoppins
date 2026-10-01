@@ -37,7 +37,7 @@ describe("the Tauri bridge", () => {
     const answer: TerminalStarted = { session: 7, pid: 123, editor: "nvim", source: "editor", fixture: false };
     vi.mocked(invoke).mockImplementationOnce(async () => answer);
     const s = sink();
-    const req = { account: "work", id: "d1", path: "/d/d1.md", cols: 80, rows: 24 };
+    const req = { account: "work", id: "d1", path: "/d/d1.md", cols: 80, rows: 24, theme: "light" as const };
     await expect(tauriBridge.spawn(req, s)).resolves.toEqual(answer);
     const [cmd, args] = vi.mocked(invoke).mock.lastCall!;
     expect(cmd).toBe("terminal_spawn");

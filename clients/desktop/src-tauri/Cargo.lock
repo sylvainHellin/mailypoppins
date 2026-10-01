@@ -2598,6 +2598,7 @@ dependencies = [
  "mp-client",
  "mp-core",
  "mp-protocol",
+ "objc2-foundation",
  "portable-pty",
  "serde",
  "serde_json",

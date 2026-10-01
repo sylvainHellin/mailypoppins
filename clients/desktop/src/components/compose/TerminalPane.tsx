@@ -15,6 +15,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { tauriBridge, type TerminalBridge, type TerminalExit, type TerminalStarted } from "@/lib/terminal";
 import { terminalFont, terminalTheme } from "@/components/compose/terminalTheme";
+import { currentScheme } from "@/app/theme";
 
 /** How long a run of container resizes settles before the PTY hears of it. */
 export const RESIZE_DEBOUNCE_MS = 50;
@@ -142,7 +143,7 @@ export function TerminalPane({ session, bridge = tauriBridge, visible, onStarted
           else latest.current.onExit?.(exit);
         },
       };
-      pty.spawn({ ...draft, cols: sent.cols, rows: sent.rows }, sink).then(
+      pty.spawn({ ...draft, cols: sent.cols, rows: sent.rows, theme: currentScheme() }, sink).then(
         (answer) => {
           started = answer.session;
           latest.current.onStarted?.(answer);

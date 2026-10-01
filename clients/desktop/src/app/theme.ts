@@ -45,6 +45,14 @@ export function paintScheme(scheme: Scheme, doc: Document = document): void {
   if (meta) meta.content = scheme;
 }
 
+/**
+ * The palette on the document now, as `paintScheme` left it: what the
+ * embedded editor takes at spawn (ticket 0137). Dark unless `light` is painted.
+ */
+export function currentScheme(doc: Document = document): Scheme {
+  return doc.documentElement.classList.contains("light") ? "light" : "dark";
+}
+
 /** The listener `system` keeps on the media query, removed by the next `applyTheme`. */
 let detach: (() => void) | null = null;
 
