@@ -2352,3 +2352,21 @@ Terminal.app takes the editor through `osascript` with the words as `argv`, so n
 `do script` runs the words in the user's login shell, and AppleScript's `quoted form of` is POSIX quoting, which fish reads differently: fish takes `\'` and `\\` as escapes even inside single quotes, so `'/d/a\'\'';echo INJECTED;#'` ends the word early and runs `echo INJECTED`.
 The script quotes each word itself so that no backslash ever sits inside single quotes: it splits on `\`, turns each piece's `'` into `'\''`, joins the pieces with `'\\'` and wraps the whole in `'…'`, which sh, bash, zsh and fish read as the same literal word.
 Applying the backslash pass after `quoted form of` instead breaks a plain `it's`, whose `'\''` already holds a backslash outside the quotes.
+
+## One Tauri channel carries raw and JSON frames, in order
+
+A `Channel<InvokeResponseBody>` takes `Raw` and `Json` messages mixed on the same channel (tauri 2.12, `src/ipc/channel.rs`, `channel_on`).
+Rust numbers every message with one counter whatever its body, and `@tauri-apps/api`'s `Channel` holds a message back until every lower index has run, so a JSON exit sent after the last raw output arrives after it.
+A raw message under 1 KiB travels through `webview.eval` as a JSON number array turned into an `ArrayBuffer`, and anything larger through a `fetch` of the IPC protocol, which answers an `ArrayBuffer` too; a JSON message under 8 KiB is evaluated as an object literal.
+The two roads finish out of order, which is what the index fixes, and why the desktop's terminal (`clients/desktop/src-tauri/src/terminal.rs`) needs no tag byte on its frames.
+
+## `portable-pty` reports a signal by name and kills without checking for a reaped child
+
+`portable_pty::ExitStatus::signal()` is the `strsignal` text ("Hangup: 1" on macOS), not a number; on Unix the child behind `Box<dyn Child>` is a `std::process::Child`, so the desktop's terminal coerces it to `&mut dyn Child`, downcasts it, and reads `ExitStatusExt::signal()`.
+`Child::kill` sends SIGHUP, waits up to 200 ms, then SIGKILL, and it calls `kill(pid)` even when the child was already reaped, which could signal a recycled pid; the terminal asks `try_wait` first under the same lock the pump reaps with.
+A PTY's reads end only when every holder of the slave closes it, so the slave is dropped right after the spawn, and a child whose grandchild keeps the terminal open is reaped by polling while the output is quiet.
+
+## A window's `CloseRequested` is prevented when the webview listens for it
+
+tauri 2.12 calls `prevent_close()` itself on `CloseRequested` when the webview has a `tauri://close-requested` listener (`src/manager/window.rs`), and the webview then decides whether to destroy the window.
+A Rust hook that cleans up on `CloseRequested` would therefore act on a close the user may still cancel; the desktop kills its terminal children on `WindowEvent::Destroyed` and `RunEvent::Exit` instead.
