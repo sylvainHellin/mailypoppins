@@ -100,3 +100,11 @@ Spike: `pnpm create tauri-app@latest -m pnpm -t react-ts` (Vite template), then 
 - New-window (target=_blank / window.open) interception API on Tauri 2: UNVERIFIED — no first-class hook found in the pages fetched; next step: read `WebviewWindowBuilder` full docs / search `on_new_window` in the tauri repo.
 - Whether the webgl addon is formally "recommended on WKWebView": inferred from xterm 6 release work and community reports (nexterm runs WebGL on WKWebView), not an official statement.
 - Exact notification-plugin macOS signing requirement wording: plugin docs page fetched only partially; practical claim rests on community reports.
+
+## M5 refresh, 2026-10-01
+
+Re-checked against crates.io and npm for #0130 before the install, approved by Sylvain the same day; nothing moved since the research above.
+
+- `portable-pty` 0.9.0 (2025-02-11): installed. `pty-process` 0.5.3 has no Windows path and `tauri-plugin-pty` 0.3.1 (2026-07-08) hides the reader thread the read batching needs, so both stay out.
+- `@xterm/xterm` 6.0.0, `@xterm/addon-fit` 0.11.0, `@xterm/addon-webgl` 0.19.0, `@xterm/addon-unicode11` 0.9.0, `@xterm/addon-clipboard` 0.2.0 (npm entries last modified 2026-08-30): installed. unicode11 gives the width table Neovim assumes for CJK and emoji; clipboard answers the OSC 52 writes of Neovim's `+` register, the only clipboard path a PTY has.
+- `libghostty-vt` stays out: the VT state machine alone, without a renderer, and the full libghostty is not published for embedding.
