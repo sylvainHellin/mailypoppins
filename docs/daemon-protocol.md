@@ -710,8 +710,8 @@ It exists for a compose wizard that collects the recipients and the subject *bef
 A partial object is `-32602`: which fields the override covers is not a thing to leave ambiguous.
 
 **A draft's attachment list is the daemon's to rewrite.**
-`DraftAttachments` is `{account, id, path, attachments}`, each entry `{index, entry, path, exists}`: the entry as the file spells it, where the send path finds it (`~` against the daemon's home, a relative entry against the draft's directory) and whether a file is there.
-`draft.attach` stores `path` as typed, trimmed, after the TUI prompt's checks, each a `-32602` with the sentence a user reads: a relative path, a directory, no file there (`No such file: <path>`), and a file the list already names (`<entry> is already attached`).
+`DraftAttachments` is `{account, id, path, attachments}`, each entry `{index, entry, path, exists}`: the entry as the file spells it, where the send path finds it (`~` against the daemon's home, a relative entry against the draft's directory) and whether a file, or a directory whose regular files a send attaches, is there.
+`draft.attach` stores `path` as typed, trimmed, after checks stricter than the TUI's `ta` prompt, which only asks that the path exists; each is a `-32602` with the sentence a user reads: a relative path, a directory, no file there (`No such file: <path>`), and a file the list already names (`<entry> is already attached`).
 `draft.detach` removes entry `index` and leaves the file; an index past the end and a list whose lines do not read one entry each are `-32602`.
 All three answer the list as the file has it afterwards, refuse a draft that will not parse with `-32010`, and are declared in `DRAFT_ATTACHMENT_METHOD_SPECS`, an array of their own for the reason `DRAFT_FROM_MESSAGE_METHOD_SPECS` is one.
 

@@ -122,6 +122,22 @@ describe("the compose wizard", () => {
     expect(callsOf("draft_forward")[0]).toMatchObject({ account: "work", row_id: 1002, signature: null, no_signature: true });
   });
 
+  it("an untouched signature select sends neither field, so the daemon resolves the account default", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    noCompletion();
+    await user.keyboard("jj");
+    await user.keyboard("cf");
+    const dialog = await screen.findByRole("dialog", { name: "Forward" });
+    const signature = (await within(dialog).findByLabelText("Signature")) as HTMLSelectElement;
+    await waitFor(() => expect(signature.value).toBe("work"));
+    await user.click(within(dialog).getByLabelText("To"));
+    await user.keyboard("kim@example.com");
+    await user.click(within(dialog).getByRole("button", { name: /Forward and edit/ }));
+    await waitFor(() => expect(callsOf("draft_forward")).toHaveLength(1));
+    expect(callsOf("draft_forward")[0]).toMatchObject({ account: "work", row_id: 1002, signature: null, no_signature: null });
+  });
+
   it("refuses a draft with no recipient, as the TUI does, and stays open", async () => {
     const { user } = renderApp();
     await shellReady();

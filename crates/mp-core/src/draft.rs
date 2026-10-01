@@ -1086,8 +1086,9 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// Append the file the user typed to the draft at `path` (the TUI's `ta`),
-/// after the checks its prompt makes: the path is absolute or `~`-relative,
-/// names a file rather than a directory, and is not attached already. The
+/// with checks stricter than its prompt, which only asks that the path
+/// exists: the path is absolute or `~`-relative, names a file rather than a
+/// directory, and is not attached already. The
 /// entry is stored as typed, trimmed, so a `~` path stays portable; the
 /// error is the sentence a user reads.
 pub fn attach_checked(path: &Path, input: &str, home: Option<&Path>) -> Result<()> {

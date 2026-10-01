@@ -867,7 +867,7 @@ fn attachment_list(account: &str, row: &DraftRow) -> Result<Value, RpcError> {
             let resolved = crate::draft::resolve_attachment_entry(&entry, dir, home.as_deref());
             DraftAttachment {
                 index: index as u32,
-                exists: resolved.is_file(),
+                exists: resolved.is_file() || resolved.is_dir(),
                 path: resolved.display().to_string(),
                 entry,
             }

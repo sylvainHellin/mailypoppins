@@ -114,8 +114,11 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
   const submit = async () => {
     if (!dialog || busy) return;
     setBusy(true);
+    // An untouched select sends neither field, so the daemon resolves the
+    // account default and honours `include_signature = false`, as the TUI's
+    // wizard does; an explicit pick, the default included, names it.
     const withSignature: ComposeFields =
-      signs && signatures && signatures.names.length > 0
+      signs && signatures && signatures.names.length > 0 && picked.current
         ? { ...fields, signature: signature === NONE ? null : signature }
         : fields;
     const refusal = await submitCompose(dialog, withSignature, dispatch);

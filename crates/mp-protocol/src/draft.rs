@@ -245,7 +245,8 @@ pub struct DraftAttachment {
     /// Where the send path finds it: `~` against the daemon's home, a
     /// relative entry against the draft file's directory.
     pub path: String,
-    /// Whether a file is there now; a send fails on a missing one.
+    /// Whether something is there now: a file, or a directory whose regular
+    /// files the send path attaches. A send fails on a missing one.
     pub exists: bool,
 }
 
