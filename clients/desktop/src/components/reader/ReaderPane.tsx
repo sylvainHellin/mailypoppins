@@ -121,8 +121,10 @@ export function ReaderPane() {
             {s.reader.meta.invite ? <InviteCard meta={s.reader.meta} /> : null}
             {s.readerMode === "text" ? (
               <ReaderText
+                instance={s.bootstrap?.instance_id ?? ""}
                 account={s.reader.meta.account}
                 rowId={s.reader.meta.row_id}
+                messageId={s.reader.meta.message_id}
                 version={s.reader.load.loadedGen}
                 subject={s.reader.meta.subject}
               />

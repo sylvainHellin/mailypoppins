@@ -62,8 +62,12 @@ function ReaderFrame({ htmlUrl, subject }: ReaderBodyProps) {
 }
 
 export type ReaderTextProps = {
+  /** The daemon instance the row id belongs to: a restarted daemon may give the id to another message. */
+  instance: string;
   account: string;
   rowId: number;
+  /** The message's `Message-ID`, which a row id is checked against. */
+  messageId: string;
   /** The reader load the headers came from: a reload of the message reads its text again. */
   version: number;
   /** The message subject, for the text's accessible name. */
@@ -73,12 +77,14 @@ export type ReaderTextProps = {
 type TextResult = { kind: "text"; body: string | null } | { kind: "error"; error: GuiError };
 
 /**
- * The stored plain text of the open message, read once per message and load
- * and cached; a message change drops an answer still on its way. Line breaks
+ * The stored plain text of the open message, read once per daemon instance,
+ * message and load and cached; a message change drops an answer still on its way. Line breaks
  * stay as stored, and a line quoted with `>` is muted.
  */
-export function ReaderText({ account, rowId, version, subject }: ReaderTextProps) {
-  const message = readerKey(account, rowId);
+export function ReaderText({ instance, account, rowId, messageId, version, subject }: ReaderTextProps) {
+  // A row id is per daemon instance (state.ts, `MessageRef`), so the cache
+  // and the shown text are keyed by the instance and the Message-ID too.
+  const message = `${instance}/${readerKey(account, rowId)}/${messageId}`;
   const key = `${message}@${version}`;
   const [shown, setShown] = useState<{ message: string; result: TextResult } | null>(() => {
     const hit = cachedText(key);

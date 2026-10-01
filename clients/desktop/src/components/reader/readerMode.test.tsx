@@ -4,7 +4,7 @@ import { parseReaderMode } from "@/app/readerMode";
 import { GUI_ENTRIES, paletteEntries } from "@/keymap/catalog";
 import * as cmd from "@/lib/commands";
 import { renderApp, shellReady } from "@/test/render";
-import { mock, resetMock } from "@/test/tauri-mock";
+import { emit, fixtures, mock, resetMock } from "@/test/tauri-mock";
 
 const reader = () => screen.getByRole("complementary", { name: "Reader" });
 const frame = () => reader().querySelector("iframe");
@@ -236,5 +236,36 @@ describe("Settings and the palette", () => {
       await user.click(row as HTMLElement);
     });
     expect(frame()).not.toBeNull();
+  });
+});
+
+describe("the text cache across a daemon restart", () => {
+  it("does not serve an old message's text for the same row_id under a new daemon instance", async () => {
+    const { user } = renderApp(1400, () => mock.settings.set("reader_mode", "text"));
+    await shellReady();
+    await openFirst(user);
+    expect((await textPane()).textContent).toContain("the quarterly ledger");
+
+    // The restarted daemon's store lost the ledger message and numbered
+    // Angebot Dachsanierung 1001, the row id the cached text was read under.
+    const inbox = mock.rows.work.inbox;
+    inbox.splice(inbox.findIndex((r) => r.id === 1001), 1);
+    const angebot = inbox.find((r) => r.id === 1002);
+    if (!angebot) throw new Error("no row 1002");
+    angebot.id = 1001;
+    act(() => emit({ type: "disconnected", reason: "fixture: simulated daemon restart" }));
+    act(() => emit({ type: "reconnected", instance_id: "fixture-instance-2" }));
+    act(() =>
+      emit({ type: "rebootstrapped", cause: "instance_changed", bootstrap: { ...fixtures.bootstrap, instance_id: "fixture-instance-2" } }),
+    );
+    // The ledger is gone, so the selection clears; the first row is now 1001.
+    await waitFor(() => expect(within(reader()).queryByLabelText(/^Message text: /)).toBeNull());
+    await user.keyboard("j");
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.getAttribute("data-row-id")).toBe("1001");
+    await within(reader()).findByRole("heading", { name: "Angebot Dachsanierung" });
+    await waitFor(async () => expect((await textPane()).textContent).toContain("Dachsanierung"));
+    expect((await textPane()).textContent).not.toContain("the quarterly ledger");
+    // Read again under the new instance, not served from the cache.
+    expect(calls("message_text").filter((c) => c.args?.row_id === 1001).length).toBeGreaterThan(1);
   });
 });

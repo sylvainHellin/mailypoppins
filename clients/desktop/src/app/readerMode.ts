@@ -70,7 +70,11 @@ type CachedText = { body: string | null };
 
 const TEXT_CACHE_SIZE = 32;
 
-/** The bodies read so far, keyed by `readerKey@loadedGen`, so a reload of the message reads its text again. */
+/**
+ * The bodies read so far, keyed by `<instance>/<readerKey>/<Message-ID>@<loadedGen>`:
+ * a reload of the message reads its text again, and a row id a restarted
+ * daemon gave to another message misses.
+ */
 const textCache = new Map<string, CachedText>();
 
 export function cachedText(key: string): CachedText | undefined {
