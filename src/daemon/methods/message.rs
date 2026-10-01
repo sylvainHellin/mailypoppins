@@ -270,12 +270,14 @@ impl ListRead {
 /// string `resolve_date` would have returned, without the parse. `0` and
 /// `NULL` are the column's "no parsable date" (and the one real date that
 /// stamps as `0`, the epoch itself), so those rows, rare by construction, take
-/// `resolve_date` and keep its answer exactly.
+/// `resolve_date` and keep its answer exactly. So does a header with a leap
+/// second (`23:59:60`): chrono folds it into the unix time but prints the
+/// `60` from the parsed value, which only the parse can give back.
 fn wire_date_sort(row: &MessageRow, stamped: Option<i64>) -> String {
     use chrono::{Datelike, Timelike};
 
     let at = stamped
-        .filter(|secs| *secs != 0)
+        .filter(|secs| *secs != 0 && !row.date_display.as_deref().unwrap_or("").contains(":60"))
         .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
     match at {
         // `%Y` pads to four digits inside this range and signs outside it, so
@@ -1940,6 +1942,8 @@ mod tests {
             "",
             "Fri, 31 Dec 2100 23:59:59 +1400",
             "2 Jan 2024 08:00:00 GMT",
+            "Sat, 31 Dec 2016 23:59:60 +0000",
+            "Sat, 31 Dec 2016 23:59:60 +0100",
         ];
         for (index, date) in dates.iter().enumerate() {
             let odd = index % 2 == 1;
