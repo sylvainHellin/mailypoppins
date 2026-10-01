@@ -79,6 +79,9 @@ All notable changes to this project are documented in this file.
 - **The log directory stays under 200 MB.** Nothing ever deleted a log file, a long-running daemon kept writing into the file of the day it started, and every rendered message wrote its whole HTML parse as debug lines, so `<data_dir>/logs/` reached several gigabytes. A process now moves to a new file each UTC day and after 20 MB, deletes the oldest log files once the directory passes 200 MB, empties `daemon.log` past 10 MB, and logs a dependency only from `INFO` up. The first `mp` run after upgrading trims an existing directory.
 - **A client that connects to the daemon now sees each account's real sync health.** The bootstrap snapshot reported `unknown` for every account whatever the last pass did; it now carries the verdict of the last completed pass, and `sync.completed` keeps it current. The snapshot's pending holds, running operations and failing diagnostics are typed in `mp-protocol` with the same shapes `send.hold_status`, `operation.status` and `diagnostic.health` answer, so a GUI decodes one type per shape. Nothing on the wire changes apart from the `sync_health` value.
 
+### Performance
+- **Opening a large mailbox costs the daemon less and no longer holds one of its workers.** `message.list` formats each row's sort date from the column ingest stored instead of parsing the `Date:` header again, serialises rows borrowed from the store instead of cloned, and reads on the blocking pool; at 50 000 rows the method is 10 to 16% faster and the answer is byte-identical. A mailbox past about 34 000 rows still exceeds the 16 MiB response cap and cannot be opened (`docs/baselines/message-list-unbounded.md`).
+
 ## [0.10.0] - 2026-09-24
 
 ### Added

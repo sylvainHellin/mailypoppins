@@ -147,6 +147,7 @@ Since P5-U4 the three reads a frame needs go the same way, through `crate::tui::
 The two that can wait keep the thread they always had and block on a call rather than on a store open: the mailbox load of `Action::LoadMailbox` and the per-account count of the two-phase startup, both through a `Session::handle()` a worker thread can own, so nothing about the load moved onto the draw thread.
 The preview body is the one synchronous read, one `message.get` per cursor move behind the memo that already made a frame on an unchanged selection cost nothing, which is the number `docs/plans/preview-latency.md` budgets.
 The listing is transferred whole, once per mailbox open, as `docs/baselines/decisions/list-transfer.md` decided; the row deltas that keep it current decode here already and are applied by nothing until P5-U8 drains the event stream.
+The daemon reads it on its blocking pool rather than on a runtime worker, and a mailbox whose answer passes the 16 MiB response cap, about 34 000 rows, is refused with `frame_too_large` (`docs/baselines/message-list-unbounded.md`).
 An `App` with no session at all reads nothing: an empty list, zeroed counts and an empty preview, each with a line in the log (P5-U10e).
 The store-backed readers it used to fall back to are `src/tui_tests/oracle.rs`, in the crate that owns the store, where they are the oracle every daemon-backed answer is compared against.
 

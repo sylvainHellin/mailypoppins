@@ -189,16 +189,32 @@ pub fn list_mailbox(store: &Store, account: &str, mailbox: &str) -> Result<Vec<M
     // (`CALENDAR_SIDECAR_NAME`, chosen precisely to not collide with real
     // attachment names), so the LEFT JOIN never multiplies a row and the
     // result is byte-identical to the `row_columns` form. The invite boolean
-    // stays the last column (index 15, after reply_to/bcc) so [`row_from_sql`]
-    // reads it unchanged.
-    let sql = list_mailbox_sql();
-    let mut stmt = store.conn().prepare(&sql)?;
-    let rows = stmt.query_map((account, mailbox), row_from_sql)?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.context("reading a message row")?);
-    }
-    Ok(out)
+    // stays at index 15 (after reply_to/bcc) so [`row_from_sql`] reads it
+    // unchanged; `date_sort` follows it at 16 for [`list_mailbox_dated`].
+    listing(store, account, mailbox, None, row_from_sql).map(|(rows, _)| rows)
+}
+
+/// A listed row and its `date_sort` column, as [`list_mailbox_dated`] reads
+/// them.
+pub type DatedRow = (MessageRow, Option<i64>);
+
+/// [`list_mailbox`] or [`list_mailbox_page`], each row paired with its
+/// `date_sort` column (unix seconds, `0` for a `Date:` ingest could not parse,
+/// `None` for a row written without one).
+///
+/// For a caller that renders the sort key: the column is what ingest derived
+/// from the same header with the same parser, so formatting it costs a fraction
+/// of parsing `date_display` again, which is the per-row work `message.list`
+/// used to do for every row of a whole-mailbox answer.
+pub fn list_mailbox_dated(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    limit: Option<usize>,
+) -> Result<(Vec<DatedRow>, usize)> {
+    listing(store, account, mailbox, limit, |row| {
+        Ok((row_from_sql(row)?, row.get(16)?))
+    })
 }
 
 /// The first `limit` rows of [`list_mailbox`]'s order, and how many rows the
@@ -217,6 +233,28 @@ pub fn list_mailbox_page(
     mailbox: &str,
     limit: usize,
 ) -> Result<(Vec<MessageRow>, usize)> {
+    listing(store, account, mailbox, Some(limit), row_from_sql)
+}
+
+/// The one body of the three listings: the whole mailbox, whose length is its
+/// total, or a `LIMIT`ed prefix counted separately in the same snapshot.
+fn listing<T>(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    limit: Option<usize>,
+    map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> Result<(Vec<T>, usize)> {
+    let Some(limit) = limit else {
+        let mut stmt = store.conn().prepare(&list_mailbox_sql())?;
+        let rows = stmt.query_map((account, mailbox), map)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.context("reading a message row")?);
+        }
+        let total = out.len();
+        return Ok((out, total));
+    };
     let tx = store.conn().unchecked_transaction()?;
     let total: i64 = tx.query_row(MAILBOX_TOTAL_SQL, (account, mailbox), |row| row.get(0))?;
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -224,7 +262,7 @@ pub fn list_mailbox_page(
     let mut out = Vec::new();
     {
         let mut stmt = tx.prepare(&sql)?;
-        let rows = stmt.query_map((account, mailbox, limit), row_from_sql)?;
+        let rows = stmt.query_map((account, mailbox, limit), map)?;
         for row in rows {
             out.push(row.context("reading a message row")?);
         }
@@ -246,7 +284,7 @@ fn list_mailbox_sql() -> String {
          messages.date_display, messages.flags, messages.has_attachments, \
          messages.body_blob, messages.thread_id, \
          messages.reply_to, messages.bcc, \
-         (invite.message_row IS NOT NULL) \
+         (invite.message_row IS NOT NULL), messages.date_sort \
          FROM messages \
          LEFT JOIN (SELECT DISTINCT message_row FROM message_blobs \
                      WHERE kind = 'attachment' \
