@@ -6,36 +6,49 @@
 //! The Edit and Window items are the predefined macOS ones. No item carries
 //! an accelerator the webview's keymap also owns: a menu key equivalent is
 //! taken before the page sees the key, and a bare `z` or `?` there would stop
-//! the user typing it into a field.
+//! the user typing it into a field. Cmd+, on "Settings…" is the one
+//! accelerator, the macOS convention, which the keymap never sees anyway
+//! since it passes every Cmd combination on.
 
-use tauri::menu::{AboutMetadata, Menu, MenuBuilder, SubmenuBuilder};
+use tauri::menu::{AboutMetadata, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// The event the frontend listens on (`src/lib/events.ts`).
 pub const MENU_EVENT: &str = "menu";
 
-/// Every custom item: its id, its label, and the menu it sits in.
-pub const ACTIONS: &[(&str, &str, &str)] = &[
-    ("restart_daemon", "Restart Daemon…", "File"),
-    ("toggle_sidebar", "Toggle Sidebar", "View"),
-    ("widen_list", "Widen List", "View"),
-    ("narrow_list", "Narrow List", "View"),
-    ("zoom_pane", "Zoom Focused Pane", "View"),
-    ("command_palette", "Command Palette…", "View"),
-    ("key_help", "Key Help", "View"),
-    ("keyboard_shortcuts", "Keyboard Shortcuts", "Help"),
+/// Every custom item: its id, its label, the menu it sits in, and its
+/// accelerator if it has one.
+pub const ACTIONS: &[(&str, &str, &str, Option<&str>)] = &[
+    ("settings", "Settings…", "App", Some("CmdOrCtrl+,")),
+    ("restart_daemon", "Restart Daemon…", "File", None),
+    ("toggle_sidebar", "Toggle Sidebar", "View", None),
+    ("widen_list", "Widen List", "View", None),
+    ("narrow_list", "Narrow List", "View", None),
+    ("zoom_pane", "Zoom Focused Pane", "View", None),
+    ("command_palette", "Command Palette…", "View", None),
+    ("key_help", "Key Help", "View", None),
+    ("keyboard_shortcuts", "Keyboard Shortcuts", "Help", None),
 ];
 
 fn items_of<'m, R: Runtime>(
+    app: &AppHandle<R>,
     mut sub: SubmenuBuilder<'m, R, AppHandle<R>>,
     menu: &str,
-) -> SubmenuBuilder<'m, R, AppHandle<R>> {
-    for (id, label, of) in ACTIONS {
-        if *of == menu {
-            sub = sub.text(*id, *label);
+) -> tauri::Result<SubmenuBuilder<'m, R, AppHandle<R>>> {
+    for (id, label, of, accelerator) in ACTIONS {
+        if *of != menu {
+            continue;
         }
+        sub = match accelerator {
+            Some(keys) => sub.item(
+                &MenuItemBuilder::with_id(*id, *label)
+                    .accelerator(keys)
+                    .build(app)?,
+            ),
+            None => sub.text(*id, *label),
+        };
     }
-    sub
+    Ok(sub)
 }
 
 /// The menu bar, built once at startup.
@@ -45,18 +58,23 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         version: Some(env!("CARGO_PKG_VERSION").into()),
         ..Default::default()
     };
-    let app_menu = SubmenuBuilder::new(app, "mailypoppins")
-        .about(Some(about))
-        .separator()
-        .services()
-        .separator()
-        .hide()
-        .hide_others()
-        .show_all()
-        .separator()
-        .quit()
-        .build()?;
-    let file = items_of(SubmenuBuilder::new(app, "File"), "File")
+    let app_menu = items_of(
+        app,
+        SubmenuBuilder::new(app, "mailypoppins")
+            .about(Some(about))
+            .separator(),
+        "App",
+    )?
+    .separator()
+    .services()
+    .separator()
+    .hide()
+    .hide_others()
+    .show_all()
+    .separator()
+    .quit()
+    .build()?;
+    let file = items_of(app, SubmenuBuilder::new(app, "File"), "File")?
         .separator()
         .close_window()
         .build()?;
@@ -69,7 +87,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .paste()
         .select_all()
         .build()?;
-    let view = items_of(SubmenuBuilder::new(app, "View"), "View")
+    let view = items_of(app, SubmenuBuilder::new(app, "View"), "View")?
         .separator()
         .fullscreen()
         .build()?;
@@ -79,7 +97,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .separator()
         .close_window()
         .build()?;
-    let help = items_of(SubmenuBuilder::new(app, "Help"), "Help").build()?;
+    let help = items_of(app, SubmenuBuilder::new(app, "Help"), "Help")?.build()?;
     #[cfg(target_os = "macos")]
     {
         window.set_as_windows_menu_for_nsapp()?;
@@ -92,7 +110,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
 /// Forward one of our items to the frontend; predefined items act natively.
 pub fn on_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
-    if ACTIONS.iter().any(|(known, _, _)| *known == id) {
+    if ACTIONS.iter().any(|(known, ..)| *known == id) {
         if let Err(e) = app.emit(MENU_EVENT, id) {
             tracing::warn!("[menu] could not emit {id}: {e}");
         }
@@ -107,7 +125,7 @@ mod tests {
     #[test]
     fn every_action_id_is_one_the_frontend_runs() {
         let frontend = include_str!("../../src/app/actions.ts");
-        for (id, _, _) in ACTIONS {
+        for (id, ..) in ACTIONS {
             assert!(
                 frontend.contains(&format!("  {id}: \"")),
                 "src/app/actions.ts MENU_ACTIONS lacks {id}"
@@ -117,8 +135,19 @@ mod tests {
 
     #[test]
     fn every_item_sits_in_a_known_menu() {
-        for (_, _, menu) in ACTIONS {
-            assert!(["File", "View", "Help"].contains(menu), "{menu}");
+        for (_, _, menu, _) in ACTIONS {
+            assert!(["App", "File", "View", "Help"].contains(menu), "{menu}");
+        }
+    }
+
+    /// The keymap passes every Cmd combination on, so an accelerator never
+    /// takes a key the page would otherwise read; a bare key here would.
+    #[test]
+    fn every_accelerator_carries_the_command_modifier() {
+        for (id, _, _, accelerator) in ACTIONS {
+            if let Some(keys) = accelerator {
+                assert!(keys.starts_with("CmdOrCtrl+"), "{id}: {keys}");
+            }
         }
     }
 }

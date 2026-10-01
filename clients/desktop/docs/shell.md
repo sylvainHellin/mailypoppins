@@ -503,7 +503,7 @@ In the narrow layout the view stands where the list would, under a bar titled wi
 - `Space c` and `Space a`, the TUI's GLOBAL keys, show Contacts and Calendar; `Space m` shows Mail and focuses its list.
 - The sidebar's entries at its foot: Contacts, Calendar and Settings are buttons, the shown one `aria-current="page"`, out of the pane's tab order like the outbox line; Activity is a button too, and opens the activity log dialog instead of a view.
 - The palette's "Switch to Mail view", "Switch to Contacts view", "Switch to Calendar view" and "Open settings".
-  Settings has no key: the TUI has no settings view, and `Space s` is left free.
+  Settings has no key of the keymap's: the TUI has no settings view, and `Space s` is left free; the app menu's "Settings…" carries Cmd+, (the macOS convention), which the menu takes before the page sees it.
 
 A switch to a view ends a search, as choosing a mailbox does, and keeps the selection, the marks and the outbox view; `Space m` inside Mail changes nothing but the focus.
 Escape, the view's "Mail" button, the palette's "Clear selection / return to list", a mailbox in the sidebar, a search or an outbox bring Mail back as it was.
@@ -772,7 +772,7 @@ The daemon has no per-key writer, so a setting changes in config.toml, through t
 
 ### Entry points
 
-The sidebar's Settings entry and the palette's "Open settings" show the view; it has no key (see Views).
+The sidebar's Settings entry, the palette's "Open settings" and the app menu's "Settings…" (Cmd+,) show the view; the keymap itself binds no key for it (see Views).
 The view reads `config_get` on every open, since another client may have reloaded config.toml, and again after each `config.changed`.
 While it loads the view shows three skeleton lines, and a failed read says "The configuration did not load: <why>".
 On a switch the focus follows into the view, on its "Mail" button, as in the other views.

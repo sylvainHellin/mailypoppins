@@ -292,8 +292,9 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "APP", label: "Narrow list", keys: [], id: "narrow_list", badge: null },
   { section: "APP", label: "Restart daemon", keys: [], id: "restart_daemon", badge: null },
   { section: "APP", label: "Back", keys: ["Alt+Left"], id: "back", badge: null },
-  // The TUI has no settings view, and no key for one (D11): palette and sidebar only.
-  { section: "APP", label: "Open settings", keys: [], id: "open_settings", badge: null },
+  // The TUI has no settings view, and no key for one (D11): the palette, the
+  // sidebar and the app menu's "Settings…", whose Cmd+, is the macOS convention.
+  { section: "APP", label: "Open settings", keys: ["Cmd+,"], id: "open_settings", badge: null },
   // The account wizard (ACC-01): the TUI has none, the CLI's `mp config
   // add-account` is its model; no key of its own (D11), as Settings.
   { section: "APP", label: "Add account", keys: [], id: "add_account", badge: null },

@@ -777,4 +777,13 @@ describe("views (the TUI's Space m, Space c, Space a)", () => {
     await user.keyboard("{Enter}");
     expect(await region("Settings")).toBeInTheDocument();
   });
+
+  it("the app menu's Settings item (Cmd+,) shows Settings from any view", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard(" c");
+    await region("Contacts");
+    act(() => emitMenu("settings"));
+    expect(await region("Settings")).toBeInTheDocument();
+  });
 });

@@ -43,6 +43,7 @@ export const READER_SCROLL_ID = "mp-reader-scroll";
 
 /** The native menu's item ids (src-tauri/src/menu.rs) and what they run. */
 export const MENU_ACTIONS: Record<string, ActionId> = {
+  settings: "open_settings",
   restart_daemon: "restart_daemon",
   toggle_sidebar: "toggle_sidebar",
   widen_list: "widen_list",
