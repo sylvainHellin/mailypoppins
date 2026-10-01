@@ -211,6 +211,7 @@ The fixture seeds one hold (`fixture-hold-seed`, 60 s), so `MP_DESKTOP_FIXTURE=1
 
 Compose goes through the user's external editor, as in the TUI, until the embedded editor of M5.
 Every command that writes a draft answers the file's path, and `editor_open` opens it without waiting for the editor to exit ([rust-layer.md](rust-layer.md), "Drafts and the editor").
+A terminal editor in `$VISUAL` or `$EDITOR`, such as `nvim`, opens in a new window of the first terminal emulator found: WezTerm, Ghostty, kitty, Alacritty, then Terminal.app.
 Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, so no action reloads anything itself.
 `src/app/compose.ts` holds the flows, which every path runs: the keys, the palette, the reader toolbar and the draft preview's buttons.
 
@@ -261,6 +262,7 @@ A draft that does not parse cannot be edited this way, and says why.
 A discard or any `state.remove` of the draft ends its session too, and a `draft.changed` or `draft.invalid` leaves it alone.
 The banner is one `role="status"` region, "Drafts in the editor", mounted empty for the same reason as the activity area's.
 An editor that did not start is a `setup` error: its session turns to `error` and a failure notice in the activity area carries the Rust layer's message, which names `MP_DESKTOP_EDITOR` or the editor setting to fix.
+In fixture mode the Rust layer launches nothing and answers `fixture: true`, and the notice line says "Fixture mode: the editor was not launched; the command would have been <editor>."; the Signatures dialog, `sc`, `sf` and the Calendar's `invite.ics` show the same sentence in place of theirs.
 
 ### Approve and demote
 

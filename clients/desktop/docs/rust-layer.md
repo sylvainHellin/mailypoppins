@@ -211,8 +211,8 @@ type DraftStatusBatch = {
   failed: { id: string; error: GuiError; invalid?: DraftInvalid }[];
 };
 type SignatureListing = { account: string; names: string[]; default: string | null };
-type EditorSource = "env" | "setting" | "visual" | "editor" | "probe" | "fallback";
-type EditorLaunch = { editor: string; pid?: number; source: EditorSource };
+type EditorSource = "env" | "setting" | "visual" | "editor" | "terminal" | "probe" | "fallback";
+type EditorLaunch = { editor: string; pid?: number; source: EditorSource; fixture: boolean };
 type EditorSetting = {
   editor: string | null; file: string; env_override: string | null;
   effective: string; effective_source: EditorSource;
@@ -511,7 +511,7 @@ The editor is a command template, resolved in this order:
 
 1. `MP_DESKTOP_EDITOR`;
 2. the `editor` key of `desktop.json` in the app config directory (`~/Library/Application Support/dev.mailypoppins.desktop/` on macOS), read and written by `editor_setting_get` and `editor_setting_set`;
-3. `$VISUAL`, then `$EDITOR`, each skipped when it names a terminal editor (`vi`, `vim`, `nvim`, `hx`, `nano` and a few more);
+3. `$VISUAL`, then `$EDITOR`; one naming a terminal editor (`vi`, `vim`, `nvim`, `hx`, `nano` and a few more) runs inside the first terminal emulator found, with source `terminal`, and is skipped when there is none;
 4. the first of `code`, `zed`, `subl` and `cursor` found in `/opt/homebrew/bin`, `/usr/local/bin` or `/usr/bin`;
 5. `open -t` on macOS, which opens the default text editor, or `xdg-open` elsewhere.
 
@@ -520,7 +520,18 @@ The template is split with shell-words rules and run without a shell.
 An app started from Finder inherits a `PATH` without Homebrew, so a bare program name is looked up on `PATH` and then in the three directories above.
 The process gets null stdio and its own process group.
 A spawn failure or a nonzero exit within 2 s rejects with `setup`, whose message names the variable or the setting to fix; the command answers when the launcher exits or after 2 s, whichever comes first.
-A terminal editor needs a terminal to run in, so it goes through a terminal command, for example `MP_DESKTOP_EDITOR="wezterm start -- hx {path}"`.
+
+The terminals are probed in this order, each on `PATH`, in the three directories above and, on macOS, as `/Applications/<App>.app/Contents/MacOS/<program>`:
+
+1. WezTerm, as `wezterm start -- <editor> {path}`;
+2. Ghostty, as `open -na /Applications/Ghostty.app --args -e <editor> {path}` on macOS, whose `ghostty` binary refuses to start a terminal from the command line, and `ghostty -e <editor> {path}` elsewhere;
+3. kitty, as `kitty -- <editor> {path}`;
+4. Alacritty, as `alacritty -e <editor> {path}`;
+5. Terminal.app on macOS, found as `/System/Applications/Utilities/Terminal.app`, through `osascript` with a script that runs its arguments, each shell-quoted, in a new window, and `x-terminal-emulator -e <editor> {path}` elsewhere.
+
+`<editor>` is the variable's value with its own arguments, as in `nvim --clean`, and its program is looked up on `PATH` and in the three directories, since the terminal may not see the shell's `PATH`.
+A value that carries its own `{path}` keeps it where it is.
+`MP_DESKTOP_EDITOR` and the setting are taken verbatim and never wrapped: a terminal editor there names its terminal itself, for example `MP_DESKTOP_EDITOR="wezterm start -- hx {path}"`.
 
 ## Attachments
 
@@ -742,7 +753,7 @@ A create and a rename publish the watcher's `signature.changed` for the new file
 `signature_changed` appends "Edited behind the fixture's back." to `work` and its file and publishes `signature.changed`, as an edit in another window would; it is an error once `work` is gone.
 Each write publishes `draft.changed`, and a file that does not parse is listed under `skipped`, is an `invalid` row in the bootstrap, and is refused by `draft.approve` and `draft.preview` with `-32010`.
 
-`editor_open` spawns nothing in fixture mode: it journals the path and the resolved command.
+`editor_open` spawns nothing in fixture mode: it journals the path and the resolved command, and answers `fixture: true` with no `pid`.
 `editor_save` appends a line to the file the last `editor_open` named, which moves it to the top of the listing, and publishes `draft.changed`.
 `editor_invalid` breaks that file's frontmatter and publishes `draft.invalid`.
 Either is an error before any `editor_open`.
