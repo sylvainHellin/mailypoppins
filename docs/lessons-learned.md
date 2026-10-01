@@ -2352,3 +2352,11 @@ Terminal.app takes the editor through `osascript` with the words as `argv`, so n
 `do script` runs the words in the user's login shell, and AppleScript's `quoted form of` is POSIX quoting, which fish reads differently: fish takes `\'` and `\\` as escapes even inside single quotes, so `'/d/a\'\'';echo INJECTED;#'` ends the word early and runs `echo INJECTED`.
 The script quotes each word itself so that no backslash ever sits inside single quotes: it splits on `\`, turns each piece's `'` into `'\''`, joins the pieces with `'\\'` and wraps the whole in `'…'`, which sh, bash, zsh and fish read as the same literal word.
 Applying the backslash pass after `quoted form of` instead breaks a plain `it's`, whose `'\''` already holds a backslash outside the quotes.
+
+## The desktop terminal pane: StrictMode, realms, `@theme inline` and the colour guard
+
+React's StrictMode mounts, unmounts and mounts every effect in a dev build, so a pane that spawns its PTY in the effect spawns twice and leaves two Neovims on one draft.
+`TerminalPane.tsx` spawns from a `setTimeout(0)` that the cleanup cancels; `requestAnimationFrame` would do the same but never fires while WKWebView has the window occluded.
+An `ArrayBuffer` made by Node's `TextEncoder` in a vitest jsdom test is not `instanceof` the global `ArrayBuffer`, so a frame check written with `instanceof` alone drops every frame in the tests; `src/lib/terminal.ts` also accepts the `[object ArrayBuffer]` tag.
+Tailwind 4's `@theme inline` emits no CSS variable for its entries, so `getPropertyValue("--font-mono")` is empty in the built app; the pane reads the computed `font-family` of an element carrying `font-mono`.
+The colour guard's hex pattern also matches a ticket reference such as `#0130` in a comment under `src/components` or `src/app`; write `ticket 0130` there.

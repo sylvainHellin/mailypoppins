@@ -267,6 +267,29 @@ The banner is one `role="status"` region, "Drafts in the editor", mounted empty 
 An editor that did not start is a `setup` error: its session turns to `error` and a failure notice in the activity area carries the Rust layer's message, which names `MP_DESKTOP_EDITOR` or the editor setting to fix.
 In fixture mode the Rust layer launches nothing and answers `fixture: true`, and the notice line says "Fixture mode: the editor was not launched; the command would have been <editor>."; the Signatures dialog, `sc`, `sf` and the Calendar's `invite.ics` show the same sentence in place of theirs.
 
+### The terminal pane
+
+The embedded editor of M5 (#0130) runs a terminal editor such as `nvim` on a PTY of the Rust layer and draws it with xterm.js in `components/compose/TerminalPane.tsx`.
+The pane exists and is tested; U3 wires it into the reader pane and `state.compose`, so no key or menu opens it yet.
+
+`src/lib/terminal.ts` puts the four commands and the output Channel behind a `TerminalBridge` (`spawn`, `write`, `resize`, `kill`), so the pane and its tests never touch Tauri; `src/test/terminal-fake.ts` is the fake.
+The Channel carries output as raw bytes (an `ArrayBuffer` per frame) that go to `term.write` undecoded, and its last frame is `{ "exit": { "code", "signal" } }`.
+
+- On mount the pane fits the terminal to its container, spawns the editor at that size, and focuses it once the spawn answers.
+- Keys go to `terminal_write`; a key typed before the spawn answers is held and sent with it.
+- A resize of the container refits the terminal and sends `terminal_resize` once the size has held for 50 ms, and only when the columns or rows changed.
+- The exit frame reaches `onExit` once, after `onStarted` even when it overtook the spawn's answer; nothing is written to the session afterwards.
+- `visible={false}` hides the pane and keeps the terminal and its buffer; shown again, it refits and takes the focus.
+- Unmounting disposes xterm and its addons and leaves the session running: killing the child is the owner's explicit `kill`.
+- The renderer is WebGL, with xterm's DOM renderer when WebGL refuses or its context is lost; unicode11 gives the CJK and emoji widths Neovim assumes, and the clipboard addon answers OSC 52.
+- Colours follow the palette on `<html>` and change with it, and the font is the app's `font-mono` at `text-sm` ([design-tokens.md](design-tokens.md), "Terminal").
+
+While the terminal has the focus, every key is the editor's, Escape and Tab included: `isEditable` counts any element inside `[data-slot="terminal"]` as editable, and the keymap returns before its Escape rule.
+Cmd combinations pass to the browser and the menu, so copy, paste and the menu items keep working.
+Leaving the pane is a click elsewhere or a menu item.
+
+A dev build shows the pane on an echo bridge at `#terminal-fixture` (`pnpm dev`, then `http://localhost:1420/#terminal-fixture`), with buttons to switch the theme, hide it and kill the session.
+
 ### Approve and demote
 
 `cA` and `cD` act on `actionTargets`: the marked drafts, else the cursor one.

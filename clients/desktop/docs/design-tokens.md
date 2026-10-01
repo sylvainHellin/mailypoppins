@@ -2,6 +2,7 @@
 
 The desktop client has a dark and a light palette, and every colour a component uses is a semantic token defined once in `src/index.css`.
 The tokens are the shadcn set (`background`, `foreground`, `card`, `popover`, `primary`, `secondary`, `muted`, `accent`, `destructive`, `border`, `input`, `ring`, `sidebar-*`, `chart-*`) plus eight of our own: `selection`, `selection-foreground`, `link`, `framing`, `warning`, `disabled-foreground`, `reader-canvas` and `overlay`.
+The sixteen `terminal-*` tokens are the embedded editor's ANSI colours (see Terminal).
 Tailwind reaches them as `bg-background`, `text-link`, `ring-ring` and so on.
 
 ## Themes
@@ -43,6 +44,44 @@ It derives from Basenord Palette D itself:
 |---|---|---|
 | `reader-canvas` | `#FFFFFF` | the reader frame's page in both palettes, since mail is authored for white and a message that sets no background would draw black text on Prussian |
 | `overlay` | `#0C1B3399` dark, `#0C1B3366` light | the scrim behind a dialog or a sheet: Prussian at 60% alpha over the dark palette, 40% over the light one |
+
+## Terminal
+
+The embedded editor's xterm.js theme (`src/components/compose/terminalTheme.ts`) reads the tokens from `<html>` at mount and again whenever `src/app/theme.ts` changes its class, so it follows the palette.
+Its surfaces are the shell's tokens:
+
+| xterm slot | Token |
+|---|---|
+| `background`, `cursorAccent` | `background` |
+| `foreground`, `cursor` | `foreground` |
+| `selectionBackground`, `selectionForeground` | `selection`, `selection-foreground` |
+| `selectionInactiveBackground` | `muted` |
+| scrollbar slider, hover and active | `border`, `input`, `input` |
+
+The sixteen ANSI colours are tokens of their own, `--terminal-<name>` and `--terminal-bright-<name>`, declared in both palette blocks.
+Where a palette token fits, the ANSI colour is that token; the other hues (green, yellow, magenta, cyan and the bright reds, greens, magentas and cyans) are new values, lifted to read on the dark inset pane and darkened to read on cream.
+
+| ANSI | Dark | Light |
+|---|---|---|
+| black | `#25406A` (`border`) | `#0C1B33` (`foreground`) |
+| red | `#FF7A85` (`destructive`) | `#B4232E` (`destructive`) |
+| green | `#8FD19E` | `#2F7A3E` |
+| yellow | `#F2C14E` | `#8A6100` |
+| blue | `#4BA3CC` (`ring`) | `#1A6385` (`link`) |
+| magenta | `#D7A2E8` | `#8A3FA0` |
+| cyan | `#5CC8C8` | `#1E7A7A` |
+| white | `#B4BFCE` (`muted-foreground`) | `#E6E1D3` (`secondary`) |
+| bright black | `#7D8BA3` (`disabled-foreground`) | `#77839A` (`disabled-foreground`) |
+| bright red | `#FF9AA2` | `#D6404B` |
+| bright green | `#B0E3BB` | `#3E9450` |
+| bright yellow | `#FF6700` (`warning`, Pumpkin) | `#B34700` (`warning`) |
+| bright blue | `#6DB6DA` (`link`) | `#1F6F93` (`ring`) |
+| bright magenta | `#E6C3F0` | `#A35BB8` |
+| bright cyan | `#8EDCDC` | `#2A9494` |
+| bright white | `#F4F1E8` (`foreground`, Cream) | `#FFFFFF` (`card`) |
+
+Black and white sit close to the background in each palette, as terminal themes place them, so the contrast pass does not check the ANSI colours; a Neovim colour scheme with `termguicolors` draws in its own truecolour anyway.
+The font is the host element's computed `font-mono` at `text-sm`: `@theme inline` emits no `--font-mono` variable, so the class is the only place the stack resolves.
 
 ## Rules
 
