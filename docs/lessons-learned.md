@@ -2406,3 +2406,9 @@ The owner kills the child in the pane's unmount cleanup only once the spawn has 
 
 `vi.mock("@/lib/tauri", () => import("@/test/tauri-mock"))` resolves the mock through the module graph, so a mock that imports, even indirectly, a module importing `@/lib/tauri` waits on itself and vitest hangs with no error until the run times out.
 The terminal fake routed frames through `frameRouter` from `src/lib/terminal.ts`, which imports Tauri; the router now lives in the Tauri-free `src/lib/terminal-frames.ts`, and the fake takes only types from `terminal.ts`.
+
+## WKWebView does not repeat a held key on macOS until press-and-hold is off
+
+macOS's press-and-hold accent popup (`ApplePressAndHoldEnabled`, on by default) swallows key repeat for every key in a WKWebView, so a held `j` moves once in the desktop's list and in the embedded Neovim alike; VS Code users know the same fix as `defaults write com.microsoft.VSCode ApplePressAndHoldEnabled -bool false`.
+The desktop registers `false` with `NSUserDefaults.standardUserDefaults().registerDefaults(...)` at the top of `run()`, before the window exists (`clients/desktop/src-tauri/src/lib.rs`, `key_repeat`); the registration domain is searched last, so a value the user wrote for the bundle id, or into the global domain with `defaults write -g`, still wins.
+`objc2-foundation` came into the tree through tao and wry; the desktop names it as a direct macOS dependency at the locked version with only the features it uses.

@@ -83,6 +83,28 @@ fn fixture_requested() -> bool {
     env || std::env::args().any(|a| a == "--fixture")
 }
 
+/// Let a held key repeat in the webview (#0137): macOS's press-and-hold
+/// accent popup (`ApplePressAndHoldEnabled`, on by default) swallows key
+/// repeat for every key in a WKWebView, so a held `j` moved once. The value
+/// goes into the registration domain, the last place `NSUserDefaults` looks,
+/// so a user's own `defaults write dev.mailypoppins.desktop
+/// ApplePressAndHoldEnabled -bool true` (or the global domain's value) still
+/// wins. Before the window exists, so its first key reads it.
+#[cfg(target_os = "macos")]
+fn key_repeat() {
+    use objc2_foundation::{ns_string, NSDictionary, NSNumber, NSObject, NSUserDefaults};
+    let off = NSNumber::new_bool(false);
+    let value: &NSObject = &off;
+    let defaults =
+        NSDictionary::from_slices(&[ns_string!("ApplePressAndHoldEnabled")], &[&**value]);
+    // SAFETY: the dictionary maps an NSString to an NSNumber, a property-list
+    // value, which is what `registerDefaults:` takes.
+    unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+}
+
+#[cfg(not(target_os = "macos"))]
+fn key_repeat() {}
+
 /// A refused URL: log it, and tell the frontend.
 fn refuse(app: &tauri::AppHandle, url: &tauri::Url, source: InterceptSource) {
     let entry = intercepted(&app.state::<InterceptLog>(), url, source);
@@ -101,6 +123,7 @@ pub fn run() {
         if fixture { " in fixture mode" } else { "" },
         paths.data_dir.display()
     );
+    key_repeat();
     let session = SessionHandle::new(fixture);
     let setup_session = session.clone();
 
