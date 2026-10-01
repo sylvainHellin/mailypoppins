@@ -87,7 +87,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `message_set_flag` | `account`, `row_ids`, `flagged` | `MutationBatch` |
 | `message_set_read` | `account`, `row_ids`, `read` | `MutationBatch` |
 | `draft_discard` | `account`, `ids` | `DraftDiscardBatch` |
-| `draft_create` | `account`, `name`, `signature?`, `no_signature?`, `headers?: DraftHeaders` | `DraftCreated` |
+| `draft_create` | `account`, `name`, `signature?`, `no_signature?`, `headers?: DraftHeaders`, `body?` | `DraftCreated` |
 | `draft_reply` | `account`, `row_id`, `all`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
 | `draft_forward` | `account`, `row_id`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
 | `draft_from_message` | `account`, `kind: DraftKind`, `message: DraftMessage` | `DraftCreated` |
@@ -527,7 +527,7 @@ A file that is not a JSON object is `setup` for every read and write.
 
 A draft is a Markdown file with YAML frontmatter in the account's drafts directory, and every command that writes one answers its absolute `path`.
 `draft_create` takes the file name; a name already taken is refused with `protocol` code `-32602`, and the message names the existing path.
-`draft.create` itself takes no recipients, so `headers` are written into the new file client-side.
+It passes `headers` and a non-blank `body` to `draft.create`, which writes the file whole: the recipients and subject in the frontmatter, the body above the signature.
 `draft_reply` and `draft_forward` address the source by `row_id` and pass `headers` to the daemon, which then needs all four fields; an empty string clears one.
 They pass `signature` and `no_signature` as `draft_create` does, and neither means the account's default, which the daemon resolves.
 `draft_from_message` builds a reply, reply-all or forward from a server-only search hit (`DraftMessage`, the hit's own field names), with no attachments.

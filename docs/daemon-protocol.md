@@ -659,7 +659,7 @@ The family is the eleven methods below, all served from protocol 1 and all durab
 | method | kind | params | result |
 |---|---|---|---|
 | `draft.approve` | command | `{account, id}` | `{account, id, status: "approved", path}` |
-| `draft.create` | command | `{account, name, no_signature?, signature?}` | `DraftCreated` |
+| `draft.create` | command | `{account, name, body?, headers?, no_signature?, signature?}` | `DraftCreated` |
 | `draft.create_from_message` | command | `{account, kind, message, no_signature?, signature?}` | `DraftCreated` |
 | `draft.demote` | command | `{account, id}` | `{account, id, status: "draft", path}` |
 | `draft.discard` | command | `{account, id\|selector, force?}` or `{account, sent: true}` | `{account, id, selector, status}` or `{account, cleared, kept}` |
@@ -701,6 +701,7 @@ That is not a choice this method makes: a client holding a server-only hit has n
 There is no `headers` override: the compose wizard writes its recipients over a draft built from a *row*, and no flow collects them for a server-only hit.
 
 `headers` is `{to, cc, bcc, subject}`, all four required once it is present and an empty string clearing the field, and it rewrites the built draft's frontmatter in place.
+`draft.create` takes the same `headers` and a `body`, the compose wizard's inline body (#0131): the trimmed text goes above the signature block with one blank line between, and an absent or blank `body` writes the skeleton `mp new` always wrote, so the wizard's draft is written whole in one call instead of rewritten by the client.
 It exists for a compose wizard that collects the recipients and the subject *before* the draft is written and keeps them over the ones the builder derived; without it such a client would have to build the draft through the daemon and then rewrite the file behind its back.
 A partial object is `-32602`: which fields the override covers is not a thing to leave ambiguous.
 
@@ -1288,3 +1289,7 @@ The types are `mp_protocol::rendition`, and the fixtures are `crates/mp-protocol
 `hook.list` `{account}` and `hook.test` `{account, hook, row_id|id|selector, mailbox?}` are queries, `hook.replay` with the same parameters is a durable operation, and their shapes are in [the family's section](#the-hook-family).
 `config.get`'s account gained `hooks`, the account's `[[accounts.hooks]]` entries with their defaults applied, which is also what makes a reload that edits a hook restart that account's runtime; `tests/daemon_config.rs` pins the account at ten keys.
 The capability list a handshake advertises grew by the three names, which is the derivation working rather than a change to it.
+
+#0131's daemon gaps closed what the desktop client had worked around on its own side, all additive; no field was renamed, none was dropped, and no command's output moved.
+`draft.reply` and `draft.forward` already took `signature` and `no_signature`; `tests/daemon_gui_gaps.rs` pins them now.
+`draft.create` gained `body?` and `headers?`, the second with `draft.forward`'s contract, so a draft made in a compose wizard is written in one call.

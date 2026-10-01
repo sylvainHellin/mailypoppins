@@ -146,7 +146,7 @@ Open for M4 and for Sylvain:
 - Confirm that `d` on a draft file that does not parse shows a notice instead of deleting the file, as the TUI does.
 - `REQUIRED_CAPABILITIES` in `clients/desktop/src-tauri/src/connector.rs` lacked the M3 methods, so a daemon without them connected and failed at the first call: fixed in `30a9f51c`.
 - `draft.reply` and `draft.forward` take no signature arguments, so a reply or a forward gets no signature choice: they always took `signature` and `no_signature`, and the forward wizard passes its choice now ("Daemon gaps closed").
-- `draft.create` takes no body, so the wizard cannot write one.
+- `draft.create` takes no body, so the wizard cannot write one: it takes `body` and `headers` now, and the wizard has the TUI's inline body ("Daemon gaps closed").
 - `DraftEntry` has no `bcc`, so the recipients dialog reads the draft through `draft_preview`.
 - `DraftCreated` has no `subject`.
 - `mp_client` drops a refusal's `data`, so the layer rebuilds the `draft.invalid` payload from the listing's skipped file.
@@ -274,6 +274,7 @@ Open for M5 and for Sylvain:
 The daemon and Rust-layer gaps M3 and M4 worked around client-side, closed on the `p-2026-10-01` branch on 2026-10-01, one commit each, tagged `(#0131)`, with the TUI unaffected.
 
 - Signatures for a reply and a forward: `draft.reply` and `draft.forward` always took `signature` and `no_signature`, which `tests/daemon_gui_gaps.rs` now pins; `draft_reply` and `draft_forward` pass them, and the forward wizard has the new-draft wizard's Signature select.
+- A body on `draft.create`: it takes `body` and `headers`, so the new-draft wizard's draft is written whole by the daemon, the client-side recipients rewrite is gone, and the wizard has the TUI's inline Body, which skips the editor when filled.
 
 ## Exit gate
 

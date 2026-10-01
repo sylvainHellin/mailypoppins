@@ -1077,10 +1077,10 @@ fn rewrite_recipients(door: &Door, path: &str, edit: &DraftRecipientEdit) -> Res
     Ok(())
 }
 
-/// `draft.create`: a skeleton named `name` in the account's drafts
-/// directory. A name already taken is the daemon's `-32602`, a `protocol`
-/// error whose message names the path. `headers` are written into the new
-/// file client-side, since `draft.create` takes none.
+/// `draft.create`: a draft named `name` in the account's drafts directory,
+/// written whole by the daemon with the wizard's `headers` and its inline
+/// `body` above the signature. A name already taken is the daemon's
+/// `-32602`, a `protocol` error whose message names the path.
 pub fn draft_create_on(
     door: &Door,
     account: &str,
@@ -1088,9 +1088,16 @@ pub fn draft_create_on(
     signature: Option<&str>,
     no_signature: bool,
     headers: Option<&DraftHeaders>,
+    body: Option<&str>,
 ) -> Result<DraftCreated, GuiError> {
     let mut params = json!({"account": account, "name": name});
     with_signature(&mut params, signature, no_signature);
+    if let Some(headers) = headers {
+        params["headers"] = headers.wire();
+    }
+    if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
+        params["body"] = json!(body);
+    }
     let answer = call(
         door,
         "draft.create",
@@ -1098,11 +1105,7 @@ pub fn draft_create_on(
         DRAFT_QUERY_BUDGET,
         Addressing::Params,
     )?;
-    let created: DraftCreated = decode("draft.create", answer)?;
-    if let Some(headers) = headers {
-        rewrite_recipients(door, &created.path, &headers.edit())?;
-    }
-    Ok(created)
+    decode("draft.create", answer)
 }
 
 /// The signature a written draft carries: the one named, none with
@@ -1807,6 +1810,7 @@ pub async fn draft_create(
     signature: Option<String>,
     no_signature: Option<bool>,
     headers: Option<DraftHeaders>,
+    body: Option<String>,
 ) -> Result<DraftCreated, GuiError> {
     with_door(&session, move |_, door| {
         draft_create_on(
@@ -1816,6 +1820,7 @@ pub async fn draft_create(
             signature.as_deref(),
             no_signature.unwrap_or(false),
             headers.as_ref(),
+            body.as_deref(),
         )
     })
     .await
@@ -2688,8 +2693,9 @@ mod tests {
 
     #[test]
     fn a_created_draft_is_a_file_with_frontmatter_and_a_taken_name_is_refused() {
-        let (d, _f, rx) = fixture_with_events();
-        let created = draft_create_on(&d, "work", "note", None, false, None).expect("created");
+        let (d, f, rx) = fixture_with_events();
+        let created =
+            draft_create_on(&d, "work", "note", None, false, None, None).expect("created");
         assert!(
             created.path.ends_with("/drafts/work/note.md"),
             "{}",
@@ -2710,7 +2716,7 @@ mod tests {
         assert_eq!(events[0].0, "draft.changed");
         assert_eq!(events[0].1["id"], created.id.as_str());
 
-        match draft_create_on(&d, "work", "note", None, false, None) {
+        match draft_create_on(&d, "work", "note", None, false, None, None) {
             Err(GuiError::Protocol {
                 code: Some(-32602),
                 message,
@@ -2718,7 +2724,7 @@ mod tests {
             other => panic!("expected the collision, got {other:?}"),
         }
         assert!(matches!(
-            draft_create_on(&d, "nobody", "x", None, false, None),
+            draft_create_on(&d, "nobody", "x", None, false, None, None),
             Err(GuiError::NotFound {
                 code: Some(-32005),
                 ..
@@ -2726,7 +2732,8 @@ mod tests {
         ));
 
         let wizard = headers("robin@example.com, ", "", " Hello ");
-        let bare = draft_create_on(&d, "work", "bare", None, true, Some(&wizard)).expect("bare");
+        let bare =
+            draft_create_on(&d, "work", "bare", None, true, Some(&wizard), None).expect("bare");
         let draft = parsed(&bare.path);
         assert_eq!(draft.frontmatter.to.as_deref(), Some("robin@example.com"));
         assert_eq!(draft.frontmatter.subject, "Hello");
@@ -2734,11 +2741,34 @@ mod tests {
             !draft.body_markdown.contains("Fixture GmbH"),
             "no_signature"
         );
-        let short = draft_create_on(&d, "work", "short", Some("short"), false, None).expect("s");
+        let (_, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(
+            params["headers"],
+            json!({"to": "robin@example.com", "cc": "", "bcc": "", "subject": "Hello"}),
+            "the daemon writes the headers, normalised"
+        );
+        assert!(params.get("body").is_none(), "an empty body is not sent");
+        let short =
+            draft_create_on(&d, "work", "short", Some("short"), false, None, None).expect("s");
         assert!(!parsed(&short.path).body_markdown.contains("Fixture GmbH"));
+        let typed = draft_create_on(
+            &d,
+            "work",
+            "typed",
+            None,
+            false,
+            Some(&wizard),
+            Some("Kurze Frage\n"),
+        )
+        .expect("typed");
+        let (_, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(params["body"], "Kurze Frage\n");
+        let body = parsed(&typed.path).body_markdown;
+        let (text, signature) = (body.find("Kurze Frage"), body.find("Fixture GmbH"));
+        assert!(text.is_some() && text < signature, "{body}");
         match list_messages_on(&d, "work", "drafts").expect("drafts") {
             MessageList::Drafts { listing, .. } => {
-                assert_eq!(listing.drafts.len(), 5);
+                assert_eq!(listing.drafts.len(), 6);
                 assert!(listing.drafts.iter().any(|r| r.id == bare.id && r.ready));
             }
             other => panic!("expected drafts, got {other:?}"),

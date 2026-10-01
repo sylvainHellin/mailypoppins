@@ -106,7 +106,6 @@ async fn call(conn: &mut Connection, method: &str, params: Value) -> Value {
         .unwrap_or_else(|e| panic!("{method} failed: {e:?}"))
 }
 
-#[allow(dead_code)]
 async fn call_err(conn: &mut Connection, method: &str, params: Value) -> RpcError {
     let error = within(method, conn.call(method, params))
         .await
@@ -172,4 +171,62 @@ async fn a_reply_and_a_forward_carry_the_signature_they_name_or_none() {
         "no_signature splices none: {body}"
     );
     assert!(!body.contains(SIGNATURE_LINE));
+}
+
+// ---------------------------------------------------------------------------
+// 2. A body and the recipients on draft.create
+// ---------------------------------------------------------------------------
+
+/// `draft.create` takes the compose wizard's inline body and its `headers`,
+/// so the new draft is written whole in one call: the recipients and the
+/// subject in the frontmatter, the body above the signature.
+#[tokio::test]
+async fn a_new_draft_is_written_with_its_body_and_its_headers() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+
+    let draft = created(
+        &mut conn,
+        "draft.create",
+        json!({
+            "account": fixture::ACCOUNT,
+            "name": "mit-text",
+            "signature": SIGNATURE,
+            "body": "Kurze Frage:\nmorgen um zehn?\n",
+            "headers": {"to": "robin@example.com", "cc": "", "bcc": "chef@example.com", "subject": "Termin"},
+        }),
+    )
+    .await;
+    let parsed = parse_email_draft(Path::new(&draft.path)).expect("it parses");
+    assert_eq!(parsed.frontmatter.to.as_deref(), Some("robin@example.com"));
+    assert_eq!(parsed.frontmatter.bcc.as_deref(), Some("chef@example.com"));
+    assert_eq!(parsed.frontmatter.subject, "Termin");
+    let body = parsed.body_markdown;
+    let text = body.find("morgen um zehn?").expect("the body is written");
+    let signature = body.find(SIGNATURE_LINE).expect("the signature is spliced");
+    assert!(
+        text < signature,
+        "the body sits above the signature: {body}"
+    );
+
+    // Absent, both leave the skeleton `mp new` has always written.
+    let bare = created(
+        &mut conn,
+        "draft.create",
+        json!({"account": fixture::ACCOUNT, "name": "leer", "no_signature": true}),
+    )
+    .await;
+    let parsed = parse_email_draft(Path::new(&bare.path)).expect("it parses");
+    assert_eq!(parsed.frontmatter.to, None);
+    assert_eq!(parsed.body_markdown.trim(), "");
+
+    // A partial override is refused before anything is written.
+    let refused = call_err(
+        &mut conn,
+        "draft.create",
+        json!({"account": fixture::ACCOUNT, "name": "halb", "headers": {"to": "x@example.com"}}),
+    )
+    .await;
+    assert_eq!(refused.code, -32602);
+    assert!(!fixture::draft_path(slice.root(), fixture::ACCOUNT, "halb.md").exists());
 }

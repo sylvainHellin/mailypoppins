@@ -45,8 +45,27 @@ describe("the compose wizard", () => {
     const signature = within(dialog).getByLabelText("Signature") as HTMLSelectElement;
     expect(signature.value).toBe("work");
     expect([...signature.options].map((o) => o.textContent)).toEqual(["short", "work (default)", "none"]);
-    // No inline body: draft_create takes none, so the body is written in the editor.
-    expect(within(dialog).queryByRole("textbox", { name: /body/i })).toBeNull();
+    // The TUI's inline body, empty: the draft then opens in the editor.
+    expect(within(dialog).getByRole("textbox", { name: "Body" })).toHaveValue("");
+  });
+
+  it("an inline body is written by the daemon and the draft does not open in the editor", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    noCompletion();
+    const dialog = await openWizard(user);
+    await user.keyboard("kim@example.com");
+    await user.click(within(dialog).getByRole("textbox", { name: "Body" }));
+    await user.keyboard("Kurze Frage:{Enter}morgen um zehn?");
+    expect(within(dialog).getByRole("textbox", { name: "Body" })).toHaveValue("Kurze Frage:\nmorgen um zehn?");
+    expect(callsOf("draft_create")).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: /^Create/ }));
+    await waitFor(() => expect(callsOf("draft_create")).toHaveLength(1));
+    const args = callsOf("draft_create")[0] as Record<string, unknown>;
+    expect(args).toMatchObject({ body: "Kurze Frage:\nmorgen um zehn?", headers: { to: "kim@example.com" } });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New draft" })).toBeNull());
+    expect(await screen.findByText(`Created: ${String(args.name)}.md`)).toBeInTheDocument();
+    expect(mock.editorOpens).toEqual([]);
   });
 
   it("Enter moves to the next field, and Cmd+Enter creates the draft and opens it in the editor", async () => {

@@ -226,7 +226,7 @@ pub fn contact_vcard_draft_on(
         bcc: String::new(),
         subject: format!("Contact: {}", vcard_name(&contact.display_name, address)),
     };
-    let draft = draft_create_on(door, account, name, None, true, Some(&headers))?;
+    let draft = draft_create_on(door, account, name, None, true, Some(&headers), None)?;
     let drafts = Path::new(&draft.path)
         .parent()
         .ok_or_else(|| GuiError::protocol(format!("{} has no directory", draft.path)))?;

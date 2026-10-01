@@ -39,11 +39,30 @@ pub fn new_draft_skeleton_with_id(
     id: &str,
     signature: Option<&str>,
 ) -> String {
+    new_draft_with_body(from, date, id, "", signature)
+}
+
+/// [`new_draft_skeleton_with_id`] with a body already typed, the compose
+/// wizard's inline body (#0097): the trimmed text, then the signature block
+/// after one blank line, the layout the TUI wizard writes. An empty or
+/// whitespace-only body is the skeleton exactly.
+pub fn new_draft_with_body(
+    from: &str,
+    date: &str,
+    id: &str,
+    body: &str,
+    signature: Option<&str>,
+) -> String {
     // The signature (#0099) is appended to the body at creation so it is
     // visible and editable; a blank line separates it from the empty body the
     // user types into. No configured signature leaves the body empty, exactly
     // as before.
-    let body = signature_block(signature).unwrap_or_default();
+    let block = signature_block(signature);
+    let body = match (body.trim(), block) {
+        ("", block) => block.unwrap_or_default(),
+        (text, None) => format!("{text}\n"),
+        (text, Some(block)) => format!("{text}\n\n{block}"),
+    };
     format!("---\nid: {id}\nto:\ncc:\nbcc:\nsubject: \"\"\nstatus: draft\nfrom: {from}\ndate: {date}\nreply_to:\nattachments:\n---\n\n{body}")
 }
 
@@ -1672,6 +1691,23 @@ mod tests {
     use super::*;
     use crate::types::{EmailDraft, EmailFrontmatter, EmailStatus};
     use std::path::PathBuf;
+
+    /// The wizard's inline body goes above the signature, a blank line
+    /// between, and an empty one is the skeleton byte for byte.
+    #[test]
+    fn a_typed_body_sits_above_the_signature_and_an_empty_one_is_the_skeleton() {
+        let with = new_draft_with_body("a@x", "d", "i1", "  Hallo\nzusammen \n", Some("Gruss"));
+        assert!(with.ends_with(
+            "---\n\nHallo\nzusammen\n\n<!-- mp:sig-start -->\nGruss\n<!-- mp:sig-end -->\n"
+        ));
+        let bare = new_draft_with_body("a@x", "d", "i1", "Hallo", None);
+        assert!(bare.ends_with("---\n\nHallo\n"));
+        assert_eq!(
+            new_draft_with_body("a@x", "d", "i1", " \n", Some("Gruss")),
+            new_draft_skeleton_with_id("a@x", "d", "i1", Some("Gruss"))
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Signature sentinels + set_signature_block (#0106)
     // -----------------------------------------------------------------------

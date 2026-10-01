@@ -1101,7 +1101,9 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       }
       const headers = (args.headers as { to: string; cc: string; bcc: string; subject: string } | null) ?? null;
       const sig = args.no_signature ? null : ((args.signature as string | null) ?? mock.signatures.defaults[account] ?? null);
-      const body = sig ? `\n\n${mock.signatures.signatures[sig] ?? ""}\n` : "";
+      const typed = typeof args.body === "string" ? args.body.trim() : "";
+      const block = sig ? `${mock.signatures.signatures[sig] ?? ""}\n` : "";
+      const body = typed ? `${typed}\n${block ? `\n${block}` : ""}` : block ? `\n\n${block}` : "";
       return writeDraft(
         account,
         { name, to: headers?.to ?? null, cc: headers?.cc ?? null, bcc: headers?.bcc ?? "", subject: headers?.subject ?? "", body },

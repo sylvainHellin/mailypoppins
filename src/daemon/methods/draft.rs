@@ -438,6 +438,12 @@ fn preview(
 /// The `.md` suffixing rule is the daemon's, because the daemon owns the
 /// directory the file lands in: `mp new note` writes `note.md` and
 /// `mp new note.txt` writes `note.txt`.
+///
+/// `body` and `headers` are the compose wizard's (#0131): the text typed
+/// inline, above the signature, and the recipients and subject, with
+/// `draft.forward`'s contract. Both are optional, so `mp new` and the TUI write
+/// the skeleton as before; with them the file is complete in one call rather
+/// than rewritten by the client behind the daemon's back.
 fn create(
     params: &Value,
     accounts: &[AccountConfig],
@@ -445,6 +451,12 @@ fn create(
 ) -> Result<Value, RpcError> {
     let account = configured(accounts, &string_param(params, "account")?)?;
     let name = string_param(params, "name")?;
+    let body = match params.get("body") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(body)) => body.clone(),
+        Some(_) => return Err(invalid_params("body is the draft's text, a string")),
+    };
+    let headers = recipient_headers(params)?;
     let file_name = match Path::new(&name).extension() {
         Some(_) => name.clone(),
         None => format!("{name}.md"),
@@ -469,14 +481,19 @@ fn create(
     // The id is minted here rather than by a later index pass, so the selector
     // handed out is the one in the file from its first byte.
     let id = crate::store::drafts::new_id();
-    let skeleton = crate::draft::new_draft_skeleton_with_id(
+    let skeleton = crate::draft::new_draft_with_body(
         &account.default_from,
         &chrono::Utc::now().to_rfc2822(),
         &id,
+        &body,
         signature_of(account, params, email).as_deref(),
     );
     std::fs::write(&path, skeleton)
         .map_err(|e| internal(format!("writing {}: {e}", path.display())))?;
+    if let Some(headers) = headers {
+        crate::draft::rewrite_draft_recipients(&path, &headers)
+            .map_err(|e| internal(format!("writing the headers of {}: {e:#}", path.display())))?;
+    }
 
     created(&account.name, &id, &path, None)
 }
@@ -632,8 +649,9 @@ fn from_source(
     )
 }
 
-/// The `headers` override of `draft.reply` and `draft.forward` (P5-U6), which
-/// rewrites the built draft's `to`, `cc`, `bcc` and `subject` in place.
+/// The `headers` override of `draft.reply`, `draft.forward` (P5-U6) and
+/// `draft.create` (#0131), which rewrites the built draft's `to`, `cc`, `bcc`
+/// and `subject` in place.
 ///
 /// Additive and absent by default, so every existing caller writes the draft
 /// the builder derived. It exists for the compose wizard's forward, which asks

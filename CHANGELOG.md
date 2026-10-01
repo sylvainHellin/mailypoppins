@@ -7,6 +7,7 @@ All notable changes to this project are documented in this file.
 ### Added
 - **The daemon serves what the desktop client used to work out for itself (#0131).**
   - The desktop's Forward wizard picks a signature, as the New draft wizard does, and passes it to `draft.forward`, which always took one.
+  - The desktop's New draft wizard has the TUI's inline Body: a body typed there is written above the signature and the draft is done without the editor. `draft.create` takes `body` and `headers`, so the daemon writes the whole file.
 - **The desktop client has a light theme, a plain-text reader, a filter in the key help, and runs a terminal editor in a terminal (#0136).**
   - Settings' Theme buttons and the palette's "Theme: dark", "Theme: light" and "Theme: system" switch the window between the dark palette, a light one on cream, and whichever the system uses; dark stays the default.
   - `tt`, the reader toolbar's HTML and Text, Settings' Reader field and the palette show a message's stored plain text instead of its HTML, in a monospaced block with quoted lines muted, and the choice is remembered; in the TUI `tt` opens the thread, which the desktop does not have yet.

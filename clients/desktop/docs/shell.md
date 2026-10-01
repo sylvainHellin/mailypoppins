@@ -226,7 +226,7 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 
 | Key | Action | Where | Command |
 |---|---|---|---|
-| `cn` | New draft: the wizard | any pane | `signature_list`, then `draft_create` and the editor |
+| `cn` | New draft: the wizard | any pane | `signature_list`, then `draft_create` and, with no inline body, the editor |
 | `r`, `cr` | Reply | list, reader | `draft_reply` (`all: false`) or `draft_from_message` (`reply`), then the editor |
 | `ca` | Reply all | list, reader | `draft_reply` (`all: true`) or `draft_from_message` (`reply_all`), then the editor |
 | `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `signature_list`, then `draft_forward` with `headers` and the signature, or `draft_from_message` (`forward`), then the editor |
@@ -245,11 +245,11 @@ On a draft, reply and forward say that a draft has nothing to quote.
 
 ### The wizard
 
-`cn` and `cf` on a stored message open `ComposeWizard.tsx`, a dialog titled "New draft" or "Forward" with To, Cc, Bcc and Subject.
+`cn` and `cf` on a stored message open `ComposeWizard.tsx`, a dialog titled "New draft" or "Forward" with To, Cc, Bcc and Subject, and a new draft has the TUI's inline Body last.
 Both have a Signature select, filled from `signature_list`, with the account's default preselected and "none" last; a reply has no wizard and carries the account's default, as in the TUI.
 The select reads the account's listing in `state.signatures`, which a `signature.changed` or a change in the Signatures dialog makes stale, so it follows while the wizard is open: until the user picks, it shows the default, and a pick stays while its name is listed and falls back to the default when it goes.
 The forward's Subject starts as the forward will write it (`Fwd: `, the rule of `mp_core::draft::fwd_subject`); the TUI asks for the forward's recipients first too, and a reply goes straight to the editor.
-Enter in a field moves to the next one and, after the last, to the submit button; Cmd+Enter or Ctrl+Enter submits from anywhere in the dialog; Escape cancels and writes nothing.
+Enter in a field moves to the next one and, after the last, to the submit button, except in Body, where it starts a new line; Cmd+Enter or Ctrl+Enter submits from anywhere in the dialog; Escape cancels and writes nothing.
 
 To, Cc and Bcc complete contacts as the TUI's wizard does (`RecipientsInput.tsx`, a `combobox` over a `listbox` named "Contacts"); Subject is a plain field.
 The text after the last comma, trimmed and at least one character, asks `contact_search` for 12 rows 120 ms after the typing pauses, and only the latest query's answer shows.
@@ -260,8 +260,8 @@ When a query finds nothing and the account's index is empty (a `contact_search` 
 A draft needs at least one recipient across To, Cc and Bcc, the TUI's rule, and trailing separators are trimmed from each field.
 The new draft's file name is the TUI wizard's, `draft-<local time>-<subject slug>`.
 The submit calls `draft_create`, or `draft_forward` for a forward, with the wizard's `headers`, and `signature` or `no_signature`, then closes the dialog and opens the file in the editor.
+A body typed in the wizard goes to `draft_create` too, and the daemon writes it above the signature; the draft is then complete, as in the TUI: no editor opens, the submit button says "Create", and the notice says "Created: <file name>".
 A refusal, such as a file name already taken, shows in the dialog, which stays open.
-The TUI wizard's inline body is left out: `draft_create` takes no body, so the body is written in the editor.
 
 ### The recipients dialog
 

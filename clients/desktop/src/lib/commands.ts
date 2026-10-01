@@ -132,11 +132,11 @@ export const draftDiscard = (account: string, ids: string[]): Promise<DraftDisca
 // write answers the file's absolute path; the watcher's `draft.changed` or
 // `draft.invalid` then reaches the frontend, and the commands publish nothing.
 
-/** `name` is the file name; `headers` are written into the new file client-side. */
+/** `name` is the file name; the daemon writes `headers` and the inline `body`, above the signature. */
 export const draftCreate = (
   account: string,
   name: string,
-  opts: { signature?: string; no_signature?: boolean; headers?: DraftHeaders } = {},
+  opts: { signature?: string; no_signature?: boolean; headers?: DraftHeaders; body?: string } = {},
 ): Promise<DraftCreated> =>
   invoke<DraftCreated>("draft_create", {
     account,
@@ -144,6 +144,7 @@ export const draftCreate = (
     signature: opts.signature ?? null,
     no_signature: opts.no_signature ?? null,
     headers: opts.headers ?? null,
+    body: opts.body ?? null,
   });
 
 export const draftReply = (

@@ -1634,6 +1634,8 @@ impl State {
         match method {
             "draft.create" => {
                 let name = param_str(method, params, "name")?;
+                let headers = recipient_headers(method, params)?;
+                let body = params["body"].as_str().unwrap_or_default();
                 let file_name = match Path::new(name).extension() {
                     Some(_) => name.to_string(),
                     None => format!("{name}.md"),
@@ -1648,13 +1650,17 @@ impl State {
                     ));
                 }
                 let id = self.mint_id();
-                let skeleton = mp_core::draft::new_draft_skeleton_with_id(
+                let skeleton = mp_core::draft::new_draft_with_body(
                     FIXTURE_FROM,
                     &rfc3339_in(Duration::ZERO),
                     &id,
+                    body,
                     self.signature_for(&account, params).as_deref(),
                 );
                 fs::write(&path, skeleton)?;
+                if let Some(headers) = headers {
+                    mp_core::draft::rewrite_draft_recipients(&path, &headers)?;
+                }
                 self.created(&account, &id, &path, None)
             }
             "draft.reply" | "draft.forward" => {

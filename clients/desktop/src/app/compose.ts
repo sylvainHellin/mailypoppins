@@ -376,8 +376,8 @@ export function setShownStatus(s: AppState, dispatch: Dispatch<Action>, account:
 // The wizard's and the recipients dialog's submit
 // ---------------------------------------------------------------------------
 
-/** The wizard's fields; `signature` is a name, or null for none. */
-export type ComposeFields = DraftHeaders & { signature?: string | null };
+/** The wizard's fields; `signature` is a name, or null for none, and `body` the new draft's inline body. */
+export type ComposeFields = DraftHeaders & { signature?: string | null; body?: string };
 
 /** A recipient field as the TUI normalises it: no trailing separators. */
 export function normalizeRecipients(field: string): string {
@@ -429,8 +429,10 @@ export const NO_RECIPIENT = "Add a recipient in To, Cc or Bcc";
 
 /**
  * Submit a compose dialog. Resolves to null once the draft is written (and,
- * for a new draft or a forward, the editor asked to open it), or to the
- * reason it was not, which the dialog shows while it stays open.
+ * for a forward or a new draft with no inline body, the editor asked to open
+ * it), or to the reason it was not, which the dialog shows while it stays
+ * open. A new draft with a body is complete: the TUI's "Created: <file>" and
+ * no editor.
  */
 export async function submitCompose(dialog: ComposeDialog, fields: ComposeFields, dispatch: Dispatch<Action>): Promise<string | null> {
   const headers = normalized(fields);
@@ -455,7 +457,13 @@ export async function submitCompose(dialog: ComposeDialog, fields: ComposeFields
     if (dialog.kind === "forward") {
       draft = await cmd.draftForward(account, dialog.row_id, headers, signature);
     } else {
-      draft = await cmd.draftCreate(account, draftName(headers.subject), { ...signature, headers });
+      const body = fields.body?.trim() ? fields.body : undefined;
+      draft = await cmd.draftCreate(account, draftName(headers.subject), { ...signature, headers, ...(body ? { body } : {}) });
+      if (body) {
+        dispatch({ type: "overlay", overlay: null });
+        notice(dispatch, `Created: ${draft.path.slice(draft.path.lastIndexOf("/") + 1)}`);
+        return null;
+      }
     }
   } catch (e: unknown) {
     return asGuiError(e).message;
