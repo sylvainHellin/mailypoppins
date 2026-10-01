@@ -604,9 +604,10 @@ Each word is one argv entry, with no shell quoting; the directory is escaped for
 A plugin that sets a colorscheme later (on `VimEnter` or lazily) can still override it; `'runtimepath'` drops a duplicate entry, so the second prepend never doubles the first.
 `hx` and every other editor get nothing but the variable.
 
-`<resources>` is `app.path().resource_dir()`: `Contents/Resources` in the macOS bundle, and the executable's directory under `tauri dev` (`<target>/debug`), where tauri-build copies the resources on every build.
+`<resources>/nvim` is `app.path().resource_dir()` joined with `nvim`: `Contents/Resources/nvim` in the macOS bundle, and under `tauri dev` the executable's directory, `target/debug/nvim`, where tauri-build copies the resources on every build.
 `tauri.conf.json` ships `src-tauri/resources/nvim/` as the bundle's `nvim/` resource (`bundle.resources`, the map form, so the path does not keep the `resources/` prefix).
-A resource directory that does not resolve leaves Neovim and Vim undressed, with a warning in the log.
+Tauri takes the executable's directory for a dev build only when it sits in a directory named `target`; a `CARGO_TARGET_DIR` named otherwise makes it look for `../Resources`, which is not there, so a debug build falls back to `src-tauri/resources/nvim` in the source tree (`terminal::SOURCE_RUNTIME`).
+With neither directory there Neovim and Vim go undressed, with a warning in the log.
 The colorscheme, `resources/nvim/colors/mailypoppins.vim`, is Vimscript for Neovim and Vim alike; see [design-tokens.md](design-tokens.md), "Terminal".
 
 ```ts

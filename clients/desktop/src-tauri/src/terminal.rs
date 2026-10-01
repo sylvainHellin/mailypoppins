@@ -1163,18 +1163,38 @@ fn task_failed(e: impl std::fmt::Display) -> GuiError {
     GuiError::internal(format!("the command task failed: {e}"))
 }
 
+/// The source tree's runtime directory, which a debug build falls back to.
+pub const SOURCE_RUNTIME: Option<&str> = if cfg!(debug_assertions) {
+    Some(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/nvim"))
+} else {
+    None
+};
+
+/// The first of `<resource>/nvim` and `source` that is a directory.
+pub fn runtime_from(resource: Option<PathBuf>, source: Option<&str>) -> Option<PathBuf> {
+    resource
+        .map(|dir| dir.join(RESOURCE_SUBDIR))
+        .filter(|dir| dir.is_dir())
+        .or_else(|| source.map(PathBuf::from).filter(|dir| dir.is_dir()))
+}
+
 /// `<resources>/nvim`: the bundle's `Contents/Resources/nvim` on macOS, and
-/// under `tauri dev` the build's target directory (`target/debug/nvim`),
-/// where tauri-build copies the resources; `None`, logged, when it does not
-/// resolve.
+/// under `tauri dev` the executable's directory (`target/debug/nvim`), where
+/// tauri-build copies the resources. Tauri takes the executable's directory
+/// only when it sits in a directory named `target`; with another
+/// `CARGO_TARGET_DIR` it looks for `../Resources` and fails, so a debug build
+/// falls back to [`SOURCE_RUNTIME`]. `None`, logged, when neither is there.
 fn runtime_dir(app: &AppHandle) -> Option<PathBuf> {
-    match app.path().resource_dir() {
-        Ok(dir) => Some(dir.join(RESOURCE_SUBDIR)),
-        Err(e) => {
-            tracing::warn!("[terminal] no resource directory, so no colorscheme: {e}");
-            None
-        }
+    let resource = app
+        .path()
+        .resource_dir()
+        .map_err(|e| tracing::debug!("[terminal] no resource directory: {e}"))
+        .ok();
+    let found = runtime_from(resource, SOURCE_RUNTIME);
+    if found.is_none() {
+        tracing::warn!("[terminal] no `{RESOURCE_SUBDIR}` resource, so no colorscheme");
     }
+    found
 }
 
 /// Start the terminal editor on a draft in the app's palette `theme`

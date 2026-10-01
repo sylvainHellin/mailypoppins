@@ -705,6 +705,32 @@ fn vim_is_known_by_its_file_name_or_its_link() {
 }
 
 #[test]
+fn the_runtime_is_the_resource_then_the_source_tree_in_a_debug_build() {
+    let source = SOURCE_RUNTIME.expect("a test build is a debug build");
+    assert!(
+        Path::new(source).join("colors/mailypoppins.vim").is_file(),
+        "{source}"
+    );
+    let bundle = crate::test_support::scratch_dir("resources");
+    std::fs::create_dir_all(bundle.join(RESOURCE_SUBDIR)).expect("nvim");
+    assert_eq!(
+        runtime_from(Some(bundle.clone()), Some(source)),
+        Some(bundle.join(RESOURCE_SUBDIR))
+    );
+    let empty = crate::test_support::scratch_dir("no-resources");
+    assert_eq!(
+        runtime_from(Some(empty.clone()), Some(source)),
+        Some(PathBuf::from(source))
+    );
+    assert_eq!(
+        runtime_from(None, Some(source)),
+        Some(PathBuf::from(source))
+    );
+    assert_eq!(runtime_from(Some(empty), None), None);
+    assert_eq!(runtime_from(None, Some("/no/such/nvim")), None);
+}
+
+#[test]
 fn the_theme_is_dark_or_light() {
     assert_eq!(Scheme::parse("dark").expect("dark"), Scheme::Dark);
     assert_eq!(Scheme::parse("light").expect("light"), Scheme::Light);
