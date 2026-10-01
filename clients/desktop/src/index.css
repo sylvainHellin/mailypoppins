@@ -135,6 +135,26 @@
     --chart-4: #F4F1E8;
     --chart-5: #B4BFCE;
 
+    /* The embedded editor's 16 ANSI colours (components/compose/terminalTheme.ts);
+       its background, foreground, cursor and selection are the tokens above.
+       Tokens where one fits, else a hue lifted to read on the inset pane. */
+    --terminal-black: #25406A;          /* border */
+    --terminal-red: #FF7A85;            /* destructive */
+    --terminal-green: #8FD19E;
+    --terminal-yellow: #F2C14E;
+    --terminal-blue: #4BA3CC;           /* ring, Ocean lightened */
+    --terminal-magenta: #D7A2E8;
+    --terminal-cyan: #5CC8C8;
+    --terminal-white: #B4BFCE;          /* muted-foreground */
+    --terminal-bright-black: #7D8BA3;   /* disabled-foreground */
+    --terminal-bright-red: #FF9AA2;
+    --terminal-bright-green: #B0E3BB;
+    --terminal-bright-yellow: #FF6700;  /* warning, Pumpkin */
+    --terminal-bright-blue: #6DB6DA;    /* link */
+    --terminal-bright-magenta: #E6C3F0;
+    --terminal-bright-cyan: #8EDCDC;
+    --terminal-bright-white: #F4F1E8;   /* foreground, Cream */
+
     --sidebar-foreground: #F4F1E8;
     --sidebar-primary: #4BA3CC;
     --sidebar-primary-foreground: #0C1B33;
@@ -193,6 +213,24 @@
     --chart-3: #1A6385;
     --chart-4: #0C1B33;
     --chart-5: #46546C;
+
+    /* The terminal's ANSI colours, darkened to read on cream. */
+    --terminal-black: #0C1B33;          /* foreground, Prussian */
+    --terminal-red: #B4232E;            /* destructive */
+    --terminal-green: #2F7A3E;
+    --terminal-yellow: #8A6100;
+    --terminal-blue: #1A6385;           /* link */
+    --terminal-magenta: #8A3FA0;
+    --terminal-cyan: #1E7A7A;
+    --terminal-white: #E6E1D3;          /* secondary */
+    --terminal-bright-black: #77839A;   /* disabled-foreground */
+    --terminal-bright-red: #D6404B;
+    --terminal-bright-green: #3E9450;
+    --terminal-bright-yellow: #B34700;  /* warning, Pumpkin darkened */
+    --terminal-bright-blue: #1F6F93;    /* ring */
+    --terminal-bright-magenta: #A35BB8;
+    --terminal-bright-cyan: #2A9494;
+    --terminal-bright-white: #FFFFFF;   /* card */
 
     --sidebar-foreground: #0C1B33;
     --sidebar-primary: #1F6F93;
