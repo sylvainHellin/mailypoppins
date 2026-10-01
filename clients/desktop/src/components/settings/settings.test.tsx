@@ -60,6 +60,17 @@ describe("the Settings view", () => {
     await waitFor(() => expect(within(view).getByLabelText("Editor command")).toHaveAttribute("placeholder", "code --wait {path}"));
   });
 
+  it("the editor field says when drafts open in the embedded terminal editor", async () => {
+    const { user, view } = await openSettings();
+    const field = await within(view).findByLabelText("Editor command");
+    await user.type(field, "nvim{Enter}");
+    await waitFor(() =>
+      expect(field).toHaveAccessibleDescription(
+        "Drafts open in the embedded terminal editor; config.toml and the log open in nvim. {path} stands for the file.",
+      ),
+    );
+  });
+
   it("offers Sign in on the OAuth2 and Graph cards and Add account below them, both live", async () => {
     const { user, view } = await openSettings();
     const home = card(view, "home");
