@@ -55,6 +55,32 @@ describe("the connection screens", () => {
     expect(screen.queryByRole("listbox")).toBeNull();
   });
 
+  it("turns a reconnect to a daemon of another version into the restart screen, and back", async () => {
+    renderApp();
+    await shellReady();
+    act(() => emit({ type: "disconnected", reason: "the socket closed" }));
+    const why = "the running daemon is mailypoppins 0.9.0, but this app starts /Applications/mailypoppins.app/Contents/MacOS/mp (mailypoppins 0.10.0); restart the daemon to run the matching version";
+    act(() =>
+      emit({
+        type: "connection",
+        status: { state: "failed", error: { ...unavailable, kind: "version_mismatch", why, daemon_version: "0.9.0" } },
+      }),
+    );
+    expect(await screen.findByRole("heading", { name: /incompatible version/ })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(why);
+    expect(screen.getByText("0.9.0")).toBeInTheDocument();
+    expect(screen.queryByRole("listbox")).toBeNull();
+    act(() => emit({ type: "reconnected", instance_id: "fixture-instance-2" }));
+    act(() =>
+      emit({
+        type: "connection",
+        status: { state: "connected", instance_id: "fixture-instance-2", daemon_version: "0.10.0", protocol: 1, fixture: false },
+      }),
+    );
+    act(() => emit({ type: "rebootstrapped", cause: "reconnected", bootstrap: fixtures.bootstrap }));
+    expect(await screen.findAllByRole("listbox")).not.toHaveLength(0);
+  });
+
   it("shows a reconnecting banner, then a resync banner that the next bootstrap clears", async () => {
     renderApp();
     await shellReady();

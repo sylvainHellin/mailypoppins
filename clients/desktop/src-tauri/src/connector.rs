@@ -26,6 +26,16 @@
 //! does not have on its `PATH` (`~/.cargo/bin/mp`, `/opt/homebrew/bin/mp`,
 //! `/usr/local/bin/mp`).
 //!
+//! The version handshake: a daemon that completes `initialize` must also run the
+//! same mailypoppins version as the `mp` the app would start one with, read off
+//! that binary's `mp --version` (cached per binary and modification time). A
+//! daemon left running by another install, or by a `cargo install` that was not
+//! followed by `mp daemon restart`, is a [`ConnectFailure::VersionMismatch`],
+//! which is the blocking restart screen; its Restart runs `mp daemon restart`
+//! with that same binary, which replaces the daemon by a matching one. The CLI
+//! and the TUI check only the protocol range, since each is the `mp` that would
+//! start the daemon; the app ships its own and so checks the version too.
+//!
 //! `Connector` is two function pointers, so what they need (the paths, the last
 //! handshake, the last reconnect failure) lives in statics here.
 
@@ -213,6 +223,12 @@ static LAST_HELLO: Mutex<Option<Hello>> = Mutex::new(None);
 static LAST_REOPEN_FAILURE: Mutex<Option<ConnectError>> = Mutex::new(None);
 static LAST_AUTOSTART: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// Called when the kind of the latest reconnect failure changes, so the
+/// session can push its status: a reconnect refused for a version mismatch
+/// turns the banner into the restart screen.
+type ReopenListener = Box<dyn Fn() + Send>;
+static REOPEN_LISTENER: Mutex<Option<ReopenListener>> = Mutex::new(None);
+
 fn paths() -> &'static Paths {
     PATHS.get_or_init(Paths::resolve)
 }
@@ -233,9 +249,30 @@ pub fn last_reopen_failure() -> Option<ConnectError> {
     LAST_REOPEN_FAILURE.lock().ok().and_then(|g| g.clone())
 }
 
-fn record_reopen_failure(failure: Option<ConnectError>) {
-    if let Ok(mut slot) = LAST_REOPEN_FAILURE.lock() {
-        *slot = failure;
+pub(crate) fn record_reopen_failure(failure: Option<ConnectError>) {
+    let changed = match LAST_REOPEN_FAILURE.lock() {
+        Ok(mut slot) => {
+            let changed = slot.as_ref().map(|f| f.kind) != failure.as_ref().map(|f| f.kind);
+            *slot = failure;
+            changed
+        }
+        Err(_) => false,
+    };
+    // Outside the slot's lock: the listener reads it back through `status`.
+    if changed {
+        if let Ok(listener) = REOPEN_LISTENER.lock() {
+            if let Some(notify) = listener.as_ref() {
+                notify();
+            }
+        }
+    }
+}
+
+/// Register what runs when the kind of the reconnect failure changes,
+/// replacing an earlier listener.
+pub fn on_reopen_failure_change(listener: ReopenListener) {
+    if let Ok(mut slot) = REOPEN_LISTENER.lock() {
+        *slot = Some(listener);
     }
 }
 
@@ -349,12 +386,130 @@ fn autostart_budget() -> Duration {
         .unwrap_or(AUTOSTART_TIMEOUT)
 }
 
-/// Connect, starting a daemon on demand when `autostart` allows it.
+// ---------------------------------------------------------------------------
+// The version handshake
+// ---------------------------------------------------------------------------
+
+/// The `mp` the app starts and restarts the daemon with, and its version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpectedMp {
+    pub path: PathBuf,
+    pub version: String,
+}
+
+/// How long `mp --version` may take.
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The last probe, keyed by the binary's path, size and modification time,
+/// so a `cargo install` or an app update is read again and nothing else is.
+type ProbeKey = (PathBuf, u64, Option<std::time::SystemTime>);
+static LAST_PROBE: Mutex<Option<(ProbeKey, String)>> = Mutex::new(None);
+
+/// The version in `mp --version`'s first line, `mailypoppins 0.10.0`.
+pub fn parse_version(output: &str) -> Option<String> {
+    let token = output.lines().next()?.split_whitespace().last()?;
+    token
+        .starts_with(|c: char| c.is_ascii_digit())
+        .then(|| token.to_string())
+}
+
+/// Run `<path> --version` under [`VERSION_PROBE_TIMEOUT`].
+async fn probe_version(path: &Path) -> Option<String> {
+    let mut child = Command::new(path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+    let mut out = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
+    parse_version(&out)
+}
+
+/// The `mp` [`resolve_mp_binary`] finds and the version it reports; `None`
+/// when there is none or it does not say, which skips the check rather than
+/// refusing every daemon.
+pub async fn expected_mp() -> Option<ExpectedMp> {
+    let path = resolve_mp_binary(&BinarySearch::from_process()).ok()?;
+    let meta = path.metadata().ok()?;
+    let key: ProbeKey = (path.clone(), meta.len(), meta.modified().ok());
+    if let Ok(last) = LAST_PROBE.lock() {
+        if let Some((seen, version)) = last.as_ref() {
+            if *seen == key {
+                return Some(ExpectedMp {
+                    path,
+                    version: version.clone(),
+                });
+            }
+        }
+    }
+    let version = probe_version(&path).await?;
+    if let Ok(mut last) = LAST_PROBE.lock() {
+        *last = Some((key, version.clone()));
+    }
+    Some(ExpectedMp { path, version })
+}
+
+/// A daemon whose version is not the expected one, as the restart screen
+/// shows it.
+pub fn version_mismatch(daemon_version: &str, expected: &ExpectedMp) -> Option<ConnectError> {
+    if daemon_version == expected.version {
+        return None;
+    }
+    let mut failure = error(
+        ConnectFailure::VersionMismatch,
+        format!(
+            "the running daemon is mailypoppins {daemon_version}, but this app starts {} \
+             (mailypoppins {}); restart the daemon to run the matching version",
+            expected.path.display(),
+            expected.version
+        ),
+    );
+    failure.daemon_version = Some(daemon_version.to_string());
+    Some(failure)
+}
+
+/// Hand back a handshake whose daemon runs the expected version, or refuse it.
+async fn check_version(
+    open: (Connection, InitializeResult),
+) -> Result<(Connection, InitializeResult), ConnectError> {
+    let Some(expected) = expected_mp().await else {
+        tracing::warn!(
+            "[connect] no `mp --version` to compare the daemon's {} with; skipping the version check",
+            open.1.app_version
+        );
+        return Ok(open);
+    };
+    match version_mismatch(&open.1.app_version, &expected) {
+        None => Ok(open),
+        Some(failure) => {
+            tracing::warn!("[connect] {}", failure.why);
+            Err(failure)
+        }
+    }
+}
+
+/// Connect, starting a daemon on demand when `autostart` allows it, and
+/// refuse a daemon whose version is not the expected `mp`'s.
 pub async fn connect_or_start(
     autostart: bool,
 ) -> Result<(Connection, InitializeResult), ConnectError> {
     match handshake().await {
-        Ok(open) => return Ok(open),
+        Ok(open) => return check_version(open).await,
         Err(e) => {
             if let Some(failure) = classify(&e) {
                 return Err(failure);
@@ -378,7 +533,8 @@ pub async fn connect_or_start(
     let mut gap = RETRY_MIN;
     loop {
         match handshake().await {
-            Ok(open) => return Ok(open),
+            // Started with the expected binary, unless another starter won.
+            Ok(open) => return check_version(open).await,
             Err(e) => {
                 if let Some(failure) = classify(&e) {
                     if failure.kind != ConnectFailure::Unavailable {
@@ -795,6 +951,76 @@ mod tests {
         let found = resolve_mp_binary(&search);
         // A Homebrew or /usr/local `mp` on this machine sorts after it.
         assert_eq!(found, Ok(root.join(".cargo/bin/mp")));
+    }
+
+    #[test]
+    fn the_version_is_the_last_word_of_the_first_line() {
+        assert_eq!(
+            parse_version("mailypoppins 0.10.0\n"),
+            Some("0.10.0".into())
+        );
+        assert_eq!(parse_version("mp 1.2.3-rc.1"), Some("1.2.3-rc.1".into()));
+        assert_eq!(parse_version(""), None);
+        assert_eq!(parse_version("usage: mp [OPTIONS]"), None);
+    }
+
+    #[test]
+    fn a_daemon_of_another_version_is_a_version_mismatch_naming_both() {
+        let expected = ExpectedMp {
+            path: "/Applications/mailypoppins.app/Contents/MacOS/mp".into(),
+            version: "0.11.0".into(),
+        };
+        assert!(version_mismatch("0.11.0", &expected).is_none());
+        let failure = version_mismatch("0.10.0", &expected).expect("a mismatch");
+        assert_eq!(failure.kind, ConnectFailure::VersionMismatch);
+        assert_eq!(failure.daemon_version.as_deref(), Some("0.10.0"));
+        assert!(failure.why.contains("0.10.0"), "{}", failure.why);
+        assert!(failure.why.contains("0.11.0"), "{}", failure.why);
+        assert!(failure.why.contains("Contents/MacOS/mp"), "{}", failure.why);
+        assert!(matches!(
+            GuiError::from(failure),
+            GuiError::VersionMismatch { daemon_version: Some(v), .. } if v == "0.10.0"
+        ));
+    }
+
+    /// The expected version is the resolved binary's own `--version`, read
+    /// again once the binary is replaced.
+    #[test]
+    fn the_expected_version_is_probed_from_the_binary_and_reread_on_replacement() {
+        let _lock = crate::test_support::env_lock();
+        let bin = scratch_dir("probe").join("mp");
+        let script = |version: &str| {
+            std::fs::write(&bin, format!("#!/bin/sh\necho mailypoppins {version}\n"))
+                .expect("write");
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let saved = std::env::var_os(MP_BIN_ENV);
+        std::env::set_var(MP_BIN_ENV, &bin);
+        script("0.10.0");
+        let first = runtime.block_on(expected_mp());
+        // A longer version string changes the size, so the cache misses even
+        // within the modification time's resolution.
+        script("0.10.10");
+        let second = runtime.block_on(expected_mp());
+        std::fs::write(&bin, "#!/bin/sh\nexit 3\n").expect("write");
+        let failing = runtime.block_on(expected_mp());
+        match saved {
+            Some(v) => std::env::set_var(MP_BIN_ENV, v),
+            None => std::env::remove_var(MP_BIN_ENV),
+        }
+        assert_eq!(
+            first,
+            Some(ExpectedMp {
+                path: bin.clone(),
+                version: "0.10.0".into()
+            })
+        );
+        assert_eq!(second.map(|e| e.version), Some("0.10.10".into()));
+        assert_eq!(failing, None, "a failing --version skips the check");
     }
 
     #[test]
