@@ -14,15 +14,19 @@
 //! 2. the `editor` key of `desktop.json` in the app config directory
 //!    ([`crate::settings`]), which `editor_setting_get` and
 //!    `editor_setting_set` read and write;
-//! 3. `$VISUAL`, then `$EDITOR`; one naming a terminal-only editor
-//!    ([`TERMINAL_EDITORS`]) runs inside the first terminal emulator found
-//!    ([`terminal_template`]), and is skipped when there is none;
+//! 3. `$VISUAL`, then `$EDITOR`;
 //! 4. the first of [`PROBE_NAMES`] found in [`PROBE_DIRS`];
 //! 5. `open -t` on macOS, `xdg-open` elsewhere.
 //!
-//! `MP_DESKTOP_EDITOR` and the setting are taken verbatim and never wrapped:
-//! a terminal editor there names its terminal itself, as in
-//! `open -na Ghostty --args -e nvim {path}`.
+//! Any of the first three that names a terminal-only editor
+//! ([`TERMINAL_EDITORS`]) runs inside the first terminal emulator found
+//! ([`terminal_template`]), and is skipped when there is none. A draft never
+//! gets here with such an editor when the embedded route finds it (#0130),
+//! but `config.toml`, the daemon's log, a signature and an `invite.ics` do,
+//! so a setting of `nvim` opens them in a terminal rather than starting a
+//! Neovim with no terminal at all. A template whose program is anything else
+//! is taken verbatim, so one that names its terminal itself, as in
+//! `open -na Ghostty --args -e nvim {path}`, runs as written.
 //!
 //! A template is split with shell-words rules (quotes and backslashes, no
 //! expansion, no shell). `{path}` in any word is replaced by the draft's path;
@@ -68,9 +72,9 @@ pub const PROBE_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/b
 /// How long a launch is watched for an early failure.
 pub const EXIT_WINDOW: Duration = Duration::from_secs(2);
 
-/// Editors that need a terminal; `$VISUAL` or `$EDITOR` naming one runs in a
-/// terminal emulator, or is skipped when none is found. An explicit
-/// `MP_DESKTOP_EDITOR` or setting is never wrapped nor skipped.
+/// Editors that need a terminal; `MP_DESKTOP_EDITOR`, the setting, `$VISUAL`
+/// or `$EDITOR` naming one runs in a terminal emulator, or is skipped when
+/// none is found.
 pub const TERMINAL_EDITORS: &[&str] = &[
     "vi", "vim", "nvim", "hx", "helix", "nano", "pico", "micro", "kak", "joe", "ne", "mg", "ed",
 ];
@@ -270,27 +274,44 @@ impl Lookup<'_> {
 /// The editor template, by the order in the module docs.
 pub fn resolve(lookup: &Lookup) -> Resolved {
     let found = |template: String, source| Resolved { template, source };
-    if let Some(v) = lookup.var(EDITOR_ENV) {
-        return found(v, EditorSource::Env);
-    }
-    if let Some(v) = lookup.setting.clone().filter(|v| !v.trim().is_empty()) {
-        return found(v, EditorSource::Setting);
-    }
-    for (name, source) in [
-        ("VISUAL", EditorSource::Visual),
-        ("EDITOR", EditorSource::Editor),
+    let setting = lookup.setting.clone().filter(|v| !v.trim().is_empty());
+    // A wrapped explicit choice keeps its own source, so a launch that fails
+    // names the variable or the setting to fix.
+    for (name, value, source, wrapped) in [
+        (
+            EDITOR_ENV,
+            lookup.var(EDITOR_ENV),
+            EditorSource::Env,
+            EditorSource::Env,
+        ),
+        (
+            "the editor setting",
+            setting,
+            EditorSource::Setting,
+            EditorSource::Setting,
+        ),
+        (
+            "$VISUAL",
+            lookup.var("VISUAL"),
+            EditorSource::Visual,
+            EditorSource::Terminal,
+        ),
+        (
+            "$EDITOR",
+            lookup.var("EDITOR"),
+            EditorSource::Editor,
+            EditorSource::Terminal,
+        ),
     ] {
-        if let Some(v) = lookup.var(name) {
-            if needs_terminal(&v) {
-                if let Some(template) = terminal_template(lookup, &v) {
-                    tracing::info!("[editor] ${name}={v} runs in a terminal: {template}");
-                    return found(template, EditorSource::Terminal);
-                }
-                tracing::info!("[editor] ${name}={v} needs a terminal and none was found; skipped");
-                continue;
-            }
+        let Some(v) = value else { continue };
+        if !needs_terminal(&v) {
             return found(v, source);
         }
+        if let Some(template) = terminal_template(lookup, &v) {
+            tracing::info!("[editor] {name} `{v}` runs in a terminal: {template}");
+            return found(template, wrapped);
+        }
+        tracing::info!("[editor] {name} `{v}` needs a terminal and none was found; skipped");
     }
     for name in PROBE_NAMES {
         for dir in PROBE_DIRS {
@@ -343,8 +364,9 @@ pub fn resolve_terminal_editor(lookup: &Lookup) -> Result<Option<Resolved>, Reso
     gui.map_or(Ok(None), Err)
 }
 
-/// `editor` (a `$VISUAL` or `$EDITOR` value, with its own arguments) run
-/// inside the first terminal emulator found, as a template that still takes
+/// `editor` (a terminal editor's template with its own arguments, from
+/// `MP_DESKTOP_EDITOR`, the setting, `$VISUAL` or `$EDITOR`) run inside the
+/// first terminal emulator found, as a template that still takes
 /// `{path}`; `None` when no terminal is found or `editor` does not split.
 ///
 /// Each of [`TERMINALS`] is looked for on `PATH`, in [`PROBE_DIRS`] and, on
@@ -836,8 +858,15 @@ mod tests {
             ("/usr/bin/zed", EditorSource::Probe),
             "zed comes before cursor in the probe order, whatever the directory"
         );
-        // An explicit choice is taken as it is, terminal or not.
+        // An explicit terminal editor with no terminal is skipped the same way.
         let explicit = env_of(&[(EDITOR_ENV, "hx")]);
+        let r = resolve(&lookup(&explicit, Some("nvim"), &files));
+        assert_eq!(
+            (r.template.as_str(), r.source),
+            ("/usr/bin/zed", EditorSource::Probe)
+        );
+        // A GUI editor named explicitly is taken as it is.
+        let explicit = env_of(&[(EDITOR_ENV, "zed -w"), ("EDITOR", "hx")]);
         assert_eq!(
             resolve(&lookup(&explicit, None, &files)).source,
             EditorSource::Env
@@ -1062,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn a_gui_editor_and_an_explicit_choice_are_never_wrapped() {
+    fn a_gui_editor_and_a_template_naming_its_terminal_are_never_wrapped() {
         let files = files_at(&["/opt/homebrew/bin/wezterm", TERMINAL_APP]);
         let env = env_of(&[("EDITOR", "zed -w")]);
         let r = resolve(&lookup(&env, None, &files));
@@ -1070,15 +1099,54 @@ mod tests {
             (r.template.as_str(), r.source),
             ("zed -w", EditorSource::Editor)
         );
-        let env = env_of(&[(EDITOR_ENV, "nvim"), ("EDITOR", "nvim")]);
+        let own = "open -na Ghostty --args -e nvim {path}";
+        let env = env_of(&[(EDITOR_ENV, own), ("EDITOR", "nvim")]);
         let r = resolve(&lookup(&env, Some("hx"), &files));
-        assert_eq!((r.template.as_str(), r.source), ("nvim", EditorSource::Env));
-        let env = env_of(&[("EDITOR", "nvim")]);
-        let r = resolve(&lookup(&env, Some("hx {path}"), &files));
+        assert_eq!((r.template.as_str(), r.source), (own, EditorSource::Env));
+        let r = resolve(&lookup(&env_of(&[]), Some("kitty -- hx"), &files));
         assert_eq!(
             (r.template.as_str(), r.source),
-            ("hx {path}", EditorSource::Setting)
+            ("kitty -- hx", EditorSource::Setting)
         );
+    }
+
+    /// What `config_open`, `log_open`, a signature and an `invite.ics` run
+    /// when the setting names the embedded route's editor: a bare `nvim`
+    /// spawned with null stdio would have no terminal at all.
+    #[test]
+    fn an_explicit_terminal_editor_runs_in_a_terminal_and_keeps_its_source() {
+        let files = files_at(&[
+            "/opt/homebrew/bin/nvim",
+            "/opt/homebrew/bin/wezterm",
+            TERMINAL_APP,
+        ]);
+        let env = env_of(&[(EDITOR_ENV, "nvim"), ("EDITOR", "hx")]);
+        let r = resolve(&lookup(&env, Some("hx"), &files));
+        assert_eq!(
+            (r.template.as_str(), r.source),
+            (
+                "/opt/homebrew/bin/wezterm start -- /opt/homebrew/bin/nvim {path}",
+                EditorSource::Env
+            )
+        );
+        let env = env_of(&[("EDITOR", "nvim")]);
+        let r = resolve(&lookup(&env, Some("hx +3 {path}"), &files));
+        assert_eq!(
+            (r.template.as_str(), r.source),
+            (
+                "/opt/homebrew/bin/wezterm start -- hx +3 {path}",
+                EditorSource::Setting
+            )
+        );
+        match setup_error("x", r.source) {
+            GuiError::Setup { message } => assert!(message.contains("editor setting"), "{message}"),
+            other => panic!("expected a setup error, got {other:?}"),
+        }
+        // Terminal.app is the last resort on macOS, as for $EDITOR.
+        let only_terminal_app = files_at(&[TERMINAL_APP]);
+        let r = resolve(&lookup(&env_of(&[]), Some("nvim"), &only_terminal_app));
+        assert_eq!(r.source, EditorSource::Setting);
+        assert!(r.template.starts_with("osascript "), "{}", r.template);
     }
 
     #[test]

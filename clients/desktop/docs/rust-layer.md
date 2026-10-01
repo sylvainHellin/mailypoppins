@@ -416,7 +416,8 @@ Neither computes a path: the daemon's answer names the file it uses.
 - `config_open` calls `config.get` and opens its `path`; a `state` of `absent` is refused before any editor starts, as `not_found` "There is no config.toml yet; add an account first", and an `invalid` file opens, since the editor is where it gets fixed.
 - `log_open` calls `diagnostic.log_path`, the daemon's dated log (`mailypoppins-<date>.log`), and refuses a file that does not exist yet with `not_found` "No log file found at <path>".
 
-Both hand the path to `editor::open_on`, the resolver and spawn `editor_open` uses, so a fixture journals the editor and runs nothing; its refusal of a path that is no file now says "no file at <path>".
+Both hand the path to `editor::open_on`, the resolver and spawn `editor_open` uses, with the setting read through `editor::read_setting_or_none`, so a fixture journals the editor and runs nothing; its refusal of a path that is no file now says "no file at <path>".
+Neither is a draft, so neither takes the embedded route: a terminal editor in the setting, such as the `nvim` that runs drafts embedded, opens the file in a terminal window (see Drafts and the editor).
 Both methods are in `REQUIRED_CAPABILITIES`.
 
 ## Configuration and secrets
@@ -542,9 +543,13 @@ The editor is a command template, resolved in this order:
 
 1. `MP_DESKTOP_EDITOR`;
 2. the `editor` key of `desktop.json` in the app config directory (`~/Library/Application Support/dev.mailypoppins.desktop/` on macOS), read and written by `editor_setting_get` and `editor_setting_set`;
-3. `$VISUAL`, then `$EDITOR`; one naming a terminal editor (`vi`, `vim`, `nvim`, `hx`, `nano` and a few more) runs inside the first terminal emulator found, with source `terminal`, and is skipped when there is none;
+3. `$VISUAL`, then `$EDITOR`;
 4. the first of `code`, `zed`, `subl` and `cursor` found in `/opt/homebrew/bin`, `/usr/local/bin` or `/usr/bin`;
 5. `open -t` on macOS, which opens the default text editor, or `xdg-open` elsewhere.
+
+Any of the first three that names a terminal editor (`vi`, `vim`, `nvim`, `hx`, `nano` and a few more) runs inside the first terminal emulator found, and is skipped when there is none.
+The wrapped command keeps the source `env` or `setting`, so a failed launch names what to fix, and one from `$VISUAL` or `$EDITOR` has the source `terminal`.
+A draft whose editor the embedded route finds never reaches `editor_open` (see Terminal sessions), but `config.toml`, the daemon's log, a signature and an `invite.ics` do: with the setting `nvim` they open in a terminal window, where a bare `nvim` with null stdio would have no terminal at all.
 
 The template is split with shell-words rules and run without a shell.
 `{path}` in any word is replaced by the path; a template without it gets the path as its last argument.
@@ -560,9 +565,9 @@ The terminals are probed in this order, each on `PATH`, in the three directories
 4. WezTerm, as `wezterm start -- <editor> {path}`, last among the emulators since it is in maintenance and slow on macOS;
 5. Terminal.app on macOS, found as `/System/Applications/Utilities/Terminal.app`, through `osascript` with a script that runs its arguments in a new window, each in single quotes with every backslash outside them so that sh, bash, zsh and fish all read it as one literal word, and `x-terminal-emulator -e <editor> {path}` elsewhere.
 
-`<editor>` is the variable's value with its own arguments, as in `nvim --clean`, and its program is looked up on `PATH` and in the three directories, since the terminal may not see the shell's `PATH`.
+`<editor>` is the template with its own arguments, as in `nvim --clean`, and its program is looked up on `PATH` and in the three directories, since the terminal may not see the shell's `PATH`.
 A value that carries its own `{path}` keeps it where it is.
-`MP_DESKTOP_EDITOR` and the setting are taken verbatim and never wrapped: a terminal editor there names its terminal itself, for example `MP_DESKTOP_EDITOR="open -na Ghostty --args -e hx {path}"`.
+A template whose program is not a terminal editor is taken verbatim, so one that names its terminal itself runs as written, for example `MP_DESKTOP_EDITOR="open -na Ghostty --args -e hx {path}"`.
 
 `EditorSetting.route` says where a draft opens, and the frontend reads it before every open.
 It is `embedded` exactly when `terminal_spawn` would accept the editor for an existing draft: `terminal::route` runs the same resolution and lookup as `terminal_spawn` (see Terminal sessions) without the draft file, so the two cannot disagree.
