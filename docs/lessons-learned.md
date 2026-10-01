@@ -2348,4 +2348,7 @@ The TUI deletes a skipped file from disk itself (`delete_skip_file` in `clients/
 `/Applications/Ghostty.app/Contents/MacOS/ghostty -e nvim` refuses on macOS: its `--help` says launching the terminal from the CLI is not supported there, and `+new-window` is not supported on the platform either.
 The desktop's editor wrapper starts it as `open -na /Applications/Ghostty.app --args -e <editor> <path>` instead, which Ghostty's help names (`clients/desktop/src-tauri/src/editor.rs`, `terminal_template`).
 On the development Mac `alacritty --help` and `--version` die with SIGKILL (exit 137), so its `-e` form comes from Alacritty's documentation and was not checked against the binary.
-Terminal.app takes the editor through `osascript` with the words as `argv` and `quoted form of` each, so neither the editor's arguments nor the draft's path is ever spliced into AppleScript text.
+Terminal.app takes the editor through `osascript` with the words as `argv`, so neither the editor's arguments nor the draft's path is ever spliced into AppleScript text.
+`do script` runs the words in the user's login shell, and AppleScript's `quoted form of` is POSIX quoting, which fish reads differently: fish takes `\'` and `\\` as escapes even inside single quotes, so `'/d/a\'\'';echo INJECTED;#'` ends the word early and runs `echo INJECTED`.
+The script quotes each word itself so that no backslash ever sits inside single quotes: it splits on `\`, turns each piece's `'` into `'\''`, joins the pieces with `'\\'` and wraps the whole in `'…'`, which sh, bash, zsh and fish read as the same literal word.
+Applying the backslash pass after `quoted form of` instead breaks a plain `it's`, whose `'\''` already holds a backslash outside the quotes.

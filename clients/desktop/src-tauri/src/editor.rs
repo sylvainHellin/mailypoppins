@@ -126,19 +126,49 @@ pub const TERMINALS: &[TerminalApp] = &[
 pub const TERMINAL_APP: &str =
     "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal";
 
-/// The AppleScript that runs its arguments, each shell-quoted, in a new
-/// Terminal.app window: the editor's words and the path arrive as `argv`, so
-/// neither is ever spliced into the script's text.
-const TERMINAL_APP_SCRIPT: &[&str] = &[
-    "on run argv",
-    "set c to \"\"",
+/// The AppleScript lines that join `argv` into `c`, one shell word per
+/// argument, for Terminal.app's `do script` to run in the user's login shell.
+/// The editor's words and the path arrive as `argv`, so neither is ever
+/// spliced into the script's text.
+///
+/// `quoted form of` alone is POSIX quoting, and fish reads `\'` and `\\` as
+/// escapes even inside single quotes, so a path with `\'` in it would end
+/// the word early there. Each word is instead split on `\` first, each piece's
+/// `'` turned into `'\''`, the pieces joined with `'\\'` and the whole put in
+/// single quotes: no backslash is then ever inside single quotes, and sh,
+/// bash, zsh and fish read the same literal word.
+const TERMINAL_APP_JOIN: &[&str] = &[
+    r#"set c to """#,
     "repeat with w in argv",
-    "set c to c & quoted form of (w as text) & \" \"",
+    r#"set AppleScript's text item delimiters to "\\""#,
+    "set parts to text items of (w as text)",
+    "set q to {}",
+    "repeat with p in parts",
+    r#"set AppleScript's text item delimiters to "'""#,
+    "set bits to text items of (p as text)",
+    r#"set AppleScript's text item delimiters to "'\\''""#,
+    "set end of q to bits as text",
     "end repeat",
-    "tell application \"Terminal\" to activate",
-    "tell application \"Terminal\" to do script c",
-    "end run",
+    r#"set AppleScript's text item delimiters to "'\\\\'""#,
+    r#"set c to c & "'" & (q as text) & "' ""#,
+    "end repeat",
+    r#"set AppleScript's text item delimiters to """#,
 ];
+
+/// What Terminal.app's script does with the joined `c`.
+const TERMINAL_APP_RUN: &[&str] = &[
+    r#"tell application "Terminal" to activate"#,
+    r#"tell application "Terminal" to do script c"#,
+];
+
+/// The whole script: `on run argv`, [`TERMINAL_APP_JOIN`], `then`, `end run`.
+fn terminal_app_script(then: &[&'static str]) -> Vec<&'static str> {
+    std::iter::once("on run argv")
+        .chain(TERMINAL_APP_JOIN.iter().copied())
+        .chain(then.iter().copied())
+        .chain(std::iter::once("end run"))
+        .collect()
+}
 
 /// The Linux last resort, Debian's alternatives name for the default terminal.
 const LINUX_TERMINAL: &str = "x-terminal-emulator";
@@ -311,7 +341,7 @@ pub fn terminal_template(lookup: &Lookup, editor: &str) -> Option<String> {
     }
     if prefix.is_none() && lookup.macos && (lookup.is_file)(Path::new(TERMINAL_APP)) {
         let mut words = vec!["osascript".to_string()];
-        for line in TERMINAL_APP_SCRIPT {
+        for line in terminal_app_script(TERMINAL_APP_RUN) {
             words.push("-e".to_string());
             words.push(line.to_string());
         }
@@ -854,19 +884,76 @@ mod tests {
         assert_eq!(r.source, EditorSource::Terminal);
         let argv = command_line(&r.template, "/d/it's.md").expect("line");
         assert_eq!(argv[0], "osascript");
+        let script = terminal_app_script(TERMINAL_APP_RUN);
+        let n = 1 + 2 * script.len();
         assert_eq!(
-            &argv[1..17],
-            TERMINAL_APP_SCRIPT
+            &argv[1..n],
+            script
                 .iter()
                 .flat_map(|l| ["-e", l])
                 .collect::<Vec<_>>()
                 .as_slice()
         );
         assert_eq!(
-            &argv[17..],
+            &argv[n..],
             ["nvim", "-u", "my init.lua", "/d/it's.md"],
             "the editor's words and the path reach the script as argv, unspliced"
         );
+    }
+
+    #[test]
+    fn the_terminal_app_script_takes_backslashes_out_of_single_quotes() {
+        let script = terminal_app_script(TERMINAL_APP_RUN).join("\n");
+        assert!(
+            !script.contains("quoted form of"),
+            "POSIX quoting alone lets fish read a backslash inside single quotes"
+        );
+        // AppleScript source: split on one backslash, rejoin with '\\'.
+        assert!(script.contains(r#"text item delimiters to "\\""#));
+        assert!(script.contains(r#"text item delimiters to "'\\\\'""#));
+        assert!(script.contains(r#"text item delimiters to "'\\''""#));
+        assert!(script.ends_with("do script c\nend run"));
+    }
+
+    /// The words `do script` would get, through a real `osascript` that
+    /// returns them instead of opening a window, read back by each shell
+    /// installed. `cargo test -- --ignored terminal_app_words`.
+    #[test]
+    #[ignore = "runs osascript and the installed shells"]
+    fn terminal_app_words_read_back_unchanged_in_every_shell() {
+        let words = [
+            r"a\'b",
+            r"a\\b",
+            "it's",
+            r"/d/a\';echo INJECTED;#",
+            "",
+            "$HOME `id` \"q\"",
+        ];
+        let mut osascript = Command::new("osascript");
+        for line in terminal_app_script(&["return c"]) {
+            osascript.args(["-e", line]);
+        }
+        let out = osascript.args(words).output().expect("osascript runs");
+        assert!(out.status.success(), "{out:?}");
+        let joined = String::from_utf8(out.stdout).expect("utf-8");
+        let joined = joined.trim_end_matches('\n');
+        let mut checked = 0;
+        for shell in ["sh", "bash", "zsh", "fish"] {
+            let Ok(read) = Command::new(shell)
+                .args(["-c", &format!("printf '%s\\n' {joined}")])
+                .output()
+            else {
+                continue;
+            };
+            let expected: String = words.iter().map(|w| format!("{w}\n")).collect();
+            assert_eq!(
+                String::from_utf8_lossy(&read.stdout),
+                expected,
+                "{shell} read {joined}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no shell to check with");
     }
 
     #[test]
