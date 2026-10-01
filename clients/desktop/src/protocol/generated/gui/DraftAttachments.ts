@@ -2,7 +2,7 @@
 import type { DraftAttachment } from "./DraftAttachment";
 
 /**
- * A draft's attachments, from its file.
+ * A draft's attachments, from its file: `mp_protocol::draft::DraftAttachments`.
  */
 export type DraftAttachments = { account: string, id: string,
 /**

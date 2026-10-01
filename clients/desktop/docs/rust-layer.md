@@ -379,7 +379,7 @@ No event says that an index changed, so the frontend reads the list again after 
 
 1. `draft.create` of `name` with the headers `to: recipient` and `subject: "Contact: <name>"` (the display name, else the address's local part) and `no_signature`, the TUI's vCard draft carrying none;
 2. `mp_core::contacts::contact_to_vcard` of the contact into `_vcards/` beside the new draft, named by `vcard_file_stem` (`doe-jane.vcf`), then `-1`, `-2` and on while the name is taken, the TUI's rule;
-3. the `.vcf`'s absolute path appended to the draft's `attachments:` through `draft_attach`'s code, which reads the file back through `draft.path`.
+3. the `.vcf`'s absolute path appended to the draft's `attachments:` through `draft.attach`.
 
 It answers the `DraftCreated` and the `.vcf`'s path, and opens nothing: the frontend hands the draft to the editor as a new draft's.
 An empty address is a `protocol` refusal before any call.
@@ -672,14 +672,14 @@ The app cache is Tauri's `app_cache_dir`, `~/Library/Caches/dev.mailypoppins.des
 On unix `renditions/` and each `hit-<hash>/` are 0700, tightened if found wider (`mp_core::config::create_private_dir_all`), and `message.html` is 0600, as the daemon's handles and the TUI's temp files are.
 Each write first removes the renditions older than a day.
 
-A draft's attachments are the paths its `attachments:` frontmatter lists, and the daemon serves neither `draft.attach` nor a removal, so all four draft commands work on the file, which `draft.path` resolves fresh:
+A draft's attachments are the paths its `attachments:` frontmatter lists, and the daemon reads and rewrites them (#0131), so no command here writes the file:
 
-- `draft_attachments` parses the file and answers each entry as typed, where the send path finds it, and whether a file is there: `~` expands against `$HOME`, and a relative entry resolves against the draft's own directory (`ATT-03`).
-- `draft_attach` appends with `mp_core::draft::append_draft_attachment`, the TUI's `ta`, which keeps the body and every other line byte for byte and stores the path as typed, `~` included.
-  It refuses a blank or relative path and a directory with `protocol`, a path with no file behind it with `not_found` ("No such file: <path>", the TUI's words), and a file the list already names with `protocol` ("<entry> is already attached").
-- `draft_attachment_remove` drops item `index` of the block list and leaves the file it named alone.
-  The rewrite is this layer's own, line by line, and it first checks that the list has one line per parsed entry, so a flow-style list or an entry that spans lines is refused rather than rewritten; an emptied list keeps its bare `attachments:` key, the skeleton's shape.
-- `draft_attachment_open` opens entry `index` with the opener (`ATT-04`), and a missing file is `not_found`.
+- `draft_attachments` is `draft.attachments`: each entry as typed, where the send path finds it, and whether a file is there: `~` expands against the daemon's `$HOME`, and a relative entry resolves against the draft's own directory (`ATT-03`).
+- `draft_attach` is `draft.attach`, the TUI's `ta`: `mp_core::draft::attach_checked` keeps the body and every other line byte for byte and stores the path as typed, `~` included.
+  A blank path is refused here, before any call; the daemon refuses a relative path, a directory, a path with no file behind it ("No such file: <path>", the TUI's words) and a file the list already names ("<entry> is already attached"), each a `protocol` error carrying the daemon's sentence without the refusal's frame.
+- `draft_attachment_remove` is `draft.detach`: item `index` of the block list goes and the file it named stays.
+  `mp_core::draft::remove_draft_attachment` first checks that the list has one line per parsed entry, so a flow-style list or an entry that spans lines is refused rather than rewritten; an emptied list keeps its bare `attachments:` key, the skeleton's shape.
+- `draft_attachment_open` opens entry `index` where `draft.attachments` resolved it, with the opener (`ATT-04`), and a missing file is `not_found`.
 
 ```ts
 type DraftAttachments = {

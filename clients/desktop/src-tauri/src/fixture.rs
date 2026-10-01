@@ -415,6 +415,8 @@ struct State {
     editor_opens: Vec<EditorOpen>,
     /// Every file the system opener was asked to open, oldest first.
     opened: Vec<String>,
+    /// What `~` means to `draft.attach*`, the daemon's `$HOME`.
+    home: Option<PathBuf>,
     next_draft: u64,
     html: BTreeMap<i64, String>,
     instance: u32,
@@ -1763,6 +1765,53 @@ impl State {
                 let (id, path) = self.finish_built(&built, None)?;
                 self.created(&account, &id, &path, None)
             }
+            "draft.attachments" | "draft.attach" | "draft.detach" => {
+                let id = param_str(method, params, "id")?;
+                let path = PathBuf::from(self.parseable(method, &account, id)?.path);
+                let home = self.home.clone();
+                let mut events = Vec::new();
+                if method != "draft.attachments" {
+                    let changed = if method == "draft.attach" {
+                        let input = param_str(method, params, "path")?;
+                        mp_core::draft::attach_checked(&path, input, home.as_deref())
+                    } else {
+                        let index = params["index"].as_u64().ok_or_else(|| {
+                            refused(method, -32602, "index is the entry's zero-based position")
+                        })?;
+                        mp_core::draft::remove_draft_attachment(&path, index as usize)
+                    };
+                    changed.map_err(|e| refused(method, -32602, &format!("{e:#}")))?;
+                    self.rescan();
+                    events = self.watch_events(&path);
+                }
+                let draft = mp_core::draft::parse_email_draft(&path)
+                    .map_err(|e| refused(method, -32010, &one_line(&e)))?;
+                let dir = path.parent().unwrap_or(Path::new("/"));
+                let attachments: Vec<Value> = draft
+                    .frontmatter
+                    .attachments
+                    .unwrap_or_default()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        let resolved =
+                            mp_core::draft::resolve_attachment_entry(&entry, dir, home.as_deref());
+                        json!({
+                            "index": index,
+                            "entry": entry,
+                            "path": resolved.display().to_string(),
+                            "exists": resolved.is_file(),
+                        })
+                    })
+                    .collect();
+                let answer = json!({
+                    "account": account,
+                    "id": id,
+                    "path": path.display().to_string(),
+                    "attachments": attachments,
+                });
+                Ok((answer, events))
+            }
             "draft.path" => {
                 let id = param_str(method, params, "id")?;
                 let entry = self.draft(method, &account, id)?;
@@ -2420,6 +2469,7 @@ impl Fixture {
             signatures,
             editor_opens: Vec::new(),
             opened: Vec::new(),
+            home: crate::attachments::home_dir(),
             next_draft: 0,
             html,
             instance: 1,
@@ -2919,6 +2969,9 @@ impl Fixture {
                 Ok(serde_json::to_value(listing)?)
             }
             "draft.create"
+            | "draft.attach"
+            | "draft.attachments"
+            | "draft.detach"
             | "draft.reply"
             | "draft.forward"
             | "draft.create_from_message"
@@ -4439,6 +4492,12 @@ impl Fixture {
     /// Journal a file the system opener would have opened.
     pub fn record_open(&self, path: &str) {
         self.state().opened.push(path.to_string());
+    }
+
+    /// What `~` means to `draft.attach*` from now on, for a test.
+    #[cfg(test)]
+    pub fn set_home(&self, home: &Path) {
+        self.state().home = Some(home.to_path_buf());
     }
 
     /// Every stubbed open of a file, oldest first.

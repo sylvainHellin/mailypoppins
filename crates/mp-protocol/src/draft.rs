@@ -234,6 +234,36 @@ pub struct DraftPreview {
     pub signature: Option<String>,
 }
 
+/// One entry of a draft's `attachments:` list (#0131).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct DraftAttachment {
+    /// Zero-based, the list's order, which is what `draft.detach` takes.
+    pub index: u32,
+    /// The entry as the file spells it, `~` kept.
+    pub entry: String,
+    /// Where the send path finds it: `~` against the daemon's home, a
+    /// relative entry against the draft file's directory.
+    pub path: String,
+    /// Whether a file is there now; a send fails on a missing one.
+    pub exists: bool,
+}
+
+/// The `result` of `draft.attachments`, `draft.attach` and `draft.detach`:
+/// a draft's attachment list, read from its file after the change (#0131).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct DraftAttachments {
+    /// The account the draft belongs to.
+    pub account: String,
+    /// The draft id.
+    pub id: String,
+    /// The draft file.
+    pub path: String,
+    /// The entries, in the list's order.
+    pub attachments: Vec<DraftAttachment>,
+}
+
 /// Which draft `draft.create_from_message` builds (P5-U10d, #0126).
 ///
 /// The wire spelling of `mailypoppins::draft::DraftFromSource`, which is

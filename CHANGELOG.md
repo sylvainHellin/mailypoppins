@@ -13,6 +13,7 @@ All notable changes to this project are documented in this file.
   - `mp_client`'s session keeps a refusal's `data` (`mp_client::session::refusal`), so the desktop shows a broken draft's diagnostics as the daemon sent them.
   - A sent draft's outcome names its `Message-ID`, which `send.draft` and `send.approved` answered empty.
   - The daemon lists the signatures and an account's default (`signature.list`), which the desktop's wizards read instead of the directory.
+  - The daemon lists, attaches and removes a draft's attachments (`draft.attachments`, `draft.attach`, `draft.detach`), with the checks the TUI's `ta` makes; the desktop's Attach file dialog and the preview's Remove go through it.
 - **The desktop client has a light theme, a plain-text reader, a filter in the key help, and runs a terminal editor in a terminal (#0136).**
   - Settings' Theme buttons and the palette's "Theme: dark", "Theme: light" and "Theme: system" switch the window between the dark palette, a light one on cream, and whichever the system uses; dark stays the default.
   - `tt`, the reader toolbar's HTML and Text, Settings' Reader field and the palette show a message's stored plain text instead of its HTML, in a monospaced block with quoted lines muted, and the choice is remembered; in the TUI `tt` opens the thread, which the desktop does not have yet.

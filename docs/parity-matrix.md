@@ -740,11 +740,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `ta` in the drafts mailbox (`clients/tui/src/app/keymap.rs:659`), `resolve_attachment_paths` (`src/send.rs:1964`)
 - Daemon surface: `draft.attach` with an absolute path
-- GUI location: clients/desktop: `ta` in Drafts, the palette or the draft preview's Attach file open the "Attach file" dialog, whose File field takes an absolute or `~` path; `draft_attach` appends it client-side with `mp_core::draft::append_draft_attachment`, and the preview's attachment list removes an entry with `draft_attachment_remove` (M3, #0131; reader.md, "Drafts and server-only hits")
+- GUI location: clients/desktop: `ta` in Drafts, the palette or the draft preview's Attach file open the "Attach file" dialog, whose File field takes an absolute or `~` path; `draft_attach` appends it through the daemon's `draft.attach`, and the preview's attachment list removes an entry with `draft_attachment_remove` over `draft.detach` (M3, #0131; reader.md, "Drafts and server-only hits")
 - Validation: `tests/draft_integration.rs`; `clients/desktop/src/components/compose/compose.test.tsx` (`ta opens the path dialog, which keeps a missing file open and attaches an existing one`, `the preview lists the entries in order, opens one, flags a missing one and removes one`), `clients/desktop/src-tauri/src/attachments.rs` (`attach_appends_in_order_refuses_duplicates_and_missing_files_and_remove_rewrites`, `a_draft_entry_resolves_as_the_send_path_resolves_it`)
 - Status: GUI shipped (M3, #0131) with a typed path; the native file picker waits on the `tauri-plugin-dialog` install
 - Note: appends to the `attachments:` frontmatter list and verifies the path at the prompt, so the GUI file picker applies the same verification.
-  `draft.attach` is not built, so the desktop, like the TUI, rewrites the file itself, and the daemon serves no removal either.
+  The daemon serves `draft.attach`, `draft.attachments` and `draft.detach` since #0131 ("Daemon gaps closed"), which the desktop calls; the TUI still rewrites the file itself.
 - Accepted divergence (P4-U15 review): a relative entry resolves against **the draft file's own directory**, where the pre-daemon binary resolved it against the sending process's working directory. No attachment path crosses the wire - `send.draft` carries a selector and the daemon reads the draft itself - so the client has nothing to rewrite, and the daemon's cwd is whichever directory happened to start it (`daemon::lifecycle::spawn_detached` sets no `current_dir`). The draft's directory is the one anchor both processes agree on; `send::resolve_attachment_paths` takes it explicitly and reads no `current_dir()`. Pinned by `tests/daemon_send_attachments.rs` and the unit rows in `src/send.rs` and `tests/daemon_autostart.rs`. A `~`-relative or absolute entry is unaffected, which is what the TUI's attach prompt stores.
 
 ### ATT-04 Open a draft's own attachment
@@ -752,7 +752,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `src/selector.rs`
 - Daemon surface: `draft.materialize_attachment`, opened client-side
-- GUI location: clients/desktop: `to` on a draft opens its one file or picks among several, and the draft preview's attachment list has an Open button per entry, disabled with a "missing" badge when no file is there; `draft_attachment_open` opens the path the frontmatter names with the system opener (M3, #0131; reader.md, "Drafts and server-only hits")
+- GUI location: clients/desktop: `to` on a draft opens its one file or picks among several, and the draft preview's attachment list has an Open button per entry, disabled with a "missing" badge when no file is there; `draft_attachment_open` opens the path `draft.attachments` resolved with the system opener (M3, #0131; reader.md, "Drafts and server-only hits")
 - Validation: `tests/cli_selector_contract.rs`; `clients/desktop/src/components/compose/compose.test.tsx` (`to on a draft picks among its files; ta outside Drafts and ts on a draft say why not`, `the preview lists the entries in order, opens one, flags a missing one and removes one`)
 - Status: GUI shipped (M3, #0131)
 - Note: `draft.materialize_attachment` is not served; a draft's file is already on disk, so the desktop opens the path the frontmatter lists, resolved as the send path resolves it.

@@ -400,3 +400,91 @@ async fn signature_list_answers_the_names_and_the_default() {
     .await;
     assert_eq!(unknown.code, -32005);
 }
+
+// ---------------------------------------------------------------------------
+// 8. A draft's attachments
+// ---------------------------------------------------------------------------
+
+/// `draft.attach` appends a file after the TUI prompt's checks,
+/// `draft.attachments` lists the entries resolved, and `draft.detach` removes
+/// one by index and leaves the file; each answers the list as it is now.
+#[tokio::test]
+async fn a_draft_attaches_lists_and_detaches_its_files() {
+    let slice = Slice::start();
+    let files = slice.root().join("files");
+    std::fs::create_dir_all(&files).expect("a files dir");
+    let (a, b) = (files.join("a.pdf"), files.join("b.pdf"));
+    std::fs::write(&a, b"a").expect("a");
+    std::fs::write(&b, b"b").expect("b");
+    let mut conn = slice.connect().await;
+    let id = json!({"account": fixture::ACCOUNT, "id": fixture::VALID});
+    let with = |extra: Value| {
+        let mut params = id.clone();
+        for (k, v) in extra.as_object().expect("an object") {
+            params[k] = v.clone();
+        }
+        params
+    };
+    let list = |value: Value| -> mp_protocol::draft::DraftAttachments {
+        serde_json::from_value(value).expect("DraftAttachments")
+    };
+
+    let empty = list(call(&mut conn, "draft.attachments", id.clone()).await);
+    assert!(empty.attachments.is_empty());
+    assert!(empty.path.ends_with("angebot.md"));
+
+    list(
+        call(
+            &mut conn,
+            "draft.attach",
+            with(json!({"path": a.display().to_string()})),
+        )
+        .await,
+    );
+    let two = list(
+        call(
+            &mut conn,
+            "draft.attach",
+            with(json!({"path": format!(" {} ", b.display())})),
+        )
+        .await,
+    );
+    let entries: Vec<&str> = two.attachments.iter().map(|e| e.entry.as_str()).collect();
+    assert_eq!(
+        entries,
+        vec![a.display().to_string(), b.display().to_string()]
+    );
+    assert!(two.attachments.iter().all(|e| e.exists));
+    assert_eq!(two.attachments[1].index, 1);
+
+    let twice = call_err(
+        &mut conn,
+        "draft.attach",
+        with(json!({"path": a.display().to_string()})),
+    )
+    .await;
+    assert_eq!(twice.code, -32602);
+    assert!(
+        twice.message.ends_with("is already attached"),
+        "{}",
+        twice.message
+    );
+    let missing = call_err(
+        &mut conn,
+        "draft.attach",
+        with(json!({"path": files.join("nope.pdf").display().to_string()})),
+    )
+    .await;
+    assert!(
+        missing.message.starts_with("No such file"),
+        "{}",
+        missing.message
+    );
+
+    let one = list(call(&mut conn, "draft.detach", with(json!({"index": 0}))).await);
+    let entries: Vec<&str> = one.attachments.iter().map(|e| e.entry.as_str()).collect();
+    assert_eq!(entries, vec![b.display().to_string()]);
+    assert!(a.is_file(), "the file the entry named stays");
+    let out_of_range = call_err(&mut conn, "draft.detach", with(json!({"index": 3}))).await;
+    assert_eq!(out_of_range.code, -32602);
+}
