@@ -2406,3 +2406,10 @@ The owner kills the child in the pane's unmount cleanup only once the spawn has 
 
 `vi.mock("@/lib/tauri", () => import("@/test/tauri-mock"))` resolves the mock through the module graph, so a mock that imports, even indirectly, a module importing `@/lib/tauri` waits on itself and vitest hangs with no error until the run times out.
 The terminal fake routed frames through `frameRouter` from `src/lib/terminal.ts`, which imports Tauri; the router now lives in the Tauri-free `src/lib/terminal-frames.ts`, and the fake takes only types from `terminal.ts`.
+
+## cmdk's `aria-activedescendant` ignores a controlled `value`
+
+cmdk 1.1 updates the store's `selectedItemId`, which its `Command.List` and `Command.Input` render as `aria-activedescendant`, only through its own `setState("value")`: its keys, a pointer move and a click.
+A controlled `value` prop sets the selected row (`aria-selected` follows) but leaves `selectedItemId` behind, and cmdk overwrites any `id` passed to a list or an item with its own `useId`.
+A field outside the `Command` that drives the selection itself (`clients/desktop/src/components/compose/RecipientsInput.tsx`) reads the list's id and the `[cmdk-item][aria-selected="true"]` row's id from the DOM through a `MutationObserver` and sets them on the input.
+A click on a row would also blur that field, since cmdk's root is focusable (`tabIndex=-1`): the panel prevents `mousedown`.
