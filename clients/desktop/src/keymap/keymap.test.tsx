@@ -382,6 +382,8 @@ describe("compose keys (the TUI's)", () => {
     expect(within(dialog).getByLabelText("Subject")).toHaveValue("Fwd: Angebot Dachsanierung");
     expect(callsOf("draft_forward")).toEqual([]);
     await waitFor(() => expect(within(dialog).getByLabelText("To")).toHaveFocus());
+    // Completion off: the test types a recipient and is not about it.
+    mock.failing.set("contact_search", new Error("off"));
     await user.keyboard("kim@example.com{Control>}{Enter}{/Control}");
     await waitFor(() =>
       expect(callsOf("draft_forward")).toEqual([

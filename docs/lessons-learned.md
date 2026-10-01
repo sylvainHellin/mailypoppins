@@ -2423,3 +2423,10 @@ A colorscheme shared by Vim and Neovim guards its tree-sitter groups (`@markup.h
 After `:highlight clear` Neovim restores its own default scheme, whose groups carry explicit `Nvim*` colours (`@variable`, `OkMsg`); dump `:highlight` after loading and look for colours outside the tokens.
 Under `tauri dev`, `app.path().resource_dir()` is the executable's directory (`target/debug`), where tauri-build copies `bundle.resources` on each build; the map form `{"resources/nvim/": "nvim/"}` lands it at `<resource dir>/nvim` there and in the bundle alike.
 tauri-utils (`platform::resource_dir_from`) takes the executable's directory only when its parent or grandparent is named exactly `target`: with `CARGO_TARGET_DIR=/var/tmp/mp-x-target` it falls through to the bundle's `../Resources` and fails, although the files were copied, so a debug build of the desktop falls back to the source tree's `resources/nvim`.
+
+## cmdk's `aria-activedescendant` ignores a controlled `value`
+
+cmdk 1.1 updates the store's `selectedItemId`, which its `Command.List` and `Command.Input` render as `aria-activedescendant`, only through its own `setState("value")`: its keys, a pointer move and a click.
+A controlled `value` prop sets the selected row (`aria-selected` follows) but leaves `selectedItemId` behind, and cmdk overwrites any `id` passed to a list or an item with its own `useId`.
+A field outside the `Command` that drives the selection itself (`clients/desktop/src/components/compose/RecipientsInput.tsx`) reads the list's id and the `[cmdk-item][aria-selected="true"]` row's id from the DOM through a `MutationObserver` and sets them on the input.
+A click on a row would also blur that field, since cmdk's root is focusable (`tabIndex=-1`): the panel prevents `mousedown`.

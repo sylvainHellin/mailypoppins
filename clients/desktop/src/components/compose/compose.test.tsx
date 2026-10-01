@@ -23,6 +23,14 @@ async function openWizard(user: User) {
   return dialog;
 }
 
+/**
+ * Contact completion off: a test that types a recipient and is not about
+ * completion keeps Enter and Escape for the dialog, however slow the run.
+ */
+function noCompletion() {
+  mock.failing.set("contact_search", new Error("off"));
+}
+
 /** A file the listing skipped because it does not parse. */
 function brokenDraft() {
   mock.drafts.work.skipped = [{ path: "/fixture/work/drafts/broken.md", error: "line 2: mapping values are not allowed here" }];
@@ -44,6 +52,7 @@ describe("the compose wizard", () => {
   it("Enter moves to the next field, and Cmd+Enter creates the draft and opens it in the editor", async () => {
     const { user } = renderApp();
     await shellReady();
+    noCompletion();
     const dialog = await openWizard(user);
     await user.keyboard("kim@example.com{Enter}");
     expect(within(dialog).getByLabelText("Cc")).toHaveFocus();
@@ -68,6 +77,7 @@ describe("the compose wizard", () => {
   it("none carries no signature", async () => {
     const { user } = renderApp();
     await shellReady();
+    noCompletion();
     const dialog = await openWizard(user);
     await user.keyboard("kim@example.com");
     await user.selectOptions(within(dialog).getByLabelText("Signature"), "none");
@@ -89,6 +99,7 @@ describe("the compose wizard", () => {
   it("shows the daemon's refusal in the dialog, which stays open", async () => {
     const { user } = renderApp();
     await shellReady();
+    noCompletion();
     mock.failing.set("draft_create", {
       kind: "not_found",
       message: "draft.create: the daemon refused the call: A draft already exists at /fixture/work/drafts/x.md (-32602)",
@@ -103,6 +114,7 @@ describe("the compose wizard", () => {
   it("Escape cancels and writes nothing", async () => {
     const { user } = renderApp();
     await shellReady();
+    noCompletion();
     await openWizard(user);
     await user.keyboard("kim@example.com{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "New draft" })).toBeNull());
@@ -114,6 +126,7 @@ describe("the recipients dialog", () => {
   it("rewrites the recipients and keeps the subject when it did not change", async () => {
     const { user } = renderApp();
     await shellReady();
+    noCompletion();
     await drafts(user);
     await user.keyboard("j");
     await user.keyboard("ce");

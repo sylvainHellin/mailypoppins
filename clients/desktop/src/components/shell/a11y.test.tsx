@@ -200,14 +200,14 @@ describe("accessibility primitives", () => {
     await user.keyboard("cn");
     const wizard = await screen.findByRole("dialog", { name: "New draft" });
     expect(wizard).toHaveAccessibleDescription(/opens in your editor/);
-    await waitFor(() => expect(within(wizard).getByRole("textbox", { name: "To" })).toHaveFocus());
+    await waitFor(() => expect(within(wizard).getByRole("combobox", { name: "To" })).toHaveFocus());
     // Base UI traps focus with a guard on each side and makes the rest of
     // the window inert. Tab onto a guard moves focus back into the dialog on
     // the next animation frame, so each Tab waits for focus to settle inside
     // the wizard before the next one: sampling right after the Tab raced that
     // frame and missed To under a loaded suite. On the way, focus may pass a
     // guard or the body, and no control outside the dialog ever takes it.
-    const to = within(wizard).getByRole("textbox", { name: "To" });
+    const to = within(wizard).getByRole("combobox", { name: "To" });
     const escaped: Element[] = [];
     const watch = (e: FocusEvent) => {
       const el = e.target as HTMLElement;
@@ -225,7 +225,8 @@ describe("accessibility primitives", () => {
       if (document.activeElement === to) break;
     }
     expect(visited[visited.length - 1]).toBe(to);
-    for (const name of ["Cc", "Bcc", "Subject"]) expect(visited).toContain(within(wizard).getByRole("textbox", { name }));
+    for (const name of ["Cc", "Bcc"]) expect(visited).toContain(within(wizard).getByRole("combobox", { name }));
+    expect(visited).toContain(within(wizard).getByRole("textbox", { name: "Subject" }));
     expect(visited).toContain(within(wizard).getByRole("combobox", { name: "Signature" }));
     expect(visited).toContain(within(wizard).getByRole("button", { name: "Create and edit" }));
     // Shift+Tab from To wraps backwards to the last control, still inside.
@@ -234,7 +235,9 @@ describe("accessibility primitives", () => {
     expect(document.activeElement).toBe(visited[visited.length - 2]);
     document.removeEventListener("focusin", watch);
     expect(escaped).toEqual([]);
-    for (const name of ["To", "Cc", "Bcc", "Subject"]) expect(within(wizard).getByRole("textbox", { name })).toBeInTheDocument();
+    // The recipient fields complete contacts, so they are comboboxes.
+    for (const name of ["To", "Cc", "Bcc"]) expect(within(wizard).getByRole("combobox", { name })).toBeInTheDocument();
+    expect(within(wizard).getByRole("textbox", { name: "Subject" })).toBeInTheDocument();
     expect(within(wizard).getByRole("combobox", { name: "Signature" })).toBeInTheDocument();
   });
 
@@ -252,7 +255,7 @@ describe("accessibility primitives", () => {
     await user.keyboard("j");
     await user.keyboard("ce");
     const recipients = await screen.findByRole("dialog", { name: "Edit recipients" });
-    await waitFor(() => expect(within(recipients).getByRole("textbox", { name: "To" })).toHaveFocus());
+    await waitFor(() => expect(within(recipients).getByRole("combobox", { name: "To" })).toHaveFocus());
   });
 
   it("mounts the editing banner's live region empty, and names its buttons after the draft", async () => {

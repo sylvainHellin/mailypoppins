@@ -45,7 +45,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/keymap/viewKeys.ts` | Each full-pane view's key table, read before any prefix arms |
 | `src/components/{shell,sidebar,list,search,reader,screens,palette}` | The views; `components/ui` is shadcn's; the reader frame is [reader.md](reader.md) |
 | `src/components/mutations` | The archive, delete, approve, demote and send confirmation, the move picker, and the activity area (notices and send holds) |
-| `src/components/compose` | The compose wizard and recipients dialog, the editing banner, the draft preview, the embedded editor's terminal pane and host, and the leave question |
+| `src/components/compose` | The compose wizard and recipients dialog, their recipient fields' contact completion, the editing banner, the draft preview, the embedded editor's terminal pane and host, and the leave question |
 | `src/components/outbox` | The outbox view |
 | `src/components/views` | The view host, and `EmptyView.tsx`, the placeholder no view uses any more |
 | `src/components/contacts` | The Contacts view, its list and rows |
@@ -250,6 +250,13 @@ A new draft also has a Signature select, filled from `signature_list`, with the 
 The select reads the account's listing in `state.signatures`, which a `signature.changed` or a change in the Signatures dialog makes stale, so it follows while the wizard is open: until the user picks, it shows the default, and a pick stays while its name is listed and falls back to the default when it goes.
 The forward's Subject starts as the forward will write it (`Fwd: `, the rule of `mp_core::draft::fwd_subject`); the TUI asks for the forward's recipients first too, and a reply goes straight to the editor.
 Enter in a field moves to the next one and, after the last, to the submit button; Cmd+Enter or Ctrl+Enter submits from anywhere in the dialog; Escape cancels and writes nothing.
+
+To, Cc and Bcc complete contacts as the TUI's wizard does (`RecipientsInput.tsx`, a `combobox` over a `listbox` named "Contacts"); Subject is a plain field.
+The text after the last comma, trimmed and at least one character, asks `contact_search` for 12 rows 120 ms after the typing pauses, and only the latest query's answer shows.
+The rows, name and address, best first, open under the field with the first highlighted: ArrowDown and ArrowUp move, Enter or Tab accepts, a click accepts, and Escape closes the list and keeps the text, which leaves the dialog open.
+Accepting replaces the text after the last comma with `Name <addr>`, the name quoted when it holds a comma, or the bare address when no message named one, then `, `, and the focus stays in the field.
+A closed list stays closed until the text changes, and with no list open Enter moves on as above.
+When a query finds nothing and the account's index is empty (a `contact_search` for the empty query answers no row), the list shows one row, "No contacts yet: rebuild the index in Contacts", once per focus of the field; it takes no key but Escape, which closes it; Enter still moves on.
 A draft needs at least one recipient across To, Cc and Bcc, the TUI's rule, and trailing separators are trimmed from each field.
 The new draft's file name is the TUI wizard's, `draft-<local time>-<subject slug>`.
 The submit calls `draft_create` with the wizard's `headers`, and `signature` or `no_signature`, then closes the dialog and opens the file in the editor.
