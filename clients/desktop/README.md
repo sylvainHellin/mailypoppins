@@ -13,7 +13,7 @@ The plan is [docs/plans/native-gui.md](../../docs/plans/native-gui.md), and the 
 - M3: approve and demote, the draft preview with its validation and attachments, and the recipients dialog.
 - M3: send and send all approved behind the TUI's confirmations and the daemon's hold, with the Sent, Send cancelled, Failed and Partly delivered outcomes.
 - M3: the outbox view with retry and discard, the sidebar's outbox line as its link, and the queue depth in the status region.
-- M3: opening and saving a message's attachments, the browser rendition, attaching a file to a draft, and fetching a server-only search hit; paths are typed until the dialog plugin brings the native picker.
+- M3: opening and saving a message's attachments, the browser rendition, attaching a file to a draft, and fetching a server-only search hit; a path is typed or picked with Browse in the system's file or folder picker.
 - M4: the Contacts, Calendar and Settings views beside Mail, switched with `Space c`, `Space a` and `Space m`, the sidebar or the palette.
 - M4: the agenda with its past toggle and the source `invite.ics` in the editor, the reader's invitation card, RSVP from the card, `tv` and `V`, and a New invitation form, disabled on a Graph account.
 - M4: ranked contacts with a fuzzy search, compose to a contact, a contact sent as a vCard draft, the address copied, and the index rebuild.

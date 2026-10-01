@@ -26,6 +26,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2.6"
 tauri-plugin-shell = "2.4"
+# The native file and folder pickers of the Save and Attach file dialogs (JS side).
+tauri-plugin-dialog = "2.8"
 mp-client = { path = "../../../crates/mp-client" }
 mp-protocol = { path = "../../../crates/mp-protocol" }
 mp-core = { path = "../../../crates/mp-core" }

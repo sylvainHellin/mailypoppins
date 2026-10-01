@@ -236,7 +236,7 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `cD` | Back to draft, Drafts only | list, reader | `draft_demote` |
 | `x` | Send the cursor draft, approving it first | any pane | `send_draft` (`hold: true`) |
 | `cX` | Send all approved drafts, Drafts only | list, reader | `send_approved` (`hold: true`) |
-| `ta` | Attach a file to the draft, Drafts only: the path dialog | list, reader | `draft_attach` |
+| `ta` | Attach a file to the draft, Drafts only: the path dialog, with Browse for the system's file picker | list, reader | `draft_attach` |
 
 The keys are the TUI's (`clients/tui/src/app/keymap.rs`), and like its MESSAGE and List keys they do nothing from the sidebar.
 `ce`, `cA`, `cD` and `cX` outside the Drafts list say that they are only available in Drafts, in the TUI's words.

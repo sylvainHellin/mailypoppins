@@ -137,7 +137,7 @@ Known limits carried:
 
 Open for M4 and for Sylvain:
 
-- Install `tauri-plugin-dialog` to replace the path text fields in the Save and Attach file dialogs: the crate `tauri-plugin-dialog = "2"`, `.plugin(tauri_plugin_dialog::init())` in the builder, the npm package `@tauri-apps/plugin-dialog`, and the capability `dialog:allow-open` in `src-tauri/capabilities/default.json`.
+- `tauri-plugin-dialog` is installed (2026-10-01, approved by Sylvain): the Save and Attach file dialogs keep their path field and gain a Browse button for the native folder and file picker, with `dialog:allow-open` the only permission granted.
 - Check by eye with `MP_DESKTOP_FIXTURE=1 pnpm tauri dev`: the wizard, the editing banner, the draft preview, the hold card's outcomes, the outbox view and the attachment dialogs; nothing of M3 was run in a real window.
 - Confirm the editor resolution order above: `MP_DESKTOP_EDITOR`, `desktop.json`, `$VISUAL` and `$EDITOR` with terminal editors skipped, the `code`, `zed`, `subl` and `cursor` probes, `open -t`.
 - Confirm that the outbox's Retry and Discard sit behind a confirmation.

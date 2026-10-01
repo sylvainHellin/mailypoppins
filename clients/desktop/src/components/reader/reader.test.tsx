@@ -146,6 +146,36 @@ describe("the reader's attachments", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("Browse picks the directory natively, written with ~, and a closed or missing picker leaves the field", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("ts");
+    const dialog = await screen.findByRole("dialog", { name: "Save attachment" });
+    const dir = within(dialog).getByRole("textbox", { name: "Directory" });
+    const browse = within(dialog).getByRole("button", { name: "Browse for a directory" });
+    // Closed without a pick: nothing changes.
+    await user.click(browse);
+    await waitFor(() => expect(mock.pickerCalls).toHaveLength(1));
+    expect(mock.pickerCalls[0]).toMatchObject({ directory: true, multiple: false, defaultPath: "/home/fixture/Downloads" });
+    expect(dir).toHaveValue("~/Downloads");
+    // A window with no picker says so, and the field stays to be typed.
+    mock.pickerFailure = "plugin dialog not found";
+    await user.click(browse);
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("The file picker did not open (plugin dialog not found); type the path instead");
+    expect(dir).toHaveValue("~/Downloads");
+    mock.pickerFailure = null;
+    mock.picked = "/home/fixture/Mail/Q3";
+    await user.click(browse);
+    await waitFor(() => expect(dir).toHaveValue("~/Mail/Q3"));
+    expect(within(dialog).getByRole("alert")).toBeEmptyDOMElement();
+    expect(within(dialog).getByRole("button", { name: "Save" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await waitFor(() =>
+      expect(argsOf("attachment_save")).toEqual([{ account: "work", row_id: 1001, parts: [0], dest_dir: "~/Mail/Q3" }]),
+    );
+  });
+
   it("keeps the Save dialog open on a relative directory, and offers the last directory used next", async () => {
     const { user } = renderApp();
     await shellReady();

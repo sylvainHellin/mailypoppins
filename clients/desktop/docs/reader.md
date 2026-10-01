@@ -92,9 +92,12 @@ The keys act on the cursor message from the list or the reader, as the TUI's MES
 - `ts` opens the Save dialog with every part checked.
 - A message with none says "No attachments", the TUI's line.
 
-The Save dialog ("Save attachment", or "Save attachments" over several parts) has a checkbox per part and a Directory field, which stands in for the TUI's directory picker and the native folder picker until the dialog plugin is installed.
+The Save dialog ("Save attachment", or "Save attachments" over several parts) has a checkbox per part and a Directory field, the TUI's directory prompt, with "Browse…" beside it, the system's folder picker.
 The field starts at `~/Downloads`, the TUI's default, and then at the last directory a save went to in this window.
 It takes an absolute path or one starting with `~`; a refusal, such as a relative path, shows in the dialog's alert, which keeps it open.
+Browse opens the folder picker at the field's directory, `~` expanded (a relative or empty field leaves the system's choice), and a folder picked fills the field, written with `~` when it lies under the home directory, then moves the focus to Save; closing the picker changes nothing.
+The picker is `tauri-plugin-dialog`'s `open` (`directory: true`), allowed by `dialog:allow-open` ([rust-layer.md](rust-layer.md), "App CSP").
+Where no picker opens, such as a browser under `pnpm dev`, the alert says "The file picker did not open (<why>); type the path instead" and the field stays; the vitest mock answers whatever path a test sets.
 A save that went through closes the dialog and says "Saved 2 files to ~/Downloads" in the activity area, with the directory as typed; parts that failed turn it into an alert naming why.
 
 ## The browser rendition
@@ -117,7 +120,7 @@ Its toolbar, "Draft actions", has Edit in editor (`e`), Edit recipients (`ce`), 
 Approve and Back to draft act on the draft the preview shows and ask nothing, even with drafts marked; a draft being sent is refused with a notice, as by the keys.
 
 Attach file, `ta` in Drafts, opens the "Attach file" dialog, whose File field takes an absolute path or one starting with `~`, stored in the draft as typed.
-The native file picker arrives with the dialog plugin, and the dialog says so under the field.
+Its "Browse…" opens the system's file picker the same way as the Save dialog's, and a file picked fills the field, under the home directory as `~/…`, so a draft keeps a path that resolves on another machine's home too; Attach or Enter then attaches it.
 A path with no file behind it ("No such file: ~/nope.pdf", the TUI's words), a relative path, a directory, and a file the draft already lists are refused in the dialog's alert, which keeps it open for a correction, as the TUI's prompt stays armed.
 An attach that went through closes the dialog and says "Attached <path> to <draft>".
 On a draft, `to` opens one of its files, or picks among several in the same dialog as a message's parts, and `ts` says the files are already on disk.

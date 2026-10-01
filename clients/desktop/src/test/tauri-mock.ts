@@ -127,6 +127,12 @@ export const mock = {
   nextOp: 1,
   /** What `search_server_cancel` answers. */
   cancelOutcome: "cancelled" as "cancelled" | "already_settled",
+  /** What the native picker (`openPicker`) answers: a path, or null as when the user closes it. */
+  picked: null as string | null,
+  /** A rejection of the native picker, as when the window has none (a browser under `pnpm dev`). */
+  pickerFailure: null as unknown,
+  /** The options each `openPicker` call was given. */
+  pickerCalls: [] as Record<string, unknown>[],
   /** The rows the commands read and the mutations change, fresh per test. */
   rows: clone(fixtures.messages),
   drafts: clone(fixtures.drafts),
@@ -345,6 +351,9 @@ export function resetMock(): void {
   mock.interceptLog = [];
   mock.nextOp = 1;
   mock.cancelOutcome = "cancelled";
+  mock.picked = null;
+  mock.pickerFailure = null;
+  mock.pickerCalls = [];
   mock.rows = clone(fixtures.messages);
   mock.drafts = clone(fixtures.drafts);
   mock.holds = clone(fixtures.bootstrap.snapshot.holds);
@@ -1679,6 +1688,16 @@ export const invoke = vi.fn(async <T,>(cmd: string, args?: Record<string, unknow
     await gate;
   }
   return result as T;
+});
+
+/** `@tauri-apps/api/path`'s `homeDir`: the mock's `~`. */
+export const homeDir = vi.fn(async () => MOCK_HOME);
+
+/** `@tauri-apps/plugin-dialog`'s `open`: answers `mock.picked`, or rejects with `mock.pickerFailure`. */
+export const openPicker = vi.fn(async (options: Record<string, unknown> = {}) => {
+  mock.pickerCalls.push(options);
+  if (mock.pickerFailure !== null) throw mock.pickerFailure;
+  return mock.picked;
 });
 
 export const listen = vi.fn(async <T,>(event: string, handler: (e: { payload: T }) => void) => {

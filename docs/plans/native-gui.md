@@ -334,7 +334,7 @@ What is open:
 
 M3 landed on the `gui-m3` branch on 2026-09-30, in the commits `b765c620` to `efe865b5`, each tagged `(#0131)`.
 What shipped per unit, the keys, the fixture simulations, the decisions and what stays open are in the ticket's section ["M3 landed"](../tickets/0131-gui-full-parity.md#m3-landed), and the parity rows it closes in [parity-matrix.md](../parity-matrix.md).
-The attachment save and attach take a typed path, since the native file picker needs `tauri-plugin-dialog`, which is not installed yet.
+The attachment save and attach take a typed path, and since 2026-10-01 a Browse button fills it from the native picker of `tauri-plugin-dialog`.
 
 ### M4: calendar, contacts, signatures and config (#0131)
 
@@ -347,7 +347,7 @@ The attachment save and attach take a typed path, since the native file picker n
 
 M4 landed on the `gui-m4` branch on 2026-09-30, in the commits `f888afce` to `41e3b73f`, each tagged `(#0131)`.
 What shipped per unit, the keys, the fixture simulations, the decisions and what stays open are in the ticket's section ["M4 landed"](../tickets/0131-gui-full-parity.md#m4-landed), and the parity rows it closes in [parity-matrix.md](../parity-matrix.md).
-No plugin was installed: the copies go through `navigator.clipboard.writeText` from the key or click handler instead of the clipboard-manager plugin, and M3's typed path fields stay until the dialog plugin is approved.
+No plugin was installed: the copies go through `navigator.clipboard.writeText` from the key or click handler instead of the clipboard-manager plugin; the dialog plugin came after M5, for M3's path fields.
 The signatures and the vCard are client-side over `mp-core`, since the daemon serves no `signature.*` method and no `contact.vcard`.
 
 ### M5: embedded Neovim (#0130)

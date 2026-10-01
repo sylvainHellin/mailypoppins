@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The desktop client's Save and Attach file dialogs open the system's folder and file picker (#0131).** Browse beside the Directory and File fields opens the macOS picker; what you pick fills the field, with your home directory written `~`, and typing a path still works.
 - **The desktop client repeats a held key, keeps its colours in the editor, shows what a prefix key continues with, and completes recipients (#0137).**
   - A held `j` or `k` repeats in the list and in the embedded editor alike; a value you set yourself with `defaults write` still wins.
   - Neovim and Vim in the embedded editor take the app's own colours in the dark and the light theme, and follow a theme change at the next editor started; Settings' "Editor colours" keeps your own colorscheme instead, and every editor gets `MP_DESKTOP_THEME` for a config of your own.

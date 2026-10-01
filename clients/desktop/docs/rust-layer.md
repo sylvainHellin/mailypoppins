@@ -787,7 +787,9 @@ The policy lives in `tauri.conf.json` under `app.security.csp`:
 - `frame-src mpmsg: http://mpmsg.localhost https: http:`: `https:` and `http:` are there only so that a link clicked in the reader reaches `on_navigation`, which refuses it; with `frame-src mpmsg:` alone the CSP blocks the navigation first and the click dies silently.
 - `dangerousDisableAssetCspModification: ["style-src"]` stops Tauri from adding a nonce to `style-src` when `index.html` carries an inline `<style>`, which would switch `'unsafe-inline'` off.
 
-The capability grants `core:default`, `core:window:allow-destroy` (the close of a window that asked first, see Terminal sessions) and `opener:allow-open-url` scoped to `https://*`, `http://*` and `mailto:*`.
+The capability grants `core:default`, `core:window:allow-destroy` (the close of a window that asked first, see Terminal sessions), `opener:allow-open-url` scoped to `https://*`, `http://*` and `mailto:*`, and `dialog:allow-open`, the native file and folder picker of the Save and Attach file dialogs ([reader.md](reader.md), "Attachments").
+`tauri-plugin-dialog` is registered in the builder for that picker alone, which the webview calls through `@tauri-apps/plugin-dialog`; no command of this layer opens a dialog, and the plugin's save, message, ask and confirm stay unallowed.
+The picker hands back a path, and since no `fs:` permission is granted the webview reads nothing through it: `attachment_save` and `draft_attach` read and write the disk themselves, as they do for a typed path.
 
 ## Environment
 
