@@ -4,15 +4,20 @@
 // before the first of them, since a live region that mounts with its text
 // already inside may not be announced; a failure is its own `role="alert"`.
 // A hold card's end line is a status region of the card, mounted empty with
-// the card, for the same reason.
+// the card, for the same reason. Between the holds and the notices, one card
+// per contact rebuild, RSVP and invitation this window awaits, with Cancel.
 
-import { useCallback, useEffect } from "react";
-import { CircleAlert, CircleCheck, Send, Undo2, X } from "lucide-react";
+import { useCallback, useEffect, useState, type Dispatch } from "react";
+import { CircleAlert, CircleCheck, LoaderCircle, Send, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useMutations } from "@/app/mutations";
 import { useAppState, useDispatch } from "@/app/store";
 import { FAILURES } from "@/app/activity";
-import { visibleNotices, type ActivityNotice, type HoldEntry } from "@/app/state";
+import { RESPONSE_LABEL } from "@/app/rsvp";
+import type { Action } from "@/app/reducer";
+import * as cmd from "@/lib/commands";
+import { asGuiError } from "@/lib/gui-types";
+import { visibleNotices, type ActivityNotice, type AppState, type HoldEntry } from "@/app/state";
 
 /** How long an applied notice stays. */
 export const APPLIED_MS = 5000;
@@ -175,6 +180,83 @@ export function HoldToast({ hold, awaiting = false, onCancel, onGone }: HoldToas
   );
 }
 
+/** An operation this window awaits that a card offers to cancel. */
+export type RunningOperation = { operation_id: string; kind: "contact_rebuild" | "rsvp" | "send_invite"; text: string; cancelLabel: string };
+
+/**
+ * The contact rebuilds, RSVPs and invitations this window awaits, in that
+ * order, once their start answered with an id: before that there is nothing
+ * to name in a cancel.
+ */
+export function runningOperations(s: AppState): RunningOperation[] {
+  const out: RunningOperation[] = [];
+  for (const r of s.rebuilds) {
+    if (!r.operation_id) continue;
+    out.push({ operation_id: r.operation_id, kind: "contact_rebuild", text: `Rebuilding the contact index of ${r.account}…`, cancelLabel: "Cancel the contact rebuild" });
+  }
+  for (const r of s.rsvps) {
+    if (!r.operation_id) continue;
+    out.push({ operation_id: r.operation_id, kind: "rsvp", text: `Sending ${RESPONSE_LABEL[r.response]} to ${r.summary}…`, cancelLabel: "Cancel the RSVP" });
+  }
+  for (const r of s.inviteSends) {
+    if (!r.operation_id) continue;
+    out.push({ operation_id: r.operation_id, kind: "send_invite", text: `Sending the invitation ${r.subject}…`, cancelLabel: "Cancel the invitation" });
+  }
+  return out;
+}
+
+/**
+ * Cancel one operation by id (`operation_cancel`). It stays awaited, so its
+ * `cancelled` finish ends it and says so; a cancel that came too late
+ * answers `already_settled` and its own end says how it went. Resolves
+ * false when the cancel itself failed, which a notice says.
+ */
+export async function cancelOperation(dispatch: Dispatch<Action>, operationId: string): Promise<boolean> {
+  try {
+    await cmd.operationCancel(operationId);
+    return true;
+  } catch (e: unknown) {
+    dispatch({ type: "notice", text: `The cancel failed: ${asGuiError(e).message}`, level: "error" });
+    return false;
+  }
+}
+
+/**
+ * One running operation with its Cancel, disabled while the cancel is in
+ * flight and until the operation's end takes the card away.
+ */
+export function OperationToast({ op }: { op: RunningOperation }) {
+  const dispatch = useDispatch();
+  const [cancelling, setCancelling] = useState(false);
+  return (
+    <div
+      role="group"
+      aria-label={op.text}
+      data-operation={op.operation_id}
+      data-kind={op.kind}
+      className="flex items-center gap-2 rounded-lg border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-md"
+    >
+      <LoaderCircle aria-hidden="true" className="size-4 shrink-0 animate-spin text-muted-foreground" />
+      <p className="min-w-0 flex-1 break-words">{op.text}</p>
+      <Button
+        size="xs"
+        variant="outline"
+        aria-label={op.cancelLabel}
+        disabled={cancelling}
+        onClick={() => {
+          setCancelling(true);
+          void cancelOperation(dispatch, op.operation_id).then((ok) => {
+            if (!ok) setCancelling(false);
+          });
+        }}
+      >
+        <Undo2 aria-hidden="true" />
+        {cancelling ? "Cancelling…" : "Cancel"}
+      </Button>
+    </div>
+  );
+}
+
 /**
  * The activity area. A cancelled hold's notice stays in the model and is not
  * shown, since the hold's own toast says so. While `!` hides the notices the
@@ -186,6 +268,7 @@ export function ActivityStack() {
   const dispatch = useDispatch();
   const m = useMutations();
   const holds = Object.values(s.holds);
+  const running = runningOperations(s);
   const awaited = new Set(s.sends.flatMap((r) => (r.operation_id ? [r.operation_id] : [])));
   // `!` hides the notices (prefs.activityHidden); a hold card always shows.
   const notices = visibleNotices(s);
@@ -205,6 +288,11 @@ export function ActivityStack() {
       <div className="flex flex-col gap-2">
         {holds.map((h) => (
           <HoldToast key={h.operation_id} hold={h} awaiting={awaited.has(h.operation_id)} onCancel={onCancel} onGone={onGone} />
+        ))}
+      </div>
+      <div className="flex flex-col gap-2">
+        {running.map((op) => (
+          <OperationToast key={op.operation_id} op={op} />
         ))}
       </div>
       <div className="flex flex-col gap-2">

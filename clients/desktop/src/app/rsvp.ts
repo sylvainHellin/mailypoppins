@@ -188,6 +188,13 @@ function rsvpEnded(s: AppState, run: RsvpRun, end: OperationEnd): AppState {
   if ("dropped" in end) {
     return pushNotice(next, { kind: "send_failed", account, text: `The RSVP to ${run.summary} was interrupted; check the outbox` });
   }
+  if (end.state === "cancelled") {
+    // The daemon does not stop a reply it already handed to the transport.
+    return pushNotice(
+      { ...next, accounts: markStale(next.accounts) },
+      { kind: "operation_cancelled", account, text: `Stopped waiting for the RSVP to ${run.summary}; the daemon may still send it, check the outbox` },
+    );
+  }
   if (end.state !== "succeeded") {
     return pushNotice(next, { kind: "send_failed", account, text: `RSVP failed: ${end.error ?? end.state}` });
   }

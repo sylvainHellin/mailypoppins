@@ -80,7 +80,8 @@ The type blocks in this document are for reading, and the generated files are th
 | `message_html_meta` | `account`, `row_id` | `MessageMeta` |
 | `search_local` | `params: LocalSearchParams` | `LocalSearchHit[]` |
 | `search_server_start` | `params: ServerSearchParams` | `{ operation_id }` |
-| `search_server_cancel` | `operation_id` | `"cancelled" \| "already_settled"` |
+| `search_server_cancel` | `operation_id` | `"cancelled" \| "already_settled"`; the search is no longer awaited |
+| `operation_cancel` | `operation_id` | `"cancelled" \| "already_settled"`; the operation stays awaited until its finish (see Cancelling) |
 | `message_archive` | `account`, `row_ids` | `MutationBatch` |
 | `message_delete` | `account`, `row_ids` | `MutationBatch` |
 | `message_move` | `account`, `row_ids`, `destination` (slug or label) | `MutationBatch` |
@@ -120,7 +121,6 @@ The type blocks in this document are for reading, and the generated files are th
 | `config_add_account` | `account` (`AccountDraft`) | `ConfigSwap`; a refusal is the daemon's sentence |
 | `config_init` | `account` (`AccountDraft`) | `ConfigInitialised`; refused where a `config.toml` exists |
 | `config_oauth2_login` | `account` | `OperationStarted`, awaited as `oauth2_login` |
-| `config_oauth2_cancel` | `operation_id` | `"cancelled"` or `"already_settled"` |
 | `send_hold_status` | `account` (or `null` for every account) | `HoldListing` |
 | `send_cancel_hold` | `operation_id` | `HoldCancelled` |
 | `send_draft` | `account`, `id`, `hold` | `SendStarted`; rejects with a `SendRefusal` |
@@ -307,6 +307,16 @@ A cancelled hold cancels the operation too, which then ends `cancelled`.
 
 Each ends one of three ways, as the event stream below says: `operation.finished` with `{operation_id, state, result?, error?}`, `operation_settled` with the whole `OperationStatus` after a re-query, or `operation_dropped` when the daemon restarted.
 A send's `state` is `succeeded` once the submission ran, with each recipient's verdict in `recipients`, `failed` with the transport's error, or `cancelled`; a `succeeded` send every recipient refused is a failure to show.
+
+### Cancelling
+
+`operation_cancel {operation_id}` is `operation.cancel` for any operation the layer awaits: the activity area's Cancel of a contact rebuild, an RSVP and an invitation send, and the device-code dialog's Cancel of a sign-in ([shell.md](shell.md), "Actions, dialogs and the activity area").
+The operation stays awaited, so its `operation.finished` with `state: "cancelled"` reaches the webview and ends it like any other end.
+An id the daemon refuses with `-32602`, one that already ended or that it forgot, answers `already_settled`: its own end has come or will come, and says how it went.
+`search_server_cancel` is the same call followed by `forget_operation`, since the search view ends the search itself on the answer; a held send is cancelled with `send_cancel_hold`, not with this.
+
+The daemon settles a cancelled operation at once, but `contact.rebuild`, `calendar.rsvp` and `send.invite` never look at their token after the start: the rebuild may still write its index, and a reply or an invitation already on its way may still go out.
+The frontend therefore words a cancelled end as having stopped waiting, never as undone (shell.md, "Actions, dialogs and the activity area").
 
 ## The outbox
 
@@ -499,7 +509,7 @@ It settles with an `OAuth2Stored`, never the token:
 type OAuth2Stored = { stored: boolean; account: string; kind: string; key: string }; // kind oauth2 or graph, key oauth2-token-<account>
 ```
 
-`config_oauth2_cancel` calls `operation.cancel` and keeps the sign-in awaited, so its `cancelled` finish ends it the usual way; one already over answers `already_settled`.
+The dialog's Cancel is `operation_cancel`, which keeps the sign-in awaited, so its `cancelled` finish ends it the usual way; one already over answers `already_settled`.
 The daemon never hands its cancel token to the provider's poll, so a sign-in finished in the browser after a cancel still caches its token.
 
 ## Desktop settings

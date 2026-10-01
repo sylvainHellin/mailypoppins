@@ -267,7 +267,7 @@ Open for M5 and for Sylvain:
 - The daemon door of the five signature commands has no Rust test, which needs `mp-core`'s test-support override of the config directory.
 - `EmptyView.tsx` is used by no view any more and is kept.
 - The daemon follow-ups M4 worked around are in `BACKLOG.md`: a `signature.*` family with `signature.removed`, `contact.vcard`, an event when a contact index changes (`CON-08`), and a signal for `contact.search`'s refused implicit build.
-- The Tauri layer calls `operation.cancel` through two dedicated commands, `search_server_cancel` and `config_oauth2_cancel`; a generic cancel command would serve a rebuild, an RSVP or an invitation too, and `BACKLOG.md` carries it as optional.
+- The Tauri layer's generic `operation_cancel` (2026-10-01) cancels a contact rebuild, an RSVP, an invitation send and a sign-in from the window, and replaced `config_oauth2_cancel`; `search_server_cancel` stays, since it also stops awaiting the search. The daemon's rebuild, RSVP and invitation workers ignore their token, so a cancel stops the wait and not the work, and the notice says so.
 
 ## Exit gate
 

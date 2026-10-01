@@ -71,6 +71,14 @@ function inviteEnded(s: AppState, run: InviteSendRun, end: OperationEnd): AppSta
   if ("dropped" in end) {
     return pushNotice(next, { kind: "send_failed", account, text: `The invitation ${run.subject} was interrupted; check the outbox` });
   }
+  if (end.state === "cancelled") {
+    // The daemon does not stop an invitation it already handed to the transport.
+    return pushNotice(next, {
+      kind: "operation_cancelled",
+      account,
+      text: `Stopped waiting for the invitation ${run.subject}; the daemon may still send it, check the outbox`,
+    });
+  }
   if (end.state !== "succeeded") {
     return pushNotice(next, { kind: "send_failed", account, text: `The invitation ${run.subject} failed: ${end.error ?? end.state}` });
   }

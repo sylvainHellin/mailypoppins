@@ -184,7 +184,7 @@ From the Drafts list it says "Quick-move is not available in this mailbox", the 
 Toggling read or flag over several rows follows the TUI: flagging wins when any row is unflagged, and marking read when any is unread.
 
 The activity area is a stack at the bottom right of the window, raised above the reader's blocked-link notice while that shows.
-Held sends come first, then the failures, then the applied notices of `state.activity`:
+Held sends come first, then the running operations, then the failures, then the applied notices of `state.activity`:
 
 - An applied batch is a notice that leaves after five seconds.
 - A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, a draft that could not be written or an editor that did not open, a send or an outbox retry that failed, went to only some recipients or was interrupted, and a refused retry or discard are `role="alert"` notices that stay until dismissed.
@@ -208,6 +208,12 @@ Each send hold shows "Sending in N s" with the subject and the account, a progre
 The seconds are the last `send.hold_tick`'s; Cancel calls `send_cancel_hold` and is disabled while that call is in flight.
 A `u` while every live hold is already being cancelled does nothing and says nothing, as the TUI re-queues its cancel silently; "No send is being held" shows only when no hold is live.
 The card's end line is a `role="status"` element mounted empty with the card, so the text it takes is announced.
+
+A running card (`OperationToast`, a `group` named after its line) shows each contact rebuild, RSVP and invitation send this window awaits, once its start answered with an id: "Rebuilding the contact index of <account>…", "Sending Accept to <summary>…", "Sending the invitation <subject>…", in that order (`runningOperations` in `ActivityStack.tsx`).
+Like a hold card it shows while `!` hides the notices, and its Cancel ("Cancel the contact rebuild", "Cancel the RSVP", "Cancel the invitation") calls `operation_cancel` and reads "Cancelling…" until the operation's end takes the card away ([rust-layer.md](rust-layer.md), "Cancelling").
+A cancel the daemon refuses says "The cancel failed: <why>" on the notice line and enables Cancel again; one that came too late changes nothing, and the operation's own end says how it went.
+The daemon settles a cancelled operation at once without stopping its worker, so the cancelled end is an `operation_cancelled` notice that says the window stopped waiting: "Stopped waiting for the contact index of <account>; the daemon may still finish the rebuild", which also makes the account's contacts stale, and "Stopped waiting for the RSVP to <summary>" or "… for the invitation <subject>", each followed by "; the daemon may still send it, check the outbox", which also make the outbox counts stale.
+The notice is not a failure, so it leaves after five seconds and stays in the activity log.
 A hold another client armed says "Sent" when it fires and "Send cancelled" when it is cancelled; a send this window started says "Sending…" from the fire until its operation settles, then its outcome (Compose, "Send").
 An ended card leaves after three seconds through `dismiss_hold`, except a failure or a partial delivery of one draft, which stays until its Dismiss button.
 The fixture seeds one hold (`fixture-hold-seed`, 60 s), so `MP_DESKTOP_FIXTURE=1` shows it at start.
@@ -572,7 +578,7 @@ The header's "Compose", "Send vCard" and "Copy address" buttons, shown while a c
 
 A rebuild is `contact_rebuild`, awaited as `contact_rebuild`: `state.rebuilds` keeps each one this window started (`{token, account, operation_id}`) and `rebuildEarly` an end that overtook the start's answer, as `sends` and `sendEarly` do.
 One runs per account: a second `r` meanwhile says "The contact index of <account> is already being rebuilt".
-While it runs, the header's status line says "Rebuilding the contact index of <account>…" and the "Rebuild index" button is `aria-busy`.
+While it runs, the header's status line says "Rebuilding the contact index of <account>…" and the "Rebuild index" button is `aria-busy`, and the activity area's running card has its Cancel (see Actions, dialogs and the activity area).
 The settle says the TUI's words:
 
 - "Contacts refreshed (N)" when the index was written, and the list is read again;
@@ -641,6 +647,7 @@ Enter sends even while a button behind the dialog still holds the focus, which t
 A reply is `calendar_rsvp`, awaited as `rsvp`: `state.rsvps` keeps each one this window started (`{token, account, row_id, response, summary, operation_id}`) until it settles or is dropped, and `rsvpEarly` holds an end that overtook the start's answer, as `sends` and `sendEarly` do.
 The settle says "Replied <response> to <summary>", with the response word the daemon took and the invitation's summary, and adds "; queued in the outbox" when no recipient took the reply yet.
 A failure says "RSVP failed: <why>", the TUI's words, as does a refused start; a reply dropped by a daemon restart says "The RSVP to <summary> was interrupted; check the outbox".
+While it runs, the activity area's running card can cancel it, and the end then says that the daemon may still send it.
 Every end makes the account's agenda and invitation cards stale, so the card and the agenda row show the new reply once the daemon folded it in.
 
 ### New invitation
@@ -657,7 +664,7 @@ Every other refusal shows verbatim in the form's alert, which keeps it open: the
 On a Graph account the form takes no input, its Send is disabled, and it shows the probe's sentence, the same one the reader's card shows (`invite_refusal`).
 
 A send is `send_invite`, awaited as `send_invite`: `state.inviteSends` keeps each one (`{token, account, subject, operation_id}`) and `inviteSendEarly` an end that overtook the answer.
-The form closes once the send started.
+The form closes once the send started, and the activity area's running card then shows the send, with Cancel.
 The settle says "Sent the invitation <subject>"; one some recipients refused says "The invitation <subject> reached N of M recipients; the outbox names who never got it", one no recipient took that the outbox says why, a failure "The invitation <subject> failed: <why>", and a drop that it was interrupted.
 Every end makes the account's agenda, invitation cards and outbox counts stale, so the invitation appears in the agenda as the user's own once the daemon filed it.
 
@@ -902,7 +909,7 @@ How it ends, in the dialog and as a notice in the activity log:
 - cancelled: the sign-in's cancelled finish, saying the provider's poll runs on, so a sign-in finished in the browser may still complete and store the token;
 - dropped: "The sign-in of <name> was interrupted: <why>", after a daemon restart.
 
-While it runs, "Cancel sign-in" and Escape call `config_oauth2_cancel`; a Cancel before the start answered is sent once the id is known.
+While it runs, "Cancel sign-in" and Escape call `operation_cancel`; a Cancel before the start answered is sent once the id is known.
 The sign-in stays awaited until its `cancelled` finish, which ends it.
 Once it ended, Close or Escape closes the dialog and forgets the sign-in.
 The dialog opens on "Cancel sign-in", then moves the focus to "Copy code" when the code arrives and to Close when it ends.

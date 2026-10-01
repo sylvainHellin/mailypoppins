@@ -2430,3 +2430,10 @@ cmdk 1.1 updates the store's `selectedItemId`, which its `Command.List` and `Com
 A controlled `value` prop sets the selected row (`aria-selected` follows) but leaves `selectedItemId` behind, and cmdk overwrites any `id` passed to a list or an item with its own `useId`.
 A field outside the `Command` that drives the selection itself (`clients/desktop/src/components/compose/RecipientsInput.tsx`) reads the list's id and the `[cmdk-item][aria-selected="true"]` row's id from the DOM through a `MutationObserver` and sets them on the input.
 A click on a row would also blur that field, since cmdk's root is focusable (`tabIndex=-1`): the panel prevents `mousedown`.
+
+## `operation.cancel` settles an operation without stopping a worker that ignores its token
+
+The registry's `cancel` (`src/daemon/operations.rs`) shuts the token, marks the operation `cancelled` and publishes the finish before it answers, whatever the worker is doing.
+Only a worker that checks `handle.token` stops: `sync` does, while `contact.rebuild`, `calendar.rsvp` and `send.invite` never look after the start, so a cancelled rebuild still writes its index and a cancelled RSVP or invitation may still be submitted; the worker's later result is dropped as an invalid transition.
+A client that offers Cancel on such an operation must word the cancelled end as "stopped waiting", never as undone, which is what the desktop's generic `operation_cancel` does (`clients/desktop/docs/rust-layer.md`, "Cancelling").
+`tauri-plugin-dialog` 2.8 pulls `tauri-plugin-fs` in as a dependency and adds a picked path to the fs scope, but with no `fs:` permission in the capability the webview can read nothing through it; only `dialog:allow-open` is granted.

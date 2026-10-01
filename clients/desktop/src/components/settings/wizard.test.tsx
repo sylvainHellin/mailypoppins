@@ -274,7 +274,7 @@ describe("the device-code dialog", () => {
     });
     await within(dialog).findByText("FXTR-CODE");
     await user.click(within(dialog).getByRole("button", { name: "Cancel sign-in" }));
-    await waitFor(() => expect(callsOf("config_oauth2_cancel")).toEqual([{ operation_id: "fixture-oauth-1" }]));
+    await waitFor(() => expect(callsOf("operation_cancel")).toEqual([{ operation_id: "fixture-oauth-1" }]));
     expect(await within(dialog).findByText(cancelledLine("home"))).toBeInTheDocument();
     expect(within(dialog).getByText(/may still complete/)).toBeInTheDocument();
     expect(probe.state.signIn?.outcome?.kind).toBe("cancelled");
@@ -283,7 +283,7 @@ describe("the device-code dialog", () => {
   it("Escape while it runs cancels too, and a denied sign-in shows the provider's sentence", async () => {
     const { user, dialog } = await signInHome();
     await user.keyboard("{Escape}");
-    await waitFor(() => expect(callsOf("config_oauth2_cancel")).toHaveLength(1));
+    await waitFor(() => expect(callsOf("operation_cancel")).toHaveLength(1));
     expect(screen.getByRole("dialog", { name: "Sign in home" })).toBeInTheDocument();
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Sign in home" })).toBeNull());

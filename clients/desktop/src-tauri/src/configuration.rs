@@ -28,8 +28,8 @@
 //! A sign-in is an operation the GUI awaits as `oauth2_login`. Its one
 //! `operation.progress` has phase `device_code` and a message of two tokens,
 //! the verification URL and the user code, split on their one space; it
-//! settles as an [`OAuth2Stored`]. `operation.cancel` settles it `cancelled`,
-//! but the daemon's provider poll runs on, so a sign-in finished in the
+//! settles as an [`OAuth2Stored`]. `operation_cancel` (`operation.cancel`)
+//! settles it `cancelled`, but the daemon's provider poll runs on, so a sign-in finished in the
 //! browser afterwards still caches its token.
 
 use std::time::Duration;
@@ -39,7 +39,7 @@ use serde_json::json;
 use tauri::State;
 
 use crate::calendar::daemon_sentence;
-use crate::commands::{call, decode, with_door, CancelOutcome, OperationStarted};
+use crate::commands::{call, decode, with_door, OperationStarted};
 use crate::error::{Addressing, GuiError};
 use crate::session::{Door, PendingKind, SessionHandle};
 
@@ -65,9 +65,6 @@ const WRITE_BUDGET: Duration = Duration::from_secs(60);
 /// Starting a device-code sign-in: the answer is the operation id, before
 /// the provider is asked anything.
 const LOGIN_START_BUDGET: Duration = Duration::from_secs(10);
-
-/// Cancelling a sign-in.
-const CANCEL_BUDGET: Duration = Duration::from_secs(5);
 
 /// The phase of the one `operation.progress` a sign-in reports, the daemon's
 /// `DEVICE_CODE_PHASE`.
@@ -466,23 +463,6 @@ pub fn config_oauth2_login_on(
     Ok(OperationStarted { operation_id })
 }
 
-/// Cancel a sign-in. It stays awaited, so its `operation.finished`
-/// (`cancelled`) ends it the usual way; one already over answers
-/// `already_settled`.
-pub fn config_oauth2_cancel_on(door: &Door, operation_id: &str) -> Result<CancelOutcome, GuiError> {
-    match call(
-        door,
-        "operation.cancel",
-        json!({"operation_id": operation_id}),
-        CANCEL_BUDGET,
-        Addressing::Resource,
-    ) {
-        Ok(_) => Ok(CancelOutcome::Cancelled),
-        Err(GuiError::NotFound { .. }) => Ok(CancelOutcome::AlreadySettled),
-        Err(e) => Err(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The commands
 // ---------------------------------------------------------------------------
@@ -516,18 +496,6 @@ pub async fn config_oauth2_login(
 ) -> Result<OperationStarted, GuiError> {
     with_door(&session, move |session, door| {
         config_oauth2_login_on(session, door, &account)
-    })
-    .await
-}
-
-/// Cancel a sign-in; the provider poll may still complete it.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn config_oauth2_cancel(
-    session: State<'_, SessionHandle>,
-    operation_id: String,
-) -> Result<CancelOutcome, GuiError> {
-    with_door(&session, move |_, door| {
-        config_oauth2_cancel_on(door, &operation_id)
     })
     .await
 }

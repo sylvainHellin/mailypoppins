@@ -797,25 +797,40 @@ pub fn search_server_start_on(
     Ok(OperationStarted { operation_id })
 }
 
-pub fn search_server_cancel_on(
-    session: &SessionHandle,
-    door: &Door,
-    operation_id: &str,
-) -> Result<CancelOutcome, GuiError> {
-    let result = call(
+/// Cancel any operation by id: `operation.cancel`.
+///
+/// The operation stays awaited, so its `cancelled` finish reaches the
+/// frontend and ends it the way every other end does. One that already
+/// ended, or that the daemon has forgotten, answers `already_settled`: either
+/// way it is not running, and its own end has come or will come.
+///
+/// The daemon settles the operation at once, but a worker that never looks
+/// at its token runs on: a contact rebuild may still write its index, and an
+/// RSVP or an invitation already handed to the transport may still go out.
+pub fn operation_cancel_on(door: &Door, operation_id: &str) -> Result<CancelOutcome, GuiError> {
+    match call(
         door,
         "operation.cancel",
         json!({"operation_id": operation_id}),
         CANCEL_BUDGET,
         Addressing::Resource,
-    );
-    session.forget_operation(operation_id);
-    match result {
+    ) {
         Ok(_) => Ok(CancelOutcome::Cancelled),
-        // Already finished, or forgotten: either way it is not running.
         Err(GuiError::NotFound { .. }) => Ok(CancelOutcome::AlreadySettled),
         Err(e) => Err(e),
     }
+}
+
+/// Cancel a server search and stop awaiting it: the frontend ends the search
+/// itself on the answer, so no finish follows.
+pub fn search_server_cancel_on(
+    session: &SessionHandle,
+    door: &Door,
+    operation_id: &str,
+) -> Result<CancelOutcome, GuiError> {
+    let result = operation_cancel_on(door, operation_id);
+    session.forget_operation(operation_id);
+    result
 }
 
 /// Fetch the server-only message `message_id` of `mailbox` (a sidebar label
@@ -1674,6 +1689,20 @@ pub async fn search_server_cancel(
 ) -> Result<CancelOutcome, GuiError> {
     with_door(&session, move |s, door| {
         search_server_cancel_on(s, door, &operation_id)
+    })
+    .await
+}
+
+/// Cancel an operation this window awaits, which stays awaited until its
+/// `cancelled` finish: a contact rebuild, an RSVP, an invitation send, a
+/// sign-in.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn operation_cancel(
+    session: State<'_, SessionHandle>,
+    operation_id: String,
+) -> Result<CancelOutcome, GuiError> {
+    with_door(&session, move |_, door| {
+        operation_cancel_on(door, &operation_id)
     })
     .await
 }

@@ -57,6 +57,19 @@ describe("the reader's invitation card", () => {
     await waitFor(() => expect(button(within(reader()).getByRole("group", { name: "Reply to the invitation" }), "Tentative")).toBeEnabled());
   });
 
+  it("the activity area's card cancels a running reply, whose end says it may still go out", async () => {
+    const { user } = await openInvitation();
+    await user.click(button(await replies(), "Accept"));
+    const activity = screen.getByRole("region", { name: "Activity" });
+    const running = await within(activity).findByRole("group", { name: "Sending Accept to Steering committee…" });
+    await user.click(within(running).getByRole("button", { name: "Cancel the RSVP" }));
+    await waitFor(() => expect(callsOf("operation_cancel")).toEqual([{ operation_id: "fixture-rsvp-1" }]));
+    expect(
+      await screen.findByText("Stopped waiting for the RSVP to Steering committee; the daemon may still send it, check the outbox"),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(button(within(reader()).getByRole("group", { name: "Reply to the invitation" }), "Accept")).toBeEnabled());
+  });
+
   it("follows invite_cancel: the card says cancelled and the replies are disabled with the TUI's sentence", async () => {
     await openInvitation();
     act(() => simulateInvite(true));

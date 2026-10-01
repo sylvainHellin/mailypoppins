@@ -1385,11 +1385,16 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       mock.signIns.push({ operation_id, account, kind: a.auth_method });
       return { operation_id };
     }
-    case "config_oauth2_cancel": {
+    case "operation_cancel": {
+      // Every operation the mock keeps running until a test settles it.
       const id = String(args.operation_id);
-      const at = mock.signIns.findIndex((r) => r.operation_id === id);
-      if (at < 0) return "already_settled";
-      mock.signIns.splice(at, 1);
+      const runs: { operation_id: string }[][] = [mock.signIns, mock.rebuilds, mock.rsvps, mock.invitesSent];
+      const list = runs.find((l) => l.some((r) => r.operation_id === id));
+      if (!list) return "already_settled";
+      list.splice(
+        list.findIndex((r) => r.operation_id === id),
+        1,
+      );
       emitEnvelope("operation.finished", {
         operation_id: id,
         state: "cancelled",
