@@ -6,7 +6,8 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 ## Now
 
-- [#0130 M5, embedded Neovim composition](docs/tickets/0130-gui-embedded-neovim.md) -- feature _(started 2026-10-01; four units U1 to U4 in the ticket, `portable-pty` and xterm.js 6 pending Sylvain's approval)_
+- [#0130 M5, embedded Neovim composition](docs/tickets/0130-gui-embedded-neovim.md) -- feature _(started 2026-10-01; U1 to U3 landed, U4 is the hand checklist on the Mac)_
+- [#0137 Feedback after M5, the embedded editor in use](docs/tickets/0137-gui-feedback-after-m5.md) -- feature _(started 2026-10-01; key repeat, the editor theme, the prefix popup, recipient completion)_
 
 > Architecture review 2026-08-06, follow-ups #0053 to #0064: [synthesis](.agents/handoff/2026-08-06_architecture-review-synthesis.md). Suggested order is #0053, #0054, #0055, #0056, then #0057 and #0058. #0053, #0054, #0055, #0056, #0057, #0058 and #0064 have shipped. Their post-ship reviews all passed and left deferred notes, which are filed as #0065 to #0071; #0065, #0066, #0067, #0068 and #0071 have shipped.
 
