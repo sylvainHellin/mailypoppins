@@ -19,7 +19,7 @@ import {
   type MutationDialog,
 } from "@/app/state";
 import * as cmd from "@/lib/commands";
-import { asGuiError, type DraftHeaders } from "@/lib/gui-types";
+import { asGuiError, fixtureNotice, type DraftHeaders } from "@/lib/gui-types";
 import type { DraftCreated, DraftKind, DraftMessage } from "@/protocol/types";
 
 /** What a reply or a forward is built from: a stored row, or a server-only hit's own headers. */
@@ -77,13 +77,16 @@ function failed(dispatch: Dispatch<Action>, account: string, what: string, e: un
  * Open a draft file in the editor. The session shows `opening` until
  * `editor_open` answers; a launch that fails (`setup`: the command did not
  * start or exited at once) is a failure notice whose text names
- * `MP_DESKTOP_EDITOR` or the editor setting.
+ * `MP_DESKTOP_EDITOR` or the editor setting. In fixture mode a notice says
+ * that no editor was launched.
  */
 export async function openInEditor(dispatch: Dispatch<Action>, account: string, draftId: string, path: string): Promise<void> {
   dispatch({ type: "compose_opening", account, draftId, path });
   try {
     const launch = await cmd.editorOpen(path);
     dispatch({ type: "compose_editing", account, draftId, editor: launch.editor });
+    const fixture = fixtureNotice(launch);
+    if (fixture) notice(dispatch, fixture);
   } catch (e: unknown) {
     dispatch({ type: "compose_failed", account, draftId, error: asGuiError(e) });
   }

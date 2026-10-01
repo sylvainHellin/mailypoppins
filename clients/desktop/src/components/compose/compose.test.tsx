@@ -162,6 +162,28 @@ describe("the editing banner", () => {
     await waitFor(() => expect(banner()).toBeEmptyDOMElement());
   });
 
+  it("in fixture mode the notice says the editor was not launched and names the command", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    mock.editorFixture = true;
+    await user.keyboard("j");
+    await user.keyboard("r");
+    expect(
+      await screen.findByText(
+        "Fixture mode: the editor was not launched; the command would have been code --wait '/fixture/work/drafts/fixture-draft-1.md'.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("an editor that started shows no fixture notice", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("r");
+    await waitFor(() => expect(banner()).toHaveTextContent("Editing fixture-draft-1.md in code --wait"));
+    expect(screen.queryByText(/Fixture mode: the editor was not launched/)).toBeNull();
+  });
+
   it("an editor that did not start is a failure notice naming what to set", async () => {
     const { user } = renderApp();
     await shellReady();

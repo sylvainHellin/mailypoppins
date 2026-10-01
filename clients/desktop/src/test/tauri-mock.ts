@@ -145,6 +145,8 @@ export const mock = {
   editorOpens: [] as string[],
   /** What `editor_open` rejects with instead of opening, once. */
   editorFailure: null as GuiError | null,
+  /** Whether the editor commands answer as the Rust layer's fixture mode does: journaled, nothing launched. */
+  editorFixture: false,
   /** A draft's fields the listing does not carry, by `<account>/<id>`. */
   draftExtra: {} as Record<string, { bcc: string; body: string }>,
   /** The next minted draft id's counter. */
@@ -341,6 +343,7 @@ export function resetMock(): void {
   mock.gates.clear();
   mock.editorOpens = [];
   mock.editorFailure = null;
+  mock.editorFixture = false;
   mock.draftExtra = {};
   mock.nextDraft = 1;
   mock.editorSetting = null;
@@ -1307,7 +1310,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const failure = mock.editorFailure;
       mock.editorFailure = null;
       if (failure) throw failure;
-      return { editor: `code --wait '${path}'`, source: "probe" };
+      return { editor: `code --wait '${path}'`, source: "probe", fixture: mock.editorFixture };
     }
     case "config_open":
     case "log_open": {
@@ -1318,7 +1321,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const failure = mock.editorFailure;
       mock.editorFailure = null;
       if (failure) throw failure;
-      return { editor: `code --wait '${path}'`, source: "probe" };
+      return { editor: `code --wait '${path}'`, source: "probe", fixture: mock.editorFixture };
     }
     case "config_get":
       return {
@@ -1443,7 +1446,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const failure = mock.editorFailure;
       mock.editorFailure = null;
       if (failure) throw failure;
-      return { editor: `code --wait '${path}'`, source: "probe" };
+      return { editor: `code --wait '${path}'`, source: "probe", fixture: mock.editorFixture };
     }
     case "invite_get": {
       knownAccount(cmd, account);

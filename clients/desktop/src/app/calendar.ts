@@ -6,7 +6,7 @@
 
 import type { Dispatch } from "react";
 import type { AgendaEvent } from "@/protocol/types";
-import { asGuiError, type GuiError } from "@/lib/gui-types";
+import { asGuiError, fixtureNotice, type GuiError } from "@/lib/gui-types";
 import * as cmd from "@/lib/commands";
 import type { Action } from "@/app/reducer";
 import { emptyLoadable, markStale, type AppState, type CalendarView, type Loadable } from "@/app/state";
@@ -198,7 +198,7 @@ export async function openEventSource(s: AppState, dispatch: Dispatch<Action>): 
   }
   try {
     const launch = await cmd.inviteSourceOpen(view.account, event.row_id);
-    dispatch({ type: "notice", text: `Opened the invite.ics of ${eventTitle(event)} in ${launch.editor}` });
+    dispatch({ type: "notice", text: fixtureNotice(launch) ?? `Opened the invite.ics of ${eventTitle(event)} in ${launch.editor}` });
   } catch (e: unknown) {
     const error = asGuiError(e);
     dispatch({ type: "notice", text: error.kind === "not_found" ? error.message : `Open failed: ${error.message}` });

@@ -3,7 +3,7 @@
 // into src/protocol/generated/gui (`pnpm gen:types`) and re-exported here; the protocol
 // shapes they embed come from src/protocol/types.ts.
 
-import type { GuiError } from "@/protocol/generated/gui";
+import type { EditorLaunch, GuiError } from "@/protocol/generated/gui";
 
 export type * from "@/protocol/generated/gui";
 
@@ -60,4 +60,13 @@ export function asGuiError(e: unknown): GuiError {
     return e as GuiError;
   }
   return { kind: "internal", message: e instanceof Error ? e.message : String(e) };
+}
+
+/**
+ * The notice of an editor handoff the Rust layer only journaled: in fixture
+ * mode (`MP_DESKTOP_FIXTURE`) it launches nothing and answers the command
+ * it would have run. Null for an editor that started.
+ */
+export function fixtureNotice(launch: EditorLaunch): string | null {
+  return launch.fixture ? `Fixture mode: the editor was not launched; the command would have been ${launch.editor}.` : null;
 }

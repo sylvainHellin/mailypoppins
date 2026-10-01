@@ -8,7 +8,7 @@ import type { AppState } from "@/app/state";
 import type { MessageMeta } from "@/lib/gui-types";
 import { copyText } from "@/lib/clipboard";
 import * as cmd from "@/lib/commands";
-import { asGuiError, type EditorLaunch } from "@/lib/gui-types";
+import { asGuiError, fixtureNotice, type EditorLaunch } from "@/lib/gui-types";
 
 /**
  * Run one editor handoff and say how it went: the editor it started, the
@@ -18,7 +18,7 @@ import { asGuiError, type EditorLaunch } from "@/lib/gui-types";
 async function openInEditor(dispatch: Dispatch<Action>, what: string, failed: string, run: () => Promise<EditorLaunch>): Promise<void> {
   try {
     const launch = await run();
-    dispatch({ type: "notice", text: `Opened ${what} in ${launch.editor}` });
+    dispatch({ type: "notice", text: fixtureNotice(launch) ?? `Opened ${what} in ${launch.editor}` });
   } catch (e: unknown) {
     const error = asGuiError(e);
     if (error.kind === "not_found") dispatch({ type: "notice", text: error.message, level: "warning" });

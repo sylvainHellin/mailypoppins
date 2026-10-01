@@ -11,7 +11,7 @@ import type { Dispatch } from "react";
 import type { Action } from "@/app/reducer";
 import { emptyLoadable, markStale, type AppState, type Loadable, type SignaturesDialog } from "@/app/state";
 import * as cmd from "@/lib/commands";
-import { asGuiError, type GuiError, type SignatureFile, type SignatureListing } from "@/lib/gui-types";
+import { asGuiError, fixtureNotice, type GuiError, type SignatureFile, type SignatureListing } from "@/lib/gui-types";
 
 /**
  * The account whose listing an open overlay reads: the Signatures dialog's,
@@ -133,7 +133,7 @@ export function deleteSignature(dispatch: Dispatch<Action>, account: string, nam
 export async function editSignature(dispatch: Dispatch<Action>, path: string, name: string): Promise<string | null> {
   try {
     const launch = await cmd.editorOpen(path);
-    dispatch({ type: "notice", text: `Editing signature '${name}' in ${launch.editor}` });
+    dispatch({ type: "notice", text: fixtureNotice(launch) ?? `Editing signature '${name}' in ${launch.editor}` });
     return null;
   } catch (e: unknown) {
     return `Cannot open signature: ${asGuiError(e).message}`;
