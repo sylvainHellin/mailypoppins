@@ -270,7 +270,7 @@ Once the drain runs, each mailbox whose counts moved gets a `state.invalidate` w
 `draft_discard` is followed by `state.remove` for `draft:<account>/<id>`.
 
 `draft_approve` and `draft_demote` follow the same batch rules, and a draft whose file does not parse (`-32010` `draft_invalid`) also fails alone.
-Its failure carries `invalid`, the `draft.invalid` payload: the session keeps a refusal's text but not its `data`, so the path comes from `draft.list`'s skipped file under that stem and the one diagnostic is the refusal's message.
+Its failure carries `invalid`, the `draft.invalid` payload the daemon sends as the refusal's `data`, the file and the parser's diagnostics, which `mp_client::session::refusal` reads off the call's error.
 
 `send_cancel_hold` stops a hold whichever client armed it; a hold that already fired, or never existed, is `not_found`.
 The countdown itself comes from the bootstrap's `holds` and the `send.hold_started`, `send.hold_tick`, `send.hold_fired` and `send.hold_cancelled` events, each carrying one `HoldStatus` with the daemon's `remaining_secs`.
@@ -286,7 +286,7 @@ The countdown itself comes from the bootstrap's `holds` and the `send.hold_start
 4. `send.draft {account, id, hold}`, awaited as `kind: "send"`.
 
 A refused approve stops the send.
-Its `SendRefusal` is the `GuiError`, and for a file that does not parse (`-32010` `draft_invalid`) `invalid` carries the `draft.invalid` payload, rebuilt from the listing's skipped file as `draft_approve` does.
+Its `SendRefusal` is the `GuiError`, and for a file that does not parse (`-32010` `draft_invalid`) `invalid` carries the `draft.invalid` payload, the refusal's `data`, as `draft_approve` does.
 A `send.draft` the daemon refuses leaves the approval in place, as the TUI's does, and `approved` in the answer says whether this call approved the draft.
 `send_approved` starts `send.approved {account, hold}`, awaited as `kind: "send_approved"`.
 
@@ -352,7 +352,7 @@ The daemon refuses nothing about the invitation itself: an RSVP to the user's ow
 
 `invite_refusal` answers whether an account can reply to or send invitations at all.
 The daemon refuses both on a Graph account (`ANO-4`) before it looks at anything else, so the layer reads `account.list`, and for an account whose `backend` is `graph` it calls `calendar.rsvp {account}` alone.
-That call is refused before an operation id exists, and `refusal` is the daemon's sentence, taken off the refusal text by `error::refusal_sentence` (the session keeps a refusal's text and drops its `data`).
+That call is refused before an operation id exists, and `refusal` is the daemon's sentence, taken off the refusal text by `error::refusal_sentence` (the session keeps a refusal's `data` too, behind `mp_client::session::refusal`, and this one carries none a client needs).
 An `imap` account answers `refusal: null` without that call, and an unknown one is `not_found`.
 
 `send_invite` is `mp send --invite`: `send.invite` builds the `VEVENT` and the iMIP message and submits it through the durable outbox, awaited as `kind: "send_invite"` with a `SendOutcome`.

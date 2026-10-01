@@ -1338,7 +1338,22 @@ impl State {
             .get(account)
             .and_then(|l| l.skipped.iter().find(|s| stem_of(&s.path) == id))
         {
-            return Err(refused(method, -32010, &skip.error));
+            // The daemon's `draft.invalid` payload, as `draft_invalid` carries it.
+            let payload = DraftInvalid {
+                account: account.to_string(),
+                id: id.to_string(),
+                path: skip.path.clone(),
+                diagnostics: vec![Diagnostic {
+                    line: None,
+                    message: skip.error.clone(),
+                }],
+            };
+            return Err(refused_with(
+                method,
+                -32010,
+                &skip.error,
+                serde_json::to_value(payload).ok(),
+            ));
         }
         self.draft(method, account, id).cloned()
     }
@@ -2258,8 +2273,22 @@ pub struct Fixture {
     calls: Mutex<Vec<(String, Value)>>,
 }
 
+/// A daemon refusal as the session answers it: the same text, and the typed
+/// error `mp_client::session::refusal` reads back.
 fn refused(method: &str, code: i32, message: &str) -> anyhow::Error {
-    anyhow!("{method}: the daemon refused the call: {message} ({code})")
+    refused_with(method, code, message, None)
+}
+
+/// [`refused`] with the refusal's `data`.
+fn refused_with(method: &str, code: i32, message: &str, data: Option<Value>) -> anyhow::Error {
+    anyhow::Error::new(mp_client::session::Refused {
+        method: method.to_string(),
+        error: mp_protocol::RpcError {
+            code,
+            message: message.to_string(),
+            data,
+        },
+    })
 }
 
 fn param_str<'a>(method: &str, params: &'a Value, key: &str) -> Result<&'a str> {

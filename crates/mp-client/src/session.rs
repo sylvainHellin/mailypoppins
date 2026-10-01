@@ -78,9 +78,10 @@ use log::{info, warn};
 use serde_json::Value;
 use tokio::sync::mpsc as async_mpsc;
 
+use crate::types::ClientError;
 use crate::Connection;
 use mp_protocol::state::Bootstrap;
-use mp_protocol::{EventEnvelope, METHOD_STATE_EVENT, METHOD_STATE_RESYNC_REQUIRED};
+use mp_protocol::{EventEnvelope, RpcError, METHOD_STATE_EVENT, METHOD_STATE_RESYNC_REQUIRED};
 
 use crate::events::{Incoming, Subscription};
 
@@ -116,7 +117,46 @@ const RECONNECT_MAX: Duration = Duration::from_secs(2);
 struct Call {
     method: String,
     params: Value,
-    then: Box<dyn FnOnce(Result<Value, String>) + Send>,
+    then: Box<dyn FnOnce(Result<Value, Failure>) + Send>,
+}
+
+/// Why a call on the session thread failed: the daemon's refusal, kept typed
+/// so its `data` reaches the caller, or anything else, as its sentence.
+enum Failure {
+    Refused(RpcError),
+    Other(String),
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Refused(error) => ClientError::Rpc(error.clone()).fmt(f),
+            Failure::Other(text) => f.write_str(text),
+        }
+    }
+}
+
+/// A daemon refusal a blocking call answered, `data` included (#0131).
+///
+/// The `anyhow::Error` [`Session::call_within`] and [`QueryHandle::call_within`]
+/// answer wraps one of these when the daemon refused the call, and its text is
+/// the text those calls always answered, `<method>: the daemon refused the
+/// call: <message> (<code>)`; [`refusal`] reads it back. A client whose
+/// refusal carries a payload, such as `draft_invalid`'s `draft.invalid`
+/// diagnostics, decodes the payload instead of rebuilding it.
+#[derive(Debug, thiserror::Error)]
+#[error("{method}: {}", ClientError::Rpc(.error.clone()))]
+pub struct Refused {
+    /// The method that was refused.
+    pub method: String,
+    /// The daemon's error, code, message and `data` as they arrived.
+    pub error: RpcError,
+}
+
+/// The daemon's refusal behind an error a blocking call answered, or `None`
+/// for a failure of any other kind (a timeout, a closed session).
+pub fn refusal(error: &anyhow::Error) -> Option<&RpcError> {
+    error.downcast_ref::<Refused>().map(|refused| &refused.error)
 }
 
 /// How the binary opens the first connection, and how it opens a replacement.
@@ -249,9 +289,12 @@ impl Session {
             .spawn(move || {
                 let queries = build();
                 while let Some(call) = inbox.blocking_recv() {
-                    let answer = queries
-                        .call(&call.method, call.params)
-                        .map_err(|e| format!("{e:#}"));
+                    let answer = queries.call(&call.method, call.params).map_err(|e| {
+                        match e.downcast::<Refused>() {
+                            Ok(refused) => Failure::Refused(refused.error),
+                            Err(e) => Failure::Other(format!("{e:#}")),
+                        }
+                    });
                     (call.then)(answer);
                 }
             })
@@ -286,14 +329,15 @@ impl Session {
         let call = Call {
             method: method.to_string(),
             params,
-            then: Box::new(then),
+            then: Box::new(move |answer| then(answer.map_err(|e| e.to_string()))),
         };
+        let closed = || Failure::Other("the daemon session is closed".to_string());
         let Some(sender) = self.calls.as_ref() else {
-            (call.then)(Err("the daemon session is closed".to_string()));
+            (call.then)(Err(closed()));
             return;
         };
         if let Err(e) = sender.send(call) {
-            (e.0.then)(Err("the daemon session is closed".to_string()));
+            (e.0.then)(Err(closed()));
         }
     }
 
@@ -453,7 +497,10 @@ async fn serve(
                     let answer = connection
                         .call(&call.method, call.params)
                         .await
-                        .map_err(|e| format!("{e}"));
+                        .map_err(|e| match e {
+                            ClientError::Rpc(error) => Failure::Refused(error),
+                            other => Failure::Other(format!("{other}")),
+                        });
                     if let Err(ref e) = answer {
                         warn!("[tui] {} failed: {e}", call.method);
                     }
@@ -486,7 +533,7 @@ async fn serve(
                     // At once rather than after the 30 s ceiling, and from
                     // nowhere else: a client that answered a dead daemon out of
                     // the store would be a second engine.
-                    (call.then)(Err("the daemon is not reachable".to_string()));
+                    (call.then)(Err(Failure::Other("the daemon is not reachable".to_string())));
                 }
                 _ = tokio::time::sleep_until(next_attempt) => {
                     if let Some((connection, instance_id)) = (connector.reopen)().await {
@@ -537,7 +584,7 @@ fn call_on(
     params: Value,
     budget: Duration,
 ) -> Result<Value> {
-    let (answer, wait) = sync_mpsc::sync_channel::<Result<Value, String>>(1);
+    let (answer, wait) = sync_mpsc::sync_channel::<Result<Value, Failure>>(1);
     let call = Call {
         method: method.to_string(),
         params,
@@ -550,7 +597,92 @@ fn call_on(
     }
     match wait.recv_timeout(budget) {
         Ok(Ok(value)) => Ok(value),
+        Ok(Err(Failure::Refused(error))) => Err(anyhow::Error::new(Refused {
+            method: method.to_string(),
+            error,
+        })),
         Ok(Err(e)) => Err(anyhow!("{method}: {e}")),
         Err(e) => Err(anyhow!("{method}: no answer from the daemon ({e})")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    use serde_json::json;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    use super::*;
+
+    /// The socket the scripted daemon listens on, which a [`Connector`] of
+    /// plain function pointers can only reach through a static.
+    static SOCKET: OnceLock<PathBuf> = OnceLock::new();
+
+    fn open() -> Pin<Box<dyn Future<Output = Connection> + Send>> {
+        Box::pin(async {
+            Connection::connect(SOCKET.get().expect("the socket is set"))
+                .await
+                .expect("the scripted daemon listens")
+        })
+    }
+
+    /// No second connection: the test ends with the first.
+    const REOPEN: ReopenSession = || Box::pin(async { None });
+
+    /// A refusal keeps its `data` through the session thread, and its text is
+    /// the one every caller already reads (#0131).
+    #[test]
+    fn a_refusal_keeps_its_data_and_its_text() {
+        let dir = std::env::temp_dir().join(format!("mp-client-session-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch dir");
+        let path = dir.join("d.sock");
+        let _ = std::fs::remove_file(&path);
+        SOCKET.set(path.clone()).expect("set once");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let listener = runtime.block_on(async { UnixListener::bind(&path).expect("bind") });
+        let script = std::thread::spawn(move || runtime.block_on(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let answer = json!({"jsonrpc": "2.0", "id": request["id"], "error": {
+                "code": -32010, "message": "line 2: no",
+                "data": {"account": "a", "id": "x", "path": "/p/x.md", "diagnostics": []},
+            }});
+            let mut frame = serde_json::to_vec(&answer).unwrap();
+            frame.push(b'\n');
+            write.write_all(&frame).await.unwrap();
+            // Hold the socket open until the session closes it.
+            let _ = lines.next_line().await;
+        }));
+
+        let session = Session::connect(Connector {
+            open,
+            reopen: REOPEN,
+        }).expect("a session");
+        let error = session
+            .call_within("draft.approve", json!({}), Duration::from_secs(5))
+            .expect_err("refused");
+        assert_eq!(
+            format!("{error:#}"),
+            "draft.approve: the daemon refused the call: line 2: no (-32010)"
+        );
+        let refused = refusal(&error).expect("a typed refusal");
+        assert_eq!(refused.code, -32010);
+        assert_eq!(
+            refused.data.as_ref().map(|d| d["path"].clone()),
+            Some(json!("/p/x.md"))
+        );
+        assert!(refusal(&anyhow!("x: the daemon session is closed")).is_none());
+        drop(session);
+        script.join().expect("the script ran");
     }
 }

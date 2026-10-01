@@ -1,11 +1,12 @@
 //! The one error type every command answers with.
 //!
 //! Serialised as `{kind, message, ...}` so the frontend branches on `kind`
-//! and never on message text. The Rust side has to classify from text in one
-//! place, [`GuiError::from_call`], because `mp_client::session` flattens a
-//! daemon refusal into a string before it crosses the call channel; the
-//! refusal's code survives as the trailing `(<code>)` of
-//! `ClientError::Rpc`'s `Display`, which is what [`rpc_code`] reads.
+//! and never on message text. The Rust side classifies from the error's text
+//! in one place, [`GuiError::from_call`], since the fixture door answers the
+//! same text: a refusal's code is the trailing `(<code>)` of
+//! `ClientError::Rpc`'s `Display`, which is what [`rpc_code`] reads. A command
+//! that needs a refusal's `data` (the `draft.invalid` payload of `-32010`)
+//! reads it with `mp_client::session::refusal` before classifying.
 
 use serde::Serialize;
 

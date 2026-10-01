@@ -25,7 +25,7 @@ use mp_protocol::draft::{
     DraftCreated, DraftKind, DraftListing, DraftLocation, DraftMessage, DraftPreview,
     DraftValidation,
 };
-use mp_protocol::events::{Diagnostic, DraftInvalid};
+use mp_protocol::events::DraftInvalid;
 use mp_protocol::listing::MessageListRow;
 use mp_protocol::send::{HoldListing, OutboxListing};
 use mp_protocol::state::{AccountState, Bootstrap, OutboxCounts, SyncHealthState};
@@ -1261,49 +1261,22 @@ fn about_one_draft(error: &GuiError) -> bool {
         )
 }
 
-/// The daemon's own sentence out of a refusal's text.
-fn refusal_message(text: &str) -> &str {
-    const MARK: &str = "the daemon refused the call: ";
-    let tail = text.find(MARK).map_or(text, |at| &text[at + MARK.len()..]);
-    tail.rfind(" (").map_or(tail, |at| &tail[..at])
-}
-
-/// The `draft.invalid` payload of a `-32010` refusal. The session keeps the
-/// refusal's text but not its `data`, so the path comes from the listing's
-/// skipped files, where an unparseable draft sits under its file stem.
-fn invalid_payload(door: &Door, account: &str, id: &str, error: &GuiError) -> Option<DraftInvalid> {
-    if !matches!(
-        error,
-        GuiError::Protocol {
-            code: Some(-32010),
-            ..
-        }
-    ) {
-        return None;
-    }
-    let listing = call(
-        door,
-        "draft.list",
-        json!({"account": account}),
-        DRAFT_QUERY_BUDGET,
-        Addressing::Resource,
-    )
-    .ok()
-    .and_then(|answer| decode::<DraftListing>("draft.list", answer).ok())?;
-    let skip = listing.skipped.into_iter().find(|skip| {
-        std::path::Path::new(&skip.path)
-            .file_stem()
-            .is_some_and(|stem| stem.to_string_lossy() == id)
-    })?;
-    Some(DraftInvalid {
-        account: account.to_string(),
-        id: id.to_string(),
-        path: skip.path,
-        diagnostics: vec![Diagnostic {
-            line: None,
-            message: refusal_message(error.message()).to_string(),
-        }],
-    })
+/// One call that keeps a `-32010` refusal's `draft.invalid` payload, its
+/// `data`, beside the error the rest of the layer classifies.
+fn call_keeping_invalid(
+    door: &Door,
+    method: &str,
+    params: Value,
+) -> Result<Value, (GuiError, Option<Box<DraftInvalid>>)> {
+    door.call_within(method, params, DRAFT_QUERY_BUDGET)
+        .map_err(|e| {
+            let invalid = mp_client::session::refusal(&e)
+                .filter(|refused| refused.code == mp_protocol::ErrorCode::DraftInvalid.code())
+                .and_then(|refused| refused.data.clone())
+                .and_then(|data| serde_json::from_value(data).ok())
+                .map(Box::new);
+            (GuiError::from_call(&e, Addressing::Resource), invalid)
+        })
 }
 
 /// `draft.approve` or `draft.demote` over `ids`, one call per id in order.
@@ -1313,14 +1286,15 @@ fn draft_status_on(
     account: &str,
     ids: &[String],
 ) -> Result<DraftStatusBatch, GuiError> {
+    let mut invalid = std::collections::BTreeMap::new();
     let (done, failed) = each_of_by(ids, about_one_draft, |id| {
-        let answer = call(
-            door,
-            method,
-            json!({"account": account, "id": id}),
-            DRAFT_QUERY_BUDGET,
-            Addressing::Resource,
-        )?;
+        let answer = call_keeping_invalid(door, method, json!({"account": account, "id": id}))
+            .map_err(|(error, payload)| {
+                if let Some(payload) = payload {
+                    invalid.insert(id.clone(), *payload);
+                }
+                error
+            })?;
         decode::<DraftStatusChanged>(method, answer)
     })?;
     Ok(DraftStatusBatch {
@@ -1328,7 +1302,7 @@ fn draft_status_on(
         failed: failed
             .into_iter()
             .map(|(id, error)| DraftStatusFailure {
-                invalid: invalid_payload(door, account, &id, &error),
+                invalid: invalid.remove(&id),
                 id,
                 error,
             })
@@ -1491,18 +1465,10 @@ pub fn send_draft_on(
     // refusal says whether it does not parse (`-32010`) or does not exist.
     let approve = entry.as_ref().is_none_or(|e| e.status != "approved");
     if approve {
-        let approved = call(
-            door,
-            "draft.approve",
-            json!({"account": account, "id": id}),
-            DRAFT_QUERY_BUDGET,
-            Addressing::Resource,
-        );
-        if let Err(error) = approved {
-            return Err(SendRefusal {
-                invalid: invalid_payload(door, account, id, &error).map(Box::new),
-                error,
-            });
+        let approved =
+            call_keeping_invalid(door, "draft.approve", json!({"account": account, "id": id}));
+        if let Err((error, invalid)) = approved {
+            return Err(SendRefusal { invalid, error });
         }
     }
     let (operation_id, answer) = session.start_operation_answer(
@@ -3008,6 +2974,10 @@ mod tests {
         assert!(!invalid.diagnostics[0].message.contains("-32010"));
         assert_eq!(batch.failed[1].id, "missing");
         assert!(batch.failed[1].invalid.is_none());
+        assert!(
+            f.calls().iter().all(|(method, _)| method != "draft.list"),
+            "the payload is the refusal's data, not a listing read"
+        );
         let value = serde_json::to_value(&batch).expect("json");
         assert!(
             value["failed"][1].get("invalid").is_none(),

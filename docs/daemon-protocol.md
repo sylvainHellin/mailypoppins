@@ -1296,3 +1296,4 @@ The capability list a handshake advertises grew by the three names, which is the
 `draft.create` gained `body?` and `headers?`, the second with `draft.forward`'s contract, so a draft made in a compose wizard is written in one call.
 A `draft.list` row gained `bcc`, the file's `bcc:` field, `null` when it is empty; the row is pinned at eleven keys in `tests/daemon_draft_slice.rs`, and `mp list` reads it not.
 `DraftCreated` gained `subject`, the one the file was written with, so a client names the new draft without reading it; `crates/mp-protocol/fixtures/draft.create_from_message.response.json` carries it.
+On the client side, `mp_client::session` stopped flattening a refusal into its text: the error a blocking call answers wraps `mp_client::session::Refused`, read with `mp_client::session::refusal`, so a `-32010`'s `draft.invalid` payload reaches the caller; the text is the one it always was.

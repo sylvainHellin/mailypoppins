@@ -319,3 +319,42 @@ async fn a_created_draft_names_the_subject_it_was_written_with() {
     .await;
     assert_eq!(bare.subject, "");
 }
+
+// ---------------------------------------------------------------------------
+// 5. A refusal's data
+// ---------------------------------------------------------------------------
+
+/// `draft.approve` on a file that will not parse refuses with `-32010` and
+/// the `draft.invalid` payload as its `data`: the file and the parser's
+/// diagnostics, which a client renders instead of rebuilding them from a
+/// listing (`mp_client::session::refusal` keeps it on the blocking path).
+#[tokio::test]
+async fn an_unparseable_draft_is_refused_with_its_payload() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let stem = fixture::UNPARSEABLE_FILE.trim_end_matches(".md");
+    // The watcher announces a file with no id under its stem once its first
+    // poll settled; until then the stem resolves to nothing (`-32602`).
+    let mut refused = None;
+    for _ in 0..100 {
+        let error = call_err(
+            &mut conn,
+            "draft.approve",
+            json!({"account": fixture::ACCOUNT, "id": stem}),
+        )
+        .await;
+        if error.code != -32602 {
+            refused = Some(error);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let refused = refused.expect("the watcher announced the file");
+    assert_eq!(refused.code, -32010);
+    let payload: mp_protocol::events::DraftInvalid =
+        serde_json::from_value(refused.data.expect("the refusal carries data"))
+            .expect("the data is the draft.invalid payload");
+    assert_eq!(payload.id, stem);
+    assert!(payload.path.ends_with(fixture::UNPARSEABLE_FILE));
+    assert!(!payload.diagnostics.is_empty());
+}
