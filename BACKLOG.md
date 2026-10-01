@@ -6,6 +6,7 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 ## Now
 
+- [#0130 M5, embedded Neovim composition](docs/tickets/0130-gui-embedded-neovim.md) -- feature _(started 2026-10-01; four units U1 to U4 in the ticket, `portable-pty` and xterm.js 6 pending Sylvain's approval)_
 
 > Architecture review 2026-08-06, follow-ups #0053 to #0064: [synthesis](.agents/handoff/2026-08-06_architecture-review-synthesis.md). Suggested order is #0053, #0054, #0055, #0056, then #0057 and #0058. #0053, #0054, #0055, #0056, #0057, #0058 and #0064 have shipped. Their post-ship reviews all passed and left deferred notes, which are filed as #0065 to #0071; #0065, #0066, #0067, #0068 and #0071 have shipped.
 
@@ -144,7 +145,6 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 - Install `tauri-plugin-dialog` in `clients/desktop` so the Save and Attach file dialogs get the native picker instead of a typed path: the crate, the builder's `.plugin(tauri_plugin_dialog::init())`, `@tauri-apps/plugin-dialog`, and `dialog:allow-open` in the capability file -- chore _(needs Sylvain's approval; M4 shipped without it, see #0131 "M3 landed")_
 - Daemon and Rust-layer gaps M3 and M4 worked around client-side: the desktop's required capabilities, signature arguments on `draft.reply` and `draft.forward`, a body on `draft.create`, `bcc` on `DraftEntry`, `subject` on `DraftCreated`, the refusal `data` `mp_client` drops, the empty `SendOutcome.message_id`, `signature.list`, `draft.attach` and an attachment removal, and an awaitable `message.fetch`; since M4 the whole `signature.*` family with a `signature.removed` event (the Phase 3b follow-up above), `contact.vcard`, an event when a contact index changes (`CON-08`), and a signal for `contact.search`'s refused implicit build, which only the daemon log records -- chore _(each workaround is in #0131 "M3 landed" and "M4 landed")_
 - A generic cancel command in the desktop's Tauri layer: only `search_server_cancel` and `config_oauth2_cancel` reach `operation.cancel`, so a contact rebuild, an RSVP or an invitation send cannot be cancelled from the window -- chore _(optional; #0131 "M4 landed")_
-- [#0130 M5, embedded Neovim composition](docs/tickets/0130-gui-embedded-neovim.md) -- feature
 - [#0132 M6, distribution and release](docs/tickets/0132-gui-distribution-and-release.md) -- chore _(needs #0012)_
 
 > Data-access-layer redesign (DECIDED 2026-07-14, decisions settled 2026-07-31): server-as-truth SQLite mirror + content-addressed blob store; drafts local-only, received read-only. Greenfield rebuild on a branch, no dual-write, safety net is `mp-legacy` + the `pre-dal-nuke` tag. Plan: [docs/plans/data-access-layer.md](docs/plans/data-access-layer.md). Stage 0 (#0049, the pre-nuke oracle capture and the `pre-dal-nuke` freeze) is done. Order below is the build order; the stop-gate sits after the #0038 + #0050 + #0052 triple, because the product is only half usable between them. #0038, #0050 and #0052 have all shipped, so the stop-gate is reached and the stages below it are the work after the pause.
