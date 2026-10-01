@@ -41,7 +41,7 @@ A GUI editor (`code -w`, `zed`, `subl`) keeps the external route of M3.
 ### U1, the PTY in Rust (`src-tauri/src/terminal.rs`)
 
 - A session table keyed by a session id: the `portable-pty` master, the child, the reader thread, and the draft it edits.
-- `terminal_spawn(account, id, path, cols, rows, output: Channel)` resolves the editor as `editor.rs` does, refuses a GUI editor with a `setup` error naming it, and starts it with the user's login-shell `PATH` (`$SHELL -lc 'printf %s "$PATH"'`, read once per process), `TERM=xterm-256color`, `COLORTERM=truecolor`, the draft's directory as the working directory, and the draft path as the one argument.
+- `terminal_spawn(account, id, path, cols, rows, output: Channel)` resolves the editor as `editor.rs` does, refuses a GUI editor with a `setup` error naming it, and starts it with the user's login-shell `PATH` (`$SHELL -lc`, read once per process), `TERM=xterm-256color`, `COLORTERM=truecolor`, `LANG` (the login shell's, else `en_US.UTF-8`) when the app has none of `LANG`, `LC_ALL` and `LC_CTYPE`, the draft's directory as the working directory, and the draft path as the one argument.
 - Output goes on the channel as raw bytes (`InvokeResponseBody::Raw`), coalesced in the reader thread to at most 64 KiB or 4 ms per message, which is what the spike's release build was missing.
 - `terminal_write(session, bytes)`, `terminal_resize(session, cols, rows)` and `terminal_kill(session)`.
 - The channel's last message is the exit: a tagged frame carrying the status, so ordering against the last output holds without a second event stream.

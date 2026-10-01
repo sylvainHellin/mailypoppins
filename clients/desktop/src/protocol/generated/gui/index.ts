@@ -72,5 +72,8 @@ export type { SettingKey } from "./SettingKey";
 export type { SignatureFile } from "./SignatureFile";
 export type { SignatureListing } from "./SignatureListing";
 export type { SyncMode } from "./SyncMode";
+export type { TerminalExit } from "./TerminalExit";
+export type { TerminalExitFrame } from "./TerminalExitFrame";
+export type { TerminalStarted } from "./TerminalStarted";
 export type { VcardDraft } from "./VcardDraft";
 export type { VersionInfo } from "./VersionInfo";

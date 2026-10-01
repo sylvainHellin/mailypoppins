@@ -13,6 +13,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `session.rs` | The one `Session`, the `StateTracker` watermark, the event pump, re-bootstrap, the awaited-operations table |
 | `commands.rs` | The Tauri commands and their result types |
 | `editor.rs` | The external editor a draft opens in, and the editor setting |
+| `terminal.rs` | The embedded terminal editor: one PTY session per draft, its reader and pump threads, and the session table |
 | `settings.rs` | `desktop.json`, the desktop's own settings: the editor template, the theme and the reader mode |
 | `attachments.rs` | Attachments, a draft's `attachments:` list, and the browser rendition |
 | `calendar.rs` | The agenda, an agenda entry's `invite.ics` in the editor, a message's invitation, the RSVP, the Graph probe and a new invitation |
@@ -105,6 +106,10 @@ The type blocks in this document are for reading, and the generated files are th
 | `editor_open` | `path` | `EditorLaunch` |
 | `editor_setting_get` | none | `EditorSetting` |
 | `editor_setting_set` | `editor` (or `null` to clear) | `EditorSetting` |
+| `terminal_spawn` | `account`, `id`, `path`, `cols`, `rows`, `output: Channel` | `TerminalStarted`; see Terminal sessions |
+| `terminal_write` | `session`, `data` (a string) | nothing, once the bytes are queued |
+| `terminal_resize` | `session`, `cols`, `rows` | nothing |
+| `terminal_kill` | `session` | nothing, once the exit frame has gone; an unknown session is fine |
 | `setting_get` | `key` (`SettingKey`) | `string \| null`; an unknown key is `not_found` |
 | `setting_set` | `key` (`SettingKey`), `value` (or `null` to remove) | `string \| null`, the value the key holds afterwards; an unknown key is `not_found`, a value the key cannot hold `setup` |
 | `config_open` | none | `EditorLaunch`; `not_found` when the daemon has no `config.toml` |
@@ -556,6 +561,49 @@ The terminals are probed in this order, each on `PATH`, in the three directories
 A value that carries its own `{path}` keeps it where it is.
 `MP_DESKTOP_EDITOR` and the setting are taken verbatim and never wrapped: a terminal editor there names its terminal itself, for example `MP_DESKTOP_EDITOR="open -na Ghostty --args -e hx {path}"`.
 
+## Terminal sessions
+
+`terminal_spawn` runs a terminal editor on a draft in a native PTY (`portable-pty`), which the webview renders with xterm.js; it is the embedded route of M5 (#0130), beside `editor_open`'s external one.
+
+The editor is resolved before any wrapping in a terminal emulator:
+
+1. `MP_DESKTOP_EDITOR`, then the `editor` setting, taken as they are;
+2. else the first of `$VISUAL` and `$EDITOR` that names a terminal editor (`vi`, `vim`, `nvim`, `hx`, `nano` and the rest of `TERMINAL_EDITORS`);
+3. else, when none of the four is set, the first of `nvim`, `vim` and `hx` found.
+
+A GUI editor named there (`code -w`, `zed`) is refused with `setup`, naming it and where it came from; so is an explicit choice of one, and a `$VISUAL`/`$EDITOR` pair that names no terminal editor.
+A bare program is looked for on the login shell's `PATH`, then in `/opt/homebrew/bin`, `/usr/local/bin` and `/usr/bin`, then in `~/.local/share/bob/nvim-bin`, and runs by its absolute path, so a Finder launch finds it; a program found nowhere is `setup`, and so is nothing found at all.
+The login shell's `PATH` and `LANG` come from one `$SHELL -lc` call that prints a mark line, then `$PATH`, then `$LANG`, read after the last mark so whatever the startup files print is skipped; it runs once per process with a 5 s budget, and a shell that fails leaves the process's own `PATH` and no `LANG`, with a warning in the log.
+
+The child runs with the template's words, `{path}` replaced by the draft path or the path appended, in the draft's directory, with the inherited environment plus `PATH` (the login shell's), `TERM=xterm-256color` and `COLORTERM=truecolor`.
+When the app's environment has none of `LANG`, `LC_ALL` and `LC_CTYPE`, which is the case under a Finder launch, the child also gets `LANG`: the login shell's, else `en_US.UTF-8`; without it `/usr/bin/vim` runs in latin1 and splits an umlaut on `x` or `r`.
+A relative path is `protocol` and a missing file `not_found`, as for `editor_open`; a PTY that does not open is `internal`, naming the OS error.
+
+```ts
+type TerminalStarted = { session: number; pid: number | null; editor: string; source: EditorSource; fixture: boolean };
+type TerminalExit = { code: number | null; signal: number | null };
+type TerminalExitFrame = { exit: TerminalExit };
+```
+
+`output` is a `Channel` whose messages are, in order:
+
+- PTY output as raw bytes (`InvokeResponseBody::Raw`, an `ArrayBuffer` in JavaScript), at most 64 KiB each, sent once 64 KiB is reached or 4 ms after the first unsent byte; a frame may end inside a UTF-8 sequence, so the webview decodes with a streaming `TextDecoder`;
+- last, the exit as JSON (`InvokeResponseBody::Json`, an object in JavaScript): `{"exit":{"code":0,"signal":null}}`, `code` when the child exited and `signal` the signal number when one killed it (Unix), both `null` when the status could not be read.
+
+The JavaScript `Channel` replays messages in the order Rust sent them whatever their body, so the exit never overtakes the last output; a frame is told apart by its type, `ArrayBuffer` or object.
+
+`terminal_write` queues the string's UTF-8 bytes, as xterm's `onData` gives them, for the session's writer thread and answers at once, so a child that stops reading (Neovim in a long synchronous command, a `:!cmd`) blocks only that thread, and keystrokes keep their call order.
+A write that fails (`EIO` once the child closed the terminal) ends the writer thread, is logged at debug, and drops the rest of the queue; `terminal_write` answers `Ok` for a session that is still in the table, exited or not.
+`terminal_resize` sets the PTY's size and is dropped once the child exited; for both, an unknown session is `not_found`.
+`terminal_kill` kills the child (SIGHUP, then SIGKILL after 200 ms), waits until the exit frame has gone, and drops the session; the frontend calls it after an exit frame too, which frees the PTY, and a second call is fine.
+A child that exited while something it started keeps the PTY open gets its exit frame after 200 ms of quiet.
+Every live child is killed when the window is destroyed and when the app exits.
+The window's close request kills nothing, since a webview that listens for it decides whether the window closes.
+
+In fixture mode nothing is spawned: the command is journaled as `editor_open`'s is, so `fixture_simulate("editor_save")` plays against the draft, and the answer has `fixture: true` and no `pid`.
+No frame comes until `terminal_kill`, which sends the exit `{code: 0, signal: null}`.
+A fixture with no terminal editor installed journals a bare `nvim`, and a GUI editor is refused as it is outside the fixture.
+
 ## Attachments
 
 A received message's part and its browser rendition are files the daemon writes, one call each: `message.materialise_attachment {account, row_id, part}` and `message.materialise_html {account, row_id}` answer `{handle, path, name, bytes, expires_at}`, with the file at `<data_dir>/runtime/handles/<handle>/<name>` for ten minutes.
@@ -709,7 +757,7 @@ The capability grants `core:default` and `opener:allow-open-url` scoped to `http
 | `MP_DESKTOP_MP_BIN` | The `mp` binary to start the daemon with; else the sidecar next to the executable, then `PATH`, then `~/.cargo/bin/mp`, `/opt/homebrew/bin/mp`, `/usr/local/bin/mp` |
 | `MP_DESKTOP_WINDOW_SIZE=WxH` | The initial window size, e.g. `950x800` for the medium layout or `600x820` for the narrow one; default `1400x900` |
 | `MP_DESKTOP_STUB_OPENER=1` | `open_external` records instead of opening, and a file open only logs |
-| `MP_DESKTOP_EDITOR` | The editor command template `editor_open` runs; see Drafts and the editor |
+| `MP_DESKTOP_EDITOR` | The editor command template `editor_open` and `terminal_spawn` run; see Drafts and the editor, and Terminal sessions |
 | `MP_DESKTOP_LOG` | `error` to `trace`, default `info`; to stderr and `<data>/logs/mp-desktop.log` |
 | `MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR` | The same overrides the binary reads |
 | `MAILYPOPPINS_DAEMON_AUTOSTART=0` | No on-demand start |
