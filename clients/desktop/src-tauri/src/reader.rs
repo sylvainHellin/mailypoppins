@@ -121,14 +121,9 @@ pub fn render(door: &Door, account: &str, row_id: i64) -> Result<Rendered, GuiEr
         )),
         Err(e) => match rpc_code(&format!("{e:#}")) {
             Some(-32004) => materialised(door, &params).map(Rendered::Html),
-            Some(-32602) => {
-                let mut get = params;
-                get["body"] = json!(true);
-                let record = door
-                    .call_within("message.get", get, TEXT_BUDGET)
-                    .map_err(|e| GuiError::from_call(&e, Addressing::Resource))?;
-                Ok(Rendered::Text(record["body"].as_str().map(str::to_string)))
-            }
+            // No markup: the stored plain text, what `message_text` answers.
+            Some(-32602) => crate::commands::message_text_on(door, account, row_id)
+                .map(|text| Rendered::Text(text.body)),
             _ => Err(GuiError::from_call(&e, Addressing::Resource)),
         },
     }
@@ -385,5 +380,19 @@ mod tests {
         let body = String::from_utf8(response.into_body()).expect("utf-8");
         assert!(body.contains("Dachsanierung"));
         assert!(body.contains(MESSAGE_CSP));
+    }
+
+    #[test]
+    fn a_message_without_markup_or_text_says_it_has_no_stored_body() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::mem::forget(rx);
+        let fixture = Arc::new(Fixture::load(tx).expect("fixture"));
+        fixture.clear_body("work", 1002);
+        let door = Door::Fixture(Arc::clone(&fixture));
+        assert_eq!(render(&door, "work", 1002), Ok(Rendered::Text(None)));
+        let response = respond("GET", "/work/1002", Ok(door));
+        assert_eq!(response.headers()["X-Mp-Rendition"], "text");
+        let body = String::from_utf8(response.into_body()).expect("utf-8");
+        assert!(body.contains("(This message has no stored body.)"));
     }
 }

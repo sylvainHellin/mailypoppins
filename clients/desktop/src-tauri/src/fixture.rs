@@ -2509,6 +2509,22 @@ impl Fixture {
             .unwrap_or_default()
     }
 
+    /// Drop the stored plain-text body of one row, as a message the store
+    /// holds no readable text for.
+    #[cfg(test)]
+    pub fn clear_body(&self, account: &str, row_id: i64) {
+        let mut s = self.state();
+        if let Some((mailbox, i)) = s.locate(account, row_id) {
+            if let Some(rows) = s
+                .messages
+                .get_mut(account)
+                .and_then(|b| b.get_mut(&mailbox))
+            {
+                rows[i]["body"] = Value::Null;
+            }
+        }
+    }
+
     /// How long one second of a hold lasts; a test shortens it.
     #[cfg(test)]
     pub fn set_hold_second(&self, second: Duration) {

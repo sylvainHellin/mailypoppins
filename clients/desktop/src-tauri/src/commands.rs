@@ -2516,6 +2516,26 @@ mod tests {
     }
 
     #[test]
+    fn the_text_body_keeps_its_line_breaks_and_a_missing_one_is_none() {
+        let (d, f) = fixture_door();
+        let text = message_text_on(&d, "work", 1001).expect("text");
+        assert_eq!((text.account.as_str(), text.row_id), ("work", 1001));
+        let body = text.body.expect("a body");
+        assert!(body.starts_with("Hi,\n\nthe quarterly ledger"), "{body:?}");
+        assert!(f
+            .calls()
+            .iter()
+            .any(|(m, p)| m == "message.get" && p["row_id"] == 1001 && p["body"] == true));
+        f.clear_body("work", 1001);
+        let none = message_text_on(&d, "work", 1001).expect("a row with no body");
+        assert_eq!(none.body, None);
+        assert_eq!(
+            serde_json::to_value(&none).expect("json"),
+            json!({"account": "work", "row_id": 1001, "body": null})
+        );
+    }
+
+    #[test]
     fn absent_headers_decode_as_none() {
         let meta = message_html_meta_on(&door(), "home", 1021).expect("meta");
         assert_eq!(meta.subject, None);

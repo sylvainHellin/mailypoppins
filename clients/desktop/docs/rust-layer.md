@@ -75,7 +75,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `list_accounts` | none | `AccountInfo[]` |
 | `list_mailboxes` | `account` | `MailboxListing` |
 | `list_messages` | `account`, `mailbox` (slug) | `MessageList` |
-| `message_text` | `account`, `row_id` | `MessageText` |
+| `message_text` | `account`, `row_id` | `MessageText`: the stored plain text, `body: null` when the store holds none; `not_found` for an unknown row |
 | `message_html_meta` | `account`, `row_id` | `MessageMeta` |
 | `search_local` | `params: LocalSearchParams` | `LocalSearchHit[]` |
 | `search_server_start` | `params: ServerSearchParams` | `{ operation_id }` |
@@ -656,10 +656,14 @@ The header is always `MESSAGE_CSP` and never a policy read out of the message: a
 The scheme answers:
 
 - 200 with the rendition, the daemon's policy (`reader::MESSAGE_CSP`) as a `Content-Security-Policy` header, `X-Content-Type-Options: nosniff` and `X-Mp-Rendition: html`;
-- 200 with the stored plain text in a minimal document and `X-Mp-Rendition: text` when the message has no markup;
+- 200 with the stored plain text in a minimal document and `X-Mp-Rendition: text` when the message has no markup, read through `message_text_on`;
 - 404 for an unknown account or row, 400 for a malformed URL, 503 while no daemon answers, 504 on a timeout.
 
 A rendition over 8 MiB goes through `message.materialise_html`, and the handle is released as soon as the file is read.
+
+`message_text` answers the reader's text mode: `message.get {account, row_id, body: true}`, whose `body` is the stored plain text the TUI's preview shows (`mp_client::queries::message_body`).
+A row the store has no body for answers `body: null`, and the frontend says so rather than switching modes; a row that does not exist is `not_found`.
+The scheme's plain-text fallback reads the same command, so the two never disagree.
 
 ## Menus
 
