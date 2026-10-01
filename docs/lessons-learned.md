@@ -2342,3 +2342,10 @@ The desktop's wizard test waits for focus to settle inside the dialog after ever
 `draft.approve` and the send path fall back to the watcher's `resolve`, which knows an unparseable file by its stem, so they answer `-32010` with the diagnostics (`src/daemon/methods/draft.rs`, the approve path).
 `draft.discard` goes through `resolve`, which scans only the drafts that parse, so the same stem answers `-32602` "no draft matches", and no method takes a path.
 The TUI deletes a skipped file from disk itself (`delete_skip_file` in `clients/tui/src/commands.rs`); the desktop names the path and leaves the file alone.
+
+## Ghostty on macOS starts no terminal from its binary, and Alacritty's binary may be killed
+
+`/Applications/Ghostty.app/Contents/MacOS/ghostty -e nvim` refuses on macOS: its `--help` says launching the terminal from the CLI is not supported there, and `+new-window` is not supported on the platform either.
+The desktop's editor wrapper starts it as `open -na /Applications/Ghostty.app --args -e <editor> <path>` instead, which Ghostty's help names (`clients/desktop/src-tauri/src/editor.rs`, `terminal_template`).
+On the development Mac `alacritty --help` and `--version` die with SIGKILL (exit 137), so its `-e` form comes from Alacritty's documentation and was not checked against the binary.
+Terminal.app takes the editor through `osascript` with the words as `argv` and `quoted form of` each, so neither the editor's arguments nor the draft's path is ever spliced into AppleScript text.
