@@ -3,4 +3,4 @@
 /**
  * Where the editor command came from.
  */
-export type EditorSource = "env" | "setting" | "visual" | "editor" | "probe" | "fallback";
+export type EditorSource = "env" | "setting" | "visual" | "editor" | "terminal" | "probe" | "fallback";

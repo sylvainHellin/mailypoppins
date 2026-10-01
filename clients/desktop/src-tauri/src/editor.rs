@@ -13,10 +13,15 @@
 //! 1. `MP_DESKTOP_EDITOR`;
 //! 2. the `editor` key of `desktop.json` in the app config directory, which
 //!    `editor_setting_get` and `editor_setting_set` read and write;
-//! 3. `$VISUAL`, then `$EDITOR`, each skipped when it names a terminal-only
-//!    editor ([`TERMINAL_EDITORS`]), which cannot run without a terminal;
+//! 3. `$VISUAL`, then `$EDITOR`; one naming a terminal-only editor
+//!    ([`TERMINAL_EDITORS`]) runs inside the first terminal emulator found
+//!    ([`terminal_template`]), and is skipped when there is none;
 //! 4. the first of [`PROBE_NAMES`] found in [`PROBE_DIRS`];
 //! 5. `open -t` on macOS, `xdg-open` elsewhere.
+//!
+//! `MP_DESKTOP_EDITOR` and the setting are taken verbatim and never wrapped:
+//! a terminal editor there names its terminal itself, as in
+//! `wezterm start -- nvim {path}`.
 //!
 //! A template is split with shell-words rules (quotes and backslashes, no
 //! expansion, no shell). `{path}` in any word is replaced by the draft's path;
@@ -67,11 +72,76 @@ pub const PROBE_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/b
 /// How long a launch is watched for an early failure.
 pub const EXIT_WINDOW: Duration = Duration::from_secs(2);
 
-/// Editors that need a terminal; `$VISUAL` or `$EDITOR` naming one is skipped.
-/// An explicit `MP_DESKTOP_EDITOR` or setting is never skipped.
+/// Editors that need a terminal; `$VISUAL` or `$EDITOR` naming one runs in a
+/// terminal emulator, or is skipped when none is found. An explicit
+/// `MP_DESKTOP_EDITOR` or setting is never wrapped nor skipped.
 pub const TERMINAL_EDITORS: &[&str] = &[
     "vi", "vim", "nvim", "hx", "helix", "nano", "pico", "micro", "kak", "joe", "ne", "mg", "ed",
 ];
+
+/// A terminal emulator a terminal editor can run in.
+pub struct TerminalApp {
+    /// The program, looked up on `PATH` and in [`PROBE_DIRS`].
+    pub program: &'static str,
+    /// The macOS app bundle's name in `/Applications`, without `.app`.
+    pub bundle: &'static str,
+    /// The words between the terminal and the editor's own command line.
+    pub args: &'static [&'static str],
+    /// Whether macOS starts it with `open -na <bundle> --args`, since its
+    /// binary refuses to start a terminal from the command line there.
+    pub macos_open: bool,
+}
+
+/// The terminal emulators probed for a terminal editor, in this order.
+/// macOS then falls back to Terminal.app ([`TERMINAL_APP`]), anything else to
+/// `x-terminal-emulator -e`.
+pub const TERMINALS: &[TerminalApp] = &[
+    TerminalApp {
+        program: "wezterm",
+        bundle: "WezTerm",
+        args: &["start", "--"],
+        macos_open: false,
+    },
+    TerminalApp {
+        program: "ghostty",
+        bundle: "Ghostty",
+        args: &["-e"],
+        macos_open: true,
+    },
+    TerminalApp {
+        program: "kitty",
+        bundle: "kitty",
+        args: &["--"],
+        macos_open: false,
+    },
+    TerminalApp {
+        program: "alacritty",
+        bundle: "Alacritty",
+        args: &["-e"],
+        macos_open: false,
+    },
+];
+
+/// Terminal.app's binary, whose presence makes it the macOS last resort.
+pub const TERMINAL_APP: &str =
+    "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal";
+
+/// The AppleScript that runs its arguments, each shell-quoted, in a new
+/// Terminal.app window: the editor's words and the path arrive as `argv`, so
+/// neither is ever spliced into the script's text.
+const TERMINAL_APP_SCRIPT: &[&str] = &[
+    "on run argv",
+    "set c to \"\"",
+    "repeat with w in argv",
+    "set c to c & quoted form of (w as text) & \" \"",
+    "end repeat",
+    "tell application \"Terminal\" to activate",
+    "tell application \"Terminal\" to do script c",
+    "end run",
+];
+
+/// The Linux last resort, Debian's alternatives name for the default terminal.
+const LINUX_TERMINAL: &str = "x-terminal-emulator";
 
 /// Where the editor command came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -87,6 +157,9 @@ pub enum EditorSource {
     Visual,
     /// `$EDITOR`.
     Editor,
+    /// A terminal editor from `$VISUAL` or `$EDITOR`, run inside the first
+    /// terminal emulator found.
+    Terminal,
     /// A GUI editor found in a probe directory.
     Probe,
     /// `open -t` (macOS) or `xdg-open`.
@@ -104,6 +177,8 @@ pub struct EditorLaunch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub source: EditorSource,
+    /// Fixture mode: the command was journaled and nothing was launched.
+    pub fixture: bool,
 }
 
 /// The editor setting and what it resolves to now.
@@ -162,7 +237,11 @@ pub fn resolve(lookup: &Lookup) -> Resolved {
     ] {
         if let Some(v) = lookup.var(name) {
             if needs_terminal(&v) {
-                tracing::info!("[editor] ${name}={v} needs a terminal; skipped");
+                if let Some(template) = terminal_template(lookup, &v) {
+                    tracing::info!("[editor] ${name}={v} runs in a terminal: {template}");
+                    return found(template, EditorSource::Terminal);
+                }
+                tracing::info!("[editor] ${name}={v} needs a terminal and none was found; skipped");
                 continue;
             }
             return found(v, source);
@@ -178,6 +257,72 @@ pub fn resolve(lookup: &Lookup) -> Resolved {
     }
     let fallback = if lookup.macos { "open -t" } else { "xdg-open" };
     found(fallback.to_string(), EditorSource::Fallback)
+}
+
+/// `editor` (a `$VISUAL` or `$EDITOR` value, with its own arguments) run
+/// inside the first terminal emulator found, as a template that still takes
+/// `{path}`; `None` when no terminal is found or `editor` does not split.
+///
+/// Each of [`TERMINALS`] is looked for on `PATH`, in [`PROBE_DIRS`] and, on
+/// macOS, as `/Applications/<bundle>.app/Contents/MacOS/<program>`; macOS then
+/// falls back to Terminal.app through `osascript`, anything else to
+/// `x-terminal-emulator -e`. The editor's program is located the same way,
+/// since the terminal may not see the shell's `PATH`.
+pub fn terminal_template(lookup: &Lookup, editor: &str) -> Option<String> {
+    let mut words = split(editor).ok()?;
+    let program = words.first_mut()?;
+    let path_var = lookup.var("PATH");
+    *program = locate(program, path_var.as_deref(), lookup.is_file);
+    if !words.iter().any(|w| w.contains("{path}")) {
+        words.push("{path}".to_string());
+    }
+    let found_on_path = |program: &str| {
+        let at = locate(program, path_var.as_deref(), lookup.is_file);
+        (at != program).then_some(at)
+    };
+    let mut prefix: Option<Vec<String>> = None;
+    for t in TERMINALS {
+        let bundle = format!("/Applications/{}.app", t.bundle);
+        let in_bundle = format!("{bundle}/Contents/MacOS/{}", t.program);
+        if lookup.macos && t.macos_open {
+            if (lookup.is_file)(Path::new(&in_bundle)) {
+                prefix = Some(
+                    ["open", "-na", &bundle, "--args"]
+                        .into_iter()
+                        .chain(t.args.iter().copied())
+                        .map(str::to_string)
+                        .collect(),
+                );
+                break;
+            }
+            continue;
+        }
+        let at = found_on_path(t.program).or_else(|| {
+            (lookup.macos && (lookup.is_file)(Path::new(&in_bundle))).then_some(in_bundle)
+        });
+        if let Some(at) = at {
+            prefix = Some(
+                std::iter::once(at)
+                    .chain(t.args.iter().map(|a| a.to_string()))
+                    .collect(),
+            );
+            break;
+        }
+    }
+    if prefix.is_none() && lookup.macos && (lookup.is_file)(Path::new(TERMINAL_APP)) {
+        let mut words = vec!["osascript".to_string()];
+        for line in TERMINAL_APP_SCRIPT {
+            words.push("-e".to_string());
+            words.push(line.to_string());
+        }
+        prefix = Some(words);
+    }
+    if prefix.is_none() && !lookup.macos {
+        prefix = found_on_path(LINUX_TERMINAL).map(|at| vec![at, "-e".to_string()]);
+    }
+    let all = prefix?.into_iter().chain(words);
+    let quoted = all.map(|w| if w == "{path}" { w } else { quote(&w) });
+    Some(quoted.collect::<Vec<_>>().join(" "))
 }
 
 /// Whether a template's program is a terminal-only editor.
@@ -353,6 +498,10 @@ fn setup_error(why: &str, source: EditorSource) -> GuiError {
     let hint = match source {
         EditorSource::Env => format!("check {EDITOR_ENV}"),
         EditorSource::Setting => "check the editor setting".to_string(),
+        EditorSource::Terminal => format!(
+            "the terminal comes from $VISUAL or $EDITOR naming a terminal editor; \
+             set {EDITOR_ENV} or the editor setting to another, e.g. \"wezterm start -- nvim {{path}}\""
+        ),
         _ => format!(
             "set {EDITOR_ENV} or the editor setting, e.g. \"code --wait {{path}}\"; \
              a terminal editor needs a terminal command such as \"wezterm start -- hx {{path}}\""
@@ -392,6 +541,7 @@ pub fn open_on(
             editor,
             pid: None,
             source: resolved.source,
+            fixture: true,
         });
     }
     tracing::info!("[editor] {editor}");
@@ -400,6 +550,7 @@ pub fn open_on(
         editor,
         pid: Some(pid),
         source: resolved.source,
+        fixture: false,
     })
 }
 
@@ -628,6 +779,188 @@ mod tests {
             resolve(&lookup(&explicit, None, &files)).source,
             EditorSource::Env
         );
+    }
+
+    fn files_at(paths: &'static [&'static str]) -> impl Fn(&Path) -> bool {
+        move |p| paths.iter().any(|f| p == Path::new(f))
+    }
+
+    #[test]
+    fn a_terminal_editor_in_the_environment_runs_in_the_first_terminal_found() {
+        let files = files_at(&[
+            "/opt/homebrew/bin/nvim",
+            "/opt/homebrew/bin/wezterm",
+            "/opt/homebrew/bin/kitty",
+            "/usr/local/bin/code",
+            TERMINAL_APP,
+        ]);
+        let env = env_of(&[("EDITOR", "nvim")]);
+        let r = resolve(&lookup(&env, None, &files));
+        assert_eq!(
+            (r.template.as_str(), r.source),
+            (
+                "/opt/homebrew/bin/wezterm start -- /opt/homebrew/bin/nvim {path}",
+                EditorSource::Terminal
+            ),
+            "a terminal wins over the GUI probes, and wezterm over kitty"
+        );
+        assert_eq!(
+            command_line(&r.template, "/d/a b.md").expect("line"),
+            [
+                "/opt/homebrew/bin/wezterm",
+                "start",
+                "--",
+                "/opt/homebrew/bin/nvim",
+                "/d/a b.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn each_terminal_has_its_own_command_shape_in_probe_order() {
+        let env = env_of(&[("EDITOR", "hx"), ("PATH", "/x")]);
+        let template = |files: &'static [&'static str]| {
+            let is = files_at(files);
+            resolve(&lookup(&env, None, &is)).template
+        };
+        assert_eq!(
+            template(&["/Applications/WezTerm.app/Contents/MacOS/wezterm"]),
+            "/Applications/WezTerm.app/Contents/MacOS/wezterm start -- hx {path}",
+            "an app bundle counts when nothing is on PATH"
+        );
+        assert_eq!(
+            template(&[
+                "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+                "/x/kitty"
+            ]),
+            "open -na /Applications/Ghostty.app --args -e hx {path}",
+            "Ghostty starts through open on macOS, and before kitty"
+        );
+        assert_eq!(
+            template(&["/x/kitty", "/opt/homebrew/bin/alacritty"]),
+            "/x/kitty -- hx {path}"
+        );
+        assert_eq!(
+            template(&["/Applications/Alacritty.app/Contents/MacOS/alacritty"]),
+            "/Applications/Alacritty.app/Contents/MacOS/alacritty -e hx {path}"
+        );
+    }
+
+    #[test]
+    fn terminal_app_is_the_macos_last_resort_through_osascript() {
+        let files = files_at(&[TERMINAL_APP, "/usr/bin/zed"]);
+        let env = env_of(&[("VISUAL", "nvim -u 'my init.lua'")]);
+        let r = resolve(&lookup(&env, None, &files));
+        assert_eq!(r.source, EditorSource::Terminal);
+        let argv = command_line(&r.template, "/d/it's.md").expect("line");
+        assert_eq!(argv[0], "osascript");
+        assert_eq!(
+            &argv[1..17],
+            TERMINAL_APP_SCRIPT
+                .iter()
+                .flat_map(|l| ["-e", l])
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+        assert_eq!(
+            &argv[17..],
+            ["nvim", "-u", "my init.lua", "/d/it's.md"],
+            "the editor's words and the path reach the script as argv, unspliced"
+        );
+    }
+
+    #[test]
+    fn with_no_terminal_a_terminal_editor_falls_through_as_before() {
+        let none = |_: &Path| false;
+        let env = env_of(&[("VISUAL", "vim"), ("EDITOR", "nvim")]);
+        let r = resolve(&lookup(&env, None, &none));
+        assert_eq!(
+            (r.template.as_str(), r.source),
+            ("open -t", EditorSource::Fallback)
+        );
+        let mut linux = lookup(&env, None, &none);
+        linux.macos = false;
+        assert_eq!(resolve(&linux).source, EditorSource::Fallback);
+        // Terminal.app's binary means nothing off macOS, nor do the bundles.
+        let mac_only = files_at(&[
+            TERMINAL_APP,
+            "/Applications/WezTerm.app/Contents/MacOS/wezterm",
+        ]);
+        let mut linux = lookup(&env, None, &mac_only);
+        linux.macos = false;
+        assert_eq!(resolve(&linux).template, "xdg-open");
+    }
+
+    #[test]
+    fn linux_runs_ghostty_directly_and_falls_back_to_x_terminal_emulator() {
+        let env = env_of(&[("EDITOR", "nano")]);
+        let ghostty = files_at(&["/usr/bin/ghostty", "/usr/bin/x-terminal-emulator"]);
+        let mut l = lookup(&env, None, &ghostty);
+        l.macos = false;
+        assert_eq!(resolve(&l).template, "/usr/bin/ghostty -e nano {path}");
+        let x = files_at(&["/usr/bin/x-terminal-emulator"]);
+        let mut l = lookup(&env, None, &x);
+        l.macos = false;
+        let r = resolve(&l);
+        assert_eq!(
+            (r.template.as_str(), r.source),
+            (
+                "/usr/bin/x-terminal-emulator -e nano {path}",
+                EditorSource::Terminal
+            )
+        );
+    }
+
+    #[test]
+    fn visual_keeps_its_arguments_and_its_own_placeholder() {
+        let files = files_at(&["/opt/homebrew/bin/wezterm"]);
+        let env = env_of(&[
+            ("VISUAL", "nvim -u 'my init.lua' +10 {path}"),
+            ("EDITOR", "code -w"),
+        ]);
+        let r = resolve(&lookup(&env, None, &files));
+        assert_eq!(
+            (r.template.as_str(), r.source),
+            (
+                "/opt/homebrew/bin/wezterm start -- nvim -u 'my init.lua' +10 {path}",
+                EditorSource::Terminal
+            )
+        );
+        assert_eq!(
+            command_line(&r.template, "/d/x.md").expect("line")[3..],
+            ["nvim", "-u", "my init.lua", "+10", "/d/x.md"]
+        );
+    }
+
+    #[test]
+    fn a_gui_editor_and_an_explicit_choice_are_never_wrapped() {
+        let files = files_at(&["/opt/homebrew/bin/wezterm", TERMINAL_APP]);
+        let env = env_of(&[("EDITOR", "zed -w")]);
+        let r = resolve(&lookup(&env, None, &files));
+        assert_eq!(
+            (r.template.as_str(), r.source),
+            ("zed -w", EditorSource::Editor)
+        );
+        let env = env_of(&[(EDITOR_ENV, "nvim"), ("EDITOR", "nvim")]);
+        let r = resolve(&lookup(&env, Some("hx"), &files));
+        assert_eq!((r.template.as_str(), r.source), ("nvim", EditorSource::Env));
+        let env = env_of(&[("EDITOR", "nvim")]);
+        let r = resolve(&lookup(&env, Some("hx {path}"), &files));
+        assert_eq!(
+            (r.template.as_str(), r.source),
+            ("hx {path}", EditorSource::Setting)
+        );
+    }
+
+    #[test]
+    fn a_terminal_editor_is_known_by_its_program_name() {
+        assert!(needs_terminal("nvim"));
+        assert!(needs_terminal("/usr/bin/vim -u x"));
+        assert!(needs_terminal("'/opt/my bin/hx' {path}"));
+        assert!(!needs_terminal("code -w"));
+        assert!(!needs_terminal("nvim-qt"));
+        assert!(!needs_terminal("'nvim"), "a template that does not split");
+        assert!(!needs_terminal("  "));
     }
 
     #[test]

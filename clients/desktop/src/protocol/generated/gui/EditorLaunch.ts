@@ -12,4 +12,8 @@ editor: string,
 /**
  * The launched process; absent in fixture mode.
  */
-pid?: number | null, source: EditorSource, };
+pid?: number | null, source: EditorSource,
+/**
+ * Fixture mode: the command was journaled and nothing was launched.
+ */
+fixture: boolean, };

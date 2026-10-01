@@ -2783,6 +2783,7 @@ mod tests {
         let offsite = draft_path_on(&d, "work", "offsite-note").expect("path");
         let launch = open_in_editor(&f, &offsite.path);
         assert_eq!(launch.pid, None, "the fixture spawns nothing");
+        assert!(launch.fixture, "and says so");
         assert_eq!(launch.source, crate::editor::EditorSource::Env);
         assert_eq!(launch.editor, format!("zed --wait {}", offsite.path));
         let opens = f.editor_opens();
