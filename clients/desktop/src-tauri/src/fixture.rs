@@ -4637,7 +4637,7 @@ fn seed_drafts(
                 &DraftRecipientEdit {
                     to: text(&row.to),
                     cc: text(&row.cc),
-                    bcc: String::new(),
+                    bcc: text(&row.bcc),
                     subject: text(&row.subject),
                 },
             )?;
@@ -4765,6 +4765,7 @@ fn scan_drafts(account: &str, dir: &Path) -> (Vec<DraftEntry>, Vec<DraftSkip>) {
                         status: fm.status.to_string(),
                         to: filled(&fm.to),
                         cc: filled(&fm.cc),
+                        bcc: filled(&fm.bcc),
                         subject: Some(fm.subject.clone()),
                         date: fm.date.clone(),
                         valid: true,

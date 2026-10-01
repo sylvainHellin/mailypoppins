@@ -672,9 +672,10 @@ The family is the eleven methods below, all served from protocol 1 and all durab
 
 The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they are wire shapes, so they live in the crate a client links rather than in the daemon crate a client must never link.
 `DraftCreated` is `{account, id, selector, path, source}`, whose `source` is `{id, selector}` for a reply or a forward and absent for a draft made from nothing.
-`DraftListing` is `{account, drafts, skipped, collisions}`, whose rows are `{id, selector, path, status, to, cc, subject, date, valid, ready}` in the index's order (`mtime DESC, id ASC`); `to`, `cc`, `subject` and `date` stay nullable, which is where the row differs from the snapshot's, and `skipped` names a file that will not parse by path because such a file has no id to be named by (#0080).
+`DraftListing` is `{account, drafts, skipped, collisions}`, whose rows are `{id, selector, path, status, to, cc, bcc, subject, date, valid, ready}` in the index's order (`mtime DESC, id ASC`); `to`, `cc`, `bcc`, `subject` and `date` stay nullable, which is where the row differs from the snapshot's, and `skipped` names a file that will not parse by path because such a file has no id to be named by (#0080).
 `cc` and `date` are the index's own columns and joined the row in P5-U4, for a client that lists drafts beside received mail: such a list prints the Cc line and sorts a draft by its `date:` field, falling back to the `YYYY-MM-DD-…` stem of `path` when the file has none.
 `mp list` reads neither.
+`bcc` is the file's `bcc:` field and joined the row in #0131, for a recipients dialog that edits all three recipient fields from the row it lists.
 `DraftValidation` is `{account, reports}`, whose reports are `{id, selector, valid, error, warnings}`.
 `DraftLocation` is `{account, id, selector, path, status}` and `DraftPreview` is the dry run's record, whose body is cut at 500 characters while `body_truncated` is decided on 500 bytes and whose `signature` is `null` for the CLI, because the body already carries it (#0099).
 
@@ -1293,3 +1294,4 @@ The capability list a handshake advertises grew by the three names, which is the
 #0131's daemon gaps closed what the desktop client had worked around on its own side, all additive; no field was renamed, none was dropped, and no command's output moved.
 `draft.reply` and `draft.forward` already took `signature` and `no_signature`; `tests/daemon_gui_gaps.rs` pins them now.
 `draft.create` gained `body?` and `headers?`, the second with `draft.forward`'s contract, so a draft made in a compose wizard is written in one call.
+A `draft.list` row gained `bcc`, the file's `bcc:` field, `null` when it is empty; the row is pinned at eleven keys in `tests/daemon_draft_slice.rs`, and `mp list` reads it not.

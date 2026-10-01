@@ -2542,7 +2542,19 @@ mod tests {
     fn the_drafts_mailbox_branches_to_the_draft_listing() {
         let d = door();
         match list_messages_on(&d, "work", "drafts").expect("drafts") {
-            MessageList::Drafts { listing, .. } => assert_eq!(listing.drafts.len(), 2),
+            MessageList::Drafts { listing, .. } => {
+                assert_eq!(listing.drafts.len(), 2);
+                // The row carries the file's bcc, which `ce` fills its dialog from.
+                let bcc = |id: &str| {
+                    listing
+                        .drafts
+                        .iter()
+                        .find(|r| r.id == id)
+                        .and_then(|r| r.bcc.clone())
+                };
+                assert_eq!(bcc("angebot-antwort"), None);
+                assert_eq!(bcc("offsite-note"), None);
+            }
             other => panic!("expected drafts, got {other:?}"),
         }
         match list_messages_on(&d, "work", "inbox").expect("inbox") {
@@ -2766,10 +2778,22 @@ mod tests {
         let body = parsed(&typed.path).body_markdown;
         let (text, signature) = (body.find("Kurze Frage"), body.find("Fixture GmbH"));
         assert!(text.is_some() && text < signature, "{body}");
+        let blind = DraftHeaders {
+            bcc: "chef@example.com".into(),
+            ..headers("robin@example.com", "", "Blind")
+        };
+        let blind =
+            draft_create_on(&d, "work", "blind", None, true, Some(&blind), None).expect("blind");
         match list_messages_on(&d, "work", "drafts").expect("drafts") {
             MessageList::Drafts { listing, .. } => {
-                assert_eq!(listing.drafts.len(), 6);
+                assert_eq!(listing.drafts.len(), 7);
                 assert!(listing.drafts.iter().any(|r| r.id == bare.id && r.ready));
+                let row = listing.drafts.iter().find(|r| r.id == blind.id);
+                assert_eq!(
+                    row.and_then(|r| r.bcc.as_deref()),
+                    Some("chef@example.com"),
+                    "the row carries the bcc `ce` fills its dialog from"
+                );
             }
             other => panic!("expected drafts, got {other:?}"),
         }

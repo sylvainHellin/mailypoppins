@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
-use mp_protocol::draft::DraftCreated;
+use mp_protocol::draft::{DraftCreated, DraftListing};
 use mp_protocol::RpcError;
 
 use mailypoppins::draft::{parse_email_draft, SIG_START};
@@ -229,4 +229,51 @@ async fn a_new_draft_is_written_with_its_body_and_its_headers() {
     .await;
     assert_eq!(refused.code, -32602);
     assert!(!fixture::draft_path(slice.root(), fixture::ACCOUNT, "halb.md").exists());
+}
+
+// ---------------------------------------------------------------------------
+// 3. Bcc on a listed draft
+// ---------------------------------------------------------------------------
+
+/// A `draft.list` row carries the `bcc:` field beside `to` and `cc`, so a
+/// recipients dialog fills all three from the row it lists; a draft that
+/// blind-copies nobody lists `null`.
+#[tokio::test]
+async fn a_listed_draft_carries_its_bcc() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let draft = created(
+        &mut conn,
+        "draft.create",
+        json!({
+            "account": fixture::ACCOUNT,
+            "name": "blind",
+            "headers": {"to": "robin@example.com", "cc": "", "bcc": "chef@example.com", "subject": "Blind"},
+        }),
+    )
+    .await;
+
+    let listing: DraftListing = serde_json::from_value(
+        call(
+            &mut conn,
+            "draft.list",
+            json!({"account": fixture::ACCOUNT}),
+        )
+        .await,
+    )
+    .expect("a DraftListing");
+    let row = |id: &str| {
+        listing
+            .drafts
+            .iter()
+            .find(|row| row.id == id)
+            .unwrap_or_else(|| panic!("{id} is listed"))
+            .clone()
+    };
+    assert_eq!(row(&draft.id).bcc.as_deref(), Some("chef@example.com"));
+    assert_eq!(
+        row(fixture::VALID).bcc,
+        None,
+        "the seeded draft has an empty bcc:"
+    );
 }

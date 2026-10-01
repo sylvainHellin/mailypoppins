@@ -2,8 +2,8 @@
   "work": {
     "account": "work",
     "drafts": [
-      {"id": "angebot-antwort", "selector": "mp://work/drafts/angebot-antwort", "path": "/fixture/work/drafts/angebot-antwort.md", "status": "draft", "to": "robin@example.com", "cc": null, "subject": "Re: Angebot Dachsanierung", "date": "2026-09-29T10:02:00", "valid": true, "ready": true},
-      {"id": "offsite-note", "selector": "mp://work/drafts/offsite-note", "path": "/fixture/work/drafts/offsite-note.md", "status": "draft", "to": null, "cc": null, "subject": null, "date": "2026-09-27T18:40:00", "valid": true, "ready": false}
+      {"id": "angebot-antwort", "selector": "mp://work/drafts/angebot-antwort", "path": "/fixture/work/drafts/angebot-antwort.md", "status": "draft", "to": "robin@example.com", "cc": null, "bcc": null, "subject": "Re: Angebot Dachsanierung", "date": "2026-09-29T10:02:00", "valid": true, "ready": true},
+      {"id": "offsite-note", "selector": "mp://work/drafts/offsite-note", "path": "/fixture/work/drafts/offsite-note.md", "status": "draft", "to": null, "cc": null, "bcc": null, "subject": null, "date": "2026-09-27T18:40:00", "valid": true, "ready": false}
     ],
     "skipped": [],
     "collisions": []

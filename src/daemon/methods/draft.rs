@@ -317,6 +317,10 @@ fn entry(account: &str, row: &DraftRow) -> DraftEntry {
         status: row.status.clone(),
         to: row.to.clone(),
         cc: row.cc.clone(),
+        bcc: draft
+            .as_ref()
+            .ok()
+            .and_then(|draft| draft.frontmatter.bcc.clone()),
         subject: draft
             .as_ref()
             .ok()

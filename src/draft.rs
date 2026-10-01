@@ -315,6 +315,10 @@ fn draft_to_wire(account: &str, row: &crate::store::drafts::DraftRow) -> DraftEn
         status: row.status.clone(),
         to: row.to.clone(),
         cc: row.cc.clone(),
+        bcc: draft
+            .as_ref()
+            .ok()
+            .and_then(|draft| draft.frontmatter.bcc.clone()),
         subject: draft
             .as_ref()
             .ok()

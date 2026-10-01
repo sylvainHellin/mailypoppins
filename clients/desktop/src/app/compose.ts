@@ -309,11 +309,11 @@ export async function editDraft(s: AppState, dispatch: Dispatch<Action>): Promis
 }
 
 /**
- * `ce`, Drafts only: the recipients dialog, filled from the draft. The
- * listing has no Bcc, so the fields come from `draft_preview`, which reads
- * the file; a draft that does not parse cannot be edited this way.
+ * `ce`, Drafts only: the recipients dialog, filled from the draft's listed
+ * row, which carries To, Cc, Bcc and the subject; a draft that does not
+ * parse cannot be edited this way.
  */
-export async function editRecipients(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
+export function editRecipients(s: AppState, dispatch: Dispatch<Action>): void {
   if (!draftsShown(s)) {
     notice(dispatch, "Edit recipients (c e) is only available in Drafts");
     return;
@@ -323,15 +323,14 @@ export async function editRecipients(s: AppState, dispatch: Dispatch<Action>): P
   const { account, row } = cur;
   const busy = sendingRefusal(s, [{ account, draft: row.id }]);
   if (busy) return notice(dispatch, busy);
-  try {
-    const p = await cmd.draftPreview(account, row.id);
-    dispatch({
-      type: "open_compose",
-      dialog: { kind: "recipients", account, draftId: row.id, to: p.to ?? "", cc: p.cc ?? "", bcc: p.bcc ?? "", subject: p.subject },
-    });
-  } catch (e: unknown) {
-    failed(dispatch, account, `Cannot edit ${row.id}`, e);
+  if (!row.valid) {
+    dispatch({ type: "activity", kind: "compose_failed", account, text: `Cannot edit ${row.id}: ${row.diagnostic ?? "it does not parse"}` });
+    return;
   }
+  dispatch({
+    type: "open_compose",
+    dialog: { kind: "recipients", account, draftId: row.id, to: row.to ?? "", cc: row.cc ?? "", bcc: row.bcc ?? "", subject: row.subject ?? "" },
+  });
 }
 
 /**

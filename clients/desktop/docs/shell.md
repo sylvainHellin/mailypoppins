@@ -231,7 +231,7 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `ca` | Reply all | list, reader | `draft_reply` (`all: true`) or `draft_from_message` (`reply_all`), then the editor |
 | `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `signature_list`, then `draft_forward` with `headers` and the signature, or `draft_from_message` (`forward`), then the editor |
 | `e` | Edit the draft in the editor; on a received message, open it in the reader | list, reader | `draft_path`, then the editor |
-| `ce` | Edit recipients, Drafts only | list, reader | `draft_preview`, then `draft_set_recipients` |
+| `ce` | Edit recipients, Drafts only | list, reader | `draft_set_recipients`, the dialog filled from the listed row |
 | `cA` | Approve, Drafts only | list, reader | `draft_approve` |
 | `cD` | Back to draft, Drafts only | list, reader | `draft_demote` |
 | `x` | Send the cursor draft, approving it first | any pane | `send_draft` (`hold: true`) |
@@ -265,7 +265,7 @@ A refusal, such as a file name already taken, shows in the dialog, which stays o
 
 ### The recipients dialog
 
-`ce` opens the same dialog titled "Edit recipients", filled from `draft_preview`, since the listing carries no Bcc.
+`ce` opens the same dialog titled "Edit recipients", filled from the draft's row in the Drafts listing, which carries To, Cc, Bcc and the subject; on a draft that does not parse it says "Cannot edit <id>: <why>" and opens nothing.
 Its submit calls `draft_set_recipients`, which rewrites the four lines of the file and nothing else, and passes `subject` only when it changed.
 No editor opens; the notice "Recipients updated: mp://…" is the TUI's.
 A draft that does not parse cannot be edited this way, and says why.

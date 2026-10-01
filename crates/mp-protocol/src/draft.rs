@@ -70,6 +70,14 @@ pub struct DraftEntry {
     /// Here because a TUI drafts list renders the same row a mailbox listing
     /// renders, and that row prints the Cc line; the CLI listing ignores it.
     pub cc: Option<String>,
+    /// The `bcc:` field, absent when the draft blind-copies nobody (#0131).
+    ///
+    /// Here because a client's recipients dialog edits To, Cc, Bcc and the
+    /// subject from the row it lists, and would otherwise read the file or
+    /// the preview for the one field the row lacked. Defaulted, so a row from
+    /// an older daemon still decodes.
+    #[serde(default)]
+    pub bcc: Option<String>,
     /// The `subject:` field, absent when the file has none.
     pub subject: Option<String>,
     /// The `date:` frontmatter field, absent when the file has none (P5-U4).
