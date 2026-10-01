@@ -650,8 +650,9 @@ pub fn read_setting(file: &Path) -> Result<Option<String>, GuiError> {
 
 /// [`read_setting`] as every command that runs or reports the editor reads
 /// it: a file that does not read is logged and counts as no setting, so
-/// `editor_open`, `terminal_spawn` and the route `editor_setting_get`
-/// reports all see the same value.
+/// `editor_open`, `config_open`, `log_open`, `invite_source_open`,
+/// `terminal_spawn` and the route `editor_setting_get` reports all see the
+/// same value.
 pub fn read_setting_or_none(file: &Path) -> Option<String> {
     read_setting(file).unwrap_or_else(|e| {
         tracing::warn!("[editor] ignoring the setting: {e}");

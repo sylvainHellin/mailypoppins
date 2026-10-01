@@ -84,11 +84,7 @@ pub fn log_open_on(
 
 /// The editor lookup with the settings file's `editor`, as `editor_open` reads it.
 fn lookup_for(settings: &Path) -> Lookup<'static> {
-    let setting = editor::read_setting(settings).unwrap_or_else(|e| {
-        tracing::warn!("[editor] ignoring the setting: {e}");
-        None
-    });
-    editor::live_lookup(setting)
+    editor::live_lookup(editor::read_setting_or_none(settings))
 }
 
 /// `sc`: `not_found` when there is no `config.toml` yet.

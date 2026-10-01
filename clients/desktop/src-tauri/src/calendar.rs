@@ -431,14 +431,10 @@ pub async fn invite_source_open(
     let settings = editor::settings_file(&app)?;
     with_door(&session, move |_, door| {
         let cache = cache_dir(&app, door)?;
-        let setting = editor::read_setting(&settings).unwrap_or_else(|e| {
-            tracing::warn!("[editor] ignoring the setting: {e}");
-            None
-        });
         invite_source_open_on(
             door,
             &cache,
-            &editor::live_lookup(setting),
+            &editor::live_lookup(editor::read_setting_or_none(&settings)),
             &account,
             row_id,
             editor::EXIT_WINDOW,
