@@ -18,7 +18,7 @@ The wire contract is [daemon-protocol.md](../daemon-protocol.md), the crate shap
 
 ## Goal
 
-Ship a macOS GUI using Tauri 2, React, shadcn/ui, the approved dark Basenord palette, and later a real embedded Neovim process for draft composition.
+Ship a macOS GUI using Tauri 2, React, shadcn/ui, the approved Basenord palette in dark and light, and later a real embedded Neovim process for draft composition.
 The GUI provides every user-facing capability present in the TUI, as the parity matrix classifies it.
 Capabilities classified as CLI automation, diagnostics and maintenance, daemon administration, or migration-only carry no GUI-parity obligation.
 A capability classified as GUI parity may be deferred only when a settled decision names it and `BACKLOG.md` records the deferral.
@@ -50,7 +50,7 @@ A capability classified as GUI parity may be deferred only when a settled decisi
 
 ### Visual system
 
-The GUI is dark-only, and all styling uses semantic tokens from the dark inverse of Basenord Palette D:
+The GUI has a dark and a light palette, dark by default, and all styling uses semantic tokens; the dark palette is the dark inverse of Basenord Palette D:
 
 - Prussian blue `#0C1B33` as the outer canvas and dominant background.
 - Cream `#F4F1E8` as the primary foreground.
@@ -62,7 +62,8 @@ The GUI is dark-only, and all styling uses semantic tokens from the dark inverse
 
 Card, popover, muted, input, border, sidebar, destructive, and focus tokens are derived through a dedicated contrast pass.
 No component hardcodes a palette value.
-The first release exposes one dark theme while retaining shadcn's semantic token structure for a later light theme.
+The light palette derives from Palette D itself, cream canvas and Prussian text, and redeclares every token but the reader canvas, which stays white in both (#0136).
+The theme is a desktop setting, dark, light or system, in Settings and the palette, and system follows the operating system's appearance.
 Text, focus rings, disabled states, selection states, error states, and orange accents are checked against WCAG contrast requirements.
 
 ### Layout
@@ -295,7 +296,6 @@ What is open:
 - App keys stop at the cross-origin reader frame: with focus in a message body, no app key works until a click returns focus to the app.
 - List windowing is off, so every row of a mailbox is mounted.
 - The performance targets have not been measured on the M1 build.
-- The light theme stays deferred.
 
 ### M2: mutations with the undo hold (#0131)
 
@@ -422,7 +422,6 @@ The socket singleton, the handshake, the explicit restart and the packaging test
 
 ## Deferred
 
-- Light theme using the existing semantic tokens, which is the deferral behind `OBS-07`.
 - Status-item menu-bar mode.
 - Separate composition windows.
 - Outbox retry and discard as GUI actions rather than CLI-only operator commands.
@@ -431,6 +430,5 @@ The socket singleton, the handshake, the explicit restart and the packaging test
 
 ## Open questions
 
-- When the light theme deferred behind `OBS-07` lands, and what it needs beyond a second token set.
 - Message-list paging against whole-list transfer with row deltas for large mailboxes, where the TUI's whole-list model may not suit a webview list.
 - How CI exercises the Tauri build on Linux without webkit2gtk.

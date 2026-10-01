@@ -1310,13 +1310,13 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 ### OBS-07 Theme configuration
 
-- Classification: GUI parity with a recorded deferral
+- Classification: GUI parity
 - Source anchor: the top-level `theme` key in `config.toml` (`src/config.rs:25`), `clients/tui/src/theme.rs`, `docs/tickets/0023-enable-theme-config.md`
-- Daemon surface: client-side; the client reads the theme at startup
-- GUI location: deferred for the light theme; the dark theme is M1 (#0129)
-- Validation: `test_parse_config_with_theme` (`src/config.rs:1602`)
-- Status: deferred, with the light theme in the deferred backlog
-- Note: read once at startup, so a change needs a restart; the first GUI release is dark-only by settled decision.
+- Daemon surface: client-side; each client reads its own theme at startup
+- GUI location: clients/desktop: Settings' Theme buttons (Dark, Light, System) and the palette's "Theme: dark", "Theme: light" and "Theme: system", stored as the `theme` key of `desktop.json` through `setting_get|set`, dark by default, with system following `prefers-color-scheme`; the light palette is `:root.light` in `src/index.css` (#0136; shell.md, "Theme"; design-tokens.md)
+- Validation: `test_parse_config_with_theme` (`src/config.rs:1602`); `clients/desktop/src/app/theme.test.tsx` (`puts the light or dark class, color-scheme and its meta on the document`, `system paints the system's scheme and follows its changes until another theme is applied`, `the stored theme is painted at startup and kept in the store`, `Settings' Theme buttons paint at once and store the choice`, `the palette has Theme: dark, light and system, with no key`), `clients/desktop/src/design/contrast.test.ts` (`keeps every pair at or above its minimum`, per palette)
+- Status: GUI shipped (after M4, #0136)
+- Note: the TUI reads config.toml's `theme` once at startup, so a change needs a restart; the desktop does not read that key, and a theme chosen in its Settings paints at once.
 
 ### OBS-08 Quit the client while leaving durable work in place
 

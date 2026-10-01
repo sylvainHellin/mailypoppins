@@ -14,7 +14,7 @@ The rendering rule and its reasons are in the plan, `docs/plans/native-gui.md`, 
 - `sandbox="allow-popups"` and nothing else: no scripts, no same origin, no forms, no top navigation; `allow-popups` is there only so that a `target=_blank` click reaches `on_new_window`, which refuses it.
 - The URL is used as the Rust layer hands it over, so a Windows spelling (`http://mpmsg.localhost/…`) needs no frontend change.
 - A skeleton covers the frame until its `load` event; the frame is keyed on the URL, so every message starts with the skeleton.
-- The frame draws on `--reader-canvas` (white), because mail is authored for a white page and a message that sets no background would put default black text on the dark shell.
+- The frame draws on `--reader-canvas` (white) in both palettes, because mail is authored for a white page and a message that sets no background would put default black text on the dark palette's Prussian.
 - A message without markup comes back on the same URL as a plain-text document (`X-Mp-Rendition: text`), so in html mode React has one path and fetches no `message_text`.
 - Remote content stays blocked by the reader CSP; M1 has no "load remote images" toggle.
 - The body scrolls inside the frame; the header block above it is unchanged.

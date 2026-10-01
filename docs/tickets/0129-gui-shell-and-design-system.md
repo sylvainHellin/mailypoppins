@@ -54,7 +54,6 @@ The ticket stays open for the first item; the rest are known limits of M1.
 - App keys stop at the cross-origin reader frame: with focus in a message body, no app key works until a click returns focus to the app.
 - List windowing is off, so every row of a mailbox is mounted.
 - The performance targets have not been measured on the M1 build.
-- The light theme stays deferred.
 
 ## Deferred follow-ups for the client crates
 

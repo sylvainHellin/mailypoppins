@@ -30,7 +30,7 @@ Blocked on #0129 (M1), and #0130 (M5) is blocked on this ticket, because the mil
 
 ## Settled deferrals
 
-The first release is dark-only (`OBS-07`), and auto-mark-read, which #0110 retired, is not restored; `BACKLOG.md` records both.
+Auto-mark-read, which #0110 retired, is not restored, and `BACKLOG.md` records it; the light theme (`OBS-07`) shipped in #0136.
 The inline images and the rich HTML render #0109 and #0111 retired from the TUI come back in the GUI reader, which loads `message.html` with its `cid:` images inlined as `data:` URIs in a sandboxed frame (`RD-05`).
 
 ## M2 landed

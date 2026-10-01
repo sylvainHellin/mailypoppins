@@ -10,7 +10,6 @@ The dark palette is the `:root` block, and the light palette the `:root.light` b
 The theme setting is dark, light or system, dark by default (see [shell.md](shell.md), "Settings").
 `src/app/theme.ts` paints a theme by putting the `light` or `dark` class on `<html>` and setting `color-scheme` and its meta tag; system follows `prefers-color-scheme` and its changes.
 shadcn's `dark:` variants match under `.dark`, so the light palette draws shadcn's light defaults.
-The first release was dark only (OBS-07); the light palette came with #0136.
 
 ## Dark palette
 
