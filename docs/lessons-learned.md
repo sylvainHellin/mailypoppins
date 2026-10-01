@@ -2381,3 +2381,11 @@ A write after the slave side closed fails with `EIO`, which can land between the
 
 launchd gives a Finder-launched app no `LANG`, `LC_ALL` or `LC_CTYPE`, and a child inherits that: Neovim picks UTF-8 itself, but `/usr/bin/vim` falls back to latin1 and splits an umlaut on `x` or `r`.
 The desktop's terminal sets `LANG` on the child when the app has none of the three, taking the login shell's `LANG` from the same `$SHELL -lc` call that reads `PATH`, else `en_US.UTF-8`.
+
+## The desktop terminal pane: StrictMode, realms, `@theme inline` and the colour guard
+
+React's StrictMode mounts, unmounts and mounts every effect in a dev build, so a pane that spawns its PTY in the effect spawns twice and leaves two Neovims on one draft.
+`TerminalPane.tsx` spawns from a `setTimeout(0)` that the cleanup cancels; `requestAnimationFrame` would do the same but never fires while WKWebView has the window occluded.
+An `ArrayBuffer` made by Node's `TextEncoder` in a vitest jsdom test is not `instanceof` the global `ArrayBuffer`, so a frame check written with `instanceof` alone drops every frame in the tests; `src/lib/terminal.ts` also accepts the `[object ArrayBuffer]` tag.
+Tailwind 4's `@theme inline` emits no CSS variable for its entries, so `getPropertyValue("--font-mono")` is empty in the built app; the pane reads the computed `font-family` of an element carrying `font-mono`.
+The colour guard's hex pattern also matches a ticket reference such as `#0130` in a comment under `src/components` or `src/app`; write `ticket 0130` there.

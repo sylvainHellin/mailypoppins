@@ -34,9 +34,18 @@ const BADGE_TEXT: Record<Badge, string> = {
   later: "is not in the desktop client yet",
 };
 
+/** The embedded editor's pane (components/compose/TerminalPane.tsx). */
+export const TERMINAL_SELECTOR = '[data-slot="terminal"]';
+
+/** True inside the embedded editor, whose keys are all the editor's. */
+export function inTerminal(el: EventTarget | null): boolean {
+  return el instanceof Element && el.closest(TERMINAL_SELECTOR) !== null;
+}
+
 export function isEditable(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false;
   if (el.isContentEditable) return true;
+  if (inTerminal(el)) return true;
   if (el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) return true;
   if (el instanceof HTMLInputElement) {
     return !["button", "checkbox", "radio", "submit", "reset", "range", "color"].includes(el.type);
@@ -108,6 +117,10 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       if (screenFor(s) !== "shell") return;
       // An open menu (the reader's Copy) owns its keys, as a dialog does.
       if (e.target instanceof Element && e.target.closest('[role="menu"]')) return;
+
+      // The embedded editor takes every key, Escape and Tab included; Cmd
+      // combinations it hands back reach the menu and the webview, not here.
+      if (inTerminal(e.target)) return;
 
       if (isEditable(e.target)) {
         if (e.key === "Escape") {

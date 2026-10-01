@@ -10,10 +10,25 @@ import "./index.css";
 applyTheme(DEFAULT_THEME);
 void preloadTheme();
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <LucideProvider strokeWidth={1.75}>
-      <App />
-    </LucideProvider>
-  </React.StrictMode>,
-);
+const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
+
+// A dev build at `#terminal-fixture` shows the embedded editor's pane on an
+// echo bridge instead of the app (TerminalPane.fixture.tsx); a release build
+// drops the branch and its chunk.
+if (import.meta.env.DEV && window.location.hash === "#terminal-fixture") {
+  void import("@/components/compose/TerminalPane.fixture").then(({ TerminalFixture }) =>
+    root.render(
+      <React.StrictMode>
+        <TerminalFixture />
+      </React.StrictMode>,
+    ),
+  );
+} else {
+  root.render(
+    <React.StrictMode>
+      <LucideProvider strokeWidth={1.75}>
+        <App />
+      </LucideProvider>
+    </React.StrictMode>,
+  );
+}
