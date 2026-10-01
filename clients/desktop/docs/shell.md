@@ -215,8 +215,8 @@ The fixture seeds one hold (`fixture-hold-seed`, 60 s), so `MP_DESKTOP_FIXTURE=1
 Every command that writes a draft answers the file's path, and the draft opens in an editor by one of two routes.
 `openInEditor` in `src/app/compose.ts` asks `editor_setting_get` for the route on every open ([rust-layer.md](rust-layer.md), "Drafts and the editor"):
 
-- The embedded route runs a terminal editor such as `nvim` on a PTY, drawn in the reader area (see "The embedded editor"). It applies exactly when `terminal_spawn` would accept the editor: a terminal editor named by `MP_DESKTOP_EDITOR`, the editor setting, `$VISUAL` or `$EDITOR`, or found by the probe of `nvim`, `vim` and `hx`.
-- The external route is M3's: `editor_open` opens the file in the user's editor without waiting for it to exit. A GUI editor (`code -w`, `zed`, `subl`) takes it, and so does a terminal editor the embedded route cannot find; one in `$VISUAL` or `$EDITOR` then opens in a new window of the first terminal emulator found: Ghostty, kitty, Alacritty, WezTerm, then Terminal.app.
+- The embedded route runs a terminal editor such as `nvim` on a PTY, drawn in the reader area (see "The embedded editor"). It applies exactly when `terminal_spawn` would accept the editor and finds it: a terminal editor named by `MP_DESKTOP_EDITOR` or the editor setting; else the first of `$VISUAL` and `$EDITOR` that names a terminal editor, so `VISUAL="code -w"` with `EDITOR=nvim` is embedded; else, when none of the four is set, the first of `nvim`, `vim` and `hx` the probe finds.
+- The external route is M3's: `editor_open` opens the file in the user's editor without waiting for it to exit. A GUI editor (`code -w`, `zed`, `subl`) named by `MP_DESKTOP_EDITOR` or the setting takes it, and so does one in `$VISUAL` or `$EDITOR` when neither of the two names a terminal editor, and a terminal editor the embedded route cannot find; one in `$VISUAL` or `$EDITOR` then opens in a new window of the first terminal emulator found: Ghostty, kitty, Alacritty, WezTerm, then Terminal.app.
 
 A route that cannot be read is external.
 Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, whatever the route, so no action reloads anything itself.
@@ -770,6 +770,7 @@ On a switch the focus follows into the view, on its "Mail" button, as in the oth
 - Theme: Dark, Light and System, the `theme` key of `desktop.json` (see Theme).
 - Reader: HTML and Text, the current one pressed, the `reader_mode` key of `desktop.json`; `tt` and the palette's "Reader: HTML" and "Reader: text" do the same ([reader.md](reader.md), "Text mode").
 - Editor command: the M3 editor setting through `editor_setting_get|set`, its placeholder the template in effect; Save with an empty field clears it, and the hint names `MP_DESKTOP_EDITOR` when that wins.
+  On the embedded route the hint and the notice of a cleared setting say that drafts open in the embedded terminal editor, and that the template in effect opens config.toml and the log.
 
 A reload says what the swap did on the notice line, in the activity log's words: "Configuration reloaded: no account changed" or "Configuration reloaded: added ...; updated ...; removed ...".
 A refused one says "config.toml was not reloaded: <the daemon's sentence>".
