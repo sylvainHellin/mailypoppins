@@ -104,6 +104,7 @@ The font is the host element's computed `font-mono` at `text-sm`: `@theme inline
 - A change the daemon has not confirmed draws a spinning Lucide `LoaderCircle` in `muted-foreground` among the row's icons; it has no colour of its own.
 - The flag toggle is `warning` when set, and the unread dot `link`.
 - A notice is a `popover` surface: an applied one carries a `link` check, a failure a `destructive` alert icon.
+- The which-key popup is a `popover` surface with a `ring` border, the TUI's accent frame; its title and keys are `link`.
 - A held send carries a `warning` icon and a `warning` countdown bar on a `muted` track.
 
 ## Contrast

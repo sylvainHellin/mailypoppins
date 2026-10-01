@@ -4,14 +4,16 @@
 
 import { useEffect, useRef, type Dispatch } from "react";
 import type { Action } from "@/app/reducer";
-import { liveHolds, screenFor, type AppState } from "@/app/state";
+import { draftsShown, liveHolds, screenFor, type AppState } from "@/app/state";
 import { hiddenNotice } from "@/app/views";
 import { FILTER_INPUT_ID, HALF_PAGE, PAGE, READER_SCROLL_ID, runAction } from "@/app/actions";
 import { CONTACTS_SEARCH_ID } from "@/app/contacts";
 import { describeKey, type ActionId, type Badge } from "@/keymap/catalog";
 import { VIEW_AGNOSTIC_COMBOS, VIEW_SHARED_KEYS, viewKeyTable } from "@/keymap/viewKeys";
+import { setPendingPrefix } from "@/keymap/pendingPrefix";
 
-const PREFIX_TIMEOUT_MS = 1200;
+/** How long an armed prefix waits for its continuation; a timer then drops it. */
+export const PREFIX_TIMEOUT_MS = 1200;
 const PREFIXES = new Set(["g", "f", "c", "t", "s"]);
 const LINE_PX = 48;
 
@@ -82,7 +84,65 @@ const COMPOSE_ROW_KEYS: Record<string, ActionId> = {
   tb: "open_html",
   ta: "attach_file",
   tv: "rsvp",
+  // Desktop only: the reader's text mode, from the list or the reader; the
+  // TUI's `tt` is its thread view, which the desktop does not have yet.
+  tt: "toggle_reader_mode",
 };
+
+/** Mail's prefix continuations that run from any pane. */
+const MAIL_COMBOS: Record<string, ActionId> = {
+  gg: "list_top",
+  gm: "focus_sidebar",
+  ga: "next_account",
+  // Desktop only: the TUI has no outbox view, and no `go`.
+  go: "open_outbox",
+  gj: "next_message",
+  gk: "prev_message",
+  fm: "focus_filter",
+  ff: "search_server",
+  cn: "new_draft",
+  // Mail only: a view never arms `c`, as the TUI's do not.
+  cs: "manage_signatures",
+};
+
+/** The `c` and `t` row keys whose action answers outside Drafts with a notice only. */
+const DRAFTS_ONLY: ReadonlySet<ActionId> = new Set(["edit_recipients", "approve", "demote", "send_all", "attach_file"]);
+
+/**
+ * What a prefix combo (`gg`, `Space m`) does in this state: the action the
+ * keymap runs, `"notice"` for a combo it does not bind (the KEYMAP row's
+ * badge notice, if any), or null for one it ignores here.
+ */
+export function resolvePrefix(s: AppState, combo: string): ActionId | "notice" | null {
+  const view = viewKeyTable(s.view);
+  const own = view?.combos[combo] ?? VIEW_AGNOSTIC_COMBOS[combo];
+  if (own) return own;
+  // A view binds nothing else under a prefix, as the TUI's views do not.
+  if (view) return null;
+  if (MAIL_COMBOS[combo]) return MAIL_COMBOS[combo];
+  if (COMPOSE_ROW_KEYS[combo]) return s.focus !== "sidebar" ? COMPOSE_ROW_KEYS[combo] : null;
+  return "notice";
+}
+
+/**
+ * The action a prefix combo would carry out here, or null: the keymap's own
+ * resolution, less what the run would answer with a notice only (an action on
+ * the hidden mailbox selection, or a Drafts-only key outside Drafts). The
+ * which-key popup lists exactly these.
+ */
+export function prefixRuns(s: AppState, combo: string): ActionId | null {
+  const id = resolvePrefix(s, combo);
+  if (id === null || id === "notice") return null;
+  if (hiddenNotice(s, id)) return null;
+  if (DRAFTS_ONLY.has(id) && !draftsShown(s)) return null;
+  return id;
+}
+
+/** The prefixes that arm in this state: a view's own, or Mail's families. */
+export function armsPrefix(s: AppState, key: string): boolean {
+  const view = viewKeyTable(s.view);
+  return view ? view.prefixes.has(key) : PREFIXES.has(key) || key === " ";
+}
 
 /** Tab cycles panes only from a pane (or nothing); elsewhere it is the browser's. */
 function tabIsOurs(target: EventTarget | null): boolean {
@@ -97,6 +157,29 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
   const prefix = useRef<{ key: string; at: number } | null>(null);
 
   useEffect(() => {
+    // The armed prefix lives in the ref for the hot path and is published
+    // for the which-key popup; a timer drops it once it expires, so a stale
+    // prefix never resolves.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const disarm = () => {
+      clearTimeout(timer);
+      prefix.current = null;
+      setPendingPrefix(null);
+    };
+    const arm = (key: string) => {
+      clearTimeout(timer);
+      const p = { key, at: Date.now() };
+      prefix.current = p;
+      setPendingPrefix(p);
+      timer = setTimeout(disarm, PREFIX_TIMEOUT_MS);
+    };
+    /** The armed prefix, if still live, and disarmed: any next key consumes it. */
+    const take = () => {
+      const p = prefix.current;
+      if (p) disarm();
+      return p && Date.now() - p.at < PREFIX_TIMEOUT_MS ? p : null;
+    };
+
     // Over a full-pane view or the outbox view, a key for an action on the
     // hidden mailbox selection does nothing, from any pane.
     const run = (id: ActionId) => {
@@ -111,8 +194,10 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
 
     const onKey = (e: KeyboardEvent) => {
       const s = ref.current;
-      if (e.defaultPrevented || e.isComposing) return;
       if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
+      // The next key ends a pending prefix wherever it goes, resolved or not.
+      const pending = take();
+      if (e.defaultPrevented || e.isComposing) return;
       if (s.overlay !== null) return;
       if (screenFor(s) !== "shell") return;
       // An open menu (the reader's Copy) owns its keys, as a dialog does.
@@ -159,51 +244,13 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       const view = viewKeyTable(s.view);
 
       // A pending family prefix (`g`, `f`, `c`, `t`, `s`, Space).
-      const pending = prefix.current;
-      prefix.current = null;
-      if (pending && Date.now() - pending.at < PREFIX_TIMEOUT_MS) {
+      if (pending) {
         handled();
         const combo = pending.key === " " ? `Space ${e.key}` : `${pending.key}${e.key}`;
-        const own = view?.combos[combo] ?? VIEW_AGNOSTIC_COMBOS[combo];
-        if (own) return run(own);
-        // A view binds nothing else under a prefix, as the TUI's views do not.
-        if (view) return;
-        switch (combo) {
-          case "gg":
-            return run("list_top");
-          case "gm":
-            return run("focus_sidebar");
-          case "ga":
-            return run("next_account");
-          // Desktop only: the TUI has no outbox view, and no `go`.
-          case "go":
-            return run("open_outbox");
-          case "gj":
-            return run("next_message");
-          case "gk":
-            return run("prev_message");
-          case "fm":
-            return run("focus_filter");
-          case "ff":
-            return run("search_server");
-          case "cn":
-            return run("new_draft");
-          // Mail only: a view never arms `c`, as the TUI's do not.
-          case "cs":
-            return run("manage_signatures");
-          // Desktop only: the reader's text mode, from the list or the
-          // reader; the TUI's `tt` is its thread view, which the desktop
-          // does not have yet.
-          case "tt":
-            if (s.focus !== "sidebar") run("toggle_reader_mode");
-            return;
-          default:
-            if (COMPOSE_ROW_KEYS[combo]) {
-              if (s.focus !== "sidebar") run(COMPOSE_ROW_KEYS[combo]);
-              return;
-            }
-            return notice(combo);
-        }
+        const id = resolvePrefix(s, combo);
+        if (id === "notice") return notice(combo);
+        if (id) return run(id);
+        return;
       }
 
       // A full-pane view reads its own keys before any prefix arms, so it can
@@ -215,10 +262,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
         if (e.key === "Enter" && s.focus === "sidebar") return handled(), run("select_mailbox");
         const id = view.keys[e.key];
         if (id) return handled(), run(id);
-        if (view.prefixes.has(e.key)) {
+        if (armsPrefix(s, e.key)) {
           handled();
-          prefix.current = { key: e.key, at: Date.now() };
-          return;
+          return arm(e.key);
         }
         if (e.key === "Escape") return handled(), run("view_mail");
         // While a send is held, `u` cancels it from every view (the TUI's rule).
@@ -227,10 +273,9 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
           if (e.key.length === 1) handled();
           return;
         }
-      } else if (PREFIXES.has(e.key) || e.key === " ") {
+      } else if (armsPrefix(s, e.key)) {
         handled();
-        prefix.current = { key: e.key, at: Date.now() };
-        return;
+        return arm(e.key);
       }
 
       function pageBy(n: number) {
@@ -350,7 +395,21 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       if (e.key.length === 1) notice(e.key);
     };
 
+    // Leaving the window, or moving the focus into a field or the embedded
+    // editor, drops the prefix: the next key would never reach it.
+    const onBlur = () => disarm();
+    const onFocusIn = (e: FocusEvent) => {
+      if (prefix.current && isEditable(e.target)) disarm();
+    };
+
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focusin", onFocusIn);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focusin", onFocusIn);
+      disarm();
+    };
   }, [dispatch]);
 }

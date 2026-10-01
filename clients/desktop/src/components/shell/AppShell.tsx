@@ -6,6 +6,7 @@ import { VersionMismatchScreen } from "@/components/screens/VersionMismatchScree
 import { RestartDaemonDialog } from "@/components/screens/RestartDaemonDialog";
 import { CommandPalette } from "@/components/palette/CommandPalette";
 import { KeyHelp } from "@/components/palette/KeyHelp";
+import { PrefixPopup } from "@/components/palette/PrefixPopup";
 import { InterceptedLinksDialog } from "@/components/reader/InterceptedLinksDialog";
 import { ConfirmMutationDialog } from "@/components/mutations/ConfirmMutationDialog";
 import { MovePicker } from "@/components/mutations/MovePicker";
@@ -94,6 +95,7 @@ export function AppShell() {
     <TerminalSlotProvider>
       {body}
       <TerminalHost />
+      <PrefixPopup state={s} />
       <CommandPalette open={s.overlay === "palette"} onOpenChange={close} onRun={run} />
       <KeyHelp open={s.overlay === "help"} onOpenChange={close} />
       <RestartDaemonDialog open={s.overlay === "restart"} onOpenChange={close} onConfirm={restart} />
