@@ -3,4 +3,4 @@
 /**
  * A key of `desktop.json`.
  */
-export type SettingKey = "editor" | "theme" | "reader_mode";
+export type SettingKey = "editor" | "theme" | "reader_mode" | "editor_colors";

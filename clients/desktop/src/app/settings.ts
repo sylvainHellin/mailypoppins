@@ -219,3 +219,46 @@ export async function saveEditorSetting(dispatch: Dispatch<Action>, template: st
     return asGuiError(e).message;
   }
 }
+
+// ---------------------------------------------------------------------------
+// The editor's colours
+// ---------------------------------------------------------------------------
+
+/**
+ * Whose colours the embedded Neovim or Vim shows, the `editor_colors` key of
+ * desktop.json (ticket 0137): `app`, the mailypoppins colorscheme in the
+ * app's palette, or `editor`, its own. The Rust layer reads it at each
+ * spawn, so a change applies to the next editor started.
+ */
+export type EditorColors = "app" | "editor";
+
+export const EDITOR_COLORS: EditorColors[] = ["app", "editor"];
+
+/** What an unset or unknown value means, as `settings.rs` reads it. */
+export const DEFAULT_EDITOR_COLORS: EditorColors = "app";
+
+export const EDITOR_COLORS_LABELS: Record<EditorColors, string> = { app: "Follow the app", editor: "The editor's own" };
+
+/** A stored value as editor colours; anything else is the default. */
+export function parseEditorColors(value: string | null | undefined): EditorColors {
+  return EDITOR_COLORS.includes(value as EditorColors) ? (value as EditorColors) : DEFAULT_EDITOR_COLORS;
+}
+
+/** The stored choice; the default when unset or when the file does not read. */
+export async function loadEditorColors(): Promise<EditorColors> {
+  try {
+    return parseEditorColors(await cmd.settingGet("editor_colors"));
+  } catch {
+    return DEFAULT_EDITOR_COLORS;
+  }
+}
+
+/** Store the choice; answers the stored value, or the refusal's sentence on the notice line and null. */
+export async function saveEditorColors(dispatch: Dispatch<Action>, colors: EditorColors): Promise<EditorColors | null> {
+  try {
+    return parseEditorColors(await cmd.settingSet("editor_colors", colors));
+  } catch (e: unknown) {
+    dispatch({ type: "notice", text: `The editor colours were not saved: ${asGuiError(e).message}`, level: "error" });
+    return null;
+  }
+}

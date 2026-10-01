@@ -18,6 +18,21 @@
 //! and, when the app has none of [`LOCALE_VARS`], the login shell's `LANG` or
 //! [`DEFAULT_LANG`].
 //!
+//! # The look
+//!
+//! `terminal_spawn` takes the app's palette, `dark` or `light`, and
+//! [`Launch::dressed`] puts it on the launch (#0137): `MP_DESKTOP_THEME` in
+//! the child's environment always, and for Neovim and Vim ([`is_vim`]),
+//! right after the program, `--cmd "set runtimepath^=<resources>/nvim"`,
+//! `-c` of the same, then, while the `editor_colors` setting is `app`,
+//! `-c "set background=<palette>" -c "colorscheme mailypoppins"`. `--cmd`
+//! runs before the user's config, so the config can use the colorscheme;
+//! `-c` runs after it and after the file loads, so the directory is back on
+//! a runtime path the config reset (lazy.nvim resets it by default), and the
+//! app's colours win over the config's colorscheme. The colorscheme is
+//! `resources/nvim/colors/mailypoppins.vim`, shipped as the bundle's `nvim/`
+//! resource ([`RESOURCE_SUBDIR`]).
+//!
 //! # The channel
 //!
 //! Each session has one `Channel<InvokeResponseBody>`. PTY output goes as
@@ -60,7 +75,7 @@ use std::time::{Duration, Instant};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::editor::{
     self, command_line, live_lookup, quote, read_setting_or_none, settings_file, EditorRoute,
@@ -69,6 +84,7 @@ use crate::editor::{
 use crate::error::GuiError;
 use crate::fixture::Fixture;
 use crate::session::SessionHandle;
+use crate::settings::{editor_colors, EditorColors};
 
 /// The largest output frame.
 pub const FRAME_MAX: usize = 64 * 1024;
@@ -94,6 +110,19 @@ pub const TERMINAL_PROBES: &[&str] = &["nvim", "vim", "hx"];
 
 /// bob's Neovim shims, under `$HOME`; probed after [`PROBE_DIRS`].
 pub const BOB_DIR: &str = ".local/share/bob/nvim-bin";
+
+/// The child's variable naming the app's palette, `dark` or `light`.
+pub const THEME_ENV: &str = "MP_DESKTOP_THEME";
+
+/// The runtime directory under the app's resource directory, holding
+/// `colors/mailypoppins.vim`.
+pub const RESOURCE_SUBDIR: &str = "nvim";
+
+/// The colorscheme that runtime directory ships.
+pub const COLORSCHEME: &str = "mailypoppins";
+
+/// The program names that take `--cmd`, `-c` and the colorscheme.
+pub const VIM_NAMES: &[&str] = &["nvim", "vim"];
 
 /// A started session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -445,7 +474,103 @@ pub struct Launch {
     pub source: EditorSource,
 }
 
+/// The app's palette, as `terminal_spawn` names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scheme {
+    Dark,
+    Light,
+}
+
+impl Scheme {
+    /// `dark` or `light`; anything else is a `protocol` error.
+    pub fn parse(theme: &str) -> Result<Scheme, GuiError> {
+        match theme {
+            "dark" => Ok(Scheme::Dark),
+            "light" => Ok(Scheme::Light),
+            other => Err(GuiError::protocol(format!(
+                "the theme `{other}` is neither dark nor light"
+            ))),
+        }
+    }
+
+    /// The value of `MP_DESKTOP_THEME` and of Vim's `background`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Scheme::Dark => "dark",
+            Scheme::Light => "light",
+        }
+    }
+}
+
+/// How a spawn dresses the editor ([`Launch::dressed`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Look {
+    pub scheme: Scheme,
+    pub colors: EditorColors,
+    /// `<resources>/nvim`; `None` when the resource directory did not
+    /// resolve, which leaves Neovim and Vim undressed.
+    pub runtime: Option<PathBuf>,
+}
+
+/// Whether `program` is Neovim or Vim: its file name, or the file name of
+/// what it links to (`/usr/bin/vi` is a link to `vim` on macOS), is one of
+/// [`VIM_NAMES`].
+pub fn is_vim(program: &str) -> bool {
+    let named = |p: &Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| VIM_NAMES.contains(&n))
+    };
+    let path = Path::new(program);
+    named(path) || std::fs::canonicalize(path).is_ok_and(|p| named(&p))
+}
+
+/// `value` as a `:set` value of a comma list such as 'runtimepath': a
+/// backslash, a space, `|` and `"` escaped for `:set`, and a comma escaped
+/// once more for the list.
+fn set_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            ',' => out.push_str("\\\\,"),
+            ' ' | '|' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl Launch {
+    /// The launch in `look`: see the module docs, "The look". Words go in
+    /// right after the program, so they precede the user's arguments and
+    /// the draft path.
+    pub fn dressed(mut self, look: &Look) -> Launch {
+        self.env
+            .push((THEME_ENV.to_string(), look.scheme.name().to_string()));
+        let Some(runtime) = &look.runtime else {
+            return self;
+        };
+        if !self.argv.first().is_some_and(|p| is_vim(p)) {
+            return self;
+        }
+        let rtp = format!("set runtimepath^={}", set_value(&runtime.to_string_lossy()));
+        let mut words = vec!["--cmd".to_string(), rtp.clone(), "-c".to_string(), rtp];
+        if look.colors == EditorColors::App {
+            words.extend([
+                "-c".to_string(),
+                format!("set background={}", look.scheme.name()),
+                "-c".to_string(),
+                format!("colorscheme {COLORSCHEME}"),
+            ]);
+        }
+        self.argv.splice(1..1, words);
+        self
+    }
+
     fn shown(&self) -> String {
         self.argv
             .iter()
@@ -1038,7 +1163,22 @@ fn task_failed(e: impl std::fmt::Display) -> GuiError {
     GuiError::internal(format!("the command task failed: {e}"))
 }
 
-/// Start the terminal editor on a draft; output and the exit come on `output`.
+/// `<resources>/nvim`: the bundle's `Contents/Resources/nvim` on macOS, and
+/// under `tauri dev` the build's target directory (`target/debug/nvim`),
+/// where tauri-build copies the resources; `None`, logged, when it does not
+/// resolve.
+fn runtime_dir(app: &AppHandle) -> Option<PathBuf> {
+    match app.path().resource_dir() {
+        Ok(dir) => Some(dir.join(RESOURCE_SUBDIR)),
+        Err(e) => {
+            tracing::warn!("[terminal] no resource directory, so no colorscheme: {e}");
+            None
+        }
+    }
+}
+
+/// Start the terminal editor on a draft in the app's palette `theme`
+/// (`dark` or `light`); output and the exit come on `output`.
 #[tauri::command(rename_all = "snake_case")]
 #[allow(clippy::too_many_arguments)]
 pub async fn terminal_spawn(
@@ -1050,14 +1190,22 @@ pub async fn terminal_spawn(
     path: String,
     cols: u16,
     rows: u16,
+    theme: String,
     output: Channel<InvokeResponseBody>,
 ) -> Result<TerminalStarted, GuiError> {
     let file = settings_file(&app)?;
+    let scheme = Scheme::parse(&theme)?;
+    let runtime = runtime_dir(&app);
     let fixture = daemon.fixture();
     let terminals = terminals.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let lookup = live_lookup(read_setting_or_none(&file));
-        let launch = plan(&lookup, login_env(), &path, fixture.is_some())?;
+        let look = Look {
+            scheme,
+            colors: editor_colors(&file),
+            runtime,
+        };
+        let launch = plan(&lookup, login_env(), &path, fixture.is_some())?.dressed(&look);
         let draft = Draft { account, id, path };
         terminals.start(fixture.as_deref(), draft, launch, cols, rows, output)
     })

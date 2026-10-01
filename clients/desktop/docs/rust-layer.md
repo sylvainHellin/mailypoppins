@@ -14,7 +14,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `commands.rs` | The Tauri commands and their result types |
 | `editor.rs` | The external editor a draft opens in, and the editor setting |
 | `terminal.rs` | The embedded terminal editor: one PTY session per draft, its reader and pump threads, and the session table |
-| `settings.rs` | `desktop.json`, the desktop's own settings: the editor template, the theme and the reader mode |
+| `settings.rs` | `desktop.json`, the desktop's own settings: the editor template, the theme, the reader mode and the editor's colours |
 | `attachments.rs` | Attachments, a draft's `attachments:` list, and the browser rendition |
 | `calendar.rs` | The agenda, an agenda entry's `invite.ics` in the editor, a message's invitation, the RSVP, the Graph probe and a new invitation |
 | `contacts.rs` | The ranked contacts with their recipient, the index rebuild, and a contact's vCard draft |
@@ -106,7 +106,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `editor_open` | `path` | `EditorLaunch` |
 | `editor_setting_get` | none | `EditorSetting`, with the route a draft takes |
 | `editor_setting_set` | `editor` (or `null` to clear) | `EditorSetting` |
-| `terminal_spawn` | `account`, `id`, `path`, `cols`, `rows`, `output: Channel` | `TerminalStarted`; see Terminal sessions |
+| `terminal_spawn` | `account`, `id`, `path`, `cols`, `rows`, `theme` (`dark` or `light`), `output: Channel` | `TerminalStarted`; see Terminal sessions |
 | `terminal_write` | `session`, `data` (a string) | nothing, once the bytes are queued |
 | `terminal_resize` | `session`, `cols`, `rows` | nothing |
 | `terminal_kill` | `session` | nothing, once the exit frame has gone; an unknown session is fine |
@@ -508,12 +508,13 @@ None of them reaches the daemon.
 The file is one JSON object, and each setting is a string under its key:
 
 ```ts
-type SettingKey = "editor" | "theme" | "reader_mode";
+type SettingKey = "editor" | "theme" | "reader_mode" | "editor_colors";
 ```
 
 - `editor` is the editor command template (see Drafts and the editor), refused with `setup` when it does not split.
 - `theme` is `dark`, `light` or `system`, refused with `setup` otherwise; unset means dark ([shell.md](shell.md), "Settings").
 - `reader_mode` is `html` or `text`, refused with `setup` otherwise; unset means html ([reader.md](reader.md), "Text mode").
+- `editor_colors` is `app` (Neovim and Vim take the `mailypoppins` colorscheme in the app's palette) or `editor` (their own), refused with `setup` otherwise; unset means app (see Terminal sessions, "The look"). `terminal_spawn` reads it at each spawn, and a file that does not read counts as `app`, logged.
 
 `setting_get` and `setting_set` read and write one key, and `editor_setting_get` and `editor_setting_set` are the `editor` key with what it resolves to.
 A key outside `SettingKey` is `not_found` naming the known keys, and nothing is written.
@@ -586,6 +587,27 @@ The login shell's `PATH` and `LANG` come from one `$SHELL -lc` call that prints 
 The child runs with the template's words, `{path}` replaced by the draft path or the path appended, in the draft's directory, with the inherited environment plus `PATH` (the login shell's), `TERM=xterm-256color` and `COLORTERM=truecolor`.
 When the app's environment has none of `LANG`, `LC_ALL` and `LC_CTYPE`, which is the case under a Finder launch, the child also gets `LANG`: the login shell's, else `en_US.UTF-8`; without it `/usr/bin/vim` runs in latin1 and splits an umlaut on `x` or `r`.
 A relative path is `protocol` and a missing file `not_found`, as for `editor_open`; a PTY that does not open is `internal`, naming the OS error.
+
+### The look
+
+`theme` is the palette the webview paints at spawn, `dark` or `light` (a stored `system` is already resolved to one); anything else is `protocol`.
+The child always gets `MP_DESKTOP_THEME=<theme>`, for every editor, so a user's own config can follow the app.
+When the located program's file name, or that of the file it links to, is `nvim` or `vim` (`/usr/bin/vi` links to `vim` on macOS), these words go in right after the program, before the template's own arguments and the draft path:
+
+```
+nvim --cmd "set runtimepath^=<resources>/nvim" -c "set runtimepath^=<resources>/nvim" -c "set background=<theme>" -c "colorscheme mailypoppins" <args> <path>
+```
+
+The last two `-c` pairs come only while `editor_colors` is `app`; with `editor` the runtime path alone is added, so `:colorscheme mailypoppins` stays one command away.
+Each word is one argv entry, with no shell quoting; the directory is escaped for `:set` (a space, `|`, `"` and a backslash) and its list (a comma).
+`--cmd` runs before the user's `init.lua` or `vimrc`, so the config itself can load the colorscheme; `-c` runs after the config and after the file is loaded, so it puts the directory back on a runtime path the config reset (lazy.nvim resets it by default, dropping what `--cmd` added) and the app's colours win over the config's colorscheme.
+A plugin that sets a colorscheme later (on `VimEnter` or lazily) can still override it; `'runtimepath'` drops a duplicate entry, so the second prepend never doubles the first.
+`hx` and every other editor get nothing but the variable.
+
+`<resources>` is `app.path().resource_dir()`: `Contents/Resources` in the macOS bundle, and the executable's directory under `tauri dev` (`<target>/debug`), where tauri-build copies the resources on every build.
+`tauri.conf.json` ships `src-tauri/resources/nvim/` as the bundle's `nvim/` resource (`bundle.resources`, the map form, so the path does not keep the `resources/` prefix).
+A resource directory that does not resolve leaves Neovim and Vim undressed, with a warning in the log.
+The colorscheme, `resources/nvim/colors/mailypoppins.vim`, is Vimscript for Neovim and Vim alike; see [design-tokens.md](design-tokens.md), "Terminal".
 
 ```ts
 type TerminalStarted = { session: number; pid: number | null; editor: string; source: EditorSource; fixture: boolean };
@@ -767,6 +789,7 @@ The capability grants `core:default`, `core:window:allow-destroy` (the close of 
 | `MP_DESKTOP_WINDOW_SIZE=WxH` | The initial window size, e.g. `950x800` for the medium layout or `600x820` for the narrow one; default `1400x900` |
 | `MP_DESKTOP_STUB_OPENER=1` | `open_external` records instead of opening, and a file open only logs |
 | `MP_DESKTOP_EDITOR` | The editor command template `editor_open` and `terminal_spawn` run; see Drafts and the editor, and Terminal sessions |
+| `MP_DESKTOP_THEME` | Set by the desktop on the embedded editor's child, `dark` or `light`, the app's palette at spawn; see Terminal sessions, "The look" |
 | `MP_DESKTOP_LOG` | `error` to `trace`, default `info`; to stderr and `<data>/logs/mp-desktop.log` |
 | `MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR` | The same overrides the binary reads |
 | `MAILYPOPPINS_DAEMON_AUTOSTART=0` | No on-demand start |

@@ -70,7 +70,7 @@ describe("the route", () => {
     await shellReady();
     await replyEmbedded(user);
     expect(mock.terminal.of("spawn").map((c) => c.req)).toEqual([
-      expect.objectContaining({ account: "work", id: "fixture-draft-1", path: DRAFT }),
+      expect.objectContaining({ account: "work", id: "fixture-draft-1", path: DRAFT, theme: "dark" }),
     ]);
     expect(mock.editorOpens).toEqual([]);
     expect(line()).toHaveTextContent(`Editing fixture-draft-1.md in nvim '${DRAFT}'; each save updates the list`);

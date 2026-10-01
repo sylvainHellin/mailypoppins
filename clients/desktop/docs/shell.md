@@ -329,6 +329,14 @@ With no editor running the handler does nothing and the window closes as before;
 "Close the editor" kills every embedded editor, then calls `getCurrentWindow().destroy()`, which the capability `core:window:allow-destroy` allows; "Stay" leaves the window and the editors alone.
 The menu's Close Window (Cmd+W) asks the same way; its Quit (Cmd+Q) ends the app, and the Rust layer kills every child on `RunEvent::Exit`.
 
+#### The editor's colours
+
+Neovim and Vim apply their own colorscheme over the pane, so the Rust layer starts them on the app's: `mailypoppins`, shipped with the app, in the palette of the spawn ([rust-layer.md](rust-layer.md), "Terminal sessions", "The look").
+Its background is the pane's, the app's `background`, with and without `termguicolors`, and its few hues are the terminal's ANSI tokens: orange headings and list markers, blue links and frontmatter keys, cyan code, a dim grey for comments, quotes and line numbers.
+The Settings row "Editor colours" chooses between "Follow the app", the default, and "The editor's own", which keeps the user's colorscheme; `hx` and every other editor always keep theirs.
+A theme change while an editor runs repaints the pane's own colours at once but reaches the editor at the next spawn: Reopen, or the next draft opened.
+Every editor's child also gets `MP_DESKTOP_THEME=dark` or `light`, so a user's own config can follow the app, for instance `if vim.env.MP_DESKTOP_THEME then vim.o.background = vim.env.MP_DESKTOP_THEME end` in `init.lua` with "The editor's own" chosen.
+
 ### The terminal pane
 
 The embedded editor of M5 (#0130) runs a terminal editor such as `nvim` on a PTY of the Rust layer and draws it with xterm.js in `components/compose/TerminalPane.tsx`.
@@ -345,6 +353,7 @@ The Channel carries output as raw bytes (an `ArrayBuffer` per frame) that go to 
 - Unmounting disposes xterm and its addons and leaves the session running: killing the child is the owner's explicit `kill`.
 - The renderer is WebGL, with xterm's DOM renderer when WebGL refuses or its context is lost; unicode11 gives the CJK and emoji widths Neovim assumes, and the clipboard addon answers OSC 52.
 - Colours follow the palette on `<html>` and change with it, and the font is the app's `font-mono` at `text-sm` ([design-tokens.md](design-tokens.md), "Terminal").
+- The spawn carries the palette painted then (`currentScheme` in `src/app/theme.ts`, `dark` or `light`, a `system` theme already resolved), and the editor follows it: see "The embedded editor", "The editor's colours".
 
 While the terminal has the focus, every key is the editor's, Escape and Tab included: `isEditable` counts any element inside `[data-slot="terminal"]` as editable, and the keymap returns before its Escape rule.
 Cmd combinations pass to the browser and the menu, so copy, paste and the menu items keep working.
@@ -771,6 +780,7 @@ On a switch the focus follows into the view, on its "Mail" button, as in the oth
 - Reader: HTML and Text, the current one pressed, the `reader_mode` key of `desktop.json`; `tt` and the palette's "Reader: HTML" and "Reader: text" do the same ([reader.md](reader.md), "Text mode").
 - Editor command: the M3 editor setting through `editor_setting_get|set`, its placeholder the template in effect; Save with an empty field clears it, and the hint names `MP_DESKTOP_EDITOR` when that wins.
   On the embedded route the hint and the notice of a cleared setting say that drafts open in the embedded terminal editor, and that the template in effect opens config.toml and the log.
+- Editor colours: "Follow the app" and "The editor's own", the current one pressed, the `editor_colors` key of `desktop.json` (`app` or `editor`, unset is `app`); the next embedded editor started takes a change, and a refused write says "The editor colours were not saved: <why>" (see Compose, "The editor's colours").
 
 A reload says what the swap did on the notice line, in the activity log's words: "Configuration reloaded: no account changed" or "Configuration reloaded: added ...; updated ...; removed ...".
 A refused one says "config.toml was not reloaded: <the daemon's sentence>".

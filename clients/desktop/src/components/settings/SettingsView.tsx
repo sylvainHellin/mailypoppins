@@ -4,7 +4,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { openConfig } from "@/app/interop";
-import { editorHint, kindLabel, reloadConfig, saveEditorSetting, usesPassword } from "@/app/settings";
+import {
+  EDITOR_COLORS,
+  EDITOR_COLORS_LABELS,
+  editorHint,
+  kindLabel,
+  loadEditorColors,
+  reloadConfig,
+  saveEditorColors,
+  saveEditorSetting,
+  usesPassword,
+  type EditorColors,
+} from "@/app/settings";
 import { signInOrShow } from "@/app/signin";
 import { saveTheme, THEME_LABELS, THEMES, type Theme } from "@/app/theme";
 import { READER_MODE_LABELS, READER_MODES, saveReaderMode } from "@/app/readerMode";
@@ -214,6 +225,55 @@ function EditorSettingField() {
 }
 
 /**
+ * The editor's colours (`setting_get|set` of `editor_colors`): two buttons,
+ * the current one pressed; the next embedded editor started takes the choice.
+ */
+function EditorColorsField() {
+  const dispatch = useDispatch();
+  const id = useId();
+  const [colors, setColors] = useState<EditorColors | null>(null);
+  useEffect(() => {
+    let live = true;
+    void loadEditorColors().then((got) => {
+      if (live) setColors(got);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const choose = async (choice: EditorColors) => {
+    const before = colors;
+    setColors(choice);
+    const stored = await saveEditorColors(dispatch, choice);
+    setColors(stored ?? before);
+  };
+  return (
+    <div className="mt-3 flex flex-col gap-1">
+      <span id={`${id}-colors`} className="text-sm text-muted-foreground">
+        Editor colours
+      </span>
+      <div role="group" aria-labelledby={`${id}-colors`} className="flex gap-1">
+        {EDITOR_COLORS.map((choice) => (
+          <Button
+            key={choice}
+            size="sm"
+            variant="outline"
+            aria-pressed={colors === choice}
+            className="aria-pressed:border-framing aria-pressed:bg-selection aria-pressed:text-selection-foreground"
+            onClick={() => void choose(choice)}
+          >
+            {EDITOR_COLORS_LABELS[choice]}
+          </Button>
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Neovim and Vim in the embedded editor take the app's light or dark colours, or keep their own colorscheme; the next editor started takes a change.
+      </p>
+    </div>
+  );
+}
+
+/**
  * The Settings view (clients/desktop/docs/shell.md, "Settings"): the
  * daemon's configuration as `config_get` reads it, read on every open and
  * after each `config.changed`. Settings change in config.toml, then Reload;
@@ -286,6 +346,7 @@ export function SettingsView() {
               <ThemeField />
               <ReaderModeField />
               <EditorSettingField />
+              <EditorColorsField />
             </section>
             <section aria-labelledby="settings-accounts">
               <h3 id="settings-accounts" className="mb-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase">

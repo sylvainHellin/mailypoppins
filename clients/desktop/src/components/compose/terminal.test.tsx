@@ -163,7 +163,7 @@ describe("the terminal pane", () => {
   it("fits, then spawns the editor at the fitted size and focuses the terminal", async () => {
     const m = mount();
     const term = await started(m);
-    expect(m.bridge.of("spawn")).toEqual([{ cmd: "spawn", req: { ...DRAFT, cols: 100, rows: 30 } }]);
+    expect(m.bridge.of("spawn")).toEqual([{ cmd: "spawn", req: { ...DRAFT, cols: 100, rows: 30, theme: "dark" } }]);
     expect(m.onStarted).toHaveBeenCalledWith(expect.objectContaining({ session: 1, editor: `nvim '${DRAFT.path}'` }));
     expect(term.options.allowProposedApi).toBe(true);
     expect(term.unicode.activeVersion).toBe("11");
@@ -345,6 +345,19 @@ describe("the terminal pane", () => {
     root.style.setProperty("--background", "#FBFAF6");
     root.classList.add("light");
     await waitFor(() => expect(term.options.theme).toMatchObject({ background: "#FBFAF6" }));
+  });
+
+  it("spawns in the palette painted at spawn, and a later change reaches only the next spawn", async () => {
+    document.documentElement.classList.add("light");
+    const first = mount();
+    await started(first);
+    expect(first.bridge.of("spawn").map((c) => c.req.theme)).toEqual(["light"]);
+    document.documentElement.classList.replace("light", "dark");
+    await sleep(20);
+    expect(first.bridge.of("spawn")).toHaveLength(1);
+    first.unmount();
+    const second = mount();
+    await waitFor(() => expect(second.bridge.of("spawn").map((c) => c.req.theme)).toEqual(["dark"]));
   });
 });
 

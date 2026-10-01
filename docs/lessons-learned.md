@@ -2412,3 +2412,12 @@ The terminal fake routed frames through `frameRouter` from `src/lib/terminal.ts`
 macOS's press-and-hold accent popup (`ApplePressAndHoldEnabled`, on by default) swallows key repeat for every key in a WKWebView, so a held `j` moves once in the desktop's list and in the embedded Neovim alike; VS Code users know the same fix as `defaults write com.microsoft.VSCode ApplePressAndHoldEnabled -bool false`.
 The desktop registers `false` with `NSUserDefaults.standardUserDefaults().registerDefaults(...)` at the top of `run()`, before the window exists (`clients/desktop/src-tauri/src/lib.rs`, `key_repeat`); the registration domain is searched last, so a value the user wrote for the bundle id, or into the global domain with `defaults write -g`, still wins.
 `objc2-foundation` came into the tree through tao and wry; the desktop names it as a direct macOS dependency at the locked version with only the features it uses.
+
+## lazy.nvim drops a runtime path added with `--cmd`, and Vim refuses `@` group names
+
+The desktop starts Neovim with its own colorscheme (`clients/desktop/src-tauri/src/terminal.rs`, `Launch::dressed`): `--cmd "set runtimepath^=<dir>"` runs before the user's config, `-c` after the config and after the first file loads.
+With a lazy.nvim config the `--cmd` prepend alone fails with `E185: Cannot find color scheme`: `require("lazy").setup()` resets `'runtimepath'` (`performance.rtp.reset`, on by default), so the same `set runtimepath^=<dir>` goes in again as the first `-c`, and `'runtimepath'` drops the duplicate when no reset happened.
+Check such a change against the real config, not `--clean`: `nvim --headless --cmd ... -c ... -c 'lua io.stdout:write(vim.g.colors_name)' -c 'qa!' file.md`.
+A colorscheme shared by Vim and Neovim guards its tree-sitter groups (`@markup.heading`, `@property`) with `has('nvim')`: Vim refuses `@` and `.` in a group name, while an unknown plain name such as `WinSeparator` is just created.
+After `:highlight clear` Neovim restores its own default scheme, whose groups carry explicit `Nvim*` colours (`@variable`, `OkMsg`); dump `:highlight` after loading and look for colours outside the tokens.
+Under `tauri dev`, `app.path().resource_dir()` is the executable's directory (`<target>/debug`, `CARGO_TARGET_DIR` included), where tauri-build copies `bundle.resources` on each build; the map form `{"resources/nvim/": "nvim/"}` lands it at `<resource dir>/nvim` there and in the bundle alike.

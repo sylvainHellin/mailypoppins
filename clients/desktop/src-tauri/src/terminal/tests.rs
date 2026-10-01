@@ -551,6 +551,168 @@ fn a_terminal_editor_found_nowhere_stays_external_outside_the_fixture() {
     assert_eq!(route_of(&[], Some("zed"), true), External);
 }
 
+// ---------------------------------------------------------------------------
+// The look
+// ---------------------------------------------------------------------------
+
+fn look(scheme: Scheme, colors: EditorColors) -> Look {
+    Look {
+        scheme,
+        colors,
+        runtime: Some(PathBuf::from(
+            "/Applications/mailypoppins.app/Contents/Resources/nvim",
+        )),
+    }
+}
+
+/// The dressed launch of `editor` (a template) on a fresh draft.
+fn dressed(editor: &str, files: &'static [&'static str], look: &Look) -> (Launch, String) {
+    let path = draft("look");
+    let env = env_of(&[]);
+    let is = files_at(files);
+    let launch = plan(&lookup(&env, Some(editor), &is), &login("/x"), &path, false)
+        .expect("plan")
+        .dressed(look);
+    (launch, path)
+}
+
+fn theme_of(launch: &Launch) -> Option<&str> {
+    launch
+        .env
+        .iter()
+        .find(|(k, _)| k == THEME_ENV)
+        .map(|(_, v)| v.as_str())
+}
+
+#[test]
+fn nvim_following_the_app_gets_the_runtime_path_then_the_colorscheme_before_the_file() {
+    let (launch, path) = dressed(
+        "nvim",
+        &["/x/nvim"],
+        &look(Scheme::Light, EditorColors::App),
+    );
+    assert_eq!(
+        launch.argv,
+        [
+            "/x/nvim",
+            "--cmd",
+            "set runtimepath^=/Applications/mailypoppins.app/Contents/Resources/nvim",
+            "-c",
+            "set runtimepath^=/Applications/mailypoppins.app/Contents/Resources/nvim",
+            "-c",
+            "set background=light",
+            "-c",
+            "colorscheme mailypoppins",
+            path.as_str(),
+        ]
+    );
+    assert_eq!(theme_of(&launch), Some("light"));
+
+    // A template's own arguments and placeholder stay after the words.
+    let (launch, path) = dressed(
+        "vim -u NONE {path} +1",
+        &["/x/vim"],
+        &look(Scheme::Dark, EditorColors::App),
+    );
+    assert_eq!(
+        launch.argv,
+        [
+            "/x/vim",
+            "--cmd",
+            "set runtimepath^=/Applications/mailypoppins.app/Contents/Resources/nvim",
+            "-c",
+            "set runtimepath^=/Applications/mailypoppins.app/Contents/Resources/nvim",
+            "-c",
+            "set background=dark",
+            "-c",
+            "colorscheme mailypoppins",
+            "-u",
+            "NONE",
+            path.as_str(),
+            "+1",
+        ]
+    );
+    assert_eq!(theme_of(&launch), Some("dark"));
+}
+
+#[test]
+fn nvim_keeping_its_own_colours_gets_the_runtime_path_only_before_and_after_its_config() {
+    let (launch, path) = dressed(
+        "nvim",
+        &["/x/nvim"],
+        &look(Scheme::Dark, EditorColors::Editor),
+    );
+    assert_eq!(
+        launch.argv,
+        [
+            "/x/nvim",
+            "--cmd",
+            "set runtimepath^=/Applications/mailypoppins.app/Contents/Resources/nvim",
+            "-c",
+            "set runtimepath^=/Applications/mailypoppins.app/Contents/Resources/nvim",
+            path.as_str(),
+        ]
+    );
+    assert_eq!(theme_of(&launch), Some("dark"));
+}
+
+#[test]
+fn hx_gets_nothing_but_the_theme_variable() {
+    for colors in [EditorColors::App, EditorColors::Editor] {
+        let (launch, path) = dressed("hx", &["/x/hx"], &look(Scheme::Light, colors));
+        assert_eq!(launch.argv, ["/x/hx", path.as_str()]);
+        assert_eq!(theme_of(&launch), Some("light"));
+        assert_eq!(
+            launch.env.last(),
+            Some(&(THEME_ENV.to_string(), "light".to_string())),
+            "set over the rest of the child's environment"
+        );
+    }
+}
+
+#[test]
+fn without_a_resource_directory_nvim_is_left_alone() {
+    let mut bare = look(Scheme::Dark, EditorColors::App);
+    bare.runtime = None;
+    let (launch, path) = dressed("nvim", &["/x/nvim"], &bare);
+    assert_eq!(launch.argv, ["/x/nvim", path.as_str()]);
+    assert_eq!(theme_of(&launch), Some("dark"));
+}
+
+#[test]
+fn the_runtime_path_is_escaped_for_set_and_its_list() {
+    let mut odd = look(Scheme::Dark, EditorColors::Editor);
+    odd.runtime = Some(PathBuf::from("/My Apps/a,b|c/nvim"));
+    let (launch, _) = dressed("nvim", &["/x/nvim"], &odd);
+    let want = r"set runtimepath^=/My\ Apps/a\\,b\|c/nvim";
+    assert_eq!(launch.argv[2], want);
+    assert_eq!(launch.argv[4], want);
+}
+
+#[test]
+fn vim_is_known_by_its_file_name_or_its_link() {
+    assert!(is_vim("/opt/homebrew/bin/nvim"));
+    assert!(is_vim("vim"));
+    assert!(!is_vim("/x/hx"));
+    assert!(!is_vim("/x/nvim-qt"));
+    let dir = crate::test_support::scratch_dir("vi-link");
+    let vim = dir.join("vim");
+    std::fs::write(&vim, "").expect("vim");
+    let vi = dir.join("vi");
+    std::os::unix::fs::symlink(&vim, &vi).expect("link");
+    assert!(is_vim(&vi.to_string_lossy()), "vi linked to vim");
+    assert!(!is_vim(&dir.join("nvi").to_string_lossy()));
+}
+
+#[test]
+fn the_theme_is_dark_or_light() {
+    assert_eq!(Scheme::parse("dark").expect("dark"), Scheme::Dark);
+    assert_eq!(Scheme::parse("light").expect("light"), Scheme::Light);
+    for bad in ["system", "", "Dark"] {
+        assert!(matches!(Scheme::parse(bad), Err(GuiError::Protocol { .. })));
+    }
+}
+
 #[test]
 fn the_login_env_is_read_after_the_last_mark() {
     let env = |path: &str, lang: Option<&str>| LoginEnv {

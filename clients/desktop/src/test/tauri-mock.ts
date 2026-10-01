@@ -1580,7 +1580,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
   }
 }
 
-const SETTING_KEYS = ["editor", "theme", "reader_mode"];
+const SETTING_KEYS = ["editor", "theme", "reader_mode", "editor_colors"];
 
 function settingKey(key: unknown): string {
   const k = String(key);
@@ -1597,6 +1597,9 @@ function storeSetting(key: string, value: string | null): void {
   }
   if (key === "reader_mode" && v !== "" && !["html", "text"].includes(v)) {
     throw { kind: "setup", message: `the reader mode \`${v}\` is neither html nor text` };
+  }
+  if (key === "editor_colors" && v !== "" && !["app", "editor"].includes(v)) {
+    throw { kind: "setup", message: `the editor colours \`${v}\` are neither app nor editor` };
   }
   if (v === "") mock.settings.delete(key);
   else mock.settings.set(key, v);
@@ -1621,7 +1624,12 @@ function terminalAnswer(cmd: string, args: Record<string, unknown>): Promise<unk
   const t = mock.terminal;
   switch (cmd) {
     case "terminal_spawn": {
-      const req = { account: String(args.account), id: String(args.id), path: String(args.path), cols: Number(args.cols), rows: Number(args.rows) };
+      // terminal.rs `Scheme::parse`: the palette at spawn, dark or light.
+      const theme = args.theme;
+      if (theme !== "dark" && theme !== "light") {
+        return Promise.reject({ kind: "protocol", message: `the theme \`${String(theme)}\` is neither dark nor light`, code: null });
+      }
+      const req = { account: String(args.account), id: String(args.id), path: String(args.path), cols: Number(args.cols), rows: Number(args.rows), theme } as const;
       return t.spawn(req, channelSink(args.output as Channel<unknown>));
     }
     case "terminal_write":
