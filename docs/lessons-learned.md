@@ -2389,3 +2389,20 @@ React's StrictMode mounts, unmounts and mounts every effect in a dev build, so a
 An `ArrayBuffer` made by Node's `TextEncoder` in a vitest jsdom test is not `instanceof` the global `ArrayBuffer`, so a frame check written with `instanceof` alone drops every frame in the tests; `src/lib/terminal.ts` also accepts the `[object ArrayBuffer]` tag.
 Tailwind 4's `@theme inline` emits no CSS variable for its entries, so `getPropertyValue("--font-mono")` is empty in the built app; the pane reads the computed `font-family` of an element carrying `font-mono`.
 The colour guard's hex pattern also matches a ticket reference such as `#0130` in a comment under `src/components` or `src/app`; write `ticket 0130` there.
+
+## A webview that listens for the window's close owns the close, and needs `core:window:allow-destroy`
+
+`@tauri-apps/api` 2.12's `onCloseRequested` wraps the handler: once the handler resolves, the wrapper calls `destroy()` unless the handler called `event.preventDefault()` (`window.js`), and tauri prevents the native close itself as soon as any `tauri://close-requested` listener exists.
+So a handler that does nothing still closes the window, but only through `destroy()`, which `core:default` does not grant: without `core:window:allow-destroy` in the capability, registering the listener makes the window impossible to close.
+`preventDefault` must be called before the handler resolves; the desktop calls it synchronously when an embedded editor runs, asks in its own dialog, and calls `destroy()` itself after killing the editors (`clients/desktop/src/app/compose.ts`, `useCloseGuard`).
+
+## An embedded terminal must outlive every remount of the shell around it
+
+The terminal pane spawns its editor on mount and loses its buffer on unmount, so it cannot live inside the reader pane: a full-pane view, the narrow layout's sidebar, a zoom and the connecting screen of a daemon restart all unmount the reader, and a remount would start a second Neovim on the same draft.
+The desktop mounts every pane once under `AppShell` and lays the shown one `position: fixed` over a slot the reader renders (`clients/desktop/src/components/compose/TerminalHost.tsx`); each pane is keyed by its draft and a spawn counter, so only Reopen remounts one.
+The owner kills the child in the pane's unmount cleanup only once the spawn has answered, which is also what keeps StrictMode's mount, unmount, mount from killing anything: the first mount's spawn never started.
+
+## A test mock of `@/lib/tauri` must not import a module that imports `@/lib/tauri`
+
+`vi.mock("@/lib/tauri", () => import("@/test/tauri-mock"))` resolves the mock through the module graph, so a mock that imports, even indirectly, a module importing `@/lib/tauri` waits on itself and vitest hangs with no error until the run times out.
+The terminal fake routed frames through `frameRouter` from `src/lib/terminal.ts`, which imports Tauri; the router now lives in the Tauri-free `src/lib/terminal-frames.ts`, and the fake takes only types from `terminal.ts`.

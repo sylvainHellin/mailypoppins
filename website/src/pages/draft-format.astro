@@ -171,6 +171,30 @@ Email body here.`;
     </section>
 
     <section>
+      <h2 id="editing-drafts">Editing Drafts</h2>
+      <p>
+        A draft is edited as the file it is. The TUI suspends itself and opens the file in
+        <code>$EDITOR</code>, and returns when the editor exits.
+      </p>
+      <p>
+        The desktop app runs a terminal editor such as Neovim inside its reader pane, with your
+        own configuration and plugins, while the message list stays usable beside it. It picks
+        the editor from <code>MP_DESKTOP_EDITOR</code>, its editor setting, <code>$VISUAL</code>
+        or <code>$EDITOR</code>, and otherwise looks for <code>nvim</code>, <code>vim</code> and
+        <code>hx</code>, also in the Homebrew directories, so a launch from the Finder finds them.
+        Every save updates the list at once. Quitting with <code>:wq</code> shows the draft's
+        preview; <code>:q!</code> drops only the unsaved changes and never the file, and an editor
+        that crashes leaves the draft as last saved, with a Reopen button.
+      </p>
+      <p>
+        Selecting another message while the editor runs asks whether to keep editing in the
+        background, close the editor (the draft stays), or stay. Closing the window asks the
+        same before it closes the editor. A GUI editor such as VS Code or Zed named in the setting
+        or in <code>$VISUAL</code> opens the draft in its own window instead.
+      </p>
+    </section>
+
+    <section>
       <h2 id="reply-drafts">Reply Drafts</h2>
       <p>
         Reply drafts are created with <code>mp reply</code> (or <code>r</code> to reply,

@@ -104,7 +104,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `signature_delete` | `account`, `name` | `SignatureListing` |
 | `signature_set_default` | `account`, `name` (or `null` to clear) | `SignatureListing` |
 | `editor_open` | `path` | `EditorLaunch` |
-| `editor_setting_get` | none | `EditorSetting` |
+| `editor_setting_get` | none | `EditorSetting`, with the route a draft takes |
 | `editor_setting_set` | `editor` (or `null` to clear) | `EditorSetting` |
 | `terminal_spawn` | `account`, `id`, `path`, `cols`, `rows`, `output: Channel` | `TerminalStarted`; see Terminal sessions |
 | `terminal_write` | `session`, `data` (a string) | nothing, once the bytes are queued |
@@ -221,9 +221,10 @@ type DraftStatusBatch = {
 type SignatureListing = { account: string; names: string[]; default: string | null };
 type EditorSource = "env" | "setting" | "visual" | "editor" | "terminal" | "probe" | "fallback";
 type EditorLaunch = { editor: string; pid?: number; source: EditorSource; fixture: boolean };
+type EditorRoute = "embedded" | "external";
 type EditorSetting = {
   editor: string | null; file: string; env_override: string | null;
-  effective: string; effective_source: EditorSource;
+  effective: string; effective_source: EditorSource; route: EditorRoute;
 };
 type SyncMode = "quick" | "full";
 type RsvpSettled = {
@@ -561,6 +562,12 @@ The terminals are probed in this order, each on `PATH`, in the three directories
 A value that carries its own `{path}` keeps it where it is.
 `MP_DESKTOP_EDITOR` and the setting are taken verbatim and never wrapped: a terminal editor there names its terminal itself, for example `MP_DESKTOP_EDITOR="open -na Ghostty --args -e hx {path}"`.
 
+`EditorSetting.route` says where a draft opens, and the frontend reads it before every open.
+It is `embedded` exactly when `terminal_spawn` would accept the editor for an existing draft: `terminal::route` runs the same resolution and lookup as `terminal_spawn` (see Terminal sessions) without the draft file, so the two cannot disagree.
+Anything else is `external`, and `effective` is what `editor_open` then runs: a GUI editor, a terminal editor found nowhere, or nothing found at all.
+In fixture mode a terminal editor found nowhere and an empty slot are `embedded` too, as `terminal_spawn` journals them, and a GUI editor stays `external`.
+The route needs the login shell's `PATH`, which the first call per process reads for up to 5 s, so `editor_setting_get` and `editor_setting_set` run off the main thread.
+
 ## Terminal sessions
 
 `terminal_spawn` runs a terminal editor on a draft in a native PTY (`portable-pty`), which the webview renders with xterm.js; it is the embedded route of M5 (#0130), beside `editor_open`'s external one.
@@ -599,6 +606,7 @@ A write that fails (`EIO` once the child closed the terminal) ends the writer th
 A child that exited while something it started keeps the PTY open gets its exit frame after 200 ms of quiet.
 Every live child is killed when the window is destroyed and when the app exits.
 The window's close request kills nothing, since a webview that listens for it decides whether the window closes.
+The webview does listen ([shell.md](shell.md), "The embedded editor"): with an editor running it asks, kills the sessions, and destroys the window itself, which the main window's capability allows with `core:window:allow-destroy`.
 
 In fixture mode nothing is spawned: the command is journaled as `editor_open`'s is, so `fixture_simulate("editor_save")` plays against the draft, and the answer has `fixture: true` and no `pid`.
 No frame comes until `terminal_kill`, which sends the exit `{code: 0, signal: null}`.
@@ -747,7 +755,7 @@ The policy lives in `tauri.conf.json` under `app.security.csp`:
 - `frame-src mpmsg: http://mpmsg.localhost https: http:`: `https:` and `http:` are there only so that a link clicked in the reader reaches `on_navigation`, which refuses it; with `frame-src mpmsg:` alone the CSP blocks the navigation first and the click dies silently.
 - `dangerousDisableAssetCspModification: ["style-src"]` stops Tauri from adding a nonce to `style-src` when `index.html` carries an inline `<style>`, which would switch `'unsafe-inline'` off.
 
-The capability grants `core:default` and `opener:allow-open-url` scoped to `https://*`, `http://*` and `mailto:*`.
+The capability grants `core:default`, `core:window:allow-destroy` (the close of a window that asked first, see Terminal sessions) and `opener:allow-open-url` scoped to `https://*`, `http://*` and `mailto:*`.
 
 ## Environment
 
