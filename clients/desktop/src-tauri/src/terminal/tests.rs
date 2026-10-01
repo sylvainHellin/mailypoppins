@@ -215,6 +215,13 @@ fn draft(tag: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn login(path: &str) -> LoginEnv {
+    LoginEnv {
+        path: path.into(),
+        lang: None,
+    }
+}
+
 fn setup_message<T: std::fmt::Debug>(r: Result<T, GuiError>) -> String {
     match r {
         Err(GuiError::Setup { message }) => message,
@@ -239,18 +246,45 @@ fn a_terminal_editor_in_the_environment_runs_bare_never_wrapped() {
         wrapped.template
     );
 
-    let launch = plan(&l, "/usr/bin:/bin", &path, false).expect("plan");
+    let launch = plan(&l, &login("/usr/bin:/bin"), &path, false).expect("plan");
     assert_eq!(launch.argv, ["/opt/homebrew/bin/nvim", path.as_str()]);
     assert_eq!(launch.source, EditorSource::Editor);
     assert_eq!(launch.cwd, Path::new(&path).parent().expect("dir"));
+    let base = [
+        ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+        ("TERM".to_string(), "xterm-256color".to_string()),
+        ("COLORTERM".to_string(), "truecolor".to_string()),
+    ];
+    let with_lang = |lang: &str| {
+        let mut env = base.to_vec();
+        env.push(("LANG".to_string(), lang.to_string()));
+        env
+    };
     assert_eq!(
         launch.env,
-        [
-            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
-            ("TERM".to_string(), "xterm-256color".to_string()),
-            ("COLORTERM".to_string(), "truecolor".to_string()),
-        ]
+        with_lang(DEFAULT_LANG),
+        "a Finder launch has no locale, and the login shell set none"
     );
+
+    let shell_lang = LoginEnv {
+        path: "/usr/bin:/bin".into(),
+        lang: Some("de_DE.UTF-8".into()),
+    };
+    let launch = plan(&l, &shell_lang, &path, false).expect("plan");
+    assert_eq!(
+        launch.env,
+        with_lang("de_DE.UTF-8"),
+        "the login shell's LANG"
+    );
+
+    for var in LOCALE_VARS {
+        let env = env_of(&[("EDITOR", "nvim"), (var, "fr_FR.UTF-8")]);
+        let launch = plan(&lookup(&env, None, &files), &shell_lang, &path, false).expect("plan");
+        assert_eq!(
+            launch.env, base,
+            "{var} in the app's environment is inherited"
+        );
+    }
 }
 
 #[test]
@@ -262,14 +296,20 @@ fn the_explicit_choice_wins_and_a_terminal_editor_beats_a_gui_visual() {
         ("VISUAL", "code -w"),
         ("EDITOR", "hx"),
     ]);
-    let launch = plan(&lookup(&env, Some("nvim"), &files), "/x", &path, false).expect("plan");
+    let launch = plan(
+        &lookup(&env, Some("nvim"), &files),
+        &login("/x"),
+        &path,
+        false,
+    )
+    .expect("plan");
     assert_eq!(launch.argv, ["/x/vim", "-u", "NONE", path.as_str()]);
     assert_eq!(launch.source, EditorSource::Env);
 
     let env = env_of(&[("VISUAL", "code -w"), ("EDITOR", "hx")]);
     let launch = plan(
         &lookup(&env, Some("nvim {path} +1"), &files),
-        "/x",
+        &login("/x"),
         &path,
         false,
     )
@@ -277,7 +317,7 @@ fn the_explicit_choice_wins_and_a_terminal_editor_beats_a_gui_visual() {
     assert_eq!(launch.argv, ["/x/nvim", path.as_str(), "+1"]);
     assert_eq!(launch.source, EditorSource::Setting);
 
-    let launch = plan(&lookup(&env, None, &files), "/x", &path, false).expect("plan");
+    let launch = plan(&lookup(&env, None, &files), &login("/x"), &path, false).expect("plan");
     assert_eq!(launch.argv, ["/x/hx", path.as_str()]);
     assert_eq!(launch.source, EditorSource::Editor);
 }
@@ -287,19 +327,34 @@ fn a_gui_editor_is_a_setup_error_naming_it() {
     let path = draft("term-gui");
     let files = files_at(&["/x/nvim", "/usr/local/bin/code"]);
     let env = env_of(&[("EDITOR", "code -w")]);
-    let message = setup_message(plan(&lookup(&env, None, &files), "/x", &path, false));
+    let message = setup_message(plan(
+        &lookup(&env, None, &files),
+        &login("/x"),
+        &path,
+        false,
+    ));
     assert!(message.contains("`code -w`"), "{message}");
     assert!(message.contains("$EDITOR"), "{message}");
 
     let env = env_of(&[]);
-    let message = setup_message(plan(&lookup(&env, Some("zed"), &files), "/x", &path, false));
+    let message = setup_message(plan(
+        &lookup(&env, Some("zed"), &files),
+        &login("/x"),
+        &path,
+        false,
+    ));
     assert!(
         message.contains("the editor setting names `zed`"),
         "{message}"
     );
     // The fixture refuses it too, so the UI's refusal can be exercised.
     assert!(matches!(
-        plan(&lookup(&env, Some("zed"), &files), "/x", &path, true),
+        plan(
+            &lookup(&env, Some("zed"), &files),
+            &login("/x"),
+            &path,
+            true
+        ),
         Err(GuiError::Setup { .. })
     ));
 }
@@ -310,7 +365,8 @@ fn with_nothing_named_nvim_then_vim_then_hx_are_probed() {
     let env = env_of(&[("HOME", "/home/u")]);
     let run = |files: &'static [&'static str]| {
         let is = files_at(files);
-        plan(&lookup(&env, None, &is), "/x:/y", &path, false).map(|l| (l.argv[0].clone(), l.source))
+        plan(&lookup(&env, None, &is), &login("/x:/y"), &path, false)
+            .map(|l| (l.argv[0].clone(), l.source))
     };
     assert_eq!(
         run(&[
@@ -351,7 +407,7 @@ fn with_nothing_named_nvim_then_vim_then_hx_are_probed() {
     assert!(message.contains("bob"), "{message}");
 
     let none = |_: &Path| false;
-    let launch = plan(&lookup(&env, None, &none), "/x", &path, true).expect("fixture");
+    let launch = plan(&lookup(&env, None, &none), &login("/x"), &path, true).expect("fixture");
     assert_eq!(
         launch.argv,
         ["nvim", path.as_str()],
@@ -364,7 +420,7 @@ fn a_named_editor_found_nowhere_is_a_setup_error() {
     let path = draft("term-missing");
     let none = |_: &Path| false;
     let env = env_of(&[("EDITOR", "nvim")]);
-    let message = setup_message(plan(&lookup(&env, None, &none), "/x", &path, false));
+    let message = setup_message(plan(&lookup(&env, None, &none), &login("/x"), &path, false));
     assert!(
         message.contains("`nvim` from $EDITOR was not found"),
         "{message}"
@@ -372,33 +428,52 @@ fn a_named_editor_found_nowhere_is_a_setup_error() {
     assert!(message.contains("full path"), "{message}");
     let message = setup_message(plan(
         &lookup(&env, Some("/no/such/nvim"), &none),
-        "/x",
+        &login("/x"),
         &path,
         false,
     ));
     assert!(message.contains("/no/such/nvim"), "{message}");
     assert!(matches!(
-        plan(&lookup(&env, None, &none), "/x", "relative.md", false),
+        plan(
+            &lookup(&env, None, &none),
+            &login("/x"),
+            "relative.md",
+            false
+        ),
         Err(GuiError::Protocol { .. })
     ));
     assert!(matches!(
-        plan(&lookup(&env, None, &none), "/x", "/no/such/draft.md", false),
+        plan(
+            &lookup(&env, None, &none),
+            &login("/x"),
+            "/no/such/draft.md",
+            false
+        ),
         Err(GuiError::NotFound { .. })
     ));
 }
 
 #[test]
-fn the_login_path_is_the_last_line_the_shell_printed() {
+fn the_login_env_is_read_after_the_last_mark() {
+    let env = |path: &str, lang: Option<&str>| LoginEnv {
+        path: path.into(),
+        lang: lang.map(str::to_string),
+    };
     assert_eq!(
-        parse_login_path(b"welcome!\n/opt/homebrew/bin:/usr/bin").as_deref(),
-        Some("/opt/homebrew/bin:/usr/bin")
+        parse_login_env(b"welcome!\n__mp_login_env__\n/opt/homebrew/bin:/usr/bin\nen_GB.UTF-8\n"),
+        Some(env("/opt/homebrew/bin:/usr/bin", Some("en_GB.UTF-8")))
     );
-    assert_eq!(parse_login_path(b"/a:/b\n").as_deref(), Some("/a:/b"));
-    assert_eq!(parse_login_path(b"no path here"), None);
-    assert_eq!(parse_login_path(b""), None);
-    let path = login_shell_path("/bin/sh").expect("sh answers");
-    assert!(path.contains('/'), "{path}");
-    assert!(login_shell_path("/no/such/shell").is_err());
+    assert_eq!(
+        parse_login_env(b"__mp_login_env__\n/x\n__mp_login_env__\n/a:/b\n\n"),
+        Some(env("/a:/b", None)),
+        "the last mark, and a blank LANG is none"
+    );
+    assert_eq!(parse_login_env(b"__mp_login_env__\nno path\n"), None);
+    assert_eq!(parse_login_env(b"/a:/b\n"), None, "no mark");
+    assert_eq!(parse_login_env(b""), None);
+    let got = login_shell_env("/bin/sh").expect("sh answers");
+    assert!(got.path.contains('/'), "{got:?}");
+    assert!(login_shell_env("/no/such/shell").is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +644,127 @@ done"#;
     );
 }
 
+fn pty_of(s: &Session) -> &Pty {
+    match &s.kind {
+        Kind::Pty(pty) => pty,
+        Kind::Fixture(_) => panic!("a fixture session"),
+    }
+}
+
+fn wait_finished(handle: &JoinHandle<()>, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !handle.is_finished() {
+        assert!(Instant::now() < deadline, "{what} did not end");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_write_to_a_child_that_does_not_read_never_blocks_the_command() {
+    // Raw mode, as Neovim runs: the master then takes about 1 KiB and blocks
+    // the next write, where a canonical-mode line discipline would discard.
+    let (d, launch) = sh("stty raw -echo; echo ready; sleep 2", "pty-stuck");
+    let terminals = Terminals::default();
+    let rx = Received::default();
+    let started = terminals
+        .start(None, d, launch, 80, 24, rx.channel())
+        .expect("spawn");
+    rx.wait_text("ready");
+    let line = format!("{}\r", "a".repeat(4095));
+    for round in 0..16 {
+        let t = Instant::now();
+        terminals.write(started.session, &line).expect("queued");
+        assert!(
+            t.elapsed() < Duration::from_millis(100),
+            "write {round} of 4 KiB took {:?}",
+            t.elapsed()
+        );
+    }
+    let session = terminals.get(started.session).expect("live");
+    assert!(
+        !pty_of(&session).writer.is_finished(),
+        "the writer is still at it, since sleep reads nothing"
+    );
+    let t = Instant::now();
+    terminals.kill(started.session);
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    assert_eq!(rx.exit().map(|e| e.signal), Some(Some(1)));
+    drop(terminals);
+    wait_finished(&pty_of(&session).writer, "the writer of a killed child");
+}
+
+#[test]
+fn a_write_that_lands_while_the_child_exits_is_dropped_quietly() {
+    let (d, launch) = sh("echo bye", "pty-exiting");
+    let terminals = Terminals::default();
+    let rx = Received::default();
+    let started = terminals
+        .start(None, d, launch, 80, 24, rx.channel())
+        .expect("spawn");
+    rx.wait_exit();
+    let session = terminals.get(started.session).expect("kept until kill");
+    let pty = pty_of(&session);
+    // As if the write came in after the slave closed but before the pump
+    // saw the exit: it reaches the writer, whose write fails.
+    pty.exited.store(false, Ordering::SeqCst);
+    for _ in 0..3 {
+        terminals.write(started.session, "late\r").expect("Ok");
+    }
+    wait_finished(&pty.writer, "the writer after a failed write");
+    terminals
+        .write(started.session, "later\r")
+        .expect("Ok once the writer is gone too");
+    terminals.kill(started.session);
+}
+
+/// A writer whose writes fail after `ok` of them.
+struct Failing {
+    ok: usize,
+    got: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl Write for Failing {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.ok == 0 {
+            return Err(std::io::Error::from_raw_os_error(5));
+        }
+        self.ok -= 1;
+        lock(&self.got).push(buf.to_vec());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn the_writer_keeps_the_order_and_ends_at_the_first_failure() {
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let failing = Failing {
+        ok: 2,
+        got: got.clone(),
+    };
+    let (tx, handle) = spawn_writer(0, Box::new(failing)).expect("writer");
+    for word in ["a", "b", "c", "d"] {
+        let _ = tx.send(word.as_bytes().to_vec());
+    }
+    wait_finished(&handle, "the writer");
+    assert_eq!(*lock(&got), [b"a".to_vec(), b"b".to_vec()]);
+    assert!(tx.send(b"e".to_vec()).is_err(), "the queue closed with it");
+
+    let (tx, handle) = spawn_writer(
+        0,
+        Box::new(Failing {
+            ok: 9,
+            got: got.clone(),
+        }),
+    )
+    .expect("writer");
+    drop(tx);
+    wait_finished(&handle, "the writer of a dropped queue");
+}
+
 #[test]
 fn a_nonzero_exit_is_reported() {
     let (d, launch) = sh("echo going; exit 7", "pty-seven");
@@ -652,7 +848,7 @@ fn a_fixture_session_journals_spawns_nothing_and_exits_on_kill() {
     let at = crate::commands::draft_path_on(&door, "work", "offsite-note").expect("path");
     let env = env_of(&[("EDITOR", "nvim -u NONE")]);
     let none = |_: &Path| false;
-    let launch = plan(&lookup(&env, None, &none), "/x", &at.path, true).expect("plan");
+    let launch = plan(&lookup(&env, None, &none), &login("/x"), &at.path, true).expect("plan");
     let terminals = Terminals::default();
     let rx = Received::default();
     let draft = Draft {

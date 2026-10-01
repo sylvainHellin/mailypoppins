@@ -107,7 +107,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `editor_setting_get` | none | `EditorSetting` |
 | `editor_setting_set` | `editor` (or `null` to clear) | `EditorSetting` |
 | `terminal_spawn` | `account`, `id`, `path`, `cols`, `rows`, `output: Channel` | `TerminalStarted`; see Terminal sessions |
-| `terminal_write` | `session`, `data` (a string) | nothing |
+| `terminal_write` | `session`, `data` (a string) | nothing, once the bytes are queued |
 | `terminal_resize` | `session`, `cols`, `rows` | nothing |
 | `terminal_kill` | `session` | nothing, once the exit frame has gone; an unknown session is fine |
 | `setting_get` | `key` (`SettingKey`) | `string \| null`; an unknown key is `not_found` |
@@ -573,9 +573,10 @@ The editor is resolved before any wrapping in a terminal emulator:
 
 A GUI editor named there (`code -w`, `zed`) is refused with `setup`, naming it and where it came from; so is an explicit choice of one, and a `$VISUAL`/`$EDITOR` pair that names no terminal editor.
 A bare program is looked for on the login shell's `PATH`, then in `/opt/homebrew/bin`, `/usr/local/bin` and `/usr/bin`, then in `~/.local/share/bob/nvim-bin`, and runs by its absolute path, so a Finder launch finds it; a program found nowhere is `setup`, and so is nothing found at all.
-The login shell's `PATH` is `$SHELL -lc 'printf %s "$PATH"'` (the last line it prints), read once per process with a 5 s budget; a shell that fails leaves the process's own `PATH`, with a warning in the log.
+The login shell's `PATH` and `LANG` come from one `$SHELL -lc` call that prints a mark line, then `$PATH`, then `$LANG`, read after the last mark so whatever the startup files print is skipped; it runs once per process with a 5 s budget, and a shell that fails leaves the process's own `PATH` and no `LANG`, with a warning in the log.
 
 The child runs with the template's words, `{path}` replaced by the draft path or the path appended, in the draft's directory, with the inherited environment plus `PATH` (the login shell's), `TERM=xterm-256color` and `COLORTERM=truecolor`.
+When the app's environment has none of `LANG`, `LC_ALL` and `LC_CTYPE`, which is the case under a Finder launch, the child also gets `LANG`: the login shell's, else `en_US.UTF-8`; without it `/usr/bin/vim` runs in latin1 and splits an umlaut on `x` or `r`.
 A relative path is `protocol` and a missing file `not_found`, as for `editor_open`; a PTY that does not open is `internal`, naming the OS error.
 
 ```ts
@@ -591,7 +592,9 @@ type TerminalExitFrame = { exit: TerminalExit };
 
 The JavaScript `Channel` replays messages in the order Rust sent them whatever their body, so the exit never overtakes the last output; a frame is told apart by its type, `ArrayBuffer` or object.
 
-`terminal_write` writes the string's UTF-8 bytes, as xterm's `onData` gives them, and `terminal_resize` sets the PTY's size; both are dropped without an error once the child exited, and an unknown session is `not_found`.
+`terminal_write` queues the string's UTF-8 bytes, as xterm's `onData` gives them, for the session's writer thread and answers at once, so a child that stops reading (Neovim in a long synchronous command, a `:!cmd`) blocks only that thread, and keystrokes keep their call order.
+A write that fails (`EIO` once the child closed the terminal) ends the writer thread, is logged at debug, and drops the rest of the queue; `terminal_write` answers `Ok` for a session that is still in the table, exited or not.
+`terminal_resize` sets the PTY's size and is dropped once the child exited; for both, an unknown session is `not_found`.
 `terminal_kill` kills the child (SIGHUP, then SIGKILL after 200 ms), waits until the exit frame has gone, and drops the session; the frontend calls it after an exit frame too, which frees the PTY, and a second call is fine.
 A child that exited while something it started keeps the PTY open gets its exit frame after 200 ms of quiet.
 Every live child is killed when the window is destroyed and when the app exits.

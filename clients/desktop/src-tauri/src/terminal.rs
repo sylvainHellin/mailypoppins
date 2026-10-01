@@ -8,9 +8,13 @@
 //! `$VISUAL` and `$EDITOR` naming a terminal editor ([`TERMINAL_EDITORS`]).
 //! A GUI editor named there is a [`GuiError::Setup`] naming it; with nothing
 //! named, [`TERMINAL_PROBES`] are probed in order. A bare program is located
-//! on the login shell's `PATH` ([`login_path`]), then in [`PROBE_DIRS`], then
+//! on the login shell's `PATH` ([`login_env`]), then in [`PROBE_DIRS`], then
 //! in [`BOB_DIR`] under `$HOME`, so a Finder launch finds Homebrew's or bob's
 //! Neovim; a program found nowhere is a `setup` error too.
+//!
+//! The child gets that `PATH`, `TERM=xterm-256color`, `COLORTERM=truecolor`
+//! and, when the app has none of [`LOCALE_VARS`], the login shell's `LANG` or
+//! [`DEFAULT_LANG`].
 //!
 //! # The channel
 //!
@@ -25,7 +29,11 @@
 //!
 //! # Lifecycle
 //!
-//! A reader thread does the blocking PTY reads; the pump thread coalesces,
+//! A writer thread takes what `terminal_write` queues, so a child that stops
+//! reading never blocks a command, and keystrokes keep their call order; a
+//! failed write ends it and drops the rest, since it only fails once the child
+//! closed the terminal. A reader thread does the blocking PTY reads; the pump
+//! thread coalesces,
 //! polls the child while the output is quiet, reaps it after EOF and sends the
 //! exit frame. A child that exited while a grandchild still holds the PTY open
 //! gets its exit frame after [`EXIT_GRACE`] of quiet. The session stays in
@@ -42,7 +50,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -325,6 +333,28 @@ pub fn pump(
     sink(Frame::Exit(exit));
 }
 
+/// A thread writing what `terminal_write` queues to the PTY, so a child that
+/// stops reading blocks this thread and never a command. It ends when the
+/// queue's sender drops or a write fails (`EIO` once the child closed the
+/// terminal), and drops what is still queued.
+fn spawn_writer(
+    id: u32,
+    mut writer: Box<dyn Write + Send>,
+) -> std::io::Result<(Sender<Vec<u8>>, JoinHandle<()>)> {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let handle = std::thread::Builder::new()
+        .name(format!("mp-pty-writer-{id}"))
+        .spawn(move || {
+            for bytes in rx {
+                if let Err(e) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
+                    tracing::debug!("[terminal] session {id}: input dropped: {e}");
+                    break;
+                }
+            }
+        })?;
+    Ok((tx, handle))
+}
+
 // ---------------------------------------------------------------------------
 // The child
 // ---------------------------------------------------------------------------
@@ -478,10 +508,11 @@ fn searched() -> String {
 /// found, so fixture runs work on a machine without one.
 pub fn plan(
     lookup: &Lookup,
-    login_path: &str,
+    login: &LoginEnv,
     path: &str,
     fixture: bool,
 ) -> Result<Launch, GuiError> {
+    let login_path = login.path.as_str();
     let file = Path::new(path);
     if !file.is_absolute() {
         return Err(GuiError::protocol(format!(
@@ -534,17 +565,33 @@ pub fn plan(
             )))
         }
     }
+    let mut env = vec![
+        ("PATH".to_string(), login_path.to_string()),
+        ("TERM".to_string(), "xterm-256color".to_string()),
+        ("COLORTERM".to_string(), "truecolor".to_string()),
+    ];
+    if !LOCALE_VARS.iter().any(|v| lookup.var(v).is_some()) {
+        let lang = login
+            .lang
+            .clone()
+            .unwrap_or_else(|| DEFAULT_LANG.to_string());
+        env.push(("LANG".to_string(), lang));
+    }
     Ok(Launch {
         argv,
         cwd,
-        env: vec![
-            ("PATH".to_string(), login_path.to_string()),
-            ("TERM".to_string(), "xterm-256color".to_string()),
-            ("COLORTERM".to_string(), "truecolor".to_string()),
-        ],
+        env,
         source: resolved.source,
     })
 }
+
+/// Any of these set in the app's environment leaves the child's locale alone.
+pub const LOCALE_VARS: &[&str] = &["LANG", "LC_ALL", "LC_CTYPE"];
+
+/// The child's `LANG` when the app has no locale (a Finder launch, whose
+/// launchd environment has none) and the login shell sets no `LANG` either:
+/// without it `/usr/bin/vim` runs in latin1 and splits an umlaut.
+pub const DEFAULT_LANG: &str = "en_US.UTF-8";
 
 /// The first of [`TERMINAL_PROBES`] found, name by name.
 fn probe(
@@ -574,23 +621,50 @@ fn probe(
     )))
 }
 
-/// The `PATH` a login shell prints, read off its output: the last line, when
-/// it holds a directory.
-pub fn parse_login_path(output: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(output);
-    let last = text
-        .trim_end_matches(['\n', '\r'])
-        .rsplit('\n')
-        .next()?
-        .trim();
-    last.contains('/').then(|| last.to_string())
+/// What the login shell says about the user's environment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginEnv {
+    /// `$PATH`.
+    pub path: String,
+    /// `$LANG`, when it is set and not blank.
+    pub lang: Option<String>,
 }
 
-/// `shell -lc 'printf %s "$PATH"'`, within [`LOGIN_SHELL_TIMEOUT`].
-pub fn login_shell_path(shell: &str) -> Result<String, String> {
+/// The line the login shell prints ahead of its answer, so whatever its
+/// startup files print first is skipped.
+const LOGIN_MARK: &str = "__mp_login_env__";
+
+/// The script the login shell runs: the mark, `PATH`, then `LANG`, one per
+/// line (fish's builtin `printf` reads `\n` too, and joins a quoted `PATH`
+/// with colons).
+const LOGIN_SCRIPT: &str = r#"printf '\n%s\n%s\n%s\n' __mp_login_env__ "$PATH" "$LANG""#;
+
+/// The login environment read off the shell's output: the lines after the
+/// last mark, with a `PATH` that holds a directory.
+pub fn parse_login_env(output: &[u8]) -> Option<LoginEnv> {
+    let text = String::from_utf8_lossy(output);
+    let at = text.rfind(&format!("{LOGIN_MARK}\n"))?;
+    let mut lines = text[at + LOGIN_MARK.len() + 1..].split('\n');
+    let path = lines.next()?.trim_end_matches('\r').trim();
+    if !path.contains('/') {
+        return None;
+    }
+    let lang = lines
+        .next()
+        .map(|l| l.trim_end_matches('\r').trim())
+        .filter(|l| !l.is_empty())
+        .map(str::to_string);
+    Some(LoginEnv {
+        path: path.to_string(),
+        lang,
+    })
+}
+
+/// `shell -lc` printing `PATH` and `LANG`, within [`LOGIN_SHELL_TIMEOUT`].
+pub fn login_shell_env(shell: &str) -> Result<LoginEnv, String> {
     use std::process::{Command, Stdio};
     let mut child = Command::new(shell)
-        .args(["-lc", r#"printf %s "$PATH""#])
+        .args(["-lc", LOGIN_SCRIPT])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -621,27 +695,33 @@ pub fn login_shell_path(shell: &str) -> Result<String, String> {
     if !status.success() {
         return Err(format!("{shell} exited with {status}"));
     }
-    parse_login_path(&out).ok_or_else(|| format!("{shell} printed no PATH"))
+    parse_login_env(&out).ok_or_else(|| format!("{shell} printed no PATH"))
 }
 
-/// The user's login-shell `PATH`, read once per process; the process's own
-/// `PATH` when the shell does not answer.
-pub fn login_path() -> &'static str {
-    static PATH: OnceLock<String> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let fallback = std::env::var("PATH").unwrap_or_default();
+/// The user's login-shell `PATH` and `LANG`, read once per process; the
+/// process's own `PATH` and no `LANG` when the shell does not answer.
+pub fn login_env() -> &'static LoginEnv {
+    static ENV: OnceLock<LoginEnv> = OnceLock::new();
+    ENV.get_or_init(|| {
         let shell = std::env::var("SHELL")
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "/bin/sh".to_string());
-        match login_shell_path(&shell) {
-            Ok(path) => {
-                tracing::info!("[terminal] the login shell's PATH: {path}");
-                path
+        match login_shell_env(&shell) {
+            Ok(env) => {
+                tracing::info!(
+                    "[terminal] the login shell's PATH: {}; LANG: {:?}",
+                    env.path,
+                    env.lang
+                );
+                env
             }
             Err(why) => {
                 tracing::warn!("[terminal] using the process PATH: {why}");
-                fallback
+                LoginEnv {
+                    path: std::env::var("PATH").unwrap_or_default(),
+                    lang: None,
+                }
             }
         }
     })
@@ -661,7 +741,11 @@ pub struct Draft {
 
 struct Pty {
     master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// The writer thread's queue; the thread ends when this drops.
+    input: Sender<Vec<u8>>,
+    /// Never joined: a child that stopped reading can hold it in a write.
+    #[cfg_attr(not(test), allow(dead_code))]
+    writer: JoinHandle<()>,
     child: Arc<Mutex<BoxedChild>>,
     pump: Mutex<Option<JoinHandle<()>>>,
     exited: Arc<AtomicBool>,
@@ -817,6 +901,13 @@ impl Terminals {
                 return Err(e);
             }
         };
+        let (input, writer) = match spawn_writer(id, writer) {
+            Ok(w) => w,
+            Err(e) => {
+                kill_child(&child);
+                return Err(pty_error("start its writer", e));
+            }
+        };
         let exited = Arc::new(AtomicBool::new(false));
         let rx = spawn_reader(reader);
         let mut reap = SharedChild(child.clone());
@@ -846,7 +937,8 @@ impl Terminals {
             draft,
             kind: Kind::Pty(Pty {
                 master: Mutex::new(pair.master),
-                writer: Mutex::new(writer),
+                input,
+                writer,
                 child,
                 pump: Mutex::new(Some(pump_handle)),
                 exited,
@@ -862,19 +954,20 @@ impl Terminals {
         })
     }
 
-    /// `data`'s bytes to the editor; dropped once it exited.
+    /// Queue `data`'s bytes for the editor, in call order, without waiting
+    /// for them to be written; dropped once it exited or a write failed.
     pub fn write(&self, session: u32, data: &str) -> Result<(), GuiError> {
         let s = self.get(session).ok_or_else(|| Self::unknown(session))?;
         let Kind::Pty(pty) = &s.kind else {
             return Ok(());
         };
-        if pty.exited.load(Ordering::SeqCst) {
+        if data.is_empty() || pty.exited.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let mut w = lock(&pty.writer);
-        w.write_all(data.as_bytes())
-            .and_then(|()| w.flush())
-            .map_err(|e| pty_error("write", e))
+        if pty.input.send(data.as_bytes().to_vec()).is_err() {
+            tracing::debug!("[terminal] session {session}: the writer is gone; input dropped");
+        }
+        Ok(())
     }
 
     /// The PTY's new size; dropped once the editor exited.
@@ -935,12 +1028,7 @@ pub async fn terminal_spawn(
             tracing::warn!("[terminal] ignoring the editor setting: {e}");
             None
         });
-        let launch = plan(
-            &live_lookup(setting),
-            login_path(),
-            &path,
-            fixture.is_some(),
-        )?;
+        let launch = plan(&live_lookup(setting), login_env(), &path, fixture.is_some())?;
         let draft = Draft { account, id, path };
         terminals.start(fixture.as_deref(), draft, launch, cols, rows, output)
     })
