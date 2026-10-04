@@ -1,8 +1,8 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { emit, emitEnvelope, fixtures, mock } from "@/test/tauri-mock";
-import { APPLIED_MS, HOLD_END_MS, HoldToast, NoticeToast } from "@/components/mutations/ActivityStack";
+import { APPLIED_MS, HOLD_END_MS, HoldToast, NoticeToast, STICKY_MS } from "@/components/mutations/ActivityStack";
 import type { ActivityNotice, HoldEntry } from "@/app/state";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
@@ -239,7 +239,7 @@ describe("activity notices", () => {
     expect(screen.getAllByRole("alert")[1]).toHaveTextContent("Sync of work did not start: no route");
   });
 
-  it("an applied notice leaves by itself after a few seconds, a failure does not", () => {
+  it("an applied notice leaves by itself after a few seconds, a failure after a while longer", () => {
     vi.useFakeTimers();
     const onDismiss = vi.fn();
     const applied: ActivityNotice = { id: 1, kind: "applied", account: "work", text: "Archived 1 message", rows: [] };
@@ -258,8 +258,39 @@ describe("activity notices", () => {
     expect(onDismiss).not.toHaveBeenCalled();
     act(() => vi.advanceTimersByTime(1));
     expect(onDismiss).toHaveBeenCalledWith(1);
-    act(() => vi.advanceTimersByTime(60_000));
     expect(onDismiss).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(STICKY_MS - APPLIED_MS - 1));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(1));
+    expect(onDismiss).toHaveBeenLastCalledWith(2);
+    // Each leaves once, even with nothing removing the toast.
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(onDismiss).toHaveBeenCalledTimes(2);
+  });
+
+  it("a notice under the pointer stays, and leaves with the time it had left once the pointer goes", () => {
+    vi.useFakeTimers();
+    const onDismiss = vi.fn();
+    const failed: ActivityNotice = { id: 7, kind: "sync_failed", account: "work", text: "Sync of work failed", rows: [] };
+    render(<NoticeToast notice={failed} onDismiss={onDismiss} />);
+    const toast = screen.getByRole("alert");
+    act(() => vi.advanceTimersByTime(STICKY_MS - 5000));
+    fireEvent.pointerEnter(toast);
+    act(() => vi.advanceTimersByTime(120_000));
+    expect(onDismiss).not.toHaveBeenCalled();
+    fireEvent.pointerLeave(toast);
+    act(() => vi.advanceTimersByTime(4999));
+    expect(onDismiss).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
+    expect(onDismiss).toHaveBeenCalledWith(7);
+  });
+
+  it("Dismiss still removes a failure at once", () => {
+    const onDismiss = vi.fn();
+    const failed: ActivityNotice = { id: 3, kind: "send_failed", account: "work", text: "Send failed", rows: [] };
+    render(<NoticeToast notice={failed} onDismiss={onDismiss} />);
+    fireEvent.click(within(screen.getByRole("alert")).getByRole("button", { name: "Dismiss" }));
+    expect(onDismiss).toHaveBeenCalledWith(3);
   });
 });
 
@@ -423,7 +454,7 @@ describe("a send's card and outcome", () => {
     expect(alert).toHaveTextContent("Send failed: the draft does not parse: line 2: mapping values are not allowed here (/fixture/work/drafts/broken.md)");
   });
 
-  it("a sticky outcome does not leave by itself", () => {
+  it("a sticky outcome stays longer than a plain end, and keeps its Dismiss", () => {
     vi.useFakeTimers();
     const onGone = vi.fn();
     const entry: HoldEntry = {
@@ -435,7 +466,30 @@ describe("a send's card and outcome", () => {
     };
     render(<HoldToast hold={entry} awaiting onCancel={() => {}} onGone={onGone} />);
     expect(screen.getByRole("status")).toHaveTextContent("Failed: 421 closed");
-    act(() => vi.advanceTimersByTime(HOLD_END_MS * 10));
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(STICKY_MS - 1));
     expect(onGone).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
+    expect(onGone).toHaveBeenCalledWith("fixture-hold-seed");
+  });
+
+  it("a sticky outcome under the pointer stays until the pointer leaves", () => {
+    vi.useFakeTimers();
+    const onGone = vi.fn();
+    const entry: HoldEntry = {
+      ...seededHold,
+      remaining_secs: 0,
+      state: "fired",
+      cancelling: false,
+      outcome: { tone: "partial", text: "Partly delivered: r1@example.com", sticky: true },
+    };
+    render(<HoldToast hold={entry} awaiting onCancel={() => {}} onGone={onGone} />);
+    const card = screen.getByRole("group");
+    fireEvent.pointerEnter(card);
+    act(() => vi.advanceTimersByTime(STICKY_MS * 3));
+    expect(onGone).not.toHaveBeenCalled();
+    fireEvent.pointerLeave(card);
+    act(() => vi.advanceTimersByTime(STICKY_MS));
+    expect(onGone).toHaveBeenCalledTimes(1);
   });
 });

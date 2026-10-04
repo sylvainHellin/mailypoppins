@@ -12,6 +12,7 @@ import { READER_SCROLL_ID } from "@/app/actions";
 import * as compose from "@/app/compose";
 import { fetchHit, openHtml } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
+import { usePaneFocused } from "@/hooks/use-pane-focused";
 import { draftOfKey, filteredDrafts, isStale, readerKey, type SearchHit } from "@/app/state";
 
 /**
@@ -79,6 +80,7 @@ function ServerHitSummary({ hit }: { hit: SearchHit }) {
 export function ReaderPane() {
   const s = useAppState();
   const dispatch = useDispatch();
+  const focused = usePaneFocused("reader");
   const { account, message, draft } = s.selection;
   const draftRow = draft ? filteredDrafts(s.messages.data, "").find((d) => d.id === draft) : undefined;
   const serverHit = s.search && s.selection.hit ? s.search.hits.find((h) => h.key === s.selection.hit) : undefined;
@@ -96,6 +98,7 @@ export function ReaderPane() {
       <aside
         aria-label="Reader"
         data-pane="reader"
+        data-focused={focused}
         className="flex h-full min-h-0 min-w-0 flex-col"
         onFocus={() => dispatch({ type: "pane_focused", pane: "reader" })}
       >
@@ -108,6 +111,7 @@ export function ReaderPane() {
     <aside
       aria-label="Reader"
       data-pane="reader"
+      data-focused={focused}
       className="flex h-full min-h-0 min-w-0 flex-col"
       onFocus={() => dispatch({ type: "pane_focused", pane: "reader" })}
     >

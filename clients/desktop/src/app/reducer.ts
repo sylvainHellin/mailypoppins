@@ -305,7 +305,7 @@ export type Action =
   | { type: "search_server_cancelled"; operation_id: string; outcome: "cancelled" | "already_settled" }
   | { type: "exit_search" }
   | { type: "intercepted_fetched"; urls: InterceptedUrl[] }
-  | { type: "dismiss_intercept" }
+  | { type: "dismiss_intercept"; entry: InterceptedUrl }
   // Mutations (app/mutations.ts dispatches these around each command).
   | {
       type: "mutation_apply";
@@ -1603,7 +1603,9 @@ function reduce(s: AppState, a: Action): AppState {
       return { ...s, intercepted: [...s.intercepted, ...fresh].slice(-INTERCEPT_CAP) };
     }
     case "dismiss_intercept":
-      return { ...s, interceptNotice: null };
+      // The notice names the link it is for: a timer armed for an older link
+      // must not clear a newer one that replaced it in the same flush.
+      return s.interceptNotice === a.entry ? { ...s, interceptNotice: null } : s;
 
     case "mutation_apply": {
       const before = visibleItems(s);

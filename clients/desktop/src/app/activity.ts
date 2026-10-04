@@ -10,7 +10,15 @@ import type { ActivityKind, ActivityLevel, ActivityLogEntry, ActivityNotice, App
 /** How many lines the log keeps, the TUI's `STATUS_LOG_CAPACITY`; a newer one drops the oldest. */
 export const ACTIVITY_LOG_CAP = 100;
 
-/** Kinds that report a failure: they stay until dismissed, are alerts, and log as errors. */
+/**
+ * How long a notice that needs reading stays: a failure, a send that failed or
+ * went to only some recipients, and the reader's blocked-link notice. A
+ * pointer resting on the notice holds it (useWindDown). The failure stays in
+ * the activity log, and a failed send in the outbox.
+ */
+export const STICKY_MS = 20_000;
+
+/** Kinds that report a failure: they stay for STICKY_MS or until dismissed, are alerts, and log as errors. */
 export const FAILURES: ReadonlySet<ActivityKind> = new Set<ActivityKind>([
   "failed",
   "rolled_back",

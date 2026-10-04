@@ -16,6 +16,7 @@ export type ActionId =
   | "focus_prev"
   | "focus_sidebar"
   | "focus_list"
+  | "focus_reader"
   | "toggle_help"
   | "toggle_zoom"
   | "open_palette"
@@ -292,6 +293,9 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "APP", label: "Narrow list", keys: [], id: "narrow_list", badge: null },
   { section: "APP", label: "Restart daemon", keys: [], id: "restart_daemon", badge: null },
   { section: "APP", label: "Back", keys: ["Alt+Left"], id: "back", badge: null },
+  // The TUI moves between panes with Tab and Shift+Tab and has a go key for
+  // the sidebar only (`gm`); `gr` is free in its `g` go family, as `go` is.
+  { section: "APP", label: "Focus reader", keys: ["gr"], id: "focus_reader", badge: null },
   // The TUI has no settings view, and no key for one (D11): the palette, the
   // sidebar and the app menu's "Settings…", whose Cmd+, is the macOS convention.
   { section: "APP", label: "Open settings", keys: ["Cmd+,"], id: "open_settings", badge: null },

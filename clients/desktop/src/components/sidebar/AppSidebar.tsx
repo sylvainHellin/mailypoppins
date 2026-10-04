@@ -5,6 +5,7 @@ import { AccountGroup, type SidebarMailbox } from "@/components/sidebar/AccountG
 import { ViewEntries } from "@/components/sidebar/ViewEntries";
 import { kindOfRole } from "@/components/sidebar/icons";
 import { useAppState, useDispatch } from "@/app/store";
+import { usePaneFocused } from "@/hooks/use-pane-focused";
 import { accountNames, type AppState, type View } from "@/app/state";
 import type { AccountState, SyncHealthState } from "@/protocol/types";
 import { outboxSummary, type OutboxSummary } from "@/app/outbox";
@@ -46,6 +47,7 @@ export function sidebarModel(s: AppState): AccountView[] {
 export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
   const s = useAppState();
   const dispatch = useDispatch();
+  const focused = usePaneFocused("sidebar");
   const onSelect = useCallback(
     (account: string, slug: string) => dispatch({ type: "select_mailbox", account, slug, focus: "list" }),
     [dispatch],
@@ -72,6 +74,7 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
         <nav
           aria-label="Accounts and mailboxes"
           data-pane="sidebar"
+          data-focused={focused}
           className="flex min-h-0 flex-1 flex-col"
           onFocus={() => dispatch({ type: "pane_focused", pane: "sidebar" })}
         >

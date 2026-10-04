@@ -15,6 +15,7 @@ import {
   SEARCH_DEBOUNCE_MS,
 } from "@/app/contacts";
 import { useAppState, useDispatch } from "@/app/store";
+import { usePaneFocused } from "@/hooks/use-pane-focused";
 import type { ActionId } from "@/keymap/catalog";
 
 /** The daemon's `AccountNotReady`: the account has no local store to read yet. */
@@ -30,6 +31,7 @@ const ACCOUNT_NOT_READY = -32006;
 export function ContactsView() {
   const s = useAppState();
   const dispatch = useDispatch();
+  const focused = usePaneFocused("list");
   const view = s.contactsView;
   const account = view?.account ?? null;
   const l = account ? s.contacts[account] : undefined;
@@ -95,6 +97,7 @@ export function ContactsView() {
       aria-label="Contacts"
       className="flex h-full min-h-0 min-w-0 flex-col"
       data-pane="list"
+      data-focused={focused}
       data-view="contacts"
       onFocus={() => dispatch({ type: "pane_focused", pane: "list" })}
     >

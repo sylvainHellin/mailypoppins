@@ -136,6 +136,7 @@ Its Fetch button, or `F`, is the TUI search overlay's `f`: `message_fetch` downl
 
 Every navigation the webview refuses arrives as a `link_intercepted` GuiEvent and lands in `state.intercepted` (the last 100).
 One from a navigation or a new window also becomes `state.interceptNotice`, shown in the reader footer (`InterceptedLinkNotice.tsx`): the URL truncated, in full on hover (`title`), with "Open in browser", "Copy" and "Dismiss".
+The notice leaves by itself after twenty seconds (`STICKY_MS`, as the activity area's failures), never while the pointer rests on it, and a newer blocked link starts the time again; the palette's "Show intercepted links" still lists it.
 "Open in browser" is the reader's only caller of `open_external`, and only for http, https and mailto; the button is disabled for any other scheme.
 The other caller is the device-code dialog's "Open verification page" ([shell.md](shell.md), "The device-code dialog").
 The stub's own log line (`source: "open_external_stub"`) raises no notice.

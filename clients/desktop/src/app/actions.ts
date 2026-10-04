@@ -80,6 +80,14 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return dispatch({ type: "focus", pane: "sidebar" });
     case "focus_list":
       return dispatch({ type: "focus", pane: "list" });
+    case "focus_reader": {
+      // A full-pane view has no reader: Mail comes back first, as `fm` brings it back.
+      if (s.view !== "mail") dispatch({ type: "switch_view", view: "mail" });
+      dispatch({ type: "focus", pane: "reader" });
+      // Landing in the reader is an explicit open, as Tab into it is.
+      if (s.focus !== "reader") openedRead(s, dispatch);
+      return;
+    }
     case "toggle_help":
       return dispatch({ type: "overlay", overlay: s.overlay === "help" ? null : "help" });
     case "open_palette":

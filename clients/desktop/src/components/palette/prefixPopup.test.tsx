@@ -69,7 +69,7 @@ describe("the prefix popup", () => {
     await shellReady();
     await user.keyboard("g");
     expect(title()).toBe("go");
-    expect(rows().map(([k]) => k)).toEqual(["gm", "ga", "gj / gk", "gg / G", "go"]);
+    expect(rows().map(([k]) => k)).toEqual(["gm", "ga", "gj / gk", "gg / G", "gr", "go"]);
     await user.keyboard("{Escape}");
     await user.keyboard(" c");
     await screen.findByRole("region", { name: "Contacts" });

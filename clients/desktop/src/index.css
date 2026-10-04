@@ -257,6 +257,26 @@
     outline: 2px solid var(--ring);
     outline-offset: 2px;
   }
+  /* The pane that holds the model's focus (state.focus, `data-focused` on its
+     `data-pane` root), wherever the DOM focus is: one 1px ring token line just
+     inside its edge, above its content (the reader's frame included) and never
+     taking a click. Every pane is positioned, so the line never moves a
+     descendant's containing block as the focus moves. */
+  [data-pane] {
+    position: relative;
+  }
+  [data-pane][data-focused="true"]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    pointer-events: none;
+    border: 1px solid var(--ring);
+    border-radius: calc(var(--radius) * 1.4); /* rounded-xl, the inset pane's corners */
+  }
+  [data-pane="sidebar"][data-focused="true"]::after {
+    border-color: var(--sidebar-ring);
+  }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation-duration: 0.01ms !important;

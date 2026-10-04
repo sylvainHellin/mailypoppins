@@ -115,11 +115,11 @@ export const PAIRS: Pair[] = [
   { fg: "warning", bg: "sidebar", need: "text", use: "Attention text on the canvas" },
   { fg: "destructive", bg: "background", need: "text", use: "Error text" },
   { fg: "destructive", bg: "card", need: "text", use: "Error text on a card" },
-  { fg: "ring", bg: "background", need: "ui", use: "Focus ring on the inset pane" },
+  { fg: "ring", bg: "background", need: "ui", use: "Focus ring, and the focused list or reader pane line, on the inset pane" },
   { fg: "ring", bg: "sidebar", need: "ui", use: "Focus ring on the canvas" },
   { fg: "ring", bg: "selection", need: "ui", use: "Focus ring around a selected row" },
   { fg: "ring", bg: "popover", need: "ui", use: "Focus ring in a dialog" },
-  { fg: "sidebar-ring", bg: "sidebar", need: "ui", use: "Sidebar focus ring" },
+  { fg: "sidebar-ring", bg: "sidebar", need: "ui", use: "Sidebar focus ring, and the focused sidebar line" },
   { fg: "input", bg: "background", need: "ui", use: "Input border" },
   // Only the label of a disabled palette entry (CommandPalette.tsx), an
   // inactive control WCAG exempts; the key help and every badge, which inform,

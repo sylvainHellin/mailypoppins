@@ -2,6 +2,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { emit, emitEnvelope, mock } from "@/test/tauri-mock";
+import { STICKY_MS } from "@/app/activity";
 import type { InterceptedUrl } from "@/lib/gui-types";
 
 const reader = () => screen.getByRole("complementary", { name: "Reader" });
@@ -85,6 +86,33 @@ describe("intercepted links", () => {
     expect(within(notice).getByRole("button", { name: "Open in browser" })).toBeDisabled();
     await user.click(within(notice).getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByRole("region", { name: "Blocked link" })).toBeNull();
+  });
+
+  it("leaves by itself after a while, held while the pointer rests on it, and a newer link starts the time again", async () => {
+    renderApp();
+    await shellReady();
+    vi.useFakeTimers();
+    try {
+      const notice = () => screen.queryByRole("region", { name: "Blocked link" });
+      intercept("https://evil.example/first");
+      expect(notice()).not.toBeNull();
+      act(() => vi.advanceTimersByTime(STICKY_MS - 1000));
+      // A newer blocked link replaces the entry and gets the full time.
+      intercept("https://evil.example/second");
+      act(() => vi.advanceTimersByTime(STICKY_MS - 1000));
+      expect(notice()).toHaveTextContent("https://evil.example/second");
+      // Under the pointer the time stands still, and resumes when it leaves.
+      fireEvent.pointerEnter(notice()!);
+      act(() => vi.advanceTimersByTime(60_000));
+      expect(notice()).not.toBeNull();
+      fireEvent.pointerLeave(notice()!);
+      act(() => vi.advanceTimersByTime(999));
+      expect(notice()).not.toBeNull();
+      act(() => vi.advanceTimersByTime(1));
+      expect(notice()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not raise a notice for the opener stub's own log line", async () => {

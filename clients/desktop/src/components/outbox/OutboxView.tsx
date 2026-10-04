@@ -5,6 +5,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { runAction } from "@/app/actions";
 import { cursorRow, outboxRows, outboxSummary, retryable, rowAction, stateLabel } from "@/app/outbox";
 import { useAppState, useDispatch } from "@/app/store";
+import { usePaneFocused } from "@/hooks/use-pane-focused";
 import type { OutboxAction } from "@/app/state";
 import type { OutboxRow } from "@/protocol/types";
 
@@ -107,6 +108,7 @@ function OutboxRowItem({
 export function OutboxView() {
   const s = useAppState();
   const dispatch = useDispatch();
+  const focused = usePaneFocused("list");
   const view = s.outboxView;
   if (!view) return null;
   const account = view.account;
@@ -126,6 +128,7 @@ export function OutboxView() {
       aria-label={`Outbox of ${account}`}
       className="flex h-full min-h-0 min-w-0 flex-col"
       data-pane="list"
+      data-focused={focused}
       data-view="outbox"
       onFocus={() => dispatch({ type: "pane_focused", pane: "list" })}
     >

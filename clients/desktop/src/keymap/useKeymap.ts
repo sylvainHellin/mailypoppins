@@ -93,6 +93,8 @@ const COMPOSE_ROW_KEYS: Record<string, ActionId> = {
 const MAIL_COMBOS: Record<string, ActionId> = {
   gg: "list_top",
   gm: "focus_sidebar",
+  // Desktop only: the TUI reaches its body pane by Tab alone, and has no `gr`.
+  gr: "focus_reader",
   ga: "next_account",
   // Desktop only: the TUI has no outbox view, and no `go`.
   go: "open_outbox",

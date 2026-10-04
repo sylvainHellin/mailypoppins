@@ -237,9 +237,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `Tab` (`clients/tui/src/app/keymap.rs:559`), `Shift+Tab` (`clients/tui/src/app/keymap.rs:560`), `z` (`clients/tui/src/app/keymap.rs:569`)
 - Daemon surface: client-side
-- GUI location: clients/desktop (M1, #0129)
-- Validation: TUI golden frames
-- Status: not started
+- GUI location: clients/desktop: `Tab` and `Shift+Tab` cycle sidebar, list and reader from the pane the model holds as focused, `gm` focuses the sidebar, `gr` and the palette's "Focus reader" the reader (a desktop key), and `z` zooms the focused list or reader; the focused pane carries `data-focused="true"`, drawn as a 1px `ring` line inside its edge (M1, #0129; shell.md, "Focus order")
+- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`Tab and Shift+Tab cycle focus through sidebar, list and reader`, `marks the pane holding the focus with data-focused, and gr or the palette's Focus reader focus the reader`), `clients/desktop/src/app/reducer.test.ts` (`cycles focus through sidebar, list and reader and walks back through history`, `focus_reader focuses the reader from any pane, brings Mail back from a view, and cycles on from there`); zoom: `keymap.test.tsx` (`z zooms the focused list pane, hiding the reader`), `clients/desktop/src/components/reader/readerMode.test.tsx` (`z zooms the reader in text mode, and j scrolls the reader's container`)
+- Status: GUI shipped (M1, #0129)
 - Note: purely presentation state, so it never enters the canonical snapshot.
 
 ### MBX-07 Mailbox roles, slugs, sidebar labels, unread counts, and outbox badges

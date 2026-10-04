@@ -187,8 +187,9 @@ The activity area is a stack at the bottom right of the window, raised above the
 Held sends come first, then the running operations, then the failures, then the applied notices of `state.activity`:
 
 - An applied batch is a notice that leaves after five seconds.
-- A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, a draft that could not be written or an editor that did not open, a send or an outbox retry that failed, went to only some recipients or was interrupted, and a refused retry or discard are `role="alert"` notices that stay until dismissed.
+- A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, a draft that could not be written or an editor that did not open, a send or an outbox retry that failed, went to only some recipients or was interrupted, and a refused retry or discard are `role="alert"` notices that leave after twenty seconds (`STICKY_MS` in `src/app/activity.ts`); the failure stays in the activity log, and a failed send in the outbox.
 - Every notice has a Dismiss button.
+- A notice, or a hold card's end, under the pointer does not leave: its time stands still from `pointerenter` and runs on with what it had left at `pointerleave` (`useWindDown` in `src/hooks/use-wind-down.ts`).
 - A cancelled hold's own notice is not shown, since the hold says so itself.
 
 `!` hides the notices and shows them again, the TUI's toggle of its log pane, which the desktop does not have.
@@ -215,7 +216,7 @@ A cancel the daemon refuses says "The cancel failed: <why>" on the notice line a
 The daemon settles a cancelled operation at once without stopping its worker, so the cancelled end is an `operation_cancelled` notice that says the window stopped waiting: "Stopped waiting for the contact index of <account>; the daemon may still finish the rebuild", which also makes the account's contacts stale, and "Stopped waiting for the RSVP to <summary>" or "… for the invitation <subject>", each followed by "; the daemon may still send it, check the outbox", which also make the outbox counts stale.
 The notice is not a failure, so it leaves after five seconds and stays in the activity log.
 A hold another client armed says "Sent" when it fires and "Send cancelled" when it is cancelled; a send this window started says "Sending…" from the fire until its operation settles, then its outcome (Compose, "Send").
-An ended card leaves after three seconds through `dismiss_hold`, except a failure or a partial delivery of one draft, which stays until its Dismiss button.
+An ended card leaves after three seconds through `dismiss_hold`, except a failure or a partial delivery of one draft, which has a Dismiss button and leaves after twenty seconds (`STICKY_MS`).
 The fixture seeds one hold (`fixture-hold-seed`, 60 s), so `MP_DESKTOP_FIXTURE=1` shows it at start.
 
 ## Compose
@@ -946,6 +947,8 @@ The window has three panes, each one tab stop, in reading order:
 3. Reader (`<aside aria-label="Reader">`, complementary): the scrollable message; outside Mail there is none, and Tab cycles the first two.
 
 Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, reader, sidebar), starting from the pane the model holds as focused, and only while focus sits in a pane or on the page; anywhere else (a dialog, a screen's buttons, the splitter) they are the browser's.
+`gm` focuses the sidebar as in the TUI, and `gr` or the palette's "Focus reader" the reader, a desktop key free in the TUI's go family; from a full-pane view the palette's row brings Mail back first, and landing in the reader is an explicit open, as Tab into it is.
+The pane the model holds as focused (`state.focus`) carries `data-focused="true"` on its `data-pane` root (`usePaneFocused` in `src/hooks/use-pane-focused.ts`), whether or not the DOM focus is inside it, and `index.css` draws it as one 1px `ring` line just inside the pane's edge (`sidebar-ring` on the sidebar), above its content, the reader's frame included, and never taking a click; a full-pane view's region carries the list's mark.
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
@@ -964,7 +967,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `j`/`k`, arrows: move in the focused pane (the sidebar cursor, the list selection, or scroll the reader).
 - `J`/`K`, `gj`/`gk`: next and previous message from any pane.
 - `Enter`: open the mailbox under the cursor, or open the message in the reader and mark it read.
-- `Tab`/`Shift+Tab`: cycle panes; `gm`: the sidebar; `Space m`: Mail and its list; `Space c`, `Space a`: Contacts and Calendar (see Views); `ga`: next account.
+- `Tab`/`Shift+Tab`: cycle panes; `gm`: the sidebar; `gr`: the reader, a desktop key; `Space m`: Mail and its list; `Space c`, `Space a`: Contacts and Calendar (see Views); `ga`: next account.
 - `1`-`9`: the selected account's nth mailbox.
 - `gg`/`G`, `Home`/`End`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`: jumps in the list or the reader.
 - `:` or `Ctrl+p`: the command palette; `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector.

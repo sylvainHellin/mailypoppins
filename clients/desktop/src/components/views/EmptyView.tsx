@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useDispatch } from "@/app/store";
+import { usePaneFocused } from "@/hooks/use-pane-focused";
 import { VIEW_TITLES } from "@/app/views";
 import type { View } from "@/app/state";
 
@@ -11,12 +12,14 @@ import type { View } from "@/app/state";
  */
 export function EmptyView({ view, children }: { view: Exclude<View, "mail">; children?: ReactNode }) {
   const dispatch = useDispatch();
+  const focused = usePaneFocused("list");
   const title = VIEW_TITLES[view];
   return (
     <section
       aria-label={title}
       className="flex h-full min-h-0 min-w-0 flex-col"
       data-pane="list"
+      data-focused={focused}
       data-view={view}
       onFocus={() => dispatch({ type: "pane_focused", pane: "list" })}
     >

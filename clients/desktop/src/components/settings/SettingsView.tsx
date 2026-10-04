@@ -20,6 +20,7 @@ import { signInOrShow } from "@/app/signin";
 import { saveTheme, THEME_LABELS, THEMES, type Theme } from "@/app/theme";
 import { READER_MODE_LABELS, READER_MODES, saveReaderMode } from "@/app/readerMode";
 import { useAppState, useDispatch } from "@/app/store";
+import { usePaneFocused } from "@/hooks/use-pane-focused";
 import * as cmd from "@/lib/commands";
 import type { ConfigAccount, ConfigServer, EditorSetting, SecretKind } from "@/lib/gui-types";
 
@@ -282,6 +283,7 @@ function EditorColorsField() {
 export function SettingsView() {
   const s = useAppState();
   const dispatch = useDispatch();
+  const focused = usePaneFocused("list");
   const l = s.config;
   const snapshot = l.data;
   const [reloading, setReloading] = useState(false);
@@ -296,6 +298,7 @@ export function SettingsView() {
       aria-label="Settings"
       className="flex h-full min-h-0 min-w-0 flex-col"
       data-pane="list"
+      data-focused={focused}
       data-view="settings"
       onFocus={() => dispatch({ type: "pane_focused", pane: "list" })}
     >

@@ -10,12 +10,14 @@ import { SearchResults } from "@/components/search/SearchResults";
 import { SearchStatusBar } from "@/components/search/SearchStatusBar";
 import { FILTER_INPUT_ID, markOpenRead, runAction, runMutation } from "@/app/actions";
 import { useAppState, useDispatch } from "@/app/store";
+import { usePaneFocused } from "@/hooks/use-pane-focused";
 import { filteredDrafts, filteredRows, sendingKeys, targetKey } from "@/app/state";
 import type { MessageListRow } from "@/protocol/types";
 
 export function MessageListPane() {
   const s = useAppState();
   const dispatch = useDispatch();
+  const focused = usePaneFocused("list");
   const scrollRef = useRef<HTMLDivElement>(null);
   // The row toggles read the flags as they are at the click.
   const stateRef = useRef(s);
@@ -108,6 +110,7 @@ export function MessageListPane() {
       aria-label="Message list"
       className="flex h-full min-h-0 min-w-0 flex-col"
       data-pane="list"
+      data-focused={focused}
       onFocus={() => dispatch({ type: "pane_focused", pane: "list" })}
     >
       <header className="flex shrink-0 flex-col gap-2 border-b border-border px-3 py-2">

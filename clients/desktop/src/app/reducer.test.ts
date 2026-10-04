@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { actionTargets, progressAction, reducer, type Action } from "@/app/reducer";
+import { runAction } from "@/app/actions";
 import { ACTIVITY_CAP } from "@/app/pending";
 import { initialState, isStale, listKey, type AppState } from "@/app/state";
 import { CLOSE_OUTBOX_FIRST } from "@/app/outbox";
@@ -224,6 +225,29 @@ describe("the reducer", () => {
     expect(s.focus).toBe("reader");
     s = run(s, { type: "back" });
     expect(s.focus).toBe("sidebar");
+  });
+
+  it("focus_reader focuses the reader from any pane, brings Mail back from a view, and cycles on from there", () => {
+    let s = booted();
+    const dispatch = (a: Action) => {
+      s = reducer(s, a);
+    };
+    runAction("focus_sidebar", s, dispatch);
+    expect(s.focus).toBe("sidebar");
+    const seq = s.focusSeq;
+    runAction("focus_reader", s, dispatch);
+    expect(s.focus).toBe("reader");
+    // The DOM focus follows, and Back returns to the pane it came from.
+    expect(s.focusSeq).toBeGreaterThan(seq);
+    expect(s.history[s.history.length - 1]).toBe("sidebar");
+    runAction("focus_next", s, dispatch);
+    expect(s.focus).toBe("sidebar");
+    runAction("focus_prev", s, dispatch);
+    expect(s.focus).toBe("reader");
+    s = run(s, { type: "switch_view", view: "contacts" });
+    expect(s.focus).not.toBe("reader");
+    runAction("focus_reader", s, dispatch);
+    expect(s).toMatchObject({ view: "mail", focus: "reader" });
   });
 
   it("clamps the list width preference", () => {

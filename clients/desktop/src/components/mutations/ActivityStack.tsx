@@ -7,12 +7,13 @@
 // the card, for the same reason. Between the holds and the notices, one card
 // per contact rebuild, RSVP and invitation this window awaits, with Cancel.
 
-import { useCallback, useEffect, useState, type Dispatch } from "react";
+import { useCallback, useState, type Dispatch } from "react";
 import { CircleAlert, CircleCheck, LoaderCircle, Send, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useMutations } from "@/app/mutations";
 import { useAppState, useDispatch } from "@/app/store";
-import { FAILURES } from "@/app/activity";
+import { FAILURES, STICKY_MS } from "@/app/activity";
+import { useWindDown } from "@/hooks/use-wind-down";
 import { RESPONSE_LABEL } from "@/app/rsvp";
 import type { Action } from "@/app/reducer";
 import * as cmd from "@/lib/commands";
@@ -26,28 +27,32 @@ export const HOLD_END_MS = 3000;
 /** The failed rows a notice lists before it says how many more. */
 const ROWS_SHOWN = 5;
 
-/** Kinds that report a failure: they stay until dismissed and are alerts (src/app/activity.ts). */
-export { FAILURES };
+/**
+ * Kinds that report a failure: alerts that leave after STICKY_MS or when
+ * dismissed (src/app/activity.ts). A hold card's failure or partial delivery
+ * leaves after STICKY_MS too.
+ */
+export { FAILURES, STICKY_MS };
 
 export type NoticeToastProps = { notice: ActivityNotice; onDismiss: (id: number) => void };
 
 /**
- * One notice: an applied batch leaves by itself, a failure stays. A failure
- * is an alert; an applied notice takes no role, the status region it sits in
+ * One notice: an applied batch leaves after APPLIED_MS, a failure after
+ * STICKY_MS, either held while the pointer rests on it. A failure is an
+ * alert; an applied notice takes no role, the status region it sits in
  * announces it.
  */
 export function NoticeToast({ notice, onDismiss }: NoticeToastProps) {
   const failure = FAILURES.has(notice.kind);
-  useEffect(() => {
-    if (failure) return;
-    const t = setTimeout(() => onDismiss(notice.id), APPLIED_MS);
-    return () => clearTimeout(t);
-  }, [failure, notice.id, onDismiss]);
+  const id = notice.id;
+  const done = useCallback(() => onDismiss(id), [id, onDismiss]);
+  const hover = useWindDown(failure ? STICKY_MS : APPLIED_MS, done);
   const extra = notice.rows.length - ROWS_SHOWN;
   return (
     <div
       role={failure ? "alert" : undefined}
       data-notice={notice.kind}
+      {...hover}
       className="flex items-start gap-2 rounded-lg border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-md"
     >
       {failure ? (
@@ -101,19 +106,18 @@ export function holdEndText(hold: HoldEntry, awaiting: boolean): string | null {
  * A send waiting out its undo window. The seconds are the daemon's, from
  * the last `send.hold_tick`, never a local clock. Its end ("Sent", "Send
  * cancelled", "Failed: …", "Partly delivered: …") goes into a status
- * region the card mounts empty; the card then leaves after a moment, or,
- * for a failure or a partial delivery of one draft, when dismissed.
+ * region the card mounts empty; the card then leaves after HOLD_END_MS, or,
+ * for a failure or a partial delivery of one draft, after STICKY_MS or when
+ * dismissed, held while the pointer rests on it.
  */
 export function HoldToast({ hold, awaiting = false, onCancel, onGone }: HoldToastProps) {
   const counting = hold.state === "started" || hold.state === "tick";
   const end = holdEndText(hold, awaiting);
   const settled = hold.outcome !== undefined || hold.state === "cancelled" || (hold.state === "fired" && !awaiting);
   const sticky = hold.outcome?.sticky ?? false;
-  useEffect(() => {
-    if (!settled || sticky) return;
-    const t = setTimeout(() => onGone(hold.operation_id), HOLD_END_MS);
-    return () => clearTimeout(t);
-  }, [settled, sticky, hold.operation_id, onGone]);
+  const operationId = hold.operation_id;
+  const gone = useCallback(() => onGone(operationId), [operationId, onGone]);
+  const hover = useWindDown(settled ? (sticky ? STICKY_MS : HOLD_END_MS) : null, gone);
   const subject = hold.subject || "(no subject)";
   const secs = Math.max(0, Math.round(hold.remaining_secs));
   const share = hold.hold_secs > 0 ? Math.min(100, (100 * secs) / hold.hold_secs) : 0;
@@ -131,6 +135,7 @@ export function HoldToast({ hold, awaiting = false, onCancel, onGone }: HoldToas
       data-hold={hold.operation_id}
       data-state={hold.state}
       data-outcome={tone}
+      {...hover}
       className="flex flex-col gap-1.5 rounded-lg border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-md"
     >
       <div className="flex items-center gap-2">
