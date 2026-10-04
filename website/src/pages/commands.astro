@@ -3,6 +3,7 @@ import Layout from '../layouts/Layout.astro';
 import Nav from '../components/Nav.astro';
 import Footer from '../components/Footer.astro';
 import CommandTable from '../components/CommandTable.astro';
+import CodeBlock from '../components/CodeBlock.astro';
 import KeyBindingTable from '../components/KeyBindingTable.astro';
 import { Code } from 'astro:components';
 // TUI key bindings are GENERATED from the single KEYMAP source of truth in
@@ -127,11 +128,13 @@ const inviteOptions = [
   { command: '--to <addr>', description: 'Attendee(s), comma-separated (also the To header)' },
   { command: '--cc <addr>', description: 'CC attendee(s), comma-separated' },
   { command: '--subject <text>', description: 'Event summary (reused as the email subject)' },
-  { command: '--start <when>', description: 'Start: local time or RFC3339 with offset' },
-  { command: '--end <when>', description: 'End (same formats as --start); or use --duration' },
-  { command: '--duration <dur>', description: 'Duration instead of --end: PT1H30M or 1h30m' },
+  { command: '--start <when>', description: 'Start: local time or RFC3339 with offset; a bare date (2026-12-24) makes an all-day event' },
+  { command: '--end <when>', description: 'End, the same kind as --start; for an all-day event the last day, inclusive' },
+  { command: '--duration <dur>', description: 'Duration instead of --end: PT1H30M or 1h30m; whole days (P3D, 3d) for an all-day event' },
   { command: '--location <text>', description: 'Optional event location' },
   { command: '--description <text>', description: 'Optional event description / body' },
+  { command: '--uid <uid>', description: 'Re-send an invitation already sent, as an update of the event with this UID' },
+  { command: '--sequence <n>', description: 'The update\'s SEQUENCE, higher than the last one sent for the UID (needs --uid)' },
 ];
 
 const localSearchSyntax = [
@@ -345,11 +348,35 @@ eval "$(mp completions bash)"`} lang="sh" />
         is reused as the event summary. Times accept local wall-clock
         (<code>2026-07-20T14:00</code>, <code>"2026-07-20 14:00"</code>) or
         RFC3339 with an offset (<code>2026-07-20T14:00:00+02:00</code>,
-        <code>...Z</code>); provide either <code>--end</code> or
+        <code>...Z</code>); a timed event needs either <code>--end</code> or
         <code>--duration</code>. The <code>ORGANIZER</code> is the sending
         account's primary address (Exchange drops mismatches). Graph accounts
         are not yet supported for invites.
       </p>
+      <p>
+        A bare date as <code>--start</code> sends an all-day event, which
+        calendars show in the all-day row. Without <code>--end</code> it covers
+        that one day. <code>--end</code> names the last day, inclusive, so
+        <code>--start 2026-12-24 --end 2027-01-08</code> covers 24 December
+        through 8 January; the invitation carries the day after as its
+        exclusive <code>DTEND</code>, as RFC 5545 requires.
+      </p>
+      <p>
+        To change an invitation already sent, send it again with
+        <code>--uid</code> set to its <code>UID</code> (shown in the preview
+        and in its <code>invite.ics</code>) and a higher <code>--sequence</code>
+        (the first send is 0, so the first update is 1). Calendar clients
+        replace the event only when the UID matches and the sequence is higher
+        than the one they hold; without <code>--uid</code> the invitation is a
+        new event.
+      </p>
+      <CodeBlock
+        lang="bash"
+        code={`mp send --invite --to me@example.com --subject "Kita closed" --start 2026-12-24
+mp send --invite --to me@example.com --subject "Christmas holidays" --start 2026-12-24 --end 2027-01-08
+mp send --invite --to me@example.com --subject "Kita closed" --start 2026-12-24 \\
+  --uid 3f2a...@example.com --sequence 1`}
+      />
       <CommandTable commands={inviteOptions} />
     </section>
 

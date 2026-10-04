@@ -2467,3 +2467,16 @@ The desktop's message list is one `Loadable` slot whose `gen` counts invalidatio
 A read asked at gen 5 before leaving the inbox, landing after coming back (key matches again, gen restarted), set `loadedGen` to 5; every later read, asked at 1, 2, 3, 4 after a `sync.completed` had ingested new mail, then counted as older and was dropped, while `dropListAnswer` walked `gen` up until it equalled 5 and the list settled as fresh on the pre-switch answer, without the new mail.
 A generation used to rank answers has to be monotonic for the slot, not per key: `retarget` now starts the new key at `s.messages.gen + 1`, which also keeps the loader's in-flight tag `messages:<key>@<gen>` from being reused.
 Pinned by `reducer.test.ts` "shows a tick's mail when a read from before leaving the mailbox lands after coming back"; the end-to-end path from a `sync.completed` to the new row is pinned in `events.test.tsx` "new mail from a watcher tick".
+
+## An all-day invitation is dates, and its stated end is not its `DTEND`
+
+An all-day `VEVENT` carries no instant: `DTSTART;VALUE=DATE:20261224` has no timezone, so modelling it as two UTC midnights (what `InviteSpec` did before #0140) sends a timed 00:00 to 00:00 block, which Google Calendar puts in the timed grid and never in the all-day row.
+`InviteSpec.span` is an `EventSpan` enum for that reason, and the all-day arm keeps `NaiveDate`s down to `Event::starts(NaiveDate)`, which is what makes the `icalendar` crate emit `VALUE=DATE`.
+The second trap is the end: a person says "24 December to 8 January" and means the 8th inclusive, while RFC 5545 §3.6.1 makes an all-day `DTEND` exclusive.
+`EventSpan::AllDay` stores the inclusive `last` the user typed and adds the day only when the `VEVENT` is built (`dtend_date`), so the preview, the validation (`last >= first`, a single day being `first == last`) and the error messages all speak in the user's terms.
+The receive side reads the exclusive end back as `2027-01-09T00:00:00`, and the TUI and desktop event cards print it as stored, so an all-day range shows one day too many there, inbound and outbound alike.
+
+## A sent invitation's copy carries two `invite.ics` blobs
+
+`build_invite_mime_body` puts the ICS in the inline `text/calendar; method=REQUEST` part and again in an `application/ics` attachment, and ingest lifts both to the sidecar name, so the sent copy's row has two `invite.ics` blobs where a received Outlook or Google invitation has one.
+`read::list_invites` joins on the blob, so it yields that row twice: the agenda does not notice, since it dedups by UID, but `reconcile_account`'s `invites_seen` counts every sent invitation twice, and any new consumer of `list_invites` has to dedup by row (`tests/imip_integration.rs`, `an_all_day_update_replaces_the_timed_original_on_the_agenda`).

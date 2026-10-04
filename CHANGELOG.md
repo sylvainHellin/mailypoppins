@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **`mp send --invite` sends all-day events and updates of an invitation already sent (#0140).**
+  - A bare date as `--start` (`--start 2026-12-24`) sends an all-day event, which calendars show in the all-day row; without `--end` it is that one day.
+  - `--end` names the last day, inclusive: `--start 2026-12-24 --end 2027-01-08` covers 24 December through 8 January, and `--duration 3d` covers three days.
+  - The preview shows the dates of an all-day event instead of a UTC instant.
+  - `--uid <UID> --sequence <N>` re-sends an invitation as an update: give the UID of the one already sent and a higher sequence (the first send is 0), and calendar clients replace the event instead of adding a second one. `send.invite` takes the optional `sequence`.
 - **The desktop client shows which pane has the focus, and `gr` focuses the reader.** The sidebar, the list or the reader, whichever the keys act on, has a thin line in the focus colour just inside its edge, in the dark and the light theme. `gr` and the palette's "Focus reader" move the focus to the reader, beside `gm` for the sidebar; from Contacts, Calendar or Settings the palette's row brings Mail back first. Tab and Shift+Tab still cycle the panes as in the TUI.
 - **The desktop client's Save and Attach file dialogs open the system's folder and file picker (#0131).** Browse beside the Directory and File fields opens the macOS picker; what you pick fills the field, with your home directory written `~`, and typing a path still works.
 - **A contact rebuild, an RSVP or an invitation being sent can be cancelled from the desktop client (#0131).** While one runs, a card in the activity area shows it with Cancel; the daemon may still finish the rebuild or send the reply, and the notice says so.
