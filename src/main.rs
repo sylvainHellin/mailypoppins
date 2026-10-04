@@ -92,7 +92,9 @@ enum Commands {
         yes: bool,
         /// Send an iMIP calendar invitation (METHOD:REQUEST) instead of a draft.
         /// Attendees come from --to/--cc; the subject is used as the event
-        /// summary. Requires --to, --start, --subject, and one of --end/--duration.
+        /// summary. Requires --to, --start and --subject; a timed event also
+        /// needs one of --end/--duration, an all-day event (a bare date
+        /// --start) does not.
         #[arg(long)]
         invite: bool,
         /// Invite recipient(s), comma-separated (invite mode; ATTENDEE + To).
@@ -105,13 +107,18 @@ enum Commands {
         #[arg(long)]
         subject: Option<String>,
         /// Event start. Local time (2026-07-20T14:00 or "2026-07-20 14:00") or
-        /// RFC3339 with offset (2026-07-20T14:00:00+02:00, ...Z). Invite mode.
+        /// RFC3339 with offset (2026-07-20T14:00:00+02:00, ...Z). A bare date
+        /// (2026-12-24) makes an all-day event. Invite mode.
         #[arg(long)]
         start: Option<String>,
-        /// Event end (same formats as --start). Provide this or --duration.
+        /// Event end, the same kind as --start. For an all-day event it is the
+        /// last day, inclusive (--start 2026-12-24 --end 2027-01-08 covers 24 Dec
+        /// through 8 Jan); omit it for a single day. A timed event needs this
+        /// or --duration.
         #[arg(long)]
         end: Option<String>,
-        /// Event duration instead of --end: ISO8601 (PT1H30M) or short (1h30m).
+        /// Event duration instead of --end: ISO8601 (PT1H30M) or short (1h30m);
+        /// whole days (P3D, 3d) for an all-day event.
         #[arg(long)]
         duration: Option<String>,
         /// Optional event location (invite mode).
@@ -120,6 +127,18 @@ enum Commands {
         /// Optional event description / body (invite mode).
         #[arg(long)]
         description: Option<String>,
+        /// Re-send an invitation already sent, as an update: give its UID (the
+        /// `UID:` line of its preview or its invite.ics) and a higher
+        /// --sequence. Calendar clients replace the event only when the UID is
+        /// the same and the SEQUENCE is higher than the one they hold; without
+        /// --uid a fresh UID is minted (a new event).
+        #[arg(long, value_name = "UID", requires = "invite")]
+        uid: Option<String>,
+        /// The update's SEQUENCE, higher than the last one sent for this UID
+        /// (the first invitation goes out as 0, so a first update is 1).
+        /// Needs --uid.
+        #[arg(long, value_name = "N", requires = "uid")]
+        sequence: Option<u32>,
     },
     /// Send every approved draft of the account
     SendApproved {
@@ -720,6 +739,8 @@ struct InviteArgs {
     duration: Option<String>,
     location: Option<String>,
     description: Option<String>,
+    uid: Option<String>,
+    sequence: Option<u32>,
     yes: bool,
 }
 
@@ -825,8 +846,9 @@ async fn run_send_invite(
         duration: args.duration.clone(),
         location: args.location.clone(),
         description: args.description.clone(),
+        sequence: args.sequence,
     };
-    let plan = mailypoppins::invite::plan_invite(account_config, &request, None)?;
+    let plan = mailypoppins::invite::plan_invite(account_config, &request, args.uid.as_deref())?;
     let spec = &plan.spec;
     // Connected before the preview: an invitation the user declines is still a
     // run that answered from the daemon, and `ANO-4` is refused above this line
@@ -837,16 +859,18 @@ async fn run_send_invite(
     println!("  {} {}", "Summary:".yellow(), plan.subject);
     println!("  {} {}", "Organizer:".green(), spec.organizer);
     println!("  {} {}", "Attendees:".green(), spec.attendees.join(", "));
-    println!(
-        "  {} {}  \u{2192}  {}",
-        "When:".blue(),
-        spec.start.to_rfc3339(),
-        spec.end.to_rfc3339()
-    );
+    println!("  {} {}", "When:".blue(), spec.span.describe());
     if let Some(loc) = spec.location.as_deref() {
         println!("  {} {}", "Location:".blue(), loc);
     }
     println!("  {} {}", "UID:".dimmed(), spec.uid);
+    if args.uid.is_some() {
+        println!(
+            "  {} {} (update of the invitation with this UID)",
+            "Sequence:".dimmed(),
+            spec.sequence
+        );
+    }
     println!("{}", "---".dimmed());
 
     if !args.yes && !prompt_confirmation("Send this invitation?") {
@@ -869,6 +893,11 @@ async fn run_send_invite(
         // out; the daemon mints one only when a client previewed nothing.
         "uid": spec.uid,
     });
+    // Only an update names a sequence, so a new invitation's call is the one a
+    // daemon from before `sequence` existed also takes.
+    if let Some(sequence) = args.sequence {
+        params["sequence"] = serde_json::json!(sequence);
+    }
     params = with_params(params, signature);
 
     daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
@@ -3589,6 +3618,8 @@ async fn main() -> Result<()> {
             duration,
             location,
             description,
+            uid,
+            sequence,
         }) => {
             if invite {
                 run_send_invite(
@@ -3603,6 +3634,8 @@ async fn main() -> Result<()> {
                         duration,
                         location,
                         description,
+                        uid,
+                        sequence,
                         yes,
                     },
                 )

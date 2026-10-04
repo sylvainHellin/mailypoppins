@@ -65,15 +65,17 @@ Arguments:
 
 Options:
   -y, --yes                        Skip confirmation prompt
-      --invite                     Send an iMIP calendar invitation (METHOD:REQUEST) instead of a draft. Attendees come from --to/--cc; the subject is used as the event summary. Requires --to, --start, --subject, and one of --end/--duration
+      --invite                     Send an iMIP calendar invitation (METHOD:REQUEST) instead of a draft. Attendees come from --to/--cc; the subject is used as the event summary. Requires --to, --start and --subject; a timed event also needs one of --end/--duration, an all-day event (a bare date --start) does not
       --to <TO>                    Invite recipient(s), comma-separated (invite mode; ATTENDEE + To)
       --cc <CC>                    Invite CC recipient(s), comma-separated (invite mode; ATTENDEE + Cc)
       --subject <SUBJECT>          Event subject / summary (invite mode)
-      --start <START>              Event start. Local time (2026-07-20T14:00 or "2026-07-20 14:00") or RFC3339 with offset (2026-07-20T14:00:00+02:00, ...Z). Invite mode
-      --end <END>                  Event end (same formats as --start). Provide this or --duration
-      --duration <DURATION>        Event duration instead of --end: ISO8601 (PT1H30M) or short (1h30m)
+      --start <START>              Event start. Local time (2026-07-20T14:00 or "2026-07-20 14:00") or RFC3339 with offset (2026-07-20T14:00:00+02:00, ...Z). A bare date (2026-12-24) makes an all-day event. Invite mode
+      --end <END>                  Event end, the same kind as --start. For an all-day event it is the last day, inclusive (--start 2026-12-24 --end 2027-01-08 covers 24 Dec through 8 Jan); omit it for a single day. A timed event needs this or --duration
+      --duration <DURATION>        Event duration instead of --end: ISO8601 (PT1H30M) or short (1h30m); whole days (P3D, 3d) for an all-day event
       --location <LOCATION>        Optional event location (invite mode)
       --description <DESCRIPTION>  Optional event description / body (invite mode)
+      --uid <UID>                  Re-send an invitation already sent, as an update: give its UID (the `UID:` line of its preview or its invite.ics) and a higher --sequence. Calendar clients replace the event only when the UID is the same and the SEQUENCE is higher than the one they hold; without --uid a fresh UID is minted (a new event)
+      --sequence <N>               The update's SEQUENCE, higher than the last one sent for this UID (the first invitation goes out as 0, so a first update is 1). Needs --uid
   -s, --signature <SIGNATURE>      Signature to use (overrides config default)
       --no-signature               Skip signature entirely
   -A, --account <ACCOUNT>          Account to use

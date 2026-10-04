@@ -14,25 +14,96 @@
 use std::str::FromStr;
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use icalendar::{Calendar, CalendarComponent, Component, Event, EventLike, Property};
 
-/// The inputs needed to build a `REQUEST` invite. Times are already resolved to
-/// absolute instants (UTC); recipients are bare email addresses.
+/// When an invited event happens: two instants, or a run of whole days.
+///
+/// The two are different kinds of value, not one kind with a flag: an all-day
+/// event has no instant and no timezone (`DTSTART;VALUE=DATE`), so it is kept
+/// as calendar dates all the way to the `VEVENT` rather than as UTC midnights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventSpan {
+    /// A timed event; `end` is strictly after `start`.
+    Timed {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    },
+    /// An all-day event from `first` through `last`, both inclusive, the way a
+    /// person states a range (24 Dec to 8 Jan). The `VEVENT` carries the RFC
+    /// 5545 exclusive end, the day after `last`; see [`EventSpan::dtend_date`].
+    AllDay { first: NaiveDate, last: NaiveDate },
+}
+
+impl EventSpan {
+    /// Refuse a span no calendar would accept.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            EventSpan::Timed { start, end } if end <= start => {
+                Err(anyhow!("Invite end must be after start"))
+            }
+            EventSpan::AllDay { first, last } if last < first => {
+                Err(anyhow!("Invite last day must not be before its first day"))
+            }
+            EventSpan::AllDay { last, .. } if last.succ_opt().is_none() => {
+                Err(anyhow!("Invite last day is out of range"))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The exclusive `DTEND` date of an all-day span (`last` + 1 day), `None`
+    /// for a timed one.
+    pub fn dtend_date(&self) -> Option<NaiveDate> {
+        match self {
+            EventSpan::AllDay { last, .. } => last.succ_opt(),
+            EventSpan::Timed { .. } => None,
+        }
+    }
+
+    /// The span as the invite preview prints it.
+    ///
+    /// A timed span keeps the two UTC instants it has always printed; an
+    /// all-day span prints its inclusive dates, never an instant.
+    pub fn describe(&self) -> String {
+        match self {
+            EventSpan::Timed { start, end } => {
+                format!("{}  \u{2192}  {}", start.to_rfc3339(), end.to_rfc3339())
+            }
+            EventSpan::AllDay { first, last } if first == last => {
+                format!("{} (all day)", first.format("%Y-%m-%d"))
+            }
+            EventSpan::AllDay { first, last } => {
+                let days = (*last - *first).num_days() + 1;
+                format!(
+                    "{}  \u{2192}  {} (all day, {days} days)",
+                    first.format("%Y-%m-%d"),
+                    last.format("%Y-%m-%d")
+                )
+            }
+        }
+    }
+}
+
+/// The inputs needed to build a `REQUEST` invite. Times are already resolved
+/// (UTC instants, or calendar dates for an all-day event); recipients are bare
+/// email addresses.
 #[derive(Debug, Clone)]
 pub struct InviteSpec {
-    /// Stable event `UID` (generate once, persist in the sent copy).
+    /// Stable event `UID` (generate once, persist in the sent copy). An update
+    /// of an invitation already sent reuses that invitation's UID.
     pub uid: String,
+    /// `SEQUENCE`: 0 for a new invitation, raised for each update of the same
+    /// UID so calendar clients replace the earlier version.
+    pub sequence: u32,
     /// `ORGANIZER` — must equal the sending account's primary address.
     pub organizer: String,
     /// `ATTENDEE`s (from `--to`/`--cc`), deduplicated, bare addresses.
     pub attendees: Vec<String>,
     /// `SUMMARY` (the invite subject).
     pub summary: String,
-    /// `DTSTART` (absolute instant).
-    pub start: DateTime<Utc>,
-    /// `DTEND` (absolute instant); must be strictly after `start`.
-    pub end: DateTime<Utc>,
+    /// `DTSTART`/`DTEND`.
+    pub span: EventSpan,
     /// Optional `LOCATION`.
     pub location: Option<String>,
     /// Optional `DESCRIPTION`.
@@ -101,7 +172,7 @@ pub fn parse_datetime(input: &str) -> Result<DateTime<Utc>> {
 
     // 2. Local wall-clock, several separators / precisions.
     let naive = parse_naive_local(s)
-        .ok_or_else(|| anyhow!("Unrecognized datetime '{}'. Use RFC3339 (2026-07-20T14:00:00+02:00) or local time (2026-07-20T14:00).", input))?;
+        .ok_or_else(|| anyhow!("Unrecognized datetime '{}'. Use RFC3339 (2026-07-20T14:00:00+02:00), local time (2026-07-20T14:00), or a bare date (2026-12-24) for an all-day event.", input))?;
 
     match chrono::Local.from_local_datetime(&naive) {
         chrono::LocalResult::Single(dt) => Ok(dt.with_timezone(&Utc)),
@@ -261,18 +332,32 @@ pub fn build_invite_ics(spec: &InviteSpec) -> Result<String> {
             "Invite has no attendees (need at least one --to/--cc)"
         ));
     }
-    if spec.end <= spec.start {
-        return Err(anyhow!("Invite end must be after start"));
+    if spec.uid.trim().is_empty() {
+        return Err(anyhow!("Invite UID is empty"));
     }
+    spec.span.validate()?;
 
     let mut event = Event::new();
     event
         .uid(&spec.uid)
-        .sequence(0)
+        .sequence(spec.sequence)
         .timestamp(Utc::now()) // DTSTAMP
-        .summary(&spec.summary)
-        .starts(spec.start)
-        .ends(spec.end);
+        .summary(&spec.summary);
+    match spec.span {
+        EventSpan::Timed { start, end } => {
+            event.starts(start).ends(end);
+        }
+        EventSpan::AllDay { first, .. } => {
+            // A `NaiveDate` serialises as `;VALUE=DATE:YYYYMMDD`. DTEND is the
+            // exclusive day after the last one (RFC 5545 §3.6.1), so a single
+            // day is DTSTART + 1; `validate` above proved it exists.
+            let dtend = spec
+                .span
+                .dtend_date()
+                .ok_or_else(|| anyhow!("Invite last day is out of range"))?;
+            event.starts(first).ends(dtend);
+        }
+    }
 
     if let Some(loc) = spec.location.as_deref().filter(|s| !s.trim().is_empty()) {
         event.location(loc);
@@ -510,28 +595,94 @@ pub fn build_reply_ics(ctx: &ReplyContext, attendee: &str, rsvp: Rsvp) -> Result
     Ok(calendar.to_string())
 }
 
-/// Convenience: resolve `--start` + (`--end` | `--duration`) into an absolute
-/// `(start, end)` UTC pair with validation.
-pub fn resolve_times(
-    start: &str,
-    end: Option<&str>,
-    duration: Option<&str>,
-) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
-    let start_dt = parse_datetime(start).context("Invalid --start")?;
-    let end_dt = match (end, duration) {
-        (Some(_), Some(_)) => {
-            return Err(anyhow!(
-                "Provide exactly one of --end or --duration, not both"
-            ))
-        }
-        (Some(e), None) => parse_datetime(e).context("Invalid --end")?,
-        (None, Some(d)) => start_dt + parse_duration(d).context("Invalid --duration")?,
-        (None, None) => return Err(anyhow!("An invite needs --end or --duration")),
-    };
-    if end_dt <= start_dt {
-        return Err(anyhow!("--end must be after --start"));
+/// A bare calendar date, `YYYY-MM-DD`, the form that makes an event all-day.
+///
+/// `None` for anything else, a datetime included, so the caller falls through
+/// to [`parse_datetime`].
+pub fn parse_date(input: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(input.trim(), "%Y-%m-%d").ok()
+}
+
+/// One `--start`/`--end` value: a bare date, or an instant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum When {
+    Date(NaiveDate),
+    Instant(DateTime<Utc>),
+}
+
+fn parse_when(input: &str) -> Result<When> {
+    match parse_date(input) {
+        Some(date) => Ok(When::Date(date)),
+        None => parse_datetime(input).map(When::Instant),
     }
-    Ok((start_dt, end_dt))
+}
+
+const MIXED_FORMS: &str = "--start and --end must be the same kind: two bare dates \
+                           (2026-12-24) for an all-day event, or two times for a timed one";
+
+/// Resolve `--start` + (`--end` | `--duration`) into an [`EventSpan`].
+///
+/// A bare-date `--start` (`2026-12-24`) makes an all-day event: `--end` is then
+/// a bare date naming the last day, inclusive, `--duration` is a whole number
+/// of days (`P3D`, `3d`), and neither means the one day. Any other `--start`
+/// is a time and needs `--end` (a time) or `--duration`, as it always has.
+pub fn resolve_span(start: &str, end: Option<&str>, duration: Option<&str>) -> Result<EventSpan> {
+    let start_when = parse_when(start).context("Invalid --start")?;
+    if end.is_some() && duration.is_some() {
+        return Err(anyhow!(
+            "Provide exactly one of --end or --duration, not both"
+        ));
+    }
+    match start_when {
+        When::Instant(start_dt) => {
+            let end_dt = match (end, duration) {
+                (Some(e), _) => match parse_when(e).context("Invalid --end")? {
+                    When::Instant(dt) => dt,
+                    When::Date(_) => return Err(anyhow!("{MIXED_FORMS}")),
+                },
+                (None, Some(d)) => start_dt + parse_duration(d).context("Invalid --duration")?,
+                (None, None) => return Err(anyhow!("An invite needs --end or --duration")),
+            };
+            if end_dt <= start_dt {
+                return Err(anyhow!("--end must be after --start"));
+            }
+            Ok(EventSpan::Timed {
+                start: start_dt,
+                end: end_dt,
+            })
+        }
+        When::Date(first) => {
+            let last = match (end, duration) {
+                (Some(e), _) => match parse_when(e).context("Invalid --end")? {
+                    When::Date(date) => date,
+                    When::Instant(_) => return Err(anyhow!("{MIXED_FORMS}")),
+                },
+                (None, Some(d)) => {
+                    let span = parse_duration(d).context("Invalid --duration")?;
+                    let secs = span.num_seconds();
+                    if secs % 86_400 != 0 {
+                        return Err(anyhow!(
+                            "An all-day invite's --duration must be whole days (P3D or 3d), \
+                             not '{d}'"
+                        ));
+                    }
+                    first
+                        .checked_add_days(chrono::Days::new((secs / 86_400 - 1) as u64))
+                        .ok_or_else(|| anyhow!("--duration '{d}' runs past the last date"))?
+                }
+                (None, None) => first,
+            };
+            if last < first {
+                return Err(anyhow!(
+                    "--end must not be before --start (an all-day --end is the last day, \
+                     inclusive)"
+                ));
+            }
+            let span = EventSpan::AllDay { first, last };
+            span.validate()?;
+            Ok(span)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -548,11 +699,14 @@ mod tests {
     fn spec() -> InviteSpec {
         InviteSpec {
             uid: "fixed-uid@mailypoppins".to_string(),
+            sequence: 0,
             organizer: "me@example.com".to_string(),
             attendees: vec!["a@example.com".to_string(), "b@example.com".to_string()],
             summary: "LOC Day planning".to_string(),
-            start: Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap(),
-            end: Utc.with_ymd_and_hms(2026, 7, 20, 13, 0, 0).unwrap(),
+            span: EventSpan::Timed {
+                start: Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap(),
+                end: Utc.with_ymd_and_hms(2026, 7, 20, 13, 0, 0).unwrap(),
+            },
             location: Some("Room 4.12".to_string()),
             description: None,
         }
@@ -615,26 +769,202 @@ mod tests {
         assert!(parse_duration("10").is_err()); // no unit
     }
 
+    fn timed(span: EventSpan) -> (DateTime<Utc>, DateTime<Utc>) {
+        match span {
+            EventSpan::Timed { start, end } => (start, end),
+            other => panic!("expected a timed span, got {other:?}"),
+        }
+    }
+
+    fn day(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
     #[test]
-    fn resolve_times_end_and_duration() {
-        let (s, e) =
-            resolve_times("2026-07-20T12:00:00Z", Some("2026-07-20T13:00:00Z"), None).unwrap();
+    fn resolve_span_end_and_duration() {
+        let (s, e) = timed(
+            resolve_span("2026-07-20T12:00:00Z", Some("2026-07-20T13:00:00Z"), None).unwrap(),
+        );
         assert_eq!(e - s, Duration::hours(1));
-        let (s, e) = resolve_times("2026-07-20T12:00:00Z", None, Some("PT90M")).unwrap();
+        let (s, e) = timed(resolve_span("2026-07-20T12:00:00Z", None, Some("PT90M")).unwrap());
         assert_eq!(e - s, Duration::minutes(90));
     }
 
     #[test]
-    fn resolve_times_rejects_bad_combos() {
-        assert!(resolve_times("2026-07-20T12:00:00Z", None, None).is_err());
-        assert!(resolve_times(
+    fn resolve_span_rejects_bad_combos() {
+        assert!(resolve_span("2026-07-20T12:00:00Z", None, None).is_err());
+        assert!(resolve_span(
             "2026-07-20T12:00:00Z",
             Some("2026-07-20T13:00:00Z"),
             Some("PT1H")
         )
         .is_err());
         // end before start
-        assert!(resolve_times("2026-07-20T12:00:00Z", Some("2026-07-20T11:00:00Z"), None).is_err());
+        assert!(resolve_span("2026-07-20T12:00:00Z", Some("2026-07-20T11:00:00Z"), None).is_err());
+    }
+
+    #[test]
+    fn a_bare_date_start_alone_is_one_all_day_event() {
+        assert_eq!(
+            resolve_span("2026-12-24", None, None).unwrap(),
+            EventSpan::AllDay {
+                first: day(2026, 12, 24),
+                last: day(2026, 12, 24),
+            }
+        );
+    }
+
+    #[test]
+    fn an_all_day_end_is_the_last_day_inclusive() {
+        assert_eq!(
+            resolve_span("2026-12-24", Some("2027-01-08"), None).unwrap(),
+            EventSpan::AllDay {
+                first: day(2026, 12, 24),
+                last: day(2027, 1, 8),
+            }
+        );
+        // The same day twice is the one day.
+        assert_eq!(
+            resolve_span("2026-12-24", Some("2026-12-24"), None).unwrap(),
+            EventSpan::AllDay {
+                first: day(2026, 12, 24),
+                last: day(2026, 12, 24),
+            }
+        );
+    }
+
+    #[test]
+    fn an_all_day_duration_counts_whole_days() {
+        for d in ["P3D", "3d"] {
+            assert_eq!(
+                resolve_span("2026-12-24", None, Some(d)).unwrap(),
+                EventSpan::AllDay {
+                    first: day(2026, 12, 24),
+                    last: day(2026, 12, 26),
+                },
+                "{d}"
+            );
+        }
+        assert_eq!(
+            resolve_span("2026-12-24", None, Some("P1D")).unwrap(),
+            EventSpan::AllDay {
+                first: day(2026, 12, 24),
+                last: day(2026, 12, 24),
+            }
+        );
+    }
+
+    #[test]
+    fn all_day_refusals() {
+        let err = |s: &str, e: Option<&str>, d: Option<&str>| {
+            format!("{:#}", resolve_span(s, e, d).unwrap_err())
+        };
+        // A sub-day duration on an all-day start.
+        assert!(err("2026-12-24", None, Some("PT5H")).contains("whole days"));
+        assert!(err("2026-12-24", None, Some("1d2h")).contains("whole days"));
+        // Mixed forms, both ways round.
+        assert!(err("2026-12-24", Some("2026-12-25T10:00"), None).contains("same kind"));
+        assert!(err("2026-12-24T10:00", Some("2026-12-25"), None).contains("same kind"));
+        // Last day before the first.
+        assert!(err("2026-12-24", Some("2026-12-23"), None).contains("before --start"));
+        // Both ends at once, with the timed path's words.
+        assert_eq!(
+            err("2026-12-24", Some("2026-12-25"), Some("1d")),
+            "Provide exactly one of --end or --duration, not both"
+        );
+        // A malformed date is not silently a datetime.
+        assert!(err("2026-13-01", None, None).starts_with("Invalid --start"));
+    }
+
+    #[test]
+    fn the_preview_prints_dates_for_an_all_day_span() {
+        let one = EventSpan::AllDay {
+            first: day(2026, 12, 24),
+            last: day(2026, 12, 24),
+        };
+        assert_eq!(one.describe(), "2026-12-24 (all day)");
+        let range = EventSpan::AllDay {
+            first: day(2026, 12, 24),
+            last: day(2027, 1, 8),
+        };
+        assert_eq!(
+            range.describe(),
+            "2026-12-24  \u{2192}  2027-01-08 (all day, 16 days)"
+        );
+        // The timed line is the one the preview has always printed.
+        assert_eq!(
+            spec().span.describe(),
+            "2026-07-20T12:00:00+00:00  \u{2192}  2026-07-20T13:00:00+00:00"
+        );
+    }
+
+    fn all_day_spec(first: NaiveDate, last: NaiveDate) -> InviteSpec {
+        InviteSpec {
+            span: EventSpan::AllDay { first, last },
+            ..spec()
+        }
+    }
+
+    #[test]
+    fn an_all_day_invite_emits_value_date_with_an_exclusive_end() {
+        let ics =
+            unfold(&build_invite_ics(&all_day_spec(day(2026, 12, 24), day(2027, 1, 8))).unwrap());
+        assert!(
+            ics.contains("DTSTART;VALUE=DATE:20261224\r\n"),
+            "ics=\n{ics}"
+        );
+        assert!(ics.contains("DTEND;VALUE=DATE:20270109\r\n"), "ics=\n{ics}");
+        assert!(!ics.contains("T000000"), "no instant anywhere:\n{ics}");
+
+        let single =
+            unfold(&build_invite_ics(&all_day_spec(day(2026, 12, 24), day(2026, 12, 24))).unwrap());
+        assert!(
+            single.contains("DTSTART;VALUE=DATE:20261224\r\n"),
+            "ics=\n{single}"
+        );
+        assert!(
+            single.contains("DTEND;VALUE=DATE:20261225\r\n"),
+            "ics=\n{single}"
+        );
+    }
+
+    #[test]
+    fn an_all_day_invite_roundtrips_through_the_receive_parser() {
+        let ics = build_invite_ics(&all_day_spec(day(2026, 12, 24), day(2027, 1, 8))).unwrap();
+        let parsed = crate::calendar::parse_ics(ics.as_bytes()).expect("parses");
+        // The receive side's all-day form: a midnight wall-clock, no offset.
+        assert_eq!(parsed.start.as_deref(), Some("2026-12-24T00:00:00"));
+        assert_eq!(parsed.end.as_deref(), Some("2027-01-09T00:00:00"));
+        // And the RSVP path echoes it verbatim.
+        let ctx = reply_context_from_ics(ics.as_bytes()).unwrap();
+        let reply = unfold(&build_reply_ics(&ctx, "a@example.com", Rsvp::Accepted).unwrap());
+        assert!(
+            reply.contains("DTSTART;VALUE=DATE:20261224"),
+            "reply=\n{reply}"
+        );
+        assert!(
+            reply.contains("DTEND;VALUE=DATE:20270109"),
+            "reply=\n{reply}"
+        );
+    }
+
+    #[test]
+    fn an_update_carries_its_uid_and_sequence() {
+        let update = InviteSpec {
+            uid: "earlier-uid@example.com".to_string(),
+            sequence: 3,
+            ..spec()
+        };
+        let ics = unfold(&build_invite_ics(&update).unwrap());
+        assert!(
+            ics.contains("UID:earlier-uid@example.com\r\n"),
+            "ics=\n{ics}"
+        );
+        assert!(ics.contains("SEQUENCE:3\r\n"), "ics=\n{ics}");
+        assert!(!ics.contains("SEQUENCE:0"), "ics=\n{ics}");
+        let parsed = crate::calendar::parse_ics(ics.as_bytes()).unwrap();
+        assert_eq!(parsed.uid.as_deref(), Some("earlier-uid@example.com"));
+        assert_eq!(parsed.sequence, 3);
     }
 
     /// Undo RFC 5545 line folding (`CRLF` + a leading space/tab) so property
@@ -673,8 +1003,17 @@ mod tests {
         assert!(build_invite_ics(&s).is_err(), "no attendees");
 
         let mut s = spec();
-        s.end = s.start;
+        if let EventSpan::Timed { start, end } = &mut s.span {
+            *end = *start;
+        }
         assert!(build_invite_ics(&s).is_err(), "end == start");
+
+        let s = all_day_spec(day(2026, 12, 24), day(2026, 12, 23));
+        assert!(build_invite_ics(&s).is_err(), "last day before first");
+
+        let mut s = spec();
+        s.uid = " ".to_string();
+        assert!(build_invite_ics(&s).is_err(), "empty uid");
 
         let mut s = spec();
         s.summary = "   ".to_string();

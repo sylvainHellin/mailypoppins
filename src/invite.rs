@@ -30,6 +30,10 @@ pub struct InviteRequest {
     pub duration: Option<String>,
     pub location: Option<String>,
     pub description: Option<String>,
+    /// `SEQUENCE`, `None` for a new invitation (0). An update of one already
+    /// sent passes that invitation's UID to [`plan_invite`] and a higher
+    /// sequence here.
+    pub sequence: Option<u32>,
 }
 
 /// One validated invitation: the preview the client renders and the `VEVENT`
@@ -56,7 +60,8 @@ pub struct InvitePlan {
 /// times, the recipients and the organizer.
 ///
 /// `uid` is the client's when it has already previewed one, so the UID the user
-/// read is the UID that goes out, and minted here otherwise.
+/// read is the UID that goes out, or the earlier invitation's when the user is
+/// sending an update (`mp send --invite --uid`), and minted here otherwise.
 pub fn plan_invite(
     account: &crate::config::AccountConfig,
     request: &InviteRequest,
@@ -75,8 +80,7 @@ pub fn plan_invite(
         .start
         .as_deref()
         .ok_or_else(|| anyhow!("--invite requires --start"))?;
-    let (start_dt, end_dt) =
-        resolve_times(start, request.end.as_deref(), request.duration.as_deref())?;
+    let span = resolve_span(start, request.end.as_deref(), request.duration.as_deref())?;
 
     // Attendees from --to/--cc (deduplicated, bare addresses). The To/Cc
     // headers keep the full form; ATTENDEE lines take the extracted address.
@@ -107,6 +111,17 @@ pub fn plan_invite(
         ));
     }
 
+    // A UID the caller names is written into the VEVENT as it is: it has to be
+    // one line of text, or the update would name a different event.
+    let uid = match uid.map(str::trim) {
+        Some("") => return Err(anyhow!("--uid is empty")),
+        Some(u) if u.chars().any(char::is_control) => {
+            return Err(anyhow!("--uid must be a single line of text"))
+        }
+        Some(u) => u.to_string(),
+        None => generate_uid(&organizer),
+    };
+
     let body = request
         .description
         .as_deref()
@@ -120,17 +135,75 @@ pub fn plan_invite(
         to_field: to_field.map(str::to_string),
         cc_field: cc_field.map(str::to_string),
         spec: InviteSpec {
-            uid: uid
-                .map(str::to_string)
-                .unwrap_or_else(|| generate_uid(&organizer)),
+            uid,
+            sequence: request.sequence.unwrap_or(0),
             organizer,
             attendees,
             summary: subject.to_string(),
-            start: start_dt,
-            end: end_dt,
+            span,
             location: request.location.clone().filter(|s| !s.trim().is_empty()),
             description: request.description.clone().filter(|s| !s.trim().is_empty()),
         },
         body,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn account() -> crate::config::AccountConfig {
+        crate::config::AccountConfig {
+            name: "acct".to_string(),
+            default_from: "Me <me@example.com>".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn request(start: &str) -> InviteRequest {
+        InviteRequest {
+            to: Some("a@example.com".to_string()),
+            subject: Some("Kita closed".to_string()),
+            start: Some(start.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_new_invitation_mints_a_uid_at_sequence_zero() {
+        let plan = plan_invite(&account(), &request("2026-12-24"), None).unwrap();
+        assert!(plan.spec.uid.ends_with("@example.com"), "{}", plan.spec.uid);
+        assert_eq!(plan.spec.sequence, 0);
+        assert!(matches!(plan.spec.span, EventSpan::AllDay { .. }));
+    }
+
+    #[test]
+    fn an_update_keeps_the_named_uid_and_sequence() {
+        let req = InviteRequest {
+            sequence: Some(2),
+            ..request("2026-12-24")
+        };
+        let plan = plan_invite(&account(), &req, Some(" earlier@example.com ")).unwrap();
+        assert_eq!(plan.spec.uid, "earlier@example.com");
+        assert_eq!(plan.spec.sequence, 2);
+    }
+
+    #[test]
+    fn a_named_uid_must_be_one_non_empty_line() {
+        let req = request("2026-12-24");
+        let err = |uid: &str| {
+            format!(
+                "{:#}",
+                plan_invite(&account(), &req, Some(uid)).unwrap_err()
+            )
+        };
+        assert_eq!(err("  "), "--uid is empty");
+        assert_eq!(err("a\r\nb"), "--uid must be a single line of text");
+    }
+
+    #[test]
+    fn a_timed_invitation_still_needs_an_end() {
+        let err = plan_invite(&account(), &request("2026-12-24T10:00"), None).unwrap_err();
+        assert_eq!(format!("{err:#}"), "An invite needs --end or --duration");
+    }
 }

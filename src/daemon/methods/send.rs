@@ -336,6 +336,7 @@ fn allowed(method: &str) -> &'static [&'static str] {
             "end",
             "location",
             "no_signature",
+            "sequence",
             "signature",
             "start",
             "subject",
@@ -399,6 +400,9 @@ fn plan(
             })
         }
         "send.invite" => {
+            // Read now, refused after `plan_invite`, so the Graph refusal stays
+            // the first thing an invitation on a Graph account meets.
+            let sequence = invite_sequence(params);
             let request = crate::invite::InviteRequest {
                 to: optional(params, "to"),
                 cc: optional(params, "cc"),
@@ -408,6 +412,7 @@ fn plan(
                 duration: optional(params, "duration"),
                 location: optional(params, "location"),
                 description: optional(params, "description"),
+                sequence: sequence.as_ref().ok().copied().flatten(),
             };
             let plan = crate::invite::plan_invite(
                 &account,
@@ -419,6 +424,7 @@ fn plan(
                 message: format!("{e}"),
                 data: Some(json!({"account": account.name})),
             })?;
+            sequence?;
             let signature = super::draft::signature_of(&account, params, &email);
             Ok(Request::Operation {
                 work: Box::new(Work::Invite {
@@ -512,6 +518,24 @@ fn first_approved(account: &str) -> Option<DraftRow> {
 /// An optional string parameter, absent when null.
 fn optional(params: &Value, name: &str) -> Option<String> {
     params.get(name).and_then(Value::as_str).map(str::to_string)
+}
+
+/// `send.invite`'s `sequence`: absent or null for a new invitation, else the
+/// `SEQUENCE` an update goes out with, a whole number that fits a `u32`.
+fn invite_sequence(params: &Value) -> Result<Option<u32>, RpcError> {
+    match params.get("sequence") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "`sequence` is a whole number from 0 to {}, not {value}",
+                    u32::MAX
+                ))
+            }),
+    }
 }
 
 /// A selector naming another account is refused rather than sent from the wrong

@@ -464,19 +464,22 @@ fn plain_multipart_email_is_unchanged() {
 fn sent_invite_roundtrips_through_receive_parser() {
     use chrono::{TimeZone, Utc};
     use lettre::message::Message;
-    use mailypoppins::invite::{build_invite_ics, generate_uid, InviteSpec};
+    use mailypoppins::invite::{build_invite_ics, generate_uid, EventSpan, InviteSpec};
     use mailypoppins::send::build_invite_mime_body;
 
     let organizer = "chair@tum.de";
     let uid = generate_uid(organizer);
     let spec = InviteSpec {
         uid: uid.clone(),
+        sequence: 0,
         organizer: organizer.to_string(),
         attendees: vec!["a@example.com".to_string(), "b@example.com".to_string()],
         // Text that exercises RFC 5545 escaping + folding across the wire.
         summary: "LOC Day planning, part 2; final".to_string(),
-        start: Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap(),
-        end: Utc.with_ymd_and_hms(2026, 7, 20, 13, 0, 0).unwrap(),
+        span: EventSpan::Timed {
+            start: Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap(),
+            end: Utc.with_ymd_and_hms(2026, 7, 20, 13, 0, 0).unwrap(),
+        },
         location: Some("Room 4.12; TUM".to_string()),
         description: Some("Agenda:\n- item one\n- item two".to_string()),
     };
@@ -602,6 +605,104 @@ impl Mailstore {
     fn invites(&self) -> Vec<mailypoppins::reconcile::InviteMessage> {
         mailypoppins::reconcile::load_invites(&self.store, &self.blobs, "acct")
     }
+}
+
+/// The raw sent copy of one outbound invitation, built the way `send.invite`
+/// builds it: the shared ICS builder and the shared iMIP MIME tree.
+fn sent_invite_raw(spec: &mailypoppins::invite::InviteSpec, message_id: &str) -> Vec<u8> {
+    let ics = mailypoppins::invite::build_invite_ics(spec).unwrap();
+    let body = mailypoppins::send::build_invite_mime_body(
+        "You are invited.",
+        "<p>You are invited.</p>".to_string(),
+        &ics,
+    );
+    lettre::message::Message::builder()
+        .from("Me <me@example.com>".parse().unwrap())
+        .to("me@gmail.example".parse().unwrap())
+        .subject(&spec.summary)
+        .message_id(Some(message_id.to_string()))
+        .multipart(body)
+        .unwrap()
+        .formatted()
+}
+
+/// The kindergarten case: a closure first sent as a 00:00-00:00 timed event,
+/// then re-sent as an all-day update with the same UID and SEQUENCE 1. Both
+/// sent copies are in the store; the agenda shows one row, the update's, as a
+/// bare date, and `mp calendar rebuild`'s fold reads both without complaint.
+#[test]
+fn an_all_day_update_replaces_the_timed_original_on_the_agenda() {
+    use chrono::{NaiveDate, TimeZone, Utc};
+    use mailypoppins::invite::{EventSpan, InviteSpec};
+
+    let uid = "kita-closure-1@example.com";
+    let original = InviteSpec {
+        uid: uid.to_string(),
+        sequence: 0,
+        organizer: "me@example.com".to_string(),
+        attendees: vec!["me@gmail.example".to_string()],
+        summary: "Kita closed".to_string(),
+        span: EventSpan::Timed {
+            start: Utc.with_ymd_and_hms(2026, 12, 23, 23, 0, 0).unwrap(),
+            end: Utc.with_ymd_and_hms(2027, 1, 8, 23, 0, 0).unwrap(),
+        },
+        location: None,
+        description: None,
+    };
+    let update = InviteSpec {
+        sequence: 1,
+        span: EventSpan::AllDay {
+            first: NaiveDate::from_ymd_opt(2026, 12, 24).unwrap(),
+            last: NaiveDate::from_ymd_opt(2027, 1, 8).unwrap(),
+        },
+        ..original.clone()
+    };
+
+    let ms = Mailstore::new();
+    let first = ms.ingest_raw(
+        &sent_invite_raw(&original, "<kita-0@example.com>"),
+        "sent",
+        1,
+    );
+    let updated = ms.ingest_raw(&sent_invite_raw(&update, "<kita-1@example.com>"), "sent", 2);
+
+    // The sent copy's sidecar keeps the VALUE=DATE form.
+    let ics = mailypoppins::store::read::load_invite_ics(&ms.store, &ms.blobs, updated)
+        .expect("the invite.ics blob");
+    let ics = String::from_utf8(ics).unwrap();
+    assert!(ics.contains("DTSTART;VALUE=DATE:20261224"), "ics=\n{ics}");
+    assert!(ics.contains("DTEND;VALUE=DATE:20270109"), "ics=\n{ics}");
+    assert!(ics.contains("SEQUENCE:1"), "ics=\n{ics}");
+
+    let agenda = mailypoppins::agenda::load_events_for_account(
+        &ms.store,
+        &ms.blobs,
+        "acct",
+        "me@example.com",
+    );
+    assert_eq!(agenda.len(), 1, "one event, not two: {agenda:#?}");
+    let row = &agenda[0];
+    assert_eq!(row.row_id, updated, "the update wins");
+    assert_eq!(row.event.sequence, 1);
+    assert_eq!(row.start_display, "2026-12-24");
+    assert_eq!(row.event.start.as_deref(), Some("2026-12-24T00:00:00"));
+    assert_eq!(row.event.end.as_deref(), Some("2027-01-09T00:00:00"));
+    assert!(row.is_organizer);
+    assert!(!row.event.superseded && !row.cancelled);
+
+    // Both versions reach the fold, each at its own sequence. Distinct rows,
+    // because a sent copy built by `build_invite_mime_body` currently lands
+    // with two `invite.ics` blobs (the inline part and the application/ics
+    // hardening part), so `list_invites` yields each row twice.
+    let mut versions: Vec<(i64, u32)> = ms
+        .invites()
+        .iter()
+        .map(|i| (i.row_id, i.parsed.sequence))
+        .collect();
+    versions.dedup();
+    assert_eq!(versions, vec![(first, 0), (updated, 1)]);
+    let report = mailypoppins::reconcile::reconcile_account(&ms.store, &ms.blobs, "acct");
+    assert_eq!(report.cancelled, 0);
 }
 
 /// Only the fixtures classified as iMIP invites reach the calendar path. The

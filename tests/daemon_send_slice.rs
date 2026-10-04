@@ -22,7 +22,8 @@
 //! send.draft           {account, selector}
 //!                          -> {operation_id}
 //! send.invite          {account, to?, cc?, subject, start,
-//!                       end?, duration?, location?, description?}
+//!                       end?, duration?, location?, description?,
+//!                       uid?, sequence?}
 //!                          -> {operation_id}
 //! send.outbox_discard  {account, row_id}
 //!                          -> {discarded, row_id, message_id, revision}
@@ -1058,6 +1059,88 @@ async fn send_invite_refuses_an_incomplete_invitation() {
     assert_eq!(both_ends.code, INVALID_PARAMS);
 }
 
+/// The all-day grammar and the update's `sequence` are refused at the wire
+/// with the client's words, and a bad `sequence` never displaces the Graph
+/// refusal, which stays the first thing a Graph account meets.
+#[tokio::test]
+async fn send_invite_refuses_a_mixed_span_and_a_bad_sequence() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let invite = |extra: Value| {
+        let mut params = json!({
+            "account": fixture::SMTP_ACCOUNT,
+            "to": fixture::TO,
+            "subject": "Kita closed",
+            "start": "2026-12-24",
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            params[k] = v.clone();
+        }
+        params
+    };
+
+    let mixed = call_err(
+        &mut conn,
+        "send.invite",
+        invite(json!({"end": "2027-01-08T10:00"})),
+    )
+    .await;
+    assert_eq!(mixed.code, INVALID_PARAMS);
+    assert!(mixed.message.contains("same kind"), "{}", mixed.message);
+
+    let partial_day = call_err(
+        &mut conn,
+        "send.invite",
+        invite(json!({"duration": "PT5H"})),
+    )
+    .await;
+    assert!(
+        partial_day.message.contains("whole days"),
+        "{}",
+        partial_day.message
+    );
+
+    let backwards = call_err(
+        &mut conn,
+        "send.invite",
+        invite(json!({"end": "2026-12-23"})),
+    )
+    .await;
+    assert!(
+        backwards.message.contains("before --start"),
+        "{}",
+        backwards.message
+    );
+
+    for bad in [
+        json!(-1),
+        json!("2"),
+        json!(1.5),
+        json!(u64::from(u32::MAX) + 1),
+    ] {
+        let refused = call_err(
+            &mut conn,
+            "send.invite",
+            invite(json!({"uid": "earlier@example.com", "sequence": bad})),
+        )
+        .await;
+        assert_eq!(refused.code, INVALID_PARAMS, "sequence {bad}");
+        assert!(
+            refused.message.contains("`sequence`"),
+            "{}",
+            refused.message
+        );
+    }
+
+    let graph = call_err(
+        &mut conn,
+        "send.invite",
+        json!({"account": fixture::GRAPH_ACCOUNT, "sequence": "nope"}),
+    )
+    .await;
+    assert_eq!(graph.message, fixture::GRAPH_INVITE_REFUSAL);
+}
+
 // ---------------------------------------------------------------------------
 // 4. `send.approved`
 // ---------------------------------------------------------------------------
@@ -1819,6 +1902,101 @@ fn mp_send_invite_previews_and_cancels_with_the_uid_masked() {
         text.lines()
             .any(|line| line.trim_start().starts_with("UID:")),
         "the masked line was really there:\n{text}"
+    );
+}
+
+/// An all-day invitation previews its dates, not a UTC instant, and asks for
+/// no `--end` or `--duration`. Routed only: the oracle predates the form.
+#[test]
+fn mp_send_invite_previews_an_all_day_event_by_its_dates() {
+    let slice = Slice::start();
+    let base = [
+        "send",
+        "--invite",
+        "-A",
+        fixture::SMTP_ACCOUNT,
+        "--to",
+        fixture::TO,
+        "--subject",
+        "Kita closed",
+        "--start",
+        "2026-12-24",
+    ];
+
+    let single = slice.routed(&base);
+    assert_cancelled("single day", &single);
+    let text = stdout(&single);
+    assert!(
+        text.contains("When: 2026-12-24 (all day)"),
+        "a single all-day date:\n{text}"
+    );
+    assert!(!text.contains("T00:00"), "no instant:\n{text}");
+    assert!(!text.contains("Sequence:"), "a new invitation:\n{text}");
+
+    let mut range_args = base.to_vec();
+    range_args.extend(["--end", "2027-01-08"]);
+    let range = slice.routed(&range_args);
+    assert_cancelled("range", &range);
+    let text = stdout(&range);
+    assert!(
+        text.contains("When: 2026-12-24  \u{2192}  2027-01-08 (all day, 16 days)"),
+        "an inclusive range:\n{text}"
+    );
+}
+
+/// `--uid` and `--sequence` preview the update the user asked for: the UID
+/// named, not a fresh one, and the sequence beside it. `--sequence` alone is
+/// a usage error, since an update with a fresh UID would be a new event.
+#[test]
+fn mp_send_invite_previews_an_update_with_its_uid_and_sequence() {
+    let slice = Slice::start();
+    let args = [
+        "send",
+        "--invite",
+        "-A",
+        fixture::SMTP_ACCOUNT,
+        "--to",
+        fixture::TO,
+        "--subject",
+        "Kita closed",
+        "--start",
+        "2026-12-24",
+        "--uid",
+        "earlier-uid@example.com",
+        "--sequence",
+        "2",
+    ];
+    let out = slice.routed(&args);
+    assert_cancelled("update", &out);
+    let text = stdout(&out);
+    assert!(
+        text.contains("UID: earlier-uid@example.com"),
+        "the UID named:\n{text}"
+    );
+    assert!(
+        text.contains("Sequence: 2 (update of the invitation with this UID)"),
+        "and its sequence:\n{text}"
+    );
+
+    let without_uid = slice.routed(&[
+        "send",
+        "--invite",
+        "-A",
+        fixture::SMTP_ACCOUNT,
+        "--to",
+        fixture::TO,
+        "--subject",
+        "Kita closed",
+        "--start",
+        "2026-12-24",
+        "--sequence",
+        "2",
+    ]);
+    assert_eq!(without_uid.status.code(), Some(2), "a clap usage error");
+    assert!(
+        stderr(&without_uid).contains("--uid"),
+        "{}",
+        stderr(&without_uid)
     );
 }
 
