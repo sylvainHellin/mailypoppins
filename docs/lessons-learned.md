@@ -2220,12 +2220,12 @@ When a message header is evidence, ask who can write it and where in the header 
 The tree as a whole is not rustfmt-clean, so formatting one new test file produced an unrelated diff in a file other suites own.
 Format a new file with `rustfmt --edition 2021 --config skip_children=true` (nightly) or check `git status` afterwards and undo whatever it touched beyond the new file.
 
-## On macOS a `/var/tmp` worktree fails the service-unit fixtures
+## `current_exe()` is resolved on Linux and spawned-as on macOS
 
-`AGENTS.md` sends agent worktrees and `CARGO_TARGET_DIR` to `/var/tmp`, which is right on the Linux host, where `/tmp` is a small tmpfs.
-On macOS `/var` is a symlink to `/private/var`, and six rows of `tests/daemon_service.rs` then fail: the unit and the plist carry the binary path as `current_exe()` reports it (`/var/tmp/...`) while the test expects the canonical `/private/var/tmp/...`, or the other way round.
-Nothing is wrong with the service code; the same rows pass from a checkout under `$HOME`.
-On the Mac, run the full suite from the primary checkout, or read those six failures as the path artifact they are.
+Linux answers `std::env::current_exe()` from `/proc/self/exe`, which has every symlink resolved; macOS answers with the path the process was spawned by.
+The service unit and plist bake `current_exe()` unresolved on purpose (a Homebrew `mp`'s canonical path is a Cellar directory the next `brew upgrade` deletes), so when a symlink sits on the binary's path the file carries the spawned spelling on macOS and the resolved one on Linux.
+The `/var/tmp` target directories `AGENTS.md` asks for hit exactly that on the Mac, where `/var` is a symlink to `/private/var`.
+A test that pins a path taken from `current_exe()` must compare canonical forms: `tests/daemon_service.rs` reads every written file through `written`, which maps the spawned spelling of `CARGO_BIN_EXE_mp` to its canonical form inside a quoted value or a `<string>` only, so a path naming any other binary still fails.
 
 ## Tauri's CSP nonce switches `'unsafe-inline'` off
 

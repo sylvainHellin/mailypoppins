@@ -63,13 +63,17 @@
 //! resolved, canonicalised, i.e. exactly the two strings
 //! `mp daemon status --json` reports.
 //!
-//! The rows render `{{MP}}` canonicalised because the test binary is a real
-//! file under `target/`, where the two spellings are the same string. They are
-//! not the same string for a Homebrew `mp`, whose `bin/mp` is a symlink into a
-//! version-stamped Cellar directory: baking the resolved path there would give
-//! a unit that breaks at the next `brew upgrade`. Nothing here can tell the
-//! two apart, so `current_exe()` is what the contract names and
+//! `current_exe()` is deliberately not canonicalised. For a Homebrew `mp`,
+//! whose `bin/mp` is a symlink into a version-stamped Cellar directory, baking
+//! the resolved path would give a unit that breaks at the next `brew upgrade`;
 //! `docs/release-process.md` carries the repair (`--force` after a move).
+//! What `current_exe()` reports for one file differs by platform, though:
+//! Linux reads `/proc/self/exe`, which is resolved, while macOS returns the
+//! path the process was spawned by, so a target directory under `/var/tmp`
+//! (`/var` is a symlink to `/private/var`) yields either spelling. The rows
+//! therefore render `{{MP}}` canonicalised and read every written file through
+//! [`written`], which maps the spawned spelling of the binary to that same
+//! canonical form and leaves any other path alone.
 //!
 //! Baking the two directories into the unit is the point of installing it: a
 //! login-started daemon inherits the session manager's environment, not the
@@ -313,8 +317,32 @@ fn fixture_text(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+/// A written unit or plist with the binary path in the form the fixtures
+/// render it.
+///
+/// The service bakes `current_exe()` unresolved, and that is the spawned path
+/// `MP` on macOS but its canonical form on Linux; when the two differ (a
+/// target directory under the macOS `/var/tmp`), the spawned spelling is
+/// canonicalised here. Only the exact value of a quoted systemd value or a
+/// plist `<string>` is replaced, so a canonical path that happens to contain
+/// `MP` as a suffix is not rewritten twice, and a written path naming any
+/// other binary still fails the comparison.
+fn written(path: &Path) -> String {
+    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let canon = canonical(Path::new(MP));
+    if canon == MP {
+        return text;
+    }
+    text.replace(&format!("\"{MP}\""), &format!("\"{canon}\""))
+        .replace(
+            &format!("<string>{MP}</string>"),
+            &format!("<string>{canon}</string>"),
+        )
+}
+
 /// An absolute, symlink-resolved path as a string, which is what the daemon's
-/// own `canonical` helper produces and therefore what the unit must carry.
+/// own `canonical` helper produces for the two directories, and what
+/// [`written`] turns the binary path into.
 fn canonical(path: &Path) -> String {
     fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
@@ -407,7 +435,7 @@ fn install_writes_the_systemd_user_unit_the_fixture_pins() {
         unit.display()
     );
     assert_eq!(
-        fs::read_to_string(&unit).expect("read the unit"),
+        written(&unit),
         sandbox.expected(UNIT_NAME),
         "the unit is the committed fixture with the three paths substituted"
     );
@@ -431,7 +459,7 @@ fn install_writes_the_systemd_user_unit_the_fixture_pins() {
 fn the_unit_starts_the_foreground_run_and_never_the_detached_start() {
     let sandbox = Sandbox::new();
     assert_eq!(code(&sandbox.install(&[])), 0);
-    let unit = fs::read_to_string(sandbox.unit_path()).expect("read the unit");
+    let unit = written(&sandbox.unit_path());
 
     assert_eq!(
         unit_value(&unit, "ExecStart"),
@@ -637,7 +665,7 @@ fn force_replaces_a_changed_unit() {
         stderr_text(&out)
     );
     assert_eq!(
-        fs::read_to_string(&unit).expect("read"),
+        written(&unit),
         sandbox.expected(UNIT_NAME),
         "--force restores the unit this version installs"
     );
@@ -945,7 +973,7 @@ fn an_install_with_no_service_manager_on_path_still_writes_the_unit() {
         stderr_text(&out)
     );
     assert_eq!(
-        fs::read_to_string(sandbox.unit_path()).expect("read the unit"),
+        written(&sandbox.unit_path()),
         sandbox.expected(UNIT_NAME),
         "the unit is written all the same"
     );
@@ -989,7 +1017,7 @@ fn darwin_writes_the_launch_agent_the_fixture_pins() {
         plist.display()
     );
     assert_eq!(
-        fs::read_to_string(&plist).expect("read the plist"),
+        written(&plist),
         sandbox.expected(&format!("{LAUNCHD_LABEL}.plist")),
         "the plist is the committed fixture with the three paths substituted"
     );
@@ -1023,7 +1051,7 @@ fn the_plist_is_well_formed_xml_and_plutil_lints_it() {
         0
     );
     let path = sandbox.plist_path();
-    let plist = fs::read_to_string(&path).expect("read the plist");
+    let plist = written(&path);
 
     assert!(
         plist.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"),
