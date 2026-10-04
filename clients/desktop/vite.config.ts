@@ -38,5 +38,10 @@ export default defineConfig(() => ({
     setupFiles: ["./src/test/setup.ts"],
     css: false,
     include: ["src/**/*.test.{ts,tsx}"],
+    // vitest's 5 s default times out dozens of tests at once when parallel
+    // cargo builds push the load average past about 30; 20 s still catches a
+    // real hang.
+    testTimeout: 20_000,
+    hookTimeout: 20_000,
   },
 }));
