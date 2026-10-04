@@ -133,6 +133,29 @@ describe("the reducer", () => {
     expect(gen).toBeLessThan(inflight);
   });
 
+  it("shows a tick's mail when a read from before leaving the mailbox lands after coming back", () => {
+    const key = listKey("work", "inbox");
+    const tick = (revision: number): Action => ({
+      type: "gui_event",
+      event: { type: "event", event: { instance_id: "fixture-instance-1", revision, kind: "sync.completed", payload: { account: "work", severity: "ok", error: null, saved: 0, new_inbox_mail: [] } } },
+    });
+    let s = run(booted(), tick(101), tick(102), tick(103));
+    // A read asked now, slow to answer: it holds the inbox as it was.
+    const old = { gen: s.messages.gen, lgen: s.listGen[key] ?? 0 };
+    s = run(s, { type: "select_mailbox", account: "work", slug: "sent" }, { type: "select_mailbox", account: "work", slug: "inbox" });
+    // Back on the inbox, a tick ingests new mail; the old read lands first.
+    s = run(s, tick(104));
+    s = run(s, { type: "messages_loaded", key, ...old, list: inbox("work", "inbox") });
+    const fresh = inbox("work", "inbox") as Extract<MessageList, { kind: "messages" }>;
+    const withNew: MessageList = { ...fresh, total: fresh.total + 1, rows: [{ ...fresh.rows[0], id: 2001, message_id: "<new@x>", selector: "mp://work/inbox/new" }, ...fresh.rows] };
+    // The loader reads again while the list is stale, each read after the tick.
+    for (let i = 0; i < 10 && isStale(s.messages); i++) {
+      s = run(s, { type: "messages_loaded", key, gen: s.messages.gen, lgen: s.listGen[key] ?? 0, list: withNew });
+    }
+    expect(isStale(s.messages)).toBe(false);
+    expect((s.messages.data as Extract<MessageList, { kind: "messages" }>).rows[0].id).toBe(2001);
+  });
+
   it("ignores an event from another daemon instance", () => {
     const s = booted();
     const next = run(s, { type: "gui_event", event: { type: "event", event: { instance_id: "someone-else", revision: 900, kind: "state.invalidate", payload: { resource: "mailbox:work/inbox", scope: {} } } } });

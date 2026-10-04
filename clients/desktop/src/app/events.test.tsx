@@ -209,3 +209,94 @@ describe("mutations end to end", () => {
     expect(probe.state.activity.map((n) => n.text)).toEqual(["Discarded 1 draft"]);
   });
 });
+
+// PERSO-80: the daemon's watcher ingests new mail and publishes a
+// `sync.completed` that names the account only, with the wire's full payload.
+describe("new mail from a watcher tick", () => {
+  const tick = (account: string, subjects: string[] = []) => ({
+    account,
+    severity: "ok",
+    saved: subjects.length,
+    skipped: 0,
+    flags_updated: 0,
+    pruned: 0,
+    prunes_deferred: 0,
+    uid_rebound: 0,
+    uidvalidity_resets: 0,
+    bodies_truncated: 0,
+    non_converging: [],
+    failed_mutations: 0,
+    error: null,
+    new_inbox_mail: subjects.map((subject) => ({ from: "Nina <nina@example.com>", subject })),
+  });
+  /** The watcher's ingest: a new row at the top of a mailbox. */
+  const arrive = (account: string, mailbox: string, id: number, subject: string) => {
+    const rows = mock.rows[account][mailbox];
+    const tmpl = rows[0];
+    rows.unshift({ ...tmpl, id, uid: id, subject, message_id: `<new-${id}@fixture.example>`, selector: `mp://${account}/${mailbox}/new-${id}`, flags: { ...tmpl.flags, seen: false } });
+  };
+
+  it("shows a row the tick ingested into the open mailbox", async () => {
+    const probe = renderProbed();
+    await shellReady();
+    expect(shownRows()).not.toContain(2001);
+    arrive("work", "inbox", 2001, "Fresh off the wire");
+    act(() => emitEnvelope("sync.completed", tick("work", ["Fresh off the wire"])));
+    await waitFor(() => expect(shownRows()[0]).toBe(2001));
+    expect(probe.state.messages.loadedGen).toBe(probe.state.messages.gen);
+  });
+
+  it("re-reads the open mailbox on a tick of its account that ingested elsewhere, and not on another account's", async () => {
+    const probe = renderProbed();
+    await shellReady();
+    const before = listCalls();
+    act(() => emitEnvelope("sync.completed", tick("home", ["Not yours"])));
+    expect(probe.state.messages.loadedGen).toBe(probe.state.messages.gen);
+    expect(listCalls()).toBe(before);
+    arrive("work", "inbox", 2002, "Into the inbox while sent was synced");
+    act(() => emitEnvelope("sync.completed", tick("work")));
+    await waitFor(() => expect(shownRows()[0]).toBe(2002));
+  });
+
+  it("lands the second of two ticks whose reads overlap", async () => {
+    const probe = renderProbed();
+    await shellReady();
+    let open!: () => void;
+    mock.gates.set("list_messages", new Promise<void>((r) => (open = r)));
+    const before = listCalls();
+    act(() => emitEnvelope("sync.completed", tick("work")));
+    // The first read is out, answered from the store before the second ingest.
+    await waitFor(() => expect(listCalls()).toBe(before + 1));
+    arrive("work", "inbox", 2003, "Second tick's mail");
+    act(() => emitEnvelope("sync.completed", tick("work", ["Second tick's mail"])));
+    await waitFor(() => expect(listCalls()).toBe(before + 2));
+    await waitFor(() => expect(shownRows()[0]).toBe(2003));
+    // The first, older answer lands last and does not take the row away.
+    await act(async () => open());
+    expect(shownRows()[0]).toBe(2003);
+    expect(probe.state.messages.loadedGen).toBe(probe.state.messages.gen);
+  });
+
+  it("brings the tick's mail in when a search over the mailbox ends", async () => {
+    const probe = renderProbed();
+    await shellReady();
+    act(() => probe.dispatch({ type: "search_local", query: "ledger" }));
+    arrive("work", "inbox", 2004, "Arrived during a search");
+    act(() => emitEnvelope("sync.completed", tick("work", ["Arrived during a search"])));
+    await waitFor(() => expect(probe.state.messages.loadedGen).toBe(probe.state.messages.gen));
+    act(() => probe.dispatch({ type: "exit_search" }));
+    await waitFor(() => expect(shownRows()[0]).toBe(2004));
+  });
+
+  it("after a daemon restart, takes the new instance's ticks", async () => {
+    const probe = renderProbed();
+    await shellReady();
+    mock.connection = { ...mock.connection, instance_id: "fixture-instance-2" } as typeof mock.connection;
+    // The Rust layer re-bootstraps before it forwards the new instance's events.
+    act(() => emit({ type: "rebootstrapped", cause: "instance_changed", bootstrap: { ...fixtures.bootstrap, instance_id: "fixture-instance-2" } }));
+    await waitFor(() => expect(probe.state.messages.loadedGen).toBe(probe.state.messages.gen));
+    arrive("work", "inbox", 2005, "From the new daemon");
+    act(() => emitEnvelope("sync.completed", tick("work", ["From the new daemon"])));
+    await waitFor(() => expect(shownRows()[0]).toBe(2005));
+  });
+});

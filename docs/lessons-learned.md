@@ -2459,3 +2459,11 @@ At 50 000 rows the method takes about 156 ms: 41 for the SQLite read, about 10 f
 The same borrowed rows serialised straight to bytes take 31.5 ms, so a further cut has to skip the tree, which `Outcome::result: Value` does not allow today (`docs/baselines/message-list-unbounded.md`).
 The answer is also bigger than it looks: about 488 bytes a row, so a mailbox past about 34 000 rows is over the 16 MiB `MAX_RESPONSE_BYTES` and the daemon answers `frame_too_large` instead of a listing.
 Moving such a read onto `spawn_blocking` has to resolve `store_path` before the hop and hand the worker a path: a fixture's data root is a thread-local (see "The data-root override is thread-local" above), and a query fixture's runtime does not re-install it on the blocking pool the way a command fixture's does.
+
+## A generation that restarts per key makes an old answer outrank the fresh ones
+
+The desktop's message list is one `Loadable` slot whose `gen` counts invalidations and whose `loadedGen` is the generation the shown answer was asked at; `listAnswerIsStale` drops an answer with `gen < loadedGen`, so of two reads the older never replaces the newer.
+`retarget` used to give a newly selected mailbox a fresh `emptyLoadable()`, restarting `gen` at 1, so the count was only monotonic within one visit (PERSO-80).
+A read asked at gen 5 before leaving the inbox, landing after coming back (key matches again, gen restarted), set `loadedGen` to 5; every later read, asked at 1, 2, 3, 4 after a `sync.completed` had ingested new mail, then counted as older and was dropped, while `dropListAnswer` walked `gen` up until it equalled 5 and the list settled as fresh on the pre-switch answer, without the new mail.
+A generation used to rank answers has to be monotonic for the slot, not per key: `retarget` now starts the new key at `s.messages.gen + 1`, which also keeps the loader's in-flight tag `messages:<key>@<gen>` from being reused.
+Pinned by `reducer.test.ts` "shows a tick's mail when a read from before leaving the mailbox lands after coming back"; the end-to-end path from a `sync.completed` to the new row is pinned in `events.test.tsx` "new mail from a watcher tick".

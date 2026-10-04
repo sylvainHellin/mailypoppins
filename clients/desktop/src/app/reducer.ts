@@ -435,7 +435,12 @@ function defaultAccount(s: AppState, names: string[]): string | null {
 /** Point the message list at a (possibly new) account/mailbox. */
 function retarget(s: AppState, sel: Selection): AppState {
   const key = sel.account && sel.mailbox ? listKey(sel.account, sel.mailbox) : null;
-  const messages = key === s.messages.key ? s.messages : { ...emptyLoadable<MessageList>(), key };
+  // The generation carries on past the last list's rather than restarting:
+  // a read asked before leaving a mailbox can land after coming back to it,
+  // and a restarted count would rank it newer than the reads after it, so
+  // `listAnswerIsStale` dropped every fresh read and the list kept the old
+  // answer, without the mail a tick brought in (PERSO-80).
+  const messages = key === s.messages.key ? s.messages : { ...emptyLoadable<MessageList>(), gen: s.messages.gen + 1, key };
   const cursor =
     sel.account && sel.mailbox ? { account: sel.account, slug: sel.mailbox } : s.sidebarCursor;
   const same = key === s.messages.key;
