@@ -21,7 +21,7 @@ The wire contract is [daemon-protocol.md](../daemon-protocol.md), the crate shap
 
 ## Goal
 
-Ship a macOS GUI using Tauri 2, React, shadcn/ui, the approved Basenord palette in dark and light, and later a real embedded Neovim process for draft composition.
+Ship a macOS GUI using Tauri 2, React, shadcn/ui, the approved Basenord palette in dark and light, and a real embedded Neovim process for draft composition (M5, shipped 2026-10-01).
 The GUI provides every user-facing capability present in the TUI, as the parity matrix classifies it.
 Capabilities classified as CLI automation, diagnostics and maintenance, daemon administration, or migration-only carry no GUI-parity obligation.
 A capability classified as GUI parity may be deferred only when a settled decision names it and `BACKLOG.md` records the deferral.

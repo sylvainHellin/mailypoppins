@@ -8,7 +8,7 @@ created: 2026-09-25
 ---
 
 Last ticket of the [native GUI plan](../plans/native-gui.md), milestone "M6: signing, notarisation and bundling".
-Blocked on #0130, since M6 follows M5.
+#0130 (M5) is done; what is left here is signing and notarisation, which wait on #0012.
 
 ## Work
 

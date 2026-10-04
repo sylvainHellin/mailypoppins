@@ -8,7 +8,7 @@ created: 2026-09-25
 ---
 
 Third ticket of the [native GUI plan](../plans/native-gui.md), milestones "M2: mutations with the undo hold", "M3: compose through the external editor" and "M4: calendar, contacts, signatures and config", plus the read slices that land in M1 beside #0129.
-Blocked on #0129 (M1), and #0130 (M5) is blocked on this ticket, because the milestones run in order.
+M1 landed under #0129 and M5 under #0130 (2026-10-01); this ticket stays open for the M4 daemon gaps and the real-window check of M2 to M4.
 
 ## Work
 
