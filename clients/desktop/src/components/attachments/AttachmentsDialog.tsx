@@ -77,22 +77,55 @@ function Size({ item }: { item: AttachmentItem }) {
   return item.size === null ? null : <span className="text-muted-foreground tabular-nums">{formatSize(item.size)}</span>;
 }
 
-/** The `to` picker: one button per attachment; the dialog closes on an open. */
+/**
+ * The `to` picker: one button per attachment; the dialog closes on an open.
+ * j/k and the arrows move the focus between the parts, skipping a missing
+ * one; Enter opens the focused one, q closes.
+ */
 function OpenList({
   owner,
   items,
+  active,
   onDone,
   firstRef,
 }: {
   owner: AttachmentOwner;
   items: AttachmentItem[];
+  active: boolean;
   onDone: () => void;
   firstRef: React.RefObject<HTMLButtonElement | null>;
 }) {
   const dispatch = useDispatch();
+  const listRef = useRef<HTMLUListElement>(null);
   const first = items.find((i) => !i.missing)?.part;
+
+  // On the window, so the keys work before the popup has taken focus, and in
+  // the capture phase, since the popup stops the arrow keys on their way up.
+  useEffect(() => {
+    if (!active) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+      const down = e.key === "j" || e.key === "ArrowDown";
+      const up = e.key === "k" || e.key === "ArrowUp";
+      if (e.key === "q") {
+        e.preventDefault();
+        onDone();
+        return;
+      }
+      if (!down && !up) return;
+      e.preventDefault();
+      const buttons = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+      if (buttons.length === 0) return;
+      const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const next = at === -1 ? 0 : Math.max(0, Math.min(buttons.length - 1, at + (down ? 1 : -1)));
+      buttons[next].focus();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [active, onDone]);
+
   return (
-    <ul aria-label="Attachments" className="flex flex-col gap-1">
+    <ul ref={listRef} aria-label="Attachments" className="flex flex-col gap-1">
       {items.map((item) => (
         <li key={item.part}>
           <Button
@@ -318,7 +351,13 @@ export function AttachmentsDialog({ dialog, onOpenChange }: AttachmentsDialogPro
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
         {d?.kind === "open" ? (
-          <OpenList owner={d.owner} items={d.items} onDone={() => onOpenChange(false)} firstRef={firstRef} />
+          <OpenList
+            owner={d.owner}
+            items={d.items}
+            active={dialog !== null}
+            onDone={() => onOpenChange(false)}
+            firstRef={firstRef}
+          />
         ) : d?.kind === "save" ? (
           <SaveForm key={`${d.account}/${d.row_id}/${d.items.map((i) => i.part).join(",")}`} dialog={d} inputRef={fieldRef} />
         ) : d?.kind === "attach" ? (

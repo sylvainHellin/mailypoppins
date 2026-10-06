@@ -88,7 +88,7 @@ Save opens the Save dialog for that one part.
 
 The keys act on the cursor message from the list or the reader, as the TUI's MESSAGE keys do:
 
-- `to` opens a message's only attachment at once, and over several opens the "Open attachment" dialog, one button per part, the first focused.
+- `to` opens a message's only attachment at once, and over several opens the "Open attachment" dialog, one button per part, the first focused; `j`/`k` and the arrows move between the parts, Enter opens the focused one, `q` closes.
 - `ts` opens the Save dialog with every part checked.
 - A message with none says "No attachments", the TUI's line.
 

@@ -241,6 +241,27 @@ describe("the reader's attachments", () => {
     await waitFor(() => expect(argsOf("attachment_open")).toEqual([{ account: "work", row_id: 1001, part: 1 }]));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
+    // j/k and the arrows walk the parts, stopping at either end; Enter opens the focused one.
+    await user.keyboard("to");
+    const again = await screen.findByRole("dialog", { name: "Open attachment" });
+    const ledger = within(again).getByRole("button", { name: "Open ledger-q3.pdf" });
+    const notes = within(again).getByRole("button", { name: "Open notes.txt" });
+    await waitFor(() => expect(ledger).toHaveFocus());
+    await user.keyboard("j");
+    expect(notes).toHaveFocus();
+    await user.keyboard("j");
+    expect(notes).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
+    expect(ledger).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(notes).toHaveFocus();
+    await user.keyboard("k");
+    expect(ledger).toHaveFocus();
+    await user.keyboard("j{Enter}");
+    await waitFor(() => expect(argsOf("attachment_open")).toHaveLength(2));
+    expect(argsOf("attachment_open")[1]).toEqual({ account: "work", row_id: 1001, part: 1 });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
     await user.keyboard("ts");
     const save = await screen.findByRole("dialog", { name: "Save attachments" });
     const boxes = within(save).getAllByRole("checkbox");
