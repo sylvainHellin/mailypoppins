@@ -257,6 +257,29 @@ process instead: `systemctl --user restart mailypoppins.service` on Linux, and
 on macOS the launchd equivalent, which is untested here with the rest of the
 launchd half.
 
+### Local install from source
+
+On the Mac, [scripts/install-local.sh](../scripts/install-local.sh) does the
+whole update in one run: it pulls, runs `cargo install --path . --locked`,
+bundles the desktop app with that same `mp` as its sidecar, quits the running
+app, swaps the new bundle into `/Applications/mailypoppins.app`, restarts the
+daemon once, relaunches the app if it was running, and prints the commit, the
+versions and the daemon's state.
+
+```sh
+scripts/install-local.sh             # pull, mp, the app, the daemon
+scripts/install-local.sh --no-gui    # mp only
+scripts/install-local.sh --dry-run   # print what it would run
+```
+
+The daemon is not stopped before the install, for the reason above. When the
+launchd agent is loaded, the restart is `mp daemon stop` then `launchctl
+kickstart gui/<uid>/dev.mailypoppins.daemon`, because `mp daemon restart`
+would start the replacement outside launchd, and the agent's `KeepAlive
+{SuccessfulExit: false}` leaves a stopped daemon stopped. The script refuses a
+tree with uncommitted changes (`--allow-dirty` overrides) and an app installed
+by the Homebrew cask; the reasoning behind each step is in its header comment.
+
 ## Upgrades and the login-start service
 
 `mp daemon install-service` bakes the absolute path of the installing binary

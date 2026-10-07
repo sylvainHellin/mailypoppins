@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- `scripts/install-local.sh` pulls and installs `mp` and the desktop app from source on a Mac in one run: `cargo install`, `pnpm bundle` with that `mp` as the sidecar, the running app quit and the new one swapped into `/Applications`, one daemon restart (through launchd when the login agent is loaded), the app relaunched; `--no-pull`, `--no-gui`, `--allow-dirty`, `--dry-run`.
 - **`mp send --invite` sends all-day events and updates of an invitation already sent (#0140).**
   - A bare date as `--start` (`--start 2026-12-24`) sends an all-day event, which calendars show in the all-day row; without `--end` it is that one day.
   - `--end` names the last day, inclusive: `--start 2026-12-24 --end 2027-01-08` covers 24 December through 8 January, and `--duration 3d` covers three days.
