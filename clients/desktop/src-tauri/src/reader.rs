@@ -380,7 +380,6 @@ fn answer(path: &str, rendered: Result<Rendered, GuiError>) -> Response<Vec<u8>>
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
-    use base64::Engine as _;
     use std::sync::Arc;
 
     fn fixture_door() -> Door {
