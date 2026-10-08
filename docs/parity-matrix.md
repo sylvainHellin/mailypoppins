@@ -989,7 +989,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### SYN-12 Per-mailbox body-fetch deadline
 
 - Classification: GUI parity for its surfacing
-- Source anchor: `[imap] body_fetch_deadline_secs` (`src/config.rs:240`), clamped to 600 at load (`src/config.rs:958`), documented at `website/src/pages/config.astro`; `BODY_CHUNK_SIZE` (`src/imap_client/fetch.rs:525`); `bodies_complete` (`src/sync/mod.rs:167`); the TUI message at `clients/tui/src/helpers.rs:411`
+- Source anchor: `[imap] body_fetch_deadline_secs` (`src/config.rs:240`), clamped to 600 at load (`src/config.rs:958`), documented at `website/src/content/docs/reference/configuration.mdx`; `BODY_CHUNK_SIZE` (`src/imap_client/fetch.rs:525`); `bodies_complete` (`src/sync/mod.rs:167`); the TUI message at `clients/tui/src/helpers.rs:411`
 - Daemon surface: `state.event` progress carrying the deadline stop
 - GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: unit tests in `src/imap_client/fetch.rs`, `clients/tui/src/helpers.rs`

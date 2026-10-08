@@ -620,7 +620,7 @@ Pruning a row because the message moved rests on the destination mailbox ingesti
 Gmail moves nothing: archiving removes the `INBOX` label and the copy in `[Gmail]/All Mail` keeps the UID it was given when it first arrived, which is usually far below the bottom of a capped window (measured: uid 1 against a window bottom of 234).
 The arrival gate cannot help, because by its own definition, correctly, that copy is not an arrival.
 The behaviour is therefore correct but asymmetric: the inbox row is pruned on the next quick sync and the archived copy is re-filed only by a full sync of the archive mailbox.
-Anything written for users about removals converging "on the next sync" has to say so ([website/src/pages/faq.astro](../website/src/pages/faq.astro)).
+Anything written for users about removals converging "on the next sync" has to say so ([website/src/content/docs/reference/faq.md](../website/src/content/docs/reference/faq.md)).
 
 ## A conservative default answer, once persisted, stops being a default
 
