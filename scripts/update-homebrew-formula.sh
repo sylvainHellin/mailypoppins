@@ -26,12 +26,10 @@ checksum() {
 }
 
 sha_macos_arm64="$(checksum aarch64-apple-darwin)"
-sha_macos_x86_64="$(checksum x86_64-apple-darwin)"
 sha_linux_x86_64="$(checksum x86_64-unknown-linux-musl)"
 
 sed \
   -e "s/__VERSION__/${version}/" \
   -e "s/__SHA256_MACOS_ARM64__/${sha_macos_arm64}/" \
-  -e "s/__SHA256_MACOS_X86_64__/${sha_macos_x86_64}/" \
   -e "s/__SHA256_LINUX_X86_64__/${sha_linux_x86_64}/" \
   "${template}"

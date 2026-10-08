@@ -22,7 +22,7 @@ The external facts are in `.agents/research/2026-10-04-tauri-updater-research.md
 ## Constraints found in the repo
 
 - The app and the DMGs are unsigned: the `desktop-macos` job in `.github/workflows/release.yml` carries the six `APPLE_*` secrets as a commented-out `env:` block, waiting on [#0012](0012-apple-developer-id-signing.md), and the Apple enrolment is Plane PERSO-84.
-- The release workflow is hand-written and does not use tauri-action: `create-release` makes the release with the changelog notes, and `desktop-macos` runs `pnpm bundle --target $TARGET -- --ci --bundles app,dmg` for `aarch64-apple-darwin` and `x86_64-apple-darwin` on `macos-latest`.
+- The release workflow is hand-written and does not use tauri-action: `create-release` makes the release with the changelog notes, and `desktop-macos` runs `pnpm bundle --target $TARGET -- --ci --bundles app,dmg` for `aarch64-apple-darwin` on `macos-latest`; there is no Intel build.
 - `create-release` runs `gh release create` without `--draft`, so a release is public and "latest" from its first minute, before any asset is attached.
 - The upload step builds its own `mailypoppins-desktop-$TARGET.app.tar.gz` with `tar -czf ... -C "$bundle/macos" mailypoppins.app` and a `.sha256` beside it; the archive's top-level entry is `mailypoppins.app/`, which is the layout the updater expects.
 - `pnpm bundle` (`clients/desktop/scripts/bundle.ts`) builds `mp`, stages it as `src-tauri/binaries/mp-<target>`, and runs `tauri build` with `--config tauri.bundle.conf.json`, the file that holds `bundle.externalBin: ["binaries/mp"]`, so `tauri dev` and `cargo test` need no staged sidecar.
@@ -136,12 +136,12 @@ Self-update works without an Apple account; the first install from a browser dow
 - [ ] Put `plugins.updater` in `tauri.conf.json`: `pubkey` (the public key's content) and `endpoints: ["https://github.com/sylvainHellin/mailypoppins/releases/latest/download/latest.json"]`; owner and repository are from `git remote -v` and the cask template's URL.
 - [ ] Stamp and check the version: `bundle.ts` already stamps the root crate's version, and the new manifest job fails when `${GITHUB_REF_NAME#v}` differs from it, so a tag without the `Cargo.toml` bump cannot publish a manifest every installed app would compare against.
 - [ ] Upload per target the updater archive Tauri wrote (`bundle/macos/mailypoppins.app.tar.gz`) and its `.sig`, renamed to `mailypoppins-desktop-$TARGET.app.tar.gz` and `.app.tar.gz.sig`, replacing the hand-made `tar`; the signature covers the bytes, so the uploaded file must be the signed one, and the asset name and its `.sha256` stay.
-- [ ] Add a `desktop-manifest` job (`needs: desktop-macos`) that downloads both `.sig` assets and writes `latest.json` with `jq -n --rawfile`, then uploads it:
-  `{version, notes, pub_date, platforms: {"darwin-aarch64": {signature, url}, "darwin-x86_64": {signature, url}}}`, with each `url` the tag's `releases/download/vX.Y.Z/mailypoppins-desktop-<target>.app.tar.gz` and each `signature` the `.sig` file's content.
+- [ ] Add a `desktop-manifest` job (`needs: desktop-macos`) that downloads the `.sig` asset and writes `latest.json` with `jq -n --rawfile`, then uploads it:
+  `{version, notes, pub_date, platforms: {"darwin-aarch64": {signature, url}}}`, with `url` the tag's `releases/download/vX.Y.Z/mailypoppins-desktop-aarch64-apple-darwin.app.tar.gz` and `signature` the `.sig` file's content.
 - [ ] Make the release "latest" only after `latest.json` is up.
   Preferred: `create-release` passes `--latest=false` and `desktop-manifest` ends with `gh release edit "$GITHUB_REF_NAME" --latest`, so every installed app keeps reading the previous, complete manifest until the new one is whole.
   A draft release would do the same but breaks `homebrew-tap`, which `curl`s the `.sha256` assets from the public download URL.
-  If either desktop target fails, the manifest job is skipped and "latest" stays on the previous release, with no half-filled manifest.
+  If the desktop build fails, the manifest job is skipped and "latest" stays on the previous release, with no half-filled manifest.
 
 ## Sidecar handling
 
@@ -164,7 +164,7 @@ Rust unit tests, no window and no network:
 - `update-state.json` read and write, a missing or broken file reading as empty.
 - The `auto_update` key in `settings.rs` (`check` refuses anything but `on` and `off`), with the ts-rs type regenerated.
 - The Stage 2 mismatch rule: a daemon of the recorded `from` version restarts quietly, any other version still shows the screen.
-- A `latest.json` built by the workflow's `jq` command from two sample `.sig` files parses with the plugin's own manifest type.
+- A `latest.json` built by the workflow's `jq` command from a sample `.sig` file parses with the plugin's own manifest type.
 
 Vitest: the sidebar entry, the palette commands, the progress card and the Restart now / Later choice against a mocked command.
 
@@ -177,7 +177,7 @@ On the Mac, with two real tags (a test pair such as `v0.11.0-rc.1` and `-rc.2` w
 - With an account on `keyring` and Terminal.app as the editor route, note whether the Keychain or the Automation prompt returns after the update.
 - The daemon after Restart now is version N+1 (`mp daemon status` through the bundled binary), and "Later" followed by a quit and a launch gives the restart screen once.
 - From a standard (non-admin) account, the admin-password fallback appears and a cancel leaves the old app working.
-- A dry run of the workflow on the throwaway repository: both `.app.tar.gz` and `.sig` assets, a valid `latest.json`, and the "latest" flag moved only after it.
+- A dry run of the workflow on the throwaway repository: the `.app.tar.gz` and `.sig` assets, a valid `latest.json`, and the "latest" flag moved only after it.
 
 ## Alternatives considered
 
@@ -195,7 +195,6 @@ On the Mac, with two real tags (a test pair such as `v0.11.0-rc.1` and `-rc.2` w
 
 - Adopting `tauri-plugin-updater` is a new dependency and needs your permission under the dependency rule in `AGENTS.md`; `tauri-plugin-process` is not needed if the relaunch stays in Rust, as proposed.
 - Custody of the minisign private key: the repository secret plus a copy in Proton Pass, password included; losing it ends updates for every installed app.
-- Whether the Intel build (`x86_64-apple-darwin`) is still wanted; dropping it halves the desktop job and removes one manifest entry.
 - The cooldown: 24 h after a successful check is proposed.
 - The `auto_update` key name and its `on`/`off` values, against the dotted `updates.auto_install` of the brief.
 - Making the release "latest" late (`--latest=false`, then `gh release edit --latest`) changes when the CLI release becomes "latest" too.

@@ -5,8 +5,8 @@
 # Gatekeeper refuses to open an unsigned app installed by one. Once the
 # release workflow signs and notarizes the DMGs:
 #   1. add a renderer beside scripts/update-homebrew-formula.sh that fills
-#      __VERSION__ and the two __SHA256_DESKTOP_*__ placeholders from the
-#      release's mailypoppins-desktop-<target>.dmg.sha256 assets;
+#      __VERSION__ and __SHA256_DESKTOP_ARM64__ from the release's
+#      mailypoppins-desktop-aarch64-apple-darwin.dmg.sha256 asset;
 #   2. write the result to Casks/mailypoppins-app.rb in the tap
 #      (sylvainHellin/homebrew-mailypoppins) from the homebrew-tap job, after
 #      the desktop-macos job.
@@ -15,17 +15,16 @@
 # and the daemon the app starts are one binary of one version; that is why it
 # conflicts with the `mailypoppins` formula, which installs `mp` too.
 cask "mailypoppins-app" do
-  arch arm: "aarch64", intel: "x86_64"
-
   version "__VERSION__"
-  sha256 arm:   "__SHA256_DESKTOP_ARM64__",
-         intel: "__SHA256_DESKTOP_X86_64__"
+  sha256 "__SHA256_DESKTOP_ARM64__"
 
-  url "https://github.com/sylvainHellin/mailypoppins/releases/download/v#{version}/mailypoppins-desktop-#{arch}-apple-darwin.dmg"
+  url "https://github.com/sylvainHellin/mailypoppins/releases/download/v#{version}/mailypoppins-desktop-aarch64-apple-darwin.dmg"
   name "mailypoppins"
   desc "Mac client for email kept as Markdown files, with its own mp and daemon"
   homepage "https://mailypoppins.dev"
 
+  # Apple silicon only: the release ships no Intel build.
+  depends_on arch: :arm64
   conflicts_with formula: "mailypoppins"
 
   app "mailypoppins.app"

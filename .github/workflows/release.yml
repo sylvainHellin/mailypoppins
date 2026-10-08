@@ -3,10 +3,10 @@
 # On every `v*` tag push:
 #   1. create a GitHub release for the tag, with notes extracted from
 #      the matching `## [X.Y.Z]` section of CHANGELOG.md;
-#   2. build release binaries for macOS (arm64 + x86_64) and Linux
+#   2. build release binaries for macOS (arm64) and Linux
 #      (x86_64 gnu + static musl) and upload them as
 #      `mailypoppins-<target>.tar.gz` plus `.sha256` checksums;
-#   3. build the desktop app for macOS (arm64 + x86_64) with the matching
+#   3. build the desktop app for macOS (arm64) with the matching
 #      `mp` inside it as a sidecar, and upload
 #      `mailypoppins-desktop-<target>.dmg` and `.app.tar.gz` plus `.sha256`
 #      checksums (ticket #0132; unsigned until #0012).
@@ -68,11 +68,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-latest is arm64; x86_64-apple-darwin is cross-compiled
-          # there. macOS TLS goes through Security.framework, no OpenSSL.
+          # macos-latest is arm64. No Intel macOS build: an Intel Mac
+          # builds from source with `cargo install --path .`. macOS TLS
+          # goes through Security.framework, no OpenSSL.
           - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-apple-darwin
             os: macos-latest
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -116,8 +115,6 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-          # Cross-compiled on the arm64 runner, as the CLI archive is.
-          - target: x86_64-apple-darwin
     runs-on: macos-latest
     defaults:
       run:

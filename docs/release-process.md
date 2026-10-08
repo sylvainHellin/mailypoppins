@@ -31,18 +31,20 @@ Homebrew tap. The pipeline lives in
      | Target | Runner | Notes |
      |---|---|---|
      | `aarch64-apple-darwin` | macos-latest | |
-     | `x86_64-apple-darwin` | macos-latest | cross-compiled |
      | `x86_64-unknown-linux-gnu` | ubuntu-latest | links system OpenSSL |
      | `x86_64-unknown-linux-musl` | ubuntu-latest | fully static, `vendored-openssl` feature |
 
    - builds the desktop app on macOS and attaches
      `mailypoppins-desktop-<target>.dmg` and
      `mailypoppins-desktop-<target>.app.tar.gz`, each with a `.sha256`, for
-     `aarch64-apple-darwin` and `x86_64-apple-darwin` (the `desktop-macos`
-     job, see [The desktop app](#the-desktop-app));
+     `aarch64-apple-darwin` (the `desktop-macos` job, see
+     [The desktop app](#the-desktop-app));
    - renders the Homebrew formula from the release checksums and pushes
      it to the tap repo (skipped with a notice while the
      `TAP_DEPLOY_KEY` secret is absent).
+
+There is no Intel macOS build (`x86_64-apple-darwin`) of the CLI or the
+app; an Intel Mac builds `mp` from source with `cargo install --path .`.
 
 Each archive contains the single `mp` binary. The `vendored-openssl`
 cargo feature (optional `openssl/vendored` dependency in `Cargo.toml`)
