@@ -129,16 +129,16 @@ Self-update works without an Apple account; the first install from a browser dow
 
 ## Release workflow changes
 
-- [ ] Generate the key once: `pnpm tauri signer generate -w ~/.tauri/mailypoppins.key`, with a password.
-- [ ] Add the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the key's content) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, exposed as `env:` on the "Build the app bundle and DMG with the mp sidecar" step beside the commented `APPLE_*` block.
-- [ ] Turn on `bundle.createUpdaterArtifacts: true` only where the key exists: `bundle.ts` adds it to its `--config` when `TAURI_SIGNING_PRIVATE_KEY` is set, so a local `pnpm bundle` without the key keeps working (that the build fails without the key is inferred from the docs, to check once).
-- [ ] Put `bundle.macOS.signingIdentity: "-"` in `tauri.bundle.conf.json`, and confirm with `codesign -dv` on a CI artifact.
-- [ ] Put `plugins.updater` in `tauri.conf.json`: `pubkey` (the public key's content) and `endpoints: ["https://github.com/sylvainHellin/mailypoppins/releases/latest/download/latest.json"]`; owner and repository are from `git remote -v` and the cask template's URL.
-- [ ] Stamp and check the version: `bundle.ts` already stamps the root crate's version, and the new manifest job fails when `${GITHUB_REF_NAME#v}` differs from it, so a tag without the `Cargo.toml` bump cannot publish a manifest every installed app would compare against.
-- [ ] Upload per target the updater archive Tauri wrote (`bundle/macos/mailypoppins.app.tar.gz`) and its `.sig`, renamed to `mailypoppins-desktop-$TARGET.app.tar.gz` and `.app.tar.gz.sig`, replacing the hand-made `tar`; the signature covers the bytes, so the uploaded file must be the signed one, and the asset name and its `.sha256` stay.
-- [ ] Add a `desktop-manifest` job (`needs: desktop-macos`) that downloads the `.sig` asset and writes `latest.json` with `jq -n --rawfile`, then uploads it:
+- [x] Generate the key once: `pnpm tauri signer generate -w ~/.tauri/mailypoppins.key`, with a password.
+- [x] Add the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the key's content) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, exposed as `env:` on the "Build the app bundle and DMG with the mp sidecar" step beside the commented `APPLE_*` block.
+- [x] Turn on `bundle.createUpdaterArtifacts: true` only where the key exists: `bundle.ts` adds it to its `--config` when `TAURI_SIGNING_PRIVATE_KEY` is set, so a local `pnpm bundle` without the key keeps working (that the build fails without the key is inferred from the docs, to check once).
+- [x] Put `bundle.macOS.signingIdentity: "-"` in `tauri.bundle.conf.json`, and confirm with `codesign -dv` on a CI artifact.
+- [x] Put `plugins.updater` in `tauri.conf.json`: `pubkey` (the public key's content) and `endpoints: ["https://github.com/sylvainHellin/mailypoppins/releases/latest/download/latest.json"]`; owner and repository are from `git remote -v` and the cask template's URL.
+- [x] Stamp and check the version: `bundle.ts` already stamps the root crate's version, and the new manifest job fails when `${GITHUB_REF_NAME#v}` differs from it, so a tag without the `Cargo.toml` bump cannot publish a manifest every installed app would compare against.
+- [x] Upload per target the updater archive Tauri wrote (`bundle/macos/mailypoppins.app.tar.gz`) and its `.sig`, renamed to `mailypoppins-desktop-$TARGET.app.tar.gz` and `.app.tar.gz.sig`, replacing the hand-made `tar`; the signature covers the bytes, so the uploaded file must be the signed one, and the asset name and its `.sha256` stay.
+- [x] Add a `desktop-manifest` job (`needs: desktop-macos`) that downloads the `.sig` asset and writes `latest.json` with `jq -n --rawfile`, then uploads it:
   `{version, notes, pub_date, platforms: {"darwin-aarch64": {signature, url}}}`, with `url` the tag's `releases/download/vX.Y.Z/mailypoppins-desktop-aarch64-apple-darwin.app.tar.gz` and `signature` the `.sig` file's content.
-- [ ] Make the release "latest" only after `latest.json` is up.
+- [x] Make the release "latest" only after `latest.json` is up.
   Preferred: `create-release` passes `--latest=false` and `desktop-manifest` ends with `gh release edit "$GITHUB_REF_NAME" --latest`, so every installed app keeps reading the previous, complete manifest until the new one is whole.
   A draft release would do the same but breaks `homebrew-tap`, which `curl`s the `.sha256` assets from the public download URL.
   If the desktop build fails, the manifest job is skipped and "latest" stays on the previous release, with no half-filled manifest.
@@ -201,10 +201,10 @@ On the Mac, with two real tags (a test pair such as `v0.11.0-rc.1` and `-rc.2` w
 
 ## Docs to update when this lands
 
-- `docs/release-process.md`: the key, the secrets, the manifest job, the late "latest", and the update path for a user.
-- `clients/desktop/docs/shell.md`: the sidebar entry, the palette commands, the progress card, the Settings lines.
-- `clients/desktop/docs/rust-layer.md`: the update commands and `update-state.json`.
-- `clients/desktop/README.md`: the update route beside the install and uninstall lines.
-- `docs/tickets/0132-gui-distribution-and-release.md`: a pointer to this ticket.
-- `website/src/pages/getting-started.astro`: "Mac app" says later versions arrive in the app.
-- `CHANGELOG.md` under `[Unreleased]`.
+- [x] `docs/release-process.md`: the key, the secrets, the manifest job, the late "latest", and the update path for a user.
+- [x] `clients/desktop/docs/shell.md`: the sidebar entry, the palette commands, the progress card, the Settings lines.
+- [x] `clients/desktop/docs/rust-layer.md`: the update commands and `update-state.json`.
+- [x] `clients/desktop/README.md`: the update route beside the install and uninstall lines.
+- [ ] `docs/tickets/0132-gui-distribution-and-release.md`: a pointer to this ticket.
+- [x] `website/src/pages/getting-started.astro`: "Mac app" says later versions arrive in the app.
+- [x] `CHANGELOG.md` under `[Unreleased]`.

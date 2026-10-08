@@ -16,7 +16,7 @@ use ts_rs::{Config, TS};
 
 use crate::{
     attachments, calendar, commands, configuration, connector, contacts, editor, error, session,
-    settings, signatures, terminal,
+    settings, signatures, terminal, updates,
 };
 
 /// Exports each listed type, and its dependencies, into `$cfg`'s directory.
@@ -130,6 +130,11 @@ fn export_into(dir: &Path) -> usize {
         session::InterceptedUrl,
         session::ConnectionStatus,
         session::GuiEvent,
+        updates::UpdateCheckState,
+        updates::UpdateCheck,
+        updates::UpdateAvailable,
+        updates::UpdateProgress,
+        updates::UpdateStatus,
     )
 }
 

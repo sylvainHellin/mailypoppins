@@ -44,6 +44,12 @@ portable-pty = "0.9.0"
 # mp-core).
 getrandom = "0.4"
 base64 = "0.22"
+# The app's own updates from GitHub Releases (src/updates.rs, #0139), driven
+# from Rust only, so the webview holds no `updater:*` permission.
+tauri-plugin-updater = "2.13"
+# RFC 3339 for update-state.json and an update's date; already in the tree
+# through the updater, at this version.
+time = { version = "0.3", features = ["formatting", "parsing"] }
 
 # The press-and-hold default (src/lib.rs `key_repeat`); already in the tree
 # through tao and wry, at this version.

@@ -56,6 +56,9 @@ import type {
   SignatureFile,
   SignatureListing,
   SyncMode,
+  UpdateCheck,
+  UpdateProgress,
+  UpdateStatus,
   VcardDraft,
   VersionInfo,
 } from "@/lib/gui-types";
@@ -423,6 +426,26 @@ export const interceptedUrls = (): Promise<InterceptedUrl[]> =>
 export const openExternal = (url: string): Promise<void> => invoke<void>("open_external", { url });
 
 export const versionInfo = (): Promise<VersionInfo> => invoke<VersionInfo>("version_info");
+
+// The app's own update (docs/rust-layer.md, "Updates"). Unlike the other
+// commands, `update_skip`, `update_install` and `update_restart` reject with a
+// plain string, the sentence to show (`updateReason` in src/app/updates.ts).
+
+/** Check for a newer app; never rejects, a failure is the answer's `failed` state. */
+export const updateCheck = (manual: boolean): Promise<UpdateCheck> => invoke<UpdateCheck>("update_check", { manual });
+
+/** What this run knows (the running version, the held or installed update, the last check), never from the network. */
+export const updateStatus = (): Promise<UpdateStatus> => invoke<UpdateStatus>("update_status");
+
+/** Record `version` as skipped: the silent check no longer announces it. */
+export const updateSkip = (version: string): Promise<null> => invoke<null>("update_skip", { version });
+
+/** Download, verify and install the held update; `finished` on the channel once the new bundle is in place. */
+export const updateInstall = (on_progress: Channel<UpdateProgress>): Promise<null> =>
+  invoke<null>("update_install", { on_progress });
+
+/** Stop the daemon and relaunch into the installed update; the frontend asks about open drafts first. */
+export const updateRestart = (): Promise<null> => invoke<null>("update_restart");
 
 export const fixtureSimulate = (what: FixtureSimulation): Promise<void> =>
   invoke<void>("fixture_simulate", { what });

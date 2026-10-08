@@ -9,9 +9,18 @@
 //! the user typing it into a field. Cmd+, on "Settings…" is the one
 //! accelerator, the macOS convention, which the keymap never sees anyway
 //! since it passes every Cmd combination on.
+//!
+//! "Check for Updates…" under About is the one item outside [`ACTIONS`]: it
+//! emits [`UPDATE_CHECK_REQUESTED_EVENT`] (#0139), and the frontend runs the
+//! manual check so its notice line shows the answer.
 
 use tauri::menu::{AboutMetadata, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Runtime};
+
+use crate::updates::UPDATE_CHECK_REQUESTED_EVENT;
+
+/// The App menu's "Check for Updates…".
+pub const CHECK_FOR_UPDATES: &str = "check_for_updates";
 
 /// The event the frontend listens on (`src/lib/events.ts`).
 pub const MENU_EVENT: &str = "menu";
@@ -62,6 +71,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         app,
         SubmenuBuilder::new(app, "mailypoppins")
             .about(Some(about))
+            .text(CHECK_FOR_UPDATES, "Check for Updates…")
             .separator(),
         "App",
     )?
@@ -110,6 +120,12 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
 /// Forward one of our items to the frontend; predefined items act natively.
 pub fn on_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
+    if id == CHECK_FOR_UPDATES {
+        if let Err(e) = app.emit(UPDATE_CHECK_REQUESTED_EVENT, ()) {
+            tracing::warn!("[menu] could not emit {UPDATE_CHECK_REQUESTED_EVENT}: {e}");
+        }
+        return;
+    }
     if ACTIONS.iter().any(|(known, ..)| *known == id) {
         if let Err(e) = app.emit(MENU_EVENT, id) {
             tracing::warn!("[menu] could not emit {id}: {e}");
@@ -131,6 +147,12 @@ mod tests {
                 "src/app/actions.ts MENU_ACTIONS lacks {id}"
             );
         }
+    }
+
+    /// The update item is not an action, so no action may take its id.
+    #[test]
+    fn the_update_item_is_no_action() {
+        assert!(ACTIONS.iter().all(|(id, ..)| *id != CHECK_FOR_UPDATES));
     }
 
     #[test]

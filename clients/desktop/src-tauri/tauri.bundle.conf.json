@@ -1,5 +1,8 @@
 {
   "bundle": {
-    "externalBin": ["binaries/mp"]
+    "externalBin": ["binaries/mp"],
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }

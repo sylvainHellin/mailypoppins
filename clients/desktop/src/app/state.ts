@@ -462,7 +462,27 @@ export function isRunning(c: ComposeSession | undefined): boolean {
  * runs: before a navigation away from it, which `action` replays once
  * answered, or before the window closes.
  */
-export type ComposeLeave = { kind: "navigate"; action: Action } | { kind: "close" };
+export type ComposeLeave = { kind: "navigate"; action: Action } | { kind: "close" } | { kind: "restart" };
+
+/**
+ * The app's own update (ticket 0139, src/app/updates.ts): none known, one
+ * available, one downloading with the bytes so far, one installed and
+ * waiting for a restart (`asking` while the activity card offers Restart
+ * now and Later), or an install that failed, which the card shows with its
+ * reason and which can be retried as an available one.
+ */
+export type UpdateState =
+  | { kind: "idle" }
+  | { kind: "available"; version: string; notes?: string; date?: string }
+  | { kind: "downloading"; version: string; downloaded: number; content_length?: number }
+  | { kind: "installed"; version: string; asking: boolean }
+  | { kind: "failed"; version: string; reason: string };
+
+/**
+ * What the last `update_status` or `update_check` answered about the running
+ * app, for Settings; `reason` says why this build never checks, else null.
+ */
+export type UpdateInfo = { current: string; last_check: string | null; reason: string | null };
 
 /**
  * The compose dialogs: the new-draft and forward wizard, and the recipients
@@ -776,6 +796,10 @@ export type AppState = {
   signIn: SignIn | null;
   /** Operation ends that arrived while `config_oauth2_login` was unanswered, for its id. */
   signInEarly: OperationEnd[];
+  /** The app's own update. */
+  update: UpdateState;
+  /** The running version and the last successful check, once `update_status` or a check answered. */
+  updateInfo: UpdateInfo | null;
 };
 
 export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
@@ -859,6 +883,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     accountWizard: null,
     signIn: null,
     signInEarly: [],
+    update: { kind: "idle" },
+    updateInfo: null,
   };
 }
 

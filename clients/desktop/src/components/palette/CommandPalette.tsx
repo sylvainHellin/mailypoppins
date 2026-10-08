@@ -18,18 +18,22 @@ function groups(entries: PaletteEntry[]): [string, PaletteEntry[]][] {
   return [...out];
 }
 
+const NO_EXTRA: PaletteEntry[] = [];
+
 export type CommandPaletteProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onRun: (id: ActionId) => void;
+  /** Rows that come and go with the model, such as the update's (`updatePaletteEntries`), after the fixed ones. */
+  extra?: PaletteEntry[];
 };
 
 /**
  * Every KEYMAP action, with its keys; what M1 cannot run yet is listed,
  * disabled, with the milestone that brings it.
  */
-export function CommandPalette({ open, onOpenChange, onRun }: CommandPaletteProps) {
-  const all = useMemo(() => groups([...paletteEntries(), ...GUI_ENTRIES]), []);
+export function CommandPalette({ open, onOpenChange, onRun, extra = NO_EXTRA }: CommandPaletteProps) {
+  const all = useMemo(() => groups([...paletteEntries(), ...GUI_ENTRIES, ...extra]), [extra]);
   return (
     <CommandDialog
       open={open}

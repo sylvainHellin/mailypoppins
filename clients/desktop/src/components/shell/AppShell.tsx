@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { Shell } from "@/components/shell/Shell";
 import { ConnectingScreen } from "@/components/screens/ConnectingScreen";
 import { DaemonUnavailableScreen } from "@/components/screens/DaemonUnavailableScreen";
@@ -28,6 +28,7 @@ import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
 import { useStoredTheme } from "@/app/theme";
 import { useStoredReaderMode } from "@/app/readerMode";
+import { updatePaletteEntries, useUpdateEvents } from "@/app/updates";
 import { screenFor } from "@/app/state";
 import { useAppState, useDispatch } from "@/app/store";
 import { useKeymap } from "@/keymap/useKeymap";
@@ -56,6 +57,9 @@ export function AppShell() {
   useDataSync(s, dispatch);
   useKeymap(s, dispatch);
   useCloseGuard(s, dispatch);
+  const checkUpdates = useCallback(() => run("check_updates"), [run]);
+  useUpdateEvents(dispatch, checkUpdates);
+  const updateRows = useMemo(() => updatePaletteEntries(s.update), [s.update]);
 
   const layout = useLayout();
   useEffect(() => dispatch({ type: "set_layout", layout }), [layout, dispatch]);
@@ -96,7 +100,7 @@ export function AppShell() {
       {body}
       <TerminalHost />
       <PrefixPopup state={s} />
-      <CommandPalette open={s.overlay === "palette"} onOpenChange={close} onRun={run} />
+      <CommandPalette open={s.overlay === "palette"} onOpenChange={close} onRun={run} extra={updateRows} />
       <KeyHelp open={s.overlay === "help"} onOpenChange={close} />
       <RestartDaemonDialog open={s.overlay === "restart"} onOpenChange={close} onConfirm={restart} />
       <InterceptedLinksDialog open={s.overlay === "intercepted"} onOpenChange={close} />

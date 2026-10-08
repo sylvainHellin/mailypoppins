@@ -9,7 +9,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 |---|---|
 | `src/lib/tauri.ts` | The only import of `@tauri-apps/api`; tests mock this one module |
 | `src/lib/commands.ts` | One typed wrapper per Tauri command |
-| `src/lib/events.ts` | The `subscribe_events` channel and the native `menu` event |
+| `src/lib/events.ts` | The `subscribe_events` channel, the native `menu` event and the updater's `update:available` and `update:check_requested` |
 | `src/lib/gui-types.ts` | The Tauri layer's result and event types |
 | `src/lib/clipboard.ts` | Every copy: `copyText(text, what, dispatch)` writes through `navigator.clipboard` from the key or click handler and says "Copied <what>" or "The clipboard refused <what>" |
 | `src/protocol/types.ts` | Wire shapes embedded in them, hand-written until ts-rs generates them |
@@ -33,6 +33,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/app/signin.ts` | The device-code sign-in this window awaits: its start, the code read from its progress, its cancel, how it ends and the lines that say so |
 | `src/app/attachments.ts` | `to`, `ts`, `tb`, `ta` and `F`, and what the attachment dialogs and buttons run |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
+| `src/app/updates.ts` | The app's own update: the check, the install with its progress, the restart behind the leave question, and what the sidebar entry and the palette rows say (see Updates) |
 | `src/app/actions.ts` | Every runnable action, whichever path asks: key, palette, menu, button |
 | `src/app/theme.ts` | The theme: painting dark, light or the system's on `<html>`, reading it at startup and storing a change |
 | `src/app/readerMode.ts` | The reader mode, html or text: reading it at startup, storing a change, and the text mode's cache |
@@ -184,7 +185,7 @@ From the Drafts list it says "Quick-move is not available in this mailbox", the 
 Toggling read or flag over several rows follows the TUI: flagging wins when any row is unflagged, and marking read when any is unread.
 
 The activity area is a stack at the bottom right of the window, raised above the reader's blocked-link notice while that shows.
-Held sends come first, then the running operations, then the failures, then the applied notices of `state.activity`:
+Held sends come first, then the app update's card (see Updates), then the running operations, then the failures, then the applied notices of `state.activity`:
 
 - An applied batch is a notice that leaves after five seconds.
 - A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, a draft that could not be written or an editor that did not open, a send or an outbox retry that failed, went to only some recipients or was interrupted, and a refused retry or discard are `role="alert"` notices that leave after twenty seconds (`STICKY_MS` in `src/app/activity.ts`); the failure stays in the activity log, and a failed send in the outbox.
@@ -344,6 +345,7 @@ There is no keep answer, since the window is the editors' terminal.
 With no editor running the handler does nothing and the window closes as before; with one it prevents the close and asks.
 "Close the editor" kills every embedded editor, then calls `getCurrentWindow().destroy()`, which the capability `core:window:allow-destroy` allows; "Stay" leaves the window and the editors alone.
 The menu's Close Window (Cmd+W) asks the same way; its Quit (Cmd+Q) ends the app, and the Rust layer kills every child on `RunEvent::Exit`.
+Restarting into an installed update asks the same question first, titled "Restart to finish the update?", with "Close the editor and restart", the initial focus, and "Stay" (`composeLeave` `{ kind: "restart" }`; see Updates).
 
 #### The editor's colours
 
@@ -509,6 +511,7 @@ In the narrow layout the view stands where the list would, under a bar titled wi
 
 - `Space c` and `Space a`, the TUI's GLOBAL keys, show Contacts and Calendar; `Space m` shows Mail and focuses its list.
 - The sidebar's entries at its foot: Contacts, Calendar and Settings are buttons, the shown one `aria-current="page"`, out of the pane's tab order like the outbox line; Activity is a button too, and opens the activity log dialog instead of a view.
+  Above them, while an update of the app is known, a button "Update to 0.12.0" installs it, and "Restart to finish the update" restarts into one installed (see Updates).
 - The palette's "Switch to Mail view", "Switch to Contacts view", "Switch to Calendar view" and "Open settings".
   Settings has no key of the keymap's: the TUI has no settings view, and `Space s` is left free; the app menu's "Settings…" carries Cmd+, (the macOS convention), which the menu takes before the page sees it.
 
@@ -794,6 +797,7 @@ On a switch the focus follows into the view, on its "Mail" button, as in the oth
 - Send hold: `email.send_hold_secs` in seconds, or "none, a send leaves at once" for 0.
 - "Open config.toml" runs `sc` (see Activity log, "config.toml and the daemon log").
 - Reload calls `config_reload` and is disabled while it runs.
+- Updates: "mailypoppins 0.11.0, last checked <local date and time>" (or "not checked yet"), from the last `update_check` answer, and "Check now", the palette's "Check for updates"; before any check answered this window, the line asks a silent one (see Updates).
 - Theme: Dark, Light and System, the `theme` key of `desktop.json` (see Theme).
 - Reader: HTML and Text, the current one pressed, the `reader_mode` key of `desktop.json`; `tt` and the palette's "Reader: HTML" and "Reader: text" do the same ([reader.md](reader.md), "Text mode").
 - Editor command: the M3 editor setting through `editor_setting_get|set`, its placeholder the template in effect; Save with an empty field clears it, and the hint names `MP_DESKTOP_EDITOR` when that wins.
@@ -852,6 +856,46 @@ A re-bootstrap from another daemon instance clears the banner, since that daemon
 The event clears the banner and makes the configuration and the account list stale.
 Each added or updated account's mailbox counts and, when shown, its list are read again; an added account's mailboxes load once the account list names it.
 For a removed account the daemon publishes `state.remove` of `account:<name>` first, which removes it from the window; `config.changed` removes only a name the window still knows, so a removal never runs twice.
+
+## Updates
+
+The app updates itself from GitHub Releases (#0139, stage 1); the Rust layer checks, downloads, verifies and installs ([rust-layer.md](rust-layer.md), "Updates"), and `src/app/updates.ts` shows what it knows.
+`state.update` is `idle`, `available` (version, notes, date), `downloading` (version, bytes so far, archive size when known), `installed` (version, and `asking` while the card offers the restart) or `failed` (version and the reason), and `state.updateInfo` the running version, the last successful check and the gate's sentence when the build never checks, from the last `update_status` or `update_check` answer.
+
+### Entry points
+
+- `update:available`, the Rust layer's silent startup check, makes the update known; nothing says so beyond the sidebar entry.
+- On mount the window reads `update_status` once, which never reaches the network: while `state.update` is still `idle`, an `installed` version becomes `installed` (with `asking` off, so the sidebar entry offers the restart and no card asks) and else an `available` one becomes `available`, so a webview reload keeps what the Rust layer knows.
+- Opening Settings reads `update_status` again for its Updates line: "mailypoppins 0.11.0, last checked …" or "…, not checked yet", and beside it the gate's sentence when the build never checks.
+- The palette's "Check for updates", always listed, the App menu's "Check for Updates…" (`update:check_requested`) and the Settings line's "Check now" run a manual check, `update_check { manual: true }`.
+- The sidebar's foot shows "Update to 0.12.0" while an update is available or its install failed, and "Restart to finish the update" once one is installed and Later was chosen; it is hidden while nothing is known and while a download runs, since the card shows that.
+- The palette lists "Update to v0.12.0" and "Restart to finish the update" under the same conditions (`updatePaletteEntries`, passed to the palette as its `extra` rows); none of the three rows has a key.
+
+### The check
+
+A manual check says how it went on the notice line: "mailypoppins 0.11.0 is up to date", "Update 0.12.0 available" (and the sidebar entry appears), the gate's sentence for a build that never checks ("Updates are off in a development build.", logged as a warning), or "The update check failed: <why>", logged as an error.
+A silent check says nothing, and its failure is only in the Rust layer's log; Settings runs none, it reads `update_status`.
+A check that answers `up_to_date` forgets an update that is available or failed, as the Rust layer drops the one it held; a download or an installed update stays.
+
+### The install
+
+The sidebar entry or the palette row calls `update_install` with a `Channel<UpdateProgress>`.
+The activity area shows one card for it, after the hold cards and before the running operations, and, like them, while `!` hides the notices:
+
+- "Downloading mailypoppins 0.12.0…" with "1.0 MB of 4.0 MB" and a progress bar from the channel's `started` and `progress`, or a pulsing bar with the bytes so far when the server sent no size;
+- on `finished`, or the command's answer, whichever lands first, "mailypoppins 0.12.0 is installed; restart to finish the update." with "Restart now" and "Later";
+- on a rejection, "The update to 0.12.0 failed: <the Rust layer's sentence>" with "Open the release page", which opens `https://github.com/sylvainHellin/mailypoppins/releases/latest` through `open_external`, and "Dismiss".
+
+The card is a `group` named after its state, and its status line, mounted empty with it, announces the install and the failure.
+Later takes the card away and leaves the restart to the sidebar entry and the palette.
+A failed install stays installable: the sidebar entry and the palette row retry it while the card shows, and Dismiss takes the card away with the update `available` again.
+The install and its failure each leave a line in the activity log.
+
+### The restart
+
+"Restart now", the sidebar entry and the palette row call `update_restart`, which stops the daemon and relaunches into the new version.
+With an embedded editor running the leave question asks first (Compose, "The embedded editor"); its "Close the editor and restart" kills every embedded editor, then calls `update_restart`, and "Stay" changes nothing.
+A refused restart says "The restart failed: <why>" on the notice line.
 
 ## Account wizard
 
@@ -979,7 +1023,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `u` while a send is held: cancel the newest held send instead of toggling read, the TUI's rule.
 - `tv`: the RSVP choice for the cursor email, from the list or the reader (the TUI's MESSAGE key); in the Calendar view `V` does it for the cursor row (see Calendar, "RSVP").
 - `X`: dismiss the newest activity notice, a desktop key.
-- `!`: hide or show the activity notices, never a hold card; `sl`: the activity log; `sc`, `sf`: config.toml and the daemon log in the editor; all four from every view (see Activity log).
+- `!`: hide or show the activity notices, never a hold card or the update card; `sl`: the activity log; `sc`, `sf`: config.toml and the daemon log in the editor; all four from every view (see Activity log).
 - `go`: the selected account's outbox, a desktop key; in the outbox view `j`/`k`, `gg`/`G` move, `R` retries and `d` discards the cursor row, Enter opens nothing, `/` closes the view and focuses the filter, and every key on the hidden mailbox selection does nothing from any pane (see Outbox, "What the view hides").
 - `ss`, `sS`: quick and full sync of the selected account.
 - In the Contacts view: `j`/`k`, `gg`/`G` move, `/` focuses the search, Enter and `n` compose to the contact, `v` sends it as a vCard, `c` copies its address, `r` rebuilds the index (see Contacts).

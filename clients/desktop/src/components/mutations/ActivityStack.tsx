@@ -4,21 +4,23 @@
 // before the first of them, since a live region that mounts with its text
 // already inside may not be announced; a failure is its own `role="alert"`.
 // A hold card's end line is a status region of the card, mounted empty with
-// the card, for the same reason. Between the holds and the notices, one card
-// per contact rebuild, RSVP and invitation this window awaits, with Cancel.
+// the card, for the same reason. Between the holds and the notices, the app
+// update's card while it downloads, asks for the restart or failed, then one
+// card per contact rebuild, RSVP and invitation this window awaits, with Cancel.
 
 import { useCallback, useState, type Dispatch } from "react";
-import { CircleAlert, CircleCheck, LoaderCircle, Send, Undo2, X } from "lucide-react";
+import { CircleAlert, CircleArrowUp, CircleCheck, ExternalLink, LoaderCircle, RotateCw, Send, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useMutations } from "@/app/mutations";
 import { useAppState, useDispatch } from "@/app/store";
 import { FAILURES, STICKY_MS } from "@/app/activity";
 import { useWindDown } from "@/hooks/use-wind-down";
 import { RESPONSE_LABEL } from "@/app/rsvp";
+import { openReleasePage, restartIntoUpdate } from "@/app/updates";
 import type { Action } from "@/app/reducer";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
-import { visibleNotices, type ActivityNotice, type AppState, type HoldEntry } from "@/app/state";
+import { visibleNotices, type ActivityNotice, type AppState, type HoldEntry, type UpdateState } from "@/app/state";
 
 /** How long an applied notice stays. */
 export const APPLIED_MS = 5000;
@@ -262,6 +264,103 @@ export function OperationToast({ op }: { op: RunningOperation }) {
   );
 }
 
+/** Bytes as the update card shows them, in MB with one decimal. */
+export function megabytes(bytes: number): string {
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
+/**
+ * The app update's card (ticket 0139): "Downloading mailypoppins X…" with a
+ * progress bar fed by `update_install`'s channel, then "Restart now" or
+ * "Later" once the new bundle is in place, or the failure with "Open the
+ * release page" and "Dismiss". One card through the three states, so its
+ * status line, mounted empty with it, announces each change. Like a hold
+ * card it shows while `!` hides the notices.
+ */
+export function UpdateToast({ update }: { update: UpdateState }) {
+  const s = useAppState();
+  const dispatch = useDispatch();
+  if (update.kind !== "downloading" && update.kind !== "failed" && !(update.kind === "installed" && update.asking)) return null;
+  const version = update.version;
+  const label =
+    update.kind === "downloading"
+      ? `Downloading mailypoppins ${version}…`
+      : update.kind === "installed"
+        ? `mailypoppins ${version} is installed`
+        : `The update to ${version} failed`;
+  const end =
+    update.kind === "installed"
+      ? `mailypoppins ${version} is installed; restart to finish the update.`
+      : update.kind === "failed"
+        ? `The update to ${version} failed: ${update.reason}`
+        : "";
+  const total = update.kind === "downloading" ? update.content_length : undefined;
+  const done = update.kind === "downloading" ? update.downloaded : 0;
+  const share = total ? Math.min(100, (100 * done) / total) : 0;
+  return (
+    <div
+      role="group"
+      aria-label={label}
+      data-update={update.kind}
+      className="flex flex-col gap-1.5 rounded-lg border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-md"
+    >
+      <div className="flex items-start gap-2">
+        {update.kind === "failed" ? (
+          <CircleAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-destructive" />
+        ) : update.kind === "downloading" ? (
+          <LoaderCircle aria-hidden="true" className="mt-0.5 size-4 shrink-0 animate-spin text-muted-foreground" />
+        ) : (
+          <CircleArrowUp aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-link" />
+        )}
+        <div className="flex min-w-0 flex-1 flex-col">
+          {update.kind === "downloading" ? <p className="break-words">{label}</p> : null}
+          <p role="status" data-slot="update-end" className="break-words">
+            {end}
+          </p>
+          {update.kind === "downloading" ? (
+            <p className="text-xs text-muted-foreground tabular-nums">{total ? `${megabytes(done)} of ${megabytes(total)}` : megabytes(done)}</p>
+          ) : null}
+        </div>
+      </div>
+      {update.kind === "downloading" ? (
+        <div
+          role="progressbar"
+          aria-label="Update download"
+          aria-valuemin={0}
+          aria-valuemax={total ?? undefined}
+          aria-valuenow={total ? done : undefined}
+          aria-valuetext={total ? `${Math.round(share)} percent` : `${megabytes(done)} downloaded`}
+          className="h-1 overflow-hidden rounded-full bg-muted"
+        >
+          <div className={`h-full bg-link ${total ? "transition-[width]" : "w-1/3 animate-pulse"}`} style={total ? { width: `${share}%` } : undefined} />
+        </div>
+      ) : null}
+      {update.kind === "installed" ? (
+        <div className="flex justify-end gap-2">
+          <Button size="xs" variant="outline" onClick={() => dispatch({ type: "update_later" })}>
+            Later
+          </Button>
+          <Button size="xs" onClick={() => void restartIntoUpdate(s, dispatch)}>
+            <RotateCw aria-hidden="true" />
+            Restart now
+          </Button>
+        </div>
+      ) : null}
+      {update.kind === "failed" ? (
+        <div className="flex justify-end gap-2">
+          <Button size="xs" variant="outline" onClick={() => dispatch({ type: "update_dismiss" })}>
+            Dismiss
+          </Button>
+          <Button size="xs" variant="outline" onClick={() => openReleasePage(dispatch)}>
+            <ExternalLink aria-hidden="true" />
+            Open the release page
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /**
  * The activity area. A cancelled hold's notice stays in the model and is not
  * shown, since the hold's own toast says so. While `!` hides the notices the
@@ -296,6 +395,7 @@ export function ActivityStack() {
         ))}
       </div>
       <div className="flex flex-col gap-2">
+        <UpdateToast update={s.update} />
         {running.map((op) => (
           <OperationToast key={op.operation_id} op={op} />
         ))}

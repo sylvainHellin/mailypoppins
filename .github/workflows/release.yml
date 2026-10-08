@@ -9,7 +9,12 @@
 #   3. build the desktop app for macOS (arm64) with the matching
 #      `mp` inside it as a sidecar, and upload
 #      `mailypoppins-desktop-<target>.dmg` and `.app.tar.gz` plus `.sha256`
-#      checksums (ticket #0132; unsigned until #0012).
+#      checksums and the updater signature `.app.tar.gz.sig`
+#      (ticket #0132; unsigned for Apple until #0012);
+#   4. write the updater manifest `latest.json` for the desktop app, and
+#      only then mark the release "latest" (ticket #0139): installed apps
+#      read `releases/latest/download/latest.json`, so they keep the
+#      previous, complete manifest until this one is whole.
 #
 # See docs/release-process.md for the full release procedure.
 
@@ -57,10 +62,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Not "latest" yet: desktop-manifest moves the flag once latest.json
+          # is uploaded (#0139). Public from the start, not a draft, since
+          # homebrew-tap downloads the .sha256 assets by their tag URL.
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
-            --notes-file /tmp/notes.md
+            --notes-file /tmp/notes.md \
+            --latest=false
 
   upload-assets:
     needs: create-release
@@ -147,8 +156,8 @@ jobs:
         #   APPLE_PASSWORD              an app-specific password of that account
         #   APPLE_TEAM_ID               the 10-character team id
         # Then drop the "unsigned" note in docs/release-process.md and publish
-        # the cask (packaging/homebrew/mailypoppins-app.rb.tmpl).
-        # env:
+        # the cask (packaging/homebrew/mailypoppins-app.rb.tmpl). These go
+        # into the env block below, beside the updater's two:
         #   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
         #   APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         #   APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -156,8 +165,18 @@ jobs:
         #   APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
         #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         # ---------------------------------------------------------------------
+        # ---- Updater signature: #0139 ---------------------------------------
+        # The minisign key the app's updater checks every archive against
+        # (plugins.updater.pubkey in src-tauri/tauri.conf.json). With it set,
+        # `pnpm bundle` turns on bundle.createUpdaterArtifacts and the bundler
+        # writes bundle/macos/mailypoppins.app.tar.gz and its .sig. A copy of
+        # the key and its password lives in Proton Pass; losing them ends
+        # updates for every installed app (docs/release-process.md).
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm bundle --target ${{ matrix.target }} -- --ci --bundles app,dmg
-      - name: Upload the DMG and the app to the release
+      - name: Upload the DMG, the updater archive and its signature to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET: ${{ matrix.target }}
@@ -167,14 +186,77 @@ jobs:
           mkdir -p "$out"
           dmg=$(ls "$bundle"/dmg/*.dmg)
           cp "$dmg" "$out/mailypoppins-desktop-$TARGET.dmg"
-          tar -czf "$out/mailypoppins-desktop-$TARGET.app.tar.gz" -C "$bundle/macos" mailypoppins.app
+          # The archive the bundler wrote and signed, not a tar of our own: the
+          # signature covers these exact bytes. Its top-level entry is
+          # mailypoppins.app/, the layout the updater unpacks.
+          archive="$bundle/macos/mailypoppins.app.tar.gz"
+          if ! [ -f "$archive" ] || ! [ -f "$archive.sig" ]; then
+            echo "::error::No $archive and .sig; is the TAURI_SIGNING_PRIVATE_KEY secret set?"
+            exit 1
+          fi
+          cp "$archive" "$out/mailypoppins-desktop-$TARGET.app.tar.gz"
+          cp "$archive.sig" "$out/mailypoppins-desktop-$TARGET.app.tar.gz.sig"
           cd "$out"
           for f in mailypoppins-desktop-$TARGET.dmg mailypoppins-desktop-$TARGET.app.tar.gz; do
             shasum -a 256 "$f" > "$f.sha256"
           done
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
             mailypoppins-desktop-$TARGET.dmg mailypoppins-desktop-$TARGET.dmg.sha256 \
-            mailypoppins-desktop-$TARGET.app.tar.gz mailypoppins-desktop-$TARGET.app.tar.gz.sha256
+            mailypoppins-desktop-$TARGET.app.tar.gz mailypoppins-desktop-$TARGET.app.tar.gz.sha256 \
+            mailypoppins-desktop-$TARGET.app.tar.gz.sig
+
+  # The updater manifest (ticket #0139). Every installed app reads
+  # releases/latest/download/latest.json, so the release becomes "latest"
+  # only after this job uploaded a complete manifest; create-release made it
+  # with --latest=false. If desktop-macos fails, this job is skipped and
+  # "latest" stays on the previous release, whose manifest is whole.
+  desktop-manifest:
+    needs: desktop-macos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag against the root crate's version
+        # pnpm bundle stamps the app with the root Cargo.toml version, and
+        # the updater compares latest.json's version with it, so a tag
+        # without the bump must not publish a manifest.
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(awk '/^\[package\]/ { p = 1; next } /^\[/ { p = 0 } p && /^version *=/ { gsub(/^version *= *"|".*$/, ""); print; exit }' Cargo.toml)
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::The tag $GITHUB_REF_NAME is version $tag, but Cargo.toml says $crate; bump Cargo.toml and tag again."
+            exit 1
+          fi
+          echo "Tag and Cargo.toml agree on $crate."
+      - name: Write and upload latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: aarch64-apple-darwin
+        run: |
+          dir="$RUNNER_TEMP/manifest"
+          mkdir -p "$dir"
+          cd "$dir"
+          asset="mailypoppins-desktop-$TARGET.app.tar.gz"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$asset.sig" --dir .
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json body --jq .body > notes.md
+          # signature is the .sig file's content (base64), trailing newline
+          # trimmed; the url is the tag's own, so it never moves.
+          jq -n \
+            --arg version "${GITHUB_REF_NAME#v}" \
+            --rawfile notes notes.md \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --rawfile signature "$asset.sig" \
+            --arg url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$asset" \
+            '{version: $version, notes: $notes, pub_date: $pub_date,
+              platforms: {"darwin-aarch64": {signature: ($signature | sub("\\s+$"; "")), url: $url}}}' \
+            > latest.json
+          cat latest.json
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber latest.json
+      - name: Mark the release latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --latest
 
   # Update the Homebrew tap (ticket #0013). Requires the TAP_DEPLOY_KEY
   # repository secret: the PRIVATE half of an ed25519 deploy key whose

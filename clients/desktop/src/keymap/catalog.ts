@@ -101,7 +101,10 @@ export type ActionId =
   | "theme_system"
   | "toggle_reader_mode"
   | "reader_html"
-  | "reader_text";
+  | "reader_text"
+  | "check_updates"
+  | "update_install"
+  | "update_restart";
 
 /**
  * Why a KEYMAP row cannot run from the palette in this build:
@@ -306,6 +309,10 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "APP", label: "Theme: dark", keys: [], id: "theme_dark", badge: null },
   { section: "APP", label: "Theme: light", keys: [], id: "theme_light", badge: null },
   { section: "APP", label: "Theme: system", keys: [], id: "theme_system", badge: null },
+  // The app's own update (ticket 0139, src/app/updates.ts): the App menu's "Check
+  // for Updates…" runs it too. "Update to vX.Y.Z" and "Restart to finish the
+  // update" join it while an update is known (`updatePaletteEntries`).
+  { section: "APP", label: "Check for updates", keys: [], id: "check_updates", badge: null },
   { section: "SEARCH", label: "Search server", keys: ["ff", "Shift+Enter"], id: "search_server", badge: null },
   { section: "SEARCH", label: "Cancel the server search", keys: [], id: "cancel_search", badge: null },
   { section: "READER", label: "Show intercepted links", keys: [], id: "show_intercepted", badge: null },

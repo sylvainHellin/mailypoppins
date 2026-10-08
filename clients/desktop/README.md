@@ -19,6 +19,7 @@ The plan is [docs/plans/native-gui.md](../../docs/plans/native-gui.md), and the 
 - M4: ranked contacts with a fuzzy search, compose to a contact, a contact sent as a vCard draft, the address copied, and the index rebuild.
 - M4: the Signatures dialog on `cs`, the activity log on `sl`, config.toml and the daemon log in the editor on `sc` and `sf`, and the reader's Copy menu.
 - M4: Settings with the config.toml banner, Reload, passwords and the device-code sign-in, the account wizard with the CLI's four presets, and a setup screen when the daemon has no config.toml.
+- Updates (#0139): an "Update to 0.12.0" entry at the sidebar's foot once a newer release is known, "Check for updates" in the palette, the App menu and Settings, the download's progress on a card in the activity area, and "Restart now" or "Later" once it is installed.
 - Nothing of M2 to M4 has run in a real window yet; the tests run against the fixtures.
 
 The Rust crate `mp-desktop` in `src-tauri/` has its own workspace and `Cargo.lock`, since the root workspace excludes `clients/desktop`.
@@ -93,6 +94,7 @@ ln -s /Applications/mailypoppins.app/Contents/MacOS/mp /usr/local/bin/mp   # opt
 
 The app starts its daemon with its own `Contents/MacOS/mp` unless `MP_DESKTOP_MP_BIN` names another, and refuses a running daemon of another version with the restart screen, whose Restart runs `mp daemon restart` with that binary.
 The symlink keeps the CLI, the TUI and the app's daemon on one version; with a Homebrew or `cargo` `mp` earlier on `PATH`, the two versions meet at the restart screen.
+To update: an installed app checks GitHub Releases once a day and offers "Update to <version>" at the sidebar's foot, and "Check for updates" (palette, App menu, Settings) checks at once; the download replaces the bundle in place and "Restart now" switches to it ([docs/shell.md](docs/shell.md), "Updates").
 To uninstall: `mp daemon stop`, quit the app, delete `/Applications/mailypoppins.app` and the symlink; the mail store and `config.toml` are the CLI's and stay (`mp config path`).
 [docs/release-process.md](../../docs/release-process.md), "The desktop app", has the release side.
 
@@ -112,6 +114,6 @@ The daemon's own variables (`MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR`, 
 ## Documentation
 
 - [docs/rust-layer.md](docs/rust-layer.md): the Tauri commands, the generated TypeScript types, the event stream, the reader scheme, links, the app CSP and fixture mode.
-- [docs/shell.md](docs/shell.md): the frontend modules, the model, mutations and pending state, the dialogs and the activity area, compose and send, the outbox, the views, contacts, the calendar, signatures, the activity log, settings, the account wizard, first run, the layouts, focus order and keys.
+- [docs/shell.md](docs/shell.md): the frontend modules, the model, mutations and pending state, the dialogs and the activity area, compose and send, the outbox, the views, contacts, the calendar, signatures, the activity log, settings, updates, the account wizard, first run, the layouts, focus order and keys.
 - [docs/reader.md](docs/reader.md): the reader frame, the toolbar and its Copy menu, invitations, the attachments, the browser rendition, the draft preview and server-only hits, refused links, and the navigation guard's verification with its manual steps.
 - [docs/design-tokens.md](docs/design-tokens.md): the semantic tokens and their contrast table.

@@ -62,6 +62,16 @@ brew install mailypoppins`}
         code={`ln -s /Applications/mailypoppins.app/Contents/MacOS/mp /usr/local/bin/mp`}
       />
       <p>
+        Later versions arrive in the app. Once a day it checks the Releases
+        page, and when a newer version is out, an "Update to" entry appears
+        at the foot of the sidebar. Choosing it downloads the update, checks
+        its signature and puts it in place while you keep working; "Restart
+        now" then switches to it, daemon included. "Check for updates" in the
+        command palette, the App menu and Settings checks at once. The
+        <code>mp</code> link above follows the update, since it points into
+        the app.
+      </p>
+      <p>
         If a daemon of another version is already running, the app says so
         and offers to restart it with its own. To uninstall, run
         <code>mp daemon stop</code>, quit the app, and delete it and the

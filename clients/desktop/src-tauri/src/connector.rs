@@ -857,6 +857,15 @@ fn finish_child(child: &mut Child, waited: Waited, what: &str) -> Result<(), Con
     }
 }
 
+/// Hold off a reconnect's on-demand start for [`REOPEN_AUTOSTART_EVERY`], as
+/// if one had just run: `update_restart` stops the daemon on purpose, and the
+/// old app must not start one in the seconds before it relaunches.
+pub fn hold_autostart() {
+    if let Ok(mut last) = LAST_AUTOSTART.lock() {
+        *last = Some(Instant::now());
+    }
+}
+
 /// `mp daemon restart`: stop the running daemon and start the `mp` binary's
 /// own. Blocking; the caller runs it off the UI thread. The explicit user
 /// confirmation is the frontend's.

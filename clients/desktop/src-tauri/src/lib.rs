@@ -20,6 +20,7 @@
 //! - [`fixture`]: the daemon stand-in behind `MP_DESKTOP_FIXTURE=1`.
 //! - [`menu`]: the native macOS menus, forwarded to the frontend's actions.
 //! - [`terminal`]: the embedded terminal editor's PTY sessions.
+//! - [`updates`]: the app's own updates from GitHub Releases.
 
 pub mod attachments;
 pub mod calendar;
@@ -40,6 +41,7 @@ pub mod session;
 pub mod settings;
 pub mod signatures;
 pub mod terminal;
+pub mod updates;
 
 #[cfg(test)]
 mod ts_bindings;
@@ -76,7 +78,7 @@ fn window_size() -> (f64, f64) {
 /// How long the scheme handler waits for a session still connecting.
 const READER_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-fn fixture_requested() -> bool {
+pub(crate) fn fixture_requested() -> bool {
     let env = std::env::var(FIXTURE_ENV)
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no"))
         .unwrap_or(false);
@@ -130,7 +132,11 @@ pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Driven from Rust only (src/updates.rs); the webview has no
+        // `updater:*` permission.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(session)
+        .manage(updates::Updates::default())
         .menu(menu::build)
         .on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()))
         .manage(InterceptLog::default())
@@ -177,6 +183,7 @@ pub fn run() {
                     NewWindowResponse::Deny
                 })
                 .build()?;
+            updates::spawn_startup_check(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -259,6 +266,11 @@ pub fn run() {
             commands::open_external,
             commands::version_info,
             commands::fixture_simulate,
+            updates::update_check,
+            updates::update_status,
+            updates::update_skip,
+            updates::update_install,
+            updates::update_restart,
             terminal::terminal_spawn,
             terminal::terminal_write,
             terminal::terminal_resize,
