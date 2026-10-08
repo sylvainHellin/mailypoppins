@@ -1,0 +1,84 @@
+---
+title: Searching mail
+description: One query grammar for the server, the local store and the search overlay.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`mp search`, its offline `--local` mode and the search overlay of the terminal UI (<kbd>f</kbd><kbd>f</kbd>) all read the same query grammar.
+
+```sh
+mp search 'from:boss@corp.com (invoice OR receipt) has:attachment'
+```
+
+Without `in:` or `--mailbox`, every mailbox of the account is searched.
+A malformed query is an error with a caret under the problem, never a silent search for less.
+
+## The grammar
+
+| Term | Matches |
+| --- | --- |
+| `from:` `to:` `cc:` | The sender, a recipient, a Cc recipient |
+| `subject:` `body:` | The subject or the body |
+| `filename:` | An attachment's file name (Gmail, Exchange and `--local` only) |
+| `has:attachment` | Only mail with an attachment |
+| `after:2026-01-01` | On or after a date; `since:` is the same |
+| `before:2026-07-01` | Strictly before a date |
+| `in:Archive` | One mailbox |
+| `message-id:<id>` | One exact Message-ID; the angle brackets are optional |
+| `"a phrase"` | The words together, in that order |
+| `a OR b` | Either term |
+| `(a OR b)` | A group, combined with the rest of the query |
+| bare words | Any field |
+
+Terms combine with an implicit AND.
+Quote a value that contains spaces: `from:"Ada Lovelace"`.
+
+## The same query as flags
+
+Every field has a flag, which builds the identical query.
+This is handy in scripts.
+
+```sh
+mp search --from boss@corp.com --has-attachment 'invoice OR receipt'
+mp search --after 2026-01-01 --before 2026-07-01 --subject 'quarterly report'
+```
+
+`-n` limits the results (20 by default) and `--full` prints whole bodies instead of a preview.
+
+## Offline search
+
+`--local` searches the local store's full-text index instead of the server.
+It needs no connection, ranks the best match first, and covers every synced mailbox at once.
+
+```sh
+mp search --local 'from:ada ledger'
+```
+
+A hit in the subject outranks the same word buried in a quoted reply.
+The index is written together with each message, so it is never behind what `mp sync` pulled.
+It only holds what has been synced; the server search is there for the rest.
+
+| Local term | Matches |
+| --- | --- |
+| `word` | The whole word in the subject, sender or body |
+| `"a phrase"` | The words together, in that order |
+| `word*` | A prefix: `invoi*` finds `invoicing` |
+| `subject:` `from:` `body:` | Restrict a term to one field |
+
+## Attachments on plain IMAP
+
+On Gmail and Exchange, `has:attachment` runs on the server.
+Plain IMAP has no search key for attachments, so mp answers that part from the local store and prints a warning.
+
+<Aside type="note">
+Mail that has not been synced yet is not covered by that part of the query.
+Run `mp sync` first for full coverage.
+</Aside>
+
+## In the terminal UI
+
+<kbd>f</kbd><kbd>f</kbd> opens the search overlay.
+Local hits show first, and server hits arrive as each mailbox answers.
+A hit that exists only on the server can be fetched into the store with <kbd>f</kbd>, or <kbd>F</kbd> in the desktop app.
+<kbd>f</kbd><kbd>m</kbd> filters the list you are looking at instead.

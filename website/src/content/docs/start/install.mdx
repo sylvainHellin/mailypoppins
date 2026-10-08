@@ -1,0 +1,129 @@
+---
+title: Install
+description: Install the mailypoppins Mac app, the mp CLI from Homebrew, or build it from source.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem, Steps, Aside } from '@astrojs/starlight/components';
+
+mailypoppins ships as one binary, `mp`, and as a desktop app for the Mac that carries its own copy of it.
+Pick one way to install.
+Mixing two of them gives you two `mp` of two versions, which the app refuses to run against.
+
+<Tabs syncKey="install">
+<TabItem label="Mac app">
+
+The app runs on Apple silicon Macs.
+It needs nothing else installed: it starts the daemon with the `mp` it ships.
+
+<Steps>
+
+1. Download `mailypoppins-desktop-aarch64-apple-darwin.dmg` from the [latest release](https://github.com/sylvainHellin/mailypoppins/releases/latest/download/mailypoppins-desktop-aarch64-apple-darwin.dmg).
+
+2. Open the DMG and drag `mailypoppins.app` to Applications.
+
+3. Open the app once. macOS blocks it the first time, because it is not signed yet.
+
+4. Allow it under System Settings, Privacy & Security, with "Open Anyway". Or clear the quarantine flag from a terminal:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/mailypoppins.app
+   ```
+
+</Steps>
+
+<Aside type="caution" title="Gatekeeper">
+Control-click and Open no longer bypasses Gatekeeper since macOS 15.
+Use "Open Anyway" or the `xattr` command above.
+Apple signing is planned; until then every release needs this step once.
+</Aside>
+
+To use the app's `mp` from a terminal too, link it onto your `PATH`.
+The CLI, the terminal UI and the app then run one version.
+
+```sh
+ln -s /Applications/mailypoppins.app/Contents/MacOS/mp /usr/local/bin/mp
+```
+
+Any directory on your `PATH` works, such as `~/.local/bin`.
+The link follows the app's own updates, since it points into the app.
+
+</TabItem>
+<TabItem label="Homebrew">
+
+Homebrew installs a prebuilt `mp` on Apple silicon Macs and on Linux.
+No Rust toolchain is needed.
+
+```sh
+brew tap sylvainHellin/mailypoppins
+brew install mailypoppins
+```
+
+Homebrew does not quarantine what it downloads, so Gatekeeper stays quiet.
+
+</TabItem>
+<TabItem label="Source">
+
+You need a Rust toolchain.
+Install one from [rustup.rs](https://rustup.rs) if you do not have it.
+This is also the way to install on an Intel Mac, which has no prebuilt build.
+
+```sh
+git clone https://github.com/sylvainHellin/mailypoppins
+cd mailypoppins
+cargo install --path .
+```
+
+The binary lands in `~/.cargo/bin/`.
+Make sure that directory is on your `PATH`.
+
+</TabItem>
+<TabItem label="Binary">
+
+Each [release](https://github.com/sylvainHellin/mailypoppins/releases) carries `mp` as an archive with a `.sha256` checksum, for macOS on Apple silicon and Linux x86_64 (glibc or fully static musl).
+
+```sh
+tar xzf mailypoppins-aarch64-apple-darwin.tar.gz
+shasum -a 256 -c mailypoppins-aarch64-apple-darwin.sha256
+```
+
+Put `mp` somewhere on your `PATH`.
+On macOS a downloaded binary is quarantined; clear it with `xattr -d com.apple.quarantine mp`.
+
+</TabItem>
+</Tabs>
+
+## Check the install
+
+```sh
+mp --version
+```
+
+The first command that touches your mail starts the daemon in the background.
+You do not need to start it yourself.
+
+## Shell completions
+
+`mp completions` prints a completion script for every command and flag.
+
+```sh
+# zsh: save it on your fpath, then restart the shell
+mp completions zsh > "${fpath[1]}/_mp"
+
+# bash: load it from ~/.bashrc
+eval "$(mp completions bash)"
+```
+
+It also knows `fish`, `elvish` and `powershell`.
+
+## Upgrading
+
+The Mac app updates itself; see [the desktop app](/guides/desktop-app/#updates).
+After `brew upgrade` or a new `cargo install`, restart the daemon so it runs the new code:
+
+```sh
+mp daemon restart
+```
+
+A running daemon keeps the code it started with, even after the binary on disk changes.

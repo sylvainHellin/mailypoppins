@@ -1,0 +1,97 @@
+---
+title: Connect an account
+description: Run the setup wizard to connect an IMAP, Proton Bridge or Microsoft 365 account.
+sidebar:
+  order: 2
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+A setup wizard writes your configuration and tests the connection before it saves anything.
+
+<Tabs syncKey="client">
+<TabItem label="Terminal">
+
+```sh
+mp config init
+```
+
+</TabItem>
+<TabItem label="Mac app">
+
+The app opens on a setup screen when there is no configuration yet.
+It walks through the same providers as the terminal wizard.
+Later accounts come from Settings, Add account.
+
+</TabItem>
+</Tabs>
+
+## What the wizard asks
+
+<Steps>
+
+1. Pick a provider:
+   - Generic IMAP and SMTP, with a password.
+   - Proton Mail, through Proton Mail Bridge.
+   - Microsoft 365 or Exchange Online, with OAuth2 over IMAP and SMTP.
+   - Microsoft 365 or Exchange Online, with the Graph API, for tenants that block IMAP.
+
+2. Enter the server, port, user name and address.
+
+3. The wizard tests the connection.
+
+4. It lists the mailboxes on the server and asks which ones are the inbox, the archive and the sent folder.
+
+5. It writes the configuration to `~/.config/mailypoppins/config.toml` and stores the password in an encrypted secrets file next to it.
+
+</Steps>
+
+`mp config path` prints where the file lives.
+`mp config show` prints the result, with passwords masked.
+
+<Aside type="note" title="Proton Mail">
+Proton Mail Bridge must be running.
+Use the password Bridge shows you, not your Proton password.
+</Aside>
+
+<Aside type="tip" title="Microsoft 365">
+A Microsoft 365 account signs in with a device code: the wizard shows a URL and a code, and you sign in from your browser.
+Your organisation needs an app registration first; see [Microsoft 365 and Exchange](/guides/microsoft-365/).
+</Aside>
+
+## More than one account
+
+Add another account to the same configuration at any time:
+
+```sh
+mp config add-account
+```
+
+Every command works on the first account unless `-A` names another:
+
+```sh
+mp -A work sync
+```
+
+In the terminal UI, <kbd>g</kbd><kbd>a</kbd> switches accounts.
+
+## Passwords
+
+Passwords never go into `config.toml`.
+They live in `secrets.enc`, encrypted with a key bound to this machine and your user.
+Set or change one later with:
+
+```sh
+mp config set-password smtp
+mp config set-password imap -A work
+```
+
+The IMAP password falls back to the SMTP one when it is not set.
+To use the system keyring instead, see [Configuration](/reference/configuration/#passwords-and-secrets).
+
+## A signature
+
+The wizard does not ask for a signature.
+A signature is a Markdown file in `~/.config/mailypoppins/signatures/`.
+Press <kbd>c</kbd><kbd>s</kbd> in the terminal UI or the app to create one and make it the default.
+See [Signatures](/reference/configuration/#signatures).

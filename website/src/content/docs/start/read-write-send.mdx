@@ -1,0 +1,135 @@
+---
+title: Read, write and send
+description: Open the terminal UI, read a message, and send your first Markdown draft.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem, Steps, Aside } from '@astrojs/starlight/components';
+
+## Open the terminal UI
+
+Run `mp` with no arguments:
+
+```sh
+mp
+```
+
+The window shows your mailboxes, the message list, and the open message with its headers.
+These keys get you around:
+
+| Key | Action |
+| --- | --- |
+| <kbd>j</kbd> <span class="kbd-sep">/</span> <kbd>k</kbd> | Move down and up the list |
+| <kbd>1</kbd> to <kbd>9</kbd> | Jump to a mailbox |
+| <kbd>Enter</kbd> <span class="kbd-sep">/</span> <kbd>e</kbd> | Open the message in your `$EDITOR` |
+| <kbd>f</kbd><kbd>f</kbd> | Search all mail |
+| <kbd>:</kbd> | Run any action by name |
+| <kbd>?</kbd> | Show every key |
+| <kbd>q</kbd> | Quit |
+
+Press <kbd>c</kbd>, <kbd>t</kbd>, <kbd>f</kbd>, <kbd>s</kbd> or <kbd>g</kbd> alone to see what can follow it.
+The full list is in [Key bindings](/reference/keys/).
+
+## Read a message
+
+<kbd>Enter</kbd> opens a received message in your editor as a read-only Markdown copy.
+The headers are YAML frontmatter and the body follows.
+Search, fold and copy it with the tools you already know.
+The copy is deleted when you leave the editor, and nothing reads it back.
+
+The column on the left of the list marks each message:
+a dot for unread, a reply arrow once you answered it, a forward arrow once you forwarded it.
+These follow the server, so a reply sent from your phone shows here too.
+
+<kbd>t</kbd><kbd>b</kbd> opens the original HTML in your browser when you want the sender's layout.
+
+## Write and send
+
+A draft moves through three states: `draft`, `approved`, `sent`.
+Only an approved draft can be sent, so nothing leaves by accident.
+
+<Tabs syncKey="client">
+<TabItem label="Terminal UI">
+
+<Steps>
+
+1. Press <kbd>c</kbd><kbd>n</kbd>. A small form asks for recipients, a subject, a signature and a body. Recipients complete from your contacts.
+
+2. Type a short body there, or leave it empty to write the draft in your `$EDITOR`. The draft shows in the Drafts list.
+
+3. Press <kbd>x</kbd>. Confirm, and the draft is approved and sent in one step.
+
+4. Changed your mind? Press <kbd>u</kbd> within 20 seconds and nothing is sent.
+
+</Steps>
+
+</TabItem>
+<TabItem label="CLI">
+
+<Steps>
+
+1. Create a draft. It prints the draft's [selector](/reference/selectors/):
+
+   ```sh
+   mp new meeting-followup
+   # mp://work/drafts/9f2c1ab30d5e4471
+   ```
+
+2. Fill in the recipients, the subject and the body:
+
+   ```sh
+   mp edit 9f2c1ab30d5e4471
+   ```
+
+3. Preview it without sending:
+
+   ```sh
+   mp 9f2c1ab30d5e4471
+   ```
+
+4. Approve and send:
+
+   ```sh
+   mp mark-approved 9f2c1ab30d5e4471
+   mp send 9f2c1ab30d5e4471
+   ```
+
+</Steps>
+
+The short id is enough; mp fills in the account and the mailbox.
+
+</TabItem>
+</Tabs>
+
+A draft is a Markdown file with YAML frontmatter:
+
+```markdown title="meeting-followup.md"
+---
+to: colleague@example.com
+cc: team@example.com
+subject: "Meeting follow-up"
+status: draft
+---
+
+Hi,
+
+Here are the action items from today's meeting:
+
+- Item one
+- Item two
+```
+
+On send, the Markdown becomes HTML with a plain-text part beside it.
+Every field is in the [draft format](/reference/draft-format/) reference.
+
+<Aside type="tip" title="Reply and forward">
+<kbd>r</kbd> replies, <kbd>c</kbd><kbd>a</kbd> replies to all and <kbd>c</kbd><kbd>f</kbd> forwards.
+From the CLI, `mp reply <selector>` and `mp forward <selector>` print the new draft's selector.
+</Aside>
+
+## Next
+
+- [Drafts and sending](/guides/drafts-and-sending/) covers the undo window, the outbox and attachments.
+- [The desktop app](/guides/desktop-app/) runs the same workflow in a window.
+- [Commands](/reference/commands/) lists every command and flag.

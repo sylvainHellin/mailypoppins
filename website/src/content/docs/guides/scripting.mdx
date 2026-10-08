@@ -1,0 +1,124 @@
+---
+title: Scripting and agents
+description: Drive mailypoppins from scripts and AI agents with selectors, JSON output, offline reads, draft files and mail hooks.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+mailypoppins is built to be driven by other programs.
+Drafts are files an agent can write, every message has a stable name, and the commands that list things can print JSON.
+The approval step keeps a human between an agent's draft and the send.
+
+## Name things with selectors
+
+Every message and draft has a selector such as `mp://work/inbox/CAF8x2@mail.example.com`.
+Every command that creates or lists something prints the full form, which pastes straight into the next command.
+
+```sh
+mp list-messages --mailbox inbox -n 5   # one line per message, with its selector
+mp show mp://work/inbox/CAF8x2@mail.example.com
+mp reply mp://work/inbox/CAF8x2@mail.example.com
+```
+
+The grammar is in [Selectors](/reference/selectors/).
+<kbd>y</kbd> in the terminal UI copies the selector of the message under the cursor.
+
+## Read without the network
+
+These answer from the local store and never open a connection:
+
+```sh
+mp list-messages                      # every mailbox, grouped, 20 per mailbox
+mp show <selector> --json             # headers, attachments and body as one object
+mp search --local 'from:ada invoice'  # ranked full-text search
+mp dump-mailbox --json                # every envelope as NDJSON
+```
+
+`mp dump-mailbox` sorts its records, so two runs over an unchanged store are byte-identical and diff cleanly.
+
+## JSON output
+
+| Command | Prints |
+| --- | --- |
+| `mp show <selector> --json` | One message: envelope, attachments, body |
+| `mp list --json` | The account's drafts |
+| `mp list-mailboxes --json` | The server's mailboxes |
+| `mp outbox list --json` | Queued, failed and partly delivered sends |
+| `mp dump-mailbox --json` | Every envelope, one object per line |
+| `mp daemon status --json` | Whether a daemon runs, and its accounts |
+| `mp daemon health --json` | Every check and its verdict |
+| `mp hooks list --json` | Each mail hook with its cursor and last run |
+
+Warnings go to stderr, so stdout stays parseable.
+
+## Let an agent write drafts
+
+An agent can create a draft and leave the send to you:
+
+```sh
+mp new quarterly-update          # prints mp://work/drafts/<id>
+path=$(mp path mp://work/drafts/<id>)
+# the agent writes the frontmatter and body into "$path"
+mp validate mp://work/drafts/<id>
+```
+
+The daemon notices the write at once, and the draft appears in the Drafts list of every open window.
+It stays at `status: draft` until someone approves it with <kbd>c</kbd><kbd>A</kbd> or `mp mark-approved`.
+The [draft format](/reference/draft-format/) lists every field.
+
+A reply works the same way: `mp reply <selector>` prints the new draft's selector, with the quote and the signature already in place.
+
+## Run a command when mail arrives
+
+A mail hook runs a command for every new message in a mailbox that passes a match table.
+Hooks are set per account in `config.toml`:
+
+```toml
+[[accounts.hooks]]
+name = "receipts"
+mailbox = "INBOX"
+exec = ["/Users/me/bin/file-receipt"]
+timeout_secs = 60
+
+[accounts.hooks.match]
+authenticated_from = ["billing@shop.example"]
+authserv_id = "mx.google.com"
+subject = "^Your receipt"
+```
+
+The command gets the message as JSON on stdin and in `$MP_HOOK_DIR/message.json`.
+The same directory holds the raw `message.eml`, the Markdown rendition `message.md` and the attachments.
+It is deleted when the command exits, so copy what you want to keep.
+
+A hook fires once per message, never for mail that was already there when you added it.
+After editing hooks by hand, run `mp daemon restart`.
+
+```sh
+mp hooks list                      # each hook, its cursor and last run
+mp hooks test receipts <selector>  # every criterion's verdict, runs nothing
+mp hooks replay receipts <selector> # run it now for a stored message
+```
+
+<Aside type="caution" title="Trust the sender, not the From header">
+A hook can run anything with your rights, and `From:` alone proves nothing.
+`authenticated_from` passes only when the receiving server's own `Authentication-Results` header records a DKIM pass for exactly the `From:` domain.
+`authserv_id` names that server, `mx.google.com` for Gmail.
+Check a new hook with `mp hooks test` before you trust it.
+</Aside>
+
+| Match key | Passes when |
+| --- | --- |
+| `authenticated_from` | The sender is on the list and DKIM-verified, as above |
+| `accept_spf` | `true` also accepts an SPF pass (off by default) |
+| `to` | A `To`, `Cc` or `Delivered-To` address matches exactly, `+tag` included |
+| `subject` | The decoded subject matches a regular expression |
+| `headers` | Each named header matches its regular expression |
+
+The command also gets `MP_HOOK_NAME`, `MP_HOOK_ACCOUNT`, `MP_HOOK_MAILBOX`, `MP_HOOK_MESSAGE_ID`, `MP_HOOK_SELECTOR`, `MP_HOOK_DIR` and `MP_HOOK_REPLAY` in its environment.
+Set your own `PATH` in the script: a daemon started on demand inherits whatever environment started it.
+
+## Exit codes
+
+A routed command exits `1` when it fails and `4` when no daemon could be reached or started.
+`mp daemon health` exits `1` when a check fails.
+See [The daemon](/guides/daemon/#exit-codes).

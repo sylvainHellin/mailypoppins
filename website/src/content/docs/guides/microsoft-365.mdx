@@ -1,0 +1,142 @@
+---
+title: Microsoft 365 and Exchange
+description: Connect a Microsoft 365 or Exchange Online account with OAuth2 over IMAP and SMTP, or with the Graph API.
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Microsoft 365 accounts sign in with OAuth2 instead of a password.
+Pick the method your organisation allows.
+
+| Method | `auth_method` | When |
+| --- | --- | --- |
+| OAuth2 over IMAP and SMTP | `oauth2` | Your tenant allows IMAP and SMTP |
+| Microsoft Graph API | `graph` | Your tenant blocks IMAP and SMTP |
+
+One configuration can mix password, OAuth2 and Graph accounts.
+
+## Register an app in Azure
+
+Both methods need an app registration in Microsoft Entra ID.
+If you cannot create one, ask your IT department.
+
+<Steps>
+
+1. In [portal.azure.com](https://portal.azure.com), open Microsoft Entra ID, App registrations, New registration.
+
+2. Name it, for example "mailypoppins". Choose "Accounts in this organizational directory only" and leave the redirect URI empty.
+
+3. Under Authentication, Advanced settings, set "Allow public client flows" to Yes. This enables the device code sign-in.
+
+4. Under API permissions, add the delegated permissions for your method:
+
+   - OAuth2: `IMAP.AccessAsUser.All` and `SMTP.Send` from Office 365 Exchange Online, and `offline_access` from Microsoft Graph.
+   - Graph: `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` and `offline_access` from Microsoft Graph.
+
+5. If a permission says "Needs admin consent", ask an administrator to grant it.
+
+6. Copy the Application (client) ID and the Directory (tenant) ID from the Overview page.
+
+</Steps>
+
+## Connect the account
+
+Run the wizard and pick one of the two Microsoft 365 options.
+It asks for the two IDs, shows a URL and a code, and waits while you sign in from your browser.
+Then it tests the account and lets you assign the mailboxes.
+
+```sh
+mp config init          # first account
+mp config add-account   # any later one
+```
+
+Or write the account by hand:
+
+<Tabs>
+<TabItem label="OAuth2">
+
+```toml
+[[accounts]]
+name = "work"
+default_from = "name@company.com"
+auth_method = "oauth2"
+
+[accounts.oauth2]
+client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+tenant_id = "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
+
+[accounts.smtp]
+host = "smtp.office365.com"
+port = 587
+username = "name@company.com"
+
+[accounts.imap]
+host = "outlook.office365.com"
+port = 993
+username = "name@company.com"
+
+[accounts.mailboxes.inbox]
+server = "INBOX"
+
+[accounts.mailboxes.archive]
+server = "Archive"
+
+[accounts.mailboxes.sent]
+server = "Sent Items"
+```
+
+</TabItem>
+<TabItem label="Graph">
+
+```toml
+[[accounts]]
+name = "exchange"
+default_from = "name@company.com"
+auth_method = "graph"
+
+[accounts.oauth2]
+client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+tenant_id = "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
+
+[accounts.mailboxes.inbox]
+server = "inbox"        # Graph's well-known folder names
+
+[accounts.mailboxes.archive]
+server = "archive"
+
+[accounts.mailboxes.sent]
+server = "sentitems"    # not "Sent Items"
+```
+
+A Graph account needs no `smtp` or `imap` section.
+
+</TabItem>
+</Tabs>
+
+Then sign in:
+
+```sh
+mp config oauth2-login -A work
+```
+
+## Tokens
+
+The token is cached encrypted under the data directory, in `tokens/<account>.enc`, and refreshed on its own.
+An access token lasts about an hour.
+The refresh token expires after about 90 days without use; sign in again with `mp config oauth2-login -A <account>`.
+
+## Differences on Graph
+
+<Aside type="note">
+A Graph account has no IMAP IDLE: the daemon polls the inbox every 60 seconds.
+It is not synced on the fifteen-minute schedule yet.
+Calendar invitations and answers are not supported on Graph yet.
+</Aside>
+
+## Troubleshooting
+
+"IMAP is disabled for your organization" means the tenant switched IMAP off.
+Ask IT to enable it, or use `auth_method = "graph"`.
+
+"AUTHENTICATE failed" can mean IMAP is disabled, the token has the wrong permissions, or admin consent is missing.
+Check the app's permissions in Azure.

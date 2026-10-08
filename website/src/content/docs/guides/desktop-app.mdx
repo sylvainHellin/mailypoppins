@@ -1,0 +1,114 @@
+---
+title: The desktop app
+description: The mailypoppins Mac app, its embedded editor, its views and its in-app updates.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+The desktop app is a third client of the same daemon as the CLI and the terminal UI.
+It runs on Apple silicon Macs.
+Its keys are the terminal UI's, the macOS menus run the same actions, and <kbd>:</kbd> opens a command palette with every action by name.
+
+<figure class="mp-frame">
+  <div class="mp-frame__bar" aria-hidden="true"><span></span><span></span><span></span><em>mailypoppins</em></div>
+  <div class="mp-placeholder">
+    <strong>Screenshot of the desktop app</strong>
+    <span>Coming soon</span>
+  </div>
+</figure>
+
+Install it from the DMG on the [Install](/start/install/) page.
+
+## What it does
+
+- Mail: accounts, mailboxes with counts, the message list, the reader, and local and server search.
+- Archive, delete, move, flag and mark read, on one message or on every marked row (<kbd>v</kbd>, <kbd>Ctrl+a</kbd>, Shift-click or Cmd-click).
+- New drafts, replies and forwards, approve, send, and the outbox.
+- Contacts (<kbd>Space</kbd> <kbd>c</kbd>), Calendar (<kbd>Space</kbd> <kbd>a</kbd>) and Settings beside Mail (<kbd>Space</kbd> <kbd>m</kbd>).
+- Signatures (<kbd>c</kbd><kbd>s</kbd>), the activity log (<kbd>s</kbd><kbd>l</kbd>), and `config.toml` and the daemon log in your editor (<kbd>s</kbd><kbd>c</kbd>, <kbd>s</kbd><kbd>f</kbd>).
+- A dark theme, a light theme on cream, or the system's, from Settings or the palette.
+
+Changes show at once and reach the server 1.5 seconds after your last one.
+A change the server refuses comes back, with a notice that says how many.
+There is no undo for an archive, a delete or a move.
+
+## Reading mail
+
+A message renders as its own document in a sandboxed frame.
+It runs no scripts and loads nothing remote.
+Links inside it are not followed: the reader lists a blocked link below the message, and "Open in browser" is the way out.
+
+<kbd>t</kbd><kbd>t</kbd> switches the reader between the HTML and the stored plain text, and the choice is remembered.
+
+## Your editor, inside the window
+
+A draft you create, reply to, forward or edit opens in Neovim, Vim or Helix right in the reader pane, with your own configuration and plugins.
+The message list stays usable beside it, and every save updates the Drafts list at once.
+
+- `:wq` closes the editor and shows the draft's preview.
+- `:q!` drops only the unsaved changes, never the file.
+- An editor that crashes leaves the draft as last saved, with a Reopen button.
+
+The app picks the editor from `MP_DESKTOP_EDITOR`, its editor setting, `$VISUAL` or `$EDITOR`.
+Otherwise it looks for `nvim`, `vim` and `hx`, also in the Homebrew directories, so a launch from the Finder finds them.
+A GUI editor such as VS Code or Zed opens the draft in its own window instead.
+
+Neovim and Vim take the app's colours in both themes.
+The Editor colours setting keeps your own colorscheme instead.
+
+## Updates
+
+The app updates itself from GitHub Releases.
+
+<Steps>
+
+1. At launch, at most once a day, it checks for a newer version.
+
+2. When one is out, "Update to X.Y.Z" appears at the foot of the sidebar and in the palette.
+
+3. Choosing it downloads the update, checks its signature, and replaces the app in place while you keep working. A card in the activity area shows the progress.
+
+4. "Restart now" switches to the new version, daemon included. "Later" waits.
+
+</Steps>
+
+"Check for updates" in the palette, the App menu and Settings checks at once.
+If a draft is still open in the embedded editor, the app asks before it restarts.
+
+<Aside type="note">
+You install the DMG once, with the Gatekeeper step.
+Every later version arrives through the app.
+</Aside>
+
+## The `mp` inside the app
+
+The app carries a complete `mp` and starts its daemon with it.
+To use it from a terminal, link it onto your `PATH`:
+
+```sh
+ln -s /Applications/mailypoppins.app/Contents/MacOS/mp /usr/local/bin/mp
+```
+
+The link follows the app's updates.
+Do not combine it with the Homebrew formula or a build from source: two `mp` of two versions is the mismatch the app refuses.
+
+The app checks that the daemon it reaches runs its own version.
+If another `mp` left a daemon of another version running, the app names both versions and offers to restart the daemon with its own.
+
+## Uninstall
+
+```sh
+mp daemon stop
+```
+
+Then quit the app, and delete it and the `mp` link.
+Your mail and `config.toml` stay where `mp config path` and `mp config show` say.
+
+## Environment
+
+| Variable | Effect |
+| --- | --- |
+| `MP_DESKTOP_EDITOR` | The editor command for drafts and other files; `{path}` stands for the file |
+| `MP_DESKTOP_MP_BIN` | The `mp` that starts the daemon, instead of the one inside the app |
+| `MP_DESKTOP_LOG` | Log level, `error` to `trace` (default `info`) |
+| `MP_DESKTOP_FIXTURE=1` | Run on bundled sample mail, with no daemon |

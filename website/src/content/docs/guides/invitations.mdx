@@ -1,0 +1,101 @@
+---
+title: Invitations
+description: Send calendar invitations with mp send --invite, answer them, and track who accepted.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+mailypoppins sends and answers calendar invitations by email (iMIP).
+They show up as an event with Accept, Tentative and Decline in Outlook, Gmail and Apple Mail.
+
+## Send an invitation
+
+```sh
+mp send --invite \
+  --to ada@example.com,grace@example.com \
+  --subject "Design review" \
+  --start "2026-07-20 14:00" --duration 1h \
+  --location "Room 2.14"
+```
+
+The subject becomes the event's title.
+Everyone in `--to` and `--cc` is an attendee.
+mp shows a preview and asks before it sends; `-y` skips the question.
+
+| Flag | Meaning |
+| --- | --- |
+| `--start` | Local time (`2026-07-20T14:00`, `"2026-07-20 14:00"`) or RFC 3339 with an offset (`2026-07-20T14:00:00+02:00`) |
+| `--end` | The end, the same kind of value as `--start` |
+| `--duration` | Instead of `--end`: `1h30m` or `PT1H30M`, whole days (`3d`, `P3D`) for an all-day event |
+| `--location` | Optional |
+| `--description` | Optional event text |
+
+A timed event needs `--end` or `--duration`.
+The organiser is the sending account's address.
+
+## All-day events
+
+A bare date as `--start` makes an all-day event:
+
+```sh
+mp send --invite --to me@example.com --subject "Office closed" --start 2026-12-24
+```
+
+Without `--end` it covers that one day.
+`--end` names the last day, inclusive:
+
+```sh
+mp send --invite --to me@example.com --subject "Holidays" \
+  --start 2026-12-24 --end 2027-01-08
+```
+
+## Update an invitation
+
+Send it again with the same `UID` and a higher sequence number.
+The `UID` is in the preview of the first send.
+The first send is sequence 0, so the first update is 1.
+
+```sh
+mp send --invite --to me@example.com --subject "Office closed" --start 2026-12-24 \
+  --uid 3f2a...@example.com --sequence 1
+```
+
+Calendars replace the event only when the UID matches and the sequence is higher.
+Without `--uid`, the invitation is a new event.
+
+## Answer an invitation
+
+```sh
+mp invite accept <selector>
+mp invite tentative <selector>
+mp invite decline <selector>
+```
+
+In the terminal UI an invitation has a calendar badge in the list and an event card above the message.
+<kbd>t</kbd><kbd>v</kbd> opens Accept, Tentative and Decline.
+The app shows the same buttons on the card.
+
+The reply is an email to the organiser, with a subject such as `Accepted: Design review`.
+It answers the whole series; there are no per-occurrence answers yet.
+
+<Aside type="caution">
+The answer is emailed to the organiser only.
+It is not written to your calendar on the server.
+</Aside>
+
+## See who accepted
+
+When attendees answer an invitation you sent, their replies arrive with normal sync.
+mailypoppins matches each one to your invitation and shows every attendee's status on it.
+The latest reply per attendee wins, and replies to an older sequence are ignored.
+
+```sh
+mp calendar rebuild
+```
+
+This prints what the replies resolve to, for every account unless `-A` names one.
+It writes nothing, and nothing goes back to the server.
+
+<Aside type="note">
+Invitations and answers are not supported on Microsoft Graph accounts yet.
+</Aside>

@@ -7,13 +7,14 @@
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
-    "preview": "astro preview"
+    "preview": "astro preview",
+    "gen:commands": "node scripts/gen-commands.ts",
+    "gen:keys": "node scripts/gen-keys.ts",
+    "gen": "node scripts/gen-commands.ts && node scripts/gen-keys.ts"
   },
   "dependencies": {
     "@astrojs/sitemap": "^3.7.2",
     "@astrojs/starlight": "^0.42.5",
-    "@astrojs/svelte": "^8.0.5",
-    "astro": "^7.3.7",
-    "svelte": "^5.55.4"
+    "astro": "^7.3.7"
   }
 }

@@ -1,0 +1,47 @@
+---
+title: Documentation
+description: Where to start, the guides and the reference for mailypoppins.
+tableOfContents: false
+pagefind: false
+---
+
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+mailypoppins has three faces over one engine.
+The `mp` command line, the terminal UI you get by running `mp` alone, and the desktop app for the Mac all talk to the same local daemon.
+Everything you do in one shows up in the others.
+
+## Get started
+
+Four short steps, from install to your first sent message.
+
+<CardGrid>
+  <LinkCard title="Install" href="/start/install/" description="The Mac app, Homebrew, or a build from source." />
+  <LinkCard title="Connect an account" href="/start/connect/" description="IMAP, Proton Bridge or Microsoft 365, set up by a wizard." />
+  <LinkCard title="First sync" href="/start/first-sync/" description="Pull your mail into the local store." />
+  <LinkCard title="Read, write and send" href="/start/read-write-send/" description="The terminal UI and the draft workflow." />
+</CardGrid>
+
+## Guides
+
+<CardGrid>
+  <LinkCard title="Drafts and sending" href="/guides/drafts-and-sending/" description="Approve, send, undo, replies, forwards and the outbox." />
+  <LinkCard title="Searching mail" href="/guides/search/" description="One query grammar for the server and the local store." />
+  <LinkCard title="Invitations" href="/guides/invitations/" description="Send calendar invitations and answer them." />
+  <LinkCard title="Contacts and calendar" href="/guides/contacts-and-calendar/" description="The contact index, completion and the agenda." />
+  <LinkCard title="The desktop app" href="/guides/desktop-app/" description="The Mac app, its embedded editor and its updates." />
+  <LinkCard title="Microsoft 365 and Exchange" href="/guides/microsoft-365/" description="OAuth2 or the Graph API, and the Azure app registration." />
+  <LinkCard title="The daemon" href="/guides/daemon/" description="Start at login, health, logs and upgrades." />
+  <LinkCard title="Scripting and agents" href="/guides/scripting/" description="Selectors, JSON output, offline reads and mail hooks." />
+</CardGrid>
+
+## Reference
+
+<CardGrid>
+  <LinkCard title="Commands" href="/reference/commands/" description="Every command and flag, generated from mp help." />
+  <LinkCard title="Key bindings" href="/reference/keys/" description="The terminal UI and the desktop app." />
+  <LinkCard title="Configuration" href="/reference/configuration/" description="Every section of config.toml." />
+  <LinkCard title="Draft format" href="/reference/draft-format/" description="Frontmatter fields, status and attachments." />
+  <LinkCard title="Selectors" href="/reference/selectors/" description="How mp:// names a message or a draft." />
+  <LinkCard title="FAQ" href="/reference/faq/" description="Troubleshooting and common questions." />
+</CardGrid>

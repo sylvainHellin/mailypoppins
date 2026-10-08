@@ -1,0 +1,53 @@
+---
+title: Contacts and calendar
+description: The contact index, address completion in other mail tools, and the agenda view.
+---
+
+## Contacts
+
+mailypoppins builds a contact index from the mail in your local store.
+It keeps a ranked list of the people in your mail, and completes their addresses as you type recipients in the terminal UI and the app.
+
+```sh
+mp contacts search ada       # fuzzy search by name and address
+mp contacts stats            # how big the index is
+mp contacts rebuild          # rebuild it from the local store
+```
+
+`mp contacts rebuild` covers every account unless `-A` names one.
+
+### Completion in other tools
+
+`--parsable` prints one `address<TAB>name` line per contact, which mutt, aerc and Vim completion scripts can read:
+
+```sh
+mp contacts search --parsable ada
+```
+
+### The contacts view
+
+<kbd>Space</kbd> <kbd>c</kbd> switches to the contacts view, in the terminal UI and in the app.
+
+| Key | Action |
+| --- | --- |
+| <kbd>/</kbd> | Fuzzy search |
+| <kbd>Enter</kbd> <span class="kbd-sep">/</span> <kbd>n</kbd> | Write to the contact |
+| <kbd>v</kbd> | Send the contact as a vCard |
+| <kbd>c</kbd> | Copy the address |
+| <kbd>r</kbd> | Rebuild the index |
+
+## Calendar
+
+The calendar view lists the events of the invitations in your mail, upcoming first.
+<kbd>Space</kbd> <kbd>a</kbd> opens it, and <kbd>Space</kbd> <kbd>m</kbd> goes back to mail.
+
+| Key | Action |
+| --- | --- |
+| <kbd>t</kbd> | Show past events too |
+| <kbd>Enter</kbd> <span class="kbd-sep">/</span> <kbd>e</kbd> | Open the invitation in your editor |
+| <kbd>V</kbd> | Answer the invitation |
+| <kbd>r</kbd> | Read the events again |
+
+An updated or cancelled invitation shows up without a refresh.
+Sending and answering invitations is covered in [Invitations](/guides/invitations/).
+The agenda is built from your mail only; mailypoppins does not sync a server calendar.

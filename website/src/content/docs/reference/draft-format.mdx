@@ -1,0 +1,155 @@
+---
+title: Draft format
+description: Markdown email drafts with YAML frontmatter, their fields, their status and their attachments.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A draft is a Markdown file with YAML frontmatter, one file per draft, in the account's `drafts/` directory.
+The frontmatter holds the envelope.
+The body below the second `---` is the message, written in Markdown and sent as HTML with a plain-text part.
+
+```markdown title="drafts/project-update.md"
+---
+id: 9f2c1ab30d5e4471
+to: recipient@example.com
+cc: optional@example.com
+bcc: hidden@example.com
+subject: "Your subject line"
+status: draft
+from: alternate@example.com
+reply_to: reply@example.com
+attachments:
+  - ~/Documents/report.pdf
+---
+
+Email body in **Markdown**.
+```
+
+`mp new <name>` writes a skeleton for you and prints its selector.
+`mp path <selector>` prints the file's path.
+
+## Fields
+
+| Field | Meaning |
+| --- | --- |
+| `id` | The draft's stable identity, the key of its `mp://<account>/drafts/<id>` selector. `mp new` writes it; a file written without one gets one. It survives a rename. |
+| `to` | Recipients, comma-separated. Required to send. |
+| `cc` | Carbon copy recipients. |
+| `bcc` | Blind carbon copy recipients. |
+| `subject` | The subject line. Required to send. |
+| `status` | `draft`, `approved` or `sent`. |
+| `from` | The sender, instead of the account's `default_from`. |
+| `reply_to` | A `Reply-To:` address. |
+| `attachments` | A list of file paths. A folder attaches every file directly inside it. |
+| `signature` | The signature spliced into the body, when one other than the default was picked. |
+| `in_reply_to` | The Message-ID this draft answers. Written by `mp reply`; sending marks the original as answered. |
+| `forwarded_from` | The Message-ID this draft forwards. Written by `mp forward`; sending marks the original as forwarded. |
+| `sent_at`, `sent_via`, `message_id` | Written on send. |
+
+`mp validate <selector>` checks a draft and says what is missing.
+A draft whose YAML does not parse still shows in the Drafts list, with the line that broke it, and cannot be approved.
+
+## Status
+
+`status:` has three values, and only an approved draft can be sent.
+
+```text
+draft  --mark-approved-->  approved  --send-->  sent
+       <--mark-draft------
+```
+
+Where a message sits (inbox, archive, sent) is a mailbox, not a status.
+
+## After sending
+
+A send that reached every recipient deletes the draft file.
+The sent message is on the server, and the next sync reads it into the local store.
+
+A partial send keeps the file with `status: sent` and three new fields:
+
+```yaml
+status: sent
+sent_at: "2026-04-22T10:30:00Z"
+sent_via: "mailypoppins 0.11.0"
+message_id: "<unique-id@example.com>"
+```
+
+<Aside type="caution">
+To send it again, set `status:` back to `approved` by hand, and remove the recipients who already got it.
+`mp mark-approved` refuses a draft that is already sent.
+</Aside>
+
+## Replies
+
+`mp reply` (or <kbd>r</kbd>, <kbd>c</kbd><kbd>a</kbd>) writes a draft like this:
+
+```markdown
+---
+to: original-sender@example.com
+subject: "Re: Original subject"
+status: draft
+in_reply_to: "<message-id@example.com>"
+---
+
+Your reply goes here.
+
+-- 
+Your Name
+
+{{SIGNATURE}}
+
+> On 2026-01-15, sender wrote:
+>
+> Original message text quoted here.
+```
+
+The signature sits in your part of the reply.
+The `{{SIGNATURE}}` line marks where your text ends and the quote begins.
+It carries no text of its own; remove it and the quote moves to the end of the body.
+
+## Forwards
+
+`mp forward` (or <kbd>c</kbd><kbd>f</kbd>) leaves `to:` empty, prefixes the subject with `Fwd:`, and lists the original's attachments:
+
+```markdown
+---
+to: ""
+subject: "Fwd: Original subject"
+status: draft
+forwarded_from: "<message-id@example.com>"
+attachments:
+  - /Users/you/Library/Application Support/mailypoppins/accounts/work/attachments/abc@example.com/document.pdf
+---
+
+Your note to the recipient.
+
+---------- Forwarded message ----------
+From: Original Sender <sender@example.com>
+Date: 2026-01-15
+Subject: Original subject
+
+Original message body here.
+```
+
+The attachments are copied once into the account's `attachments/<message-id>/` directory, so the forward still finds them after the original is archived.
+
+## Signatures in drafts
+
+The account's default signature is added to the body when the draft is created.
+`-s <name>` picks another one, and `--no-signature` skips it.
+
+The compose form's Signature field picks one too, and <kbd>c</kbd><kbd>e</kbd> on a draft changes it later: the signature block in the body is replaced.
+The choice is kept in the `signature:` field.
+The block sits between `<!-- mp:sig-start -->` and `<!-- mp:sig-end -->` comments, which never appear in the sent mail or the preview.
+
+## Attachments
+
+Any readable path works in `attachments:`.
+
+- `~/` and absolute paths mean what they say.
+- A relative path means a file next to the draft.
+- A folder attaches every file directly inside it, sorted by name, without subfolders or dotfiles.
+
+Received attachments are stored beside the message, not as files.
+<kbd>t</kbd><kbd>o</kbd> opens one, <kbd>t</kbd><kbd>s</kbd> saves them, and `mp save <selector> --output <dir>` does the same from the CLI.

@@ -1,0 +1,56 @@
+---
+title: First sync
+description: Pull your mail from the server into the local store.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Pull your mail from the server:
+
+```sh
+mp sync
+```
+
+This syncs the inbox, the archive, the sent folder and any extra mailboxes you configured.
+Add `--all-accounts` to sync every account at once.
+
+## Where your mail goes
+
+Each message becomes a row in the account's local store, `store.sqlite3`.
+Its text, its HTML and its attachments sit beside it as blobs.
+Nothing is written as a tree of mail files.
+What you read in the terminal UI is rendered from the store on demand.
+
+`mp config show` prints where the store lives.
+On macOS it is under `~/Library/Application Support/mailypoppins/`, on Linux under `~/.local/share/mailypoppins/`.
+
+## How sync behaves
+
+Sync only downloads what is new, matched by Message-ID.
+It reads the headers first and fetches a full message only when it is not stored yet.
+
+Every sync also enumerates the whole mailbox.
+A message the server no longer lists is removed from the local store, however old it is.
+A mailbox you cleaned up in another client converges on the next sync.
+
+<Aside type="note">
+The very first sync of an account never removes anything.
+A message missing from an empty store proves nothing, so removals wait for the next complete pass.
+</Aside>
+
+## After the first sync
+
+You rarely need `mp sync` again.
+The daemon watches the inbox and fetches new mail as it arrives, through IMAP IDLE, or by polling every 60 seconds on a Graph account.
+On an IMAP account it also runs a quick sync on its own after fifteen minutes without one.
+`sync_interval_secs` in the [configuration](/reference/configuration/#imap) changes that.
+
+Check what arrived without opening anything:
+
+```sh
+mp list-messages -n 5
+```
+
+This reads the local store only, so it works offline.

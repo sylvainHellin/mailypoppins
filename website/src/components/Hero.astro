@@ -1,241 +1,211 @@
 ---
+// Replaces Starlight's Hero on the landing page (the only page with `hero`
+// frontmatter): the pitch, three links and the install box, on one screen.
+import { Code, Icon, TabItem, Tabs } from '@astrojs/starlight/components';
+
+const { data } = Astro.locals.starlightRoute.entry;
+const title = data.hero?.title ?? data.title;
+const tagline = data.hero?.tagline;
+
+const repo = 'https://github.com/sylvainHellin/mailypoppins';
+const dmg = `${repo}/releases/latest/download/mailypoppins-desktop-aarch64-apple-darwin.dmg`;
 ---
 
-<section class="hero">
-  <div class="hero-glow" aria-hidden="true"></div>
-  <div class="hero-inner">
-    <div class="hero-intro">
-      <h1 class="hero-headline">
-        <span class="hero-maily">maily</span><span class="hero-poppins">poppins</span>
-      </h1>
-      <p class="hero-tagline">Your email, as plaintext files.</p>
-      <p class="hero-description">
-        A CLI and TUI for managing email drafts in Markdown.
-        Write, approve, send -- all from your terminal.
-      </p>
-      <div class="hero-cta">
-        <a href="/getting-started/" class="btn btn-primary">Get Started</a>
-        <a
-          href="https://github.com/sylvainhellin/mailypoppins"
-          class="btn btn-secondary"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          View on GitHub
-        </a>
-      </div>
+<section class="mp-hero not-content">
+  <div class="mp-hero__copy">
+    <h1 id="_top" data-page-title set:html={title} />
+    {tagline && <p class="mp-hero__tagline" set:html={tagline} />}
+    <div class="mp-hero__actions">
+      <a class="mp-btn mp-btn--primary" href="/start/install/">
+        Get started <Icon name="right-arrow" size="1.1rem" />
+      </a>
+      <a class="mp-btn" href="/docs/">Docs</a>
+      <a class="mp-btn mp-btn--quiet" href={repo}>
+        <Icon name="github" size="1.1rem" /> GitHub
+      </a>
     </div>
+    <ul class="mp-hero__facts">
+      <li>CLI, TUI and Mac app</li>
+      <li>IMAP, Proton Bridge, Microsoft 365</li>
+    </ul>
+  </div>
 
-    <div class="hero-preview">
-      <div class="terminal-chrome">
-        <span class="terminal-dot" style="background: var(--color-red);" aria-hidden="true"></span>
-        <span class="terminal-dot" style="background: var(--color-yellow);" aria-hidden="true"></span>
-        <span class="terminal-dot" style="background: var(--color-green);" aria-hidden="true"></span>
-        <span class="terminal-title">email</span>
-      </div>
-      <img
-        src="/tui-screenshot.png"
-        alt="mailypoppins TUI showing mailbox sidebar, email list, and preview pane"
-        class="hero-screenshot"
-        width="2496"
-        height="1356"
-        loading="eager"
-      />
-    </div>
+  <div class="mp-install">
+    <Tabs syncKey="install">
+      <TabItem label="Mac app">
+        <p class="mp-install__lead">
+          The desktop app for Apple silicon. It carries its own <code>mp</code> and starts the daemon itself.
+        </p>
+        <a class="mp-btn mp-btn--primary mp-btn--block" href={dmg}>
+          <Icon name="download" size="1.1rem" /> Download the DMG
+        </a>
+        <p class="mp-install__note">
+          Not signed yet. Allow it once under Privacy &amp; Security. <a href="/start/install/">Details</a>
+        </p>
+      </TabItem>
+      <TabItem label="Homebrew">
+        <p class="mp-install__lead">The <code>mp</code> CLI and terminal UI, on Apple silicon and Linux.</p>
+        <Code code={'brew tap sylvainHellin/mailypoppins\nbrew install mailypoppins'} lang="sh" />
+      </TabItem>
+      <TabItem label="Source">
+        <p class="mp-install__lead">Any machine with a Rust toolchain, Intel Macs included.</p>
+        <Code
+          code={`git clone ${repo}\ncd mailypoppins\ncargo install --path .`}
+          lang="sh"
+        />
+      </TabItem>
+    </Tabs>
   </div>
 </section>
 
 <style>
-  .hero {
-    position: relative;
-    padding: var(--space-8) 0 var(--space-12);
-    overflow: hidden;
-  }
-
-  .hero-glow {
-    position: absolute;
-    top: 0;
-    left: 25%;
-    width: 700px;
-    height: 500px;
-    transform: translate(-50%, -20%);
-    background: radial-gradient(
-      ellipse,
-      color-mix(in srgb, var(--color-mauve) 5%, transparent) 0%,
-      transparent 70%
-    );
-    pointer-events: none;
-  }
-
-  .hero-inner {
-    position: relative;
+  .mp-hero {
     display: grid;
-    grid-template-columns: 5fr 7fr;
-    gap: var(--space-10);
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+    gap: 3rem;
     align-items: center;
-    max-width: 72rem;
-    margin-inline: auto;
-    padding-inline: var(--space-6);
+    padding-block: 2.5rem 1rem;
   }
 
-  /* Left: intro */
-  .hero-intro {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
+  .mp-hero__copy h1 {
+    margin: 0;
+    font-size: clamp(2.3rem, 4.2vw, 3.4rem);
+    line-height: 1.05;
+    font-weight: 700;
+    letter-spacing: -0.035em;
+    color: var(--sl-color-white);
   }
 
-  .hero-headline {
-    font-size: 2.75rem;
-    letter-spacing: -0.03em;
-    margin-bottom: 0;
-    line-height: 1;
+  .mp-hero__copy h1 :global(em) {
+    font-style: normal;
+    color: var(--mp-pumpkin-text);
   }
 
-  .hero-maily {
-    color: var(--color-text);
-  }
-
-  .hero-poppins {
-    color: var(--color-mauve);
-  }
-
-  .hero-tagline {
-    font-size: 1.25rem;
-    color: var(--color-subtext0);
-    margin-bottom: 0;
-    font-weight: 500;
-    margin-top: var(--space-2);
-  }
-
-  .hero-description {
-    font-size: 1rem;
-    color: var(--color-overlay1);
+  .mp-hero__tagline {
+    margin-top: 1.1rem;
+    max-width: 34rem;
+    font-size: 1.15rem;
     line-height: 1.6;
-    margin-bottom: 0;
+    color: var(--sl-color-gray-2);
   }
 
-  .hero-cta {
+  .mp-hero__actions {
     display: flex;
-    gap: var(--space-3);
-    margin-top: var(--space-3);
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-top: 1.75rem;
   }
 
-  /* Right: TUI screenshot */
-  .hero-preview {
-    border: 1px solid var(--color-surface0);
-    border-radius: 10px;
-    overflow: hidden;
-    box-shadow:
-      0 8px 32px rgba(0, 0, 0, 0.4),
-      0 0 0 1px rgba(203, 166, 247, 0.04);
+  .mp-hero__facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.25rem;
+    margin: 1.6rem 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
   }
 
-  .terminal-chrome {
+  .mp-hero__facts li {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 12px;
-    background: var(--color-mantle);
-    border-bottom: 1px solid var(--color-surface0);
+    gap: 0.45rem;
   }
 
-  .terminal-dot {
-    width: 9px;
-    height: 9px;
+  .mp-hero__facts li::before {
+    content: '';
+    width: 0.4rem;
+    height: 0.4rem;
     border-radius: 50%;
-    opacity: 0.7;
+    background: var(--mp-pumpkin);
   }
 
-  .terminal-title {
-    font-family: var(--font-mono);
-    font-size: 0.6875rem;
-    color: var(--color-overlay0);
-    margin-left: auto;
-  }
-
-  .hero-screenshot {
-    display: block;
-    width: 100%;
-    height: auto;
-  }
-
-  /* Buttons */
-  .btn {
+  .mp-btn {
     display: inline-flex;
     align-items: center;
-    padding: var(--space-2) var(--space-5);
-    font-size: 0.9375rem;
+    justify-content: center;
+    gap: 0.45rem;
+    padding: 0.6rem 1.1rem;
+    border-radius: 0.55rem;
+    border: 1px solid var(--sl-color-hairline-light);
+    background: var(--mp-surface);
+    color: var(--sl-color-white);
     font-weight: 600;
-    border-radius: 8px;
-    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    font-size: var(--sl-text-sm);
+    line-height: 1.2;
     text-decoration: none;
+    transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
   }
 
-  .btn-primary {
-    background: var(--color-mauve);
-    color: var(--color-crust);
+  .mp-btn:hover {
+    border-color: var(--sl-color-gray-4);
+    background: var(--mp-surface-2);
   }
 
-  .btn-primary:hover {
-    background: color-mix(in srgb, var(--color-mauve) 85%, white);
-    color: var(--color-crust);
+  .mp-btn--primary {
+    background: var(--mp-pumpkin);
+    border-color: var(--mp-pumpkin);
+    color: var(--mp-on-pumpkin);
   }
 
-  .btn-secondary {
+  .mp-btn--primary:hover {
+    background: color-mix(in srgb, var(--mp-pumpkin) 88%, white);
+    border-color: color-mix(in srgb, var(--mp-pumpkin) 88%, white);
+  }
+
+  .mp-btn--quiet {
     background: transparent;
-    color: var(--color-mauve);
-    border: 1.5px solid var(--color-mauve);
   }
 
-  .btn-secondary:hover {
-    background: color-mix(in srgb, var(--color-mauve) 10%, transparent);
-    color: var(--color-mauve);
+  .mp-btn--block {
+    display: flex;
+    width: 100%;
+    padding-block: 0.75rem;
+    font-size: var(--sl-text-base);
   }
 
-  /* Responsive */
-  @media (max-width: 900px) {
-    .hero-inner {
+  .mp-install {
+    padding: 0.4rem 1.25rem 1.25rem;
+    border: 1px solid var(--sl-color-hairline-light);
+    border-radius: 0.9rem;
+    background: var(--mp-surface);
+    box-shadow: 0 30px 60px -30px rgba(4, 10, 22, 0.45);
+  }
+
+  .mp-install :global(starlight-tabs .tablist-wrapper) {
+    margin-bottom: 0.25rem;
+  }
+
+  .mp-install__lead {
+    margin: 1rem 0 0.9rem;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-2);
+  }
+
+  .mp-install__note {
+    margin: 0.8rem 0 0;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+
+  .mp-install__note a {
+    color: var(--sl-color-text-accent);
+  }
+
+  .mp-install :global(starlight-tabs [role='tabpanel']) {
+    min-height: 9.5rem;
+  }
+
+  .mp-install :global(.expressive-code) {
+    margin: 0;
+  }
+
+  @media (max-width: 56rem) {
+    .mp-hero {
       grid-template-columns: 1fr;
-      gap: var(--space-8);
-    }
-
-    .hero-intro {
-      align-items: center;
-      text-align: center;
-    }
-
-    .hero-headline {
-      font-size: 2.25rem;
-    }
-
-    .hero-cta {
-      justify-content: center;
-    }
-
-    .hero-preview {
-      max-width: 540px;
-      margin-inline: auto;
-    }
-  }
-
-  @media (max-width: 480px) {
-    .hero {
-      padding: var(--space-6) 0 var(--space-8);
-    }
-
-    .hero-headline {
-      font-size: 1.875rem;
-    }
-
-    .hero-cta {
-      flex-direction: column;
-      width: 100%;
-      max-width: 260px;
-    }
-
-    .btn {
-      justify-content: center;
+      gap: 2rem;
+      padding-block: 1.25rem 0.5rem;
     }
   }
 </style>

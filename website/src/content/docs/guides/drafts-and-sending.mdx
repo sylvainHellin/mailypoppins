@@ -1,0 +1,154 @@
+---
+title: Drafts and sending
+description: The draft workflow, the undo window, the outbox, replies, forwards and attachments.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Every outgoing message starts as a draft: a Markdown file with YAML frontmatter in the account's `drafts/` directory.
+You write it in your own editor, an agent can write it for you, and mailypoppins sends it once it is approved.
+
+## The three states
+
+The `status:` field of a draft is one of three values.
+
+| Status | Meaning |
+| --- | --- |
+| `draft` | Being written. It cannot be sent. |
+| `approved` | Reviewed and ready. `mp send` accepts it. |
+| `sent` | Delivered. Kept only when something went wrong (see below). |
+
+Move a draft between them:
+
+```sh
+mp mark-approved <selector>   # draft -> approved
+mp mark-draft <selector>      # approved -> draft, editable again
+mp send <selector>            # approved -> sent
+```
+
+In the terminal UI and the app, <kbd>c</kbd><kbd>A</kbd> approves and <kbd>c</kbd><kbd>D</kbd> puts a draft back.
+<kbd>x</kbd> approves and sends the draft under the cursor in one step, after a confirmation.
+
+Check a draft before you approve it:
+
+```sh
+mp validate <selector>   # one draft
+mp validate              # every draft of the account
+mp <selector>            # preview, sends nothing
+```
+
+## Sending everything approved
+
+```sh
+mp send-approved
+mp send-approved --all-accounts
+```
+
+In the Drafts list, <kbd>c</kbd><kbd>X</kbd> does the same after a confirmation.
+
+## Undo send
+
+A send from the terminal UI or the app is held for 20 seconds before it goes out.
+The status line counts down, and <kbd>u</kbd> cancels it.
+Nothing is transmitted and the approved draft stays where it was.
+
+The hold lives in the daemon, so every open window shows the same countdown and any of them can cancel it.
+Quitting the last window during the hold cancels the send and leaves the draft approved.
+
+Change the window with `send_hold_secs` under `[email]`, or set it to `0` to send at once.
+`mp send` and `mp send-approved` are never held.
+
+## After a send
+
+A send that reached every recipient deletes the draft file.
+The copy that matters is in your Sent folder on the server, and the next sync reads it back into the local store.
+Whether mailypoppins puts it there or the server does is `save_to_sent` in the [configuration](/reference/configuration/#accounts).
+
+A send that reached only some recipients keeps the file, now with `status: sent`, because it is the only local copy.
+
+<Aside type="caution" title="Sending a partial send again">
+Edit `status:` back to `approved` by hand, since `mp send` refuses anything else.
+Remove the recipients who already got it first: a re-send goes to everyone the file still lists.
+</Aside>
+
+## The outbox
+
+Every send goes through a durable queue on disk.
+It survives a crash or a restart of the daemon, and it retries on its own.
+
+```sh
+mp outbox list            # queued, retrying, failed and partly delivered sends
+mp outbox retry <id>      # send a failed one again
+mp outbox discard <id>    # drop it
+```
+
+In the app, <kbd>g</kbd><kbd>o</kbd> opens the outbox view, where <kbd>R</kbd> retries and <kbd>d</kbd> discards a row.
+
+## Replies
+
+```sh
+mp reply <selector>          # reply to the sender
+mp reply <selector> --all    # reply to everyone
+```
+
+In the terminal UI: <kbd>r</kbd> replies, <kbd>c</kbd><kbd>a</kbd> replies to all.
+
+A reply goes to every `Reply-To:` address of the original, or to `From:` when there is none.
+Reply-all keeps the original sender in `cc:`.
+The draft records the original in `in_reply_to`, and sending it marks the original as answered, locally and on the server.
+
+Your signature goes above the quoted original.
+A `{{SIGNATURE}}` line marks where your text ends and the quote begins; remove it and the quote moves to the end.
+
+## Forwards
+
+```sh
+mp forward <selector>
+```
+
+In the terminal UI: <kbd>c</kbd><kbd>f</kbd>.
+The `to:` field is left empty for you, the subject gets a `Fwd:` prefix, and the original's attachments are listed in `attachments:`.
+Sending marks the original as forwarded.
+
+## Attachments
+
+List file paths in the `attachments:` field of a draft.
+A path to a folder attaches every file directly inside it, sorted by name, skipping subfolders and dotfiles.
+
+```yaml
+attachments:
+  - ~/Documents/cover-letter.pdf
+  - ~/Documents/application/
+```
+
+A relative path means a file next to the draft.
+In the Drafts list, <kbd>t</kbd><kbd>a</kbd> attaches a file you pick.
+
+Received attachments are not files on disk; they are stored beside the message.
+
+```sh
+mp save <selector> --output ~/Downloads   # save them
+mp open <selector>                        # open one in its default app
+```
+
+In the terminal UI, <kbd>t</kbd><kbd>o</kbd> opens one and <kbd>t</kbd><kbd>s</kbd> saves them.
+A forward copies the original's attachments into the account's `attachments/` directory once, so the draft still finds them after you archive the original.
+
+## Signatures
+
+A signature is a Markdown file in `~/.config/mailypoppins/signatures/`.
+It is added to the draft body when the draft is created, so you see and can edit it before sending.
+
+```sh
+mp new note -s work         # pick a signature
+mp new note --no-signature  # skip it for this draft
+```
+
+<kbd>c</kbd><kbd>s</kbd> manages them.
+Details are in [Configuration](/reference/configuration/#signatures).
+
+## Editing drafts elsewhere
+
+Drafts are plain files, so any tool can write them.
+`mp path <selector>` prints the file path of a draft.
+The daemon watches the drafts directory: a file written by an editor or an agent shows up in the Drafts list right away, and a draft that does not parse shows with the line that broke it.

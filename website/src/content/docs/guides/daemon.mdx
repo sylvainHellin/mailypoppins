@@ -1,0 +1,97 @@
+---
+title: The daemon
+description: Start the mailypoppins daemon at login, check its health, read its logs and restart it after an upgrade.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every `mp` command that touches your mail talks to a local daemon over a Unix socket.
+The daemon owns your accounts: it syncs, watches the inbox, holds sends during the undo window and drains the outbox.
+The CLI, the terminal UI and the desktop app are all clients of it, which is why an action in one shows up in the others at once.
+
+You rarely manage it by hand.
+The first command that needs it starts one in the background, and it keeps running after that command exits.
+
+## Start it at login
+
+To have the daemon up before you open anything:
+
+```sh
+mp daemon install-service           # write the service and enable it
+mp daemon install-service --check   # report what is installed, write nothing
+mp daemon uninstall-service         # disable and remove it
+```
+
+On Linux this writes a systemd user unit, `$XDG_CONFIG_HOME/systemd/user/mailypoppins.service`.
+On macOS it writes a launchd agent, `~/Library/LaunchAgents/dev.mailypoppins.daemon.plist`.
+
+<Aside type="caution">
+The service records the absolute path of the `mp` that installed it.
+If `mp` later moves, run `mp daemon install-service --force` to rewrite it.
+A Homebrew install keeps a stable path, so its upgrades need nothing.
+</Aside>
+
+## Start, stop, restart
+
+```sh
+mp daemon status    # is one running, which version, which accounts
+mp daemon start     # start a detached daemon
+mp daemon stop      # stop it, letting running work settle for up to 10 s
+mp daemon restart   # stop it and start this binary's daemon
+```
+
+`mp daemon stop` cancels any held send, tells every open window that the daemon is leaving, and names anything it had to cut short.
+An open terminal UI says so and reconnects to the next daemon.
+
+## After an upgrade
+
+A running daemon keeps the code it started with.
+After `brew upgrade` or a new build from source, restart it:
+
+```sh
+mp daemon restart
+```
+
+`mp daemon status` shows the new instance.
+The desktop app restarts its own daemon when it updates, and refuses a daemon of another version.
+
+## Health and logs
+
+```sh
+mp daemon health                 # one line per account and per check
+mp daemon logs --lines 100       # the tail of the daemon's log
+mp daemon logs --level warn
+```
+
+`mp daemon health` exits 0 when every check passes or only warns, and 1 when one fails, so a script can use it as a probe.
+None of these commands starts a daemon.
+
+The log lives in the data directory, under `logs/`.
+The directory stays under 200 MB: files roll over daily and at 20 MB, and the oldest are deleted.
+
+## Support bundle
+
+```sh
+mp daemon support-bundle
+```
+
+This writes a directory with the configuration, the health report, the status, the version and the log.
+Passwords, client secrets and tokens are struck out of all of them, and the encrypted secrets are never copied.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success; for `mp daemon status`, a daemon answered |
+| `1` | A command failed; for `mp daemon status`, no daemon is running |
+| `4` | No daemon could be reached or started; the message names the log and the command to try by hand |
+
+## The data directory
+
+Mail, drafts, tokens and logs all live under one directory:
+
+- macOS: `~/Library/Application Support/mailypoppins/`
+- Linux: `$XDG_DATA_HOME/mailypoppins/`, by default `~/.local/share/mailypoppins/`
+
+`MAILYPOPPINS_DATA_DIR` moves the whole tree, for tests or a portable install.
+`MAILYPOPPINS_CONFIG_DIR` does the same for the configuration directory.

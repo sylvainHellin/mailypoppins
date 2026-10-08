@@ -1,0 +1,472 @@
+/*
+ * mailypoppins theme for Starlight.
+ *
+ * The palette is the desktop app's (clients/desktop/docs/design-tokens.md),
+ * Basenord Palette D: Prussian blue #0C1B33, cream #F4F1E8, ocean blue
+ * #2E86AB for links and focus, pumpkin #FF6700 for primary actions only.
+ * Dark mode is Prussian with cream text; light mode is cream with Prussian.
+ */
+
+:root {
+  --sl-font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --sl-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --mp-prussian: #0c1b33;
+  --mp-cream: #f4f1e8;
+  --mp-ocean: #2e86ab;
+  --mp-pumpkin: #ff6700;
+  --mp-pumpkin-text: #ff8a3d;
+  --mp-on-pumpkin: #0c1b33;
+
+  --sl-hue-orange: 24;
+  --sl-hue-blue: 199;
+
+  /* Dark (default) */
+  --sl-color-white: #fbfaf6;
+  --sl-color-gray-1: #eceae2;
+  --sl-color-gray-2: #c9d0dc;
+  --sl-color-gray-3: #98a4b8;
+  --sl-color-gray-4: #66758e;
+  --sl-color-gray-5: #243a5c;
+  --sl-color-gray-6: #112440;
+  --sl-color-black: #0c1b33;
+
+  --sl-color-accent-low: #12324c;
+  --sl-color-accent: #2e86ab;
+  --sl-color-accent-high: #86c5e4;
+
+  --sl-color-bg-nav: rgba(12, 27, 51, 0.86);
+  --sl-color-bg-sidebar: #0a172c;
+  --sl-color-hairline: #1b3050;
+  --sl-color-hairline-light: #243a5c;
+  --sl-color-hairline-shade: #08132a;
+  --sl-color-bg-inline-code: #16294a;
+  --sl-color-backdrop-overlay: rgba(6, 13, 26, 0.72);
+
+  --sl-text-h1: var(--sl-text-4xl);
+  --sl-line-height: 1.7;
+  --sl-content-width: 46rem;
+  --sl-sidebar-width: 17.5rem;
+
+  --mp-surface: #10223f;
+  --mp-surface-2: #142a4c;
+  --mp-kbd-bg: #16294a;
+  --mp-kbd-border: #2b4470;
+  --mp-table-head: #10223f;
+}
+
+:root[data-theme='light'] {
+  --mp-pumpkin-text: #b34700;
+  --mp-on-pumpkin: #0c1b33;
+
+  --sl-color-white: #0c1b33;
+  --sl-color-gray-1: #16263f;
+  --sl-color-gray-2: #2e3c53;
+  --sl-color-gray-3: #46546c;
+  --sl-color-gray-4: #77839a;
+  --sl-color-gray-5: #d3d6dc;
+  --sl-color-gray-6: #ece8dd;
+  --sl-color-gray-7: #f4f1e8;
+  --sl-color-black: #fbfaf6;
+
+  --sl-color-accent-low: #d5e8f2;
+  --sl-color-accent: #2e86ab;
+  --sl-color-accent-high: #1a6385;
+
+  --sl-color-text-accent: #1a6385;
+  --sl-color-bg-nav: rgba(251, 250, 246, 0.88);
+  --sl-color-bg-sidebar: #f4f1e8;
+  --sl-color-hairline: #e3dfd2;
+  --sl-color-hairline-light: #ece8dd;
+  --sl-color-hairline-shade: #d3d6dc;
+  --sl-color-bg-inline-code: #ece8dd;
+  --sl-color-backdrop-overlay: rgba(12, 27, 51, 0.4);
+
+  --mp-surface: #ffffff;
+  --mp-surface-2: #f4f1e8;
+  --mp-kbd-bg: #ffffff;
+  --mp-kbd-border: #cfcabb;
+  --mp-table-head: #f4f1e8;
+}
+
+/* ---------- Header ---------- */
+
+header.header {
+  backdrop-filter: saturate(140%) blur(10px);
+  -webkit-backdrop-filter: saturate(140%) blur(10px);
+  border-bottom-color: var(--sl-color-hairline);
+}
+
+.site-title {
+  gap: 0.6rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--sl-color-white);
+}
+
+.site-title img {
+  height: 1.9rem;
+  width: auto;
+}
+
+/* ---------- Sidebar ---------- */
+
+.sidebar-pane {
+  border-inline-end-color: var(--sl-color-hairline);
+}
+
+.sidebar-content .top-level > li > details > summary .group-label > span,
+.sidebar-content .top-level > li > details > summary {
+  font-size: var(--sl-text-xs);
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-3);
+}
+
+.sidebar-content a {
+  border-radius: 0.4rem;
+  font-size: var(--sl-text-sm);
+  color: var(--sl-color-gray-2);
+}
+
+.sidebar-content a:hover {
+  color: var(--sl-color-white);
+}
+
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover,
+.sidebar-content a[aria-current='page']:focus {
+  font-weight: 600;
+  color: var(--sl-color-white);
+  background-color: color-mix(in srgb, var(--sl-color-accent) 18%, transparent);
+  box-shadow: inset 2px 0 0 var(--mp-pumpkin);
+}
+
+/* ---------- Content ---------- */
+
+.sl-markdown-content {
+  font-size: 1rem;
+}
+
+h1,
+.sl-markdown-content :is(h2, h3, h4) {
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.sl-markdown-content h2 {
+  font-size: var(--sl-text-2xl);
+  margin-top: 2.5rem;
+  padding-top: 0.25rem;
+}
+
+.sl-markdown-content h3 {
+  font-size: var(--sl-text-xl);
+  margin-top: 2rem;
+}
+
+.sl-markdown-content h4 {
+  font-size: var(--sl-text-lg);
+}
+
+.sl-markdown-content a {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+}
+
+.sl-markdown-content a:hover {
+  text-decoration-color: currentColor;
+}
+
+.sl-markdown-content :not(pre) > code {
+  border-radius: 0.3rem;
+  padding: 0.1em 0.35em;
+  font-size: 0.875em;
+  border: 1px solid var(--sl-color-hairline);
+}
+
+/* Keys */
+.sl-markdown-content kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0.05em 0.42em;
+  font-family: var(--__sl-font-mono);
+  font-size: 0.8em;
+  line-height: 1.55;
+  text-align: center;
+  color: var(--sl-color-white);
+  background: var(--mp-kbd-bg);
+  border: 1px solid var(--mp-kbd-border);
+  border-bottom-width: 2px;
+  border-radius: 0.3rem;
+  white-space: nowrap;
+}
+
+.sl-markdown-content kbd + kbd {
+  margin-inline-start: 0.15em;
+}
+
+.kbd-sep,
+.kbd-or {
+  color: var(--sl-color-gray-4);
+  font-size: 0.85em;
+  padding-inline: 0.1em;
+}
+
+/* Tables */
+.sl-markdown-content table {
+  display: table;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 0.6rem;
+  overflow: hidden;
+  font-size: var(--sl-text-sm);
+  line-height: 1.55;
+}
+
+.sl-markdown-content :is(th, td) {
+  border: 0;
+  border-bottom: 1px solid var(--sl-color-hairline);
+  padding: 0.55rem 0.85rem;
+  vertical-align: top;
+}
+
+.sl-markdown-content tr:last-child td {
+  border-bottom: 0;
+}
+
+.sl-markdown-content th {
+  background: var(--mp-table-head);
+  color: var(--sl-color-white);
+  font-weight: 600;
+  text-align: start;
+}
+
+.sl-markdown-content td:first-child {
+  white-space: nowrap;
+}
+
+.sl-markdown-content td:first-child code {
+  white-space: nowrap;
+}
+
+@media (max-width: 50rem) {
+  .sl-markdown-content table {
+    display: block;
+    overflow-x: auto;
+  }
+  .sl-markdown-content td:first-child {
+    white-space: normal;
+  }
+}
+
+/* Steps: pumpkin counters */
+.sl-markdown-content .sl-steps > li::before {
+  background-color: color-mix(in srgb, var(--mp-pumpkin) 16%, transparent);
+  color: var(--mp-pumpkin-text);
+  font-weight: 650;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mp-pumpkin) 45%, transparent);
+}
+
+.sl-markdown-content .sl-steps > li::after {
+  background-color: var(--sl-color-hairline-light);
+}
+
+/* Cards */
+.card {
+  border-radius: 0.7rem;
+  border-color: var(--sl-color-hairline-light) !important;
+  background: var(--mp-surface);
+}
+
+.sl-link-card {
+  border-radius: 0.7rem;
+  border-color: var(--sl-color-hairline-light);
+  background: var(--mp-surface);
+  box-shadow: none;
+}
+
+.sl-link-card:hover {
+  border-color: var(--sl-color-accent);
+  background: var(--mp-surface-2);
+}
+
+/* Pagination */
+.pagination-links a {
+  border-radius: 0.7rem;
+  border-color: var(--sl-color-hairline-light);
+  box-shadow: none;
+}
+
+.pagination-links a:hover {
+  border-color: var(--sl-color-accent);
+}
+
+/* Right-hand table of contents */
+starlight-toc a[aria-current='true'],
+starlight-toc a[aria-current='true']:hover {
+  color: var(--mp-pumpkin-text);
+}
+
+/* Search dialog */
+site-search dialog {
+  border-radius: 0.9rem;
+  border-color: var(--sl-color-hairline-light);
+}
+
+/* Product shots */
+.mp-frame {
+  margin-block: 1.5rem;
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 0.8rem;
+  overflow: hidden;
+  background: #1e1e2e;
+  box-shadow: 0 24px 60px -24px rgba(4, 10, 22, 0.55);
+}
+
+.mp-frame__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.8rem;
+  background: #181825;
+  border-bottom: 1px solid #2a2b3c;
+}
+
+.mp-frame__bar span {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: #3a3c52;
+}
+
+.mp-frame__bar span:nth-child(1) { background: #ff5f57; }
+.mp-frame__bar span:nth-child(2) { background: #febc2e; }
+.mp-frame__bar span:nth-child(3) { background: #28c840; }
+
+.mp-frame__bar em {
+  margin-inline-start: 0.6rem;
+  font-style: normal;
+  font-family: var(--__sl-font-mono);
+  font-size: 0.75rem;
+  color: #a6adc8;
+}
+
+.mp-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0;
+  border-radius: 0;
+}
+
+.mp-placeholder {
+  display: grid;
+  place-items: center;
+  gap: 0.4rem;
+  aspect-ratio: 16 / 10;
+  padding: 2rem;
+  text-align: center;
+  color: var(--sl-color-gray-3);
+  background:
+    repeating-linear-gradient(135deg, transparent 0 14px, color-mix(in srgb, var(--sl-color-gray-5) 35%, transparent) 14px 15px),
+    var(--mp-surface);
+  font-size: var(--sl-text-sm);
+}
+
+.mp-placeholder strong {
+  color: var(--sl-color-gray-1);
+  font-weight: 600;
+}
+
+/* Asides: soft tints of the palette */
+:root {
+  --mp-green: #8fd19e;
+  --mp-green-text: #a8dcb4;
+}
+
+:root[data-theme='light'] {
+  --mp-green: #2f7a3e;
+  --mp-green-text: #2f7a3e;
+}
+
+.starlight-aside {
+  border-inline-start-width: 3px;
+  border-radius: 0 0.6rem 0.6rem 0;
+  padding: 0.9rem 1.15rem;
+}
+
+.starlight-aside--note {
+  --sl-color-asides-border: var(--mp-ocean);
+  --sl-color-asides-text-accent: var(--sl-color-text-accent);
+  background-color: color-mix(in srgb, var(--mp-ocean) 11%, transparent);
+}
+
+.starlight-aside--tip {
+  --sl-color-asides-border: var(--mp-green);
+  --sl-color-asides-text-accent: var(--mp-green-text);
+  background-color: color-mix(in srgb, var(--mp-green) 11%, transparent);
+}
+
+.starlight-aside--caution {
+  --sl-color-asides-border: var(--mp-pumpkin);
+  --sl-color-asides-text-accent: var(--mp-pumpkin-text);
+  background-color: color-mix(in srgb, var(--mp-pumpkin) 10%, transparent);
+}
+
+.starlight-aside__title {
+  font-size: var(--sl-text-base);
+}
+
+/* Landing */
+.mp-landing-shot {
+  margin-top: 3rem;
+}
+
+/* Code blocks sit on the palette rather than on the syntax theme's black */
+:root {
+  --mp-code-bg: #081429;
+  --mp-code-bar: #0e1f3a;
+  --mp-code-dots: #33496d;
+}
+
+:root[data-theme='light'] {
+  --mp-code-bg: #ffffff;
+  --mp-code-bar: #f4f1e8;
+  --mp-code-dots: #cfcabb;
+}
+
+/* Starlight spaces adjacent block-ish siblings; keys are inline */
+.sl-markdown-content kbd,
+.sl-markdown-content .kbd-sep {
+  margin-top: 0;
+}
+
+/* A flag inside a table cell does not break at its hyphens */
+.sl-markdown-content td code {
+  white-space: nowrap;
+}
+
+/* Tabs: labels stay on one line and fit a phone */
+starlight-tabs [role='tab'] {
+  white-space: nowrap;
+}
+
+@media (max-width: 40rem) {
+  starlight-tabs .tab > [role='tab'] {
+    padding-inline: 0.7rem;
+    font-size: var(--sl-text-sm);
+  }
+}
+
+h1 {
+  text-wrap: balance;
+}
+
+starlight-tabs .tab [role='tab'][aria-selected='true'] {
+  --sl-tab-color-border: var(--mp-pumpkin);
+}

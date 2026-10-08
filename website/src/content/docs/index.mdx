@@ -1,0 +1,19 @@
+---
+title: mailypoppins
+description: An email client for the terminal and the Mac. Drafts are Markdown files you write in your own editor, received mail syncs into a local store, and one local daemon serves the CLI, the terminal UI and the desktop app.
+template: splash
+tableOfContents: false
+pagefind: false
+editUrl: false
+hero:
+  title: Your email, in <em>plain text</em>.
+  tagline: mailypoppins is an email client for the terminal and the Mac. You write drafts as Markdown files in your own editor, and your mail syncs into a local store you can search offline.
+---
+
+import { Image } from 'astro:assets';
+import tui from '../../assets/tui-screenshot.png';
+
+<figure class="mp-frame mp-landing-shot">
+  <div class="mp-frame__bar" aria-hidden="true"><span></span><span></span><span></span><em>mp</em></div>
+  <Image src={tui} alt="The mailypoppins terminal UI: mailboxes on the left, the inbox list below them, and the open message with its headers on the right." loading="eager" />
+</figure>

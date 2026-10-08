@@ -1,0 +1,303 @@
+---
+title: Configuration
+description: Every section of ~/.config/mailypoppins/config.toml, with examples.
+---
+
+import { Aside, FileTree } from '@astrojs/starlight/components';
+
+All configuration lives in one file, `~/.config/mailypoppins/config.toml`.
+`mp config init` writes it, or you write it by hand.
+
+```sh
+mp config path    # where the file is
+mp config show    # the resolved configuration, passwords masked
+```
+
+mailypoppins never rewrites `config.toml` on its own.
+The daemon applies an edit when it reloads; Settings, Reload does that in the app, and `mp daemon restart` from a terminal.
+
+## A complete example
+
+```toml title="config.toml"
+theme = "catppuccin-mocha"   # terminal UI colours
+notifications = false        # desktop notifications for new mail
+
+[email]
+font_family = "Helvetica, Arial, sans-serif"
+font_size = "16px"
+include_signature = true
+send_hold_secs = 20          # undo window; 0 sends at once
+
+[[accounts]]
+name = "personal"
+default_from = "me@example.com"
+auth_method = "password"     # the default; can be omitted
+
+[accounts.smtp]
+host = "smtp.example.com"
+port = 587
+username = "me@example.com"
+
+[accounts.imap]
+host = "imap.example.com"    # falls back to smtp.host
+port = 993
+username = "me@example.com"  # falls back to smtp.username
+fetch_concurrency = 4
+body_fetch_deadline_secs = 30
+sync_interval_secs = 900
+
+[accounts.mailboxes.inbox]
+server = "INBOX"
+
+[accounts.mailboxes.archive]
+server = "Archive"
+
+[accounts.mailboxes.sent]
+server = "Sent"
+
+[[accounts.mailboxes.extra]]
+server = "Projects"
+```
+
+Top-level keys such as `theme` must come before the first `[section]` header.
+Passwords are never in this file; see [Passwords and secrets](#passwords-and-secrets).
+
+## Top-level keys
+
+### theme
+
+The colour theme of the terminal UI.
+Names are case-insensitive.
+An unknown name falls back to the default and logs a warning.
+
+| Theme | Aliases |
+| --- | --- |
+| `catppuccin-mocha` | `catppuccin`, `default`; used when the key is absent |
+| `catppuccin-latte` | `latte`; a light theme |
+| `tokyo-night` | `tokyonight` |
+| `terminal` | `transparent`, `ansi`; follows your terminal's own palette and background |
+
+The desktop app has its own theme setting in Settings.
+
+### notifications
+
+`true` shows a desktop notification when new mail reaches the inbox while the terminal UI runs.
+The default is `false`.
+One notification per sync: `sender: subject` for one message, `N new emails` for several.
+It uses `osascript` on macOS and `notify-send` on Linux, and stays silent when the tool is missing.
+
+### secrets_backend
+
+Where passwords and OAuth2 tokens are stored.
+`encrypted-file` is the default; `keyring` uses the system keyring.
+See [Passwords and secrets](#passwords-and-secrets).
+
+## [email]
+
+How outgoing mail is rendered and sent.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `font_family` | `Helvetica, Arial, sans-serif` | Font of the HTML part |
+| `font_size` | `16px` | Font size of the HTML part |
+| `include_signature` | `true` | Add the account's signature when a draft is created |
+| `send_hold_secs` | `20` | The undo-send window in the terminal UI and the app; `0` sends at once |
+
+## [[accounts]]
+
+One table per account.
+The `name` identifies the account in `-A`, in selectors and in the data directory.
+
+| Key | Meaning |
+| --- | --- |
+| `name` | The account's short name |
+| `default_from` | The sender address of new drafts |
+| `auth_method` | `password` (default), `oauth2` or `graph`; see [Microsoft 365](/guides/microsoft-365/) |
+| `save_to_sent` | `auto` (default), `always` or `never`: whether mailypoppins copies a sent message into Sent itself |
+
+`save_to_sent = "auto"` skips the copy where the server already keeps one (Gmail, Microsoft Graph and Proton) and makes it everywhere else.
+This avoids duplicates in Sent.
+
+### [accounts.smtp]
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `host` | | The SMTP server |
+| `port` | `465` | The SMTP port |
+| `username` | | The login name |
+| `accept_invalid_certs` | `false` | Accept a self-signed certificate, as Proton Mail Bridge uses |
+
+### [accounts.imap]
+
+`host`, `port` and `username` fall back to the SMTP values when they are omitted.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `host` | `smtp.host` | The IMAP server |
+| `port` | `993` | The IMAP port |
+| `username` | `smtp.username` | The login name |
+| `accept_invalid_certs` | `false` | Accept a self-signed certificate |
+| `fetch_concurrency` | `4` | Mailboxes fetched in parallel, one connection each, 1 to 8 |
+| `body_fetch_deadline_secs` | `30` | Seconds one mailbox may spend downloading bodies on a sync started by a window, 0 to 600, `0` for no limit |
+| `sync_interval_secs` | `900` | Seconds without a sync before the daemon runs one, at least 60, `0` to turn it off |
+
+Lower `fetch_concurrency` toward `1` if the server throttles parallel connections.
+
+A mailbox that runs out of `body_fetch_deadline_secs` keeps what it downloaded and resumes on the next sync, newest mail first.
+`mp sync` ignores the limit and downloads everything it owes.
+
+`sync_interval_secs` catches what the inbox watcher cannot see: changes in other folders, retries of queued changes, and accounts with no window open.
+Any sync restarts the wait.
+It does not apply to Microsoft Graph accounts yet.
+
+### [accounts.mailboxes]
+
+Three roles are required: `inbox`, `archive` and `sent`.
+Each names the folder on the server.
+More folders join the sync as `[[accounts.mailboxes.extra]]`.
+
+```toml
+[accounts.mailboxes.inbox]
+server = "INBOX"
+
+[accounts.mailboxes.archive]
+server = "Archive"
+
+[accounts.mailboxes.sent]
+server = "Sent Items"
+
+[[accounts.mailboxes.extra]]
+server = "Newsletters"
+```
+
+The role name is the mailbox part of a [selector](/reference/selectors/): `mp://personal/inbox/...`.
+An extra mailbox is named by its server name.
+A Microsoft Graph account uses Graph's folder names, `inbox`, `archive` and `sentitems`.
+
+### [accounts.oauth2]
+
+`client_id` and `tenant_id` of the Azure app registration, for `oauth2` and `graph` accounts.
+See [Microsoft 365 and Exchange](/guides/microsoft-365/).
+
+### [[accounts.hooks]]
+
+Commands the daemon runs when matching mail arrives.
+See [Scripting and agents](/guides/scripting/#run-a-command-when-mail-arrives).
+
+## [retention]
+
+How much of your mail the local store keeps.
+Every key is optional, and an account can override any of them in `[accounts.retention]`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `metadata_horizon_days` | `0` | Days of envelope rows to keep; `0` keeps all |
+| `body_horizon_days` | `365` | Days of message bodies to keep |
+| `attachment_horizon_days` | `90` | Days of attachments to keep |
+| `max_disk_bytes` | `10000000000` | Disk budget per account (10 GB), which wins over the horizons |
+
+The sweep runs after every sync.
+The first time an account goes over budget it only warns; the next run evicts.
+`mp store gc --dry-run` shows what would go.
+
+## Several accounts
+
+Repeat `[[accounts]]`, each with its own `smtp`, `imap` and `mailboxes` tables.
+One file can mix password, OAuth2 and Graph accounts.
+Commands use the first account unless `-A <name>` names another, and <kbd>g</kbd><kbd>a</kbd> switches accounts in the terminal UI.
+
+```toml
+[[accounts]]
+name = "personal"
+default_from = "me@example.com"
+# ... smtp, imap, mailboxes
+
+[[accounts]]
+name = "work"
+default_from = "name@company.com"
+auth_method = "oauth2"
+# ... oauth2, smtp, imap, mailboxes
+```
+
+## Passwords and secrets
+
+Passwords and OAuth2 tokens never go into `config.toml`.
+By default they live in `~/.config/mailypoppins/secrets.enc`, encrypted with a key derived from this machine's ID and your user ID.
+There is no prompt at runtime.
+A copy of the file on another machine, in a backup or in a cloud folder, does not decrypt.
+
+```sh
+mp config set-password smtp           # first account
+mp config set-password imap -A work   # another account
+```
+
+The IMAP password falls back to the SMTP one when it is not set.
+
+To use the system keyring (macOS Keychain, Linux Secret Service) instead, set this at the top of the file:
+
+```toml
+secrets_backend = "keyring"
+```
+
+<Aside type="caution" title="Moving to a new Mac">
+A restored `secrets.enc` cannot be decrypted on a new machine.
+Run `mp config reset-secrets`: it wipes the secrets file and the token caches, then asks for every password again.
+</Aside>
+
+## Signatures
+
+A signature is one Markdown file in `~/.config/mailypoppins/signatures/`.
+The file name is the signature's name: `work.md` is the signature `work`.
+
+<FileTree>
+
+- ~/.config/mailypoppins/
+  - config.toml
+  - secrets.enc
+  - signatures/
+    - work.md
+    - work-external.md
+    - personal.md
+
+</FileTree>
+
+<kbd>c</kbd><kbd>s</kbd> in the terminal UI or the app manages them.
+In the terminal UI's list, <kbd>Enter</kbd> sets or clears the account's default, <kbd>e</kbd> edits, <kbd>n</kbd> creates, <kbd>r</kbd> renames and <kbd>d</kbd> deletes.
+The default is app state, kept in `state.json` in the data directory, so `config.toml` holds nothing about signatures.
+`mp config show` prints the directory, the default and a preview of each file.
+
+A signature pasted as HTML from another mail client is converted to Markdown when it is read, links included.
+
+<Aside type="note" title="Upgrading from [accounts.signatures]">
+Signatures used to live in `config.toml`.
+The first run after the upgrade copied them into files and kept each default, then printed a notice.
+Delete the old tables by hand once the notice says so.
+If it names an entry it could not copy, that table still holds the only copy.
+</Aside>
+
+## The data directory
+
+Mail, drafts, tokens and logs live under one directory, which is not configurable per account.
+
+- macOS: `~/Library/Application Support/mailypoppins/`
+- Linux: `$XDG_DATA_HOME/mailypoppins/`, by default `~/.local/share/mailypoppins/`
+
+<FileTree>
+
+- mailypoppins/
+  - accounts/
+    - personal/
+      - store.sqlite3 synced mail, one row per message
+      - blobs/ bodies and attachments, by hash
+      - drafts/ your drafts, one Markdown file each
+      - attachments/ files a forward carries into a draft
+      - contacts-cache.json the contact index
+  - tokens/ OAuth2 tokens, encrypted
+  - logs/ daily logs, 200 MB at most
+  - state.json each account's default signature
+
+</FileTree>
+
+Drafts are the part that is still files.
+Symlink `accounts/<name>/drafts/` into a notes vault if you want your drafts next to your notes.
+`MAILYPOPPINS_DATA_DIR=/some/path` moves the whole tree, for tests or a portable install.
