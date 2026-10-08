@@ -2514,3 +2514,9 @@ It now draws a nonce per response (`fresh_nonce` in `clients/desktop/src-tauri/s
 The version only gets into the trusted comment when the CLI that signed it writes it: `@tauri-apps/cli` 2.12.0 does on every `tauri build` (its `signer sign --app-version` help says so), and an archive signed by an older CLI carries `timestamp:` and `file:` only, which the flag then refuses outright.
 So the flag is safe for mailypoppins because the first signed release is built with the locked CLI 2.12.0; downgrading `@tauri-apps/cli` below the version that binds it would break every update (#0139, `plugins/updater/src/updater.rs`, `verify_signed_version`).
 The manifest's `signature` is the `.sig` file's content, which the plugin base64-decodes, so the `desktop-manifest` job trims trailing whitespace from it; a `jq --rawfile` of a file ending in a newline would otherwise carry `\n` into the field.
+
+## A daemon test that waits for readiness events can receive a health check between them
+
+The diagnostics ledger starts every check at `ok`, and each account runtime that reports runs `diagnostics.refresh()`, so in a two-account sandbox the refresh after alpha's readiness can find beta still opening and publish `diagnostic.check_changed` (`account:beta` warn) before beta's `account.state_changed`.
+It only shows under load (a full `cargo test --workspace`), which is how `the_snapshot_of_a_converged_daemon_still_has_the_documented_shape` failed once before v0.11.0.
+A test that counts readiness events off the `state.event` stream skips `diagnostic.check_changed` rather than asserting the next event's kind.

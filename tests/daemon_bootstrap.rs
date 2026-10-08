@@ -251,6 +251,7 @@ const FAKE_READY_MS: u64 = 50;
 
 /// The event kind an account's readiness travels as.
 const KIND_ACCOUNT_STATE_CHANGED: &str = "account.state_changed";
+const KIND_DIAGNOSTIC_CHECK_CHANGED: &str = "diagnostic.check_changed";
 
 // ---------------------------------------------------------------------------
 // Layer (a) helpers: an in-process canonical state and a client-side reducer
@@ -1924,14 +1925,22 @@ async fn the_snapshot_of_a_converged_daemon_still_has_the_documented_shape() {
 
     let _first = bootstrap(&mut conn).await;
     let mut ready = BTreeMap::new();
-    for _ in 0..2 {
+    let mut reports = 0;
+    while reports < 2 {
         let event = next_event(&mut conn).await;
+        // The refresh that alpha's readiness triggers can find beta still
+        // opening under load and publish `account:beta` flipping to warn
+        // before beta reports: a health check, not a readiness event.
+        if event.kind == KIND_DIAGNOSTIC_CHECK_CHANGED {
+            continue;
+        }
         assert_eq!(event.kind, KIND_ACCOUNT_STATE_CHANGED);
         let account = event.payload["account"]
             .as_str()
             .unwrap_or_else(|| panic!("the payload names an account, got {event:?}"))
             .to_string();
         ready.insert(account, event.revision);
+        reports += 1;
     }
     assert_eq!(
         ready.keys().cloned().collect::<Vec<_>>(),
