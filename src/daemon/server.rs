@@ -41,7 +41,7 @@ use mp_protocol::{
 };
 
 use super::config::ConfigStore;
-use super::dispatch::Dispatcher;
+use super::dispatch::{Dispatcher, RowFrame, RowsSink};
 use super::operations::OperationRegistry;
 use super::runtime::account::{AccountRuntime, Readiness, TickKind, TickOutcome};
 use super::runtime::InstanceMeta;
@@ -582,7 +582,8 @@ async fn handle_connection(
 ///
 /// Three things share this task and no other connection's: the reader, the
 /// drain of this connection's [`EventQueue`] into its bounded [`Outbound`], and
-/// the writer. They are three arms of one `select!` rather than three tasks
+/// the writer, which also drains the connection's bounded channel of row
+/// frames (#0138). They are three arms of one `select!` rather than three tasks
 /// because they share the socket and the queue, and every arm is
 /// cancellation-safe: `read` and `write` return only what they actually moved,
 /// and [`EventQueue::ready`] re-checks the queue before it waits, so a change
@@ -595,6 +596,14 @@ async fn handle_connection(
 /// daemon's memory for a client that never reads is therefore
 /// [`Subscriber::max_bytes`] and no more, and every other connection has its
 /// own task and is untouched.
+///
+/// The writer picks its next whole frame in one fixed order: a pending answer,
+/// then a row frame, then the outbound queue. A `message.list_stream` producer
+/// publishes its `operation.finished` only after its last chunk is in the row
+/// channel, so preferring the channel to the queue is what puts every chunk
+/// ahead of a `succeeded` or `failed` finish; a row frame whose operation's
+/// token is shut is dropped when it is picked, so nothing of a cancelled
+/// stream is written after its finish.
 async fn serve_connection(
     stream: tokio::net::UnixStream,
     connection_id: u64,
@@ -607,7 +616,10 @@ async fn serve_connection(
     let mut buf = vec![0u8; READ_CHUNK];
     // One handshake per connection, so the session dies with the connection and
     // nothing has to expire it.
-    let mut session = Session::new(connection_id);
+    // The row frames a `message.list_stream` addresses to this connection
+    // alone, bounded so a client that stops reading parks the producer.
+    let (rows_sink, mut rows) = RowsSink::channel();
+    let mut session = Session::new(connection_id).with_rows(rows_sink);
 
     // The one buffer between the fan-out and this socket, at the caps the plan
     // fixes.
@@ -666,14 +678,22 @@ async fn serve_connection(
                     // and then the EOF. Dropping them would make an orderly
                     // stop indistinguishable from a crash for every client
                     // that did not ask for it.
-                    Some(AfterFlush::Drain) => match outbound.pop() {
-                        Some(item) => {
-                            frame_out = encode_outgoing(&item, &state.meta.instance_id)?;
+                    Some(AfterFlush::Drain) => {
+                        if let Some(frame) = next_row_frame(&mut rows) {
+                            frame_out = frame;
+                        } else {
+                            match outbound.pop() {
+                                Some(item) => {
+                                    frame_out = encode_outgoing(&item, &state.meta.instance_id)?;
+                                }
+                                None => return Ok(()),
+                            }
                         }
-                        None => return Ok(()),
-                    },
+                    }
                     None => {
-                        if let Some(item) = outbound.pop() {
+                        if let Some(frame) = next_row_frame(&mut rows) {
+                            frame_out = frame;
+                        } else if let Some(item) = outbound.pop() {
                             frame_out = encode_outgoing(&item, &state.meta.instance_id)?;
                         }
                     }
@@ -684,6 +704,10 @@ async fn serve_connection(
         let writing = written < frame_out.len();
         let reading = after_flush.is_none() && replies.len() < MAX_PENDING_REPLIES;
         let closing = after_flush.is_none();
+        // Idle and owed nothing else: wait for a row frame as well. The top of
+        // the loop already found no pending answer and an empty outbound queue,
+        // so taking a row frame here keeps the writer's order.
+        let awaiting_rows = !writing && after_flush.is_none();
         tokio::select! {
             written_now = writer.write(&frame_out[written..]), if writing => {
                 let n = written_now.context("writing a frame")?;
@@ -698,6 +722,14 @@ async fn serve_connection(
             _ = queue.ready() => {
                 for (revision, event) in drain_queue(&mut queue) {
                     outbound.push(revision, event);
+                }
+            }
+            // `recv` is cancellation-safe, and the session holds a sender for
+            // as long as this task runs, so the channel never reports closed.
+            Some(frame) = rows.recv(), if awaiting_rows => {
+                if !frame.cancel.is_cancelled() {
+                    frame_out = frame.bytes;
+                    written = 0;
                 }
             }
             changed = settled.changed(), if closing => {
@@ -764,6 +796,20 @@ async fn serve_connection(
             }
         }
     }
+}
+
+/// The next row frame worth writing, or `None` when the channel holds none.
+///
+/// A frame whose operation's token is shut is dropped here rather than
+/// written: the cancel that shut it has already published, or is about to
+/// publish, the `cancelled` finish, and no chunk may follow that finish.
+fn next_row_frame(rows: &mut tokio::sync::mpsc::Receiver<RowFrame>) -> Option<Vec<u8>> {
+    while let Ok(frame) = rows.try_recv() {
+        if !frame.cancel.is_cancelled() {
+            return Some(frame.bytes);
+        }
+    }
+    None
 }
 
 /// Start this connection's event stream again behind the snapshot it has just

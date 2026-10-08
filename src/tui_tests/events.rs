@@ -1101,6 +1101,7 @@ impl Fixture {
             kind: ClientKind::Tui,
             protocol: 1,
             capabilities: Vec::new(),
+            rows: None,
         }
     }
 

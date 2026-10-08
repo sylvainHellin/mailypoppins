@@ -110,6 +110,7 @@ impl Queries for TestDaemon {
             kind: ClientKind::Tui,
             protocol: 1,
             capabilities: Vec::new(),
+            rows: None,
         };
         let request = Request {
             jsonrpc: JSONRPC_VERSION.to_string(),

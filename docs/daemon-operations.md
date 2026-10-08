@@ -667,6 +667,11 @@ Unset, unparseable or zero means the default, as with the watcher's two hooks: a
 It exists because a test of "an expired handle is no longer releasable" would otherwise cost ten minutes; `tests/daemon_handles.rs` runs its sandboxes at 60000 ms and its one expiry case at 400 ms.
 The lifetime is read once, at startup, so a handle cannot be minted under one lifetime and released under another; its name is `mailypoppins::daemon::handles::HANDLE_TTL_ENV`.
 
+`MAILYPOPPINS_DAEMON_ROWS_CHUNK_BYTES=<n>` sets the byte budget of one `message.list_stream` chunk, which defaults to 1048576 (1 MiB).
+Unset, unparseable or zero means the default, as with the hooks above.
+It exists because a test that streams several chunks would otherwise seed thousands of rows per mebibyte; `tests/daemon_list_stream.rs` runs at 16384 and 1024 bytes.
+It is read once, when the method is registered at startup; its name is `mailypoppins::daemon::methods::message::ROWS_CHUNK_BYTES_ENV`.
+
 `MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN=1` makes `mp daemon install-service` and `mp daemon uninstall-service` render, write and remove the service file exactly as usual and run no `systemctl` and no `launchctl`.
 The command still prints the lines it would have run, plus `  dry run: MAILYPOPPINS_DAEMON_SERVICE_DRY_RUN is set, nothing was run`.
 It is what keeps `tests/daemon_service.rs` off the developer's own user session: twenty of its twenty-three rows write into a `TempDir` and never reach a service manager at all.

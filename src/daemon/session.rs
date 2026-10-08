@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use mp_protocol::{ErrorCode, RpcError, PROTOCOL_MAX, PROTOCOL_MIN};
 
-use super::dispatch::{ClientCtx, ClientKind};
+use super::dispatch::{ClientCtx, ClientKind, RowsSink};
 use super::server::DaemonState;
 
 /// The methods that are reachable before a handshake and are not served by the
@@ -60,6 +60,9 @@ pub struct Session {
     connection_id: u64,
     /// The identity the client sent, once it has initialized.
     negotiated: Option<Negotiated>,
+    /// The connection's row-frame channel, which every [`ClientCtx`] carries
+    /// so a method can address the connection that called it (#0138).
+    rows: Option<RowsSink>,
 }
 
 /// What a successful handshake settled.
@@ -81,7 +84,14 @@ impl Session {
         Session {
             connection_id,
             negotiated: None,
+            rows: None,
         }
+    }
+
+    /// The same connection, with the row-frame channel its writer drains.
+    pub fn with_rows(mut self, rows: RowsSink) -> Self {
+        self.rows = Some(rows);
+        self
     }
 
     /// What a domain method may know about this caller, once it has
@@ -93,6 +103,7 @@ impl Session {
             kind: negotiated.client_kind,
             protocol: negotiated.protocol,
             capabilities: negotiated.capabilities.clone(),
+            rows: self.rows.clone(),
         })
     }
 
@@ -528,6 +539,7 @@ mod tests {
                 "message.invite".to_string(),
                 "message.list".to_string(),
                 "message.list_server".to_string(),
+                "message.list_stream".to_string(),
                 "message.materialise_attachment".to_string(),
                 "message.materialise_html".to_string(),
                 "message.materialise_markdown".to_string(),
