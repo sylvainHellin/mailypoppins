@@ -904,12 +904,14 @@ They go to the connection that called and to no other, and `state.event` frames 
 On the calling connection no `message.rows` frame of an operation follows that operation's `operation.finished`.
 For `succeeded` and `failed` every chunk precedes the finish.
 For `cancelled` the finish can come first, since a cancel settles the operation the moment it is dispatched, and the daemon drops the chunks it has not written yet: a cancelled stream delivers some prefix of the rows, possibly none, and nothing after its finish.
-A client treats any finish other than `succeeded` as no listing and discards the rows it collected.
+A client treats any finish other than `succeeded` that arrives before `total` rows as no listing and discards the rows it collected.
 
 The store read happens before the answer, so a stream cannot fail on the store.
 What remains is `operation.cancel`, a disconnect, a daemon shutdown, and a single row whose own encoding exceeds the response cap minus the envelope, which fails the operation with `frame_too_large` and `{limit, seen}` in the finished event's `error` instead of writing a frame the client's decoder would cut the connection on.
 The method is `client_scoped`: the rows are addressed to one connection, and once it is gone nobody can read them.
 The calling connection has to be subscribed to see the finish, as for every operation; the method does not refuse an unsubscribed caller.
+The listing does not depend on the finish: once the contiguous rows reach `total`, at once for `total: 0`, the stream is complete and `mp-client` answers it without waiting, so a client that streams after a reconnect but before its `state.bootstrap` is served still gets its listing.
+A finish that arrives afterwards is an ordinary event whose revision moves the watermark; the finish is what settles a stream that falls short of `total`.
 
 ### Long-running operations
 

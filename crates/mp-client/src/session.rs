@@ -703,8 +703,9 @@ fn publish(events: &sync_mpsc::Sender<Incoming>, notification: mp_protocol::Noti
                 .to_string(),
         },
         // A chunk of a stream the session thread is no longer collecting: one
-        // it gave up on and whose finish never came. Dropped quietly, since a
-        // stream is dozens of them.
+        // it gave up on and whose finish never came, or (which a contiguous
+        // stream cannot produce) one past a stream already answered whole.
+        // Dropped quietly, since a stream is dozens of them.
         METHOD_MESSAGE_ROWS => return debug!("[tui] dropping a message.rows chunk nobody awaits"),
         other => return info!("[tui] ignoring the {other} notification"),
     };
@@ -780,8 +781,9 @@ struct StreamCall {
     mailbox: String,
     deadline: tokio::time::Instant,
     budget: Duration,
-    /// `None` once the caller has been answered, after which the stream's
-    /// rows are discarded until its finish arrives.
+    /// `None` once the caller has been answered with a failure, after which
+    /// the stream's rows are discarded until its finish arrives or the grace
+    /// runs out; a caller answered with a listing leaves the stream at once.
     answer: Option<ListingReply>,
 }
 
@@ -796,16 +798,31 @@ impl StreamCall {
         }
     }
 
-    /// Run the stream to its finish, publishing every notification that is
-    /// not one of its rows, and answer `Some(reason)` when the connection was
-    /// lost on the way.
+    /// Collect the stream until its rows are complete or it settles,
+    /// publishing every notification that is not one of its rows, and answer
+    /// `Some(reason)` when the connection was lost on the way.
+    ///
+    /// The stream is complete once the contiguous rows held reach the
+    /// answer's `total` (at once for `total: 0`): the caller gets its listing
+    /// then and the session thread serves the next call without waiting for
+    /// the finish. The finish reaches only a subscribed connection, and a
+    /// stream sent after a reconnect but before the client's `state.bootstrap`
+    /// is served would otherwise wait out its deadline for a finish that never
+    /// comes, with that bootstrap queued behind it. A finish that arrives
+    /// later is published by the serve loop like any other notification, so
+    /// its revision still reaches the watermark.
     ///
     /// The session thread serves no other call meanwhile, exactly as it serves
     /// none while one large `message.list` answer is in flight. Every other
     /// notification is published as it arrives, the stream's own finish
-    /// included, so each client's watermark sees its revision; a
-    /// `state.resync_required` is published at once, and the `state.bootstrap`
-    /// it provokes waits behind the stream.
+    /// included when it comes first, so each client's watermark sees its
+    /// revision; a `state.resync_required` is published at once, and the
+    /// `state.bootstrap` it provokes waits behind the stream.
+    ///
+    /// A stream that falls short (a failed or cancelled finish, a success
+    /// short of `total`), breaks contiguity or overruns `total` answers an
+    /// error; one that outlives its deadline is cancelled, and in both cases
+    /// the thread reads on for the finish for at most [`STREAM_SETTLE_GRACE`].
     async fn serve(
         mut self,
         connection: &mut Connection,
@@ -841,6 +858,10 @@ impl StreamCall {
         };
         let id = started.operation_id.clone();
         let mut rows = RowsCollector::new(started);
+        if rows.complete() {
+            self.reply(Ok(rows.into_listing()));
+            return None;
+        }
         // Set once the caller has been answered with a failure: how long to
         // keep reading for the finish before serving the next call anyway.
         let mut settle_by: Option<tokio::time::Instant> = None;
@@ -858,8 +879,16 @@ impl StreamCall {
                     };
                     if notification.method == METHOD_MESSAGE_ROWS {
                         if self.answer.is_some() {
-                            if let Err(failure) = rows.push(&notification.params) {
-                                self.abandon(connection, &id, failure, &mut settle_by).await;
+                            match rows.push(&notification.params) {
+                                Err(failure) => {
+                                    self.abandon(connection, &id, failure, &mut settle_by)
+                                        .await;
+                                }
+                                Ok(true) if rows.complete() => {
+                                    self.reply(Ok(rows.into_listing()));
+                                    return None;
+                                }
+                                Ok(_) => {}
                             }
                         }
                         continue;
@@ -988,7 +1017,26 @@ impl RowsCollector {
         Ok(true)
     }
 
+    /// Whether the contiguous rows held reach the announced `total`, which
+    /// [`RowsCollector::push`] never lets them exceed.
+    fn complete(&self) -> bool {
+        self.rows.len() as u64 == self.started.total
+    }
+
+    /// The listing the rows held make up.
+    fn into_listing(self) -> MessageListing {
+        MessageListing {
+            account: self.started.account,
+            mailbox: self.started.mailbox,
+            total: self.started.total,
+            messages: self.rows,
+        }
+    }
+
     /// The listing a `succeeded` finish completes, or why there is none.
+    ///
+    /// Reached only for a stream still short of `total`, since a complete one
+    /// is answered before its finish is read.
     ///
     /// A failed or cancelled finish answers the error it carries as a
     /// refusal, so its `data` (a `frame_too_large`'s `{limit, seen}`) reaches
@@ -1004,12 +1052,7 @@ impl RowsCollector {
                         self.started.total
                     )));
                 }
-                Ok(MessageListing {
-                    account: self.started.account,
-                    mailbox: self.started.mailbox,
-                    total: self.started.total,
-                    messages: self.rows,
-                })
+                Ok(self.into_listing())
             }
             state => {
                 let state = state.unwrap_or("without a state");
@@ -1128,6 +1171,18 @@ mod tests {
         /// `total`-row listing followed by `on_stream`, `operation.cancel` with
         /// its answer followed by `on_cancel`, and anything else with an echo.
         fn new(name: &str, total: u64, on_stream: Vec<Value>, on_cancel: Vec<Value>) -> Canned {
+            Canned::scripted(name, total, on_stream, on_cancel, Vec::new())
+        }
+
+        /// [`Canned::new`], with `on_other` written after the echo of every
+        /// request that is neither a stream nor a cancel.
+        fn scripted(
+            name: &str,
+            total: u64,
+            on_stream: Vec<Value>,
+            on_cancel: Vec<Value>,
+            on_other: Vec<Value>,
+        ) -> Canned {
             let dir = std::env::temp_dir()
                 .join(format!("mp-client-stream-{}-{name}", std::process::id()));
             std::fs::create_dir_all(&dir).expect("a scratch dir");
@@ -1165,7 +1220,10 @@ mod tests {
                                 ));
                                 frames.extend(on_cancel.iter().cloned());
                             }
-                            other => frames.push(answer(&request, json!({"echo": other}))),
+                            other => {
+                                frames.push(answer(&request, json!({"echo": other})));
+                                frames.extend(on_other.iter().cloned());
+                            }
                         }
                         for frame in frames {
                             let mut bytes = serde_json::to_vec(&frame).expect("encodes");
@@ -1325,6 +1383,106 @@ mod tests {
             request["params"],
             json!({"account": "work", "mailbox": "inbox"})
         );
+        daemon.finish(session);
+    }
+
+    /// A stream whose rows reach `total` answers its listing at once, with no
+    /// wait for a finish that an unsubscribed connection (one that reconnected
+    /// and has not bootstrapped yet) never receives, sends no cancel, and
+    /// leaves the session serving the next call; `total: 0` answers before any
+    /// chunk.
+    #[test]
+    fn a_complete_stream_answers_without_its_finish() {
+        let cases: [(&str, u64, Vec<Value>, Vec<i64>); 2] = [
+            (
+                "nofinish",
+                3,
+                vec![rows(0, &[3, 2]), rows(2, &[1])],
+                vec![3, 2, 1],
+            ),
+            ("empty", 0, Vec::new(), Vec::new()),
+        ];
+        for (name, total, frames, ids) in cases {
+            let daemon = Canned::new(name, total, frames, Vec::new());
+            let session = daemon.session();
+            let asked = std::time::Instant::now();
+            let listing = session
+                .list_stream_within("work", "inbox", Duration::from_secs(10))
+                .expect(name);
+            let waited = asked.elapsed();
+            assert!(
+                waited < Duration::from_secs(1),
+                "{name}: answered at once, not at the deadline, after {waited:?}"
+            );
+            assert_eq!(listing.total, total, "{name}");
+            assert_eq!(
+                listing
+                    .messages
+                    .iter()
+                    .map(|row| row.id)
+                    .collect::<Vec<_>>(),
+                ids,
+                "{name}"
+            );
+            assert_eq!(
+                session.call("account.list", json!({})).expect("served"),
+                json!({"echo": "account.list"}),
+                "{name}: the session serves the next call"
+            );
+            assert_eq!(
+                daemon.methods(),
+                ["message.list_stream", "account.list"],
+                "{name}: a complete stream is not cancelled"
+            );
+            daemon.finish(session);
+        }
+    }
+
+    /// A finish that arrives after the complete stream was answered is
+    /// published like any other event, revision and all, and a stray chunk of
+    /// the answered stream is dropped rather than published.
+    #[test]
+    fn a_finish_after_the_answer_is_published() {
+        let daemon = Canned::scripted(
+            "late",
+            2,
+            vec![rows(0, &[2, 1])],
+            Vec::new(),
+            vec![rows(2, &[]), succeeded(6, 2)],
+        );
+        let mut session = daemon.session();
+        let events = session.events().expect("the event stream");
+
+        let listing = session
+            .list_stream_within("work", "inbox", Duration::from_secs(10))
+            .expect("a listing");
+        assert_eq!(
+            listing
+                .messages
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        // The finish is written only after this call's echo, so it reaches the
+        // session after the listing was answered.
+        assert_eq!(
+            session.call("account.list", json!({})).expect("served"),
+            json!({"echo": "account.list"})
+        );
+        let mut seen = Vec::new();
+        while let Ok(incoming) = events.recv_timeout(Duration::from_millis(200)) {
+            match incoming {
+                Incoming::Event(envelope) => seen.push((
+                    envelope.kind,
+                    envelope.revision,
+                    envelope.payload["operation_id"].clone(),
+                )),
+                other => panic!("only the finish is published, got {other:?}"),
+            }
+        }
+        assert_eq!(seen, vec![("operation.finished".to_string(), 6, json!(OP))]);
+        assert_eq!(daemon.methods(), ["message.list_stream", "account.list"]);
         daemon.finish(session);
     }
 
