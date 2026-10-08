@@ -12,7 +12,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # The full history and every tag: the parity tests build their oracle
+      # from the `pre-daemon` tag, which a shallow checkout does not carry.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
