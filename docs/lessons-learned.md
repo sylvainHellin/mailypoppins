@@ -2520,3 +2520,9 @@ The manifest's `signature` is the `.sig` file's content, which the plugin base64
 The diagnostics ledger starts every check at `ok`, and each account runtime that reports runs `diagnostics.refresh()`, so in a two-account sandbox the refresh after alpha's readiness can find beta still opening and publish `diagnostic.check_changed` (`account:beta` warn) before beta's `account.state_changed`.
 It only shows under load (a full `cargo test --workspace`), which is how `the_snapshot_of_a_converged_daemon_still_has_the_documented_shape` failed once before v0.11.0.
 A test that counts readiness events off the `state.event` stream skips `diagnostic.check_changed` rather than asserting the next event's kind.
+
+## CI checks out one commit, so a test that needs a tag needs `fetch-depth: 0`
+
+`actions/checkout` fetches only the pushed commit by default, with no history and no tags, so the parity tests' oracle build (`git archive pre-daemon`) failed with `not a valid object name: pre-daemon` and turned every CI run red from 2026-09-14 to 2026-10-08 while the same tests passed on the Mac.
+`.github/workflows/ci.yml` now checks out with `fetch-depth: 0`; building the oracle takes a CI run from about 2 to about 8 minutes.
+Figure: `docs/figures/ci-parity-oracle.tex`.
