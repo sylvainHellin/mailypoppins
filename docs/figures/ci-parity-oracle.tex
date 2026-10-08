@@ -1,0 +1,59 @@
+%% ci-parity-oracle.tex -- why the CI workflow fails on every push since
+%% 2026-09-14: GitHub's runner checks out only the latest commit, without the
+%% `pre-daemon` tag the parity tests build their reference binary from, and how
+%% `fetch-depth: 0` on actions/checkout brings the tag along.
+%%
+%% Requires texfig.sty (~/code/side-projects/tex-fig). Preview:
+%%   ~/code/side-projects/tex-fig/examples/build.sh <this file> 200
+\providecommand{\tffigwidth}{\linewidth}
+\resizebox{\tffigwidth}{!}{%
+\begin{tikzpicture}[font=,
+  step/.style={tfblock={#1}{3.3cm}, minimum height=1.35cm, align=center,
+    font=\footnotesize},
+  gloss/.style={tfcaption, font=\scriptsize, text width=3.3cm, align=center}]
+
+% ===================================================================
+% The Mac: the full repository
+% ===================================================================
+\node[tfcardtitlec=tfBlue] (macT) at (-0.8,0.55) {your Mac};
+\node[tffield] (mac1) at (-0.8,0.0) {every commit};
+\node[tffield] (mac2) at (-0.8,-0.45) {tag \tflit{v0.11.0}};
+\node[tffield] (mac3) at (-0.8,-0.9) {tag \tflit{pre-daemon}};
+\begin{scope}[on background layer]
+  \node[tfcardc=tfBlue, fit=(macT)(mac1)(mac2)(mac3)] (mac) {};
+\end{scope}
+
+% ===================================================================
+% The CI run: four steps on a rented machine
+% ===================================================================
+\node[step=tfGray] (s1) at (5.2,-0.2) {1. fresh Linux\\machine};
+\node[step=tfOrange] (s2) at (9.0,-0.2) {2. checkout:\\latest commit only};
+\node[step=tfGray] (s3) at (12.8,-0.2) {3. \texttt{cargo test}};
+\node[step=tfRed] (s4) at (16.6,-0.2) {4. parity tests build\\\texttt{pre-daemon}};
+
+\node[gloss, below=3pt of s1] {rented from GitHub,\\empty, gone after the run};
+\node[gloss, below=3pt of s2] (g2) {\texttt{actions/checkout} default:\\no history, no tags};
+\node[gloss, below=3pt of s3] {about 2200 tests};
+\node[gloss, below=3pt of s4, text=tfRed!62!black]
+  {tag not found:\\38 tests fail, run turns red};
+
+\draw[tfarrowc=tfBlue] (mac.east |- s1) -- (s1.west)
+  node[tfedgelabelc=tfBlue, midway, above=2pt] {git push};
+\draw[tfarrow] (s1) -- (s2);
+\draw[tfarrow] (s2) -- (s3);
+\draw[tfarrow] (s3) -- (s4);
+
+\begin{pgfonlayer}{grouping}
+  \node[tfgroup={tfGray}{GitHub Actions, workflow \texttt{CI}, on every push to main},
+    fit=(s1)(s2)(s3)(s4), inner ysep=26pt, inner xsep=10pt, yshift=-9pt] (ci) {};
+\end{pgfonlayer}
+
+% ===================================================================
+% The fix
+% ===================================================================
+\node[tfnote={tfGreen}, text width=11cm, anchor=north, align=left,
+  font=\footnotesize] (fix) at ($(ci.south)+(0,-0.45)$)
+  {Fix: \texttt{fetch-depth: 0} on the checkout step copies the full history and every tag, so step 4 finds \texttt{pre-daemon} (a few minutes more per run).};
+\draw[tfarrowdashedc=tfGreen] (fix.north -| g2) -- (g2.south);
+
+\end{tikzpicture}}
