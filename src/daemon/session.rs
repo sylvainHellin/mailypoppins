@@ -668,6 +668,18 @@ mod tests {
         assert_eq!(data["missing"], json!(["no.such.capability"]));
     }
 
+    /// What the TUI requires at its handshake (#0138) is served by this build,
+    /// so a TUI and a daemon of one build always shake hands.
+    #[test]
+    fn the_tuis_required_capabilities_are_served() {
+        Session::new(1)
+            .initialize(
+                &params(1, 1, crate::daemon::client::TUI_REQUIRED_CAPABILITIES),
+                &state(),
+            )
+            .expect("this build serves everything the TUI requires");
+    }
+
     #[test]
     fn params_without_an_identity_are_invalid_params() {
         let error = Session::new(1)

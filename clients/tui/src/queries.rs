@@ -56,38 +56,26 @@ use mp_core::selector::DRAFTS_MAILBOX;
 // The mailbox listing
 // ---------------------------------------------------------------------------
 
-/// One mailbox of one account, newest first: the whole list, in one call.
+/// One mailbox of one account, newest first: the whole list, collected before
+/// it is handed back.
 ///
-/// The Drafts mailbox is the one branch that is not `message.list`: a draft is
-/// a local file with no `messages` row, so it is `draft.list` instead, and the
-/// two answers become the same kind of row here.
+/// A received mailbox is [`Queries::list_stream`], which a session answers
+/// with `message.list_stream` (#0138): the rows arrive in chunks of about
+/// 1 MiB and are collected on the session thread, so a mailbox past the 16 MiB
+/// response cap still lists. The Drafts mailbox is the one branch that is not
+/// a message listing: a draft is a local file with no `messages` row, so it is
+/// `draft.list` instead, and the two answers become the same kind of row here.
 pub fn list_emails(q: &dyn Queries, account: &str, mailbox: &str) -> Result<Vec<EmailEntry>> {
-    let (method, params) = list_request(account, mailbox);
-    let answer = q.call(method, params)?;
-    decode_list(account, mailbox, &answer)
-}
-
-/// The call [`list_emails`] makes, for a caller that dispatches it itself.
-pub fn list_request(account: &str, mailbox: &str) -> (&'static str, Value) {
     if mailbox == DRAFTS_MAILBOX {
-        wire::draft_list_request(account)
-    } else {
-        wire::message_list_request(account, mailbox)
+        let (method, params) = wire::draft_list_request(account);
+        return decode_drafts(&q.call(method, params)?);
     }
+    let listing = q.list_stream(account, mailbox)?;
+    Ok(entries_from_rows(account, mailbox, listing.messages))
 }
 
-/// The rows of a [`list_request`] answer, whichever of the two it was.
-pub fn decode_list(account: &str, mailbox: &str, answer: &Value) -> Result<Vec<EmailEntry>> {
-    if mailbox == DRAFTS_MAILBOX {
-        decode_drafts(answer)
-    } else {
-        Ok(decode_messages(account, mailbox, answer))
-    }
-}
-
-/// The `messages` array of a `message.list` answer, as list rows.
-fn decode_messages(account: &str, mailbox: &str, answer: &Value) -> Vec<EmailEntry> {
-    let rows = wire::decode_message_rows(answer);
+/// The rows of one message listing, as list rows.
+fn entries_from_rows(account: &str, mailbox: &str, rows: Vec<MessageListRow>) -> Vec<EmailEntry> {
     remember_mailbox(account, mailbox, &rows);
     let status = status_for_mailbox(mailbox);
     rows.into_iter()
@@ -297,7 +285,7 @@ pub fn message_ics(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<Op
 /// nothing is owed; the TUI's twin of `mp_client::queries::apply_row_delta`.
 ///
 /// `true` means the list is current again, `false` means the caller must
-/// re-issue `message.list`. A delta about another mailbox folds as a no-op and
+/// re-list the mailbox through [`list_emails`]. A delta about another mailbox folds as a no-op and
 /// answers `true`. A replace records its uid first, whichever mailbox it is
 /// about, so a later remove of that row resolves.
 pub fn apply_row_delta(held: &mut Vec<EmailEntry>, mailbox: &str, delta: &MessageRowDelta) -> bool {

@@ -599,6 +599,40 @@ fn an_operation_this_client_never_started_is_ignored() {
     );
 }
 
+/// The finish of this client's own mailbox stream is ignored too (#0138).
+///
+/// Every mailbox open is a `message.list_stream` operation, collected on the
+/// session thread, which publishes its `operation.finished` like any other.
+/// The TUI never registered the id in `started`, so the finish lands as an
+/// unawaited one: no status line, no spinner change, no refetch.
+#[test]
+fn a_mailbox_streams_own_finish_is_ignored() {
+    let fixture = Fixture::new();
+    seed_inbox();
+    let mut app = app_on_inbox(&fixture);
+    watermarked(&mut app);
+    app.set_status("Ready".to_string());
+    let bg_count = app.bg_count;
+
+    let applied = app.apply_event(&envelope(
+        INSTANCE,
+        WATERMARK + 1,
+        "operation.finished",
+        json!({
+            "operation_id": "a-list-stream-id",
+            "state": "succeeded",
+            "result": {"account": ACCOUNT, "mailbox": "inbox", "total": 3},
+        }),
+    ));
+
+    assert_eq!(applied, Applied::Ignored);
+    assert_eq!(app.status_message.as_deref(), Some("Ready"));
+    assert_eq!(
+        app.bg_count, bg_count,
+        "the stream's finish settles no spinner"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // (d) the pre-draw drain
 // ---------------------------------------------------------------------------

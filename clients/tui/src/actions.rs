@@ -908,10 +908,12 @@ pub(super) fn handle_action(
             // or account/mailbox indices went stale meanwhile.
             //
             // The thread stays: what changed is that it blocks on one
-            // `message.list` (or `draft.list`) through a `QueryHandle` instead
-            // of on a store open, so the wait is still off the draw thread and
-            // the whole-list transfer is paid once per mailbox open, as
-            // `docs/baselines/decisions/list-transfer.md` chose.
+            // `message.list_stream` (or `draft.list`) through a `QueryHandle`
+            // instead of on a store open, so the wait is still off the draw
+            // thread and the whole-list transfer is paid once per mailbox
+            // open, as `docs/baselines/decisions/list-transfer.md` chose. The
+            // stream is collected on the session thread (#0138), so the rows
+            // still arrive here as one list.
             let mailbox = match app.mailboxes.get(mailbox_idx) {
                 Some(mb) => super::app::mailbox_key(mb),
                 None => return Ok(()),

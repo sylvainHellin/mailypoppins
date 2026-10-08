@@ -48,6 +48,7 @@ use colored::Colorize;
 use log::{info, warn};
 
 use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
+use mp_protocol::ErrorCode;
 
 use super::lifecycle::{self, EXIT_UNAVAILABLE};
 use super::runtime::socket_path;
@@ -248,7 +249,12 @@ pub fn absolutise_in(path: &Path, base: &Path) -> PathBuf {
 /// to do with one, and a `Result` here would invite exactly the silent
 /// fallback the migration forbids.
 pub async fn client_session() -> Connection {
-    match open_session().await {
+    session_requiring(&[]).await
+}
+
+/// [`client_session`] requiring `required` at the handshake.
+async fn session_requiring(required: &[&str]) -> Connection {
+    match open_session(required).await {
         Ok((connection, _instance)) => connection,
         Err(why) => unavailable(&why, &socket_path()),
     }
@@ -264,7 +270,12 @@ pub async fn client_session() -> Connection {
 /// terminal in raw mode. `None` means "still nothing there", which is a state
 /// the client shows and retries out of.
 pub async fn reopen_session() -> Option<(Connection, String)> {
-    match open_session().await {
+    reopen_requiring(&[]).await
+}
+
+/// [`reopen_session`] requiring `required` at the handshake.
+async fn reopen_requiring(required: &[&str]) -> Option<(Connection, String)> {
+    match open_session(required).await {
         Ok(open) => Some(open),
         Err(why) => {
             info!("[client] no daemon to reconnect to: {why}");
@@ -282,20 +293,45 @@ pub async fn reopen_session() -> Option<(Connection, String)> {
 /// them on its session thread, which leaves exactly one connect routine in the
 /// tree and puts the exit-4 diagnostic where it has always been printed: in
 /// the process that owns the terminal, before the alternate screen.
+///
+/// Both halves require [`TUI_REQUIRED_CAPABILITIES`] at the handshake, which a
+/// one-shot command does not: a TUI against a daemon too old to stream a
+/// mailbox stops at the connect with `capability_missing` instead of opening
+/// every large mailbox empty.
 pub fn tui_connector() -> mp_tui::session::Connector {
     mp_tui::session::Connector {
-        open: || Box::pin(client_session()),
-        reopen: || Box::pin(reopen_session()),
+        open: || Box::pin(session_requiring(TUI_REQUIRED_CAPABILITIES)),
+        reopen: || Box::pin(reopen_requiring(TUI_REQUIRED_CAPABILITIES)),
     }
 }
 
+/// The capabilities the TUI requires at its handshake (#0138).
+///
+/// Only the methods an older daemon may lack and the TUI cannot do without:
+/// `message.list_stream` is how it opens a received mailbox, and the fallback
+/// `message.list` with `limit: null` answers `frame_too_large` past about
+/// 34 000 rows. The one-shot commands go through [`client_session`], which
+/// requires nothing, so `mp list-messages` keeps working against that daemon.
+pub const TUI_REQUIRED_CAPABILITIES: &[&str] = &["message.list_stream"];
+
 /// Connect, starting a daemon on demand, or say why it could not be done.
-async fn open_session() -> Result<(Connection, String), String> {
+///
+/// A daemon that refuses the handshake for a missing capability is answered at
+/// once: it is listening, so starting one on demand would find it running and
+/// the retries would meet the same refusal until the budget ran out.
+async fn open_session(required: &[&str]) -> Result<(Connection, String), String> {
     let socket = socket_path();
 
-    if let Ok(open) = connect(&socket).await {
-        ROUTED.store(true, Ordering::SeqCst);
-        return Ok(open);
+    match connect(&socket, required).await {
+        Ok(open) => {
+            ROUTED.store(true, Ordering::SeqCst);
+            return Ok(open);
+        }
+        Err(e) => {
+            if let Some(why) = too_old(&e) {
+                return Err(why);
+            }
+        }
     }
 
     if !autostart_enabled() {
@@ -312,7 +348,7 @@ async fn open_session() -> Result<(Connection, String), String> {
 
     let mut gap = RETRY_MIN;
     loop {
-        match connect(&socket).await {
+        match connect(&socket, required).await {
             Ok(open) => {
                 ROUTED.store(true, Ordering::SeqCst);
                 return Ok(open);
@@ -331,10 +367,25 @@ async fn open_session() -> Result<(Connection, String), String> {
     }
 }
 
+/// Why a handshake refused for a missing capability cannot be answered by
+/// starting a daemon, or `None` for any other failure.
+fn too_old(error: &ClientError) -> Option<String> {
+    match error {
+        ClientError::Rpc(error) if error.code == ErrorCode::CapabilityMissing.code() => {
+            Some(format!(
+                "the running daemon is too old for this client ({}); \
+                 restart it on this build with `mp daemon restart`",
+                error.message
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// One connect plus `initialize`, under [`CONNECT_TIMEOUT`], with the
 /// `instance_id` the handshake reported.
-async fn connect(socket: &Path) -> Result<(Connection, String), ClientError> {
-    let opened = Connection::open(
+async fn connect(socket: &Path, required: &[&str]) -> Result<(Connection, String), ClientError> {
+    let opened = Connection::open_requiring(
         socket,
         ClientInfo {
             kind: ClientKind::Cli,
@@ -344,6 +395,7 @@ async fn connect(socket: &Path) -> Result<(Connection, String), ClientError> {
             data_dir: crate::config::mailypoppins_data_dir(),
             config_dir: crate::config::config_dir(),
         },
+        required,
         CONNECT_TIMEOUT,
     )
     .await;
@@ -453,6 +505,31 @@ mod tests {
         }
         // A bare `mp` is the TUI or a dry-run preview; both need the engine.
         assert!(needs_daemon(None, None));
+    }
+
+    /// A handshake refused for a missing capability is answered at once, with
+    /// the way out; any other failure still goes to the on-demand start.
+    #[test]
+    fn only_a_missing_capability_is_answered_without_an_autostart() {
+        let missing = ClientError::Rpc(mp_protocol::RpcError {
+            code: ErrorCode::CapabilityMissing.code(),
+            message: "the daemon lacks message.list_stream".to_string(),
+            data: None,
+        });
+        let why = too_old(&missing).expect("a missing capability is final");
+        assert!(why.contains("message.list_stream"), "{why}");
+        assert!(why.contains("mp daemon restart"), "{why}");
+
+        assert!(too_old(&ClientError::NotRunning).is_none());
+        let shutting_down = ClientError::Rpc(mp_protocol::RpcError {
+            code: ErrorCode::ShuttingDown.code(),
+            message: "shutting down".to_string(),
+            data: None,
+        });
+        assert!(
+            too_old(&shutting_down).is_none(),
+            "a daemon on its way out is replaced by the on-demand start"
+        );
     }
 
     #[test]

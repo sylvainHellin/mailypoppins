@@ -49,9 +49,23 @@ impl Connection {
         identity: Identity,
         budget: Duration,
     ) -> Result<(Connection, InitializeResult), ClientError> {
+        Connection::open_requiring(socket, info, identity, &[], budget).await
+    }
+
+    /// [`Connection::open`] requiring `required` at the handshake, so a daemon
+    /// that lacks one refuses the connection with `capability_missing`
+    /// ([`ClientError::Rpc`]) instead of a `-32601` at the first call that
+    /// needs it.
+    pub async fn open_requiring(
+        socket: &Path,
+        info: ClientInfo,
+        identity: Identity,
+        required: &[&str],
+        budget: Duration,
+    ) -> Result<(Connection, InitializeResult), ClientError> {
         let handshake = async {
             let mut connection = Connection::connect(socket).await?;
-            let hello = connection.initialize(info, identity, &[], &[]).await?;
+            let hello = connection.initialize(info, identity, required, &[]).await?;
             Ok::<_, ClientError>((connection, hello))
         };
         match tokio::time::timeout(budget, handshake).await {
