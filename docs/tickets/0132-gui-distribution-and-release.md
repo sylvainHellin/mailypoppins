@@ -21,7 +21,9 @@ Last ticket of the [native GUI plan](../plans/native-gui.md), milestone "M6: sig
 
 ## Landed (2026-10-01), everything but signing
 
-- The `desktop-macos` job in `.github/workflows/release.yml` builds `aarch64-apple-darwin` and `x86_64-apple-darwin` on a `v*` tag and attaches `mailypoppins-desktop-<target>.dmg` and `.app.tar.gz` with `.sha256` files; plain `pnpm bundle` (`tauri build`) rather than tauri-action, for the reasons in [release-process.md](../release-process.md), "The desktop app".
+In-app updates of the installed app are [#0139](0139-desktop-auto-update.md), stage 1 shipped 2026-10-08.
+
+- The `desktop-macos` job in `.github/workflows/release.yml` builds `aarch64-apple-darwin` on a `v*` tag (the Intel target was dropped on 2026-10-08) and attaches `mailypoppins-desktop-<target>.dmg` and `.app.tar.gz` with `.sha256` files; plain `pnpm bundle` (`tauri build`) rather than tauri-action, for the reasons in [release-process.md](../release-process.md), "The desktop app".
 - `mp` is a `bundle.externalBin` sidecar, named in `clients/desktop/src-tauri/tauri.bundle.conf.json` rather than `tauri.conf.json` so `tauri dev` and `cargo test` need no staged binary; `clients/desktop/scripts/bundle.ts` builds and stages it, and the bundle lands as `mailypoppins.app/Contents/MacOS/mp`, the connector's first candidate.
 - The signing step is a marked, commented-out `env:` block naming the six `APPLE_*` secrets; Tauri's bundler reads them itself.
 - The version handshake: the app refuses a daemon whose `app_version` differs from the `--version` of the `mp` it would start, with the restart screen, at the first connect and on a reconnect ([rust-layer.md](../../clients/desktop/docs/rust-layer.md), "Conventions").

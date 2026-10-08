@@ -3,11 +3,11 @@ id: 0139
 title: Desktop app updates itself from GitHub Releases
 type: feature
 priority: next
-status: open
+status: in-progress
 created: 2026-10-04
 ---
 
-Proposed 2026-10-04, awaiting Sylvain's review of the design.
+Stage 1 shipped 2026-10-08 (merged in 1826f1f); the first end-to-end update over two tagged releases is PERSO-102, stage 2 and the stage 1 leftovers are PERSO-107.
 
 Plane PERSO-85.
 It extends [#0132](0132-gui-distribution-and-release.md), whose release job ships the unsigned DMGs this ticket teaches to update themselves.
@@ -191,13 +191,13 @@ On the Mac, with two real tags (a test pair such as `v0.11.0-rc.1` and `-rc.2` w
   Native and mature, with its own EdDSA appcast, but there is no official Tauri integration, so it would be custom Swift around a Rust app, and it prefers a Developer ID build.
   Dropped.
 
-## Open points for Sylvain
+## Decisions taken 2026-10-08
 
-- Adopting `tauri-plugin-updater` is a new dependency and needs your permission under the dependency rule in `AGENTS.md`; `tauri-plugin-process` is not needed if the relaunch stays in Rust, as proposed.
-- Custody of the minisign private key: the repository secret plus a copy in Proton Pass, password included; losing it ends updates for every installed app.
-- The cooldown: 24 h after a successful check is proposed.
-- The `auto_update` key name and its `on`/`off` values, against the dotted `updates.auto_install` of the brief.
-- Making the release "latest" late (`--latest=false`, then `gh release edit --latest`) changes when the CLI release becomes "latest" too.
+- `tauri-plugin-updater` 2.13 adopted; the relaunch stays in Rust, so no `tauri-plugin-process`.
+- The minisign private key and its password are GitHub secrets and a Proton Pass item; losing both ends updates for every installed app.
+- The silent check runs at most once per 24 h, with a manual check in the palette and the App menu at any time.
+- The release becomes "latest" only after `latest.json` is uploaded, which moves the CLI's "latest" to the same moment.
+- Intel macOS builds are dropped, so the manifest carries `darwin-aarch64` only.
 
 ## Docs to update when this lands
 
@@ -205,6 +205,6 @@ On the Mac, with two real tags (a test pair such as `v0.11.0-rc.1` and `-rc.2` w
 - [x] `clients/desktop/docs/shell.md`: the sidebar entry, the palette commands, the progress card, the Settings lines.
 - [x] `clients/desktop/docs/rust-layer.md`: the update commands and `update-state.json`.
 - [x] `clients/desktop/README.md`: the update route beside the install and uninstall lines.
-- [ ] `docs/tickets/0132-gui-distribution-and-release.md`: a pointer to this ticket.
+- [x] `docs/tickets/0132-gui-distribution-and-release.md`: a pointer to this ticket.
 - [x] `website/src/pages/getting-started.astro`: "Mac app" says later versions arrive in the app.
 - [x] `CHANGELOG.md` under `[Unreleased]`.
