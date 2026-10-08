@@ -212,6 +212,18 @@ import {
   staleAllSignatures,
   wantSignatures,
 } from "@/app/signatures";
+import {
+  updateChecked,
+  updateFailureDismissed,
+  updateFound,
+  updateInstallFailed,
+  updateInstalled,
+  updateInstallStarted,
+  updateLater,
+  updateProgressed,
+  updateStatusRead,
+} from "@/app/updates";
+import type { UpdateAvailable, UpdateCheck, UpdateProgress, UpdateStatus } from "@/lib/gui-types";
 
 export type Action =
   | { type: "gui_event"; event: GuiEvent }
@@ -398,6 +410,25 @@ export type Action =
   | { type: "sign_in_failed"; token: number; error: GuiError }
   | { type: "sign_in_cancelling" }
   | { type: "sign_in_closed" }
+  // The app's own update (app/updates.ts).
+  /** `update:available`, the silent startup check's find. */
+  | { type: "update_available"; update: UpdateAvailable }
+  /** `update_check` answered; `manual` says so on the notice line. */
+  | { type: "update_checked"; check: UpdateCheck; manual: boolean }
+  /** `update_status` answered: Settings' line, and at startup an update this run already holds or installed. */
+  | { type: "update_status"; status: UpdateStatus }
+  | { type: "update_install_started"; version: string }
+  /** One message of `update_install`'s channel. */
+  | { type: "update_progress"; progress: UpdateProgress }
+  /** `update_install` resolved. */
+  | { type: "update_installed" }
+  | { type: "update_install_failed"; reason: string }
+  /** The card's Later. */
+  | { type: "update_later" }
+  /** The failure card's Dismiss. */
+  | { type: "update_dismiss" }
+  /** Restart into the update while an embedded editor runs: the leave question asks first. */
+  | { type: "update_restart_asked" }
   // The list's multi-select, by `targetKey`.
   | { type: "mark_toggle"; key: string }
   | { type: "mark_set"; keys: string[]; on: boolean }
@@ -1753,6 +1784,26 @@ function reduce(s: AppState, a: Action): AppState {
       return signInCancelling(s);
     case "sign_in_closed":
       return signInClosed(s);
+    case "update_available":
+      return updateFound(s, a.update);
+    case "update_checked":
+      return updateChecked(s, a.check, a.manual);
+    case "update_status":
+      return updateStatusRead(s, a.status);
+    case "update_install_started":
+      return updateInstallStarted(s, a.version);
+    case "update_progress":
+      return updateProgressed(s, a.progress);
+    case "update_installed":
+      return updateInstalled(s);
+    case "update_install_failed":
+      return updateInstallFailed(s, a.reason);
+    case "update_later":
+      return updateLater(s);
+    case "update_dismiss":
+      return updateFailureDismissed(s);
+    case "update_restart_asked":
+      return { ...closeDialogs(s), overlay: "compose_leave", composeLeave: { kind: "restart" } };
     case "mark_toggle":
     case "mark_set":
     case "mark_range":

@@ -19,6 +19,7 @@ import {
 import { signInOrShow } from "@/app/signin";
 import { saveTheme, THEME_LABELS, THEMES, type Theme } from "@/app/theme";
 import { READER_MODE_LABELS, READER_MODES, saveReaderMode } from "@/app/readerMode";
+import { checkForUpdates, readUpdateStatus } from "@/app/updates";
 import { useAppState, useDispatch } from "@/app/store";
 import { usePaneFocused } from "@/hooks/use-pane-focused";
 import * as cmd from "@/lib/commands";
@@ -96,6 +97,53 @@ function AccountCard({
         )}
       </div>
     </article>
+  );
+}
+
+/** An RFC 3339 instant as the Settings line shows it, in local time. */
+export function checkedAt(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+/**
+ * The app's update line (ticket 0139): the running version and the last
+ * successful check, and why this build never checks when it does not, as
+ * `update_status` or the last `update_check` answered them; and "Check now",
+ * the palette's "Check for updates". Opening Settings reads `update_status`,
+ * which never reaches the network.
+ */
+function UpdatesField() {
+  const { updateInfo } = useAppState();
+  const dispatch = useDispatch();
+  const [checking, setChecking] = useState(false);
+  useEffect(() => {
+    void readUpdateStatus(dispatch);
+  }, [dispatch]);
+  const check = async () => {
+    setChecking(true);
+    await checkForUpdates(dispatch, true);
+    setChecking(false);
+  };
+  return (
+    <Field label="Updates">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span data-slot="update-line">
+          {updateInfo
+            ? `mailypoppins ${updateInfo.current}, ${updateInfo.last_check ? `last checked ${checkedAt(updateInfo.last_check)}` : "not checked yet"}`
+            : "Reading the version…"}
+        </span>
+        {updateInfo?.reason ? (
+          <span data-slot="update-reason" className="text-muted-foreground">
+            {updateInfo.reason}
+          </span>
+        ) : null}
+        <Button size="xs" variant="outline" onClick={() => void check()} disabled={checking} aria-busy={checking || undefined}>
+          <RotateCw aria-hidden="true" className={checking ? "animate-spin" : undefined} />
+          Check now
+        </Button>
+      </div>
+    </Field>
   );
 }
 
@@ -335,6 +383,7 @@ export function SettingsView() {
                 <Field label="Send hold">
                   {snapshot.config.email.send_hold_secs === 0 ? "none, a send leaves at once" : `${snapshot.config.email.send_hold_secs} seconds`}
                 </Field>
+                <UpdatesField />
               </dl>
               <div className="mt-2 flex flex-wrap gap-2">
                 <Button size="xs" variant="outline" onClick={() => void openConfig(dispatch)} title="Open config.toml in $EDITOR (sc)">

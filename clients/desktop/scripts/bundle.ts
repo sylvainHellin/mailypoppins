@@ -14,6 +14,10 @@
 // 3. Runs `tauri build --target <target>` with src-tauri/tauri.bundle.conf.json
 //    (the externalBin entry, kept out of tauri.conf.json so `tauri dev` and
 //    `cargo test` need no sidecar) and the bundle's version set to mp's.
+// 4. With TAURI_SIGNING_PRIVATE_KEY set (the release workflow's secret, #0139),
+//    also writes the updater archive, bundle/macos/mailypoppins.app.tar.gz,
+//    and its minisign signature, .app.tar.gz.sig; without it a local bundle
+//    builds as before, with no updater artifacts.
 
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
@@ -70,6 +74,12 @@ if (!/^\d/.test(version)) {
   process.exit(1);
 }
 
+// The updater archive needs the minisign key, so it is asked for only where
+// the key is.
+const signing = Boolean(process.env.TAURI_SIGNING_PRIVATE_KEY);
+const overrides = signing ? { version, bundle: { createUpdaterArtifacts: true } } : { version };
+console.log(`bundle: updater artifacts ${signing ? "on" : "off (no TAURI_SIGNING_PRIVATE_KEY)"}`);
+
 const binaries = join(desktop, "src-tauri", "binaries");
 mkdirSync(binaries, { recursive: true });
 const sidecar = join(binaries, `mp-${target}`);
@@ -88,7 +98,7 @@ execFileSync(
     "--config",
     join(desktop, "src-tauri", "tauri.bundle.conf.json"),
     "--config",
-    JSON.stringify({ version }),
+    JSON.stringify(overrides),
     ...passthrough,
   ],
   { cwd: desktop, stdio: "inherit" },

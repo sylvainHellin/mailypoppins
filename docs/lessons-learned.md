@@ -2480,3 +2480,10 @@ The receive side reads the exclusive end back as `2027-01-09T00:00:00`, and the 
 
 `build_invite_mime_body` puts the ICS in the inline `text/calendar; method=REQUEST` part and again in an `application/ics` attachment, and ingest lifts both to the sidecar name, so the sent copy's row has two `invite.ics` blobs where a received Outlook or Google invitation has one.
 `read::list_invites` joins on the blob, so it yields that row twice: the agenda does not notice, since it dedups by UID, but `reconcile_account`'s `invites_seen` counts every sent invitation twice, and any new consumer of `list_invites` has to dedup by row (`tests/imip_integration.rs`, `an_all_day_update_replaces_the_timed_original_on_the_agenda`).
+
+## The updater's `requireSignedVersion` depends on the Tauri CLI that signed the archive
+
+`tauri-plugin-updater` 2.13 can refuse an archive whose minisign trusted comment names another version than `latest.json` (`requireSignedVersion` in `plugins.updater`), which stops a tampered manifest from pairing a new version number with an old, validly signed archive.
+The version only gets into the trusted comment when the CLI that signed it writes it: `@tauri-apps/cli` 2.12.0 does on every `tauri build` (its `signer sign --app-version` help says so), and an archive signed by an older CLI carries `timestamp:` and `file:` only, which the flag then refuses outright.
+So the flag is safe for mailypoppins because the first signed release is built with the locked CLI 2.12.0; downgrading `@tauri-apps/cli` below the version that binds it would break every update (#0139, `plugins/updater/src/updater.rs`, `verify_signed_version`).
+The manifest's `signature` is the `.sig` file's content, which the plugin base64-decodes, so the `desktop-manifest` job trims trailing whitespace from it; a `jq --rawfile` of a file ending in a newline would otherwise carry `\n` into the field.

@@ -29,5 +29,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJFNzVBOUY1Qjg5MDZDQzcKUldUSGJKQzQ5YWwxTGhweXNHeXZ2NE4yYTB5UDM2QUVHVjdrcVV2eURpeDlYSzJ0YXdjV0E0cWsK",
+      "endpoints": [
+        "https://github.com/sylvainHellin/mailypoppins/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true
+    }
   }
 }

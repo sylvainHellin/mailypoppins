@@ -1,4 +1,4 @@
-import { Activity, CalendarDays, Settings, Users, type LucideIcon } from "lucide-react";
+import { Activity, CalendarDays, CircleArrowUp, RotateCw, Settings, Users, type LucideIcon } from "lucide-react";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -21,21 +21,33 @@ const ENTRIES: Entry[] = [
  * view, and the one shown is the current page. Like the outbox line they are
  * pointer entries out of the pane's tab order; their keys are `Space c` and
  * `Space a`, and the palette opens all three. Activity is no view: it opens
- * the activity log dialog, as `s l` does.
+ * the activity log dialog, as `s l` does. The update entry shows only while
+ * an update is known (src/app/updates.ts, `updateEntryLabel`): it installs
+ * the update, or restarts into one already installed.
  */
 export function ViewEntries({
   current,
   onOpen,
   onActivity,
+  update = null,
 }: {
   current: View;
   onOpen: (view: Exclude<View, "mail">) => void;
   onActivity: () => void;
+  update?: { label: string; restart: boolean; onChoose: () => void } | null;
 }) {
   return (
     <SidebarGroup className="mt-auto">
       <SidebarGroupContent>
         <SidebarMenu aria-label="Views">
+          {update ? (
+            <SidebarMenuItem>
+              <SidebarMenuButton tabIndex={-1} tooltip={update.label} aria-label={update.label} data-view-entry="update" onClick={update.onChoose}>
+                {update.restart ? <RotateCw aria-hidden="true" className="text-link" /> : <CircleArrowUp aria-hidden="true" className="text-link" />}
+                <span>{update.label}</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          ) : null}
           {ENTRIES.map(({ view, label, icon: Icon, keys }) => {
             const active = current === view;
             return (

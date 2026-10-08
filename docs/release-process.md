@@ -11,7 +11,10 @@ Homebrew tap. The pipeline lives in
 ## Cutting a release
 
 1. **Bump the version** in `Cargo.toml` (`version = "X.Y.Z"`), then run
-   `cargo build` so `Cargo.lock` picks it up. Commit both.
+   `cargo build` so `Cargo.lock` picks it up. Commit both. The
+   `desktop-manifest` job fails on a tag whose version differs from
+   `Cargo.toml`'s, since the app carries that version and the updater
+   compares against it.
 2. **Update `CHANGELOG.md`**: rename the `## [Unreleased]` section to
    `## [X.Y.Z] - YYYY-MM-DD` and add a fresh empty `## [Unreleased]`
    above it. The release workflow extracts the notes for the GitHub
@@ -25,7 +28,8 @@ Homebrew tap. The pipeline lives in
    ```
 
 4. The `Release` workflow then, automatically:
-   - creates the GitHub release with the changelog section as notes;
+   - creates the GitHub release with the changelog section as notes, not
+     marked "latest" yet;
    - builds and attaches `mailypoppins-<target>.tar.gz` + `.sha256` for:
 
      | Target | Runner | Notes |
@@ -36,9 +40,13 @@ Homebrew tap. The pipeline lives in
 
    - builds the desktop app on macOS and attaches
      `mailypoppins-desktop-<target>.dmg` and
-     `mailypoppins-desktop-<target>.app.tar.gz`, each with a `.sha256`, for
+     `mailypoppins-desktop-<target>.app.tar.gz`, each with a `.sha256`, and
+     the archive's updater signature `.app.tar.gz.sig`, for
      `aarch64-apple-darwin` (the `desktop-macos` job, see
      [The desktop app](#the-desktop-app));
+   - writes and attaches the updater manifest `latest.json`, then marks the
+     release "latest" (the `desktop-manifest` job, see
+     [App updates](#app-updates-0139));
    - renders the Homebrew formula from the release checksums and pushes
      it to the tap repo (skipped with a notice while the
      `TAP_DEPLOY_KEY` secret is absent).
@@ -104,6 +112,63 @@ secrets and uncommenting it:
 
 `tauri build` then imports the certificate into a temporary keychain, signs
 the app and the sidecar, notarizes and staples.
+
+Until then `tauri.bundle.conf.json` sets `bundle.macOS.signingIdentity: "-"`,
+an ad-hoc signature, which spares Apple silicon users the "damaged" dialog on
+a downloaded app while keeping the Privacy & Security step;
+`APPLE_SIGNING_IDENTITY` replaces it once set.
+
+### App updates (#0139)
+
+An installed app updates itself from the releases through
+`tauri-plugin-updater`: it reads
+`https://github.com/sylvainHellin/mailypoppins/releases/latest/download/latest.json`,
+downloads the archive the manifest names, checks its minisign signature
+against the public key in `tauri.conf.json` (`plugins.updater.pubkey`), and
+swaps the bundle in place. That signature is the updater's own and has
+nothing to do with Apple signing; the app's side is in
+[rust-layer.md](../clients/desktop/docs/rust-layer.md), "Updates".
+
+The release side:
+
+- The repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the private key's
+  content) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are the `env:` of the
+  "Build the app bundle and DMG with the mp sidecar" step. With the key set,
+  `pnpm bundle` adds `bundle.createUpdaterArtifacts: true` to its `--config`,
+  and the bundler writes `bundle/macos/mailypoppins.app.tar.gz` and its
+  `.sig`, binding the bundle's version into the signature. A local
+  `pnpm bundle` without the key builds as before, with no updater archive.
+- `desktop-macos` uploads that archive and its `.sig` as
+  `mailypoppins-desktop-<target>.app.tar.gz` and `.app.tar.gz.sig`. It is
+  the bundler's archive, not a `tar` of our own, because the signature covers
+  its exact bytes; the step fails when either file is missing.
+- `desktop-manifest` (`needs: desktop-macos`) first fails when
+  `${GITHUB_REF_NAME#v}` differs from the root `Cargo.toml` version. It then
+  downloads the `.sig` asset and writes `latest.json` with `jq -n --rawfile`:
+  `{version, notes, pub_date, platforms: {"darwin-aarch64": {signature, url}}}`,
+  where `notes` is the release's body, `signature` the `.sig` file's content
+  and `url` the tag's own download URL of the archive. It uploads the file
+  and only then runs `gh release edit "$GITHUB_REF_NAME" --latest`.
+- `create-release` passes `--latest=false`, so every installed app keeps
+  reading the previous release's complete manifest until the new one is up.
+  If the desktop build fails, the manifest job is skipped and "latest" stays
+  where it was. The CLI's release becomes "latest" at the same moment. The
+  release stays public from its first minute rather than a draft, because
+  `homebrew-tap` downloads the `.sha256` assets by their tag URL.
+
+Key custody: the private key and its password are the two repository
+secrets, and a copy of both lives in Proton Pass. An installed app accepts
+only archives signed by that key, so losing it ends updates for every
+installed app, which would then need a manual reinstall of an app carrying a
+new public key. Keep the key and `pubkey` unchanged when the Apple signing of
+#0012 arrives.
+
+For a user: install once from the DMG, with the Gatekeeper step above; every
+later version arrives in the app, which checks at launch, at most once a
+day, and then offers "Update to X.Y.Z" at the sidebar's foot. "Check for
+updates" in the palette, the App menu or Settings checks at once; the
+download shows on a card in the activity area, and "Restart now" switches to
+the new version ([shell.md](../clients/desktop/docs/shell.md), "Updates").
 
 ### `mp` on PATH from the app
 

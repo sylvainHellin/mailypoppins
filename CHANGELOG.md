@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The desktop app can update itself from GitHub Releases (#0139).**
+  - At launch, at most once a day, the app checks for a newer version; the App menu's "Check for Updates…", the palette's "Check for updates" and the Settings line's "Check now" check at once and say the answer on the notice line.
+  - A newer version shows as "Update to X.Y.Z" at the sidebar's foot and in the palette; choosing it shows the download's progress on a card in the activity area, which then offers "Restart now" or "Later", asks about drafts still open in the embedded editor before a restart, and on a failure says why with a link to the release page.
+  - An update downloads, has its signature checked against the key the app ships with, and replaces `mailypoppins.app` in place while the app and its daemon keep running; a restart then stops the daemon and opens the new version, which starts a daemon of its own version.
+  - A release now carries the signed updater archive (`mailypoppins-desktop-aarch64-apple-darwin.app.tar.gz` and its `.sig`) and `latest.json`, and becomes the latest release only once that manifest is uploaded; a tag whose version differs from `Cargo.toml` publishes no manifest.
+  - The app bundle is signed ad hoc until the Apple signing of #0012.
 - `scripts/install-local.sh` pulls and installs `mp` and the desktop app from source on a Mac in one run: `cargo install`, `pnpm bundle` with that `mp` as the sidecar, the running app quit and the new one swapped into `/Applications`, one daemon restart (through launchd when the login agent is loaded), the app relaunched; `--no-pull`, `--no-gui`, `--allow-dirty`, `--dry-run`.
 - **`mp send --invite` sends all-day events and updates of an invitation already sent (#0140).**
   - A bare date as `--start` (`--start 2026-12-24`) sends an all-day event, which calendars show in the all-day row; without `--end` it is that one day.

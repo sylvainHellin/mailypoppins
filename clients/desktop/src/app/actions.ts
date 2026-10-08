@@ -17,6 +17,7 @@ import { copyFromMessage, openConfig, openLog, openMeta } from "@/app/interop";
 import { hiddenNotice, viewPanes } from "@/app/views";
 import { saveTheme } from "@/app/theme";
 import { saveReaderMode, toggleReaderMode } from "@/app/readerMode";
+import { checkForUpdates, installUpdate, restartIntoUpdate } from "@/app/updates";
 import { actionTargets, type Action } from "@/app/reducer";
 import {
   draftItems,
@@ -319,6 +320,12 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return void saveReaderMode(dispatch, "html");
     case "reader_text":
       return void saveReaderMode(dispatch, "text");
+    case "check_updates":
+      return void checkForUpdates(dispatch, true);
+    case "update_install":
+      return void installUpdate(s, dispatch);
+    case "update_restart":
+      return void restartIntoUpdate(s, dispatch);
     case "calendar_open_source":
       return void openEventSource(s, dispatch);
     case "calendar_toggle_past":

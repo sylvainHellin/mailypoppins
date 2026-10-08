@@ -45,6 +45,9 @@ import type {
   MessageText,
   MutationAck,
   MutationBatch,
+  UpdateCheck,
+  UpdateProgress,
+  UpdateStatus,
   VersionInfo,
 } from "@/lib/gui-types";
 
@@ -112,10 +115,18 @@ export function outboxListing(account: string): OutboxListing {
   };
 }
 
+/** updates.rs's gate in fixture mode. */
+export const UPDATE_DISABLED: UpdateCheck = { state: "disabled", current: "0.11.0", reason: "Updates are off in fixture mode." };
+
+/** `update_status` in fixture mode, as updates.rs's gate says. */
+export const UPDATE_STATUS_FIXTURE: UpdateStatus = { current: "0.1.0", enabled: false, reason: "Updates are off in fixture mode." };
+
 export const mock = {
   connection: { state: "connected", instance_id: "fixture-instance-1", daemon_version: "0.0.0-fixture", protocol: 1, fixture: true } as ConnectionStatus,
   channel: null as Channel<GuiEvent> | null,
   menu: null as ((e: { payload: string }) => void) | null,
+  /** Every app event handler `listen` registered, by event name. */
+  listeners: new Map<string, (e: { payload: unknown }) => void>(),
   calls: [] as { cmd: string; args: Record<string, unknown> | undefined }[],
   /** Fail a command with a GuiError-shaped rejection. */
   failing: new Map<string, unknown>(),
@@ -235,7 +246,36 @@ export const mock = {
   signIns: [] as { operation_id: string; account: string; kind: "oauth2" | "graph" }[],
   /** The next sign-in's operation id counter. */
   nextSignIn: 1,
+  /** What `update_check` answers: by default fixture mode's `disabled`, as updates.rs's gate says. */
+  updateCheck: { ...UPDATE_DISABLED } as UpdateCheck,
+  /** What `update_status` answers: by default fixture mode's, updates off. */
+  updateStatus: { ...UPDATE_STATUS_FIXTURE } as UpdateStatus,
+  /** The installs `update_install` started and no test ended yet, oldest first. */
+  updateInstalls: [] as { channel: Channel<UpdateProgress>; resolve: () => void; reject: (why: string) => void }[],
+  /** What `update_restart` rejects with, or null to answer. */
+  updateRestartFailure: null as string | null,
 };
+
+/** Send one message on the oldest running install's channel. */
+export function updateProgress(progress: UpdateProgress): void {
+  const install = mock.updateInstalls[0];
+  if (!install) throw new Error("no update_install is running");
+  install.channel.onmessage(progress);
+}
+
+/** End the oldest running install: `finished` then the answer, or a rejection with `fail`. */
+export function settleUpdateInstall(opts: { fail?: string } = {}): void {
+  const install = mock.updateInstalls.shift();
+  if (!install) throw new Error("no update_install is running");
+  if (opts.fail !== undefined) return install.reject(opts.fail);
+  install.channel.onmessage({ type: "finished" });
+  install.resolve();
+}
+
+/** Emit an app event as `@tauri-apps/api/event`'s `emit` would reach `listen`. */
+export function emitAppEvent(event: string, payload: unknown): void {
+  mock.listeners.get(event)?.({ payload });
+}
 
 /** fixture.rs's `DEVICE_CODE_MESSAGE`, the device-code progress's message. */
 export const DEVICE_CODE_MESSAGE = "https://microsoft.com/devicelogin FXTR-CODE";
@@ -345,6 +385,7 @@ export function resetMock(): void {
   mock.connection = { state: "connected", instance_id: "fixture-instance-1", daemon_version: "0.0.0-fixture", protocol: 1, fixture: true };
   mock.channel = null;
   mock.menu = null;
+  mock.listeners.clear();
   mock.calls = [];
   mock.failing.clear();
   mock.rowShift = 0;
@@ -400,6 +441,10 @@ export function resetMock(): void {
   mock.config = clone(fixtures.config);
   mock.signIns = [];
   mock.nextSignIn = 1;
+  mock.updateCheck = { ...UPDATE_DISABLED };
+  mock.updateStatus = { ...UPDATE_STATUS_FIXTURE };
+  mock.updateInstalls = [];
+  mock.updateRestartFailure = null;
 }
 
 /** `mp_core::addresses::format_recipient`: the name quoted when it holds a character outside atext and spaces. */
@@ -1061,6 +1106,22 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     }
     case "open_external":
       return undefined;
+    // updates.rs: the check never rejects, the install and the restart reject with a string.
+    case "update_check":
+      return clone(mock.updateCheck);
+    case "update_status":
+      return clone(mock.updateStatus);
+    case "update_skip":
+      return null;
+    case "update_install": {
+      const channel = args.on_progress as Channel<UpdateProgress>;
+      return new Promise<null>((resolve, reject) => {
+        mock.updateInstalls.push({ channel, resolve: () => resolve(null), reject });
+      });
+    }
+    case "update_restart":
+      if (mock.updateRestartFailure !== null) throw mock.updateRestartFailure;
+      return null;
     case "search_local": {
       // fixture.rs's `matches`: subject, sender or body, case-insensitive.
       const params = args.params as { account: string; query: string; mailbox?: string };
@@ -1711,8 +1772,11 @@ export const openPicker = vi.fn(async (options: Record<string, unknown> = {}) =>
 
 export const listen = vi.fn(async <T,>(event: string, handler: (e: { payload: T }) => void) => {
   if (event === "menu") mock.menu = handler as unknown as (e: { payload: string }) => void;
+  const h = handler as unknown as (e: { payload: unknown }) => void;
+  mock.listeners.set(event, h);
   return () => {
     if (event === "menu") mock.menu = null;
+    if (mock.listeners.get(event) === h) mock.listeners.delete(event);
   };
 });
 

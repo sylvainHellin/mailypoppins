@@ -9,6 +9,7 @@ import { usePaneFocused } from "@/hooks/use-pane-focused";
 import { accountNames, type AppState, type View } from "@/app/state";
 import type { AccountState, SyncHealthState } from "@/protocol/types";
 import { outboxSummary, type OutboxSummary } from "@/app/outbox";
+import { installUpdate, updateEntryLabel } from "@/app/updates";
 
 type AccountView = {
   name: string;
@@ -61,6 +62,10 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
     s.sidebarCursor ??
     (s.selection.account && s.selection.mailbox ? { account: s.selection.account, slug: s.selection.mailbox } : null);
   const selectedAccount = s.selection.account;
+  const updateLabel = updateEntryLabel(s.update);
+  const update = updateLabel
+    ? { label: updateLabel, restart: s.update.kind === "installed", onChoose: () => void installUpdate(s, dispatch) }
+    : null;
   return (
     <Sidebar variant="inset" collapsible={collapsible} className={collapsible === "none" ? "w-full" : undefined}>
       <SidebarHeader>
@@ -95,7 +100,7 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
               onSelect={onSelect}
             />
           ))}
-          <ViewEntries current={s.view} onOpen={onOpenView} onActivity={onActivity} />
+          <ViewEntries current={s.view} onOpen={onOpenView} onActivity={onActivity} update={update} />
         </nav>
       </SidebarContent>
     </Sidebar>

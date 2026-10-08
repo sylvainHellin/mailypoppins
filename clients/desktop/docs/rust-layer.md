@@ -25,6 +25,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
 | `menu.rs` | The native menus (App, File, Edit, View, Window, Help) and their `menu` event |
+| `updates.rs` | The app's own updates: the check, the install, the relaunch, `update-state.json` |
 | `error.rs` | `GuiError` |
 
 ## Conventions
@@ -157,6 +158,11 @@ The type blocks in this document are for reading, and the generated files are th
 | `open_external` | `url` (http, https or mailto) | nothing; opens it in the default handler |
 | `version_info` | none | `VersionInfo` |
 | `fixture_simulate` | `what` | nothing; fixture mode only |
+| `update_check` | `manual` (boolean) | `UpdateCheck`; never rejects (see Updates) |
+| `update_status` | none | `UpdateStatus`; reads managed state and `update-state.json`, never the network |
+| `update_skip` | `version` | nothing; the silent check stops offering that version |
+| `update_install` | `on_progress: Channel<UpdateProgress>` | nothing, once the new bundle is in place; rejects with a string |
+| `update_restart` | none | nothing; stops the daemon and relaunches into the installed version |
 
 ```ts
 type ConnectError = {
@@ -772,7 +778,7 @@ The scheme's plain-text fallback reads the same command, so the two never disagr
 
 ## Menus
 
-`menu.rs` builds the menu bar with `tauri::menu`, no plugin: the App, Edit and Window menus are the predefined macOS items, and File, View and Help carry our own.
+`menu.rs` builds the menu bar with `tauri::menu`, no plugin: the Edit and Window menus are the predefined macOS items, the App menu is too apart from "Check for Updates…" and "Settings…", and File, View and Help carry our own.
 Each of ours emits its id as the `menu` event (`listen("menu", …)`, allowed by `core:default`), and the frontend runs the same action its key runs (`MENU_ACTIONS` in `src/app/actions.ts`, pinned by a Rust test that reads that file):
 
 | Id | Menu | Runs |
@@ -786,6 +792,104 @@ Each of ours emits its id as the `menu` event (`listen("menu", …)`, allowed by
 | `keyboard_shortcuts` | Help | `?` |
 
 No item takes an accelerator the webview's keymap owns, since a menu key equivalent reaches AppKit before the page and a bare `z` would stop the user typing one.
+
+"Check for Updates…", under About in the App menu, is not one of these: its id `check_for_updates` emits the event `update:check_requested` with no payload, and the frontend runs `update_check` with `manual: true` so its notice line shows the answer (see Updates).
+
+## Updates
+
+`updates.rs` keeps the app current from GitHub Releases through `tauri-plugin-updater` (#0139, stage 1).
+The plugin reads `latest.json` from the one endpoint in `tauri.conf.json` (`plugins.updater.endpoints`, `https://github.com/sylvainHellin/mailypoppins/releases/latest/download/latest.json`) and checks the archive's minisign signature against `plugins.updater.pubkey`.
+`requireSignedVersion` is on, so a signature whose trusted comment names another version than the manifest is refused; `tauri build` writes that version into every signature it makes.
+On macOS the install untars the archive, renames the running bundle away and the new one into place, with an administrator prompt only when the bundle's directory is not writable.
+The check and the install run in Rust: the plugin is registered for its Rust API, the capability grants no `updater:*` permission, and the CSP is unchanged.
+
+### When it checks
+
+Nothing checks or installs when `updates::gate` says no (`update_check` answers `disabled`, `update_install` rejects):
+
+- a debug build (`cfg!(debug_assertions)`), which is `0.1.0` and would always see an update;
+- fixture mode (`MP_DESKTOP_FIXTURE=1` or `--fixture`);
+- an executable whose path does not contain `.app/Contents/MacOS/`, such as a release binary run from `target/`.
+
+The silent check runs once, 10 s after setup, and only when the last successful check is 24 h old or more, none was recorded, or the clock went back past it.
+A version it finds is held for `update_install`, and announced with the event `update:available` unless it is the skipped version.
+A failed silent check is logged at warn and shown nowhere.
+
+`current` in every answer is `package_info().version`, the bundle's version, which `pnpm bundle` stamps with `mp`'s and the updater compares with the manifest's.
+It is not `version_info`'s `app_version`, the desktop crate's own `0.1.0`.
+
+### update-state.json
+
+The file sits in the app data directory (`~/Library/Application Support/dev.mailypoppins.desktop/` on macOS), beside `desktop.json`, whose commands accept only `SettingKey` names:
+
+```json
+{ "last_check": "2026-10-05T12:00:00Z", "skipped_version": "0.12.0", "pending_restart": { "from": "0.11.0", "to": "0.12.0" } }
+```
+
+- `last_check` is the last successful check, RFC 3339, written by the silent check and by `update_check` alike; a failed check leaves it.
+- `skipped_version` is what `update_skip` recorded.
+- `pending_restart` is written by a successful install; the next launch logs it and clears it 10 s after setup, and stage 2 will read it before then to restart a daemon of version `from` without the blocking screen.
+
+Each key is `null` when unset.
+A missing file, one that does not parse, and a key of the wrong type all read as empty, with a warning in the log for the last two; an unknown key is ignored.
+A write goes to a temporary file in the same directory and is renamed over the old one, under a lock, so two writes never interleave and a crash leaves one whole file.
+
+### Commands and events
+
+```ts
+type UpdateCheckState = "up_to_date" | "available" | "disabled" | "failed";
+type UpdateCheck = {
+  state: UpdateCheckState; current: string;
+  version?: string; notes?: string; date?: string; // when available; date is RFC 3339
+  reason?: string;                                 // when disabled or failed, a sentence to show
+  last_check?: string;                             // RFC 3339, absent before the first successful check
+};
+type UpdateStatus = {
+  current: string; enabled: boolean;
+  reason?: string;     // when not enabled, the gate's sentence
+  last_check?: string; // RFC 3339, absent before the first successful check
+  available?: string;  // the version held in managed state, unless it is the skipped one
+  installed?: string;  // the version this run installed, waiting for update_restart
+};
+type UpdateAvailable = { version: string; notes?: string; date?: string };
+type UpdateProgress =
+  | { type: "started"; content_length?: number }
+  | { type: "progress"; downloaded: number; content_length?: number }
+  | { type: "finished" };
+```
+
+`update_check { manual }` answers an `UpdateCheck` and never rejects.
+With `manual: true` it always asks the endpoint and offers a skipped version too.
+With `manual: false` it keeps the cooldown, answering inside it from memory (`available` when this run already found a version the user did not skip, else `up_to_date`), and a skipped version answers `up_to_date`.
+A check that cannot run answers `disabled` with the gate's sentence ("Updates are off in a development build."), and one that fails answers `failed` with the plugin's error.
+Every check that reaches the endpoint replaces the held update, or clears it when there is none.
+
+`update_status` answers an `UpdateStatus` from what this run already knows: `package_info().version`, the gate, the state file's `last_check` and `skipped_version`, the update the last check holds and the version this run installed.
+It never reaches the endpoint and never rejects.
+Settings reads it each time it opens, for the version, the last check and the gate's sentence, and the window reads it once on mount, so a webview that reloaded still offers an update this run holds (`available`) or the restart into one it installed (`installed`).
+A restart clears both, since they live in managed state; `pending_restart` in the file is not read here.
+
+`update_skip { version }` records `skipped_version`; a manual check still offers that version.
+
+`update_install { on_progress }` downloads, verifies and installs the held update, or the update a fresh check finds when none is held, and resolves once the new bundle is in place.
+The channel carries `started` (with the archive's size when the server sent one), `progress` with the bytes downloaded so far at most every 100 ms and once at the end, and `finished` after the signature checked out and the bundle was replaced.
+The app and its daemon keep running from the old binaries throughout, so a failed download or a refused signature leaves both as they were.
+On success it records `pending_restart` and remembers the version for `update_restart`.
+A second install while one runs is refused, and one of the version this run already installed sends `finished` at once.
+It rejects with a plain string, the sentence to show, not a `GuiError`: the gate's sentence, "mailypoppins X is up to date." when there is nothing to install, or the plugin's error (network, signature, permissions).
+
+`update_restart` needs an install from this run, and rejects with a string otherwise.
+It holds off the session's on-demand start, sends `daemon.stop` over the app's session (a lifecycle method every daemon answers, not in `REQUIRED_CAPABILITIES`), waits up to 15 s for the daemon's socket to go, and calls `AppHandle::request_restart`, which runs the exit path (the terminals are killed) and starts the new bundle.
+No daemon to stop is fine, and a daemon still there after the wait is logged and left to the new app's restart screen.
+The new app starts a daemon of its own version on its first connect.
+The frontend asks about open drafts first, as a window close does; this command asks nothing.
+
+| Event | Payload | When |
+|---|---|---|
+| `update:available` | `UpdateAvailable` | the silent startup check found a version the user did not skip |
+| `update:check_requested` | none (`null`) | the App menu's "Check for Updates…" |
+
+Both are app events, heard with `listen` under `core:default`, like `menu`.
 
 ## Links
 
@@ -805,6 +909,7 @@ The policy lives in `tauri.conf.json` under `app.security.csp`:
 - `dangerousDisableAssetCspModification: ["style-src"]` stops Tauri from adding a nonce to `style-src` when `index.html` carries an inline `<style>`, which would switch `'unsafe-inline'` off.
 
 The capability grants `core:default`, `core:window:allow-destroy` (the close of a window that asked first, see Terminal sessions), `opener:allow-open-url` scoped to `https://*`, `http://*` and `mailto:*`, and `dialog:allow-open`, the native file and folder picker of the Save and Attach file dialogs ([reader.md](reader.md), "Attachments").
+`tauri-plugin-updater` is registered too, for its Rust API alone (see Updates), and the webview is granted none of its commands.
 `tauri-plugin-dialog` is registered in the builder for that picker alone, which the webview calls through `@tauri-apps/plugin-dialog`; no command of this layer opens a dialog, and the plugin's save, message, ask and confirm stay unallowed.
 The picker hands back a path, and since no `fs:` permission is granted the webview reads nothing through it: `attachment_save` and `draft_attach` read and write the disk themselves, as they do for a typed path.
 
