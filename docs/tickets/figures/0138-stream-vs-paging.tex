@@ -1,0 +1,95 @@
+%% 0138-stream-vs-paging.tex -- where a mailbox listing's work lives in the two
+%% designs ticket 0138 weighs: the daemon streams the whole list once and the
+%% client keeps its in-memory model (A), or the daemon serves pages and every
+%% list interaction becomes a round trip (B).
+%%
+%% Requires texfig.sty (~/code/side-projects/tex-fig). Preview:
+%%   ~/code/side-projects/tex-fig/examples/build.sh <this file> 200
+\providecommand{\tffigwidth}{\linewidth}
+\resizebox{\tffigwidth}{!}{%
+\begin{tikzpicture}[font=,
+  label chip/.style 2 args={tfchip={#1}{0pt}, minimum width=#2,
+    minimum height=0.44cm, inner sep=2pt, font=\scriptsize},
+  hop/.style={tfarrowc=#1, line width=0.7pt, -{Latex[length=1.8mm,width=1.4mm]}},
+  body/.style={tflabel, font=\footnotesize},
+  verdict/.style={tfcaption, font=\footnotesize, text width=9cm}]
+
+% ===================================================================
+% A: streamed whole list
+% ===================================================================
+% daemon
+\node[tfcardtitlec=tfBlue] (aDt) at (0,-0.15) {daemon};
+\node[body] (aDb) at (1.3,-0.95) {store read,\\one snapshot};
+\coordinate (aDse) at (2.6,-4.8);
+% client
+\node[tfcardtitlec=tfBlue] (aCt) at (6.2,-0.15) {client};
+\node[body] (aCb) at (7.6,-0.95) {full list\\in memory};
+\foreach \txt [count=\i] in {sort, filter, jump-to-date, select-all}
+  \node[label chip={tfBlue}{2.8cm}] at (7.6,{-1.35-0.55*\i}) {\txt};
+\node[label chip={tfTeal}{2.8cm}] (aCd) at (7.6,-4.35) {row deltas\\applied locally};
+\coordinate (aCse) at (9.0,-4.8);
+
+\begin{scope}[on background layer]
+  \node[tfcard, fit=(aDt)(aDb)(aDse)] (aD) {};
+  \node[tfcard, fit=(aCt)(aCb)(aCd)(aCse)] (aC) {};
+\end{scope}
+
+% the stream: head, rows chunks, finished
+\draw[tfarrowc=tfBlue] (aD.east |- 0,-0.95) -- (aC.west |- 0,-0.95)
+  node[midway, above=2pt, tfedgelabelc=tfBlue] {head \{total\}};
+\draw[tfarrowc=tfBlue] (aD.east |- 0,-2.45) -- (aC.west |- 0,-2.45);
+\foreach \d in {0.24,0.12,0}
+  \node[label chip={tfBlue}{1.7cm}, minimum height=0.8cm, fill=tfLightBlue]
+    at ({4.4+\d},{-2.45+\d}) {\texttt{rows} chunk\\1 MiB};
+\node[tflabelc=tfBlue] at (4.4,-3.2) {\dots};
+\draw[hop=tfBlue, dash pattern=on 3pt off 2.2pt]
+  (aD.east |- 0,-4.1) -- (aC.west |- 0,-4.1)
+  node[midway, above=2pt, tfedgelabelc=tfBlue] {operation.finished};
+
+\begin{pgfonlayer}{grouping}
+  \node[tfpanelc=tfBlue, fit=(aD)(aC)] (aP) {};
+\end{pgfonlayer}
+\node[tftitle] at (aP.north west) {A. Streamed whole list (\#0138)};
+\node[verdict, anchor=north] at ($(aP.south)+(0,-0.15)$)
+  {transport changes, client model stays};
+
+% ===================================================================
+% B: server-side paging
+% ===================================================================
+\begin{scope}[xshift=10.7cm]
+% daemon
+\node[tfcardtitlec=tfOrange] (bDt) at (0,-0.15) {daemon};
+\node[body] (bDb) at (1.5,-0.95) {store read\\per call};
+\foreach \txt [count=\i] in {{page \{offset, size\}}, count, filter, jump-to-date,
+                             select-all ids, unread index}
+  \node[label chip={tfOrange}{3.0cm}] at (1.5,{-1.3-0.5*\i}) {\txt};
+\coordinate (bDse) at (3.0,-4.8);
+% client
+\node[tfcardtitlec=tfOrange] (bCt) at (6.2,-0.15) {client};
+\node[body] (bCb) at (7.6,-0.95) {window of\\$\sim$200 rows};
+\node[label chip={tfTeal}{2.8cm}] (bCd) at (7.6,-2.25) {row deltas re-mapped\\to the window};
+\coordinate (bCse) at (9.0,-4.8);
+
+\begin{scope}[on background layer]
+  \node[tfcard, fit=(bDt)(bDb)(bDse)] (bD) {};
+  \node[tfcard, fit=(bCt)(bCb)(bCd)(bCse)] (bC) {};
+\end{scope}
+
+% round trips: a request to the daemon and its reply, per interaction
+\foreach \lbl [count=\i] in {page, count, filter, jump} {
+  \pgfmathsetmacro{\y}{-0.95-0.95*(\i-1)}
+  \draw[hop=tfOrange] (bC.west |- 0,\y+0.08) -- (bD.east |- 0,\y+0.08);
+  \draw[hop=tfOrange] (bD.east |- 0,\y-0.08) -- (bC.west |- 0,\y-0.08);
+  \node[tfedgelabelc=tfOrange, above=2pt] at ($(bD.east |- 0,\y+0.08)!0.5!(bC.west |- 0,\y+0.08)$) {\lbl};
+}
+\node[tflabelc=tfOrange] at ($(bD.east |- 0,-4.4)!0.5!(bC.west |- 0,-4.4)$) {\dots};
+
+\begin{pgfonlayer}{grouping}
+  \node[tfpanelc=tfOrange, fit=(bD)(bC)] (bP) {};
+\end{pgfonlayer}
+\node[tftitle] at (bP.north west) {B. Server-side paging};
+\node[verdict, anchor=north] at ($(bP.south)+(0,-0.15)$)
+  {every list interaction becomes a round trip;\\both clients' list models rewritten};
+\end{scope}
+
+\end{tikzpicture}}
