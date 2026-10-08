@@ -1,8 +1,14 @@
 // Keyboard routing the way the TUI routes it: global keys first, then the
 // focused pane's. Keys are ignored while a text field has focus, except
 // Escape, which leaves the field; an open dialog owns every key.
+//
+// A key pressed inside the reader frame stays in the frame's document; its
+// bridge posts it here, and it is dispatched again as a keydown on the frame
+// element, so it runs through this same handler as any other key
+// (docs/reader.md, "The bridge").
 
 import { useEffect, useRef, type Dispatch } from "react";
+import { flushSync } from "react-dom";
 import type { Action } from "@/app/reducer";
 import { draftsShown, liveHolds, screenFor, type AppState } from "@/app/state";
 import { hiddenNotice } from "@/app/views";
@@ -11,11 +17,13 @@ import { CONTACTS_SEARCH_ID } from "@/app/contacts";
 import { describeKey, type ActionId, type Badge } from "@/keymap/catalog";
 import { VIEW_AGNOSTIC_COMBOS, VIEW_SHARED_KEYS, viewKeyTable } from "@/keymap/viewKeys";
 import { setPendingPrefix } from "@/keymap/pendingPrefix";
+import { forwardedKey, scrollReaderFrame, scrollReaderFrameTo } from "@/components/reader/ReaderBody";
 
 /** How long an armed prefix waits for its continuation; a timer then drops it. */
 export const PREFIX_TIMEOUT_MS = 1200;
 const PREFIXES = new Set(["g", "f", "c", "t", "s"]);
-const LINE_PX = 48;
+/** One `j`/`k` step of the reader, in pixels. */
+export const LINE_PX = 48;
 
 const MESSAGE_KEYS: Record<string, ActionId> = {
   r: "reply",
@@ -55,9 +63,16 @@ export function isEditable(el: EventTarget | null): boolean {
   return false;
 }
 
+/**
+ * Scroll the reader. In html mode the body scrolls inside the frame, so a
+ * line or a page goes to the frame's bridge, and a jump to the top or the
+ * bottom moves the frame and the pane that holds the header block alike;
+ * with no frame (text mode, a draft, a server-only hit) the pane scrolls.
+ */
 function scrollReader(by: number | "top" | "bottom"): void {
   const el = document.getElementById(READER_SCROLL_ID);
-  if (!el) return;
+  const framed = typeof by === "number" ? scrollReaderFrame(by) : scrollReaderFrameTo(by);
+  if (!el || (framed && typeof by === "number")) return;
   if (by === "top") el.scrollTop = 0;
   else if (by === "bottom") el.scrollTop = el.scrollHeight;
   else el.scrollTop += by;
@@ -249,6 +264,8 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       if (pending) {
         handled();
         const combo = pending.key === " " ? `Space ${e.key}` : `${pending.key}${e.key}`;
+        // In the reader `gg` is the top of the message, as `G` is its bottom.
+        if (combo === "gg" && !view && s.focus === "reader") return scrollReader("top");
         const id = resolvePrefix(s, combo);
         if (id === "notice") return notice(combo);
         if (id) return run(id);
@@ -404,13 +421,30 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       if (prefix.current && isEditable(e.target)) disarm();
     };
 
+    // A key the reader frame's bridge forwarded. It is dispatched on the
+    // frame element, this document's focused element while the focus is in
+    // the frame, so onKey and every other keydown listener see it as a key
+    // pressed there; no second routing path exists. The frame belongs to the
+    // reader, which may not be the recorded pane yet (a click into the frame
+    // need not reach the pane's focus handler), so the reader is recorded
+    // first, synchronously, for onKey to read. Every other message is ignored
+    // (forwardedKey).
+    const onMessage = (e: MessageEvent) => {
+      const forwarded = forwardedKey(e);
+      if (!forwarded) return;
+      if (ref.current.focus !== "reader") flushSync(() => dispatch({ type: "pane_focused", pane: "reader" }));
+      forwarded.frame.dispatchEvent(new KeyboardEvent("keydown", { ...forwarded.init, bubbles: true, cancelable: true }));
+    };
+
     window.addEventListener("keydown", onKey);
     window.addEventListener("blur", onBlur);
     window.addEventListener("focusin", onFocusIn);
+    window.addEventListener("message", onMessage);
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("focusin", onFocusIn);
+      window.removeEventListener("message", onMessage);
       disarm();
     };
   }, [dispatch]);

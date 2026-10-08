@@ -2595,6 +2595,8 @@ name = "mp-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "getrandom 0.4.3",
  "mp-client",
  "mp-core",
  "mp-protocol",

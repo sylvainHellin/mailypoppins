@@ -4,6 +4,8 @@ import { renderApp, shellReady } from "@/test/render";
 import { emitEnvelope, emitMenu, fixtures, mock } from "@/test/tauri-mock";
 import { VIEW_KEYS } from "@/keymap/viewKeys";
 import type { ActionId } from "@/keymap/catalog";
+import { LINE_PX } from "@/keymap/useKeymap";
+import { HALF_PAGE } from "@/app/actions";
 
 function lastRow(list: HTMLElement): HTMLElement {
   const rows = within(list).getAllByRole("option");
@@ -811,5 +813,138 @@ describe("views (the TUI's Space m, Space c, Space a)", () => {
     await region("Contacts");
     act(() => emitMenu("settings"));
     expect(await region("Settings")).toBeInTheDocument();
+  });
+});
+
+describe("the reader frame's keys (PERSO-81)", () => {
+  const reader = () => screen.getByRole("complementary", { name: "Reader" });
+  const scrollPane = () => document.getElementById("mp-reader-scroll") as HTMLElement;
+
+  /** Open the first message, focus the reader pane, and spy on the frame's window. */
+  async function openFrame(user: ReturnType<typeof renderApp>["user"]) {
+    await user.keyboard("j");
+    const frame = (await within(reader()).findByTitle("Message body: Quarterly ledger review")) as HTMLIFrameElement;
+    const target = frame.contentWindow;
+    if (!target) throw new Error("the frame has no window");
+    const post = vi.spyOn(target, "postMessage").mockImplementation(() => {});
+    act(() => scrollPane().focus());
+    return { frame, target, post };
+  }
+
+  /** A message to this window from `source`, as a postMessage would deliver it. */
+  function deliver(data: unknown, source: Window | null) {
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", { data, source }));
+    });
+  }
+
+  const key = (k: string, mods: Partial<Record<"ctrlKey" | "metaKey" | "altKey" | "shiftKey", boolean>> = {}) => ({
+    type: "key",
+    key: k,
+    code: "",
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...mods,
+  });
+
+  it("in html mode j, k, Ctrl+d, Ctrl+u, G and gg post to the frame's window with target *", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const { post } = await openFrame(user);
+    await user.keyboard("j");
+    await user.keyboard("k");
+    await user.keyboard("{Control>}d{/Control}");
+    await user.keyboard("{Control>}u{/Control}");
+    await user.keyboard("G");
+    await user.keyboard("gg");
+    expect(post.mock.calls).toEqual([
+      [{ type: "scroll", dy: LINE_PX }, "*"],
+      [{ type: "scroll", dy: -LINE_PX }, "*"],
+      [{ type: "scroll", dy: HALF_PAGE * LINE_PX }, "*"],
+      [{ type: "scroll", dy: -HALF_PAGE * LINE_PX }, "*"],
+      [{ type: "scrollTo", y: "bottom" }, "*"],
+      [{ type: "scrollTo", y: "top" }, "*"],
+    ]);
+    // The keys scrolled the body: the selection and the pane stayed.
+    expect(selectedSubject()).toMatch(/Quarterly ledger review/);
+    expect(scrollPane().scrollTop).toBe(0);
+  });
+
+  it("in text mode the same keys scroll the reader's pane, and gg goes back to its top", async () => {
+    const { user } = renderApp(1400, () => mock.settings.set("reader_mode", "text"));
+    await shellReady();
+    await user.keyboard("j");
+    await within(reader()).findByLabelText(/^Message text: /);
+    expect(reader().querySelector("iframe")).toBeNull();
+    act(() => scrollPane().focus());
+    await user.keyboard("jj");
+    expect(scrollPane().scrollTop).toBe(2 * LINE_PX);
+    await user.keyboard("k");
+    expect(scrollPane().scrollTop).toBe(LINE_PX);
+    await user.keyboard("{Control>}d{/Control}");
+    expect(scrollPane().scrollTop).toBe(LINE_PX + HALF_PAGE * LINE_PX);
+    await user.keyboard("gg");
+    expect(scrollPane().scrollTop).toBe(0);
+    expect(selectedSubject()).toMatch(/Quarterly ledger review/);
+  });
+
+  it("a key the frame forwards runs as the same key pressed in the app", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const { frame, target, post } = await openFrame(user);
+    act(() => frame.focus());
+    expect(document.activeElement).toBe(frame);
+    deliver(key("j"), target);
+    expect(post.mock.calls).toEqual([[{ type: "scroll", dy: LINE_PX }, "*"]]);
+    deliver(key("d", { ctrlKey: true }), target);
+    expect(post.mock.calls[1]).toEqual([{ type: "scroll", dy: HALF_PAGE * LINE_PX }, "*"]);
+    // A prefix arms and resolves across two forwarded keys.
+    deliver(key("g"), target);
+    deliver(key("g"), target);
+    expect(post.mock.calls[2]).toEqual([{ type: "scrollTo", y: "top" }, "*"]);
+    // J moves the selection, as it does from the app.
+    deliver(key("J", { shiftKey: true }), target);
+    await waitFor(() => expect(selectedSubject()).toMatch(/Angebot Dachsanierung/));
+  });
+
+  it("a forwarded key acts as the reader's even when another pane was the recorded one", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const { frame, target, post } = await openFrame(user);
+    // Back to the list, then the focus enters the frame without the reader
+    // pane hearing it.
+    await user.keyboard("{Tab}{Tab}");
+    expect(document.activeElement?.closest("[data-pane]")).toHaveAttribute("data-pane", "list");
+    const active = vi.spyOn(document, "activeElement", "get").mockReturnValue(frame);
+    deliver(key("j"), target);
+    active.mockRestore();
+    expect(post.mock.calls).toEqual([[{ type: "scroll", dy: LINE_PX }, "*"]]);
+    expect(selectedSubject()).toMatch(/Quarterly ledger review/);
+    expect(document.querySelector('[data-pane][data-focused="true"]')).toHaveAttribute("data-pane", "reader");
+  });
+
+  it("ignores a message from another window, one that is not a key, and a key while the frame has no focus", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const { frame, target, post } = await openFrame(user);
+    const other = document.createElement("iframe");
+    document.body.appendChild(other);
+    act(() => frame.focus());
+    deliver(key("j"), window);
+    deliver(key("j"), other.contentWindow);
+    deliver(key("j"), null);
+    deliver({ type: "scroll", dy: 48 }, target);
+    deliver({ type: "key" }, target);
+    deliver({ type: "key", key: "x".repeat(40) }, target);
+    deliver("j", target);
+    expect(post).not.toHaveBeenCalled();
+    expect(selectedSubject()).toMatch(/Quarterly ledger review/);
+    // The focus back on the pane: the frame cannot send keys it did not get.
+    act(() => scrollPane().focus());
+    deliver(key("J", { shiftKey: true }), target);
+    expect(selectedSubject()).toMatch(/Quarterly ledger review/);
+    other.remove();
   });
 });

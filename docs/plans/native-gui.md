@@ -163,11 +163,15 @@ A message without markup is `-32602`, and the reader shows the stored plain text
 The rendering rule, decided on 2026-09-30 from the M0 findings:
 
 - The reader loads the rendition as its own document from the custom URI scheme, `mpmsg://localhost/<account>/<row_id>` on macOS.
-- A Rust scheme handler answers that URL with the `message.html` string and the daemon's policy above as a `Content-Security-Policy` response header, a constant in the handler and never a value read out of the message, since a header may carry `report-uri` and a sender can hide a meta-looking policy inside the doctype.
+- A Rust scheme handler answers that URL with the `message.html` string and the daemon's policy above, plus `script-src 'nonce-<n>'` for the app's bridge script, with a nonce drawn for each response, as a `Content-Security-Policy` response header, built from constants in the handler and never from a value read out of the message, since a header may carry `report-uri` and a sender can hide a meta-looking policy inside the doctype.
 - The app CSP stays strict: the scheme document ignores it, whereas a `srcdoc` document inherits it, and M0 lost the `data:` images of a `srcdoc` message under `img-src 'self'`.
 - Tauri issue #12767 did not reproduce on macOS 26.6, where the scheme iframe loads, renders and fires `load`; it is retested on macOS 15 before M6.
 - The string never goes through `innerHTML` into the application's own document.
-- The iframe carries `sandbox="allow-popups"` and no `allow-scripts`, so a `target=_blank` link reaches Rust; without `allow-popups` the sandbox drops it and nothing reaches Rust.
+- The iframe carries `sandbox="allow-popups allow-scripts"`, so a `target=_blank` link reaches Rust; without `allow-popups` the sandbox drops it and nothing reaches Rust.
+- `allow-scripts` is there for one script, the app's bridge, which the handler puts into the document after replacing the daemon's meta with one carrying the same policy and nonce as the header (PERSO-81, 2026-10-08), and into the plain-text document it builds for a message without markup; no sender script, `on*` handler or `javascript:` URL carries a nonce the sender could know, so the message still runs nothing.
+  A nonce rather than the bridge's hash, because under CSP Level 3 a hash source also admits `<script src=… integrity="sha256-<the same hash>">`, and the bridge's hash is public.
+  The bridge scrolls the body on the parent's `postMessage` and forwards the keys pressed inside the frame to the keymap, which an opaque origin otherwise keeps from the app; `clients/desktop/docs/reader.md`, "The bridge", has the protocol.
+- The iframe never carries `allow-same-origin`: with scripts allowed it would give the frame the app's origin.
   M0 saw it arrive at `on_navigation`; M1 refuses it at either hook.
 - The app CSP's `frame-src` admits `mpmsg:`, `https:` and `http:`; limited to `mpmsg:`, it blocks a clicked link's frame navigation before `on_navigation` sees it, and the link is silently dead.
 - `on_navigation` sees subframe navigations as well as the main frame, so its allowlist admits the `mpmsg` scheme; it denies every other URL, logs it as intercepted and shows it in a notice under the message.
@@ -176,7 +180,7 @@ The rendering rule, decided on 2026-09-30 from the M0 findings:
 - A `<meta http-equiv="refresh">` does nothing inside the sandbox, and no navigation from it reaches `on_navigation`.
 
 M0 saw the `target=_blank` path with `allow-scripts allow-popups`, because its probe needed a script to click.
-M1 drove the plain-link and `window.open` paths from the app document, and the owner then clicked a plain link, a `target=_blank` link and a form submit in the script-free frame by hand on 2026-09-30: all three were refused, recorded with the steps in `clients/desktop/docs/reader.md`.
+M1 drove the plain-link and `window.open` paths from the app document, and the owner then clicked a plain link, a `target=_blank` link and a form submit by hand on 2026-09-30, in the frame as it was before the bridge: all three were refused, recorded with the steps in `clients/desktop/docs/reader.md`.
 Admitting `https:` and `http:` in `frame-src` leaves `on_navigation` as the only guard against a web page loading in the reader frame, a risk listed below.
 
 ### What the CSP does not cover
@@ -187,7 +191,7 @@ Admitting `https:` and `http:` in `frame-src` leaves `on_navigation` as the only
 - `sandbox`, `frame-ancestors` and `report-uri`, which cannot be set from a meta tag, so sandboxing comes from the host frame.
 - Inline CSS, which is allowed, so a message can imitate client UI.
 
-The CSP does block scripts, remote images, styles, fonts and media, `object` and `embed`, remote or `data:` iframes, form submission, and `<base>`.
+The CSP does block scripts other than the bridge, remote images, styles, fonts and media, `object` and `embed`, remote or `data:` iframes, form submission, and `<base>`.
 
 ## Events, reconnect and re-bootstrap
 

@@ -755,13 +755,15 @@ The frontend keeps each awaited operation's last report (`progress` in the model
 ## The reader
 
 `message_html_meta` answers the headers and `html_url`, `mpmsg://localhost/<account>/<row_id>`.
-The iframe loads that URL with `sandbox="allow-popups"` and no `allow-scripts`; the plan's section "Reading HTML bodies" explains both.
-The frontend side, the refused-link notice and the guard's verification in a real webview are in [reader.md](reader.md).
-The header is always `MESSAGE_CSP` and never a policy read out of the message: a sender can hide a meta-looking policy inside the doctype, ahead of the daemon's tag, and a header may carry `report-uri`.
+The iframe loads that URL with `sandbox="allow-popups allow-scripts"` and never `allow-same-origin`; the plan's section "Reading HTML bodies" explains both.
+The frontend side, the bridge, the refused-link notice and the guard's verification in a real webview are in [reader.md](reader.md).
+The header is built from constants and never from a policy read out of the message: a sender can hide a meta-looking policy inside the doctype, ahead of the daemon's tag, and a header may carry `report-uri`.
+A response that carries the bridge, an HTML rendition or the text one, gets `reader::message_csp(nonce)`, the daemon's policy (`reader::DAEMON_CSP`) plus `script-src 'nonce-<n>'`, with a nonce drawn for that response alone: 16 bytes from `getrandom`, standard base64.
+Every other response carries `DAEMON_CSP` alone.
 The scheme answers:
 
-- 200 with the rendition, the daemon's policy (`reader::MESSAGE_CSP`) as a `Content-Security-Policy` header, `X-Content-Type-Options: nosniff` and `X-Mp-Rendition: html`;
-- 200 with the stored plain text in a minimal document and `X-Mp-Rendition: text` when the message has no markup, read through `message_text_on`;
+- 200 with the rendition, the daemon's meta replaced by one carrying `message_csp(nonce)` and `<script nonce="<n>">` with the bridge right after it, the same policy as a `Content-Security-Policy` header, `X-Content-Type-Options: nosniff` and `X-Mp-Rendition: html`;
+- 200 with the stored plain text, escaped, in a minimal document the handler builds with the same `message_csp(nonce)` meta and the bridge after it, the same header, and `X-Mp-Rendition: text` when the message has no markup, read through `message_text_on`;
 - 404 for an unknown account or row, 400 for a malformed URL, 503 while no daemon answers, 504 on a timeout.
 
 A rendition over 8 MiB goes through `message.materialise_html`, and the handle is released as soon as the file is read.
