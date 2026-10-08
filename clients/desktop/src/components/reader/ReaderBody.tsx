@@ -1,10 +1,16 @@
 // <ReaderBody>: the message body as its own document, the `mpmsg` URL the
 // Rust layer serves (clients/desktop/docs/rust-layer.md, "The reader").
 //
-// The frame is sandboxed with `allow-popups` alone: no scripts, no same
-// origin, no forms, no top navigation. `allow-popups` is there so that a
+// The frame is sandboxed with `allow-popups allow-scripts`: no same origin,
+// no forms, no top navigation. `allow-popups` is there so that a
 // `target=_blank` link reaches the Rust layer's `on_new_window`, which refuses
 // it and logs it; without it the sandbox drops the click before Rust sees it.
+// `allow-scripts` runs one script, the app's bridge (src-tauri/src/reader.rs
+// `BRIDGE`), which the reader CSP admits by a nonce drawn for each response
+// and which no sender script carries; never `allow-same-origin`, so the frame stays an opaque
+// origin that cannot reach this document. The bridge scrolls the body on
+// this window's messages and posts back the keys pressed inside the frame,
+// which the keymap runs as its own (docs/reader.md, "The bridge").
 // Remote content is blocked by the reader CSP the scheme sends as a header.
 // A message without markup comes back as a plain-text document on the same
 // URL (`X-Mp-Rendition: text`), so there is one path here.
@@ -22,8 +28,68 @@ import { readerKey } from "@/app/state";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type GuiError } from "@/lib/gui-types";
 
-/** The exact sandbox the reader frame runs in; a test pins it. */
-export const READER_SANDBOX = "allow-popups";
+/** The exact sandbox the reader frame runs in; a test pins it, and that it never holds `allow-same-origin`. */
+export const READER_SANDBOX = "allow-popups allow-scripts";
+
+/** The reader frame, while the reader shows a message in html mode; null otherwise. */
+export function readerFrame(): HTMLIFrameElement | null {
+  return document.querySelector<HTMLIFrameElement>('iframe[data-slot="reader-frame"]');
+}
+
+/** What the bridge obeys; anything else it ignores. */
+export type FrameMessage = { type: "scroll"; dy: number } | { type: "scrollTo"; y: "top" | "bottom" };
+
+/**
+ * Post to the bridge, with target `"*"`: the frame's origin is opaque
+ * ("null"), which no other target matches. False when no frame is shown.
+ */
+function postToFrame(message: FrameMessage): boolean {
+  const target = readerFrame()?.contentWindow;
+  if (!target) return false;
+  target.postMessage(message, "*");
+  return true;
+}
+
+/** Scroll the frame's body by `dy` pixels; false when the reader shows no frame. */
+export function scrollReaderFrame(dy: number): boolean {
+  return postToFrame({ type: "scroll", dy });
+}
+
+/** Scroll the frame's body to its top or bottom; false when the reader shows no frame. */
+export function scrollReaderFrameTo(y: "top" | "bottom"): boolean {
+  return postToFrame({ type: "scrollTo", y });
+}
+
+/** The longest `KeyboardEvent.key` taken from the frame ("ArrowDown", "PageDown" fit with room). */
+const KEY_MAX = 32;
+
+/**
+ * A key the bridge forwarded, as the init of the keydown the keymap gets, and
+ * the frame to dispatch it on; null for any other message. Taken only from
+ * the reader frame's own window, only while the frame holds the focus (a key
+ * pressed inside it is the only way it gets one), and only as
+ * `{type: "key", key, ...}`.
+ */
+export function forwardedKey(e: MessageEvent): { frame: HTMLIFrameElement; init: KeyboardEventInit } | null {
+  const frame = readerFrame();
+  if (!frame || !frame.contentWindow || e.source !== frame.contentWindow) return null;
+  if (document.activeElement !== frame) return null;
+  const data: unknown = e.data;
+  if (typeof data !== "object" || data === null) return null;
+  const m = data as Record<string, unknown>;
+  if (m.type !== "key" || typeof m.key !== "string" || m.key === "" || m.key.length > KEY_MAX) return null;
+  return {
+    frame,
+    init: {
+      key: m.key,
+      code: typeof m.code === "string" && m.code.length <= KEY_MAX ? m.code : "",
+      ctrlKey: m.ctrlKey === true,
+      metaKey: m.metaKey === true,
+      altKey: m.altKey === true,
+      shiftKey: m.shiftKey === true,
+    },
+  };
+}
 
 export type ReaderBodyProps = {
   /** `MessageMeta.html_url`, as the Rust layer hands it over. */
@@ -50,6 +116,7 @@ function ReaderFrame({ htmlUrl, subject }: ReaderBodyProps) {
         </div>
       )}
       <iframe
+        data-slot="reader-frame"
         src={htmlUrl}
         sandbox={READER_SANDBOX}
         referrerPolicy="no-referrer"

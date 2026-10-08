@@ -2256,7 +2256,7 @@ The desktop client reads the code back off the trailing parenthesis (`error::rpc
 `inject_csp_meta` (`crates/mp-core/src/parse.rs`) inserts its tag after the doctype's first `>`, and its stripping regex matches only `http-equiv` before `content`.
 A sender who writes `<!doctype html <meta content="default-src 'none'; report-uri https://t.example/r" http-equiv=Content-Security-Policy>` keeps that string, and it lands ahead of the daemon's tag; the browser reads it as part of the doctype, so the document itself is safe.
 A reader that copies "the first CSP meta" into a response header is not: a header may carry `report-uri`, a meta may not, and every blocked remote image becomes a violation report to the sender.
-The desktop reader (`clients/desktop/src-tauri/src/reader.rs`) therefore sends its own `MESSAGE_CSP` constant as the header and never a value taken from the message; fixture row 1006 carries the trick.
+The desktop reader (`clients/desktop/src-tauri/src/reader.rs`) therefore sends its own policy (`DAEMON_CSP`, or `message_csp(nonce)` when the bridge is in, built from constants and a fresh nonce) as the header and never a value taken from the message; fixture row 1006 carries the trick.
 
 ## TypeScript 6 no longer loads `@types/node` on its own
 
@@ -2281,7 +2281,7 @@ A menu item's key equivalent is handled by AppKit ahead of the page, so an accel
 
 ## A click inside the reader frame cannot be scripted, but the guard can still be probed
 
-The reader frame is cross-origin to the app and sandboxed without `allow-scripts`, so no page script can click a link in it, and on a Mac where the terminal lacks the Accessibility permission (`AXIsProcessTrusted()` false) neither System Events nor posted `CGEvent`s reach the window.
+The reader frame is cross-origin to the app and runs no script but the app's bridge, which clicks nothing, so no page script can click a link in it, and on a Mac where the terminal lacks the Accessibility permission (`AXIsProcessTrusted()` false) neither System Events nor posted `CGEvent`s reach the window.
 What does work, without touching `src/`, is a probe module injected by a throwaway Vite config (`transformIndexHtml`, served through `/@fs/`) and run with `pnpm tauri dev --config '{"build":{"beforeDevCommand":"pnpm exec vite --config <probe config>"}}'`.
 It drives the keymap with dispatched `keydown` events, navigates the reader frame from its parent, and reports by creating hidden subframes on `https://probe.invalid/<step>?…`: `on_navigation` refuses each and logs it, so the Rust log is an ordered transcript.
 `window.open` from the app document with no user gesture still reaches `on_new_window` in WKWebView (macOS 26.6) and returns `null`.
@@ -2495,3 +2495,15 @@ Giving up on a stream is an `operation.cancel` sent as an ordinary call, then re
 `crates/mp-protocol/tests/ts_bindings.rs` is `#![cfg(feature = "ts")]`, so the plain `cargo test --workspace` that CI runs compiles it to zero tests, and a wire type that derives `ts_rs::TS` without being listed in `export_into` goes unnoticed.
 Before #0138, `DraftAttachment`, `DraftAttachments` and `SignatureListing` were in that state, and `cargo test -p mp-protocol --features ts` failed on `every_ts_type_is_listed`.
 Run that command after touching any type in `crates/mp-protocol/src/`, and `pnpm gen:types` in `clients/desktop` when it reports stale bindings.
+
+## In vitest's jsdom, a child frame's `parent` is not the test's `window`, and `postMessage` carries no `source`
+
+`bridge.test.ts` (desktop) runs the reader bridge in a jsdom `<iframe>`, and the first version spied on `window.postMessage` and dispatched messages with `source: window`: nothing happened, because `frame.contentWindow.parent === window` is false under vitest, whose global `window` mirrors jsdom's rather than being it.
+Spy on `frame.contentWindow.parent.postMessage` and pass that object as `source` instead.
+jsdom's own `postMessage` fires the `message` event with no `source` at all (a TODO in its `Window.js`), so a listener that checks `e.source`, as the reader's does, can only be tested with a hand-built `MessageEvent` whose `source` is set; a child frame's scripts do run, since vitest sets `runScripts: "dangerously"`.
+
+## A CSP hash source admits an external script too
+
+Under CSP Level 3 `script-src 'sha256-<h>'` admits an inline script whose text hashes to `<h>`, and also `<script src="https://…" integrity="sha256-<h>">`: the browser fetches the URL and runs the body only if it matches, but the request has gone out.
+The desktop reader first admitted its bridge by hash, and the bridge's text is public, so any sender could have made the reader frame request one URL of their choice.
+It now draws a nonce per response (`fresh_nonce` in `clients/desktop/src-tauri/src/reader.rs`) and puts the same value in the header, the replaced meta and the bridge's `nonce` attribute; a nonce the sender cannot know when writing the message admits nothing they write.

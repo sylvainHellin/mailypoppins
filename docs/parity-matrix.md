@@ -269,8 +269,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `j/k`, `gg/G`, `Ctrl+d`, `Ctrl+u` in the EMAIL LIST and BODY keymap sections (`clients/tui/src/app/keymap.rs`)
 - Daemon surface: client-side over the list `message.list_stream` returned
-- GUI location: clients/desktop: `j`/`k` and the arrows, `gg`/`G`, `Ctrl+d`/`Ctrl+u` in the list, the reader following the selection (M1, #0129)
-- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`j and k move the selection in the list and the reader follows`), with no desktop test of the jumps or the half-page keys
+- GUI location: clients/desktop: `j`/`k` and the arrows, `gg`/`G`, `Ctrl+d`/`Ctrl+u` in the list, the reader following the selection (M1, #0129); the same keys on the reader scroll the body, inside the HTML frame through its bridge (PERSO-81)
+- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`j and k move the selection in the list and the reader follows`, and the block `the reader frame's keys (PERSO-81)`), with no desktop test of the list's jumps or half-page keys
 - Status: GUI shipped (M1, #0129)
 
 ### LST-03 Jump to a date in the list
@@ -400,8 +400,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: `mp show <selector> [--mailbox]`, `src/read_cmd.rs`, `tests/cli_read_surface_integration.rs`
 - Daemon surface: `message.get`, addressed by `"<mailbox>/<uid>"` or by the selector the daemon resolves
-- GUI location: clients/desktop: the reader pane shows the selected message's headers above its `message.html` rendition, loaded from the `mpmsg` scheme in a script-free sandboxed frame (M1, #0129)
-- Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`; `clients/desktop/src/components/reader/reader.test.tsx` (`loads the mpmsg URL in a script-free sandbox, with no referrer`), `clients/desktop/src-tauri/src/commands.rs` (`a_message_reads_as_text_and_as_meta`), `clients/desktop/src-tauri/src/reader.rs` (`the_path_parses_into_an_account_and_a_row`)
+- GUI location: clients/desktop: the reader pane shows the selected message's headers above its `message.html` rendition, loaded from the `mpmsg` scheme in a sandboxed frame whose only script is the app's bridge, admitted by a per-response nonce (M1, #0129; PERSO-81)
+- Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`; `clients/desktop/src/components/reader/reader.test.tsx` (`loads the mpmsg URL in a sandbox that runs scripts but never on the app's origin, with no referrer`), `clients/desktop/src/components/reader/bridge.test.ts`, `clients/desktop/src-tauri/src/commands.rs` (`a_message_reads_as_text_and_as_meta`), `clients/desktop/src-tauri/src/reader.rs` (`the_path_parses_into_an_account_and_a_row`)
 - Status: routed (P4-U4); GUI shipped (M1, #0129)
 - Note: the selector crosses the socket unresolved, because resolving one needs the store the client no longer has; which account it names stays a client-side decision.
 

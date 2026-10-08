@@ -137,7 +137,7 @@ use mp_protocol::send::{
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
 
-use crate::reader::MESSAGE_CSP;
+use crate::reader::DAEMON_CSP;
 
 const BOOTSTRAP: &str = include_str!("../../fixtures/bootstrap.json");
 const ACCOUNTS: &str = include_str!("../../fixtures/accounts.json");
@@ -5035,7 +5035,7 @@ fn server_only_hit(account: &str, query: &str) -> Value {
 /// a leading doctype, which ends at its first `>` (`parse.rs`'s
 /// `insert_at_document_start`).
 fn rendition(body: &str) -> String {
-    let tag = format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{MESSAGE_CSP}\">\n");
+    let tag = format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{DAEMON_CSP}\">\n");
     let lead = body.len() - body.trim_start().len();
     let rest = &body[lead..];
     let doctype = rest

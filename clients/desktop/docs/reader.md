@@ -8,16 +8,42 @@ The rendering rule and its reasons are in the plan, `docs/plans/native-gui.md`, 
 `src/components/reader/ReaderBody.tsx` renders:
 
 ```html
-<iframe src="mpmsg://localhost/work/1006" sandbox="allow-popups" referrerpolicy="no-referrer" title="Message body: …">
+<iframe data-slot="reader-frame" src="mpmsg://localhost/work/1006" sandbox="allow-popups allow-scripts" referrerpolicy="no-referrer" title="Message body: …">
 ```
 
-- `sandbox="allow-popups"` and nothing else: no scripts, no same origin, no forms, no top navigation; `allow-popups` is there only so that a `target=_blank` click reaches `on_new_window`, which refuses it.
+- `sandbox="allow-popups allow-scripts"` and nothing else: no same origin, no forms, no top navigation; `allow-popups` is there only so that a `target=_blank` click reaches `on_new_window`, which refuses it.
+- `allow-scripts` runs no sender script: the only script is the app's own bridge (see The bridge), admitted by a nonce the reader CSP carries for that one response.
+- Never `allow-same-origin`: with scripts allowed it would give the frame the app's origin, and `reader.test.tsx` pins its absence.
 - The URL is used as the Rust layer hands it over, so a Windows spelling (`http://mpmsg.localhost/…`) needs no frontend change.
 - A skeleton covers the frame until its `load` event; the frame is keyed on the URL, so every message starts with the skeleton.
 - The frame draws on `--reader-canvas` (white) in both palettes, because mail is authored for a white page and a message that sets no background would put default black text on the dark palette's Prussian.
-- A message without markup comes back on the same URL as a plain-text document (`X-Mp-Rendition: text`), so in html mode React has one path and fetches no `message_text`.
+- A message without markup comes back on the same URL as a plain-text document (`X-Mp-Rendition: text`) carrying the bridge too, so in html mode React has one path, fetches no `message_text`, and the scroll keys work on it as on HTML.
 - Remote content stays blocked by the reader CSP; M1 has no "load remote images" toggle.
-- The body scrolls inside the frame; the header block above it is unchanged.
+- The body scrolls inside the frame; the header block above it is unchanged, and the reader's scroll keys reach the body through the bridge.
+
+## The bridge
+
+The frame is an opaque origin, so the app can neither scroll its document nor hear its keys; the bridge is the one script that does both (PERSO-81).
+Its source is the constant `BRIDGE` in `src-tauri/src/reader.rs`, minified by hand, with no dependency.
+
+- For every HTML or text response the handler draws a fresh nonce, 16 bytes from the operating system's generator in base64 (`fresh_nonce`), and serves the policy `message_csp(nonce)`: the daemon's plus `script-src 'nonce-<n>'`.
+- It puts `<script nonce="<n>">BRIDGE</script>` once into the HTML rendition, right after the CSP meta at the start of the document, ahead of any sender markup; it searches for no `<head>`, which a sender can spoof, for the same reason the daemon does not.
+- It replaces every copy of the daemon's meta (`default-src 'none'`, which would block the bridge) with one carrying the same policy as the header, nonce included.
+- No sender `<script>`, `on*` handler or `javascript:` URL carries a nonce the sender could know when writing the message, so the message runs nothing, and a pasted copy of the bridge does not run either.
+- A nonce rather than the bridge's hash: under CSP Level 3 a hash source also admits `<script src=… integrity="sha256-<the same hash>">`, and the bridge's hash is public, so a sender could have made the frame fetch one URL.
+- The text rendition, the plain-text document the handler builds for a message without markup, gets the bridge the same way, under its own fresh nonce, with `message_csp(nonce)` in the header and in its meta; it holds no sender markup, since the app writes it from constants and the escaped stored text.
+- A rendition without the daemon's meta is served as it came, with no bridge and under the daemon's policy alone, and so is any response for which no nonce could be drawn.
+- The browser rendition (`tb`, `html_open`) is the daemon's file and keeps its script-free meta.
+
+The parent posts `{type: "scroll", dy}` and `{type: "scrollTo", y: "top" | "bottom"}` to the frame's window with target `"*"`, the only target an opaque origin matches (`scrollReaderFrame`, `scrollReaderFrameTo` in `ReaderBody.tsx`).
+The bridge obeys a message only from `window.parent` and only in those two shapes with a finite `dy`, and scrolls `document.scrollingElement`.
+In html mode `j`/`k`, the arrows, `Ctrl+d`/`Ctrl+u` and `PageDown`/`PageUp` scroll the body; `G`, `End`, `gg` and `Home` move the body and the pane holding the header block to the same end.
+
+The bridge posts every keydown inside the frame to the parent as `{type: "key", key, code, ctrlKey, metaKey, altKey, shiftKey}`.
+It prevents the key's default unless Ctrl or Cmd is held, so Space, the arrows and the Page keys do not also scroll the frame natively, and copy and select all still work on the message text.
+One listener in `useKeymap.ts` takes a key message only when its `source` is the reader frame's window and the frame holds the focus, the only way a real key reaches it (`forwardedKey`), and ignores every other message.
+It records the reader as the focused pane, then dispatches the key again as a `keydown` on the frame element, so the keymap runs it through the same handler as a key pressed outside the frame: `Escape`, `:`, `J`, a `g` prefix and the rest behave alike inside and outside the message.
+`bridge.test.ts` runs the bridge out of the Rust source in a jsdom frame; jsdom enforces neither the sandbox nor the CSP, which only the manual run below checks.
 
 ## Text mode
 
@@ -27,7 +53,7 @@ It reads `message_text` once per message and reader load, caches the answer in `
 The cache key holds the daemon instance and the `Message-ID` beside the row id, since a restarted daemon may give a row id to another message.
 The text sits in a `<pre>` named "Message text: <subject>", on `bg-background` in `text-foreground` and the mono font, so it follows the app's theme.
 Line breaks stay as stored, long lines wrap, and a line whose first non-blank character is `>` is `text-muted-foreground`.
-The text flows in `#mp-reader-scroll`, so `j`/`k`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`, `G` and `Home`/`End` scroll the body itself, and `z` zooms the reader as in html mode.
+The text flows in `#mp-reader-scroll`, so `j`/`k`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`, `G`, `gg` and `Home`/`End` scroll the body itself, and `z` zooms the reader as in html mode.
 A message whose store holds no text says "No text body" with a hint that `t t` shows the HTML version, and the mode stays text.
 A read that fails says "The text did not load: <why>".
 
@@ -148,7 +174,8 @@ Run: macOS 26.6.2, WKWebView, `MP_DESKTOP_STUB_OPENER=1 MP_DESKTOP_FIXTURE=1 pnp
 
 Mouse and keyboard input into the app could not be automated.
 `cliclick` is not installed, and `AXIsProcessTrusted()` is false for the terminal the agent runs in, so neither `osascript`/System Events nor posted `CGEvent`s reach the window.
-Page JavaScript cannot click inside the frame either: the frame is cross-origin to the app and runs no script of its own, so a click inside it needs a real input event.
+Page JavaScript cannot click inside the frame either: the frame is cross-origin to the app, and its only script, the bridge, scrolls and forwards keys and clicks nothing, so a click inside it needs a real input event.
+This run predates the bridge (PERSO-81), when the sandbox was `allow-popups` alone; the manual cases below cover the bridge and are to be run again with it.
 
 What was automated instead is a throwaway probe, injected by a Vite config outside the repository (`transformIndexHtml` adds one module script; nothing in `src/` changed).
 It selects row 1006 by dispatching `j` keydown events to the app's keymap, waits for the frame's `load`, then acts from the app document.
@@ -170,17 +197,15 @@ Also observed in the same run:
 - The main document stayed on `http://localhost:1420/` (the dev origin) throughout.
 - No `[open] stubbed` line appeared: nothing called `open_external`.
 
-## Known limitation
+## Known limitations
 
-Once focus is inside the reader frame (a click in the message body), the app's keys no longer reach the app: the frame is cross-origin to it and runs no script, so its key events stay in its own document and the keymap never hears them.
-Escape, `j`/`k`, `:` and every other app key do nothing until focus returns to the app, by a click on the header, the list or the sidebar.
-`j`/`k` on the reader pane scroll `#mp-reader-scroll`, which holds the header block and the frame; the body scrolls inside the frame, so from the keyboard only the header area moves.
-Text mode has no frame, so neither limit applies there (see Text mode).
+- Tab inside the frame is the app's pane cycle, so the keyboard does not walk the message's links; a link is refused at either hook anyway (see Refused links).
 
 ## Manual verification
 
 Cases (a), (b) and (c) of the table above need a real click, which the agent cannot post (see the run above); the owner ran these steps on 2026-09-30 and all three held, including step 6, whose stub line replaces the browser.
-Repeat them after any change to the scheme handler, the navigation hooks or the frame's `sandbox`.
+Steps 7 to 10 cover the bridge (PERSO-81) and have not been run yet.
+Repeat them after any change to the scheme handler, the bridge, the navigation hooks or the frame's `sandbox`.
 
 1. In a herdr tab: `cd clients/desktop && MP_DESKTOP_STUB_OPENER=1 MP_DESKTOP_FIXTURE=1 pnpm tauri dev`, and keep its output in view (it also goes to `<data>/logs/mp-desktop.log`).
 2. In the Inbox of `work`, click row 1006, "Action required: verify your account" from Security Team, the sixth row, and wait for the body.
@@ -192,7 +217,17 @@ Repeat them after any change to the scheme handler, the navigation hooks or the 
    Click "Dismiss".
 5. Case (c): type anything in the password field and click "Verify".
    Expected: nothing happens; no notice, no `[nav] refused` line for `https://evil.example/collect`, no `[open] stubbed` line; the frame still shows the message.
-6. Last, show the notice again with step 3 and click "Open in browser" once.
+6. Show the notice again with step 3 and click "Open in browser" once.
    Expected: exactly one `[open] stubbed: https://evil.example/?from=plain-link` line and no browser window; the palette's "Show intercepted links" lists it as "opener stub".
+7. Case (f), sender script: reload row 1006 (`k` then `j` from the list) and wait 4 s after the body shows.
+   Expected: the message carries `<script>` setting `document.title` and navigating to `?from=script`, and an `onload` handler opening `?from=onload`; no `[nav] refused` line with `from=script` or `from=onload` appears, no notice shows, and the frame still shows the message.
+   In the Web Inspector (right-click in the frame, Inspect Element, where the dev build allows it), the console shows CSP refusals for the inline script and the `onload` handler and none for the bridge.
+   In its Network tab, the `mpmsg` response's `Content-Security-Policy` header ends in `script-src 'nonce-<n>'`, the same `<n>` as the meta at the top of the document; reloading the row (`k` then `j`) shows another `<n>`.
+8. Case (g), the bridge scrolls: Tab to the reader (or `gr`), then press `j` a few times, `Ctrl+d`, `G` and `gg`.
+   Expected: the message body itself scrolls by a line, by half a page, to its end and back to its top; `gg` also brings the header block back into view; the list selection does not move.
+9. Case (h), keys from inside the frame: click in the message body's text, then press `j`, `Space` and `G`.
+   Expected: `j` and `G` scroll the body as in step 8, `Space` opens the which-key popup of the Space family and does not page the frame, `Escape` closes it, and `J` opens the next message; Cmd+C on selected message text still copies it.
+10. Case (i), the text rendition: in html mode open row 1002 (no markup; shrink the window until its text overflows), press `j`, `Ctrl+d` and `G`, then click in its text and press `j` and `Escape`.
+    Expected: the plain text scrolls in its frame as in steps 8 and 9, and the keys after the click reach the app; in the Web Inspector the `mpmsg` response carries `X-Mp-Rendition: text` and a `script-src 'nonce-<n>'` matching the meta and the one `<script>`.
 
 The verdict of each step goes into the table above, with the date of the run.

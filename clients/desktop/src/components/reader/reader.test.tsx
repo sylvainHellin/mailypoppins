@@ -4,6 +4,7 @@ import { renderApp, shellReady } from "@/test/render";
 import { emit, emitEnvelope, mock } from "@/test/tauri-mock";
 import { STICKY_MS } from "@/app/activity";
 import type { InterceptedUrl } from "@/lib/gui-types";
+import { READER_SANDBOX } from "@/components/reader/ReaderBody";
 
 const reader = () => screen.getByRole("complementary", { name: "Reader" });
 
@@ -18,12 +19,18 @@ function intercept(url: string, source: InterceptedUrl["source"] = "navigation")
 }
 
 describe("the reader frame", () => {
-  it("loads the mpmsg URL in a script-free sandbox, with no referrer", async () => {
+  it("loads the mpmsg URL in a sandbox that runs scripts but never on the app's origin, with no referrer", async () => {
     const { user } = renderApp();
     await shellReady();
     const frame = await openHostile(user);
     expect(frame.tagName).toBe("IFRAME");
-    expect(frame.getAttribute("sandbox")).toBe("allow-popups");
+    expect(frame.getAttribute("sandbox")).toBe("allow-popups allow-scripts");
+    // With scripts allowed, same origin would hand the frame this document.
+    const tokens = (frame.getAttribute("sandbox") ?? "").split(/\s+/);
+    expect(tokens).not.toContain("allow-same-origin");
+    expect(READER_SANDBOX.toLowerCase()).not.toContain("same-origin");
+    expect(tokens).not.toContain("allow-top-navigation");
+    expect(tokens).not.toContain("allow-forms");
     expect(frame.getAttribute("src")).toBe("mpmsg://localhost/work/1006");
     expect(frame.getAttribute("referrerpolicy")).toBe("no-referrer");
     expect(frame).not.toHaveAttribute("srcdoc");
