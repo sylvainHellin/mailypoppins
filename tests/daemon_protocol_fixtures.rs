@@ -82,6 +82,17 @@ const P5_U10D_FIXTURES: &[&str] = &[
     "message.thread.response.json",
 ];
 
+/// The fixtures #0138 adds for the streamed listing: the call, its immediate
+/// answer, and one `message.rows` chunk.
+///
+/// Separate from the lists above for the reason they are separate from each
+/// other: each list is the record of what one change required.
+const LIST_STREAM_FIXTURES: &[&str] = &[
+    "message.list_stream.request.json",
+    "message.list_stream.response.json",
+    "notification.message_rows.json",
+];
+
 /// The two `state.bootstrap` answers: a healthy daemon's, whose `diagnostics`
 /// is empty, and one carrying a failing check, which pins the shape a client
 /// renders as a complaint (the #0125 follow-ups).
@@ -147,6 +158,7 @@ fn every_required_fixture_is_committed() {
         .iter()
         .chain(P5_U10C_FIXTURES)
         .chain(P5_U10D_FIXTURES)
+        .chain(LIST_STREAM_FIXTURES)
         .chain(BOOTSTRAP_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();
@@ -841,6 +853,73 @@ fn a_streamed_server_hit_carries_the_operation_and_the_envelope() {
         "the fixture shows the server-only hit, which is the case this event exists for"
     );
     assert_eq!(value["payload"]["hit"]["selector"], json!(null));
+}
+
+// ---------------------------------------------------------------------------
+// #0138: the streamed listing
+// ---------------------------------------------------------------------------
+
+/// `message.list_stream` takes the account and the mailbox and nothing else,
+/// and answers with the operation id beside the listing's head: the rows come
+/// as `message.rows` chunks, never in the answer.
+#[test]
+fn the_stream_call_and_its_answer_carry_the_documented_fields() {
+    use mp_protocol::listing::{MessageListStreamStarted, METHOD_MESSAGE_LIST_STREAM};
+
+    let request = load("message.list_stream.request.json");
+    assert_eq!(request["method"], json!(METHOD_MESSAGE_LIST_STREAM));
+    assert_keys(
+        &request["params"],
+        &["account", "mailbox"],
+        "message.list_stream params",
+    );
+
+    let name = "message.list_stream.response.json";
+    let response = load(name);
+    assert_keys(
+        &response["result"],
+        &["account", "mailbox", "operation_id", "total"],
+        name,
+    );
+    assert_string(&response, "/result/operation_id", name);
+    let started: MessageListStreamStarted = serde_json::from_value(response["result"].clone())
+        .expect("the answer decodes into MessageListStreamStarted");
+    assert_eq!(started.total, 2);
+}
+
+/// One chunk is a `message.rows` notification of `{offset, operation_id,
+/// rows}`, and its rows are `message.list` rows: the chunk fixture carries the
+/// listing fixture's rows unchanged, so the two shapes cannot drift apart.
+#[test]
+fn a_rows_chunk_carries_message_list_rows() {
+    use mp_protocol::listing::{MessageListStreamStarted, MessageRowsChunk};
+    use mp_protocol::METHOD_MESSAGE_ROWS;
+
+    let name = "notification.message_rows.json";
+    let value = load(name);
+    let typed: Notification =
+        serde_json::from_value(value.clone()).expect("the fixture is a Notification");
+    assert_eq!(typed.method, METHOD_MESSAGE_ROWS);
+    assert_keys(&value["params"], &["offset", "operation_id", "rows"], name);
+    let chunk: MessageRowsChunk =
+        serde_json::from_value(typed.params).expect("the params decode into MessageRowsChunk");
+    assert_eq!(
+        chunk.offset, 0,
+        "the fixture is the first chunk of its stream"
+    );
+
+    let started: MessageListStreamStarted =
+        serde_json::from_value(load("message.list_stream.response.json")["result"].clone())
+            .expect("the answer decodes");
+    assert_eq!(
+        chunk.operation_id, started.operation_id,
+        "the chunk names the operation the answer issued"
+    );
+    assert_eq!(
+        value["params"]["rows"],
+        load("message.list.response.json")["result"]["messages"],
+        "a streamed row is a message.list row, key for key"
+    );
 }
 
 /// `initialize` is deliberately not namespaced: it is the one method a client

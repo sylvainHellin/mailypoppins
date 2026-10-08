@@ -67,5 +67,15 @@ pub const METHOD_STATE_RESYNC_REQUIRED: &str = "state.resync_required";
 /// `params` are `{instance_id, clean, unsettled}`.
 pub const METHOD_DAEMON_STOPPED: &str = "daemon.stopped";
 
+/// Method of the notification that carries one chunk of a
+/// `message.list_stream` (#0138), with a [`listing::MessageRowsChunk`] as its
+/// params.
+///
+/// A fourth notification method rather than a `state.event` kind: it is sent
+/// on the calling connection only, where a lifecycle event reaches every
+/// bootstrapped connection, takes a revision it has no use for and sits in the
+/// 4 MiB outbound queue that five chunks would overflow.
+pub const METHOD_MESSAGE_ROWS: &str = "message.rows";
+
 /// The JSON-RPC version string every message on this protocol declares.
 pub const JSONRPC_VERSION: &str = "2.0";

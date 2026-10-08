@@ -137,6 +137,56 @@ pub struct MessageListing {
     pub messages: Vec<MessageListRow>,
 }
 
+/// The operation that streams one whole mailbox to the calling connection
+/// (#0138).
+///
+/// A twin of `message.list` named after how it differs, as `message.list_server`
+/// and `message.search_server` are: it answers [`MessageListStreamStarted`] at
+/// once and then sends the rows as [`MessageRowsChunk`] notifications of method
+/// [`crate::METHOD_MESSAGE_ROWS`], so a mailbox past the 16 MiB response cap
+/// still lists.
+pub const METHOD_MESSAGE_LIST_STREAM: &str = "message.list_stream";
+
+/// The immediate answer of `message.list_stream` (#0138).
+///
+/// An operation answer with members beside the id, on the precedent of
+/// `send.draft`'s `{operation_id, held}`: the daemon reads the whole mailbox
+/// before it answers, so `total` is the exact number of rows the stream will
+/// carry, and a client checks the stream against it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct MessageListStreamStarted {
+    /// The operation the rows and the finish belong to.
+    pub operation_id: String,
+    /// The account that is being listed.
+    pub account: String,
+    /// The mailbox id the daemon resolved, not the spelling that was sent.
+    pub mailbox: String,
+    /// How many rows the stream carries, which is the mailbox's row count at
+    /// the one read the daemon made.
+    #[serde(default)]
+    pub total: u64,
+}
+
+/// The `params` of one `message.rows` notification: a contiguous run of a
+/// streamed listing (#0138).
+///
+/// `offset` is the position of the first row in the stream, not a request
+/// parameter: the first chunk starts at `0`, each next one where the last one
+/// ended, and the last one ends at the answer's `total`. A client that sees a
+/// gap, or a row past `total`, holds a broken stream and keeps the list it had.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct MessageRowsChunk {
+    /// The position of `rows[0]` in the stream.
+    pub offset: u64,
+    /// The `message.list_stream` operation this chunk belongs to.
+    pub operation_id: String,
+    /// The rows, `message.list` rows byte for byte, newest first.
+    #[serde(default)]
+    pub rows: Vec<MessageListRow>,
+}
+
 /// One message of a conversation, as `message.thread` answers it (P5-U10d,
 /// `LST-10`).
 ///
@@ -319,6 +369,38 @@ mod tests {
         assert_eq!(
             first.selector, "mp://work/inbox/Bericht@example.com",
             "every row carries the daemon's own spelling of its selector"
+        );
+    }
+
+    /// The two committed `message.list_stream` fixtures decode into their typed
+    /// shapes, and a chunk's rows are the listing fixture's rows exactly.
+    #[test]
+    fn the_committed_stream_fixtures_decode_whole() {
+        let raw = include_str!("../fixtures/message.list_stream.response.json");
+        let response: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let started: MessageListStreamStarted =
+            serde_json::from_value(response["result"].clone()).expect("the result decodes");
+        assert_eq!(started.account, "work");
+        assert_eq!(started.mailbox, "inbox");
+        assert_eq!(started.total, 2);
+        assert!(!started.operation_id.is_empty());
+
+        let raw = include_str!("../fixtures/notification.message_rows.json");
+        let notification: crate::Notification =
+            serde_json::from_str(raw).expect("the fixture is a notification");
+        assert_eq!(notification.method, crate::METHOD_MESSAGE_ROWS);
+        let chunk: MessageRowsChunk =
+            serde_json::from_value(notification.params).expect("the params decode");
+        assert_eq!(chunk.offset, 0);
+        assert_eq!(chunk.operation_id, started.operation_id);
+
+        let raw = include_str!("../fixtures/message.list.response.json");
+        let response: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let listing: MessageListing =
+            serde_json::from_value(response["result"].clone()).expect("the result decodes");
+        assert_eq!(
+            chunk.rows, listing.messages,
+            "a streamed row is a message.list row, field for field"
         );
     }
 

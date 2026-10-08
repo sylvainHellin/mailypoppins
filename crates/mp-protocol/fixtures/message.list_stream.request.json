@@ -1,0 +1,9 @@
+{
+  "id": 4,
+  "jsonrpc": "2.0",
+  "method": "message.list_stream",
+  "params": {
+    "account": "work",
+    "mailbox": "inbox"
+  }
+}

@@ -79,6 +79,8 @@ fn export_into(dir: &Path) -> usize {
         listing::MessageFlags,
         listing::MessageListRow,
         listing::MessageListing,
+        listing::MessageListStreamStarted,
+        listing::MessageRowsChunk,
         listing::ThreadMessage,
         listing::ThreadListing,
         listing::ServerSearchHit,
