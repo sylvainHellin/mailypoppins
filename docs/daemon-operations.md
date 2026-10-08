@@ -130,7 +130,7 @@ The table is what routes and through what:
 | `mp hooks replay <hook> <selector> [--mailbox]` | `hook.replay` | #0135 |
 | `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
 | `mp` (the TUI) | `state.bootstrap`, once at startup, on a session that stays open for the run | P5-U2 |
-| `mp`'s mailbox list, sidebar counts and preview body | `message.list` / `draft.list` per mailbox open, `mailbox.list` per recount, `message.get` per cursor move | P5-U4 |
+| `mp`'s mailbox list, sidebar counts and preview body | `message.list_stream` / `draft.list` per mailbox open, `mailbox.list` per recount, `message.get` per cursor move | P5-U4 |
 | `mp`'s five message mutations (`a`, `d`, `u`, `*`, the quick move) | `message.archive`, `message.delete`, `message.set_read`, `message.set_flag`, `message.move`, all with `settle: false`; the daemon drains the queued ops 1.5 s after the account's last one (#0133) | P5-U6 |
 | `mp`'s draft keys (`cA`, `cD`, `d` on a drafts row, `e`, `ce`) | `draft.approve`, `draft.demote`, `draft.discard`, `draft.path` | P5-U6 |
 | `mp`'s two sync keys and the startup auto-fetch | `sync.quick` / `sync.full`, then `operation.status` polled to a terminal state | P5-U6 |
@@ -142,12 +142,15 @@ The table is what routes and through what:
 The TUI's row is a session rather than a call: `mp` with no arguments connects through the same `client_session` every command above goes through, before it takes over the terminal, and holds the connection until the user quits.
 It paints its shell first and applies the snapshot when it lands, so a slow daemon costs a beat of zeroed counts rather than a blank terminal.
 A daemon it cannot reach ends the run with the ordinary exit-4 diagnostic, on a terminal that is still in its normal mode.
+Its handshake requires `message.list_stream` (`TUI_REQUIRED_CAPABILITIES` in `src/daemon/client.rs`), which no one-shot command does, so a daemon too old to stream a mailbox ends the run at once with that diagnostic and `mp daemon restart` as the way out, instead of starting the TUI over mailboxes that open empty.
 
 Since P5-U4 the three reads a frame needs go the same way, through `crate::tui::queries` and the session the `App` holds.
 The two that can wait keep the thread they always had and block on a call rather than on a store open: the mailbox load of `Action::LoadMailbox` and the per-account count of the two-phase startup, both through a `Session::handle()` a worker thread can own, so nothing about the load moved onto the draw thread.
 The preview body is the one synchronous read, one `message.get` per cursor move behind the memo that already made a frame on an unchanged selection cost nothing, which is the number `docs/plans/preview-latency.md` budgets.
 The listing is transferred whole, once per mailbox open, as `docs/baselines/decisions/list-transfer.md` decided; the row deltas that keep it current decode here already and are applied by nothing until P5-U8 drains the event stream.
-The daemon reads it on its blocking pool rather than on a runtime worker, and a mailbox whose answer passes the 16 MiB response cap, about 34 000 rows, is refused with `frame_too_large` (`docs/baselines/message-list-unbounded.md`).
+Since #0138 the transfer is `message.list_stream`: the daemon reads the mailbox on its blocking pool, answers with its `total`, and streams the rows in `message.rows` chunks of about 1 MiB, which the session thread collects into one list before the loader thread sees it.
+A mailbox past the 16 MiB response cap therefore opens; only `message.list` with `limit: null` still answers `frame_too_large` there, about 34 000 rows, for a client that still sends it (`docs/baselines/message-list-unbounded.md`).
+Every mailbox open is an operation, so its `operation.finished` reaches every subscribed client, and the TUI ignores it as it ignores any operation it did not start.
 An `App` with no session at all reads nothing: an empty list, zeroed counts and an empty preview, each with a line in the log (P5-U10e).
 The store-backed readers it used to fall back to are `src/tui_tests/oracle.rs`, in the crate that owns the store, where they are the oracle every daemon-backed answer is compared against.
 

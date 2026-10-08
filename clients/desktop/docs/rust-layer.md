@@ -80,7 +80,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `bootstrap` | none | `Bootstrap`, also sent on the channel as `rebootstrapped` with `cause: "requested"` |
 | `list_accounts` | none | `AccountInfo[]` |
 | `list_mailboxes` | `account` | `MailboxListing` |
-| `list_messages` | `account`, `mailbox` (slug) | `MessageList` |
+| `list_messages` | `account`, `mailbox` (slug) | `MessageList`; a received mailbox is `message.list_stream` collected whole on the session thread under the 15 s list budget, so a mailbox past the 16 MiB response cap lists, and the Drafts mailbox is `draft.list` (#0138) |
 | `message_text` | `account`, `row_id` | `MessageText`: the stored plain text, `body: null` when the store holds none; `not_found` for an unknown row |
 | `message_html_meta` | `account`, `row_id` | `MessageMeta` |
 | `search_local` | `params: LocalSearchParams` | `LocalSearchHit[]` |

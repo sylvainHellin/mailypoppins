@@ -2576,6 +2576,8 @@ mod tests {
     /// `message.list` with `limit: null` over a large mailbox, timed in process:
     /// the store read alone, the whole method, and the frame the server would
     /// encode from its answer (`docs/baselines/message-list-unbounded.md`).
+    /// Then `message.list_stream` (#0138): the read plus every chunk encoded
+    /// to bytes, and the client's decode of those chunks into rows.
     ///
     /// Points at a fixture `examples/mkfixture.rs` built, named by
     /// `MP_BENCH_FIXTURE`, and prints nothing but a skip line without one:
@@ -2672,6 +2674,51 @@ mod tests {
             let value: Value = serde_json::from_slice(&bytes).expect("decodes");
             std::hint::black_box(value);
         });
+        // `message.list_stream` (#0138), the daemon's side: the store read the
+        // handler makes before it answers, then every row encoded into
+        // `message.rows` frames as bytes, the producer's work minus the writes.
+        let encode_chunks = |dated: &[read::DatedRow]| -> Vec<Vec<u8>> {
+            let mut chunks = ChunkEncoder::new("op-bench", ROWS_CHUNK_BYTES, MAX_RESPONSE_BYTES);
+            let mut frames = Vec::new();
+            for (row, stamped) in dated {
+                chunks
+                    .push(&WireRow::new("alpha", row, wire_date_sort(row, *stamped)))
+                    .expect("a row fits");
+                while let Some(frame) = chunks.next_frame() {
+                    frames.push(frame);
+                }
+            }
+            chunks.finish();
+            while let Some(frame) = chunks.next_frame() {
+                frames.push(frame);
+            }
+            frames
+        };
+        let stream_daemon = sample(|| {
+            let dated = read_dated("alpha", &resolved, &path).expect("rows");
+            std::hint::black_box(encode_chunks(&dated));
+        });
+        let frames = encode_chunks(&dated);
+        let stream_bytes: usize = frames.iter().map(Vec::len).sum();
+        let largest_frame = frames.iter().map(Vec::len).max().unwrap_or(0);
+        // The client's side, as `mp-client`'s collector does it: each frame
+        // through the line decoder into a `Value`, the notification out of it,
+        // and every row through `row_from_wire` into one `Vec`.
+        let stream_client = sample(|| {
+            let mut decoder = mp_protocol::frame::Decoder::new(MAX_RESPONSE_BYTES);
+            let mut rows: Vec<mp_protocol::listing::MessageListRow> =
+                Vec::with_capacity(dated.len());
+            for frame in &frames {
+                for value in decoder.push(frame).expect("a frame decodes") {
+                    let notification: mp_protocol::Notification =
+                        serde_json::from_value(value).expect("a notification");
+                    let chunk = notification.params["rows"].as_array().expect("rows");
+                    rows.extend(chunk.iter().map(mp_client::queries::row_from_wire));
+                }
+            }
+            assert_eq!(rows.len(), dated.len());
+            std::hint::black_box(rows);
+        });
 
         let show = |(median, min, max): (f64, f64, f64)| format!("{median:.1} {min:.1} {max:.1}");
         eprintln!(
@@ -2705,6 +2752,18 @@ mod tests {
         eprintln!(
             "encode + client-side parse  ms median min max: {}",
             show(decode)
+        );
+        eprintln!(
+            "stream: {} frames, {stream_bytes} bytes, the largest {largest_frame}",
+            frames.len()
+        );
+        eprintln!(
+            "list_stream read + chunks   ms median min max: {}",
+            show(stream_daemon)
+        );
+        eprintln!(
+            "  client decode of chunks    ms median min max: {}",
+            show(stream_client)
         );
     }
 }

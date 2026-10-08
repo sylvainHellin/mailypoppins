@@ -7,6 +7,9 @@ operations into.
 
 The chosen option is the whole list, transferred once per mailbox open, kept current by row-level
 delta events.
+Since #0138 the whole list travels as `message.list_stream`, an answer followed by `message.rows`
+chunks of about 1 MiB each, instead of one `message.list` frame, because one frame stops fitting
+under the 16 MiB response cap at about 34 000 rows.
 It is also the plan's recommendation, but the numbers below decide it rather than the preference:
 per sync event the two options are both sub-millisecond, the difference is a one-off at mailbox
 open, and paging spends its saving back on the three interactions it would have to move to the
@@ -98,11 +101,23 @@ The delta events are what make the option comfortable, not what make it viable.
 
 Adopted:
 
-- `message.list`, params `{"account":str,"mailbox":str,"limit":u32|null}` with `limit: null` meaning
-  the whole mailbox, answering `{"account":str,"mailbox":str,"total":u64,"messages":[...]}`, exactly
-  the shape P2-U10 pins.
+- `message.list_stream`, params `{"account":str,"mailbox":str}`, the whole mailbox: it answers
+  `{"operation_id":str,"account":str,"mailbox":str,"total":u64}` and then streams the rows to the
+  calling connection as `message.rows` notifications, params `{offset, operation_id, rows}`, each
+  chunk closing once its rows reach 1 MiB, and settles with `operation.finished` (#0138).
+  This is how both clients open a mailbox.
+  The rows are `message.list` rows byte for byte, read in one snapshot before the answer, so the
+  stream is the whole-list transfer of this decision split into frames, with no page a client could
+  ask for.
+- `message.list`, params `{"account":str,"mailbox":str,"limit":u32|null}`, answering
+  `{"account":str,"mailbox":str,"total":u64,"messages":[...]}`, exactly the shape P2-U10 pins.
+  It serves the bounded callers (`mp list-messages -n`, the envelope projection of
+  `mp dump-mailbox`); `limit: null` is still accepted and still capped, so past about 34 000 rows it
+  answers `frame_too_large`.
   There is no `offset` parameter, in this phase or a later one: an offset is the paging option, and
   adding it later is a protocol change with a client behaviour change behind it.
+  The `offset` of a `message.rows` chunk is the position of its first row in the stream, not a
+  request parameter.
 - Row-level deltas over the `state.event` notification
   (`params = {instance_id, revision, kind, payload}`), in the P3a-U5 event vocabulary:
   - `Event::Replace { kind: "message.row", payload: {account, mailbox, message} }` for an inserted or
@@ -136,6 +151,10 @@ rescue it: 5000 rows land 18% over the cap even positionally.
 At the spike's 200-row chunk size that is 25 chunk frames, comparable to the 28 frames w3 already
 measures, and the P1a-U4 decision therefore has to cover a listing and not only `dump-mailbox` and
 bodies.
+The protocol as built settled the cap at 16 MiB, which a 5000-row listing fits in one frame, and
+`message.list_stream` answers the large-payload path for a listing (#0138): 50 000 rows of
+`mkfixture --rows 50000` travel as 24 frames of at most 1 049 141 bytes, against one answer of
+24 387 191 bytes that the cap refuses.
 
 Phase 3a inherits the delta events as the load-bearing half of this decision.
 If row-level deltas degrade to a whole-list invalidation in practice, this option degrades to the
@@ -145,6 +164,14 @@ coalescing rules in P3a-U5 are what keep this decision cheap.
 Reopen the decision if one mailbox exceeds roughly 18 000 rows, where the one-off transfer crosses
 W2's 50 ms frame ceiling at this host's rate of about 2.8 us a row, or if a client is measured
 opening and closing the same mailbox often enough to sit below the 25-event crossover.
+The 50 000-row figure has since been measured on this host
+([../message-list-unbounded.md](../message-list-unbounded.md)): the daemon reads and encodes the
+stream in 111 ms and a client decodes it in 174 to 184 ms, both past the 50 ms ceiling but paid
+once per mailbox open, off the draw thread, on the TUI's loader thread and the desktop's command
+thread.
+The decision holds at that size because no interaction moves to the server; what would reopen it is
+a mailbox open measured as a visible stall, and the answer would be progressive rendering of the
+first chunk (#0138's follow-up) before paging.
 
 ## What was not measured
 

@@ -200,7 +200,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: TUI `j/k` and `Enter` (`clients/tui/src/app/keymap.rs:636`), `gm` (`clients/tui/src/app/keymap.rs:590`), `clients/tui/src/ui/sidebar.rs`
-- Daemon surface: `state.bootstrap` mailbox summaries, `message.list` on selection
+- Daemon surface: `state.bootstrap` mailbox summaries, `message.list_stream` on selection (#0138)
 - GUI location: clients/desktop: the sidebar lists each account's mailboxes, `gm` focuses it, `j`/`k` move its cursor, and Enter or a click opens the mailbox (M1, #0129)
 - Validation: TUI golden frames under `clients/tui/src/`; `clients/desktop/src/keymap/keymap.test.tsx` (`the sidebar cursor moves with j and Enter opens the mailbox`), `clients/desktop/src/components/shell/a11y.test.tsx` (`marks the selected mailbox as the current page`)
 - Status: GUI shipped (M1, #0129)
@@ -209,7 +209,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `clients/tui/src/app/keymap.rs:558`
-- Daemon surface: client-side over the bootstrap mailbox list, then `message.list`
+- Daemon surface: client-side over the bootstrap mailbox list, then `message.list_stream`
 - GUI location: clients/desktop: `1` to `9` open the selected account's nth mailbox (M1, #0129)
 - Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`digits jump to a mailbox of the selected account`)
 - Status: GUI shipped (M1, #0129)
@@ -268,7 +268,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: TUI `j/k`, `gg/G`, `Ctrl+d`, `Ctrl+u` in the EMAIL LIST and BODY keymap sections (`clients/tui/src/app/keymap.rs`)
-- Daemon surface: client-side over the list `message.list` returned
+- Daemon surface: client-side over the list `message.list_stream` returned
 - GUI location: clients/desktop: `j`/`k` and the arrows, `gg`/`G`, `Ctrl+d`/`Ctrl+u` in the list, the reader following the selection (M1, #0129)
 - Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`j and k move the selection in the list and the reader follows`), with no desktop test of the jumps or the half-page keys
 - Status: GUI shipped (M1, #0129)
@@ -912,7 +912,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Validation: TUI golden frames; `src/tui_tests/golden_frames_daemon.rs`
 - Status: routed (P5-U8); GUI not started
 - Note: implicit workflow with no command, and the reason a client shows content before sync completes.
-  `LoadMailbox` became `message.list` / `draft.list` in P5-U4 and the two fetch arms became `sync.quick` in P5-U6, each still on the worker thread it always had.
+  `LoadMailbox` became `message.list` / `draft.list` in P5-U4, `message.list_stream` / `draft.list` since #0138, and the two fetch arms became `sync.quick` in P5-U6, each still on the worker thread it always had.
   P5-U8 took the wait off those threads: a pass is started by `commands::dispatch` and its finish arrives as an `operation.finished` event, so nothing polls `operation.status` any more.
   The `opening` -> ready transition is still `BgResult::AccountOpened` as well as the bootstrap's, because the store-backed open is what a client with a wedged session has left; the account runtime's readiness now reaches the client as an event beside it.
 

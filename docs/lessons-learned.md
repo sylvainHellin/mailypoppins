@@ -2459,6 +2459,9 @@ At 50 000 rows the method takes about 156 ms: 41 for the SQLite read, about 10 f
 The same borrowed rows serialised straight to bytes take 31.5 ms, so a further cut has to skip the tree, which `Outcome::result: Value` does not allow today (`docs/baselines/message-list-unbounded.md`).
 The answer is also bigger than it looks: about 488 bytes a row, so a mailbox past about 34 000 rows is over the 16 MiB `MAX_RESPONSE_BYTES` and the daemon answers `frame_too_large` instead of a listing.
 Moving such a read onto `spawn_blocking` has to resolve `store_path` before the hop and hand the worker a path: a fixture's data root is a thread-local (see "The data-root override is thread-local" above), and a query fixture's runtime does not re-install it on the blocking pool the way a command fixture's does.
+`message.list_stream` (#0138) skips the tree without touching `Outcome`: its answer is the small head, and the rows leave through the connection's row sink as frames the producer builds as bytes, a hand-written envelope around each borrowed `WireRow` written with `serde_json::to_writer`.
+With sorted keys those bytes equal `frame::encode` of the same notification as a `Value`, which is what lets a test compare them.
+At 50 000 rows the read plus every chunk costs 111 ms on the home server where `message.list` plus its encode costs 534; the tree now lives on the client, whose line decoder still yields a `Value` per chunk (174 to 184 ms to decode the stream there).
 
 ## A generation that restarts per key makes an old answer outrank the fresh ones
 
