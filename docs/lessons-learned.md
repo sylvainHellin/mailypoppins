@@ -2480,3 +2480,15 @@ The receive side reads the exclusive end back as `2027-01-09T00:00:00`, and the 
 
 `build_invite_mime_body` puts the ICS in the inline `text/calendar; method=REQUEST` part and again in an `application/ics` attachment, and ingest lifts both to the sidecar name, so the sent copy's row has two `invite.ics` blobs where a received Outlook or Google invitation has one.
 `read::list_invites` joins on the blob, so it yields that row twice: the agenda does not notice, since it dedups by UID, but `reconcile_account`'s `invites_seen` counts every sent invitation twice, and any new consumer of `list_invites` has to dedup by row (`tests/imip_integration.rs`, `an_all_day_update_replaces_the_timed_original_on_the_agenda`).
+
+## A deadline around `Connection::call` closes the connection it was racing
+
+`Connection::call` sets `in_flight` between its write and its answer, so a `tokio::time::timeout` that drops the call's future leaves the flag set and the next call on that connection answers `ClientError::Closed`.
+The session thread's streamed listing (#0138) therefore never races its opening `message.list_stream` call against the caller's deadline; it races only the collection loop, where `next_notification` is cancellation-safe.
+Giving up on a stream is an `operation.cancel` sent as an ordinary call, then reading on, discarding that id's `message.rows`, until its `operation.finished` arrives, bounded by `STREAM_SETTLE_GRACE` for a connection that never bootstrapped and so receives no finish at all.
+
+## `every_ts_type_is_listed` runs only under `--features ts`
+
+`crates/mp-protocol/tests/ts_bindings.rs` is `#![cfg(feature = "ts")]`, so the plain `cargo test --workspace` that CI runs compiles it to zero tests, and a wire type that derives `ts_rs::TS` without being listed in `export_into` goes unnoticed.
+Before #0138, `DraftAttachment`, `DraftAttachments` and `SignatureListing` were in that state, and `cargo test -p mp-protocol --features ts` failed on `every_ts_type_is_listed`.
+Run that command after touching any type in `crates/mp-protocol/src/`, and `pnpm gen:types` in `clients/desktop` when it reports stale bindings.
