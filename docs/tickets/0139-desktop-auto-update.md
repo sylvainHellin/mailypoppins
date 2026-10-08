@@ -178,6 +178,7 @@ On the Mac, with two real tags (a test pair such as `v0.11.0-rc.1` and `-rc.2` w
 - The daemon after Restart now is version N+1 (`mp daemon status` through the bundled binary), and "Later" followed by a quit and a launch gives the restart screen once.
 - From a standard (non-admin) account, the admin-password fallback appears and a cancel leaves the old app working.
 - A dry run of the workflow on the throwaway repository: the `.app.tar.gz` and `.sig` assets, a valid `latest.json`, and the "latest" flag moved only after it.
+  Verified on the real repository with v0.11.0 instead (2026-10-08): every asset present, the manifest's `signature` equal to the `.sig` asset, `version:0.11.0` in its trusted comment, and the release marked latest by `desktop-manifest`.
 
 ## Alternatives considered
 
