@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-08
+
 ### Added
 - **The desktop app can update itself from GitHub Releases (#0139).**
   - At launch, at most once a day, the app checks for a newer version; the App menu's "Check for Updates…", the palette's "Check for updates" and the Settings line's "Check now" check at once and say the answer on the notice line.
