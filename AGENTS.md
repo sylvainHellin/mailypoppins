@@ -24,7 +24,7 @@ Agent scratch belongs there too, as `/var/tmp/mp-<purpose>-<id>` for worktrees a
 
 Website: `cd website && pnpm install && pnpm dev` (preview) or `pnpm build` (production bundle in `website/dist/`).
 
-The desktop crate (`clients/desktop/src-tauri`) builds only on the Mac, so a change made on the home server ends with the checks Sylvain has to run there: list them as a short Plane comment or task addressed to him (a line per check), never as a document section; a handoff for an agent on the other machine goes to `.agents/handoff/`, which Syncthing mirrors.
+The desktop crate (`clients/desktop/src-tauri`) builds only on the Mac; pure Rust in it can still be checked here by copying it into a scratch crate under `/var/tmp/mp-<purpose>-check` with `CARGO_TARGET_DIR` beside it, and `cargo fmt --check` runs without a build. A change made on the home server ends with the checks Sylvain has to run there: list them as a short Plane comment or task addressed to him (a line per check), never as a document section; a handoff for an agent on the other machine goes to `.agents/handoff/`, which Syncthing mirrors.
 
 ## Further reading
 
