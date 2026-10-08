@@ -57,6 +57,9 @@ export default defineConfig({
       ],
       expressiveCode: {
         themes: ['github-dark-default', 'github-light-default'],
+        // A plain frame with a copy button; a terminal frame's empty title bar
+        // only takes room (and puts "Terminal window" into search excerpts).
+        defaultProps: { frame: 'code' },
         styleOverrides: {
           borderRadius: '0.6rem',
           borderColor: 'var(--sl-color-hairline-light)',

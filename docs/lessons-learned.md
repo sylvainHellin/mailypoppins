@@ -2520,3 +2520,9 @@ The manifest's `signature` is the `.sig` file's content, which the plugin base64
 The diagnostics ledger starts every check at `ok`, and each account runtime that reports runs `diagnostics.refresh()`, so in a two-account sandbox the refresh after alpha's readiness can find beta still opening and publish `diagnostic.check_changed` (`account:beta` warn) before beta's `account.state_changed`.
 It only shows under load (a full `cargo test --workspace`), which is how `the_snapshot_of_a_converged_daemon_still_has_the_documented_shape` failed once before v0.11.0.
 A test that counts readiness events off the `state.event` stream skips `diagnostic.check_changed` rather than asserting the next event's kind.
+
+## The website's content layer caches rendered pages across builds
+
+Astro keeps every rendered Markdown page in `website/node_modules/.astro/` and `website/.astro/data-store.json`, keyed on the file, so a change to `astro.config.mjs` alone (the Expressive Code `defaultProps`, `markdown.smartypants`) leaves unchanged pages rendered the old way while edited pages follow the new config.
+After such a change, delete both caches before `pnpm build`, then check a page you did not touch.
+Smart punctuation is off for the same site: it turned every `--flag` in prose into an en dash.

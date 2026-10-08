@@ -45,7 +45,7 @@ A message missing from an empty store proves nothing, so removals wait for the n
 You rarely need `mp sync` again.
 The daemon watches the inbox and fetches new mail as it arrives, through IMAP IDLE, or by polling every 60 seconds on a Graph account.
 On an IMAP account it also runs a quick sync on its own after fifteen minutes without one.
-`sync_interval_secs` in the [configuration](/reference/configuration/#imap) changes that.
+`sync_interval_secs` in the [configuration](/reference/configuration/#accountsimap) changes that.
 
 Check what arrived without opening anything:
 

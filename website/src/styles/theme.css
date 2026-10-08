@@ -35,7 +35,7 @@
   --sl-color-accent: #2e86ab;
   --sl-color-accent-high: #86c5e4;
 
-  --sl-color-bg-nav: rgba(12, 27, 51, 0.86);
+  --sl-color-bg-nav: rgba(12, 27, 51, 0.95);
   --sl-color-bg-sidebar: #0a172c;
   --sl-color-hairline: #1b3050;
   --sl-color-hairline-light: #243a5c;
@@ -74,7 +74,7 @@
   --sl-color-accent-high: #1a6385;
 
   --sl-color-text-accent: #1a6385;
-  --sl-color-bg-nav: rgba(251, 250, 246, 0.88);
+  --sl-color-bg-nav: rgba(251, 250, 246, 0.95);
   --sl-color-bg-sidebar: #f4f1e8;
   --sl-color-hairline: #e3dfd2;
   --sl-color-hairline-light: #ece8dd;
@@ -254,13 +254,36 @@ h1,
   white-space: nowrap;
 }
 
+/* On a phone, a two-column table (key and action, option and description)
+   stacks each row; a wider table scrolls sideways. */
 @media (max-width: 50rem) {
   .sl-markdown-content table {
     display: block;
     overflow-x: auto;
   }
-  .sl-markdown-content td:first-child {
+  .sl-markdown-content table:not(:has(th:nth-child(3))) :is(tbody, tr, td) {
+    display: block;
+  }
+  .sl-markdown-content table:not(:has(th:nth-child(3))) thead {
+    display: none;
+  }
+  .sl-markdown-content table:not(:has(th:nth-child(3))) td:first-child {
+    padding-bottom: 0.15rem;
+    border-bottom: 0;
     white-space: normal;
+  }
+  .sl-markdown-content table:not(:has(th:nth-child(3))) td:last-child {
+    padding-top: 0.15rem;
+    color: var(--sl-color-gray-2);
+  }
+  .sl-markdown-content table:not(:has(th:nth-child(3))) tr {
+    border-bottom: 1px solid var(--sl-color-hairline);
+  }
+  .sl-markdown-content table:not(:has(th:nth-child(3))) tr:last-child {
+    border-bottom: 0;
+  }
+  .sl-markdown-content table:not(:has(th:nth-child(3))) td {
+    border-bottom: 0;
   }
 }
 
@@ -364,11 +387,17 @@ site-search dialog {
   border-radius: 0;
 }
 
+.sl-markdown-content .mp-frame > *,
+.sl-markdown-content .mp-placeholder > * {
+  margin-top: 0;
+}
+
 .mp-placeholder {
   display: grid;
   place-items: center;
-  gap: 0.4rem;
-  aspect-ratio: 16 / 10;
+  align-content: center;
+  gap: 0.35rem;
+  aspect-ratio: 16 / 9;
   padding: 2rem;
   text-align: center;
   color: var(--sl-color-gray-3);
@@ -469,4 +498,10 @@ h1 {
 
 starlight-tabs .tab [role='tab'][aria-selected='true'] {
   --sl-tab-color-border: var(--mp-pumpkin);
+}
+
+@media (max-width: 50rem) {
+  .sl-markdown-content table :is(thead, tbody, tr, td) {
+    margin-top: 0;
+  }
 }
