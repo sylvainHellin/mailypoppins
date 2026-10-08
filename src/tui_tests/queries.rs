@@ -229,6 +229,7 @@ impl Fixture {
                 "draft.list".to_string(),
                 "mailbox.list".to_string(),
             ],
+            rows: None,
         }
     }
 

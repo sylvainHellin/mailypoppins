@@ -20,6 +20,10 @@ It is enforced on the decoder's buffer rather than on a completed line, so a cli
 The response direction carries its own cap, `MAX_RESPONSE_BYTES`, which is 16 MiB, which is why `Decoder::new` takes a limit instead of reading either constant.
 Both sides read that one constant: the daemon refuses to write a reply above it and answers `frame_too_large` with `{limit, seen}` on the request's own id, and a client sizes its decoder by it, so an oversized answer is a named error on both ends rather than a truncated frame on one and a dropped connection on the other.
 
+Not every frame from the daemon is an answer or an event.
+`message.list_stream` sends one mailbox as `message.rows` notifications on the calling connection, each its own frame, and a chunk closes once its rows reach `ROWS_CHUNK_BYTES`, which is 1 MiB.
+A chunk frame is therefore at most 1 MiB plus one row plus its envelope, sixteen times under the response cap, so a listing of any length crosses the socket without one frame having to hold all of it ([The streamed listing](#the-streamed-listing)).
+
 A breach of the cap, invalid UTF-8, or invalid JSON closes that connection and nothing else.
 Other connections and the daemon itself keep running.
 
@@ -115,7 +119,7 @@ Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are 
 
 - **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `signature.list` and `draft.attachments` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
 - **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold` and the nine `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
-- **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
+- **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.list_stream`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
 A method also declares `since`, the first protocol version that served it, which is never below `1`, and `cancel_scope`, one of `durable` or `client_scoped`, which says what a disconnect of the calling connection does to the work the call started.
@@ -324,6 +328,11 @@ The cost is one key per row: P6-U10 measured a warm listing of 5 000 rows at 94 
 `total` is how many messages the mailbox holds and ignores `limit`: it is the "In the store: N" of `mp list-messages`.
 An absent `limit` and `limit: null` both mean every message; `limit: 0` means none, since `null` already spells "all" and a number may not mean the opposite of itself.
 An empty mailbox of a ready account is an empty listing, not an error.
+
+`limit: null` is the small-mailbox path.
+The whole answer is one frame, so a mailbox past about 34 000 rows of about 488 bytes each breaches the 16 MiB response cap and answers `frame_too_large` instead of a listing.
+A client that lists a whole mailbox for a list view calls `message.list_stream` ([The streamed listing](#the-streamed-listing)), which carries the same rows in 1 MiB chunks; `limit: null` stays accepted, with its cap, so an older client keeps working on every mailbox it could already open.
+`mp list-messages`, whose `-n` caps each mailbox, and the `envelope` projection of `mp dump-mailbox` stay on `message.list`.
 
 `mp list-messages` renders from the wire alone: it opens no store of its own, and a client that never had one prints the same listing.
 
@@ -862,9 +871,53 @@ A fetch that found the message already there publishes nothing, having changed n
 
 Both operations are `durable`: a search a user started must not be torn down because the window that started it went away, and a fetch that has written a row has nothing to be cancelled back to.
 
+### The streamed listing
+
+`message.list_stream` lists one whole mailbox to the calling connection in chunks, so a mailbox past the response cap opens (#0138).
+
+```text
+message.list_stream {account, mailbox}
+        -> {operation_id, account, mailbox, total}
+   streams  notification `message.rows`, params {offset, operation_id, rows: [...]},
+            on the calling connection only
+   settles  operation.finished {operation_id, state, result: {account, mailbox, total}}
+```
+
+It is a twin of `message.list` named after how it differs, on the pattern of `message.list_server` and `message.search_server`, and a method of its own rather than a changed `message.list`: a client that requires it gets `capability_missing` from an older daemon at the handshake instead of a wrong answer at the first mailbox open.
+`message.list` stays as it is for bounded calls.
+
+`account` and `mailbox` resolve and refuse exactly as `message.list` resolves and refuses them: `account_unknown`, `account_not_ready`, `-32602` naming the known mailboxes, Drafts refused.
+Any other parameter is `-32602`: there is no `limit` and no `projection`, because the method exists for the whole mailbox in the `list` projection and a bounded or envelope listing is `message.list`.
+The daemon reads the whole mailbox before it answers, so every refusal is the call's own error and no operation id is issued for a call that cannot succeed, the `sync.watch` precedent of validating before the id.
+`total` is the row count of that one read and therefore exactly the number of rows the stream carries.
+
+Each chunk is a `message.rows` notification, `mp_protocol::listing::MessageRowsChunk`, whose `rows` are `message.list` rows byte for byte, `selector` and `date_sort` included, so a client decodes them with the code it already has.
+`offset` is the position of the chunk's first row in the stream and not a request parameter: nothing lets a client ask for a page.
+Rows travel newest first, in the order `message.list` answers; offsets are contiguous, starting at 0, and the last chunk ends at `total`.
+A chunk closes once its encoded rows reach 1 MiB, the last one may be short, and a mailbox of zero rows streams no chunk at all and settles with `total: 0`.
+A client that sees a gap in `offset`, a row past `total`, or a success whose rows do not sum to `total` holds a broken stream, reports a protocol error and keeps the list it had.
+
+The chunks are not `state.event` kinds, unlike `message.server_hit`.
+A lifecycle event reaches every bootstrapped connection, so one mailbox open would push the whole mailbox to every client; it would sit in the 4 MiB outbound queue, which five chunks overflow; and it would take a revision from the dense counter, which a chunk has no use for.
+They go to the connection that called and to no other, and `state.event` frames from other changes may interleave between them.
+
+On the calling connection no `message.rows` frame of an operation follows that operation's `operation.finished`.
+For `succeeded` and `failed` every chunk precedes the finish.
+For `cancelled` the finish can come first, since a cancel settles the operation the moment it is dispatched, and the daemon drops the chunks it has not written yet: a cancelled stream delivers some prefix of the rows, possibly none, and nothing after its finish.
+A client treats any finish other than `succeeded` that arrives before `total` rows as no listing and discards the rows it collected.
+
+The store read happens before the answer, so a stream cannot fail on the store.
+What remains is `operation.cancel`, a disconnect, a daemon shutdown, and a single row whose own encoding exceeds the response cap minus the envelope, which fails the operation with `frame_too_large` and `{limit, seen}` in the finished event's `error` instead of writing a frame the client's decoder would cut the connection on.
+The method is `client_scoped`: the rows are addressed to one connection, and once it is gone nobody can read them.
+The calling connection has to be subscribed to see the finish, as for every operation; the method does not refuse an unsubscribed caller.
+The listing does not depend on the finish: once the contiguous rows reach `total`, at once for `total: 0`, the stream is complete and `mp-client` answers it without waiting, so a client that streams after a reconnect but before its `state.bootstrap` is served still gets its listing.
+A finish that arrives afterwards is an ordinary event whose revision moves the watermark; the finish is what settles a stream that falls short of `total`.
+
 ### Long-running operations
 
 A method whose kind is *operation* answers at once with `{"operation_id": str}` and does the work in the background.
+An answer may carry members beside the id when the method knows something before the work starts: `send.draft` answers `{operation_id, held: true}` when it armed a hold, and `message.list_stream` answers `{operation_id, account, mailbox, total}`, the head of the listing it is about to stream.
+A client reads `operation_id` from every operation answer and the other members only from the methods that document them.
 The id is an opaque non-empty string, unique for the life of the daemon process: a client echoes it and never parses it.
 
 An operation is in one of five states, `queued`, `running`, `succeeded`, `failed` or `cancelled`, and it moves forward only: `queued -> running -> {succeeded, failed, cancelled}`, plus `queued -> {succeeded, failed, cancelled}` for work that finishes before it reports anything.
@@ -944,6 +997,7 @@ The daemon's conditions occupy `-32010` to `-32000`.
 `identity_mismatch` names both directories on both sides so the client can print all four and tell the user which override to drop.
 `frame_too_large` reports the cap that was breached and the byte count that breached it, the same pair the decoder produces.
 `message.html` answers it for a rendition over its own 8 MiB inline limit, with `fallback` naming the method that serves the same bytes as a file.
+It can also arrive inside an `operation.finished` event as a failed operation's `error`: a `message.list_stream` row too large for any frame fails the stream that way, with the same `{limit, seen}` and no `fallback`.
 `message` is a human-readable line for the log and the CLI, and clients match on the code, never on the message text.
 
 `draft_invalid` is its own code rather than an overloaded `-32602`, because "you asked for a draft that does not exist" and "the draft you asked for will not parse" may not be the same answer on one connection, and its `data` is the `draft.invalid` payload, so a client renders the caller's refusal and the watcher's event with one piece of code.
@@ -1109,11 +1163,18 @@ A terminal answer is settled exactly as the lost `operation.finished` would have
 After a daemon restart every awaited id is dropped without asking, since operation ids are only ever the issuing instance's; the TUI does all of this in `requery_operations` (`clients/tui/src/events.rs`).
 If the control notification itself cannot be written, the daemon closes that connection and keeps serving every other one.
 
+The `message.rows` chunks of a `message.list_stream` bypass this queue.
+Each connection has a second, bounded channel of encoded row frames, four chunks deep, which is the queue's own 4 MiB, and the stream's producer parks when it is full, so a client that stops reading costs the daemon those four chunks and no more.
+The writer picks its next whole frame in a fixed order: a pending answer, then a row frame, then the outbound queue.
+The producer publishes `operation.finished` only after its last chunk is in the channel, and the writer prefers the channel to the queue, which is what puts every chunk ahead of a `succeeded` or `failed` finish.
+A row frame carries its operation's cancel token, and the writer drops a frame whose token is shut instead of writing it: a cancel shuts the token before it publishes the finish, so no chunk is written after a `cancelled` finish.
+Row frames are not coalesced, never overflow the queue and never cause a `state.resync_required`.
+
 A client that receives `state.resync_required` discards its state and calls `state.bootstrap`.
 
 ### Notification methods
 
-Three methods travel as notifications, and a client that reads frames off the socket has to recognise all three.
+Four methods travel as notifications, and a client that reads frames off the socket has to recognise all four.
 
 `state.event` carries one event envelope, `{instance_id, revision, kind, payload}`, and is what every kind above arrives as.
 `state.resync_required` carries `{instance_id, reason}` and is the control notification an overflow sends.
@@ -1122,6 +1183,10 @@ Three methods travel as notifications, and a client that reads frames off the so
 `daemon.stopped` is a method of its own rather than an event because the asking connection is pre-handshake and therefore not subscribed to anything: the report has to reach `mp daemon stop`, and the stop's own answer was flushed long before the daemon knew how the shutdown went.
 `clean` is whether everything settled inside the grace, and `unsettled` names what did not, as `operation.status` objects in the order `pending` carried them.
 A daemon stopped by a signal sends no report, having no connection to send it on.
+
+`message.rows` carries `{offset, operation_id, rows}`, one chunk of a `message.list_stream`, and is sent only on the connection that called it ([The streamed listing](#the-streamed-listing)).
+It is a method of its own rather than a `state.event` kind for the reasons given there: it is addressed to one connection, takes no revision and bypasses the outbound queue.
+A client that never calls `message.list_stream` never receives one.
 
 ## Fixtures
 
@@ -1136,6 +1201,8 @@ A new fixture whose name matches no rule fails the suite rather than being skipp
 
 `state.bootstrap` has two fixtures: `state.bootstrap.response.json`, a healthy daemon's answer with an empty `diagnostics`, and `state.bootstrap.diagnostics.response.json`, whose `diagnostics` carries one failing check.
 Both have their member set pinned down to one account and one check entry, and both decode as `mp_protocol::state::Bootstrap`; the second is in its current shape throughout, so it also survives that typed decode unchanged.
+
+The streamed listing has three fixtures: `message.list_stream.request.json`, `message.list_stream.response.json`, which decodes as `mp_protocol::listing::MessageListStreamStarted`, and `notification.message_rows.json`, which decodes as `MessageRowsChunk` and carries the rows of `message.list.response.json` unchanged, so the two row shapes cannot drift apart.
 
 ## Protocol changelog
 
@@ -1311,3 +1378,9 @@ On the client side, `mp_client::session` stopped flattening a refusal into its t
 `SendOutcome.message_id` is filled for `send.draft` and `send.approved`, where it was `""`: the `Message-ID` the build minted, the one the outbox row carries; it stays `""` only for a batch entry that failed before a message was built.
 `signature.list` `{account}` -> `{account, names, default}` is the first method of the `signature.*` family, a query, and the capability list grew by its name; the desktop asks for it at the handshake, so a daemon without it is a version mismatch.
 `draft.attachments` `{account, id|selector}`, `draft.attach` `{account, id|selector, path}` and `draft.detach` `{account, id|selector, index}` answer `mp_protocol::draft::DraftAttachments`, the list read, appended to or shortened by one entry, so a client no longer rewrites a draft's frontmatter behind the daemon's back; the capability list grew by the three names.
+
+#0138 added `message.list_stream`, one client-scoped operation, and `message.rows`, a fourth notification method, all additive; no field was renamed, none was dropped, and no command's output moved.
+`message.list_stream` `{account, mailbox}` -> `{operation_id, account, mailbox, total}` streams one whole mailbox to the calling connection as `message.rows` chunks of `{offset, operation_id, rows}`, each at most 1 MiB of rows, and settles with `{account, mailbox, total}`; a row too large for any frame fails it with `frame_too_large` inside the finished event.
+The types are `mp_protocol::listing::MessageListStreamStarted` and `MessageRowsChunk` with the constants `METHOD_MESSAGE_LIST_STREAM` and `mp_protocol::METHOD_MESSAGE_ROWS`, and the fixtures are `crates/mp-protocol/fixtures/message.list_stream.{request,response}.json` and `notification.message_rows.json`.
+`message.list` is unchanged, `limit: null` included, which keeps its cap and is now the small-mailbox path.
+It is declared in `MESSAGE_STREAM_METHOD_SPECS`, an array of its own for the reason `MESSAGE_HTML_METHOD_SPECS` is one, and the capability list grew by its name.

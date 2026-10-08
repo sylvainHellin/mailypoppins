@@ -217,6 +217,7 @@ fn ctx() -> ClientCtx {
         kind: ClientKind::Tui,
         protocol: 1,
         capabilities: vec!["state.bootstrap".to_string()],
+        rows: None,
     }
 }
 

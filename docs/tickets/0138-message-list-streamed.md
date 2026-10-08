@@ -3,11 +3,12 @@ id: 0138
 title: Stream the whole-mailbox listing past the 16 MiB frame cap
 type: perf
 priority: next
-status: open
+status: done
 created: 2026-10-04
 ---
 
-Proposed 2026-10-04, awaiting Sylvain's review of the contract.
+Shipped 2026-10-08 on branch `perso-0138-list-stream` in six commits, one per rollout step: the contract (`0ca2f9c`), the daemon (`07a4523`), `mp-client` (`5590583`), the TUI (`8e3f5a2`), the desktop (`feb5280`) and the regression, bench and documents (step 6).
+The desktop crate does not build on the Linux host the work was done on, so its `cargo test` and a live open of a 50 000-row mailbox in both clients are still owed on the Mac; the unticked criteria below say which.
 
 Sylvain chose a streamed answer over offset paging, and the same change carries the rows as bytes instead of a `serde_json::Value` tree.
 The facts this design builds on are in `.agents/research/2026-10-04-message-list-contract-scout.md`; every file and line cited below was re-read for this ticket.
@@ -118,14 +119,16 @@ message.list_stream {account, mailbox}
 ### `crates/mp-client`
 
 - `mp_protocol` gains `METHOD_MESSAGE_ROWS`, `MessageListStreamStarted {operation_id, account, mailbox, total}` and `MessageRowsChunk {offset, operation_id, rows: Vec<MessageListRow>}`, in `crates/mp-protocol/src/listing.rs` beside `MessageListing` (`:127`).
-- The session thread (`crates/mp-client/src/session.rs`, `serve`) gains a streamed call: it sends `message.list_stream`, then reads notifications until the `operation.finished` of that id, folding each `message.rows` of that id into one `Vec<MessageListRow>` and publishing every other notification as it does today, the finish included, so each client's watermark sees its revision.
+- The session thread (`crates/mp-client/src/session.rs`, `serve`) gains a streamed call: it sends `message.list_stream`, then reads notifications until the contiguous rows of that id reach `total` or the `operation.finished` of that id arrives, folding each `message.rows` of that id into one `Vec<MessageListRow>` and publishing every other notification as it does today, the finish included, so each client's watermark sees its revision.
+  A stream whose rows reach `total`, at once for `total: 0`, answers its listing and returns the thread to the next call without waiting for the finish, which reaches only a subscribed connection: after a reconnect, a stream sent before the client's `state.bootstrap` is served receives every row and no finish, and waiting for one would cost the stream its deadline and the bootstrap queued behind it its budget.
+  A finish that arrives after the answer is published like any other notification; the finish settles only a stream that falls short of `total`.
 - The collector checks contiguity and the final count, and hands back a `MessageListing {account, mailbox, total, messages}`, the shape a `message.list` answer decodes into, so every caller keeps the `Vec` it builds today.
 - `Queries` (`crates/mp-client/src/queries.rs:64`) gains `fn list_stream(&self, account: &str, mailbox: &str) -> Result<MessageListing>` with a default body that calls `message.list` with `limit: null` through `call` and decodes the answer into `MessageListing`; `Session` and `QueryHandle` override it with the session thread's streamed call.
   The default keeps the twelve other implementors working unchanged, production code among them: the desktop's `Budgeted` (`clients/desktop/src-tauri/src/session.rs:85`), and the TUI test fixtures in `src/tui_tests/queries.rs:250`, `actions.rs:1743` and `events.rs:1150`, which answer only `call` and through which `list_emails(&fixture, ...)` (`src/tui_tests/queries.rs:379`) lists a mailbox.
   A refusing default would break every one of them.
 - `list_messages` (`queries.rs:109`) switches to it; `message_list_request` stays for the bounded callers.
 - While it collects, the session thread serves no other call, exactly as it serves none while one large `message.list` answer is in flight today.
-  A `state.resync_required` that arrives mid-stream is published at once, and the `state.bootstrap` it provokes waits behind the stream, so the finish, a lifecycle event that survives an overflow, reaches the collector before any re-bootstrap can empty the queue.
+  A `state.resync_required` that arrives mid-stream is published at once, and the `state.bootstrap` it provokes waits behind the stream, so the finish of a stream short of `total`, a lifecycle event that survives an overflow, reaches the collector before any re-bootstrap can empty the queue.
 - The budget of a plain call is `call_on`'s `recv_timeout` on the caller's thread (`crates/mp-client/src/session.rs:599`), and a call that outlives it runs to its end with its answer dropped (`call_within`, `:357`), so no component could cancel a stream from there.
   The streamed call therefore carries its deadline inside `Call`, and `serve` races that deadline while it collects.
   At the deadline `serve` sends `operation.cancel` for the stream's id, answers the caller with a timeout error, and keeps discarding that id's `message.rows` until its finish arrives, publishing every other notification as before.
@@ -213,13 +216,17 @@ Each step lands on its own and leaves the tree green; until step 4 nothing calls
 
 ## Acceptance criteria
 
-- A 50 000-row mailbox opens in the TUI and in the desktop client against a live daemon, where today it opens empty.
-- No frame of the stream exceeds `ROWS_CHUNK_BYTES` plus one row plus the envelope, checked in the regression test.
-- The streamed rows equal the `message.list` rows for the same mailbox, field for field and in the same order.
-- At 50 000 rows the daemon's read plus chunk encoding is under 80 ms on the baseline host, recorded in `message-list-unbounded.md`.
-- `message.list` answers, fixtures and `mp list-messages` output are unchanged.
-- A TUI or desktop build against a daemon without the method stops at the handshake with `capability_missing`.
-- `cargo test --workspace` and the desktop's vitest run pass.
+- [ ] A 50 000-row mailbox opens in the TUI and in the desktop client against a live daemon, where today it opens empty.
+  Needs a live daemon and the Mac; `tests/daemon_list_stream_cap.rs` covers the path below the clients, 50 000 rows collected through `mp-client`'s session thread.
+- [x] No frame of the stream exceeds `ROWS_CHUNK_BYTES` plus one row plus the envelope, checked in the regression test (`tests/daemon_list_stream_cap.rs`: 26 frames, the largest 1 049 188 bytes).
+- [x] The streamed rows equal the `message.list` rows for the same mailbox, field for field and in the same order (`tests/daemon_list_stream.rs`, and the first 10 000 rows of the 50 000 in `tests/daemon_list_stream_cap.rs`).
+- [ ] At 50 000 rows the daemon's read plus chunk encoding is under 80 ms on the baseline host, recorded in `message-list-unbounded.md`.
+  Measured at 111 ms on the home server, where the store read alone is 89 ms against the baseline host's 41; the baseline host's figure is still to be taken.
+- [x] `message.list` answers, fixtures and `mp list-messages` output are unchanged.
+- [ ] A TUI or desktop build against a daemon without the method stops at the handshake with `capability_missing`.
+  The TUI's requirement and its at-once refusal are unit-tested (`src/daemon/client.rs`, `src/daemon/session.rs`) and the desktop's list is pinned in `connector.rs`, which compiles only on the Mac; no run against an older daemon was made.
+- [x] `cargo test --workspace` and the desktop's vitest run pass.
+  The desktop crate's own `cargo test` is not part of the workspace and is owed on the Mac.
 
 ## Alternatives considered
 
@@ -243,13 +250,13 @@ The compact positional row encoding [list-transfer.md](../baselines/decisions/li
 
 The `message.server_hit` precedent, rejected under "The `message.rows` notification".
 
-## Open points for the review
+## Review points, as they landed
 
-- The method name `message.list_stream` and the notification name `message.rows`.
-- Whether the TUI should require the capability at its handshake, as proposed, or fall back to `message.list` on `-32601`.
-- Whether a `frame_too_large` from `message.list` with `limit: null` should carry `fallback: "message.list_stream"`, as `message.html`'s carries `message.materialise_html`; it needs `encode_capped` to know the method, so it is left out of step 1.
-- Every mailbox open becomes an operation: it takes a slot in the 256-operation memory, appears in a bootstrap snapshot's `operations` while it runs, and broadcasts a small `operation.finished` to every client.
-  Both clients ignore an id they do not await, but a client that renders the snapshot's operations should be checked before step 4.
+- The method is `message.list_stream` and the notification `message.rows`, as proposed.
+- The TUI requires the capability at its handshake (`TUI_REQUIRED_CAPABILITIES` in `src/daemon/client.rs`), and a `capability_missing` there ends the run at once with `mp daemon restart` as the way out, instead of starting a daemon on demand that is already running.
+- A `frame_too_large` from `message.list` with `limit: null` carries no `fallback`; it would need `encode_capped` to know the method.
+- Every mailbox open is an operation: it takes a slot in the 256-operation memory, appears in a bootstrap snapshot's `operations` while it runs, and broadcasts a small `operation.finished` to every client.
+  The TUI ignores the finish of an id it did not start without a log line (`a_mailbox_streams_own_finish_is_ignored` in `src/tui_tests/events.rs`) and renders no snapshot operations; the desktop pump drops it with a debug line, and the desktop reads the snapshot's operations only to find its own sign-in by id (`clients/desktop/src/app/signin.ts`).
 - The calling connection must be subscribed to see the finish, as for every operation; the TUI and desktop sessions are, and the method does not refuse an unsubscribed caller.
 
 ## Follow-ups outside this ticket

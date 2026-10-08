@@ -204,6 +204,7 @@ mod tests {
             kind: ClientKind::Gui,
             protocol: 1,
             capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+            rows: None,
         }
     }
 

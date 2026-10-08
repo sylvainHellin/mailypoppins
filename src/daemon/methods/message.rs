@@ -34,6 +34,7 @@
 //! `limit` both mean "all"; `0` means none, since `null` already spells "all"
 //! and a number may not mean the opposite of itself.
 
+use std::collections::VecDeque;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -46,7 +47,7 @@ use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
 use mp_protocol::listing::{ThreadListing, ThreadMessage};
-use mp_protocol::RpcError;
+use mp_protocol::{RpcError, MAX_RESPONSE_BYTES};
 
 use crate::config::AccountConfig;
 use crate::ops::Backend;
@@ -58,12 +59,14 @@ use crate::tui::app::{build_mailboxes, resolve_date};
 
 use super::super::dispatch::{
     CancelToken, ClientCtx, Dispatcher, DomainError, Method, MethodKind, MethodSpec, Outcome,
-    ResourceId,
+    ResourceId, RowsSink,
 };
 use super::super::handles::{
     handle_dir, reap, remove_handle_dir, HandleId, HandleKind, HandleTable,
 };
-use super::{internal, invalid_params, string_param};
+use super::super::operations::{OperationHandle, OperationRegistry};
+use super::super::state::ConnectionId;
+use super::{internal, invalid_params, only_params, string_param};
 
 /// The three read methods, in method-name order.
 ///
@@ -409,6 +412,371 @@ fn serialize_display<S: serde::Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.collect_str(value)
+}
+
+// ---------------------------------------------------------------------------
+// The streamed listing (#0138)
+// ---------------------------------------------------------------------------
+
+/// The streamed whole-mailbox listing, declared on its own for the reason
+/// [`MESSAGE_HTML_METHOD_SPECS`] is.
+///
+/// An operation, because the rows travel after the answer as `message.rows`
+/// chunks and the stream settles with `operation.finished`; `client_scoped`,
+/// because the rows are addressed to one connection and once it is gone
+/// nobody can read them.
+pub const MESSAGE_STREAM_METHOD_SPECS: [MethodSpec; 1] = [MethodSpec::new(
+    mp_protocol::listing::METHOD_MESSAGE_LIST_STREAM,
+    MethodKind::Operation,
+    1,
+)
+.client_scoped()];
+
+/// The byte budget of one chunk's rows: a chunk closes once its encoded rows
+/// reach it, so a chunk frame is at most this plus one row plus the envelope,
+/// sixteen times under [`MAX_RESPONSE_BYTES`].
+///
+/// A byte budget rather than a row count, because a row's size varies with its
+/// subject and recipients and the cap is in bytes. At the 488 bytes a row of
+/// `examples/mkfixture.rs` costs, it is about 2150 rows a chunk.
+pub const ROWS_CHUNK_BYTES: usize = 1 << 20;
+
+/// Test hook: overrides [`ROWS_CHUNK_BYTES`], in bytes, so a test streams
+/// several chunks out of a few thousand rows. Unset, unparseable or zero means
+/// the default: a daemon may not change behaviour over a stray variable.
+///
+/// Read once, when the method is registered, on the
+/// [`HANDLE_TTL_ENV`](super::super::handles::HANDLE_TTL_ENV) precedent.
+pub const ROWS_CHUNK_BYTES_ENV: &str = "MAILYPOPPINS_DAEMON_ROWS_CHUNK_BYTES";
+
+/// [`ROWS_CHUNK_BYTES`], with [`ROWS_CHUNK_BYTES_ENV`] honoured.
+fn rows_chunk_bytes() -> usize {
+    std::env::var(ROWS_CHUNK_BYTES_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or(ROWS_CHUNK_BYTES)
+}
+
+/// `message.list_stream`: one whole mailbox, read before the answer and
+/// streamed to the calling connection after it.
+pub struct MessageListStream {
+    /// The live configuration, so a reload is visible to the next call.
+    pub config: Arc<super::super::config::ConfigStore>,
+    /// The registry the stream's operation is started in.
+    pub operations: Arc<OperationRegistry>,
+    /// The chunk budget, [`ROWS_CHUNK_BYTES`] unless a test lowered it.
+    pub chunk_bytes: usize,
+}
+
+impl Method for MessageListStream {
+    fn spec(&self) -> MethodSpec {
+        MESSAGE_STREAM_METHOD_SPECS[0]
+    }
+
+    fn call<'a>(
+        &'a self,
+        ctx: &'a ClientCtx,
+        params: Value,
+        _cancel: CancelToken,
+    ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
+        Box::pin(async move {
+            let spec = self.spec();
+            only_params(spec.name, &params, &["account", "mailbox"])?;
+            let accounts = self.config.accounts();
+            // The parameters, the account gate and the store path resolve on
+            // the calling thread, for the reason `list_off_thread` gives: the
+            // data-root override of a test fixture is thread-local.
+            let ListRead {
+                name,
+                mailbox,
+                path,
+                ..
+            } = list_read(&params, &accounts)?;
+            let Some(sink) = ctx.rows.clone() else {
+                return Err(DomainError::internal(format!(
+                    "{} needs a connection to stream to, and this caller has none",
+                    spec.name
+                )));
+            };
+
+            // The whole read before the answer, on the blocking pool: every
+            // refusal is the call's own error, no operation id is issued for a
+            // call that cannot succeed, and `total` is exactly what the stream
+            // will carry.
+            let (name, mailbox, rows) = tokio::task::spawn_blocking(move || {
+                read_dated(&name, &mailbox, &path).map(|rows| (name, mailbox, rows))
+            })
+            .await
+            .map_err(|e| internal(format!("the listing worker did not finish: {e}")))??;
+            let total = rows.len();
+
+            let (id, handle) = self.operations.start(
+                ConnectionId(ctx.connection_id),
+                spec.cancel_scope,
+                spec.name,
+            );
+            handle.set_running();
+            let answer = json!({
+                "operation_id": id.as_str(),
+                "account": name,
+                "mailbox": mailbox,
+                "total": total,
+            });
+            let job = StreamJob {
+                account: name,
+                mailbox,
+                rows,
+                handle,
+                sink,
+                chunk_bytes: self.chunk_bytes,
+            };
+            tokio::task::spawn_blocking(move || job.run());
+            Ok(Outcome::query(answer))
+        })
+    }
+}
+
+/// Register `message.list_stream` on `dispatcher`.
+pub fn register_stream(
+    dispatcher: &mut Dispatcher,
+    config: Arc<super::super::config::ConfigStore>,
+    operations: Arc<OperationRegistry>,
+) {
+    dispatcher.register(Arc::new(MessageListStream {
+        config,
+        operations,
+        chunk_bytes: rows_chunk_bytes(),
+    }));
+}
+
+/// Every row of one mailbox, newest first, with its stamped `date_sort`.
+fn read_dated(name: &str, mailbox: &str, path: &Path) -> Result<Vec<read::DatedRow>, RpcError> {
+    let store =
+        Store::open(path).map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+    let (rows, _total) = read::list_mailbox_dated(&store, name, mailbox, None)
+        .map_err(|e| internal(format!("listing {name}/{mailbox}: {e:#}")))?;
+    Ok(rows)
+}
+
+/// One stream's producer: the owned rows of the read, encoded one chunk at a
+/// time and handed to the connection's writer.
+///
+/// Runs on the blocking pool, so the encoding stays off the runtime workers
+/// the way the read does, and parks in [`RowsSink::blocking_send`] when the
+/// connection's channel is full, so a client that stops reading costs four
+/// chunks and no more.
+struct StreamJob {
+    account: String,
+    mailbox: String,
+    rows: Vec<read::DatedRow>,
+    handle: OperationHandle,
+    sink: RowsSink,
+    chunk_bytes: usize,
+}
+
+impl StreamJob {
+    /// Stream every row and settle the operation.
+    ///
+    /// The token is observed between chunks. A cancel has already settled the
+    /// operation by the time the token reads shut, and a connection that is
+    /// gone is cancelled by its disconnect, so neither path settles anything
+    /// here; `operation.finished` is published only after the last chunk is in
+    /// the channel, which is half of what puts every chunk ahead of a
+    /// `succeeded` finish on the wire.
+    fn run(self) {
+        let StreamJob {
+            account,
+            mailbox,
+            rows,
+            handle,
+            sink,
+            chunk_bytes,
+        } = self;
+        let token = handle.token.clone();
+        let id = handle.id();
+        let mut chunks = ChunkEncoder::new(id.as_str(), chunk_bytes, MAX_RESPONSE_BYTES);
+        let send = |chunks: &mut ChunkEncoder| -> bool {
+            while let Some(frame) = chunks.next_frame() {
+                if token.is_cancelled() || !sink.blocking_send(frame, token.clone()) {
+                    return false;
+                }
+            }
+            true
+        };
+
+        for (index, (row, stamped)) in rows.iter().enumerate() {
+            let wire = WireRow::new(&account, row, wire_date_sort(row, *stamped));
+            if let Err(error) = chunks.push(&wire) {
+                handle.fail(error.into_domain(&account, &mailbox, index));
+                return;
+            }
+            if !send(&mut chunks) {
+                return;
+            }
+        }
+        chunks.finish();
+        if !send(&mut chunks) {
+            return;
+        }
+        handle.succeed(json!({
+            "account": account,
+            "mailbox": mailbox,
+            "total": rows.len(),
+        }));
+    }
+}
+
+/// What closes a `message.rows` frame, after its last row.
+const ROWS_FRAME_SUFFIX: &[u8] = b"]}}\n";
+
+/// Why a row could not be put into a chunk.
+#[derive(Debug, PartialEq)]
+enum ChunkError {
+    /// The row's own frame, alone in a chunk, is over the response cap.
+    TooLarge { limit: usize, seen: usize },
+    /// `serde_json` refused the row, which a row of strings, integers and
+    /// booleans never makes it do.
+    Encode(String),
+}
+
+impl ChunkError {
+    /// The error the stream's operation fails with.
+    fn into_domain(self, account: &str, mailbox: &str, index: usize) -> DomainError {
+        match self {
+            ChunkError::TooLarge { limit, seen } => DomainError::new(
+                mp_protocol::ErrorCode::FrameTooLarge,
+                format!(
+                    "row {index} of {account}/{mailbox} needs a {seen}-byte frame, \
+                     over the {limit}-byte response cap"
+                ),
+                Some(json!({"limit": limit, "seen": seen})),
+            ),
+            ChunkError::Encode(error) => DomainError::internal(format!(
+                "serialising row {index} of {account}/{mailbox}: {error}"
+            )),
+        }
+    }
+}
+
+/// Builds `message.rows` frames as bytes, one chunk at a time.
+///
+/// The envelope is written by hand and each row with `serde_json::to_writer`,
+/// so no `Value` tree is built for a row. The keys are in sorted order at
+/// every level, which is what `serde_json` without `preserve_order` writes for
+/// a `Value`, so a frame is byte for byte what `frame::encode` of the same
+/// notification as a `Value` produces
+/// (`a_chunk_frame_is_frame_encode_of_the_same_notification`).
+struct ChunkEncoder {
+    /// The operation id, already a JSON string literal.
+    operation_id: String,
+    /// A chunk closes once its rows reach this many bytes.
+    budget: usize,
+    /// No frame may exceed this, terminator included.
+    cap: usize,
+    /// The open chunk's frame so far, envelope included.
+    buf: Vec<u8>,
+    /// How much of `buf` is the envelope prefix.
+    prefix_len: usize,
+    /// The stream position of the open chunk's first row.
+    offset: usize,
+    /// How many rows the open chunk holds.
+    count: usize,
+    /// Closed frames not yet handed out.
+    ready: VecDeque<Vec<u8>>,
+}
+
+impl ChunkEncoder {
+    fn new(operation_id: &str, budget: usize, cap: usize) -> Self {
+        ChunkEncoder {
+            operation_id: Value::String(operation_id.to_string()).to_string(),
+            budget,
+            cap,
+            buf: Vec::new(),
+            prefix_len: 0,
+            offset: 0,
+            count: 0,
+            ready: VecDeque::new(),
+        }
+    }
+
+    /// Start a chunk at the current offset.
+    fn open(&mut self) {
+        use std::io::Write as _;
+
+        self.buf = Vec::with_capacity(self.budget.saturating_add(self.budget / 8).min(self.cap));
+        // Writing into a `Vec` cannot fail.
+        let _ = write!(
+            self.buf,
+            r#"{{"jsonrpc":"2.0","method":"{}","params":{{"offset":{},"operation_id":{},"rows":["#,
+            mp_protocol::METHOD_MESSAGE_ROWS,
+            self.offset,
+            self.operation_id
+        );
+        self.prefix_len = self.buf.len();
+    }
+
+    /// Append one row, closing the chunk once its rows reach the budget.
+    ///
+    /// A row that would push a non-empty chunk over the cap closes that chunk
+    /// without it and opens the next one with it, so every frame stays under
+    /// the cap however the budget and the row sizes fall; a row whose frame
+    /// would be over the cap even alone is [`ChunkError::TooLarge`].
+    fn push(&mut self, row: &impl serde::Serialize) -> Result<(), ChunkError> {
+        if self.count == 0 {
+            self.open();
+        }
+        let mark = self.buf.len();
+        if self.count > 0 {
+            self.buf.push(b',');
+        }
+        let start = self.buf.len();
+        serde_json::to_writer(&mut self.buf, row).map_err(|e| ChunkError::Encode(e.to_string()))?;
+        if self.buf.len() + ROWS_FRAME_SUFFIX.len() > self.cap {
+            if self.count > 0 {
+                let bytes = self.buf[start..].to_vec();
+                self.buf.truncate(mark);
+                self.close();
+                self.open();
+                self.buf.extend_from_slice(&bytes);
+            }
+            let seen = self.buf.len() + ROWS_FRAME_SUFFIX.len();
+            if seen > self.cap {
+                // Nothing of this chunk is handed out: the operation fails.
+                self.buf.clear();
+                return Err(ChunkError::TooLarge {
+                    limit: self.cap,
+                    seen,
+                });
+            }
+        }
+        self.count += 1;
+        if self.buf.len() - self.prefix_len >= self.budget {
+            self.close();
+        }
+        Ok(())
+    }
+
+    /// Close the open chunk, which must hold at least one row.
+    fn close(&mut self) {
+        self.buf.extend_from_slice(ROWS_FRAME_SUFFIX);
+        self.ready.push_back(std::mem::take(&mut self.buf));
+        self.offset += self.count;
+        self.count = 0;
+    }
+
+    /// Close the last chunk, if it holds anything: a stream of zero rows
+    /// sends no chunk at all.
+    fn finish(&mut self) {
+        if self.count > 0 {
+            self.close();
+        }
+    }
+
+    /// The oldest closed frame not yet handed out.
+    fn next_frame(&mut self) -> Option<Vec<u8>> {
+        self.ready.pop_front()
+    }
 }
 
 /// The `envelope` projection: `mp dump-mailbox --json` for one account.
@@ -2023,9 +2391,193 @@ mod tests {
         }
     }
 
+    /// A stored row with every optional header set or not by `index`, and a
+    /// subject that needs escaping, so the encoder meets the shapes a real
+    /// listing carries.
+    fn sample_row(index: i64) -> MessageRow {
+        MessageRow {
+            id: 1000 + index,
+            mailbox: "inbox".to_string(),
+            uid: index + 1,
+            message_id: format!("<row {index}/%?#@example.com>"),
+            from: (index % 5 != 0).then(|| format!("Sender {index} <s{index}@example.com>")),
+            to: Some("me@example.com".to_string()),
+            cc: (index % 2 == 1).then(|| "cc@example.com".to_string()),
+            reply_to: (index % 3 == 0).then(|| "reply@example.com".to_string()),
+            bcc: None,
+            subject: Some(format!("Bericht \"{index}\" \u{fc}ber Antr\u{e4}ge\n")),
+            date_display: Some("Thu, 2 Jul 2026 13:57:30 +0200".to_string()),
+            flags: Some(if index % 2 == 0 { "\\Seen" } else { "" }.to_string()),
+            has_attachments: index % 4 == 0,
+            body_blob: None,
+            thread_id: None,
+            is_invite: index % 7 == 0,
+        }
+    }
+
+    /// `frame::encode` of one `message.rows` notification built as a `Value`,
+    /// with the keys inserted in sorted order so the comparison holds whether
+    /// or not `serde_json` keeps insertion order.
+    fn value_frame(offset: usize, operation_id: &str, rows: &[MessageRow]) -> Vec<u8> {
+        let rows: Vec<Value> = rows
+            .iter()
+            .map(|row| {
+                serde_json::to_value(WireRow::new("alpha", row, wire_date_sort(row, Some(0))))
+                    .expect("a row serialises")
+            })
+            .collect();
+        mp_protocol::frame::encode(&json!({
+            "jsonrpc": "2.0",
+            "method": "message.rows",
+            "params": {"offset": offset, "operation_id": operation_id, "rows": rows},
+        }))
+        .expect("a notification encodes")
+    }
+
+    /// Every hand-built chunk frame is `frame::encode` of the same notification
+    /// as a `Value`, byte for byte, and the chunks are contiguous: the first
+    /// starts at 0, each next one where the last ended, and together they carry
+    /// every row once, in order.
+    #[test]
+    fn a_chunk_frame_is_frame_encode_of_the_same_notification() {
+        let rows: Vec<MessageRow> = (0..40).map(sample_row).collect();
+        let id = "8f2c41d6b0e94a7fa3c5d81e6b0947fc";
+        // About three rows a chunk, so the stream has many chunks and a short
+        // last one.
+        let mut chunks = ChunkEncoder::new(id, 1000, MAX_RESPONSE_BYTES);
+        let mut frames = Vec::new();
+        for row in &rows {
+            chunks
+                .push(&WireRow::new("alpha", row, wire_date_sort(row, Some(0))))
+                .expect("a small row fits");
+            while let Some(frame) = chunks.next_frame() {
+                frames.push(frame);
+            }
+        }
+        chunks.finish();
+        while let Some(frame) = chunks.next_frame() {
+            frames.push(frame);
+        }
+        assert!(
+            frames.len() > 5,
+            "the budget splits the rows: {}",
+            frames.len()
+        );
+
+        let mut offset = 0;
+        for frame in &frames {
+            let decoded: Value = serde_json::from_slice(frame).expect("a frame is JSON");
+            assert_eq!(decoded["params"]["offset"], json!(offset));
+            let count = decoded["params"]["rows"].as_array().expect("rows").len();
+            assert!(count > 0, "no chunk is empty");
+            assert_eq!(
+                frame,
+                &value_frame(offset, id, &rows[offset..offset + count]),
+                "the chunk at offset {offset} is frame::encode's bytes"
+            );
+            assert_eq!(frame.iter().filter(|b| **b == b'\n').count(), 1);
+            offset += count;
+        }
+        assert_eq!(offset, rows.len(), "the chunks carry every row once");
+
+        let mut empty = ChunkEncoder::new(id, 1000, MAX_RESPONSE_BYTES);
+        empty.finish();
+        assert_eq!(empty.next_frame(), None, "zero rows stream no chunk");
+    }
+
+    /// A chunk closes once its rows reach the budget, so no frame is larger
+    /// than the budget plus one row plus the envelope; a row that would push a
+    /// chunk over the cap opens the next chunk instead; and a row whose frame
+    /// is over the cap even alone is `TooLarge` with the cap and the size.
+    #[test]
+    fn no_chunk_frame_passes_the_cap_and_an_oversized_row_is_refused() {
+        let rows: Vec<MessageRow> = (0..20).map(sample_row).collect();
+        let encoded: Vec<Vec<u8>> = rows
+            .iter()
+            .map(|row| {
+                serde_json::to_vec(&WireRow::new("alpha", row, wire_date_sort(row, Some(0))))
+                    .expect("encodes")
+            })
+            .collect();
+        let largest = encoded.iter().map(Vec::len).max().expect("rows");
+        let envelope = value_frame(0, "op", &[]).len();
+
+        // A budget far above the cap: only the cap closes a chunk.
+        let cap = envelope + 3 * largest;
+        let mut chunks = ChunkEncoder::new("op", usize::MAX / 2, cap);
+        let mut offset = 0;
+        for row in &rows {
+            chunks
+                .push(&WireRow::new("alpha", row, wire_date_sort(row, Some(0))))
+                .expect("every row fits alone");
+        }
+        chunks.finish();
+        while let Some(frame) = chunks.next_frame() {
+            assert!(frame.len() <= cap, "{} > {cap}", frame.len());
+            let decoded: Value = serde_json::from_slice(&frame).expect("JSON");
+            assert_eq!(decoded["params"]["offset"], json!(offset));
+            offset += decoded["params"]["rows"].as_array().expect("rows").len();
+        }
+        assert_eq!(offset, rows.len());
+
+        // A budget of one byte: every row is its own chunk.
+        let mut chunks = ChunkEncoder::new("op", 1, MAX_RESPONSE_BYTES);
+        for row in &rows {
+            chunks
+                .push(&WireRow::new("alpha", row, wire_date_sort(row, Some(0))))
+                .expect("fits");
+        }
+        let mut frames = 0;
+        while let Some(frame) = chunks.next_frame() {
+            assert!(frame.len() <= envelope + largest + 2);
+            frames += 1;
+        }
+        assert_eq!(frames, rows.len());
+
+        // A cap below one row's frame.
+        let mut chunks = ChunkEncoder::new("op", ROWS_CHUNK_BYTES, envelope + 10);
+        let refused = chunks
+            .push(&WireRow::new(
+                "alpha",
+                &rows[0],
+                wire_date_sort(&rows[0], Some(0)),
+            ))
+            .expect_err("the row does not fit in any frame");
+        let ChunkError::TooLarge { limit, seen } = refused else {
+            panic!("not a TooLarge: {refused:?}");
+        };
+        assert_eq!(limit, envelope + 10);
+        assert_eq!(seen, value_frame(0, "op", &rows[..1]).len());
+        assert_eq!(
+            chunks.next_frame(),
+            None,
+            "nothing of the failed row goes out"
+        );
+
+        let error = ChunkError::TooLarge { limit, seen }.into_domain("alpha", "inbox", 0);
+        assert_eq!(
+            error.code(),
+            i64::from(mp_protocol::ErrorCode::FrameTooLarge.code())
+        );
+        assert_eq!(error.data(), Some(json!({"limit": limit, "seen": seen})));
+    }
+
+    /// The method is a client-scoped operation, and a chunk's budget is 1 MiB.
+    #[test]
+    fn the_stream_is_a_client_scoped_operation_with_a_one_mib_budget() {
+        assert_eq!(ROWS_CHUNK_BYTES, 1 << 20);
+        assert_eq!(
+            MESSAGE_STREAM_METHOD_SPECS[0].cancel_scope,
+            super::super::super::dispatch::CancelScope::ClientScoped
+        );
+        assert_eq!(MESSAGE_STREAM_METHOD_SPECS[0].kind, MethodKind::Operation);
+    }
+
     /// `message.list` with `limit: null` over a large mailbox, timed in process:
     /// the store read alone, the whole method, and the frame the server would
     /// encode from its answer (`docs/baselines/message-list-unbounded.md`).
+    /// Then `message.list_stream` (#0138): the read plus every chunk encoded
+    /// to bytes, and the client's decode of those chunks into rows.
     ///
     /// Points at a fixture `examples/mkfixture.rs` built, named by
     /// `MP_BENCH_FIXTURE`, and prints nothing but a skip line without one:
@@ -2122,6 +2674,51 @@ mod tests {
             let value: Value = serde_json::from_slice(&bytes).expect("decodes");
             std::hint::black_box(value);
         });
+        // `message.list_stream` (#0138), the daemon's side: the store read the
+        // handler makes before it answers, then every row encoded into
+        // `message.rows` frames as bytes, the producer's work minus the writes.
+        let encode_chunks = |dated: &[read::DatedRow]| -> Vec<Vec<u8>> {
+            let mut chunks = ChunkEncoder::new("op-bench", ROWS_CHUNK_BYTES, MAX_RESPONSE_BYTES);
+            let mut frames = Vec::new();
+            for (row, stamped) in dated {
+                chunks
+                    .push(&WireRow::new("alpha", row, wire_date_sort(row, *stamped)))
+                    .expect("a row fits");
+                while let Some(frame) = chunks.next_frame() {
+                    frames.push(frame);
+                }
+            }
+            chunks.finish();
+            while let Some(frame) = chunks.next_frame() {
+                frames.push(frame);
+            }
+            frames
+        };
+        let stream_daemon = sample(|| {
+            let dated = read_dated("alpha", &resolved, &path).expect("rows");
+            std::hint::black_box(encode_chunks(&dated));
+        });
+        let frames = encode_chunks(&dated);
+        let stream_bytes: usize = frames.iter().map(Vec::len).sum();
+        let largest_frame = frames.iter().map(Vec::len).max().unwrap_or(0);
+        // The client's side, as `mp-client`'s collector does it: each frame
+        // through the line decoder into a `Value`, the notification out of it,
+        // and every row through `row_from_wire` into one `Vec`.
+        let stream_client = sample(|| {
+            let mut decoder = mp_protocol::frame::Decoder::new(MAX_RESPONSE_BYTES);
+            let mut rows: Vec<mp_protocol::listing::MessageListRow> =
+                Vec::with_capacity(dated.len());
+            for frame in &frames {
+                for value in decoder.push(frame).expect("a frame decodes") {
+                    let notification: mp_protocol::Notification =
+                        serde_json::from_value(value).expect("a notification");
+                    let chunk = notification.params["rows"].as_array().expect("rows");
+                    rows.extend(chunk.iter().map(mp_client::queries::row_from_wire));
+                }
+            }
+            assert_eq!(rows.len(), dated.len());
+            std::hint::black_box(rows);
+        });
 
         let show = |(median, min, max): (f64, f64, f64)| format!("{median:.1} {min:.1} {max:.1}");
         eprintln!(
@@ -2155,6 +2752,18 @@ mod tests {
         eprintln!(
             "encode + client-side parse  ms median min max: {}",
             show(decode)
+        );
+        eprintln!(
+            "stream: {} frames, {stream_bytes} bytes, the largest {largest_frame}",
+            frames.len()
+        );
+        eprintln!(
+            "list_stream read + chunks   ms median min max: {}",
+            show(stream_daemon)
+        );
+        eprintln!(
+            "  client decode of chunks    ms median min max: {}",
+            show(stream_client)
         );
     }
 }

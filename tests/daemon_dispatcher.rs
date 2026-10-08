@@ -328,6 +328,7 @@ fn ctx() -> ClientCtx {
         kind: ClientKind::Tui,
         protocol: 1,
         capabilities: vec!["account.list".to_string(), "message.list".to_string()],
+        rows: None,
     }
 }
 

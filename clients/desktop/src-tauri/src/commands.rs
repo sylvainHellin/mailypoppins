@@ -715,14 +715,17 @@ pub fn list_messages_on(
             listing,
         });
     }
-    let (method, params) = queries::message_list_request(account, mailbox);
-    let answer = call(door, method, params, LIST_BUDGET, Addressing::Resource)?;
-    let rows = queries::decode_message_rows(&answer);
+    // `message.list_stream` against a daemon (#0138): the rows arrive in
+    // chunks of about 1 MiB and are collected on the session thread, so a
+    // mailbox past the 16 MiB response cap still lists, and the frontend
+    // still receives one whole list.
+    let listing = queries::Queries::list_stream(&q, account, mailbox)
+        .map_err(|e| GuiError::from_call(&e, Addressing::Resource))?;
     Ok(MessageList::Messages {
         account: account.to_string(),
-        mailbox: answer["mailbox"].as_str().unwrap_or(mailbox).to_string(),
-        total: answer["total"].as_u64().unwrap_or(rows.len() as u64),
-        rows,
+        mailbox: listing.mailbox,
+        total: listing.total,
+        rows: listing.messages,
     })
 }
 

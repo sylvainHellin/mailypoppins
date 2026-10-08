@@ -134,7 +134,9 @@ pub fn route(action: &Action) -> ActionRoute {
             ActionRoute::ClientOnly("a copy into a directory only this process can name (ANO-15)")
         }
         Action::Fetch | Action::FetchAccount(_) => ActionRoute::Daemon(&["sync.quick"]),
-        Action::LoadMailbox { .. } => ActionRoute::Daemon(&["message.list", "draft.list"]),
+        // A received mailbox streams (#0138); the Drafts mailbox is the drafts
+        // directory's own listing.
+        Action::LoadMailbox { .. } => ActionRoute::Daemon(&["message.list_stream", "draft.list"]),
         Action::Sync => ActionRoute::Daemon(&["sync.full"]),
         // The local pass first, then the server leg (LST-08).
         Action::ServerSearch { .. } => {

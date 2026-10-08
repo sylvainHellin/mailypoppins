@@ -314,8 +314,9 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
     ("Fetch", ActionRoute::Daemon(&["sync.quick"]), false),
     (
         "LoadMailbox",
-        // Routed by P5-U4 already; here so the table is the whole enum.
-        ActionRoute::Daemon(&["message.list", "draft.list"]),
+        // Routed by P5-U4 already; here so the table is the whole enum. A
+        // received mailbox streams since #0138.
+        ActionRoute::Daemon(&["message.list_stream", "draft.list"]),
         false,
     ),
     ("FetchAccount", ActionRoute::Daemon(&["sync.quick"]), false),
@@ -1697,6 +1698,7 @@ impl Fixture {
             kind: ClientKind::Tui,
             protocol: 1,
             capabilities: Vec::new(),
+            rows: None,
         }
     }
 

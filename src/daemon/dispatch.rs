@@ -97,6 +97,64 @@ pub struct ClientCtx {
     pub protocol: u32,
     /// The capabilities in effect on this connection.
     pub capabilities: Vec<String>,
+    /// Where a method sends frames addressed to this connection alone, the
+    /// `message.rows` chunks of a `message.list_stream` (#0138).
+    ///
+    /// `None` for a caller with no socket behind it (an in-process dispatch in
+    /// a test), and a method that needs it refuses such a call before it
+    /// issues an operation id.
+    pub rows: Option<RowsSink>,
+}
+
+/// How many encoded row frames one connection's [`RowsSink`] holds before its
+/// producer parks: four chunks of about 1 MiB, which is the outbound queue's
+/// own 4 MiB budget.
+pub const ROWS_CHANNEL_FRAMES: usize = 4;
+
+/// One encoded frame for one connection, with the cancel token of the
+/// operation that produced it.
+///
+/// The writer checks the token when it picks the frame and drops the frame if
+/// it is shut: a cancel shuts the token before it publishes the finished
+/// event, so no chunk of a cancelled stream is written after its finish.
+#[derive(Debug)]
+pub struct RowFrame {
+    /// The whole frame, terminator included.
+    pub bytes: Vec<u8>,
+    /// The token of the operation the frame belongs to.
+    pub cancel: CancelToken,
+}
+
+/// The sending half of one connection's bounded channel of [`RowFrame`]s
+/// (#0138).
+///
+/// The receiving half belongs to the connection's writer, which drains it
+/// after its pending answers and before its outbound event queue. Bounded at
+/// [`ROWS_CHANNEL_FRAMES`], so a client that stops reading parks the producer
+/// instead of growing the daemon's memory.
+#[derive(Clone, Debug)]
+pub struct RowsSink {
+    sender: tokio::sync::mpsc::Sender<RowFrame>,
+}
+
+impl RowsSink {
+    /// A sink and the receiver the connection's writer drains.
+    pub fn channel() -> (RowsSink, tokio::sync::mpsc::Receiver<RowFrame>) {
+        let (sender, receiver) = tokio::sync::mpsc::channel(ROWS_CHANNEL_FRAMES);
+        (RowsSink { sender }, receiver)
+    }
+
+    /// Queue one frame, parking the calling thread while the channel is full.
+    ///
+    /// Blocking, for a producer on the blocking pool; never call it from a
+    /// runtime worker. `false` once the connection is gone, which is the
+    /// producer's cue to stop: its operation is `client_scoped` and the
+    /// disconnect cancels it.
+    pub fn blocking_send(&self, bytes: Vec<u8>, cancel: CancelToken) -> bool {
+        self.sender
+            .blocking_send(RowFrame { bytes, cancel })
+            .is_ok()
+    }
 }
 
 // ---------------------------------------------------------------------------

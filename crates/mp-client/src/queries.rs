@@ -5,7 +5,9 @@
 //! [`Queries`] is an object-safe trait with one blocking `call`, implemented
 //! for [`Session`](crate::session::Session) and
 //! [`QueryHandle`](crate::session::QueryHandle), so a query layer is testable
-//! over an in-process dispatcher without a socket.
+//! over an in-process dispatcher without a socket. Its one other method,
+//! [`Queries::list_stream`], has a default body over `call`, which the two
+//! session doors override with the streamed listing (#0138).
 //!
 //! Over it sit the reads a client needs, typed in the protocol's own
 //! vocabulary ([`mp_protocol`]) rather than in any client's model: a listing
@@ -49,7 +51,7 @@ use serde_json::{json, Value};
 
 use mp_protocol::calendar::{AgendaEvent, EventFrontmatter};
 use mp_protocol::draft::{DraftListing, DraftLocation};
-use mp_protocol::listing::{MessageListRow, ThreadListing};
+use mp_protocol::listing::{MessageListRow, MessageListing, ThreadListing};
 use mp_protocol::rendition::{MessageHtml, MessageHtmlParams, METHOD_MESSAGE_HTML};
 use mp_protocol::state::MailboxRow;
 use mp_protocol::EventEnvelope;
@@ -64,17 +66,44 @@ use mp_protocol::EventEnvelope;
 pub trait Queries {
     /// Call `method` with `params` and hand back its `result`.
     fn call(&self, method: &str, params: Value) -> Result<Value>;
+
+    /// One whole mailbox of one account, newest first (#0138).
+    ///
+    /// [`Session`](crate::session::Session) and
+    /// [`QueryHandle`](crate::session::QueryHandle) answer it through
+    /// `message.list_stream`, collected on the session thread, so a mailbox
+    /// past the response cap still lists. This default body is `message.list`
+    /// with `limit: null` through [`Queries::call`], decoded into the same
+    /// [`MessageListing`]: it is what keeps every implementor that answers
+    /// only `call` (a test fixture, a fixture-mode door) listing exactly as it
+    /// did, where a refusing default would break each of them.
+    fn list_stream(&self, account: &str, mailbox: &str) -> Result<MessageListing> {
+        let (method, params) = message_list_request(account, mailbox);
+        Ok(decode_message_listing(
+            account,
+            mailbox,
+            &self.call(method, params)?,
+        ))
+    }
 }
 
 impl Queries for crate::session::Session {
     fn call(&self, method: &str, params: Value) -> Result<Value> {
         crate::session::Session::call(self, method, params)
     }
+
+    fn list_stream(&self, account: &str, mailbox: &str) -> Result<MessageListing> {
+        crate::session::Session::list_stream(self, account, mailbox)
+    }
 }
 
 impl Queries for crate::session::QueryHandle {
     fn call(&self, method: &str, params: Value) -> Result<Value> {
         crate::session::QueryHandle::call(self, method, params)
+    }
+
+    fn list_stream(&self, account: &str, mailbox: &str) -> Result<MessageListing> {
+        crate::session::QueryHandle::list_stream(self, account, mailbox)
     }
 }
 
@@ -88,7 +117,9 @@ impl Queries for crate::session::QueryHandle {
 ///
 /// `limit: null` is the whole list: there is no offset and no paging
 /// parameter, because an offset is the option the list-transfer decision did
-/// not choose and the row deltas keep the list current afterwards.
+/// not choose and the row deltas keep the list current afterwards. It is one
+/// frame, so it answers `frame_too_large` past about 34 000 rows; a caller
+/// that can go through [`Queries::list_stream`] does (#0138).
 pub fn message_list_request(account: &str, mailbox: &str) -> (&'static str, Value) {
     (
         "message.list",
@@ -105,10 +136,10 @@ pub fn draft_list_request(account: &str) -> (&'static str, Value) {
     ("draft.list", json!({"account": account, "status": null}))
 }
 
-/// One mailbox of one account, newest first, as the daemon's wire rows.
+/// One mailbox of one account, newest first, as the daemon's wire rows,
+/// through [`Queries::list_stream`].
 pub fn list_messages(q: &dyn Queries, account: &str, mailbox: &str) -> Result<Vec<MessageListRow>> {
-    let (method, params) = message_list_request(account, mailbox);
-    Ok(decode_message_rows(&q.call(method, params)?))
+    Ok(q.list_stream(account, mailbox)?.messages)
 }
 
 /// One account's drafts, through `draft.list`.
@@ -124,6 +155,19 @@ pub fn decode_message_rows(answer: &Value) -> Vec<MessageListRow> {
         .as_array()
         .map(|rows| rows.iter().map(row_from_wire).collect())
         .unwrap_or_default()
+}
+
+/// A whole `message.list` answer as a [`MessageListing`], as leniently as
+/// [`decode_message_rows`] reads its rows: a missing `account` or `mailbox`
+/// is the one that was asked for, and a missing `total` is the row count.
+pub fn decode_message_listing(account: &str, mailbox: &str, answer: &Value) -> MessageListing {
+    let messages = decode_message_rows(answer);
+    MessageListing {
+        account: answer["account"].as_str().unwrap_or(account).to_string(),
+        mailbox: answer["mailbox"].as_str().unwrap_or(mailbox).to_string(),
+        total: answer["total"].as_u64().unwrap_or(messages.len() as u64),
+        messages,
+    }
 }
 
 /// A `draft.list` answer.
@@ -551,6 +595,43 @@ mod tests {
         assert_eq!(
             seen[0].1,
             json!({"account": "work", "mailbox": "inbox", "limit": null})
+        );
+    }
+
+    /// The default `list_stream` over a door that answers only `call` is the
+    /// `message.list` listing, asked for whole, head and rows.
+    #[test]
+    fn the_default_list_stream_is_the_message_list_listing() {
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/message.list.response.json"
+        )));
+        let listing = door.list_stream("work", "Inbox").expect("a listing");
+        assert_eq!(listing.account, "work");
+        assert_eq!(
+            listing.mailbox, "inbox",
+            "the resolved id, not the spelling"
+        );
+        assert_eq!(listing.total, 2);
+        assert_eq!(listing.messages.len(), 2);
+        assert_eq!(listing.messages[0].id, 3141);
+        let seen = door.seen.borrow();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "message.list");
+        assert_eq!(
+            seen[0].1,
+            json!({"account": "work", "mailbox": "Inbox", "limit": null})
+        );
+
+        // An answer with no head keeps the request's, and counts its rows.
+        let bare = Canned::new(json!({"messages": [{"id": 7}]}));
+        let listing = bare.list_stream("work", "inbox").expect("a listing");
+        assert_eq!(
+            (
+                listing.account.as_str(),
+                listing.mailbox.as_str(),
+                listing.total
+            ),
+            ("work", "inbox", 1)
         );
     }
 
