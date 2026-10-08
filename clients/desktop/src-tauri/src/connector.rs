@@ -90,6 +90,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "account.list",
     "mailbox.list",
     "message.list",
+    "message.list_stream",
     "message.get",
     "message.html",
     "message.search",
@@ -1098,6 +1099,16 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), REQUIRED_CAPABILITIES.len());
+    }
+
+    /// A mailbox opens through `message.list_stream` (#0138), so a daemon
+    /// that cannot stream is refused at the handshake instead of opening a
+    /// large mailbox empty. `message.list` stays: the fixture door answers a
+    /// listing with it, and its panic on an unlisted method guards that call.
+    #[test]
+    fn the_required_capabilities_cover_the_streamed_listing() {
+        assert!(REQUIRED_CAPABILITIES.contains(&"message.list_stream"));
+        assert!(REQUIRED_CAPABILITIES.contains(&"message.list"));
     }
 
     #[test]

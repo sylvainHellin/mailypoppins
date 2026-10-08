@@ -38,6 +38,7 @@ use mp_client::events::Incoming;
 use mp_client::session::{QueryHandle, Session};
 use mp_client::{Observe, StateTracker};
 use mp_protocol::events::{KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS};
+use mp_protocol::listing::MessageListing;
 use mp_protocol::operation::OperationStatus;
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
@@ -85,6 +86,24 @@ pub struct Budgeted<'a> {
 impl mp_client::queries::Queries for Budgeted<'_> {
     fn call(&self, method: &str, params: Value) -> Result<Value> {
         self.door.call_within(method, params, self.budget)
+    }
+
+    /// The daemon door streams under this budget, as the stream's deadline on
+    /// the session thread (#0138). The fixture door answers what the trait's
+    /// default body answers, `message.list` with `limit: null` through
+    /// [`Budgeted::call`], so fixture mode needs no stream simulation; the
+    /// default cannot be called from an override, hence the two lines here.
+    fn list_stream(&self, account: &str, mailbox: &str) -> Result<MessageListing> {
+        match self.door {
+            Door::Daemon(handle) => handle.list_stream_within(account, mailbox, self.budget),
+            Door::Fixture(_) => {
+                let (method, params) = mp_client::queries::message_list_request(account, mailbox);
+                let answer = self.call(method, params)?;
+                Ok(mp_client::queries::decode_message_listing(
+                    account, mailbox, &answer,
+                ))
+            }
+        }
     }
 }
 

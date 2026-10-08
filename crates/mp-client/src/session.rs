@@ -888,9 +888,13 @@ impl StreamCall {
     }
 
     /// The failure a stream that outlived its budget answers.
+    ///
+    /// "went unanswered" is the phrase [`ClientError::Timeout`] uses, which a
+    /// client that classifies a failure by its text (the desktop's
+    /// `GuiError::from_call_text`) reads as a timeout.
     fn timeout(&self) -> Failure {
         Failure::Other(format!(
-            "no complete listing of {}/{} within {}s; the stream was cancelled",
+            "the listing of {}/{} went unanswered within {}s; the stream was cancelled",
             self.account,
             self.mailbox,
             self.budget.as_secs_f64()
@@ -1431,6 +1435,10 @@ mod tests {
         let waited = asked.elapsed();
         let text = format!("{error:#}");
         assert!(text.contains("within 0.3s"), "{text}");
+        assert!(
+            text.contains("went unanswered"),
+            "the phrase a client reads as a timeout: {text}"
+        );
         assert!(
             waited < Duration::from_millis(300) + STREAM_ANSWER_GRACE,
             "answered by the session thread at the deadline, after {waited:?}"
