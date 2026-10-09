@@ -435,7 +435,8 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `events.rs` | `Incoming` (re-exported from `mp_client::events`), the subscription drain, `App::apply_event` and the watermark, and the rebootstrap a resync or a reconnect costs |
 | `actions.rs` | `handle_action()`, the side-effect dispatch for the `Action` variants `commands::dispatch` hands back: the client-only ones and the overlays |
 | `bg.rs` | `handle_bg_result()`, processing background task completions, and `land_sync`, shared by a tick this client asked for and one it heard about |
-| `helpers.rs` | Terminal suspend and resume, editor, clipboard, `resolve_send_account`, and the server search leg (`LST-08`) that is still client-side |
+| `helpers.rs` | Terminal suspend and resume, editor, `resolve_send_account`, and the server search leg (`LST-08`) that is still client-side |
+| `clipboard.rs` | System clipboard with OSC 52 fallback |
 | `event.rs` | Crossterm event polling: `poll_event` waits up to the 250 ms tick, `poll_pending_event` takes an already-queued event without waiting (the drain step, #0108). Both return `None` for an event we do not model. |
 | `theme.rs` | Named themes, semantic colour slots |
 | `diagnostics_tests.rs` | The activity overlay's half of the daemon diagnostics contract (P6-U7); the socket half is `tests/daemon_diagnostics.rs` |

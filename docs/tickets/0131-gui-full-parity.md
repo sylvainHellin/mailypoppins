@@ -203,7 +203,6 @@ Decisions taken where the breakdown was silent:
 - Enter in the RSVP choice sends whichever control holds the focus.
 - `contact_vcard_draft` takes a draft name the frontend computes, and the vCard draft carries no signature, the TUI's rule.
 - An empty query's score (`u32::MAX`) is not shown, and the contact list is read again on every switch to the view.
-- `c` on a contact says "Copied <address>" where the TUI says "<address> copied to clipboard".
 - The Contacts header's buttons render only while a contact is under the cursor, since disabled buttons broke the focus following.
 - A second `r` during a rebuild says it is already running, and a dropped rebuild says "Contacts refresh failed: <why>".
 - The signature delete confirmation is the shared confirmation, nested in the Signatures dialog.
