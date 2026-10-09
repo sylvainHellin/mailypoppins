@@ -2536,7 +2536,8 @@ Detaching it (`hdiutil detach /dev/diskN`) and rerunning with `pnpm bundle -- --
 ## A per-method fast path in `mp-client` needs no `raw_value`, only the daemon's canonical frame prefix
 
 The typed `message.rows` decode (PERSO-106) checks that a frame starts with the exact prefix the daemon writes and decodes the rows straight into typed rows; any other frame takes the normal decode through a `Value`.
-This works without serde_json's `raw_value` feature because the daemon's hand-built `message.rows` frame is byte-identical to the standard encoding, so the prefix is a fact of the wire and not a guess.
+This works without serde_json's `raw_value` feature because the daemon's hand-built `message.rows` frame is byte-identical to the standard encoding.
+A frame with that prefix is always a canonical `message.rows` frame.
 
 ## A daemon a CLI can both self-spawn and run under systemd must start through the supervisor once a unit is installed
 
