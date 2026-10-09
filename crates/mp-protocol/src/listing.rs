@@ -187,6 +187,36 @@ pub struct MessageRowsChunk {
     pub rows: Vec<MessageListRow>,
 }
 
+/// How every `message.rows` frame a daemon writes begins: the envelope's keys
+/// sorted and compact, the bytes `frame::encode` of the same notification
+/// produces and the daemon's chunk encoder writes by hand (#0138).
+pub const MESSAGE_ROWS_FRAME_PREFIX: &str = r#"{"jsonrpc":"2.0","method":"message.rows","params":"#;
+
+impl MessageRowsChunk {
+    /// One frame line decoded straight into the chunk it carries, without the
+    /// `serde_json::Value` tree a generic frame decode builds (PERSO-106).
+    ///
+    /// `None` for a line that is not a `message.rows` frame in the daemon's
+    /// own spelling ([`MESSAGE_ROWS_FRAME_PREFIX`]) or that does not decode as
+    /// one: the caller then decodes the line generically, so a chunk spelled
+    /// differently still arrives, and a malformed one is reported by whoever
+    /// reads it rather than lost here.
+    pub fn from_frame_line(line: &str) -> Option<MessageRowsChunk> {
+        /// The envelope around the params; `jsonrpc` and `method` are what
+        /// the prefix already matched.
+        #[derive(Deserialize)]
+        struct Frame {
+            params: MessageRowsChunk,
+        }
+        if !line.starts_with(MESSAGE_ROWS_FRAME_PREFIX) {
+            return None;
+        }
+        serde_json::from_str::<Frame>(line)
+            .ok()
+            .map(|frame| frame.params)
+    }
+}
+
 /// One message of a conversation, as `message.thread` answers it (P5-U10d,
 /// `LST-10`).
 ///
@@ -402,6 +432,32 @@ mod tests {
             chunk.rows, listing.messages,
             "a streamed row is a message.list row, field for field"
         );
+    }
+
+    /// A chunk's frame, encoded the generic way, starts with the prefix and
+    /// decodes straight into the chunk; a frame of another method, one spelled
+    /// otherwise and a malformed chunk are left to the generic decode.
+    #[test]
+    fn a_rows_frame_decodes_straight_into_its_chunk() {
+        let raw = include_str!("../fixtures/notification.message_rows.json");
+        let notification: crate::Notification =
+            serde_json::from_str(raw).expect("the fixture is a notification");
+        let frame = crate::frame::encode(&notification).expect("encodes");
+        let line = std::str::from_utf8(&frame).expect("UTF-8").trim_end();
+        assert!(line.starts_with(MESSAGE_ROWS_FRAME_PREFIX), "{line}");
+        let typed = MessageRowsChunk::from_frame_line(line).expect("the fast path");
+        let generic: MessageRowsChunk =
+            serde_json::from_value(notification.params).expect("the params decode");
+        assert_eq!(typed, generic);
+
+        let state_event = r#"{"jsonrpc":"2.0","method":"state.event","params":{}}"#;
+        assert_eq!(MessageRowsChunk::from_frame_line(state_event), None);
+        let spaced = r#"{"jsonrpc": "2.0", "method": "message.rows", "params": {"offset": 0, "operation_id": "x", "rows": []}}"#;
+        assert_eq!(MessageRowsChunk::from_frame_line(spaced), None);
+        let malformed = format!(
+            r#"{MESSAGE_ROWS_FRAME_PREFIX}{{"operation_id":"x","rows":[{{"id":"seven"}}]}}}}"#
+        );
+        assert_eq!(MessageRowsChunk::from_frame_line(&malformed), None);
     }
 
     /// A row from a daemon that predates `selector` still decodes: a field a

@@ -88,8 +88,26 @@ impl Decoder {
     /// An error is terminal for the connection, so the buffer is dropped rather
     /// than left holding the remains of a frame nobody will read.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Value>, FrameError> {
+        self.push_with(bytes, |line| {
+            serde_json::from_str(line).map_err(|error| FrameError::InvalidJson(error.to_string()))
+        })
+    }
+
+    /// [`Decoder::push`] with the caller's decode of each complete line, the
+    /// terminator stripped and the line already checked for the cap and for
+    /// UTF-8.
+    ///
+    /// For a reader that decodes a frame it recognises straight into a typed
+    /// shape instead of a [`Value`] tree, which is what `mp-client` does with a
+    /// `message.rows` chunk (PERSO-106). An error from `decode` is terminal
+    /// exactly as an invalid frame is in [`Decoder::push`].
+    pub fn push_with<T>(
+        &mut self,
+        bytes: &[u8],
+        decode: impl FnMut(&str) -> Result<T, FrameError>,
+    ) -> Result<Vec<T>, FrameError> {
         self.buffer.extend_from_slice(bytes);
-        match self.decode_buffered() {
+        match self.decode_buffered(decode) {
             Ok(values) => Ok(values),
             Err(error) => {
                 self.buffer.clear();
@@ -99,7 +117,10 @@ impl Decoder {
         }
     }
 
-    fn decode_buffered(&mut self) -> Result<Vec<Value>, FrameError> {
+    fn decode_buffered<T>(
+        &mut self,
+        mut decode: impl FnMut(&str) -> Result<T, FrameError>,
+    ) -> Result<Vec<T>, FrameError> {
         let mut values = Vec::new();
         while let Some(offset) = self.buffer[self.scanned..].iter().position(|b| *b == b'\n') {
             let end = self.scanned + offset;
@@ -115,9 +136,7 @@ impl Decoder {
                 // logs one line per rejected frame.
                 FrameError::InvalidUtf8
             })?;
-            let value: Value = serde_json::from_str(line)
-                .map_err(|error| FrameError::InvalidJson(error.to_string()))?;
-            values.push(value);
+            values.push(decode(line)?);
             self.buffer.drain(..frame_len);
             self.scanned = 0;
         }
@@ -163,6 +182,25 @@ mod tests {
         assert!(decoder.push(b"nope\n").is_err());
         assert_eq!(decoder.buffered(), 0);
         assert_eq!(decoder.push(b"{\"a\":1}\n").unwrap(), vec![json!({"a": 1})]);
+    }
+
+    /// The caller's decode sees each complete line without its terminator,
+    /// a partial frame waits for the next push, and a decode error is
+    /// terminal as an invalid frame is.
+    #[test]
+    fn push_with_hands_each_line_to_the_callers_decode() {
+        let mut decoder = Decoder::new(64);
+        let lines = decoder
+            .push_with(b"one\ntwo\nthr", |line| Ok(line.to_string()))
+            .unwrap();
+        assert_eq!(lines, vec!["one".to_string(), "two".to_string()]);
+        let lines = decoder.push_with(b"ee\n", |line| Ok(line.len())).unwrap();
+        assert_eq!(lines, vec![5]);
+        let refused = decoder.push_with(b"bad\n", |_| -> Result<(), FrameError> {
+            Err(FrameError::InvalidJson("no".to_string()))
+        });
+        assert!(matches!(refused, Err(FrameError::InvalidJson(_))));
+        assert_eq!(decoder.buffered(), 0);
     }
 
     #[test]
