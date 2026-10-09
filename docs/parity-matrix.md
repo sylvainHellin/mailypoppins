@@ -464,8 +464,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `y` (`clients/tui/src/app/keymap.rs:618`)
 - Daemon surface: `selector` on the `message.list` row and on the `message.search` hit, then a client-side clipboard write
-- GUI location: clients/desktop: `y` copies the selected message's `mp://` selector and says "Copied <selector>" (M1, #0129); the copy goes through `copyText`, and the reader's Copy menu and the palette's "Copy link (mp://)" copy the same selector (M4, #0131; reader.md, "The toolbar")
-- Validation: `tests/cli_selector_contract.rs` for the selector shape; `clients/desktop/src/lib/clipboard.test.ts` (`writes the text and says what it copied`), `clients/desktop/src/components/activity/activity.test.tsx` (`the Copy menu copies the sender's address, the mp:// link and the subject`); no test presses `y` itself
+- GUI location: clients/desktop: `y` copies the selected message's `mp://` selector and says "Copied <selector>" (M1, #0129), and on a draft in Drafts its file path instead, listed as "Copy the draft's file path (Drafts only)" (PERSO-100), where the TUI copies the draft's selector; the copy goes through `copyText`, and the reader's Copy menu and the palette's "Copy link (mp://)" copy the same selector (M4, #0131; reader.md, "The toolbar")
+- Validation: `tests/cli_selector_contract.rs` for the selector shape; `clients/desktop/src/lib/clipboard.test.ts` (`writes the text and says what it copied`), `clients/desktop/src/components/activity/activity.test.tsx` (`the Copy menu copies the sender's address, the mp:// link and the subject`), `clients/desktop/src/keymap/keymap.test.tsx` (`y on a draft copies its file path, and on a message its mp:// selector`)
 - Status: routed (P5-U10c-I1); GUI shipped (M1, #0129)
 - Note: the row carries it rather than a `message.selector` query answering it, because the daemon already had the string in hand when it built the row.
   The TUI's `EmailEntry` carries the daemon's string, so `y` costs neither a round trip nor a store read; a parse-skipped draft and a server-only hit carry `None`, which are the two rows with no name to copy.
@@ -478,7 +478,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the search overlay `y`, the action set in `clients/tui/src/app/types.rs`
 - Daemon surface: `message.materialise_markdown`, then a client-side clipboard write
-- GUI location: clients/desktop, not built in M1 to M4: the palette lists the search overlay's "Copy the Markdown rendition path" with the badge "later", and the desktop calls no `message.materialise_markdown`
+- GUI location: clients/desktop, not built in M1 to M4: the palette lists the search overlay's "Copy the Markdown rendition path" with the badge "later", and the desktop calls no `message.materialise_markdown`; a hit is a list row there, so `y` copies its selector, and the rendition waits for a clipboard write that survives the call's await (`copyText` must run inside the key press)
 - Validation: TUI golden frames
 - Status: routed (P5-U10c-I1); GUI not started
 - Note: the path a `y` copies now names a file inside a handle directory, which the family releases after ten minutes: nothing reads a yanked path back, so what changed is how long a pasted one resolves.

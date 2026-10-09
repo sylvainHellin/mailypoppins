@@ -228,6 +228,10 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "Half-page down / up": { badge: "key" },
     "Open in the mail list": { badge: "later" },
     "Open read-only in $EDITOR": { badge: "later" },
+    // A hit is a list row, so `y` copies its selector here; the rendition
+    // is a `message.materialise_markdown` call, and a clipboard write after
+    // an await may have lost the key press's user activation
+    // (src/lib/clipboard.ts), so it waits for a Rust-side clipboard.
     "Copy the Markdown rendition path": { badge: "later" },
     // `f` is the find family's prefix in the desktop client (`fm`, `ff`), so
     // the fetch is `F`, free in every mail context of the TUI.
@@ -329,6 +333,9 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "EMAIL LIST", label: "Mark range (from the last mark to the cursor)", keys: ["Shift+click"], id: "mark_range", badge: null },
   { section: "EMAIL LIST", label: "Clear marks", keys: ["Esc"], id: "mark_clear", badge: null },
   { section: "EMAIL LIST", label: "Discard draft (Drafts only)", keys: ["d"], id: "delete", badge: null },
+  // The TUI's `y` copies a draft's mp:// selector; the desktop copies its
+  // file, which a draft is (PERSO-100).
+  { section: "EMAIL LIST", label: "Copy the draft's file path (Drafts only)", keys: ["y"], id: "copy_selector", badge: null },
   { section: "SEND", label: "Cancel the held send", keys: ["u"], id: "cancel_hold", badge: null },
   // `X` is free in every TUI context (its `cX` is a `c` continuation) and
   // names the notice's close button.

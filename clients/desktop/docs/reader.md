@@ -74,7 +74,7 @@ Open in browser (`tb`) comes next, then the reader mode's HTML and Text (`tt`, s
 The Copy menu (`ui/dropdown-menu.tsx`) has three items, each copying through `copyText` from its click:
 
 - "Copy sender address": the part of `MessageMeta.from` between angle brackets, else the whole field, trimmed; "This message has no sender" without one.
-- "Copy link (mp://)": the message's selector, what `y` copies.
+- "Copy link (mp://)": the message's selector, what `y` copies (on a draft in Drafts `y` copies its file path).
 - "Copy subject": the subject; "This message has no subject" without one.
 
 The notice line says "Copied <address>", "Copied <selector>" or "Copied the subject", or "The clipboard refused ..." when the webview refuses the write.

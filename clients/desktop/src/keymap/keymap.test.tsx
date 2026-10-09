@@ -474,6 +474,30 @@ describe("compose keys (the TUI's)", () => {
     expect(callsOf("draft_path")).toEqual([{ account: "work", id: "angebot-antwort" }]);
   });
 
+  it("y on a draft copies its file path, and on a message its mp:// selector (PERSO-100)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    try {
+      await user.keyboard("j");
+      await user.keyboard("y");
+      expect(writeText).toHaveBeenLastCalledWith("mp://work/inbox/quarterly-ledger-review-1001@fixture.example");
+
+      await drafts(user);
+      await user.keyboard("y");
+      expect(writeText).toHaveBeenLastCalledWith("/fixture/work/drafts/angebot-antwort.md");
+      expect(await screen.findByText("Copied /fixture/work/drafts/angebot-antwort.md")).toBeInTheDocument();
+      await user.keyboard("j");
+      await user.keyboard("y");
+      expect(writeText).toHaveBeenLastCalledWith("/fixture/work/drafts/offsite-note.md");
+      expect(writeText).toHaveBeenCalledTimes(3);
+      expect(callsOf("draft_path")).toEqual([]);
+    } finally {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    }
+  });
+
   it("ce, cA and cD act in Drafts only, and say so elsewhere", async () => {
     const { user } = renderApp();
     await shellReady();

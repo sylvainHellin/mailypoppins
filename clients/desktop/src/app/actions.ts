@@ -108,6 +108,15 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     case "select_mailbox":
       return dispatch({ type: "sidebar_enter" });
     case "copy_selector": {
+      // On a draft `y` copies its file, the path the Drafts list was read
+      // from and the preview shows (PERSO-100); the TUI's `y` copies the
+      // draft's mp:// selector. Read from the listed row, so the write still
+      // runs inside the key press.
+      if (draftsShown(s) && s.selection.draft) {
+        const draft = draftItems(s.messages.data).find((d) => d.id === s.selection.draft);
+        if (draft) void copyText(draft.path, draft.path, dispatch);
+        return;
+      }
       const selector = s.selection.message?.selector;
       if (!selector) return;
       void copyText(selector, selector, dispatch);
