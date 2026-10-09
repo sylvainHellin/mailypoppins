@@ -918,26 +918,27 @@ async fn start_command(timeout: Duration) -> Result<i32> {
 /// start lock (the `mp daemon run` the manager spawns takes it itself), and
 /// then waits for the socket exactly as a detached start does; the command it
 /// ran follows the `✓` line, indented, as `install-service` prints its own.
+///
+/// A service command that fails is a `note:` and a detached start, never an
+/// exit with nothing running: a restart has already stopped the daemon by
+/// then. A service command that succeeded but whose daemon never answers is
+/// still exit 4, since a second, detached daemon would race the service's.
 async fn start_via(route: super::service::StartRoute, timeout: Duration) -> Result<i32> {
     use super::service::StartRoute;
     match route {
-        StartRoute::Detached { note } => {
-            if let Some(note) = note {
-                info!("[daemon] start: {note}");
-                eprintln!("note: {note}");
-            }
-            let code = start(timeout).await?;
-            if code == EXIT_OK {
-                print_started();
-            }
-            Ok(code)
-        }
+        StartRoute::Detached { note } => start_detached(note, timeout).await,
         StartRoute::Supervised(plan) => {
             info!(
                 "[daemon] start: through the service manager {:?}",
                 plan.lines()
             );
-            plan.run()?;
+            if let Err(e) = plan.run() {
+                return start_detached(
+                    Some(format!("{e:#}, so this daemon starts outside the service")),
+                    timeout,
+                )
+                .await;
+            }
             if wait_ready(timeout, None).await?.is_none() {
                 report_start_failure(&format!(
                     "the service started but its daemon did not answer within {}s; see `{}`",
@@ -953,6 +954,20 @@ async fn start_via(route: super::service::StartRoute, timeout: Duration) -> Resu
             Ok(EXIT_OK)
         }
     }
+}
+
+/// A detached [`start`], after the `note:` saying why the service was passed
+/// over, and the start's line.
+async fn start_detached(note: Option<String>, timeout: Duration) -> Result<i32> {
+    if let Some(note) = note {
+        info!("[daemon] start: {note}");
+        eprintln!("note: {note}");
+    }
+    let code = start(timeout).await?;
+    if code == EXIT_OK {
+        print_started();
+    }
+    Ok(code)
 }
 
 /// The start's line, in the voice of the stop's.

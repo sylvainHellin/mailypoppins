@@ -785,20 +785,22 @@ An identical file is not rewritten at all, but the enable runs again, because a 
 `mp daemon start` and `mp daemon restart` ask the service manager for the daemon when the installed service file is this `mp`'s, and spawn a detached `mp daemon run` otherwise (PERSO-109).
 A detached daemon started beside a systemd unit is one systemd does not own: the unit reads `inactive (dead)`, nothing restarts the daemon when it crashes, and whatever is ordered after the unit does not see it.
 
-| platform | the service is running | the service is loaded but stopped | the service is not loaded |
-|---|---|---|---|
-| Linux | `start` says it is already running | `systemctl --user start mailypoppins.service` | the same |
-| macOS | the same | `launchctl kickstart gui/<uid>/dev.mailypoppins.daemon` | `launchctl bootstrap gui/<uid> <plist>` |
+| platform | the service is running | the service is loaded but stopped | the service is not loaded | no user manager is reachable |
+|---|---|---|---|---|
+| Linux | `start` says it is already running | `systemctl --user start mailypoppins.service` | the same | detached start with a `note:` |
+| macOS | the same | `launchctl kickstart gui/<uid>/dev.mailypoppins.daemon` | `launchctl bootstrap gui/<uid> <plist>` | does not arise: `launchctl` always reaches launchd |
 
 The file is this `mp`'s when the `MAILYPOPPINS_DATA_DIR` it bakes is this run's data directory and the executable it runs is this one, symlinks followed, both read back out of the file the way `install-service` escaped them.
 Another data directory's service is passed over in silence, which is what keeps a test run with a temporary data directory off the user's real unit.
 A service for this data directory that runs another executable is passed over with a `note:` line on stderr naming that executable, because `restart` promises this executable's daemon and a development build restarted from `target/` would otherwise come back as the installed one.
 A service whose manager is not on `PATH` is passed over with a `note:` too, and the daemon starts detached as before.
+On Linux a `systemctl` binary proves no user manager is behind it (WSL without systemd, a container, a cron job with no session), so the unit is used only when `XDG_RUNTIME_DIR` is set and `$XDG_RUNTIME_DIR/systemd/private` is a socket; otherwise the start is detached with a `note:` naming which of the two was missing.
 Deciding reads the file system only; the one command run before the start itself is `launchctl print` on macOS, to choose between `kickstart` and `bootstrap`.
 
 The service-manager start does not take the start lock, because the `mp daemon run` it spawns takes it itself, and then waits for the socket exactly as a detached start does.
 It prints `✓ daemon started (pid N)` followed by the command it ran, indented: `  systemctl --user start mailypoppins.service`.
-A command that fails is exit 1 naming it and `systemctl --user status mailypoppins.service` (or `launchctl print …`); a service that starts but whose daemon never answers is exit 4 with the same pointer.
+A service command that fails (or cannot be run) is a `note:` on stderr naming the command, its exit status and `systemctl --user status mailypoppins.service` (or `launchctl print …`), followed by a detached start, so a `restart` that has already stopped the daemon never ends with none running; the exit code is then the detached start's.
+A service that starts but whose daemon never answers is exit 4 with the same pointer, and no detached daemon is started, since it would race the service's own once that answers.
 
 `mp daemon stop` stays the socket's under a service, because the socket stop honours `--grace-secs` and names what it cut short.
 The daemon exits 0 on it, which a `Restart=on-failure` unit records as a clean stop and a `KeepAlive {SuccessfulExit: false}` agent leaves stopped, so the service ends stopped rather than failed and its enablement is untouched: it starts again at the next boot or login.

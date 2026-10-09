@@ -68,17 +68,19 @@
 //!
 //! [`start_route`] is what `mp daemon start` and `mp daemon restart` ask
 //! before they bring a daemon up. When the installed file bakes this run's
-//! data directory and runs this executable, and its manager is on `PATH`, the
-//! answer is the manager's start command (`systemctl --user start`, or
-//! `launchctl kickstart` / `bootstrap`), so the daemon is the service's own
-//! process instead of a detached one beside a dead unit. Anything else is the
-//! detached start, with a note when a service was there and passed over. The
-//! decision is [`decide_start`], a pure function of what the probe found, and
-//! the only command the probe runs is `launchctl print`, on macOS, once a
-//! matching agent is installed.
+//! data directory and runs this executable, its manager is on `PATH`, and on
+//! Linux a systemd user manager is reachable (`$XDG_RUNTIME_DIR/systemd/private`
+//! is a socket), the answer is the manager's start command (`systemctl --user
+//! start`, or `launchctl kickstart` / `bootstrap`), so the daemon is the
+//! service's own process instead of a detached one beside a dead unit.
+//! Anything else is the detached start, with a note when a service was there
+//! and passed over. The decision is [`decide_start`], a pure function of what
+//! the probe found, and the only command the probe runs is `launchctl print`,
+//! on macOS, once a matching agent is installed.
 
+use std::ffi::OsStr;
 use std::fs::{self, Permissions};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -652,13 +654,38 @@ pub(crate) fn start_route() -> Result<StartRoute> {
     };
     let manager_on_path = installed == Installed::This && on_path(manager(target));
     let loaded = manager_on_path && target == Target::Darwin && launchd_loaded();
+    let unreachable = if manager_on_path && target == Target::Linux {
+        user_manager_unreachable(std::env::var_os("XDG_RUNTIME_DIR").as_deref())
+    } else {
+        None
+    };
     Ok(decide_start(
         target,
         &path,
         installed,
         manager_on_path,
+        unreachable,
         loaded,
     ))
+}
+
+/// Why no systemd user manager answers this process, or `None` when one does.
+///
+/// A `systemctl` binary on `PATH` proves nothing: WSL without systemd, a
+/// container, or a cron job with no session has the binary and no manager, and
+/// `systemctl --user` then fails after a restart has already stopped the
+/// daemon. The manager listens on `$XDG_RUNTIME_DIR/systemd/private`, so that
+/// socket existing is the check; nothing is run.
+fn user_manager_unreachable(runtime_dir: Option<&OsStr>) -> Option<String> {
+    let Some(dir) = runtime_dir.filter(|dir| !dir.is_empty()) else {
+        return Some("XDG_RUNTIME_DIR is not set".to_string());
+    };
+    let socket = Path::new(dir).join("systemd").join("private");
+    match fs::metadata(&socket) {
+        Ok(meta) if meta.file_type().is_socket() => None,
+        Ok(_) => Some(format!("{} is not a socket", socket.display())),
+        Err(_) => Some(format!("{} does not exist", socket.display())),
+    }
 }
 
 /// The decision itself, with every fact it reads passed in.
@@ -668,11 +695,15 @@ pub(crate) fn start_route() -> Result<StartRoute> {
 /// and a development build restarted from `target/` would otherwise come back
 /// as the installed one. Passing a service over is said on stderr, so a user
 /// who expected the service learns why it stayed stopped.
+///
+/// `unreachable` is [`user_manager_unreachable`]'s answer on Linux and `None`
+/// on macOS, where `launchctl` reaches launchd whenever it runs.
 fn decide_start(
     target: Target,
     path: &Path,
     installed: Installed,
     manager_on_path: bool,
+    unreachable: Option<String>,
     loaded: bool,
 ) -> StartRoute {
     let name = service_name(target);
@@ -687,6 +718,13 @@ fn decide_start(
             note: Some(format!(
                 "{name} is installed but {} is not on PATH, so this daemon starts outside the service",
                 manager(target)
+            )),
+        },
+        Installed::This if unreachable.is_some() => StartRoute::Detached {
+            note: Some(format!(
+                "{name} is installed but no {} user manager is reachable ({}), so this daemon starts outside the service",
+                manager_kind(target),
+                unreachable.unwrap_or_default()
             )),
         },
         Installed::This => StartRoute::Supervised(SupervisedStart {
@@ -727,6 +765,13 @@ fn manager(target: Target) -> &'static str {
     match target {
         Target::Linux => "systemctl",
         Target::Darwin => "launchctl",
+    }
+}
+
+fn manager_kind(target: Target) -> &'static str {
+    match target {
+        Target::Linux => "systemd",
+        Target::Darwin => "launchd",
     }
 }
 
@@ -1119,7 +1164,8 @@ mod tests {
         for target in [Target::Linux, Target::Darwin] {
             for installed in [Installed::Absent, Installed::Foreign] {
                 for (on_path, loaded) in [(false, false), (true, false), (true, true)] {
-                    let route = decide_start(target, path, installed.clone(), on_path, loaded);
+                    let route =
+                        decide_start(target, path, installed.clone(), on_path, None, loaded);
                     assert_eq!(route_note(&route), None, "{target:?} {installed:?}");
                 }
             }
@@ -1135,6 +1181,7 @@ mod tests {
             Path::new("/s"),
             Installed::OtherExe("/opt/old/mp".into()),
             true,
+            None,
             false,
         );
         let note = route_note(&route).expect("a note");
@@ -1149,10 +1196,67 @@ mod tests {
     #[test]
     fn this_service_without_its_manager_falls_back_with_a_note() {
         for (target, program) in [(Target::Linux, "systemctl"), (Target::Darwin, "launchctl")] {
-            let route = decide_start(target, Path::new("/s"), Installed::This, false, false);
+            let route = decide_start(target, Path::new("/s"), Installed::This, false, None, false);
             let note = route_note(&route).expect("a note");
             assert!(note.contains(program), "{note}");
         }
+    }
+
+    /// This unit with `systemctl` on `PATH` but no user manager behind it (WSL
+    /// without systemd, a container, cron) falls back to a detached start, and
+    /// the note carries the reason the probe gave.
+    #[test]
+    fn this_unit_without_a_reachable_user_manager_falls_back_with_a_note() {
+        let reason = "XDG_RUNTIME_DIR is not set".to_string();
+        let route = decide_start(
+            Target::Linux,
+            Path::new("/s"),
+            Installed::This,
+            true,
+            Some(reason.clone()),
+            false,
+        );
+        let note = route_note(&route).expect("a note");
+        assert!(
+            note.contains(UNIT_NAME)
+                && note.contains("systemd user manager")
+                && note.contains(&reason),
+            "{note}"
+        );
+    }
+
+    /// The probe answers `None` only for a socket at
+    /// `$XDG_RUNTIME_DIR/systemd/private`, and names what it found otherwise.
+    #[test]
+    fn the_user_manager_probe_wants_the_private_socket() {
+        assert_eq!(
+            user_manager_unreachable(None).as_deref(),
+            Some("XDG_RUNTIME_DIR is not set")
+        );
+        assert_eq!(
+            user_manager_unreachable(Some(OsStr::new(""))).as_deref(),
+            Some("XDG_RUNTIME_DIR is not set")
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = user_manager_unreachable(Some(tmp.path().as_os_str())).expect("missing");
+        assert!(
+            missing.ends_with("systemd/private does not exist"),
+            "{missing}"
+        );
+
+        let systemd = tmp.path().join("systemd");
+        fs::create_dir_all(&systemd).unwrap();
+        fs::write(systemd.join("private"), "").unwrap();
+        let plain = user_manager_unreachable(Some(tmp.path().as_os_str())).expect("plain");
+        assert!(
+            plain.ends_with("systemd/private is not a socket"),
+            "{plain}"
+        );
+
+        fs::remove_file(systemd.join("private")).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(systemd.join("private")).unwrap();
+        assert_eq!(user_manager_unreachable(Some(tmp.path().as_os_str())), None);
     }
 
     /// This service with its manager reachable goes through the manager: one
@@ -1161,14 +1265,14 @@ mod tests {
     #[test]
     fn this_service_starts_through_its_manager() {
         let unit = Path::new("/home/u/.config/systemd/user/mailypoppins.service");
-        let route = decide_start(Target::Linux, unit, Installed::This, true, false);
+        let route = decide_start(Target::Linux, unit, Installed::This, true, None, false);
         assert_eq!(
             route_lines(&route),
             [format!("  systemctl --user start {UNIT_NAME}")]
         );
 
         let plist = Path::new("/Users/u/Library/LaunchAgents/dev.mailypoppins.daemon.plist");
-        let loaded = decide_start(Target::Darwin, plist, Installed::This, true, true);
+        let loaded = decide_start(Target::Darwin, plist, Installed::This, true, None, true);
         assert_eq!(
             route_lines(&loaded),
             [format!(
@@ -1176,7 +1280,7 @@ mod tests {
                 gui_domain()
             )]
         );
-        let unloaded = decide_start(Target::Darwin, plist, Installed::This, true, false);
+        let unloaded = decide_start(Target::Darwin, plist, Installed::This, true, None, false);
         assert_eq!(
             route_lines(&unloaded),
             [format!(

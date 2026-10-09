@@ -23,17 +23,19 @@
 #   lets a running executable be replaced, so the restart afterwards is the
 #   whole job, and it runs once, after both installs.
 #
-# - A login service is not restarted by `mp daemon restart`. That command is
-#   `stop` then `start` (src/daemon/lifecycle.rs, `restart`), and `start`
-#   spawns a detached daemon from `current_exe()`, outside launchd. The agent's
-#   `KeepAlive {SuccessfulExit: false}` (src/daemon/templates/
-#   dev.mailypoppins.daemon.plist) means a `mp daemon stop` (exit 0) stays
-#   stopped (docs/daemon-operations.md, "a `mp daemon stop` stay stopped"), so
-#   the replacement would run unmanaged until the next login. When the agent is
-#   loaded this script runs `mp daemon stop` then `launchctl kickstart`, the
-#   sequence the live launchd check took (docs/tickets/0129, "after `mp daemon
-#   stop` plus `launchctl kickstart` the daemon runs as launchd's child");
-#   otherwise `mp daemon restart`. Not `kickstart -k`: a daemon a client
+# - A loaded agent is restarted through launchd explicitly. `mp daemon
+#   restart` is `stop` then a start through launchd (`kickstart`, or
+#   `bootstrap` for an agent launchd does not know) only when the plist bakes
+#   this data directory and runs this very `mp` (docs/daemon-operations.md,
+#   "Starting under the login service"); a plist that still runs another
+#   binary (the version warning below) is passed over and the daemon starts
+#   detached, outside launchd, while the agent's `KeepAlive {SuccessfulExit:
+#   false}` keeps its own process stopped until the next login. So when the agent is
+#   loaded this script runs `mp daemon stop` then `launchctl kickstart`
+#   whatever the plist runs, the sequence the live launchd check took
+#   (docs/tickets/0129, "after `mp daemon stop` plus `launchctl kickstart` the
+#   daemon runs as launchd's child"); otherwise `mp daemon restart`, which
+#   bootstraps a matching agent itself. Not `kickstart -k`: a daemon a client
 #   started on demand may hold the socket while the agent's own process is
 #   down, and a second launchd spawn then crash-loops (BACKLOG, "A client's
 #   on-demand `mp daemon start` races the installed service").
@@ -413,7 +415,7 @@ if command -v launchctl >/dev/null 2>&1 && launchctl print "gui/$UID_NUM/$SERVIC
     warn "no daemon answered ${DAEMON_TIMEOUT}s after the kickstart; \`$MP daemon logs\` has the reason"
   fi
 else
-  step "daemon: mp daemon restart (no login service loaded)"
+  step "daemon: mp daemon restart (agent not loaded; a matching plist is bootstrapped)"
   run "$MP" daemon restart
 fi
 
