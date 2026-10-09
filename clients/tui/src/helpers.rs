@@ -64,7 +64,7 @@ pub(super) fn install_panic_hook() {
 }
 
 // ---------------------------------------------------------------------------
-// Editor / clipboard
+// Editor
 // ---------------------------------------------------------------------------
 
 fn editor() -> String {
@@ -80,14 +80,6 @@ pub(super) fn edit_file(path: &Path) -> Result<()> {
     if !status.success() {
         anyhow::bail!("Editor exited with status: {}", status);
     }
-    Ok(())
-}
-
-pub(super) fn copy_to_clipboard(text: &str) -> Result<()> {
-    let mut clipboard = arboard::Clipboard::new().context("Failed to access clipboard")?;
-    clipboard
-        .set_text(text)
-        .context("Failed to copy to clipboard")?;
     Ok(())
 }
 

@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod app;
 pub mod bg;
+pub(crate) mod clipboard;
 pub mod commands;
 #[cfg(test)]
 mod diagnostics_tests;

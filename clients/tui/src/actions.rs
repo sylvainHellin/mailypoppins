@@ -784,10 +784,10 @@ pub(super) fn handle_action(
         }
 
         Action::CopyMessageRef => match selected_selector(app) {
-            Some(text) => match super::helpers::copy_to_clipboard(&text) {
-                Ok(()) => app.set_status(format!("{text} copied to clipboard")),
-                Err(e) => app.set_status_level(format!("Copy failed: {e}"), StatusLevel::Error),
-            },
+            Some(text) => {
+                let (line, level) = super::clipboard::copy_text(terminal, &text).status(&text);
+                app.set_status_level(line, level);
+            }
             None => app.set_status_level(
                 "That message is not in the local store, so it has no selector yet".to_string(),
                 StatusLevel::Warning,
@@ -1038,10 +1038,10 @@ pub(super) fn handle_action(
             send_contact_as_vcard(app, terminal, &contact)?;
         }
 
-        Action::CopyContactEmail { address } => match super::helpers::copy_to_clipboard(&address) {
-            Ok(()) => app.set_status(format!("{address} copied to clipboard")),
-            Err(e) => app.set_status_level(format!("Copy failed: {e}"), StatusLevel::Error),
-        },
+        Action::CopyContactEmail { address } => {
+            let (line, level) = super::clipboard::copy_text(terminal, &address).status(&address);
+            app.set_status_level(line, level);
+        }
 
         Action::OpenEventSource { msg } => {
             // The agenda row carries its own [`MessageRef`] (the invite may
@@ -1892,10 +1892,9 @@ fn handle_search_result_action(
                 return Ok(());
             };
             let shown = rendition.path.display().to_string();
-            app.server_search_status = match super::helpers::copy_to_clipboard(&shown) {
-                Ok(()) => Some(format!("Copied {shown}")),
-                Err(e) => Some(format!("Copy failed: {e:#}")),
-            };
+            // The overlay's footer has no level, so only the line is kept.
+            let (line, _) = super::clipboard::copy_text(terminal, &shown).status(&shown);
+            app.server_search_status = Some(line);
         }
 
         Action::SearchResultOpenInBrowser => {
