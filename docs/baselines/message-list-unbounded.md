@@ -81,7 +81,7 @@ That is a scheduling change and has no row in the table.
 `message_list_unbounded_bench` gained two steps for `message.list_stream`, on the same fixture and with the same protocol:
 
 - the daemon's side, the store read the handler makes before it answers plus every row encoded into `message.rows` frames as bytes, the producer's work without the socket writes;
-- the client's side, as `mp-client`'s collector does it, every frame through the line decoder into a `serde_json::Value`, the notification out of it, and every row through `row_from_wire` into one `Vec`.
+- the client's side, as `mp-client`'s collector did it until PERSO-106, every frame through the line decoder into a `serde_json::Value`, the notification out of it, and every row through `row_from_wire` into one `Vec`.
 
 The baseline host above was not available, so the figures were taken on the home server, with the `message.list` steps re-run beside them so the two methods compare under one load.
 
@@ -100,14 +100,28 @@ Milliseconds, `median min max`, 50 000 rows, two runs.
 | `message.list`: store read plus the rows as a `Value` | 490.6 486.2 493.9 | 482.6 479.6 487.2 |
 | `frame::encode` of that reply | 43.5 43.0 43.7 | 42.8 42.2 44.1 |
 | `message.list_stream`: store read plus every chunk as bytes | **110.9** 110.1 112.1 | **110.6** 110.2 111.7 |
-| client decode of the chunks into rows | 183.5 182.3 186.1 | 173.6 170.8 177.9 |
+| client decode of the chunks into rows, through a `Value` | 183.5 182.3 186.1 | 173.6 170.8 177.9 |
 
 On this host the stream's daemon side costs 111 ms against 534 ms for `message.list` plus its encode, a factor of 4.8, because it builds no `Value` tree: the read is 89 ms and the chunks about 22 ms.
 This host builds and drops the `Value` tree three times slower than the baseline host (490 against 156 ms for the method), where the store read is only twice as slow (89 against 41), so the ratio does not carry over directly.
 On the baseline host the expected figure is the 41 ms read plus about 15 to 30 ms of chunks, under the 80 ms the ticket set; that figure has not been measured there.
 
-The client's decode is now the larger half of a mailbox open: every chunk still becomes a `Value` before its rows are typed, because `mp_protocol::frame::Decoder` yields `Value`s.
-Decoding the frames straight into `MessageRowsChunk` would skip it, and is left to a later ticket.
+In this run the client's decode was the larger half of a mailbox open: every chunk became a `Value` before its rows were typed, because `mp_protocol::frame::Decoder` yielded `Value`s.
+
+## The typed chunk decode
+
+PERSO-106 decodes each `message.rows` frame straight into a `MessageRowsChunk`: `Decoder::push_with` hands `mp-client`'s connection the frame line, and `MessageRowsChunk::from_frame_line` decodes a frame in the daemon's own spelling without the `Value` tree.
+The bench's client step now times that path, and prints the old one beside it as a reference line.
+
+It has not been run on the `mkfixture` fixture.
+A standalone timing of the two client paths, on 50 000 synthetic rows of 623 bytes in 30 frames of about 1 MiB, measured the typed decode about three times faster, median of eleven runs:
+
+| client decode of 50 000 rows | run 1 | run 2 |
+| --- | --- | --- |
+| through a `Value`, then `row_from_wire` | 124.3 | 140.0 |
+| typed, straight from the frame | **39.7** | **44.0** |
+
+That run was on the baseline host, macOS 26.6.2 on the Apple M4 Pro, `rustc 1.98.1`, at a load average of 36 to 39 on 12 cores, so the absolute figures are loose and the ratio is the result.
 
 ## Not taken
 

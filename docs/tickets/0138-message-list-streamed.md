@@ -263,4 +263,4 @@ The `message.server_hit` precedent, rejected under "The `message.rows` notificat
 
 - `mp list-messages -n 50000` and `mp dump-mailbox` on a mailbox that size still pass the cap on `message.list`; the envelope projection's record size at 50 000 rows is not measured.
 - A `revision` on the immediate answer would let a client order the deltas it receives during a stream against the read; step 1 keeps today's race.
-- The client still decodes every chunk through a `Value` (`mp_protocol::frame::Decoder` yields `Value`s); that cost is the client's and is not measured.
+- The client decoded every chunk through a `Value` (`mp_protocol::frame::Decoder` yielded `Value`s), 174 of the 285 ms a 50 000-row open cost on the home server; PERSO-106 decodes the frame straight into `MessageRowsChunk` and answers a broken stream with a protocol error the desktop classifies as one ([message-list-unbounded.md](../baselines/message-list-unbounded.md), "The typed chunk decode").

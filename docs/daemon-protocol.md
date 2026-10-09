@@ -896,7 +896,7 @@ Each chunk is a `message.rows` notification, `mp_protocol::listing::MessageRowsC
 `offset` is the position of the chunk's first row in the stream and not a request parameter: nothing lets a client ask for a page.
 Rows travel newest first, in the order `message.list` answers; offsets are contiguous, starting at 0, and the last chunk ends at `total`.
 A chunk closes once its encoded rows reach 1 MiB, the last one may be short, and a mailbox of zero rows streams no chunk at all and settles with `total: 0`.
-A client that sees a gap in `offset`, a row past `total`, or a success whose rows do not sum to `total` holds a broken stream, reports a protocol error and keeps the list it had.
+A client that sees a gap in `offset`, a row past `total`, a chunk that does not decode as `MessageRowsChunk`, or a success whose rows do not sum to `total` holds a broken stream, reports a protocol error and keeps the list it had.
 
 The chunks are not `state.event` kinds, unlike `message.server_hit`.
 A lifecycle event reaches every bootstrapped connection, so one mailbox open would push the whole mailbox to every client; it would sit in the 4 MiB outbound queue, which five chunks overflow; and it would take a revision from the dense counter, which a chunk has no use for.

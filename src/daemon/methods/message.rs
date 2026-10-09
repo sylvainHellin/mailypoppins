@@ -2701,10 +2701,34 @@ mod tests {
         let frames = encode_chunks(&dated);
         let stream_bytes: usize = frames.iter().map(Vec::len).sum();
         let largest_frame = frames.iter().map(Vec::len).max().unwrap_or(0);
-        // The client's side, as `mp-client`'s collector does it: each frame
-        // through the line decoder into a `Value`, the notification out of it,
-        // and every row through `row_from_wire` into one `Vec`.
+        // The client's side, as `mp-client`'s connection and collector do it
+        // since PERSO-106: each frame line decoded straight into its typed
+        // chunk, no `Value` on the way, and the chunks' rows moved into one
+        // `Vec`.
         let stream_client = sample(|| {
+            let mut decoder = mp_protocol::frame::Decoder::new(MAX_RESPONSE_BYTES);
+            let mut rows: Vec<mp_protocol::listing::MessageListRow> =
+                Vec::with_capacity(dated.len());
+            for frame in &frames {
+                let chunks = decoder
+                    .push_with(frame, |line| {
+                        Ok(
+                            mp_protocol::listing::MessageRowsChunk::from_frame_line(line)
+                                .expect("a chunk in the daemon's spelling"),
+                        )
+                    })
+                    .expect("a frame decodes");
+                for chunk in chunks {
+                    rows.extend(chunk.rows);
+                }
+            }
+            assert_eq!(rows.len(), dated.len());
+            std::hint::black_box(rows);
+        });
+        // The same before PERSO-106, for reference: each frame through the
+        // line decoder into a `Value`, the notification out of it, and every
+        // row through `row_from_wire` into one `Vec`.
+        let stream_client_value = sample(|| {
             let mut decoder = mp_protocol::frame::Decoder::new(MAX_RESPONSE_BYTES);
             let mut rows: Vec<mp_protocol::listing::MessageListRow> =
                 Vec::with_capacity(dated.len());
@@ -2764,6 +2788,10 @@ mod tests {
         eprintln!(
             "  client decode of chunks    ms median min max: {}",
             show(stream_client)
+        );
+        eprintln!(
+            "  same through a Value (ref) ms median min max: {}",
+            show(stream_client_value)
         );
     }
 }
