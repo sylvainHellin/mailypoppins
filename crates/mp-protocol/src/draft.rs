@@ -211,11 +211,13 @@ pub struct DraftPreview {
     pub bcc: Option<String>,
     /// The subject as the file spells it.
     pub subject: String,
-    /// The body, cut at 500 **characters**.
+    /// The body, cut at 500 **characters**, or whole when the call asked
+    /// `full: true`.
     pub body: String,
     /// Whether the renderer's `...` line is on, which is decided on 500
     /// **bytes**: the two cut-offs of `draft::preview_draft` are not the same
-    /// number, and a client re-deriving either would drift.
+    /// number, and a client re-deriving either would drift. Always `false`
+    /// for a `full: true` call.
     pub body_truncated: bool,
     /// `draft`, `approved` or `sent`.
     pub status: String,

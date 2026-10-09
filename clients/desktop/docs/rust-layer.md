@@ -102,7 +102,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `draft_approve` | `account`, `ids` | `DraftStatusBatch` |
 | `draft_demote` | `account`, `ids` | `DraftStatusBatch` |
 | `draft_validate` | `account`, `id` | `DraftValidation` |
-| `draft_preview` | `account`, `id` | `DraftPreview` |
+| `draft_preview` | `account`, `id` | `DraftPreview`, with the whole body (`full: true`) |
 | `draft_set_recipients` | `account`, `id`, `to`, `cc`, `bcc`, `subject?` | `DraftLocation` |
 | `signature_list` | `account` | `SignatureListing` |
 | `signature_read` | `name` | `SignatureFile` |

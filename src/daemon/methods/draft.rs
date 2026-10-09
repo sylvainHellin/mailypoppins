@@ -404,16 +404,37 @@ fn path(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
 /// The `result` of `draft.preview`: the record the dry run renders, field for
 /// field, including the two cut-offs of [`crate::draft::preview_draft`] that a
 /// client re-implementing them would get wrong.
+///
+/// `full: true` lifts both cut-offs: the body arrives whole and
+/// `body_truncated` is `false`. The desktop's draft preview asks for it,
+/// since a reader pane has room for the whole draft (PERSO-101); the CLI's
+/// dry run and send echo leave it out and keep the renderer's cut.
 fn preview(
     params: &Value,
     accounts: &[AccountConfig],
     email: &EmailSettings,
 ) -> Result<Value, RpcError> {
     let account = configured(accounts, &string_param(params, "account")?)?;
+    let full = match params.get("full") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(full)) => *full,
+        Some(_) => return Err(invalid_params("full is a boolean")),
+    };
     let row = resolve(&account.name, &addressed_one(params, &account.name)?)?;
     let draft = crate::draft::parse_email_draft(&row.path)
         .map_err(|_| refuse_unparseable(&account.name, &row.id, &row.path))?;
     let outcome = crate::draft::validate_draft(&draft);
+    let (body, body_truncated) = if full {
+        (draft.body_markdown.clone(), false)
+    } else {
+        // 500 characters for the text and 500 bytes for the `...` line:
+        // two rules, both the renderer's, decided here so that no client
+        // has to re-derive either.
+        (
+            draft.body_markdown.chars().take(500).collect(),
+            draft.body_markdown.len() > 500,
+        )
+    };
 
     to_value(
         "draft.preview",
@@ -431,11 +452,8 @@ fn preview(
             cc: draft.frontmatter.cc.clone(),
             bcc: draft.frontmatter.bcc.clone(),
             subject: draft.frontmatter.subject.clone(),
-            // 500 characters for the text and 500 bytes for the `...` line:
-            // two rules, both the renderer's, decided here so that no client
-            // has to re-derive either.
-            body: draft.body_markdown.chars().take(500).collect(),
-            body_truncated: draft.body_markdown.len() > 500,
+            body,
+            body_truncated,
             status: draft.frontmatter.status.to_string(),
             valid: outcome.is_ok(),
             error: outcome.as_ref().err().map(|e| e.to_string()),

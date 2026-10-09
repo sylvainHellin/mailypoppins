@@ -629,8 +629,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the top-level positional `[SELECTOR]` argument in `src/main.rs`
 - Daemon surface: `draft.preview`
-- GUI location: clients/desktop: Enter on a draft shows `DraftPreview` in the reader, with From, To, Cc, Bcc, the status, the body cut at 500 characters and the file path (M3, #0131; reader.md, "Drafts and server-only hits")
-- Validation: `tests/cli_selector_contract.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`; `clients/desktop/src/components/compose/compose.test.tsx` (`Enter opens a draft's preview in the reader`, `shows the headers, the status, the validation and the body of the selected draft`)
+- GUI location: clients/desktop: Enter on a draft shows `DraftPreview` in the reader, with From, To, Cc, Bcc, the status, the whole body (`draft.preview` with `full: true`, where the dry run cuts it at 500 characters) and the file path (M3, #0131; PERSO-101; reader.md, "Drafts and server-only hits")
+- Validation: `tests/cli_selector_contract.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs` (`draft_preview_full_carries_the_whole_body`); `clients/desktop/src-tauri/src/commands.rs` (`the_draft_preview_carries_the_whole_body`); `clients/desktop/src/components/compose/compose.test.tsx` (`Enter opens a draft's preview in the reader`, `shows the headers, the status, the validation and the body of the selected draft`)
 - Status: routed (P4-U6); GUI shipped (M3, #0131)
 - Note: the send confirmation shows the TUI's "To: <to> - <subject>" line rather than the dry run.
 

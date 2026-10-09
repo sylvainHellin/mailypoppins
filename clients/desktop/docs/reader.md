@@ -136,7 +136,7 @@ On a server-only hit, `tb` writes the hit's own markup into the app cache throug
 
 The reader pane shows no frame for these two.
 
-A selected draft shows `DraftPreview.tsx` (`src/components/compose/`): the `draft_preview` record, which is the headers (From, To, Cc, Bcc), the status pill, the body as the dry run cuts it at 500 characters, and the file path.
+A selected draft shows `DraftPreview.tsx` (`src/components/compose/`): the `draft_preview` record, which is the headers (From, To, Cc, Bcc), the status pill, the whole body, which `draft_preview` asks with `full: true` where the CLI's dry run cuts it at 500 characters (PERSO-101), and the file path.
 Under the headers, `draft_validate`'s report says "Valid" or "Not sendable" with the error, and lists the warnings.
 Under the report, the "Attachments" list shows each entry of the draft's `attachments:` as the file spells it, from `draft_attachments`, with "Open <entry>" and "Remove <entry>" buttons.
 An entry with no file behind it carries a "missing" badge and its Open is disabled, since the send would fail on it.

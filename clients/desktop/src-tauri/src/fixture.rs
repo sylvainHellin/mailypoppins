@@ -1870,6 +1870,8 @@ impl State {
             }
             "draft.preview" => {
                 let id = param_str(method, params, "id")?;
+                // The daemon's `full`: the whole body and no `...` line.
+                let full = params.get("full").and_then(Value::as_bool).unwrap_or(false);
                 let entry = self.parseable(method, &account, id)?;
                 let draft = mp_core::draft::parse_email_draft(Path::new(&entry.path))
                     .map_err(|e| refused(method, -32010, &one_line(&e)))?;
@@ -1885,8 +1887,12 @@ impl State {
                     cc: fm.cc.clone(),
                     bcc: fm.bcc.clone(),
                     subject: fm.subject.clone(),
-                    body: draft.body_markdown.chars().take(500).collect(),
-                    body_truncated: draft.body_markdown.len() > 500,
+                    body: if full {
+                        draft.body_markdown.clone()
+                    } else {
+                        draft.body_markdown.chars().take(500).collect()
+                    },
+                    body_truncated: !full && draft.body_markdown.len() > 500,
                     status: fm.status.to_string(),
                     valid: outcome.is_ok(),
                     error: outcome.as_ref().err().map(|e| e.to_string()),

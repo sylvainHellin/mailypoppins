@@ -19,7 +19,7 @@
 //! draft.list      {account, status?}                              -> DraftListing
 //! draft.validate  {account, id?|selector?}                        -> DraftValidation
 //! draft.path      {account, id|selector}                          -> DraftLocation
-//! draft.preview   {account, id|selector}                          -> DraftPreview
+//! draft.preview   {account, id|selector, full?}                   -> DraftPreview
 //! draft.approve   {account, id}                                   -> {account, id, path, status}
 //! draft.demote    {account, id}                                   -> {account, id, path, status}
 //! draft.reply     {account, source:{id|selector, mailbox?}, all?,
@@ -1526,6 +1526,60 @@ async fn draft_preview_cuts_the_body_the_way_the_renderer_does() {
         preview.body_truncated,
         "and over the 500-byte one, so the renderer's `...` line is on"
     );
+}
+
+/// `full: true` lifts both cut-offs: the body arrives whole and the `...`
+/// line is off, which is what the desktop's draft preview asks for
+/// (PERSO-101). Without it the cut stays, and a non-boolean is refused.
+#[tokio::test]
+async fn draft_preview_full_carries_the_whole_body() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+
+    // 1200 characters ending in a marker the 500-character cut would drop.
+    let body = format!("{}THE END", "word ".repeat(240));
+    let id = "a0000000000000f3";
+    fs::write(
+        slice.drafts_dir(fixture::ACCOUNT).join("long.md"),
+        fixture::document(
+            id,
+            "robin@example.com",
+            "Long",
+            "draft",
+            &format!("{body}\n"),
+        ),
+    )
+    .expect("write the long draft");
+
+    let full: DraftPreview = call_typed(
+        &mut conn,
+        "draft.preview",
+        json!({"account": fixture::ACCOUNT, "id": id, "full": true}),
+    )
+    .await;
+    assert_eq!(full.body.trim(), body, "the whole body, marker included");
+    assert!(!full.body_truncated, "nothing was cut, so no `...` line");
+
+    let cut: DraftPreview = call_typed(
+        &mut conn,
+        "draft.preview",
+        json!({"account": fixture::ACCOUNT, "id": id, "full": false}),
+    )
+    .await;
+    assert_eq!(
+        cut.body.chars().count(),
+        500,
+        "`full: false` is the dry run's cut"
+    );
+    assert!(cut.body_truncated);
+
+    let error = call_err(
+        &mut conn,
+        "draft.preview",
+        json!({"account": fixture::ACCOUNT, "id": id, "full": "yes"}),
+    )
+    .await;
+    assert_eq!(error.code, INVALID_PARAMS, "full is a boolean");
 }
 
 // ---------------------------------------------------------------------------

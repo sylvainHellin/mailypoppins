@@ -43,13 +43,15 @@ bcc: string | null,
  */
 subject: string,
 /**
- * The body, cut at 500 **characters**.
+ * The body, cut at 500 **characters**, or whole when the call asked
+ * `full: true`.
  */
 body: string,
 /**
  * Whether the renderer's `...` line is on, which is decided on 500
  * **bytes**: the two cut-offs of `draft::preview_draft` are not the same
- * number, and a client re-deriving either would drift.
+ * number, and a client re-deriving either would drift. Always `false`
+ * for a `full: true` call.
  */
 body_truncated: boolean,
 /**

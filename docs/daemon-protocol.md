@@ -678,7 +678,7 @@ The family is the fourteen methods below, all served from protocol 1 and all dur
 | `draft.forward` | command | `{account, source, headers?, no_signature?, signature?}` | `DraftCreated` |
 | `draft.list` | query | `{account, status?}` | `DraftListing` |
 | `draft.path` | query | `{account, id\|selector}` | `DraftLocation` |
-| `draft.preview` | query | `{account, id\|selector}` | `DraftPreview` |
+| `draft.preview` | query | `{account, id\|selector, full?}` | `DraftPreview` |
 | `draft.reply` | command | `{account, source, all?, headers?, no_signature?, signature?}` | `DraftCreated` |
 | `draft.validate` | query | `{account, id?\|selector?}` | `DraftValidation` |
 
@@ -689,7 +689,7 @@ The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they ar
 `mp list` reads neither.
 `bcc` is the file's `bcc:` field and joined the row in #0131, for a recipients dialog that edits all three recipient fields from the row it lists.
 `DraftValidation` is `{account, reports}`, whose reports are `{id, selector, valid, error, warnings}`.
-`DraftLocation` is `{account, id, selector, path, status}` and `DraftPreview` is the dry run's record, whose body is cut at 500 characters while `body_truncated` is decided on 500 bytes and whose `signature` is `null` for the CLI, because the body already carries it (#0099).
+`DraftLocation` is `{account, id, selector, path, status}` and `DraftPreview` is the dry run's record, whose body is cut at 500 characters while `body_truncated` is decided on 500 bytes, unless `full: true` asks for the whole body (the desktop's preview, PERSO-101), and whose `signature` is `null` for the CLI, because the body already carries it (#0099).
 
 **A reply or a forward addresses its source three ways and may override its headers.**
 `source` is `{id}`, `{row_id}` or `{selector, mailbox?}`, exactly one of the three: `id` is the store's `"<mailbox>/<uid>"` key, `row_id` is the `messages.id` a `message.list` row carries, and `selector` is the grammar `mp reply` takes from a user.

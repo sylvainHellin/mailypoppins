@@ -1230,12 +1230,14 @@ pub fn draft_validate_on(
     decode("draft.validate", answer)
 }
 
-/// What a send of the draft `id` would send.
+/// What a send of the draft `id` would send, with the whole body: the
+/// reader pane has room for it, where the CLI's dry run cuts it at 500
+/// characters (`full`, PERSO-101).
 pub fn draft_preview_on(door: &Door, account: &str, id: &str) -> Result<DraftPreview, GuiError> {
     let answer = call(
         door,
         "draft.preview",
-        json!({"account": account, "id": id}),
+        json!({"account": account, "id": id, "full": true}),
         DRAFT_QUERY_BUDGET,
         Addressing::Resource,
     )?;
@@ -3076,6 +3078,22 @@ mod tests {
             draft_set_recipients_on(&d, "work", "missing", &wizard, true),
             Err(GuiError::NotFound { .. })
         ));
+    }
+
+    /// The reader's preview asks for the whole body, past the CLI's 500-character cut (PERSO-101).
+    #[test]
+    fn the_draft_preview_carries_the_whole_body() {
+        let (d, _f) = fixture_door();
+        let path = draft_preview_on(&d, "work", "angebot-antwort")
+            .expect("preview")
+            .path;
+        let mut text = std::fs::read_to_string(&path).expect("read the draft");
+        text.push_str(&format!("{}THE END\n", "word ".repeat(200)));
+        std::fs::write(&path, text).expect("lengthen the draft");
+        let preview = draft_preview_on(&d, "work", "angebot-antwort").expect("preview");
+        assert!(preview.body.chars().count() > 1000);
+        assert!(preview.body.trim_end().ends_with("THE END"));
+        assert!(!preview.body_truncated);
     }
 
     #[test]
