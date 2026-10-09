@@ -24,6 +24,30 @@ describe("the adaptive layout", () => {
     expect(screen.getByRole("separator", { name: /Resize/ })).toBeInTheDocument();
   });
 
+  it("places the panes where index.css squares the focus ring's shared corners (PERSO-95)", async () => {
+    const { container, user } = renderApp(1400);
+    await shellReady();
+    // The selectors index.css draws the ring's corners with.
+    const squareLeft = (pane: string) => container.querySelector(`[data-panes] > :not(:first-child) [data-pane="${pane}"]`);
+    const squareRight = (pane: string) => container.querySelector(`[data-panes] > :not(:last-child) [data-pane="${pane}"]`);
+    expect(squareLeft("list")).toBeNull();
+    expect(squareRight("list")).not.toBeNull();
+    expect(squareLeft("reader")).not.toBeNull();
+    expect(squareRight("reader")).toBeNull();
+
+    // A zoomed pane is alone in the row and keeps its four rounded corners.
+    await user.keyboard("z");
+    await waitFor(() => expect(screen.queryByRole("complementary", { name: "Reader" })).toBeNull());
+    expect(squareLeft("list")).toBeNull();
+    expect(squareRight("list")).toBeNull();
+
+    // So does a full-pane view such as Settings.
+    await user.keyboard("z");
+    act(() => emitMenu("settings"));
+    await screen.findByRole("region", { name: "Settings" });
+    expect(container.querySelector('[data-panes] > :first-child:last-child [data-view="settings"][data-pane="list"]')).not.toBeNull();
+  });
+
   it("medium: the sidebar collapses to an icon rail, list and reader stay", async () => {
     const { container } = renderApp(900);
     await shellReady();

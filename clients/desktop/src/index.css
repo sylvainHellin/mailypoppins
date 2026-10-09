@@ -277,6 +277,32 @@
   [data-pane="sidebar"][data-focused="true"]::after {
     border-color: var(--sidebar-ring);
   }
+  /* Only a corner the pane shares with the inset card stays rounded; a corner
+     that meets a neighbour is square (PERSO-95). In the pane row the list is
+     followed by the splitter and the reader preceded by it, so the list's
+     right corners and the reader's left ones are square, and a pane alone in
+     the row (zoomed, narrow, a full-pane view such as Settings) keeps all
+     four. A banner or the narrow bar above the row squares the top corners.
+     The sidebar stands apart from the inset card and keeps its four. */
+  [data-panes] > :not(:first-child) [data-pane]::after {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+  }
+  [data-panes] > :not(:last-child) [data-pane]::after {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  [data-slot="sidebar-inset"]:has(
+      > [role="status"] > [data-banner],
+      > [data-slot="editing-banner"] > *,
+      > [role="alert"],
+      > [data-slot="narrow-bar"]
+    )
+    [data-panes]
+    [data-pane]::after {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation-duration: 0.01ms !important;
