@@ -486,6 +486,14 @@ mp send --invite --to me@example.com --subject "Kita closed" --start 2026-12-24 
         see <code>scripts/regen-website-keys.sh</code>. These match the in-TUI
         help overlay (<kbd>?</kbd>) exactly.
       </p>
+      <p>
+        The copy keys (<kbd>y</kbd>, and <kbd>c</kbd> in Contacts) write to the system
+        clipboard. Over ssh the remote host usually has none, so the TUI sends the text to
+        your terminal as an OSC 52 escape sequence instead. Ghostty, WezTerm, kitty, iTerm2
+        and tmux with <code>set-clipboard on</code> put it on your local clipboard. The
+        status line then shows the copied text, so you can still select it by hand in a
+        terminal that ignores OSC 52.
+      </p>
 
       {tuiKeys.map((section) => (
         <>
