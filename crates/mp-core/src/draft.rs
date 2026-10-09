@@ -406,18 +406,75 @@ fn source_message_id(source: &SourceMessage) -> Option<&str> {
         .filter(|id| !id.is_empty() && !id.chars().any(|c| c == '"' || c == '\\' || c.is_control()))
 }
 
-/// Reply to a message that is not a file: the #0050 path, used by
-/// `mp reply <selector>` over a store row.
-pub fn create_reply_draft_from(
-    source: &SourceMessage,
+/// The bare, deduplicated addresses of an address header, in order, minus
+/// any address `skip` holds (lowercased).
+fn header_addresses(header: &str, skip: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for addr in split_addresses(header) {
+        let email = extract_email_address(&addr);
+        let lower = email.to_lowercase();
+        if !email.is_empty()
+            && !skip.contains(&lower)
+            && !out.iter().any(|r| r.to_lowercase() == lower)
+        {
+            out.push(email);
+        }
+    }
+    out
+}
+
+/// Recipients of a reply to a message this account sent, or `None` when the
+/// source is someone else's message.
+///
+/// The source is this account's own when its `From:` is the account's
+/// `default_from` address, the one notion of "own address" the config has.
+/// The reply goes to the original `To:` and a reply-all also keeps the
+/// original `Cc:`, as every mail client does; the account's own address is
+/// dropped from both, unless it is the only `To:` (a note to self), in which
+/// case the original `To:` stays as it was. A source whose `To:` names nobody
+/// (a Bcc-only send) returns `None` and falls back to the sender path, so the
+/// draft never carries an empty `to:`.
+fn own_message_recipients(
+    inbox: &SourceMessage,
     reply_all: bool,
     default_from: &str,
-    drafts_dir: Option<&Path>,
-    signature: Option<&str>,
-) -> Result<PathBuf> {
-    let inbox = source;
-    let original_body = inbox.body.trim();
+) -> Option<(String, Option<String>)> {
+    // `default_from` may be a full `"Name" <addr>` mailbox.
+    let self_addr = extract_email_address(default_from).to_lowercase();
+    if self_addr.is_empty() || extract_email_address(&inbox.from).to_lowercase() != self_addr {
+        return None;
+    }
+    let own = vec![self_addr];
+    let original_to = header_addresses(&inbox.to, &[]);
+    if original_to.is_empty() {
+        return None;
+    }
+    let mut to = header_addresses(&inbox.to, &own);
+    if to.is_empty() {
+        to = original_to;
+    }
+    let cc = if reply_all {
+        let mut skip = own;
+        skip.extend(to.iter().map(|a| a.to_lowercase()));
+        let cc = inbox
+            .cc
+            .as_deref()
+            .map(|cc| header_addresses(cc, &skip))
+            .unwrap_or_default();
+        (!cc.is_empty()).then(|| cc.join(", "))
+    } else {
+        None
+    };
+    Some((to.join(", "), cc))
+}
 
+/// Recipients of a reply to someone else's message: the `Reply-To:` or the
+/// sender, and for a reply-all every other recipient minus this account.
+fn others_message_recipients(
+    inbox: &SourceMessage,
+    reply_all: bool,
+    default_from: &str,
+) -> (String, Option<String>) {
     // Build reply fields. A `Reply-To:` header names where the sender wants
     // answers to go (a list, a team alias behind a `noreply@` From), so it is
     // the primary recipient; `From:` is the fallback. The header may name
@@ -475,6 +532,28 @@ pub fn create_reply_draft_from(
         }
     } else {
         None
+    };
+    (reply_to, reply_cc)
+}
+
+/// Reply to a message that is not a file: the #0050 path, used by
+/// `mp reply <selector>` over a store row.
+pub fn create_reply_draft_from(
+    source: &SourceMessage,
+    reply_all: bool,
+    default_from: &str,
+    drafts_dir: Option<&Path>,
+    signature: Option<&str>,
+) -> Result<PathBuf> {
+    let inbox = source;
+    let original_body = inbox.body.trim();
+
+    // A reply to a message this account sent itself (a Sent copy) goes back
+    // to that message's recipients, not to the sender, which is this account
+    // (PERSO-99).
+    let (reply_to, reply_cc) = match own_message_recipients(inbox, reply_all, default_from) {
+        Some(recipients) => recipients,
+        None => others_message_recipients(inbox, reply_all, default_from),
     };
 
     // Build subject with Re: prefix (case-insensitive check)
@@ -3162,6 +3241,87 @@ mod tests {
                 "{reply_to}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Reply to a message this account sent (PERSO-99)
+    // -----------------------------------------------------------------------
+
+    /// A Sent copy: `From:` is this account, written as a full mailbox and in
+    /// another case than `default_from`, with a Reply-To that must not win.
+    fn own_source(to: &str, cc: Option<&str>) -> SourceMessage {
+        SourceMessage {
+            from: "Me Myself <ME@example.com>".into(),
+            reply_to: Some("list@x.com".into()),
+            to: to.into(),
+            cc: cc.map(Into::into),
+            subject: "Plan".into(),
+            ..Default::default()
+        }
+    }
+
+    fn reply_recipients(source: &SourceMessage, all: bool) -> (Option<String>, Option<String>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let default_from = r#""Me" <me@example.com>"#;
+        let path =
+            create_reply_draft_from(source, all, default_from, Some(tmp.path()), None).unwrap();
+        let draft = parse_email_draft(&path).unwrap();
+        (draft.frontmatter.to, draft.frontmatter.cc)
+    }
+
+    #[test]
+    fn reply_to_own_message_goes_to_its_recipients() {
+        let source = own_source(r#""Bob" <bob@x.com>, carol@x.com"#, None);
+        let (to, cc) = reply_recipients(&source, false);
+        assert_eq!(to.as_deref(), Some("bob@x.com, carol@x.com"));
+        assert_eq!(cc, None);
+
+        let (to, cc) = reply_recipients(&source, true);
+        assert_eq!(to.as_deref(), Some("bob@x.com, carol@x.com"));
+        assert_eq!(cc, None);
+    }
+
+    #[test]
+    fn reply_to_own_message_with_cc_keeps_cc_only_for_reply_all() {
+        let source = own_source(
+            "bob@x.com, me@example.com",
+            Some("dave@x.com, Me <me@example.com>, BOB@x.com, erin@x.com"),
+        );
+        // A plain reply: the original To, minus this account, and no cc.
+        let (to, cc) = reply_recipients(&source, false);
+        assert_eq!(to.as_deref(), Some("bob@x.com"));
+        assert_eq!(cc, None);
+
+        // Reply-all: the original To and Cc, minus this account, and nobody
+        // in both.
+        let (to, cc) = reply_recipients(&source, true);
+        assert_eq!(to.as_deref(), Some("bob@x.com"));
+        assert_eq!(cc.as_deref(), Some("dave@x.com, erin@x.com"));
+    }
+
+    #[test]
+    fn reply_to_own_message_addressed_only_to_self_keeps_the_original_to() {
+        let source = own_source("Me <me@example.com>", Some("dave@x.com, me@example.com"));
+        let (to, cc) = reply_recipients(&source, false);
+        assert_eq!(to.as_deref(), Some("me@example.com"));
+        assert_eq!(cc, None);
+
+        let (to, cc) = reply_recipients(&source, true);
+        assert_eq!(to.as_deref(), Some("me@example.com"));
+        assert_eq!(cc.as_deref(), Some("dave@x.com"));
+    }
+
+    #[test]
+    fn reply_to_own_message_with_no_to_falls_back_to_the_sender_path() {
+        // A Bcc-only send has no To to reuse; the draft keeps the old
+        // behaviour rather than an empty `to:`.
+        let source = SourceMessage {
+            reply_to: None,
+            ..own_source("", Some("dave@x.com"))
+        };
+        let (to, cc) = reply_recipients(&source, false);
+        assert_eq!(to.as_deref(), Some("ME@example.com"));
+        assert_eq!(cc, None);
     }
 
     #[test]

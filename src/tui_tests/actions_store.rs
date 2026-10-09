@@ -215,6 +215,33 @@ mod store_backed_drafts {
         );
     }
 
+    /// Reply and reply-all to a message this account sent (PERSO-99): the
+    /// draft goes back to its recipients, not to this account.
+    #[test]
+    fn reply_to_a_sent_message_goes_to_its_recipients() {
+        let fx = Fixture::new();
+        let mut email = fixture_email("Sent plan");
+        email.from = "Me <me@example.com>".into();
+        email.to = "bob@example.com, me@example.com".into();
+        let row = fx.ingest(&email);
+        let source = fx.source(&row, false);
+
+        for (all, cc) in [(false, None), (true, Some("carol@example.com"))] {
+            let (path, _) = create_draft_from_source(
+                "alice",
+                "me@example.com",
+                &source,
+                DraftFromSource::Reply { all },
+                None,
+                None,
+            )
+            .unwrap();
+            let draft = crate::draft::parse_email_draft(&path).unwrap();
+            assert_eq!(draft.frontmatter.to.as_deref(), Some("bob@example.com"));
+            assert_eq!(draft.frontmatter.cc.as_deref(), cc, "reply-all: {all}");
+        }
+    }
+
     /// Forward: the forwarded header block plus the body, and the row's
     /// attachment blobs materialised into the stable per-account mirror that
     /// outlives the source row (#0006).
