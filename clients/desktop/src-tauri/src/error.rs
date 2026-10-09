@@ -178,6 +178,10 @@ impl GuiError {
         {
             return GuiError::unavailable(message);
         }
+        // `ClientError::Protocol`'s words, which `mp-client` also gives a
+        // `message.list_stream` that broke its contract: a gap in the
+        // offsets, rows past the total, a success short of it, or a chunk
+        // that does not decode (PERSO-106).
         if text.contains("broke the protocol") {
             return GuiError::protocol(message);
         }
@@ -272,6 +276,40 @@ mod tests {
                 Addressing::Params
             ),
             GuiError::VersionMismatch { .. }
+        ));
+    }
+
+    /// A broken `message.list_stream` is a protocol error, not an internal
+    /// fault, and a stream past its budget is a timeout (PERSO-106). The texts
+    /// are the ones `mp-client`'s session thread answers.
+    #[test]
+    fn a_broken_stream_is_a_protocol_error() {
+        for text in [
+            "message.list_stream: the daemon broke the protocol: a message.rows chunk of \
+             operation op starts at offset 2, where the stream is at 1",
+            "message.list_stream: the daemon broke the protocol: a message.rows chunk of \
+             operation op runs past the announced total of 1",
+            "message.list_stream: the daemon broke the protocol: operation op succeeded with \
+             2 rows where the stream announced 3",
+            "message.list_stream: the daemon broke the protocol: a message.rows chunk of \
+             operation op did not decode: invalid type: string \"x\", expected i64",
+        ] {
+            assert_eq!(
+                GuiError::from_call_text(text, Addressing::Resource),
+                GuiError::Protocol {
+                    message: text.to_string(),
+                    code: None
+                },
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            GuiError::from_call_text(
+                "message.list_stream: the listing of work/inbox went unanswered within 30s; \
+                 the stream was cancelled",
+                Addressing::Resource
+            ),
+            GuiError::Timeout { .. }
         ));
     }
 
