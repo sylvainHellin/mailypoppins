@@ -79,9 +79,11 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc as async_mpsc;
 
 use crate::types::ClientError;
-use crate::Connection;
+use crate::{Connection, Inbound};
 use mp_protocol::listing::METHOD_MESSAGE_LIST_STREAM;
-use mp_protocol::listing::{MessageListRow, MessageListStreamStarted, MessageListing};
+use mp_protocol::listing::{
+    MessageListRow, MessageListStreamStarted, MessageListing, MessageRowsChunk,
+};
 use mp_protocol::state::Bootstrap;
 use mp_protocol::{
     EventEnvelope, RpcError, METHOD_MESSAGE_ROWS, METHOD_STATE_EVENT, METHOD_STATE_RESYNC_REQUIRED,
@@ -168,9 +170,16 @@ impl Call {
 }
 
 /// Why a call on the session thread failed: the daemon's refusal, kept typed
-/// so its `data` reaches the caller, or anything else, as its sentence.
+/// so its `data` reaches the caller, an answer that breaks the protocol, or
+/// anything else, as its sentence.
 enum Failure {
     Refused(RpcError),
+    /// The daemon answered something the protocol rules out, such as a stream
+    /// with a gap, an overrun or a short total (PERSO-106). Its text is
+    /// [`ClientError::Protocol`]'s, `the daemon broke the protocol: <what>`,
+    /// which is how a client that classifies a failure by its text (the
+    /// desktop's `GuiError::from_call_text`) tells it from an internal fault.
+    Protocol(String),
     Other(String),
 }
 
@@ -178,6 +187,7 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Failure::Refused(error) => ClientError::Rpc(error.clone()).fmt(f),
+            Failure::Protocol(text) => ClientError::Protocol(text.clone()).fmt(f),
             Failure::Other(text) => f.write_str(text),
         }
     }
@@ -636,8 +646,9 @@ async fn serve(
                         }
                     }
                 },
-                notification = connection.next_notification() => match notification {
-                    Some(notification) => publish(&events, notification),
+                inbound = connection.next_inbound() => match inbound {
+                    Some(Inbound::Notification(notification)) => publish(&events, notification),
+                    Some(Inbound::Rows(_)) => drop_rows(),
                     None => break "the daemon closed the connection".to_string(),
                 },
             }
@@ -702,14 +713,18 @@ fn publish(events: &sync_mpsc::Sender<Incoming>, notification: mp_protocol::Noti
                 .unwrap_or_default()
                 .to_string(),
         },
-        // A chunk of a stream the session thread is no longer collecting: one
-        // it gave up on and whose finish never came, or (which a contiguous
-        // stream cannot produce) one past a stream already answered whole.
-        // Dropped quietly, since a stream is dozens of them.
-        METHOD_MESSAGE_ROWS => return debug!("[tui] dropping a message.rows chunk nobody awaits"),
+        METHOD_MESSAGE_ROWS => return drop_rows(),
         other => return info!("[tui] ignoring the {other} notification"),
     };
     let _ = events.send(incoming);
+}
+
+/// A chunk of a stream the session thread is no longer collecting: one it
+/// gave up on and whose finish never came, or (which a contiguous stream
+/// cannot produce) one past a stream already answered whole. Dropped quietly,
+/// since a stream is dozens of them.
+fn drop_rows() {
+    debug!("[tui] dropping a message.rows chunk nobody awaits");
 }
 
 /// Post one call and block for its answer, which is what both doors do.
@@ -850,7 +865,7 @@ impl StreamCall {
         let started: MessageListStreamStarted = match serde_json::from_value(started) {
             Ok(started) => started,
             Err(e) => {
-                self.reply(Err(Failure::Other(format!(
+                self.reply(Err(Failure::Protocol(format!(
                     "the {METHOD_MESSAGE_LIST_STREAM} answer did not decode: {e}"
                 ))));
                 return None;
@@ -869,36 +884,51 @@ impl StreamCall {
         loop {
             let wake = settle_by.unwrap_or(self.deadline);
             tokio::select! {
-                notification = connection.next_notification() => {
-                    let Some(notification) = notification else {
-                        self.reply(Err(Failure::Other(
-                            "the daemon closed the connection before the stream finished"
-                                .to_string(),
-                        )));
-                        return Some("the daemon closed the connection".to_string());
-                    };
-                    if notification.method == METHOD_MESSAGE_ROWS {
-                        if self.answer.is_some() {
-                            match rows.push(&notification.params) {
-                                Err(failure) => {
-                                    self.abandon(connection, &id, failure, &mut settle_by)
-                                        .await;
-                                }
-                                Ok(true) if rows.complete() => {
-                                    self.reply(Ok(rows.into_listing()));
-                                    return None;
-                                }
-                                Ok(_) => {}
-                            }
+                inbound = connection.next_inbound() => {
+                    // A chunk arrives typed when the connection decoded it
+                    // from its bytes, and as a generic notification when it
+                    // was spelled otherwise or did not decode, which the
+                    // collector then decodes or refuses.
+                    let pushed = match inbound {
+                        None => {
+                            self.reply(Err(Failure::Other(
+                                "the daemon closed the connection before the stream finished"
+                                    .to_string(),
+                            )));
+                            return Some("the daemon closed the connection".to_string());
                         }
-                        continue;
-                    }
-                    let finish = finish_payload(&notification, &id);
-                    publish(events, notification);
-                    if let Some(payload) = finish {
-                        let result = rows.finish(&payload);
-                        self.reply(result);
-                        return None;
+                        // The caller was answered with a failure: the rows
+                        // still on their way are discarded until the finish.
+                        Some(Inbound::Rows(_)) if self.answer.is_none() => continue,
+                        Some(Inbound::Rows(chunk)) => rows.push(chunk),
+                        Some(Inbound::Notification(notification))
+                            if notification.method == METHOD_MESSAGE_ROWS =>
+                        {
+                            if self.answer.is_none() {
+                                continue;
+                            }
+                            rows.push_params(notification.params)
+                        }
+                        Some(Inbound::Notification(notification)) => {
+                            let finish = finish_payload(&notification, &id);
+                            publish(events, notification);
+                            if let Some(payload) = finish {
+                                let result = rows.finish(&payload);
+                                self.reply(result);
+                                return None;
+                            }
+                            continue;
+                        }
+                    };
+                    match pushed {
+                        Err(failure) => {
+                            self.abandon(connection, &id, failure, &mut settle_by).await;
+                        }
+                        Ok(true) if rows.complete() => {
+                            self.reply(Ok(rows.into_listing()));
+                            return None;
+                        }
+                        Ok(_) => {}
                     }
                 }
                 _ = tokio::time::sleep_until(wake) => {
@@ -982,39 +1012,56 @@ impl RowsCollector {
         }
     }
 
-    /// Fold one `message.rows` chunk in, answering `false` for a chunk of
-    /// another stream, which is dropped.
+    /// Fold one typed `message.rows` chunk in, answering `false` for a chunk
+    /// of another stream, which is dropped.
     ///
-    /// Each row is decoded on its own, as a `message.list` row is
-    /// ([`crate::queries::row_from_wire`]), so one row a newer daemon shaped
-    /// differently costs that row and not the listing.
-    fn push(&mut self, params: &Value) -> Result<bool, Failure> {
+    /// The chunk is typed whole (PERSO-106): the connection decoded it from
+    /// its bytes into [`MessageRowsChunk`], so a row is never a `Value` on the
+    /// way, and a chunk with a row that does not decode never gets here (see
+    /// [`RowsCollector::push_params`]). A field a newer daemon adds is
+    /// ignored and one it omits defaults, as for any [`MessageListRow`].
+    fn push(&mut self, chunk: MessageRowsChunk) -> Result<bool, Failure> {
         let id = &self.started.operation_id;
-        if params["operation_id"].as_str() != Some(id.as_str()) {
+        if chunk.operation_id != *id {
             return Ok(false);
         }
-        let (Some(offset), Some(rows)) = (params["offset"].as_u64(), params["rows"].as_array())
-        else {
-            return Err(Failure::Other(format!(
-                "a message.rows chunk of operation {id} carries no offset or no rows"
-            )));
-        };
+        let offset = chunk.offset;
         let held = self.rows.len() as u64;
         if offset != held {
-            return Err(Failure::Other(format!(
+            return Err(Failure::Protocol(format!(
                 "a message.rows chunk of operation {id} starts at offset {offset}, \
                  where the stream is at {held}"
             )));
         }
-        if held + rows.len() as u64 > self.started.total {
-            return Err(Failure::Other(format!(
+        if held + chunk.rows.len() as u64 > self.started.total {
+            return Err(Failure::Protocol(format!(
                 "a message.rows chunk of operation {id} runs past the announced total of {}",
                 self.started.total
             )));
         }
-        self.rows
-            .extend(rows.iter().map(crate::queries::row_from_wire));
+        self.rows.extend(chunk.rows);
         Ok(true)
+    }
+
+    /// Fold in a `message.rows` chunk the connection handed over generically,
+    /// one spelled otherwise than the daemon spells it or one that does not
+    /// decode as a [`MessageRowsChunk`].
+    ///
+    /// A chunk of this stream that does not decode is a protocol error, as a
+    /// gap is: dropping it would leave a hole the next chunk's offset reports
+    /// anyway, and blanking the offending row would hand over a listing the
+    /// daemon never sent.
+    fn push_params(&mut self, params: Value) -> Result<bool, Failure> {
+        let id = &self.started.operation_id;
+        if params["operation_id"].as_str() != Some(id.as_str()) {
+            return Ok(false);
+        }
+        match serde_json::from_value::<MessageRowsChunk>(params) {
+            Ok(chunk) => self.push(chunk),
+            Err(e) => Err(Failure::Protocol(format!(
+                "a message.rows chunk of operation {id} did not decode: {e}"
+            ))),
+        }
     }
 
     /// Whether the contiguous rows held reach the announced `total`, which
@@ -1047,7 +1094,7 @@ impl RowsCollector {
             Some("succeeded") => {
                 let held = self.rows.len() as u64;
                 if held != self.started.total {
-                    return Err(Failure::Other(format!(
+                    return Err(Failure::Protocol(format!(
                         "operation {id} succeeded with {held} rows where the stream announced {}",
                         self.started.total
                     )));
@@ -1058,7 +1105,7 @@ impl RowsCollector {
                 let state = state.unwrap_or("without a state");
                 match serde_json::from_value::<RpcError>(payload["error"].clone()) {
                     Ok(error) => Err(Failure::Refused(error)),
-                    Err(_) => Err(Failure::Other(format!(
+                    Err(_) => Err(Failure::Protocol(format!(
                         "operation {id} finished {state} and carried no error"
                     ))),
                 }
@@ -1226,7 +1273,12 @@ mod tests {
                             }
                         }
                         for frame in frames {
-                            let mut bytes = serde_json::to_vec(&frame).expect("encodes");
+                            // A string is a frame written verbatim, for a
+                            // spelling `serde_json` would not produce.
+                            let mut bytes = match frame {
+                                Value::String(raw) => raw.into_bytes(),
+                                other => serde_json::to_vec(&other).expect("encodes"),
+                            };
                             bytes.push(b'\n');
                             if write.write_all(&bytes).await.is_err() {
                                 return;
@@ -1289,6 +1341,27 @@ mod tests {
             .collect();
         json!({"jsonrpc": "2.0", "method": "message.rows",
                "params": {"offset": offset, "operation_id": OP, "rows": rows}})
+    }
+
+    /// [`rows`], written verbatim with spaces after every separator, so the
+    /// connection cannot take its typed path and hands it over generically.
+    fn spaced_rows(offset: u64, ids: &[i64]) -> Value {
+        let rows: Vec<String> = ids
+            .iter()
+            .map(|id| format!(r#"{{"id": {id}, "uid": {id}, "subject": "row {id}"}}"#))
+            .collect();
+        Value::String(format!(
+            r#"{{"jsonrpc": "2.0", "method": "message.rows", "params": {{"offset": {offset}, "operation_id": "{OP}", "rows": [{}]}}}}"#,
+            rows.join(", ")
+        ))
+    }
+
+    /// A `message.rows` chunk of [`OP`] at `offset` whose params are `params`
+    /// beside the operation id, for a chunk that does not decode.
+    fn raw_rows(params: Value) -> Value {
+        let mut params = params;
+        params["operation_id"] = json!(OP);
+        json!({"jsonrpc": "2.0", "method": "message.rows", "params": params})
     }
 
     fn event(revision: u64, kind: &str, payload: Value) -> Value {
@@ -1383,6 +1456,32 @@ mod tests {
             request["params"],
             json!({"account": "work", "mailbox": "inbox"})
         );
+        daemon.finish(session);
+    }
+
+    /// A chunk spelled otherwise than the daemon spells it misses the
+    /// connection's typed path and still folds in, in order, beside typed ones.
+    #[test]
+    fn a_chunk_spelled_otherwise_still_collects() {
+        let daemon = Canned::new(
+            "spaced",
+            3,
+            vec![rows(0, &[3]), spaced_rows(1, &[2, 1])],
+            Vec::new(),
+        );
+        let session = daemon.session();
+        let listing = session
+            .list_stream_within("work", "inbox", Duration::from_secs(10))
+            .expect("a listing");
+        assert_eq!(
+            listing
+                .messages
+                .iter()
+                .map(|row| (row.id, row.subject.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(3, "row 3"), (2, "row 2"), (1, "row 1")]
+        );
+        assert_eq!(daemon.methods(), ["message.list_stream"]);
         daemon.finish(session);
     }
 
@@ -1486,9 +1585,12 @@ mod tests {
         daemon.finish(session);
     }
 
-    /// A gap in `offset`, rows past `total`, a success short of `total` and a
-    /// failed finish each answer an error rather than a listing, and the
-    /// session serves the next call once the stream's finish has arrived.
+    /// A gap in `offset`, rows past `total`, a success short of `total`, a
+    /// chunk that does not decode and a failed finish each answer an error
+    /// rather than a listing, and the session serves the next call once the
+    /// stream's finish has arrived. The first four are protocol errors in
+    /// [`ClientError::Protocol`]'s words, which the desktop classifies as such
+    /// (PERSO-106); the failed finish is the daemon's refusal.
     #[test]
     fn a_broken_stream_answers_an_error_and_the_session_serves_on() {
         let too_large = finished(
@@ -1521,6 +1623,30 @@ mod tests {
                 false,
             ),
             (
+                "badrow",
+                2,
+                vec![
+                    raw_rows(json!({"offset": 0, "rows": [{"id": "three"}]})),
+                    succeeded(9, 2),
+                ],
+                "did not decode",
+                true,
+            ),
+            (
+                "nooffset",
+                2,
+                vec![raw_rows(json!({"rows": []})), succeeded(9, 2)],
+                "did not decode",
+                true,
+            ),
+            (
+                "spacedgap",
+                3,
+                vec![rows(0, &[3]), spaced_rows(2, &[1]), succeeded(9, 3)],
+                "offset 2",
+                true,
+            ),
+            (
                 "failed",
                 2,
                 vec![rows(0, &[3]), too_large],
@@ -1538,6 +1664,11 @@ mod tests {
             assert!(
                 text.starts_with("message.list_stream: ") && text.contains(says),
                 "{name}: {text}"
+            );
+            assert_eq!(
+                text.contains("the daemon broke the protocol: "),
+                name != "failed",
+                "{name}: a broken stream is a protocol error, a refusal is not: {text}"
             );
             if name == "failed" {
                 let refused = refusal(&error).expect("a failed finish is a typed refusal");

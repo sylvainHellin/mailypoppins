@@ -32,9 +32,11 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use mp_protocol::frame::{self, Decoder};
+use mp_protocol::frame::{self, Decoder, FrameError};
+use mp_protocol::listing::MessageRowsChunk;
 use mp_protocol::{
-    Notification, Request, RequestId, RpcError, JSONRPC_VERSION, PROTOCOL_MAX, PROTOCOL_MIN,
+    Notification, Request, RequestId, RpcError, JSONRPC_VERSION, METHOD_MESSAGE_ROWS, PROTOCOL_MAX,
+    PROTOCOL_MIN,
 };
 
 use crate::types::{
@@ -46,16 +48,51 @@ use crate::MAX_RESPONSE_BYTES;
 /// business, not this buffer's.
 const READ_CHUNK: usize = 8 * 1024;
 
+/// One server-initiated frame, as [`Connection::next_inbound`] hands it over.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Inbound {
+    /// A notification decoded the generic way, `params` as a `Value`.
+    Notification(Notification),
+    /// A `message.rows` chunk in the daemon's own spelling, decoded straight
+    /// from its bytes into the typed chunk (PERSO-106). A chunk spelled any
+    /// other way, or one that does not decode, arrives as a
+    /// [`Inbound::Notification`] of method `message.rows` instead, for the
+    /// reader to decode and refuse.
+    Rows(MessageRowsChunk),
+}
+
+/// One decoded frame, before it is sorted into replies and notifications.
+#[derive(Debug)]
+enum Decoded {
+    /// Any frame, decoded generically.
+    Json(Value),
+    /// A `message.rows` frame, decoded straight into its chunk, which spares
+    /// the `Value` tree of a chunk of about 1 MiB.
+    Rows(MessageRowsChunk),
+}
+
+/// Decode one frame line: a `message.rows` chunk straight into its typed
+/// shape, anything else (a chunk that will not decode so included) into a
+/// `Value`.
+fn decode_line(line: &str) -> Result<Decoded, FrameError> {
+    if let Some(chunk) = MessageRowsChunk::from_frame_line(line) {
+        return Ok(Decoded::Rows(chunk));
+    }
+    serde_json::from_str(line)
+        .map(Decoded::Json)
+        .map_err(|error| FrameError::InvalidJson(error.to_string()))
+}
+
 /// A live connection to a daemon.
 #[derive(Debug)]
 pub struct Connection {
     stream: UnixStream,
     decoder: Decoder,
     /// Frames decoded but not yet consumed, in arrival order.
-    pending: VecDeque<Value>,
+    pending: VecDeque<Decoded>,
     /// Notifications that arrived while a call was outstanding, in arrival
-    /// order, waiting for [`Connection::next_notification`].
-    notifications: VecDeque<Value>,
+    /// order, waiting for [`Connection::next_inbound`].
+    notifications: VecDeque<Decoded>,
     /// The id of the next request; monotonic for the connection's lifetime.
     next_id: i64,
     /// A call is between writing its request and reading its answer. Still
@@ -224,31 +261,58 @@ impl Connection {
     /// if there is one, and otherwise reads until one arrives. A reply frame
     /// seen here answers no outstanding call, so it is kept for the next call
     /// to refuse by id rather than swallowed.
+    ///
+    /// A `message.rows` chunk the connection decoded typed is handed over as
+    /// the notification it arrived as, its params rebuilt from the chunk; a
+    /// reader that consumes chunks wants [`Connection::next_inbound`], which
+    /// keeps them typed.
     pub async fn next_notification(&mut self) -> Option<Notification> {
+        Some(match self.next_inbound().await? {
+            Inbound::Notification(notification) => notification,
+            Inbound::Rows(chunk) => Notification {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                method: METHOD_MESSAGE_ROWS.to_string(),
+                // A struct of strings, numbers and booleans always serialises.
+                params: serde_json::to_value(chunk).unwrap_or_default(),
+            },
+        })
+    }
+
+    /// [`Connection::next_notification`], with a `message.rows` chunk kept as
+    /// the typed chunk it was decoded into rather than turned back into a
+    /// `Value` (PERSO-106).
+    ///
+    /// Cancellation-safe as [`Connection::next_notification`] is: it awaits
+    /// nothing but one `read` and decodes what that read returned before it
+    /// awaits again.
+    pub async fn next_inbound(&mut self) -> Option<Inbound> {
         loop {
             // A closed connection is one the caller has to reopen; reading on
             // would hand out events past a call whose answer never came.
             if self.is_closed() {
                 return None;
             }
-            if let Some(value) = self.notifications.pop_front() {
-                match serde_json::from_value(value) {
-                    Ok(notification) => return Some(notification),
-                    // A frame shaped like a notification that does not parse as
-                    // one is not worth killing the connection over, and the
-                    // caller is waiting for the next real event.
-                    Err(_) => continue,
+            if let Some(frame) = self.notifications.pop_front() {
+                match frame {
+                    Decoded::Rows(chunk) => return Some(Inbound::Rows(chunk)),
+                    Decoded::Json(value) => match serde_json::from_value(value) {
+                        Ok(notification) => return Some(Inbound::Notification(notification)),
+                        // A frame shaped like a notification that does not
+                        // parse as one is not worth killing the connection
+                        // over, and the caller is waiting for the next real
+                        // event.
+                        Err(_) => continue,
+                    },
                 }
             }
             // Sort what is already decoded, keeping the arrival order of both
             // classes: a reply here answers no outstanding call and is left for
             // the next `call` to refuse by id.
             let mut replies = VecDeque::new();
-            while let Some(value) = self.pending.pop_front() {
-                if is_notification(&value) {
-                    self.notifications.push_back(value);
-                } else {
-                    replies.push_back(value);
+            while let Some(frame) = self.pending.pop_front() {
+                match frame {
+                    Decoded::Json(ref value) if !is_notification(value) => replies.push_back(frame),
+                    notification => self.notifications.push_back(notification),
                 }
             }
             self.pending = replies;
@@ -259,7 +323,7 @@ impl Connection {
             let mut buf = [0u8; READ_CHUNK];
             match self.stream.read(&mut buf).await {
                 Ok(0) | Err(_) => return None,
-                Ok(read) => match self.decoder.push(&buf[..read]) {
+                Ok(read) => match self.decoder.push_with(&buf[..read], decode_line) {
                     Ok(frames) => self.pending.extend(frames),
                     Err(_) => return None,
                 },
@@ -270,13 +334,21 @@ impl Connection {
     /// Read frames until the answer to `id` arrives.
     async fn read_reply(&mut self, id: i64) -> Result<Value, ClientError> {
         loop {
-            while let Some(value) = self.pending.pop_front() {
+            while let Some(frame) = self.pending.pop_front() {
+                let value = match frame {
+                    // A chunk is a notification, kept like any other below.
+                    Decoded::Rows(_) => {
+                        self.notifications.push_back(frame);
+                        continue;
+                    }
+                    Decoded::Json(value) => value,
+                };
                 match classify(&value, id) {
                     Frame::Ours => return Ok(value),
                     // Kept rather than dropped: a client that bootstrapped is
                     // owed every event, and one that arrives while a call is in
                     // flight is the normal case, not an oddity.
-                    Frame::Ignorable => self.notifications.push_back(value),
+                    Frame::Ignorable => self.notifications.push_back(Decoded::Json(value)),
                     Frame::Foreign(other) => {
                         return Err(ClientError::Protocol(format!(
                             "the daemon answered id {other} while {id} was outstanding"
@@ -294,7 +366,7 @@ impl Connection {
             }
             let frames = self
                 .decoder
-                .push(&buf[..read])
+                .push_with(&buf[..read], decode_line)
                 .map_err(|e| ClientError::Protocol(e.to_string()))?;
             self.pending.extend(frames);
         }
@@ -606,6 +678,62 @@ mod tests {
             .expect_err("the abandoned call poisoned the connection");
         assert!(matches!(error, ClientError::Closed), "got {error:?}");
         late.abort();
+    }
+
+    /// A `message.rows` chunk in the daemon's spelling arrives typed, through
+    /// a call it interleaves with as well as between calls; one spelled
+    /// otherwise, or one that does not decode, arrives as the generic
+    /// notification; and `next_notification` hands a typed chunk over as the
+    /// notification it arrived as (PERSO-106).
+    #[tokio::test]
+    async fn a_rows_chunk_is_decoded_typed_and_everything_else_generically() {
+        let canonical = r#"{"jsonrpc":"2.0","method":"message.rows","params":{"offset":0,"operation_id":"op","rows":[{"id":7,"subject":"s"}]}}"#;
+        let spaced = r#"{"jsonrpc": "2.0", "method": "message.rows", "params": {"offset": 1, "operation_id": "op", "rows": []}}"#;
+        let malformed = r#"{"jsonrpc":"2.0","method":"message.rows","params":{"offset":2,"operation_id":"op","rows":[{"id":"x"}]}}"#;
+        let event = r#"{"jsonrpc":"2.0","method":"state.resync_required","params":{"instance_id":"i","reason":"r"}}"#;
+        let (listener, socket) = listener("typed");
+        let script = [canonical, spaced, malformed, event].join("\n");
+        let daemon = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await.expect("the request");
+            let frames = format!(
+                "{script}\n{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}\n{canonical}\n"
+            );
+            stream.write_all(frames.as_bytes()).await.expect("written");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let mut conn = Connection::connect(&socket).await.expect("connect");
+        assert_eq!(
+            conn.call("account.list", json!({}))
+                .await
+                .expect("answered"),
+            json!({})
+        );
+        let chunk = MessageRowsChunk::from_frame_line(canonical).expect("canonical");
+        assert_eq!(chunk.rows[0].id, 7);
+        let generic = |line: &str| {
+            let notification: Notification = serde_json::from_str(line).expect("a notification");
+            Inbound::Notification(notification)
+        };
+        assert_eq!(
+            conn.next_inbound().await,
+            Some(Inbound::Rows(chunk.clone()))
+        );
+        assert_eq!(conn.next_inbound().await, Some(generic(spaced)));
+        assert_eq!(conn.next_inbound().await, Some(generic(malformed)));
+        assert_eq!(conn.next_inbound().await, Some(generic(event)));
+        let rebuilt = conn
+            .next_notification()
+            .await
+            .expect("the chunk after the reply");
+        assert_eq!(rebuilt.method, METHOD_MESSAGE_ROWS);
+        assert_eq!(
+            serde_json::from_value::<MessageRowsChunk>(rebuilt.params).expect("the params"),
+            chunk
+        );
+        daemon.abort();
     }
 
     #[test]

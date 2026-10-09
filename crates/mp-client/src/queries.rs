@@ -31,6 +31,12 @@
 //! whole list over one field it would have rendered as empty would turn an
 //! additive protocol change into a list that will not paint.
 //!
+//! A streamed listing's chunk is the exception: the session thread decodes it
+//! whole, straight from its bytes, into a `MessageRowsChunk` (PERSO-106), so a
+//! row with no `id` or a field of the wrong type fails the stream as a
+//! protocol error instead of becoming a blank row. The defaults still hold, so
+//! a row an older daemon produced decodes there too.
+//!
 //! # Row deltas
 //!
 //! [`MessageRowDelta`] is the event half of the whole-list transfer
