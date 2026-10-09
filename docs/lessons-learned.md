@@ -2526,3 +2526,9 @@ A test that counts readiness events off the `state.event` stream skips `diagnost
 `actions/checkout` fetches only the pushed commit by default, with no history and no tags, so the parity tests' oracle build (`git archive pre-daemon`) failed with `not a valid object name: pre-daemon` and turned every CI run red from 2026-09-14 to 2026-10-08 while the same tests passed on the Mac.
 `.github/workflows/ci.yml` now checks out with `fetch-depth: 0`; building the oracle takes a CI run from about 2 to about 8 minutes.
 Figure: `docs/figures/ci-parity-oracle.tex`.
+
+## A failed `bundle_dmg.sh` leaves its scratch image mounted and tauri prints no reason
+
+When the DMG step of `pnpm bundle` fails, tauri reports only `error running bundle_dmg.sh`; the script's own output, including the Finder-prettifying AppleScript that is its usual point of failure, shows only with `tauri build --verbose`.
+The failed run leaves `bundle/macos/rw.<pid>.mailypoppins_<version>_<arch>.dmg` attached at `/Volumes/dmg.<random>` (visible in `hdiutil info`).
+Detaching it (`hdiutil detach /dev/diskN`) and rerunning with `pnpm bundle -- --bundles dmg --verbose` reuses the cached cargo build and either succeeds or prints the real error; on 2026-10-09 the 0.11.0 bundle succeeded on that retry.
