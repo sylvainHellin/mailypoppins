@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Desktop: `y` on a draft copies its file path (PERSO-100).**
+
+### Fixed
+- **Reply and reply-all to a message you sent address its original recipients (PERSO-99).** They now go to its original To (and Cc for reply-all) instead of your own address.
+- **`mp daemon start` and `mp daemon restart` go through the installed systemd unit or launchd agent when it serves this data directory and runs this `mp` (PERSO-109).** A restart no longer leaves `mailypoppins.service` dead beside a detached daemon.
+- **TUI: copying over ssh on a host with no clipboard works (PERSO-113).** `y`, and `c` in Contacts, send the text to the terminal via OSC 52 and show it in the status line instead of failing with "Failed to access clipboard".
+- **Desktop: opening a mailbox selects its top message, as the TUI does (PERSO-94).**
+- **Desktop: the draft preview shows the whole body (PERSO-101).** `draft.preview` takes `full: true`.
+
+### Changed
+- **Desktop: the focused pane's frame is square where it meets the neighbouring pane (PERSO-95).**
+
+### Performance
+- **Opening a large mailbox decodes the streamed rows straight into typed rows, about three times faster on the client (PERSO-106).** A broken stream shows in the desktop as a protocol error rather than an internal one.
+
 ## [0.11.0] - 2026-10-08
 
 ### Added

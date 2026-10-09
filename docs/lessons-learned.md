@@ -2532,3 +2532,25 @@ Figure: `docs/figures/ci-parity-oracle.tex`.
 When the DMG step of `pnpm bundle` fails, tauri reports only `error running bundle_dmg.sh`; the script's own output, including the Finder-prettifying AppleScript that is its usual point of failure, shows only with `tauri build --verbose`.
 The failed run leaves `bundle/macos/rw.<pid>.mailypoppins_<version>_<arch>.dmg` attached at `/Volumes/dmg.<random>` (visible in `hdiutil info`).
 Detaching it (`hdiutil detach /dev/diskN`) and rerunning with `pnpm bundle -- --bundles dmg --verbose` reuses the cached cargo build and either succeeds or prints the real error; on 2026-10-09 the 0.11.0 bundle succeeded on that retry.
+
+## A per-method fast path in `mp-client` needs no `raw_value`, only the daemon's canonical frame prefix
+
+The typed `message.rows` decode (PERSO-106) checks that a frame starts with the exact prefix the daemon writes and decodes the rows straight into typed rows; any other frame takes the normal decode through a `Value`.
+This works without serde_json's `raw_value` feature because the daemon's hand-built `message.rows` frame is byte-identical to the standard encoding, so the prefix is a fact of the wire and not a guess.
+
+## A daemon a CLI can both self-spawn and run under systemd must start through the supervisor once a unit is installed
+
+A socket stop of a `Restart=on-failure` unit exits 0 and leaves the unit inactive, and a detached respawn then lives outside the unit, so systemd reports `mailypoppins.service` dead even though mail flows (PERSO-109).
+`mp daemon start` and `restart` therefore route through `systemctl --user start` or `launchctl` when the installed file is this data directory's and runs this `mp`.
+The route also needs a reachable user manager (`$XDG_RUNTIME_DIR/systemd/private` is a socket), since a `systemctl` binary alone proves nothing under WSL, in a container or from cron.
+
+## The TUI's copy fails on every headless host over ssh, and OSC 52 is acknowledged by nothing
+
+arboard needs an X11 or Wayland display, so every copy over ssh to a headless host failed with "Failed to access clipboard" (PERSO-113).
+OSC 52 is the only remote clipboard path, and the terminal never answers it, so the status line shows the copied text for the user to check.
+Write the sequence through `terminal.backend_mut()` and flush it; a second stdout handle interleaves with ratatui's own writes.
+
+## A Tauri `Channel` stops delivering for good once its `onmessage` handler throws
+
+The JS side's message counter never advances past the message whose handler threw, so every later message waits behind it forever.
+In Tauri 2 without the `tracing` feature, `Channel::send` fails only on a JSON error or once the event loop is gone, so the Rust side never learns the window stopped listening.
