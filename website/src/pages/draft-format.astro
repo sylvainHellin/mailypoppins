@@ -204,6 +204,14 @@ Email body here.`;
         placeholder that marks the boundary with the quoted original message.
       </p>
       <p>
+        A reply goes to the message's <code>Reply-To</code> address, or to its sender when it has
+        none; a reply-all also copies everyone else the message was sent to, except you.
+        Replying to a message you sent yourself (its sender is the account's
+        <code>default_from</code>) goes back to that message's recipients instead: a reply
+        addresses its original To, and a reply-all its original To and Cc. Your own address is
+        left out of both, unless it was the only To.
+      </p>
+      <p>
         When the reply is sent, the message it answers is marked as answered, locally and
         on the server. The list then shows a reply arrow next to it instead of the plain
         read marker.
