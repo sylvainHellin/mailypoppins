@@ -1006,10 +1006,10 @@ Usage: mp daemon [OPTIONS] <COMMAND>
 
 Commands:
   run                Run the daemon in the foreground; never connects to another daemon
-  start              Start a detached daemon and return once it answers
+  start              Start the daemon (via the login service if installed) and return once it answers
   status             Report whether a daemon is running against this data directory
   stop               Ask the running daemon to shut down
-  restart            Stop the running daemon and start this executable's daemon
+  restart            Stop the running daemon and start this executable's (via the login service if installed)
   install-service    Install the login-start service for this user and enable it
   uninstall-service  Disable the login-start service and remove its file
   health             Report the running daemon's health, its counters and its checks
@@ -1036,7 +1036,7 @@ Options:
   -h, --help                   Print help
 
 $ mp daemon start --help
-Start a detached daemon and return once it answers
+Start the daemon (via the login service if installed) and return once it answers
 
 Usage: mp daemon start [OPTIONS]
 
@@ -1073,7 +1073,7 @@ Options:
   -h, --help                         Print help
 
 $ mp daemon restart --help
-Stop the running daemon and start this executable's daemon
+Stop the running daemon and start this executable's (via the login service if installed)
 
 Usage: mp daemon restart [OPTIONS]
 

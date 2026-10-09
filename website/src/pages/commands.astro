@@ -79,10 +79,10 @@ const configCommands = [
 
 const daemonCommands = [
   { command: 'mp daemon run [--foreground-logs]', description: 'Run the daemon in the foreground; never connects to another daemon' },
-  { command: 'mp daemon start [--timeout-secs N]', description: 'Start a detached daemon and return once it answers' },
+  { command: 'mp daemon start [--timeout-secs N]', description: 'Start the daemon (through the login service when one is installed for this data directory, detached otherwise) and return once it answers' },
   { command: 'mp daemon status [--json]', description: 'Report whether a daemon is running against this data directory' },
   { command: 'mp daemon stop [--grace-secs N] [--timeout-secs N]', description: 'Ask the running daemon to shut down, letting work in flight settle for the grace' },
-  { command: 'mp daemon restart [--grace-secs N]', description: "Stop the running daemon and start this executable's daemon" },
+  { command: 'mp daemon restart [--grace-secs N]', description: "Stop the running daemon and start this executable's, through the login service when one is installed, so a systemd unit or launchd agent stays in charge" },
   { command: 'mp daemon install-service [--check] [--force]', description: 'Install the login-start service (systemd user unit or launchd agent) and enable it; --check reports and writes nothing' },
   { command: 'mp daemon uninstall-service', description: 'Disable the login-start service and remove its file' },
   { command: 'mp daemon health [--json]', description: "Report the running daemon's health, its counters and its checks" },

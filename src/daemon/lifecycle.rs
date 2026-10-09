@@ -163,7 +163,7 @@ pub enum DaemonAction {
         #[arg(long)]
         foreground_logs: bool,
     },
-    /// Start a detached daemon and return once it answers
+    /// Start the daemon (via the login service if installed) and return once it answers
     Start {
         /// Seconds to wait for the daemon to become ready
         #[arg(long, default_value_t = 10)]
@@ -184,7 +184,7 @@ pub enum DaemonAction {
         #[arg(long)]
         grace_secs: Option<u64>,
     },
-    /// Stop the running daemon and start this executable's daemon
+    /// Stop the running daemon and start this executable's (via the login service if installed)
     Restart {
         /// Seconds the daemon may spend settling work in flight (0 waits none)
         #[arg(long)]
@@ -869,7 +869,16 @@ fn print_stop_outcome(outcome: &StopOutcome) {
 ///
 /// Prints the stop's line and then the start's, so a restart that worked reads
 /// as one.
+///
+/// The stop is always the socket's, which honours `--grace-secs` and names
+/// what it cut short; a daemon a service manager runs exits 0 on it, so the
+/// manager records the service as stopped rather than failed and does not
+/// restart it behind our back. The start is [`start_via`]'s, decided before
+/// anything is stopped, so a restart under systemd or launchd brings the
+/// service back instead of leaving it dead beside a detached daemon
+/// (PERSO-109).
 async fn restart(grace_secs: Option<u64>) -> Result<i32> {
+    let route = super::service::start_route()?;
     let previous = read_instance_meta().map(|meta| meta.pid);
     let code = stop(Duration::from_secs(10), grace_secs).await?;
     if code != EXIT_OK {
@@ -883,11 +892,7 @@ async fn restart(grace_secs: Option<u64>) -> Result<i32> {
             tokio::time::sleep(POLL).await;
         }
     }
-    let code = start(Duration::from_secs(10)).await?;
-    if code == EXIT_OK {
-        print_started();
-    }
-    Ok(code)
+    start_via(route, Duration::from_secs(10)).await
 }
 
 /// `mp daemon start`: [`start`], and one line saying what it found or did.
@@ -904,11 +909,50 @@ async fn start_command(timeout: Duration) -> Result<i32> {
         );
         return Ok(EXIT_OK);
     }
-    let code = start(timeout).await?;
-    if code == EXIT_OK {
-        print_started();
+    start_via(super::service::start_route()?, timeout).await
+}
+
+/// Bring a daemon up the way `route` says, and print the start's line.
+///
+/// A supervised start runs the service manager's command, does not take the
+/// start lock (the `mp daemon run` the manager spawns takes it itself), and
+/// then waits for the socket exactly as a detached start does; the command it
+/// ran follows the `✓` line, indented, as `install-service` prints its own.
+async fn start_via(route: super::service::StartRoute, timeout: Duration) -> Result<i32> {
+    use super::service::StartRoute;
+    match route {
+        StartRoute::Detached { note } => {
+            if let Some(note) = note {
+                info!("[daemon] start: {note}");
+                eprintln!("note: {note}");
+            }
+            let code = start(timeout).await?;
+            if code == EXIT_OK {
+                print_started();
+            }
+            Ok(code)
+        }
+        StartRoute::Supervised(plan) => {
+            info!(
+                "[daemon] start: through the service manager {:?}",
+                plan.lines()
+            );
+            plan.run()?;
+            if wait_ready(timeout, None).await?.is_none() {
+                report_start_failure(&format!(
+                    "the service started but its daemon did not answer within {}s; see `{}`",
+                    timeout.as_secs(),
+                    plan.status_hint()
+                ));
+                return Ok(EXIT_UNAVAILABLE);
+            }
+            print_started();
+            for line in plan.lines() {
+                println!("{line}");
+            }
+            Ok(EXIT_OK)
+        }
     }
-    Ok(code)
 }
 
 /// The start's line, in the voice of the stop's.

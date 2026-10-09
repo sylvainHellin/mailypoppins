@@ -63,6 +63,19 @@
 //! that is not systemd's, and refusing to write the file there would make the
 //! command useless exactly where a user would copy the unit somewhere else
 //! himself.
+//!
+//! ## Starting through the service (PERSO-109)
+//!
+//! [`start_route`] is what `mp daemon start` and `mp daemon restart` ask
+//! before they bring a daemon up. When the installed file bakes this run's
+//! data directory and runs this executable, and its manager is on `PATH`, the
+//! answer is the manager's start command (`systemctl --user start`, or
+//! `launchctl kickstart` / `bootstrap`), so the daemon is the service's own
+//! process instead of a detached one beside a dead unit. Anything else is the
+//! detached start, with a note when a service was there and passed over. The
+//! decision is [`decide_start`], a pure function of what the probe found, and
+//! the only command the probe runs is `launchctl print`, on macOS, once a
+//! matching agent is installed.
 
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
@@ -111,6 +124,7 @@ enum Target {
 }
 
 /// One service-manager invocation.
+#[derive(Debug)]
 struct Invocation {
     program: &'static str,
     args: Vec<String>,
@@ -549,6 +563,260 @@ fn on_path(name: &str) -> bool {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Starting through the service manager (PERSO-109)
+// ---------------------------------------------------------------------------
+
+/// How `mp daemon start` and `mp daemon restart` bring a daemon up.
+#[derive(Debug)]
+pub(crate) enum StartRoute {
+    /// Spawn a detached `mp daemon run`, which is what a machine with no
+    /// service for this data directory gets. The note, when there is one,
+    /// says why an installed service was passed over.
+    Detached { note: Option<String> },
+    /// Ask the service manager to start the installed service, so the daemon
+    /// is the unit's own process and the unit does not read as dead.
+    Supervised(SupervisedStart),
+}
+
+/// The service-manager half of a start: what to run, and where to look when
+/// the service started but its daemon never answered.
+#[derive(Debug)]
+pub(crate) struct SupervisedStart {
+    target: Target,
+    commands: Vec<Invocation>,
+}
+
+impl SupervisedStart {
+    /// Run the commands in order, stopping at the first that fails.
+    pub(crate) fn run(&self) -> Result<()> {
+        run_all(&self.commands).with_context(|| {
+            format!(
+                "starting the daemon through {} (see `{}`)",
+                service_name(self.target),
+                self.status_hint()
+            )
+        })
+    }
+
+    /// The command lines, indented as every detail line under a `✓` is.
+    pub(crate) fn lines(&self) -> Vec<String> {
+        self.commands.iter().map(Invocation::line).collect()
+    }
+
+    /// The command that shows what the service manager knows of the service.
+    pub(crate) fn status_hint(&self) -> String {
+        match self.target {
+            Target::Linux => format!("systemctl --user status {UNIT_NAME}"),
+            Target::Darwin => format!("launchctl print {}/{LAUNCHD_LABEL}", gui_domain()),
+        }
+    }
+}
+
+/// How the installed service file relates to this `mp`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Installed {
+    /// No service file.
+    Absent,
+    /// A service file for another data directory, or one this build cannot
+    /// read a data directory or an executable out of. Its daemon would not be
+    /// the one this `mp` talks to, which is what keeps a test run with a
+    /// temporary data directory off the user's real service.
+    Foreign,
+    /// A service for this data directory that runs another executable.
+    OtherExe(String),
+    /// A service for this data directory that runs this executable.
+    This,
+}
+
+/// Probe the service file and the service manager, then decide.
+///
+/// Nothing is run unless a service file for this data directory that runs
+/// this executable is installed, and then only `launchctl print` on macOS:
+/// every other machine, a build host and a test run included, decides from
+/// the file system alone.
+pub(crate) fn start_route() -> Result<StartRoute> {
+    let target = resolve_target(std::env::var(OS_ENV).ok().as_deref())?;
+    let path = service_path(target);
+    let installed = match fs::read_to_string(&path) {
+        Err(_) => Installed::Absent,
+        Ok(content) => {
+            let exe = std::env::current_exe().context("resolving this executable")?;
+            classify(
+                target,
+                &content,
+                &crate::config::mailypoppins_data_dir(),
+                &exe,
+            )
+        }
+    };
+    let manager_on_path = installed == Installed::This && on_path(manager(target));
+    let loaded = manager_on_path && target == Target::Darwin && launchd_loaded();
+    Ok(decide_start(
+        target,
+        &path,
+        installed,
+        manager_on_path,
+        loaded,
+    ))
+}
+
+/// The decision itself, with every fact it reads passed in.
+///
+/// A service is used only when it is this data directory's and runs this
+/// executable, because `mp daemon restart` promises this executable's daemon
+/// and a development build restarted from `target/` would otherwise come back
+/// as the installed one. Passing a service over is said on stderr, so a user
+/// who expected the service learns why it stayed stopped.
+fn decide_start(
+    target: Target,
+    path: &Path,
+    installed: Installed,
+    manager_on_path: bool,
+    loaded: bool,
+) -> StartRoute {
+    let name = service_name(target);
+    match installed {
+        Installed::Absent | Installed::Foreign => StartRoute::Detached { note: None },
+        Installed::OtherExe(exe) => StartRoute::Detached {
+            note: Some(format!(
+                "{name} runs {exe}, not this executable, so this daemon starts outside the service"
+            )),
+        },
+        Installed::This if !manager_on_path => StartRoute::Detached {
+            note: Some(format!(
+                "{name} is installed but {} is not on PATH, so this daemon starts outside the service",
+                manager(target)
+            )),
+        },
+        Installed::This => StartRoute::Supervised(SupervisedStart {
+            target,
+            commands: start_commands(target, path, loaded),
+        }),
+    }
+}
+
+/// `systemctl --user start`; on macOS `kickstart` for a loaded agent and
+/// `bootstrap` for one launchd does not know, since `kickstart` refuses a
+/// label that is not loaded and `bootstrap` one that is.
+fn start_commands(target: Target, path: &Path, loaded: bool) -> Vec<Invocation> {
+    match target {
+        Target::Linux => vec![Invocation::new(
+            "systemctl",
+            &strings(&["--user", "start", UNIT_NAME]),
+        )],
+        Target::Darwin if loaded => vec![Invocation::new(
+            "launchctl",
+            &strings(&["kickstart", &format!("{}/{LAUNCHD_LABEL}", gui_domain())]),
+        )],
+        Target::Darwin => vec![Invocation::new(
+            "launchctl",
+            &strings(&["bootstrap", &gui_domain(), &path.display().to_string()]),
+        )],
+    }
+}
+
+fn service_name(target: Target) -> &'static str {
+    match target {
+        Target::Linux => UNIT_NAME,
+        Target::Darwin => LAUNCHD_LABEL,
+    }
+}
+
+fn manager(target: Target) -> &'static str {
+    match target {
+        Target::Linux => "systemctl",
+        Target::Darwin => "launchctl",
+    }
+}
+
+/// Whether launchd has the agent loaded in this user's GUI domain.
+fn launchd_loaded() -> bool {
+    Command::new("launchctl")
+        .args(["print", &format!("{}/{LAUNCHD_LABEL}", gui_domain())])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Compare an installed service file with this `mp` and its data directory.
+fn classify(target: Target, content: &str, data_dir: &Path, exe: &Path) -> Installed {
+    let (Some(baked_exe), Some(baked_dir)) = baked(target, content) else {
+        return Installed::Foreign;
+    };
+    if canonical(Path::new(&baked_dir)) != canonical(data_dir) {
+        return Installed::Foreign;
+    }
+    if same_file(Path::new(&baked_exe), exe) {
+        Installed::This
+    } else {
+        Installed::OtherExe(baked_exe)
+    }
+}
+
+/// The executable and the data directory a service file bakes, unescaped.
+fn baked(target: Target, content: &str) -> (Option<String>, Option<String>) {
+    match target {
+        Target::Linux => {
+            let exe = content
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("ExecStart="))
+                .and_then(first_systemd_word);
+            let data_dir = content
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("Environment="))
+                .filter_map(first_systemd_word)
+                .find_map(|assignment| {
+                    assignment
+                        .strip_prefix("MAILYPOPPINS_DATA_DIR=")
+                        .map(str::to_string)
+                });
+            (exe, data_dir)
+        }
+        Target::Darwin => (
+            plist_string_after(content, "<key>ProgramArguments</key>"),
+            plist_string_after(content, "<key>MAILYPOPPINS_DATA_DIR</key>"),
+        ),
+    }
+}
+
+/// The first word of a systemd value: a double-quoted one with `\"` and `\\`
+/// read back, which is what [`escape`] writes, or a bare one up to the first
+/// space.
+fn first_systemd_word(value: &str) -> Option<String> {
+    let value = value.trim_start();
+    let Some(quoted) = value.strip_prefix('"') else {
+        return value.split_whitespace().next().map(str::to_string);
+    };
+    let mut out = String::new();
+    let mut chars = quoted.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push(chars.next()?),
+            '"' => return Some(out),
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// The first `<string>` after `key` in a plist, with the entities read back.
+fn plist_string_after(content: &str, key: &str) -> Option<String> {
+    let rest = &content[content.find(key)? + key.len()..];
+    let start = rest.find("<string>")? + "<string>".len();
+    let end = start + rest[start..].find("</string>")?;
+    Some(
+        rest[start..end]
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&"),
+    )
+}
+
 fn print_lines(lines: &[String]) {
     for line in lines {
         println!("{line}");
@@ -827,5 +1095,171 @@ mod tests {
     fn on_path_finds_an_executable_and_ignores_an_empty_directory() {
         assert!(on_path("sh"), "`sh` is on the test runner's PATH");
         assert!(!on_path("a-program-nobody-installed"));
+    }
+
+    fn route_lines(route: &StartRoute) -> Vec<String> {
+        match route {
+            StartRoute::Supervised(plan) => plan.lines(),
+            StartRoute::Detached { .. } => panic!("expected a supervised start, got {route:?}"),
+        }
+    }
+
+    fn route_note(route: &StartRoute) -> Option<String> {
+        match route {
+            StartRoute::Detached { note } => note.clone(),
+            StartRoute::Supervised(_) => panic!("expected a detached start, got {route:?}"),
+        }
+    }
+
+    /// No service, or another data directory's, starts a detached daemon and
+    /// says nothing, whatever the service manager would have answered.
+    #[test]
+    fn a_start_without_this_data_directorys_service_is_detached_and_silent() {
+        let path = Path::new("/s");
+        for target in [Target::Linux, Target::Darwin] {
+            for installed in [Installed::Absent, Installed::Foreign] {
+                for (on_path, loaded) in [(false, false), (true, false), (true, true)] {
+                    let route = decide_start(target, path, installed.clone(), on_path, loaded);
+                    assert_eq!(route_note(&route), None, "{target:?} {installed:?}");
+                }
+            }
+        }
+    }
+
+    /// This data directory's service running another executable is passed
+    /// over, and the note names the service and the executable.
+    #[test]
+    fn a_service_for_another_executable_is_passed_over_with_a_note() {
+        let route = decide_start(
+            Target::Linux,
+            Path::new("/s"),
+            Installed::OtherExe("/opt/old/mp".into()),
+            true,
+            false,
+        );
+        let note = route_note(&route).expect("a note");
+        assert!(
+            note.contains(UNIT_NAME) && note.contains("/opt/old/mp"),
+            "{note}"
+        );
+    }
+
+    /// This service with no manager on `PATH` falls back to a detached start
+    /// and says which program was missing.
+    #[test]
+    fn this_service_without_its_manager_falls_back_with_a_note() {
+        for (target, program) in [(Target::Linux, "systemctl"), (Target::Darwin, "launchctl")] {
+            let route = decide_start(target, Path::new("/s"), Installed::This, false, false);
+            let note = route_note(&route).expect("a note");
+            assert!(note.contains(program), "{note}");
+        }
+    }
+
+    /// This service with its manager reachable goes through the manager: one
+    /// `systemctl --user start`, or `kickstart` / `bootstrap` by whether
+    /// launchd has the agent loaded.
+    #[test]
+    fn this_service_starts_through_its_manager() {
+        let unit = Path::new("/home/u/.config/systemd/user/mailypoppins.service");
+        let route = decide_start(Target::Linux, unit, Installed::This, true, false);
+        assert_eq!(
+            route_lines(&route),
+            [format!("  systemctl --user start {UNIT_NAME}")]
+        );
+
+        let plist = Path::new("/Users/u/Library/LaunchAgents/dev.mailypoppins.daemon.plist");
+        let loaded = decide_start(Target::Darwin, plist, Installed::This, true, true);
+        assert_eq!(
+            route_lines(&loaded),
+            [format!(
+                "  launchctl kickstart {}/{LAUNCHD_LABEL}",
+                gui_domain()
+            )]
+        );
+        let unloaded = decide_start(Target::Darwin, plist, Installed::This, true, false);
+        assert_eq!(
+            route_lines(&unloaded),
+            [format!(
+                "  launchctl bootstrap {} {}",
+                gui_domain(),
+                plist.display()
+            )]
+        );
+    }
+
+    /// What a rendered service file bakes reads back as the values that went
+    /// in, a space, an `&` and a quote included.
+    #[test]
+    fn a_rendered_service_reads_back_its_executable_and_data_directory() {
+        let mp = r#"/home/a b/Mail & "More"/bin/mp"#;
+        let data = r#"/home/a b/Mail & "More"/data"#;
+        for target in [Target::Linux, Target::Darwin] {
+            let rendered = render_template(target, mp, data, "/config");
+            assert_eq!(
+                baked(target, &rendered),
+                (Some(mp.to_string()), Some(data.to_string())),
+                "{target:?}:\n{rendered}"
+            );
+        }
+        assert_eq!(baked(Target::Linux, "[Service]\n"), (None, None));
+        assert_eq!(
+            baked(
+                Target::Linux,
+                "ExecStart=/bin/mp daemon run\nEnvironment=MAILYPOPPINS_DATA_DIR=/d\n"
+            ),
+            (Some("/bin/mp".into()), Some("/d".into())),
+            "an unquoted hand edit reads too"
+        );
+    }
+
+    /// A service file is this `mp`'s only for this data directory and this
+    /// executable, symlinks followed.
+    #[cfg(unix)]
+    #[test]
+    fn classify_matches_the_data_directory_and_the_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        let other_data = tmp.path().join("other-data");
+        fs::create_dir_all(&data).expect("data");
+        fs::create_dir_all(&other_data).expect("other data");
+        let exe = tmp.path().join("mp");
+        fs::write(&exe, b"#!/bin/sh\n").expect("mp");
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let link = tmp.path().join("mp-link");
+        std::os::unix::fs::symlink(&exe, &link).expect("symlink");
+        let other_exe = tmp.path().join("other-mp");
+        fs::write(&other_exe, b"#!/bin/sh\n").expect("other mp");
+
+        for target in [Target::Linux, Target::Darwin] {
+            let file = |mp: &Path, dir: &Path| {
+                render_template(
+                    target,
+                    &mp.display().to_string(),
+                    &canonical(dir),
+                    "/config",
+                )
+            };
+            assert_eq!(
+                classify(target, &file(&link, &data), &data, &exe),
+                Installed::This,
+                "{target:?}: a symlink to this executable is this executable"
+            );
+            assert_eq!(
+                classify(target, &file(&exe, &other_data), &data, &exe),
+                Installed::Foreign,
+                "{target:?}: another data directory is not ours"
+            );
+            assert_eq!(
+                classify(target, &file(&other_exe, &data), &data, &exe),
+                Installed::OtherExe(other_exe.display().to_string()),
+                "{target:?}: another executable is named"
+            );
+            assert_eq!(
+                classify(target, "garbage", &data, &exe),
+                Installed::Foreign,
+                "{target:?}: an unreadable file is not ours"
+            );
+        }
     }
 }
