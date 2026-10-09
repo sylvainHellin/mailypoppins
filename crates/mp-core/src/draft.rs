@@ -408,12 +408,16 @@ fn source_message_id(source: &SourceMessage) -> Option<&str> {
 
 /// The bare, deduplicated addresses of an address header, in order, minus
 /// any address `skip` holds (lowercased).
+///
+/// Only entries that look like an address (hold an `@`) count: the parser
+/// stores `(unknown)` for a missing header, and an empty group such as
+/// `undisclosed-recipients:;` names nobody, so neither becomes a recipient.
 fn header_addresses(header: &str, skip: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for addr in split_addresses(header) {
         let email = extract_email_address(&addr);
         let lower = email.to_lowercase();
-        if !email.is_empty()
+        if email.contains('@')
             && !skip.contains(&lower)
             && !out.iter().any(|r| r.to_lowercase() == lower)
         {
@@ -3313,11 +3317,24 @@ mod tests {
 
     #[test]
     fn reply_to_own_message_with_no_to_falls_back_to_the_sender_path() {
-        // A Bcc-only send has no To to reuse; the draft keeps the old
-        // behaviour rather than an empty `to:`.
+        // A Bcc-only send has no To to reuse; the parser stores `(unknown)`
+        // for the missing header, and the draft keeps the old behaviour
+        // rather than addressing `(unknown)` or an empty `to:`.
         let source = SourceMessage {
             reply_to: None,
-            ..own_source("", Some("dave@x.com"))
+            ..own_source("(unknown)", Some("dave@x.com"))
+        };
+        let (to, cc) = reply_recipients(&source, false);
+        assert_eq!(to.as_deref(), Some("ME@example.com"));
+        assert_eq!(cc, None);
+    }
+
+    #[test]
+    fn reply_to_own_message_to_an_empty_group_falls_back_to_the_sender_path() {
+        // `undisclosed-recipients:;` is an empty group: it names nobody.
+        let source = SourceMessage {
+            reply_to: None,
+            ..own_source("undisclosed-recipients:;", Some("dave@x.com"))
         };
         let (to, cc) = reply_recipients(&source, false);
         assert_eq!(to.as_deref(), Some("ME@example.com"));
