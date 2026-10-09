@@ -540,6 +540,14 @@ impl SessionHandle {
     }
 
     /// Send one event to the frontend, if one is subscribed.
+    ///
+    /// A failed send drops the sink, and that never strands a live window
+    /// (PERSO-80): tauri's `Channel::send` fails only when the event cannot
+    /// be serialised or the event loop is gone, i.e. the app is quitting. A
+    /// hidden, minimised or reloaded webview still takes the send (a failed
+    /// script evaluation is logged by the runtime, not returned), and a
+    /// reloaded or new webview subscribes again on mount (`useBoot`), which
+    /// installs a fresh sink.
     pub fn emit(&self, event: GuiEvent) {
         let mut sink = lock(&self.shared.sink);
         if let Some(send) = sink.as_ref() {
