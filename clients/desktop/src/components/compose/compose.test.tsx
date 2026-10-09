@@ -180,7 +180,6 @@ describe("the recipients dialog", () => {
     await shellReady();
     noCompletion();
     await drafts(user);
-    await user.keyboard("j");
     await user.keyboard("ce");
     const dialog = await screen.findByRole("dialog", { name: "Edit recipients" });
     const to = within(dialog).getByLabelText("To");
@@ -218,7 +217,6 @@ describe("the editing banner", () => {
     const { user } = renderApp();
     await shellReady();
     await drafts(user);
-    await user.keyboard("j");
     await user.keyboard("e");
     const row = () => document.querySelector('[data-draft-id="angebot-antwort"]');
     await waitFor(() => expect(row()?.querySelector('[data-slot="draft-editing"]')).not.toBeNull());
@@ -287,7 +285,6 @@ describe("the draft preview", () => {
     const { user } = renderApp();
     await shellReady();
     await drafts(user);
-    await user.keyboard("j");
     const preview = await within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" });
     expect(await within(preview).findByText("robin@example.com")).toBeInTheDocument();
     expect(within(preview).getByText("Valid")).toBeInTheDocument();
@@ -305,7 +302,7 @@ describe("the draft preview", () => {
     const { user } = renderApp();
     await shellReady();
     await drafts(user);
-    await user.keyboard("j{Enter}");
+    await user.keyboard("{Enter}");
     await waitFor(() => expect(document.activeElement?.closest("[data-pane]")?.getAttribute("data-pane")).toBe("reader"));
     expect(await within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" })).toBeInTheDocument();
     expect(callsOf("draft_preview")).toContainEqual({ account: "work", id: "angebot-antwort" });
@@ -319,14 +316,15 @@ describe("the draft preview", () => {
     const preview = await within(reader()).findByRole("article", { name: "Draft: broken" });
     expect(within(preview).getByText("This draft does not parse")).toBeInTheDocument();
     expect(within(preview).getByText("line 2: mapping values are not allowed here")).toBeInTheDocument();
-    expect(callsOf("draft_preview")).toEqual([]);
+    // The top draft, selected when Drafts opened, was previewed; the broken one never is.
+    expect(callsOf("draft_preview").some((c) => c?.id === "broken")).toBe(false);
   });
 
   it("Approve acts on the draft it shows, not on the marked drafts, and asks nothing", async () => {
     const { user } = renderApp();
     await shellReady();
     await drafts(user);
-    await user.keyboard("jjv");
+    await user.keyboard("jv");
     expect(document.querySelector('[data-draft-id="offsite-note"]')).toHaveAttribute("aria-selected", "true");
     expect(document.querySelector('[data-draft-id="angebot-antwort"]')).toHaveAttribute("aria-selected", "false");
     await user.keyboard("k");
@@ -369,7 +367,7 @@ describe("while a draft is being sent", () => {
 
   async function sending(user: User) {
     await drafts(user);
-    await user.keyboard("jx");
+    await user.keyboard("x");
     await screen.findByRole("dialog", { name: "Draft is not approved. Approve and send?" });
     await user.keyboard("y");
     await waitFor(() => expect(document.querySelector('[data-draft-id="angebot-antwort"]')).toHaveAttribute("data-sending", "true"));
@@ -410,7 +408,6 @@ describe("a draft's attachments", () => {
     const { user } = renderApp();
     await shellReady();
     await drafts(user);
-    await user.keyboard("j");
     await within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" });
     await user.keyboard("ta");
     const dialog = await screen.findByRole("dialog", { name: "Attach file" });
@@ -438,7 +435,6 @@ describe("a draft's attachments", () => {
     const { user } = renderApp();
     await shellReady();
     await drafts(user);
-    await user.keyboard("j");
     await within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" });
     await user.keyboard("ta");
     const dialog = await screen.findByRole("dialog", { name: "Attach file" });
@@ -465,7 +461,6 @@ describe("a draft's attachments", () => {
     });
     await shellReady();
     await drafts(user);
-    await user.keyboard("j");
     const list = await within(reader()).findByRole("list", { name: "Attachments" });
     const rows = within(list).getAllByRole("listitem");
     expect(rows.map((li) => li.querySelector(".font-mono")?.textContent)).toEqual([
@@ -501,7 +496,6 @@ describe("a draft's attachments", () => {
     await user.keyboard("ta");
     expect(await screen.findByText("Attach file (t a) is only available in Drafts")).toBeInTheDocument();
     await drafts(user);
-    await user.keyboard("j");
     await within(reader()).findByRole("list", { name: "Attachments" });
     await user.keyboard("ts");
     expect(await screen.findByText("A draft's attachments are files already; t o opens one")).toBeInTheDocument();
@@ -516,7 +510,6 @@ describe("a draft's attachments", () => {
     const { user } = renderApp();
     await shellReady();
     await drafts(user);
-    await user.keyboard("j");
     const preview = await within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" });
     await user.click(within(preview).getByRole("button", { name: "Attach file" }));
     expect(await screen.findByRole("dialog", { name: "Attach file" })).toBeInTheDocument();

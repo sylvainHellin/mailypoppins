@@ -277,7 +277,6 @@ describe("mutation keys (the TUI's)", () => {
     await shellReady();
     await user.keyboard("2");
     await screen.findByRole("listbox", { name: "Drafts messages" });
-    await user.keyboard("j");
     await user.keyboard("d");
     expect(await screen.findByRole("dialog", { name: "Delete this email?" })).toBeInTheDocument();
     await user.keyboard("y");
@@ -470,7 +469,6 @@ describe("compose keys (the TUI's)", () => {
 
     await user.keyboard("{Escape}");
     await drafts(user);
-    await user.keyboard("j");
     await user.keyboard("e");
     await waitFor(() => expect(mock.editorOpens).toEqual(["/fixture/work/drafts/angebot-antwort.md"]));
     expect(callsOf("draft_path")).toEqual([{ account: "work", id: "angebot-antwort" }]);
@@ -492,7 +490,6 @@ describe("compose keys (the TUI's)", () => {
     const { user } = renderApp();
     await shellReady();
     await drafts(user);
-    await user.keyboard("j");
     await user.keyboard("cA");
     await waitFor(() => expect(callsOf("draft_approve")).toEqual([{ account: "work", ids: ["angebot-antwort"] }]));
     const row = () => document.querySelector('[data-draft-id="angebot-antwort"]');
@@ -506,7 +503,6 @@ describe("compose keys (the TUI's)", () => {
     const { user } = renderApp();
     await shellReady();
     await drafts(user);
-    await user.keyboard("j");
     await user.keyboard("{Control>}a{/Control}");
     await user.keyboard("cA");
     expect(await screen.findByRole("dialog", { name: "Approve 2 drafts?" })).toBeInTheDocument();
@@ -523,7 +519,6 @@ describe("compose keys (the TUI's)", () => {
     });
     await shellReady();
     await drafts(user);
-    await user.keyboard("j");
     await user.keyboard("ce");
     const dialog = await screen.findByRole("dialog", { name: "Edit recipients" });
     expect(within(dialog).getByLabelText("To")).toHaveValue("robin@example.com");
@@ -554,7 +549,7 @@ describe("send keys (the TUI's x and cX)", () => {
     const { user } = renderApp();
     await shellReady();
     await toDrafts(user);
-    await user.keyboard("jx");
+    await user.keyboard("x");
     const dialog = await screen.findByRole("dialog", { name: "Draft is not approved. Approve and send?" });
     expect(dialog).toHaveTextContent("To: robin@example.com - Re: Angebot Dachsanierung");
     expect(callsOf("send_draft")).toEqual([]);
@@ -574,7 +569,7 @@ describe("send keys (the TUI's x and cX)", () => {
     await shellReady();
     mock.drafts.work.drafts[0].status = "approved";
     await toDrafts(user);
-    await user.keyboard("jv");
+    await user.keyboard("v");
     // `v` marked angebot-antwort and stepped to offsite-note; back to the first.
     await user.keyboard("k");
     await user.keyboard("x");
@@ -591,7 +586,7 @@ describe("send keys (the TUI's x and cX)", () => {
     expect(await screen.findByText("Send needs a draft; received mail has nothing to send")).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).toBeNull();
     await toDrafts(user);
-    await user.keyboard("jx");
+    await user.keyboard("x");
     await screen.findByRole("dialog", { name: "Draft is not approved. Approve and send?" });
     await user.keyboard("n");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -605,7 +600,7 @@ describe("send keys (the TUI's x and cX)", () => {
     expect(await screen.findByText("Send all approved (c X) is only available in Drafts")).toBeInTheDocument();
     mock.drafts.work.drafts[1].status = "approved";
     await toDrafts(user);
-    await user.keyboard("jcX");
+    await user.keyboard("cX");
     const dialog = await screen.findByRole("dialog", { name: "Send all approved emails?" });
     expect(dialog).toHaveTextContent("In Drafts");
     await user.keyboard("y");
@@ -619,7 +614,7 @@ describe("send keys (the TUI's x and cX)", () => {
     const { user } = renderApp();
     await shellReady();
     await toDrafts(user);
-    await user.keyboard("j:");
+    await user.keyboard(":");
     let palette = await screen.findByRole("dialog", { name: "Command palette" });
     await user.click(within(palette).getByText("Send current draft (approve + send)"));
     expect(await screen.findByRole("dialog", { name: "Draft is not approved. Approve and send?" })).toBeInTheDocument();

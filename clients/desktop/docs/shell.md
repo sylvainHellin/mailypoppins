@@ -67,6 +67,7 @@ An event that arrives mid-fetch thus leaves the answer stale when it lands, and 
 `view` is what the window shows beside the sidebar (see Views); the selection, the marks and the outbox view outlive a switch.
 
 Selection is held by stable identifiers: account name, mailbox slug, and for a message its `message_id` and `selector` next to the `row_id`.
+Opening another mailbox or account puts the cursor on the top row once its list lands, as the TUI does (PERSO-94): `retarget` flags the fresh list `pickTop`, and its first answer selects the first visible row or draft unless a selection exists by then; Escape before the answer, a refetch of the same list and a re-bootstrap move no cursor, and the launch's first list keeps nothing selected.
 A `rebootstrapped` keeps what still exists, falls back to the default account's inbox for what does not, and marks the message `verified: false`; the reloaded list confirms it by `message_id` (taking the new `row_id` after a daemon restart) or clears it.
 An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`, and `list_accounts` moves it to the default account only while that flag holds; any selection the user makes clears it, so a click made before the answer, or between a failed fetch and its retry, is never reverted.
 

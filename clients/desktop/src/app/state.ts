@@ -628,7 +628,13 @@ export type AppState = {
   bootstrap: Bootstrap | null;
   accounts: Loadable<AccountInfo[]>;
   mailboxes: Record<string, Loadable<MailboxListing>>;
-  messages: Loadable<MessageList> & { key: string | null };
+  /**
+   * `pickTop`: the list was just opened on another mailbox, so its first
+   * answer puts the cursor on the top row when nothing is selected, as the
+   * TUI does (PERSO-94); the answer consumes it, and a refetch never moves
+   * the cursor.
+   */
+  messages: Loadable<MessageList> & { key: string | null; pickTop?: boolean };
   reader: ReaderState;
   selection: Selection;
   /**

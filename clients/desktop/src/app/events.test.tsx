@@ -57,7 +57,6 @@ describe("draft events and the editor", () => {
     await shellReady();
     await user.keyboard("2");
     await screen.findByRole("listbox", { name: "Drafts messages" });
-    await user.keyboard("j");
     await user.keyboard("e");
     await waitFor(() => expect(banner()).toHaveTextContent("Editing angebot-antwort.md in code --wait"));
     const before = listCalls();
@@ -85,7 +84,6 @@ describe("draft events and the editor", () => {
     await shellReady();
     await user.keyboard("2");
     await screen.findByRole("listbox", { name: "Drafts messages" });
-    await user.keyboard("j");
     await user.keyboard("e");
     await waitFor(() => expect(banner()).toHaveTextContent("Editing angebot-antwort.md"));
     const listing = mock.drafts.work;

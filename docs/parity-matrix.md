@@ -201,8 +201,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `j/k` and `Enter` (`clients/tui/src/app/keymap.rs:636`), `gm` (`clients/tui/src/app/keymap.rs:590`), `clients/tui/src/ui/sidebar.rs`
 - Daemon surface: `state.bootstrap` mailbox summaries, `message.list_stream` on selection (#0138)
-- GUI location: clients/desktop: the sidebar lists each account's mailboxes, `gm` focuses it, `j`/`k` move its cursor, and Enter or a click opens the mailbox (M1, #0129)
-- Validation: TUI golden frames under `clients/tui/src/`; `clients/desktop/src/keymap/keymap.test.tsx` (`the sidebar cursor moves with j and Enter opens the mailbox`), `clients/desktop/src/components/shell/a11y.test.tsx` (`marks the selected mailbox as the current page`)
+- GUI location: clients/desktop: the sidebar lists each account's mailboxes, `gm` focuses it, `j`/`k` move its cursor, and Enter or a click opens the mailbox with the cursor on its top row, as the TUI's `switch_mailbox` does (M1, #0129; PERSO-94)
+- Validation: TUI golden frames under `clients/tui/src/`; `clients/desktop/src/app/reducer.test.ts` (`puts the cursor on the top row of a mailbox once its list lands`), `clients/desktop/src/keymap/keymap.test.tsx` (`the sidebar cursor moves with j and Enter opens the mailbox`), `clients/desktop/src/components/shell/a11y.test.tsx` (`marks the selected mailbox as the current page`)
 - Status: GUI shipped (M1, #0129)
 
 ### MBX-03 Jump to a mailbox by digit 1 through 9

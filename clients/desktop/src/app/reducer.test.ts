@@ -44,6 +44,33 @@ describe("the reducer", () => {
     expect(s.messages.data?.kind).toBe("messages");
   });
 
+  it("puts the cursor on the top row of a mailbox once its list lands, as the TUI does (PERSO-94)", () => {
+    let s = booted();
+    s = run(s, { type: "mailboxes_loaded", account: "home", gen: 1, listing: mailboxListing("home") });
+    s = run(s, { type: "select_mailbox", account: "home", slug: "newsletters", focus: "list" });
+    expect(s.selection.message).toBeNull();
+    expect(s.messages.data).toBeNull();
+    const list = inbox("home", "newsletters");
+    const top = (list as Extract<MessageList, { kind: "messages" }>).rows[0];
+    s = run(s, { type: "messages_loaded", key: listKey("home", "newsletters"), gen: s.messages.gen, list });
+    expect(s.selection.message).toMatchObject({ row_id: top.id, message_id: top.message_id, verified: true });
+    expect(s.focus).toBe("list");
+  });
+
+  it("moves no cursor on a refetch of the same mailbox, nor after Escape cleared it before the list landed", () => {
+    let s = booted();
+    const rows = (s.messages.data as Extract<MessageList, { kind: "messages" }>).rows;
+    s = run(s, { type: "select_mailbox", account: "work", slug: "sent" }, { type: "select_mailbox", account: "work", slug: "inbox" });
+    s = run(s, { type: "clear_selection" });
+    s = run(s, { type: "messages_loaded", key: listKey("work", "inbox"), gen: s.messages.gen, list: inbox("work", "inbox") });
+    expect(s.selection.message).toBeNull();
+
+    s = run(s, { type: "select_message", message: { row_id: rows[2].id, message_id: rows[2].message_id, selector: rows[2].selector } });
+    s = { ...s, messages: { ...s.messages, gen: s.messages.gen + 1 } };
+    s = run(s, { type: "messages_loaded", key: listKey("work", "inbox"), gen: s.messages.gen, list: inbox("work", "inbox") });
+    expect(s.selection.message?.message_id).toBe(rows[2].message_id);
+  });
+
   it("restores the selection by message_id after a re-bootstrap, even when row_id moved", () => {
     let s = booted();
     const row = (s.messages.data as Extract<MessageList, { kind: "messages" }>).rows[2];

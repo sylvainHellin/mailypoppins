@@ -464,14 +464,15 @@ function defaultAccount(s: AppState, names: string[]): string | null {
 }
 
 /** Point the message list at a (possibly new) account/mailbox. */
-function retarget(s: AppState, sel: Selection): AppState {
+function retarget(s: AppState, sel: Selection, pickTop = false): AppState {
   const key = sel.account && sel.mailbox ? listKey(sel.account, sel.mailbox) : null;
   // The generation carries on past the last list's rather than restarting:
   // a read asked before leaving a mailbox can land after coming back to it,
   // and a restarted count would rank it newer than the reads after it, so
   // `listAnswerIsStale` dropped every fresh read and the list kept the old
   // answer, without the mail a tick brought in (PERSO-80).
-  const messages = key === s.messages.key ? s.messages : { ...emptyLoadable<MessageList>(), gen: s.messages.gen + 1, key };
+  const messages =
+    key === s.messages.key ? s.messages : { ...emptyLoadable<MessageList>(), gen: s.messages.gen + 1, key, pickTop };
   const cursor =
     sel.account && sel.mailbox ? { account: sel.account, slug: sel.mailbox } : s.sidebarCursor;
   const same = key === s.messages.key;
@@ -504,12 +505,26 @@ function endSearch(s: AppState): AppState {
   return next;
 }
 
+/**
+ * The first answer of a mailbox just opened: the cursor goes on its top row
+ * unless something is selected already (a selection a re-bootstrap kept, or
+ * one the user made meanwhile), or a search shows its hits instead.
+ */
+function pickTopRow(s: AppState): AppState {
+  if (!s.messages.pickTop) return s;
+  const next: AppState = { ...s, messages: { ...s.messages, pickTop: false } };
+  const sel = next.selection;
+  if (next.search || sel.message || sel.draft || sel.hit) return next;
+  const top = visibleItems(next)[0];
+  return top ? selectItem(next, top) : next;
+}
+
 function selectMailbox(s: AppState, account: string, slug: string): AppState {
   s = endSearch(s);
   if (s.selection.account === account && s.selection.mailbox === slug) {
     return { ...s, sidebarCursor: { account, slug } };
   }
-  return retarget(s, { account, mailbox: slug, message: null, draft: null, hit: null });
+  return retarget(s, { account, mailbox: slug, message: null, draft: null, hit: null }, true);
 }
 
 type ListItem =
@@ -1357,7 +1372,7 @@ function reduce(s: AppState, a: Action): AppState {
       if (listAnswerIsStale(s, a.key, a.lgen, a.gen)) return dropListAnswer(s, a.gen);
       const list = overlayPending(s, a.list);
       const next = { ...s, messages: { ...loaded(s.messages, a.gen, list), key: s.messages.key } };
-      return pruneMarks(reverify(next, list), list);
+      return pickTopRow(pruneMarks(reverify(next, list), list));
     }
     case "messages_failed":
       if (a.key !== s.messages.key) return s;
@@ -1378,7 +1393,7 @@ function reduce(s: AppState, a: Action): AppState {
       if (a.account === s.selection.account && !s.search) return s;
       s = endSearch(s);
       if (a.account === s.selection.account) return s;
-      return retarget(s, { account: a.account, mailbox: defaultMailbox(s, a.account), message: null, draft: null, hit: null });
+      return retarget(s, { account: a.account, mailbox: defaultMailbox(s, a.account), message: null, draft: null, hit: null }, true);
     }
     case "select_mailbox": {
       const next = selectMailbox(s, a.account, a.slug);
@@ -1478,6 +1493,7 @@ function reduce(s: AppState, a: Action): AppState {
       if (s.search) return withFocus(endSearch(s), "list");
       return {
         ...s,
+        messages: s.messages.pickTop ? { ...s.messages, pickTop: false } : s.messages,
         selection: { ...s.selection, message: null, draft: null, hit: null },
         reader: emptyReader(),
       };

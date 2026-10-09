@@ -219,7 +219,6 @@ describe("the command palette", () => {
     await user.keyboard("{Escape}");
     await user.keyboard("2");
     await screen.findByRole("listbox", { name: "Drafts messages" });
-    await user.keyboard("j");
     await user.keyboard(":");
     dialog = await screen.findByRole("dialog", { name: "Command palette" });
     await user.click(within(dialog).getByText("Approve draft (Drafts only)"));

@@ -197,7 +197,7 @@ describe("the move picker", () => {
     await shellReady();
     await user.keyboard("2");
     await screen.findByRole("listbox", { name: "Drafts messages" });
-    await user.keyboard("jM");
+    await user.keyboard("M");
     expect(await screen.findByText("Quick-move is not available in this mailbox")).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).toBeNull();
   });
@@ -360,7 +360,7 @@ describe("a send's card and outcome", () => {
   async function sendFirstDraft(user: ReturnType<typeof renderApp>["user"]) {
     await user.keyboard("2");
     await screen.findByRole("listbox", { name: "Drafts messages" });
-    await user.keyboard("jx");
+    await user.keyboard("x");
     await screen.findByRole("dialog", { name: "Draft is not approved. Approve and send?" });
     await user.keyboard("y");
     await waitFor(() => expect(callsOf("send_draft")).toHaveLength(1));
