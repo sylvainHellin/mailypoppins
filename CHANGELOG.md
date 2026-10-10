@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Added
 - **Desktop: `y` on a draft copies its file path (PERSO-100).**
+- **`mp list-messages`, `mp search` and `mp contacts search` take `--json`.** Each prints one JSON object on stdout with warnings left on stderr, so a script can parse the listing: `{account, mailboxes, messages}` for `list-messages`, `{account, query, source, messages}` for `search` (the server or `--local`), `{account, query, contacts}` for `contacts search`. A message carries its selector, mailbox, Message-ID, sender, recipients, subject, the date as a UTC ISO 8601 instant beside the `Date:` header, its flags and whether it has attachments; `search --full` adds the body, and a server hit without `--full` the preview its text layout prints.
 
 ### Fixed
 - **Reply and reply-all to a message you sent address its original recipients (PERSO-99).** They now go to its original To (and Cc for reply-all) instead of your own address.

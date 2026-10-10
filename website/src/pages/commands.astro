@@ -41,22 +41,22 @@ const imapCommands = [
   { command: 'mp list-mailboxes [--json]', description: 'List available server mailboxes (--json prints them as JSON on stdout)' },
   { command: 'mp archive <selector> [--mailbox <name>]', description: 'Archive a received email (server + local)' },
   { command: 'mp delete <selector> [--mailbox <name>]', description: 'Delete a received email (server + local), or a local draft with a drafts selector' },
-  { command: 'mp search <query>', description: 'Search emails on the server with one grammar (fields, has:attachment, dates, OR groups); --local searches the store offline' },
+  { command: 'mp search <query> [--json]', description: 'Search emails on the server with one grammar (fields, has:attachment, dates, OR groups); --local searches the store offline; --json prints the hits as JSON on stdout' },
   { command: 'mp open <selector> [--mailbox <name>]', description: 'Open attachment in default app' },
   { command: 'mp save <selector> [--output <dir>] [--mailbox <name>]', description: 'Save attachment(s) to directory' },
 ];
 
 const storeCommands = [
-  { command: 'mp list-messages [--mailbox <name>] [-n N]', description: 'List received messages from the local store (offline)' },
+  { command: 'mp list-messages [--mailbox <name>] [-n N] [--json]', description: 'List received messages from the local store (offline; --json prints them as JSON on stdout)' },
   { command: 'mp show <selector> [--mailbox <name>] [--json]', description: 'Print one received message -- headers, attachments and body -- from the local store (offline)' },
-  { command: 'mp search --local <query> [--mailbox <name>] [-n N] [--full]', description: 'Ranked full-text search over the local store (offline, every synced mailbox at once)' },
+  { command: 'mp search --local <query> [--mailbox <name>] [-n N] [--full] [--json]', description: 'Ranked full-text search over the local store (offline, every synced mailbox at once)' },
 ];
 
 const storeOptions = [
   { command: '--mailbox <name>', description: 'Mailbox to list (role, slug or sidebar label). Default: every mailbox of the account, grouped' },
   { command: '-n, --limit <N>', description: 'Max messages per mailbox listed (default: 20)' },
   { command: '-A, --account <name>', description: 'Account to read (default: first in config)' },
-  { command: '--json', description: 'mp show only: emit one JSON object instead of the human layout' },
+  { command: '--json', description: 'Emit one JSON object instead of the human layout (mp show: the message; mp list-messages and mp search: the listing, with selectors and ISO 8601 dates)' },
 ];
 
 const maintenanceCommands = [
@@ -92,7 +92,7 @@ const daemonCommands = [
 ];
 
 const contactsCommands = [
-  { command: 'mp contacts search [<query>] [--parsable] [-n N]', description: 'Fuzzy-search the contact index by name and email; --parsable emits tab-delimited email/name lines for mutt, aerc or vim (default limit: 20)' },
+  { command: 'mp contacts search [<query>] [--parsable|--json] [-n N]', description: 'Fuzzy-search the contact index by name and email; --parsable emits tab-delimited email/name lines for mutt, aerc or vim, --json one JSON object with the counts (default limit: 20)' },
   { command: 'mp contacts rebuild', description: 'Rebuild the contact index from the local message store (every account unless -A names one)' },
   { command: 'mp contacts stats', description: 'Show contact index statistics' },
 ];
@@ -172,6 +172,7 @@ const searchFlags = [
   { command: '-n, --limit <N>', description: 'Max results (default: 20)' },
   { command: '--full', description: 'Show full body instead of preview' },
   { command: '--local', description: 'Search the local FTS index offline instead of the server' },
+  { command: '--json', description: 'Print the hits as one JSON object on stdout; warnings stay on stderr' },
 ];
 
 // Slugify a section title for the heading anchor id.

@@ -364,6 +364,12 @@ enum Commands {
         /// Max messages per mailbox listed
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
+        /// Emit one JSON object {account, mailboxes: [{mailbox, label, total,
+        /// shown}], messages: [...]} on stdout; each message carries selector,
+        /// mailbox, message_id, from, to, cc, subject, date (ISO 8601, UTC),
+        /// date_header, flags, has_attachments, invite
+        #[arg(long)]
+        json: bool,
     },
     /// Search emails on the IMAP server, or locally with --local
     #[command(long_about = SEARCH_LONG_ABOUT)]
@@ -415,6 +421,12 @@ enum Commands {
         /// (offline, ranked, covers every synced mailbox at once)
         #[arg(long)]
         local: bool,
+        /// Emit one JSON object {account, query, source: local|server,
+        /// messages: [...]} on stdout, messages as in `mp list-messages
+        /// --json` plus body (--full) or preview (server hit); warnings stay
+        /// on stderr
+        #[arg(long)]
+        json: bool,
     },
     /// Manage configuration
     Config {
@@ -672,6 +684,10 @@ enum ContactsAction {
         /// Emit tab-delimited `email\tname` lines (for mutt/aerc/vim integration)
         #[arg(long)]
         parsable: bool,
+        /// Emit one JSON object {account, query, contacts: [{address,
+        /// display_name, sent_to, sent_cc, received}]}, best match first
+        #[arg(long, conflicts_with = "parsable")]
+        json: bool,
         /// Max number of results
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
@@ -710,11 +726,43 @@ enum ConfigAction {
 
 /// Sort fetched emails by date descending (newest first).
 fn sort_fetched_by_date(emails: &mut [FetchedEmail]) {
-    emails.sort_by(|a, b| {
-        let da = chrono::DateTime::parse_from_rfc2822(&a.date).ok();
-        let db = chrono::DateTime::parse_from_rfc2822(&b.date).ok();
-        db.cmp(&da)
-    });
+    emails.sort_by(fetched_newest_first);
+}
+
+/// The order [`sort_fetched_by_date`] sorts in: newest first, an unparsable
+/// date last.
+fn fetched_newest_first(a: &FetchedEmail, b: &FetchedEmail) -> std::cmp::Ordering {
+    let da = chrono::DateTime::parse_from_rfc2822(&a.date).ok();
+    let db = chrono::DateTime::parse_from_rfc2822(&b.date).ok();
+    db.cmp(&da)
+}
+
+/// `mp search --json` for a server search: each hit with the store's id of the
+/// mailbox it was found in, when the search knows it.
+fn print_server_search_json(
+    account: &str,
+    query: &str,
+    hits: &[(Option<String>, FetchedEmail)],
+    full: bool,
+) -> Result<()> {
+    let results = mailypoppins::read_cmd::SearchResultsJson {
+        account: account.to_string(),
+        query: query.to_string(),
+        source: "server",
+        messages: hits
+            .iter()
+            .map(|(mailbox, email)| {
+                mailypoppins::read_cmd::ListedMessage::from_fetched(
+                    account,
+                    mailbox.as_deref(),
+                    email,
+                    full,
+                )
+            })
+            .collect(),
+    };
+    println!("{}", serde_json::to_string_pretty(&results)?);
+    Ok(())
 }
 
 fn prompt_confirmation(message: &str) -> bool {
@@ -1453,10 +1501,16 @@ async fn routed_list_messages(
     account: &AccountConfig,
     mailbox: Option<&str>,
     limit: usize,
+    json: bool,
 ) -> Result<()> {
     let selected = select_mailboxes(account, mailbox)?;
     let mut connection = daemon_connection().await;
     let mut groups = Vec::new();
+    let mut listing = mailypoppins::read_cmd::MessageListingJson {
+        account: account.name.clone(),
+        mailboxes: Vec::new(),
+        messages: Vec::new(),
+    };
     for info in selected {
         let result = daemon_try_call(
             &mut connection,
@@ -1470,6 +1524,26 @@ async fn routed_list_messages(
         .await
         .map_err(|e| refusal(&account.name, e))?;
         let total = result["total"].as_u64().unwrap_or_default() as usize;
+        if json {
+            let messages = result["messages"].as_array().cloned().unwrap_or_default();
+            listing
+                .mailboxes
+                .push(mailypoppins::read_cmd::ListedMailbox {
+                    mailbox: info.id.clone(),
+                    label: info.label.clone(),
+                    total,
+                    shown: messages.len(),
+                });
+            listing.messages.extend(messages.iter().map(|message| {
+                mailypoppins::read_cmd::ListedMessage::from_wire(
+                    &account.name,
+                    &info.id,
+                    &mp_client::queries::row_from_wire(message),
+                    None,
+                )
+            }));
+            continue;
+        }
         let rows = result["messages"]
             .as_array()
             .map(|messages| {
@@ -1480,6 +1554,10 @@ async fn routed_list_messages(
             })
             .unwrap_or_default();
         groups.push((info.label.clone(), total, rows));
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&listing)?);
+        return Ok(());
     }
     print!(
         "{}",
@@ -1502,7 +1580,14 @@ fn row_from_wire(
     message: &serde_json::Value,
     mailbox: &str,
 ) -> mailypoppins::store::read::MessageRow {
-    let row = mp_client::queries::row_from_wire(message);
+    store_row(mp_client::queries::row_from_wire(message), mailbox)
+}
+
+/// [`row_from_wire`]'s mapping, from a row already decoded.
+fn store_row(
+    row: mp_protocol::listing::MessageListRow,
+    mailbox: &str,
+) -> mailypoppins::store::read::MessageRow {
     let text = |value: String| Some(value).filter(|value| !value.is_empty());
     mailypoppins::store::read::MessageRow {
         id: 0,
@@ -1596,8 +1681,8 @@ async fn routed_dump(
     Ok(records)
 }
 
-/// `mp search --local`: the ranked hits of the daemon's index read, as the rows
-/// the search listing prints.
+/// `mp search --local`: the ranked hits of the daemon's index read, which the
+/// text listing maps onto store rows and `--json` prints as they came.
 ///
 /// The flags travel as the user typed them and the daemon builds the query with
 /// `search::from_cli`, so one parser serves every backend. `body` is `--full`;
@@ -1609,7 +1694,7 @@ async fn routed_search(
     flags: &mailypoppins::search::Flags,
     limit: usize,
     full: bool,
-) -> Result<Vec<(mailypoppins::store::read::MessageRow, Option<String>)>> {
+) -> Result<Vec<mp_client::queries::SearchHit>> {
     let mut params = serde_json::json!({
         "account": account,
         "query": query,
@@ -1637,18 +1722,7 @@ async fn routed_search(
     let result = daemon_try_call(&mut connection, "message.search", params)
         .await
         .map_err(|e| refusal(account, e))?;
-    Ok(result["hits"]
-        .as_array()
-        .map(|hits| {
-            hits.iter()
-                .map(|hit| {
-                    let mailbox = hit["mailbox"].as_str().unwrap_or_default();
-                    let body = hit["body"].as_str().map(str::to_string);
-                    (row_from_wire(hit, mailbox), body)
-                })
-                .collect()
-        })
-        .unwrap_or_default())
+    Ok(mp_client::queries::decode_search_hits(&result))
 }
 
 /// One typed answer from the daemon, on an existing connection.
@@ -2606,6 +2680,7 @@ async fn routed_contacts_search(
     account: &str,
     query: Option<&str>,
     parsable: bool,
+    json: bool,
     limit: usize,
 ) -> Result<()> {
     let mut connection = daemon_connection().await;
@@ -2617,7 +2692,15 @@ async fn routed_contacts_search(
     )
     .await
     .map_err(|error| refusal(account, error))?;
-    mailypoppins::contacts_cmd::print_search(&contact_rows(&result["contacts"]), query, parsable);
+    let rows = contact_rows(&result["contacts"]);
+    if json {
+        println!(
+            "{}",
+            mailypoppins::contacts_cmd::search_json(account, query, &rows)?
+        );
+    } else {
+        mailypoppins::contacts_cmd::print_search(&rows, query, parsable);
+    }
     Ok(())
 }
 
@@ -4093,8 +4176,12 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::ListMessages { mailbox, limit }) => {
-            routed_list_messages(&account_config, mailbox.as_deref(), limit).await?;
+        Some(Commands::ListMessages {
+            mailbox,
+            limit,
+            json,
+        }) => {
+            routed_list_messages(&account_config, mailbox.as_deref(), limit, json).await?;
         }
 
         Some(Commands::Search {
@@ -4112,6 +4199,7 @@ async fn main() -> Result<()> {
             limit,
             full,
             local,
+            json,
         }) => {
             // One parser, one AST (#0086a): the positional grammar and the
             // flags build the identical query. A malformed query is an error
@@ -4142,7 +4230,7 @@ async fn main() -> Result<()> {
                     Some(want) => Some(resolve_mailbox_key(&account_config, want)?),
                     None => None,
                 };
-                let rows = routed_search(
+                let hits = routed_search(
                     &account_config.name,
                     &query,
                     mailbox_key.as_deref(),
@@ -4151,10 +4239,34 @@ async fn main() -> Result<()> {
                     full,
                 )
                 .await?;
-                print!(
-                    "{}",
-                    mailypoppins::read_cmd::render_search(&account_config.name, &query, &rows)
-                );
+                if json {
+                    let results = mailypoppins::read_cmd::SearchResultsJson {
+                        account: account_config.name.clone(),
+                        query: query.clone(),
+                        source: "local",
+                        messages: hits
+                            .iter()
+                            .map(|hit| {
+                                mailypoppins::read_cmd::ListedMessage::from_wire(
+                                    &account_config.name,
+                                    &hit.mailbox,
+                                    &hit.row,
+                                    hit.body.clone(),
+                                )
+                            })
+                            .collect(),
+                    };
+                    println!("{}", serde_json::to_string_pretty(&results)?);
+                } else {
+                    let rows: Vec<_> = hits
+                        .into_iter()
+                        .map(|hit| (store_row(hit.row, &hit.mailbox), hit.body))
+                        .collect();
+                    print!(
+                        "{}",
+                        mailypoppins::read_cmd::render_search(&account_config.name, &query, &rows)
+                    );
+                }
                 // An early return leaves the check at the bottom of `main`
                 // unrun, so it happens here instead. Every early return out of
                 // a routed command owes this line.
@@ -4169,7 +4281,15 @@ async fn main() -> Result<()> {
                     .search_messages(&query_ast, mailbox_name.as_deref(), limit)
                     .await?;
                 sort_fetched_by_date(&mut emails);
-                if emails.is_empty() {
+                if json {
+                    // Graph names no folder per hit, so only a scoped search
+                    // knows the mailbox a selector needs.
+                    let key = mailbox_name
+                        .as_deref()
+                        .and_then(|mb| resolve_mailbox_key(&account_config, mb).ok());
+                    let tagged: Vec<_> = emails.into_iter().map(|e| (key.clone(), e)).collect();
+                    print_server_search_json(&account_config.name, &query, &tagged, full)?;
+                } else if emails.is_empty() {
                     println!("{}", "No results found".yellow());
                 } else {
                     display_fetched_emails(&emails, full);
@@ -4196,20 +4316,32 @@ async fn main() -> Result<()> {
                 };
                 let msg_id = query_ast.message_id.clone();
 
-                // The target mailboxes: the scoped one, or all the account's.
-                let targets: Vec<(String, String)> = match mailbox_name {
-                    Some(ref mb) => vec![(mb.clone(), mb.clone())],
+                // The target mailboxes: the scoped one, or all the account's,
+                // each with the store's id for it when it has one, which is
+                // the mailbox a `--json` hit's selector names.
+                let targets: Vec<(String, String, Option<String>)> = match mailbox_name {
+                    Some(ref mb) => vec![(
+                        mb.clone(),
+                        mb.clone(),
+                        resolve_mailbox_key(&account_config, mb).ok(),
+                    )],
                     None => all_configured_mailboxes(&account_config)
                         .iter()
-                        .map(|(role, mapping)| (role.to_string(), mapping.server.clone()))
+                        .map(|(role, mapping)| {
+                            (
+                                role.to_string(),
+                                mapping.server.clone(),
+                                Some(role.to_string()),
+                            )
+                        })
                         .collect(),
                 };
 
                 let mut session = imap_client::open_imap_session(&imap_config).await?;
                 let per_mb = (limit / targets.len().max(1)).max(5);
                 let mut total = 0usize;
-                let mut all_emails: Vec<FetchedEmail> = Vec::new();
-                for (label, server) in &targets {
+                let mut all_emails: Vec<(Option<String>, FetchedEmail)> = Vec::new();
+                for (label, server, key) in &targets {
                     if total >= limit {
                         break;
                     }
@@ -4229,7 +4361,7 @@ async fn main() -> Result<()> {
                     {
                         Ok(emails) => {
                             total += emails.len();
-                            all_emails.extend(emails);
+                            all_emails.extend(emails.into_iter().map(|e| (key.clone(), e)));
                         }
                         Err(e) => {
                             eprintln!("{} Search in {} failed: {}", "\u{26a0}".yellow(), label, e);
@@ -4247,7 +4379,7 @@ async fn main() -> Result<()> {
                         &store,
                         &account_config.name,
                     )?;
-                    all_emails.retain(|e| {
+                    all_emails.retain(|(_, e)| {
                         e.message_id.as_deref().is_some_and(|m| {
                             with_att
                                 .contains(&mailypoppins::store::read::normalize_message_id_key(m))
@@ -4260,11 +4392,15 @@ async fn main() -> Result<()> {
                     );
                 }
 
-                sort_fetched_by_date(&mut all_emails);
-                if all_emails.is_empty() {
+                all_emails.sort_by(|(_, a), (_, b)| fetched_newest_first(a, b));
+                if json {
+                    print_server_search_json(&account_config.name, &query, &all_emails, full)?;
+                } else if all_emails.is_empty() {
                     println!("{}", "No results found".yellow());
                 } else {
-                    display_fetched_emails(&all_emails, full);
+                    let emails: Vec<FetchedEmail> =
+                        all_emails.into_iter().map(|(_, e)| e).collect();
+                    display_fetched_emails(&emails, full);
                 }
             }
         }
@@ -4276,13 +4412,14 @@ async fn main() -> Result<()> {
             ContactsAction::Search {
                 query,
                 parsable,
+                json,
                 limit,
             } => {
                 let acct = cli.account.clone();
                 let name = pick_account_named(&global_config, acct.as_deref())?
                     .name
                     .clone();
-                routed_contacts_search(&name, query.as_deref(), parsable, limit).await?;
+                routed_contacts_search(&name, query.as_deref(), parsable, json, limit).await?;
             }
             ContactsAction::Rebuild => {
                 let acct = cli.account.clone();

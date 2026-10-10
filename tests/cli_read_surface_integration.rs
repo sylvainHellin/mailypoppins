@@ -1,5 +1,6 @@
 //! Contract for `mp show`, `mp list-messages` and `mp list --json`, the CLI
-//! read surface (#0062).
+//! read surface (#0062), and for the `--json` of `mp list-messages`,
+//! `mp search --local` and `mp contacts search`.
 //!
 //! The rendering is unit-tested in `src/read_cmd.rs`; what this pins is the
 //! wiring the unit tests cannot see -- that the commands resolve a selector
@@ -348,4 +349,101 @@ fn list_json_prints_the_draft_listing_as_json_on_a_clean_stdout() {
         stderr.contains("broken.md"),
         "the skip warning stays on stderr: {stderr}"
     );
+}
+
+/// `mp list-messages --json` is one object on a clean stdout: the mailboxes it
+/// covered with their counts, and every listed message with the selector the
+/// next command takes and the date as a UTC ISO 8601 instant.
+#[test]
+fn list_messages_json_is_one_object_with_selectors_and_iso_dates() {
+    let tmp = fixture_tree();
+    let (ok, stdout, stderr) = run(&tmp, &["list-messages", "--json", "-n", "1"]);
+    assert!(ok, "mp list-messages --json failed: {stderr}");
+    let listing: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {stdout}"));
+
+    assert_eq!(listing["account"], "alpha");
+    let inbox = listing["mailboxes"]
+        .as_array()
+        .expect("a mailboxes array")
+        .iter()
+        .find(|m| m["mailbox"] == "inbox")
+        .expect("the inbox is listed");
+    assert_eq!(inbox["label"], "Inbox");
+    assert_eq!(inbox["total"], 2);
+    assert_eq!(inbox["shown"], 1, "the limit is per mailbox");
+
+    let messages = listing["messages"].as_array().expect("a messages array");
+    assert_eq!(messages.len(), 2, "one inbox and one sent row: {stdout}");
+    let first = &messages[0];
+    assert_eq!(first["selector"], "mp://alpha/inbox/Bericht@example.com");
+    assert_eq!(first["mailbox"], "inbox");
+    assert_eq!(first["from"], "Ivana <ivana@example.com>");
+    assert_eq!(first["to"], "sylvain@example.com");
+    assert_eq!(first["cc"], "petzold@example.com");
+    assert_eq!(first["subject"], "Bericht");
+    assert_eq!(first["date"], "2026-07-02T11:57:30Z");
+    assert_eq!(first["flags"][0], "read");
+    assert_eq!(first["has_attachments"], true);
+    assert!(
+        !stdout.contains("Only-In-Beta"),
+        "another account is never listed: {stdout}"
+    );
+}
+
+/// `mp search --local --json` prints the ranked hits as one object, each
+/// addressable by its selector, with the body only under `--full`.
+#[test]
+fn search_local_json_prints_the_hits_as_one_object() {
+    let tmp = fixture_tree();
+    let (ok, stdout, stderr) = run(&tmp, &["search", "--local", "--json", "Bericht"]);
+    assert!(ok, "mp search --local --json failed: {stderr}");
+    let results: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {stdout}"));
+    assert_eq!(results["account"], "alpha");
+    assert_eq!(results["query"], "Bericht");
+    assert_eq!(results["source"], "local");
+    let messages = results["messages"].as_array().expect("a messages array");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["selector"] == "mp://alpha/inbox/Bericht@example.com"),
+        "{stdout}"
+    );
+    assert!(messages.iter().all(|m| m.get("body").is_none()), "{stdout}");
+
+    let (ok, stdout, stderr) = run(
+        &tmp,
+        &["search", "--local", "--json", "--full", "subject:Kickoff"],
+    );
+    assert!(ok, "mp search --local --json --full failed: {stderr}");
+    let results: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(results["messages"][0]["subject"], "Kickoff", "{stdout}");
+    assert_eq!(results["messages"][0]["body"], "kickoff\n", "{stdout}");
+}
+
+/// `mp contacts search --json` is one object whose rows carry the address, the
+/// name and the counts the tier glyph is drawn from.
+#[test]
+fn contacts_search_json_prints_the_ranked_rows() {
+    let tmp = fixture_tree();
+    let (ok, stdout, stderr) = run(&tmp, &["contacts", "search", "--json", "ivana"]);
+    assert!(ok, "mp contacts search --json failed: {stderr}");
+    let results: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {stdout}"));
+    assert_eq!(results["account"], "alpha");
+    assert_eq!(results["query"], "ivana");
+    let contacts = results["contacts"].as_array().expect("a contacts array");
+    let ivana = contacts
+        .iter()
+        .find(|c| c["address"] == "ivana@example.com")
+        .unwrap_or_else(|| panic!("ivana is found: {stdout}"));
+    assert_eq!(ivana["display_name"], "Ivana");
+    for key in ["sent_to", "sent_cc", "received"] {
+        assert!(ivana[key].is_u64(), "{key} is a count: {stdout}");
+    }
+
+    let (ok, _, stderr) = run(&tmp, &["contacts", "search", "--json", "--parsable"]);
+    assert!(!ok, "--json and --parsable are two answers to one question");
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
 }

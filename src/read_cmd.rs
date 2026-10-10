@@ -71,7 +71,11 @@ fn present(value: Option<&str>) -> Option<String> {
 
 /// The flag tokens of a row, in a fixed order so two runs agree.
 fn flag_names(row: &MessageRow) -> Vec<String> {
-    let flags = row.flags();
+    flag_tokens(row.flags())
+}
+
+/// The flag tokens `--json` prints, `mp show`'s spelling and order.
+fn flag_tokens(flags: crate::types::MessageFlags) -> Vec<String> {
     let mut out = Vec::new();
     for (on, name) in [
         (flags.seen, "read"),
@@ -340,6 +344,166 @@ pub fn to_json(message: &ShownMessage) -> Result<String> {
     Ok(serde_json::to_string_pretty(message)?)
 }
 
+/// One message of `mp list-messages --json` and `mp search --json`.
+///
+/// The keys are [`ShownMessage`]'s where the two overlap, so a script that
+/// reads a listing reads `mp show --json` too, with two deliberate
+/// differences: `date` is the UTC instant in ISO 8601 (`2026-07-02T11:57:30Z`)
+/// that a script can compare, the stored `Date:` header travelling beside it
+/// as `date_header`; and a listing knows only whether attachments exist, not
+/// their names, so it carries `has_attachments` instead of `attachments`.
+///
+/// `selector` and `mailbox` are `null` only for a server search hit whose
+/// mailbox the server did not name (an unscoped Graph search); `message_id`
+/// then still addresses it, since `mp show` and friends take a bare key.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ListedMessage {
+    pub selector: Option<String>,
+    pub account: String,
+    pub mailbox: Option<String>,
+    pub message_id: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub cc: Option<String>,
+    pub subject: Option<String>,
+    pub date: Option<String>,
+    pub date_header: Option<String>,
+    pub flags: Vec<String>,
+    pub has_attachments: bool,
+    pub invite: bool,
+    /// The whole plain-text body, present only with `--full`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// The first 300 characters of the body, present only on a server search
+    /// hit without `--full`, which is what its text layout prints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+/// The UTC instant of a message in ISO 8601, from its `Date:` header, else
+/// from the wire's `date_sort` (`resolve_date`'s UTC key, without the `Z`).
+fn iso_date(header: &str, date_sort: &str) -> Option<String> {
+    const ISO: &str = "%Y-%m-%dT%H:%M:%S";
+    if let Ok(at) = chrono::DateTime::parse_from_rfc2822(header) {
+        return Some(format!("{}Z", at.with_timezone(&chrono::Utc).format(ISO)));
+    }
+    chrono::NaiveDateTime::parse_from_str(date_sort, ISO)
+        .ok()
+        .map(|at| format!("{}Z", at.format(ISO)))
+}
+
+impl ListedMessage {
+    /// A row the daemon listed or found in the local store.
+    ///
+    /// The selector is the daemon's own spelling; a row from a daemon that
+    /// predates it gets the one [`Selector::for_message`] would have rendered.
+    pub fn from_wire(
+        account: &str,
+        mailbox: &str,
+        row: &mp_protocol::listing::MessageListRow,
+        body: Option<String>,
+    ) -> ListedMessage {
+        let selector = if row.selector.is_empty() {
+            Selector::new(
+                account,
+                mailbox,
+                crate::selector::message_key(&row.message_id),
+            )
+            .to_string()
+        } else {
+            row.selector.clone()
+        };
+        ListedMessage {
+            selector: Some(selector),
+            account: account.to_string(),
+            mailbox: Some(mailbox.to_string()),
+            message_id: row.message_id.clone(),
+            from: present(Some(&row.from)),
+            to: present(Some(&row.to)),
+            cc: present(row.cc.as_deref()),
+            subject: present(Some(&row.subject)),
+            date: iso_date(&row.date_display, &row.date_sort),
+            date_header: present(Some(&row.date_display)),
+            flags: flag_tokens(crate::types::MessageFlags {
+                seen: row.flags.seen,
+                answered: row.flags.answered,
+                forwarded: row.flags.forwarded,
+                flagged: row.flags.flagged,
+            }),
+            has_attachments: row.has_attachments,
+            invite: row.is_invite,
+            body,
+            preview: None,
+        }
+    }
+
+    /// A message a server search fetched, found in `mailbox` (the store's id
+    /// for it) when the search knows which one.
+    pub fn from_fetched(
+        account: &str,
+        mailbox: Option<&str>,
+        email: &crate::parse::FetchedEmail,
+        full: bool,
+    ) -> ListedMessage {
+        let message_id = email.message_id.clone().unwrap_or_default();
+        let selector = mailbox.filter(|_| !message_id.is_empty()).map(|mailbox| {
+            Selector::new(account, mailbox, crate::selector::message_key(&message_id)).to_string()
+        });
+        let (body, preview) = if full {
+            (Some(email.body_text.clone()), None)
+        } else {
+            (None, Some(email.body_text.chars().take(300).collect()))
+        };
+        ListedMessage {
+            selector,
+            account: account.to_string(),
+            mailbox: mailbox.map(str::to_string),
+            message_id,
+            from: present(Some(&email.from)),
+            to: present(Some(&email.to)),
+            cc: present(email.cc.as_deref()),
+            subject: present(Some(&email.subject)),
+            date: iso_date(&email.date, ""),
+            date_header: present(Some(&email.date)),
+            flags: flag_tokens(email.flags),
+            has_attachments: email.has_attachments,
+            invite: email.calendar_ics.is_some(),
+            body,
+            preview,
+        }
+    }
+}
+
+/// One mailbox of `mp list-messages --json`: how many rows it holds and how
+/// many of them the limit let through.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ListedMailbox {
+    pub mailbox: String,
+    pub label: String,
+    pub total: usize,
+    pub shown: usize,
+}
+
+/// `mp list-messages --json`: one object, the mailboxes it covered and every
+/// listed message in one flat array, mailbox by mailbox in listing order and
+/// newest first within each, as the text layout prints them.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct MessageListingJson {
+    pub account: String,
+    pub mailboxes: Vec<ListedMailbox>,
+    pub messages: Vec<ListedMessage>,
+}
+
+/// `mp search --json`: one object, the hits best first (`--local`) or newest
+/// first (server). `source` is `"local"` or `"server"`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SearchResultsJson {
+    pub account: String,
+    pub query: String,
+    pub source: &'static str,
+    pub messages: Vec<ListedMessage>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +706,85 @@ mod tests {
         colored::control::set_override(false);
         let text = render_search("acct", "nothing", &[]);
         assert_eq!(text, "No local matches for \"nothing\" in acct\n");
+    }
+
+    /// A `--json` listing entry carries the selector the next command takes,
+    /// the date as a UTC ISO 8601 instant, and `mp show`'s flag tokens.
+    #[test]
+    fn a_listed_message_carries_its_selector_and_an_iso_date() {
+        let row = mp_protocol::listing::MessageListRow {
+            id: 7,
+            uid: 3,
+            message_id: "<abc@example.com>".into(),
+            from: "Ada <ada@example.com>".into(),
+            to: "b@example.com".into(),
+            subject: "".into(),
+            date_display: "Thu, 2 Jul 2026 13:57:30 +0200".into(),
+            flags: mp_protocol::listing::MessageFlags {
+                seen: true,
+                flagged: true,
+                ..Default::default()
+            },
+            has_attachments: true,
+            ..Default::default()
+        };
+        let listed = ListedMessage::from_wire("acct", "inbox", &row, None);
+        assert_eq!(
+            listed.selector.as_deref(),
+            Some("mp://acct/inbox/abc@example.com"),
+            "a row without the daemon's selector gets the canonical one"
+        );
+        assert_eq!(listed.date.as_deref(), Some("2026-07-02T11:57:30Z"));
+        assert_eq!(
+            listed.date_header.as_deref(),
+            Some("Thu, 2 Jul 2026 13:57:30 +0200")
+        );
+        assert_eq!(listed.flags, vec!["read", "flagged"]);
+        assert_eq!(listed.subject, None, "an empty subject is absent");
+        assert!(listed.has_attachments);
+
+        let value = serde_json::to_value(&listed).unwrap();
+        assert!(value.get("body").is_none(), "no body key without --full");
+        assert!(value.get("preview").is_none());
+        assert_eq!(value["mailbox"], "inbox");
+    }
+
+    /// An unparsable `Date:` header falls back to the wire's UTC sort key.
+    #[test]
+    fn the_iso_date_falls_back_to_the_sort_key() {
+        assert_eq!(
+            iso_date("not a date", "2026-07-02T11:57:30").as_deref(),
+            Some("2026-07-02T11:57:30Z")
+        );
+        assert_eq!(iso_date("not a date", ""), None);
+    }
+
+    /// A server hit carries the preview its text layout prints, or the whole
+    /// body with `--full`, and no selector when the mailbox is unknown.
+    #[test]
+    fn a_fetched_hit_carries_a_preview_or_the_body() {
+        let mut e = email("hit", &"x".repeat(400));
+        // The fixture's weekday is wrong for the date, which RFC 2822 parsing
+        // refuses, and a server hit has no sort key to fall back to.
+        e.date = "Fri, 7 Aug 2026 10:00:00 +0000".into();
+        e.flags = crate::types::MessageFlags::seen(true);
+
+        let short = ListedMessage::from_fetched("acct", Some("archive"), &e, false);
+        assert_eq!(
+            short.selector.as_deref(),
+            Some("mp://acct/archive/hit@example.com")
+        );
+        assert_eq!(short.preview.as_ref().map(String::len), Some(300));
+        assert_eq!(short.body, None);
+        assert_eq!(short.date.as_deref(), Some("2026-08-07T10:00:00Z"));
+        assert_eq!(short.flags, vec!["read"]);
+
+        let full = ListedMessage::from_fetched("acct", None, &e, true);
+        assert_eq!(full.selector, None);
+        assert_eq!(full.mailbox, None);
+        assert_eq!(full.message_id, "<hit@example.com>");
+        assert_eq!(full.body.as_ref().map(String::len), Some(400));
+        assert_eq!(full.preview, None);
     }
 
     /// An account with rows in no listed mailbox says so instead of printing an

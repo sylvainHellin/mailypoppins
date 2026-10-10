@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 /// those names and `mp contacts search --parsable` prints `address\tname`: a
 /// renamed pair would make the tab-delimited line a translation rather than a
 /// projection (`ANO-8`).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct ContactRow {
     pub address: String,
     pub display_name: String,
@@ -90,6 +90,16 @@ pub fn print_search(results: &[ContactRow], q: &str, parsable: bool) {
             );
         }
     }
+}
+
+/// `mp contacts search --json`: one object, the ranked rows best first under
+/// the field names `contact.search` carries.
+pub fn search_json(account: &str, query: &str, results: &[ContactRow]) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "account": account,
+        "query": query,
+        "contacts": results,
+    }))?)
 }
 
 /// The line a rebuild prints before it starts, which names the account so a
