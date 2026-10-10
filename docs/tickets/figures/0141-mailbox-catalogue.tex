@@ -1,0 +1,127 @@
+%% 0141-mailbox-catalogue.tex -- mailbox auto-discovery as ticket 0141 proposes
+%% it: the IMAP server lists every folder, the daemon keeps that list as a
+%% per-account catalogue with a resolved role, each folder gets a policy lane
+%% (sync, status-only, ignore), and the client's folder features read from it.
+%% Colour codes the lane: green sync, orange status-only, grey ignore.
+%%
+%% Requires texfig.sty (~/code/side-projects/tex-fig). Preview:
+%%   ~/code/side-projects/tex-fig/examples/build.sh <this file> 200
+\providecommand{\tffigwidth}{\linewidth}
+\resizebox{\tffigwidth}{!}{%
+\begin{tikzpicture}[font=,
+  label chip/.style 2 args={tfchip={#1}{0pt}, minimum width=#2,
+    minimum height=0.44cm, inner sep=2pt, font=\scriptsize},
+  folders/.style={tfprose, font=\scriptsize\ttfamily, text width=5.4cm},
+  gloss/.style={tfprose, font=\scriptsize\itshape, text=tfGray, text width=5.4cm},
+  verdict/.style={tfcaption, font=\footnotesize},
+  % fixed depth, so a title with descenders sits on the same baseline
+  title/.style={tftitle, text depth=0.25em}]
+
+% ===================================================================
+% 1. Source: the IMAP server
+% ===================================================================
+\node[tfcardtitlec=tfBlue] (sT) at (0,-0.5) {IMAP server};
+\node[tffield] (sF1) at (0,-1.1) {LIST "" "*"};
+\node[tffield] (sF2) at (0,-1.5) {\ RETURN (SPECIAL-USE)};
+\coordinate (sSE) at (3.3,-1.6);
+\begin{scope}[on background layer]
+  \node[tfcard, fit=(sT)(sF1)(sF2)(sSE)] (sCard) {};
+\end{scope}
+\node[tfpill={tfBlue}{3.6cm}] (tum) at (\tfcol{sCard.north}{-3.1})
+  {TUM Exchange\\[1pt]{\tiny 24 folders}};
+\node[tfpill={tfBlue}{3.6cm}] (pro) at (\tfcol{sCard.north}{-4.4})
+  {Proton Bridge\\[1pt]{\tiny 17 folders}};
+% every panel spans the same height, so the four titles share one baseline
+\coordinate (sTop) at (0,0.05);
+\coordinate (sBot) at (0,-7.15);
+
+\begin{pgfonlayer}{grouping}
+  \node[tfpanel, fit=(sTop)(sCard)(tum)(pro)(sBot)] (sP) {};
+\end{pgfonlayer}
+\node[title] at (sP.north west) {1. Source};
+
+% ===================================================================
+% 2. Mailbox catalogue, stored per account
+% ===================================================================
+\node[tfcardtitlec=tfPurple] (cT) at (5.7,-0.5) {mailbox catalogue};
+\node[tfcardsubtitle] (cS) at (5.7,-0.95) {stored per account, one row per folder};
+\foreach \f [count=\i] in {name, delimiter, attributes, role}
+  \node[tffield] (cF\i) at (5.7,{-1.15-0.42*\i}) {\f};
+\node[tfcardsubtitle] (cR) at (5.7,-3.6) {role resolution, first match wins};
+\foreach \txt [count=\i] in {config override, SPECIAL-USE flag,
+                             provider profile, name heuristic}
+  \node[label chip={tfPurple}{3.9cm}, anchor=west] (cR\i)
+    at (5.7,{-3.65-0.56*\i}) {\i.\ \txt};
+\coordinate (cSE) at (9.9,-6.78);
+\begin{scope}[on background layer]
+  \node[tfcard, fit=(cT)(cS)(cF4)(cR)(cR4)(cSE)] (cCard) {};
+\end{scope}
+
+\begin{pgfonlayer}{grouping}
+  \node[tfpanel, fit=(sTop -| cCard.north)(cCard)(sBot -| cCard.south)] (cP) {};
+\end{pgfonlayer}
+\node[title] at (cP.north west) {2. Mailbox catalogue};
+
+\draw[tfarrowc=tfBlue] (sCard.east) -- (sCard.east -| cCard.west)
+  node[midway, above=2pt, tfedgelabelc=tfBlue] {LIST reply};
+
+% ===================================================================
+% 3. Per-folder policy: three lanes
+% ===================================================================
+% sync
+\node[tfcardtitlec=tfGreen] (gT) at (12.6,-0.5) {sync};
+\node[gloss] (gS) at (12.6,-0.8) {every tick; IDLE on INBOX only};
+\node[folders] (gF) at (12.6,-1.2) {INBOX, Sent Items, Archive,\\Drafts, Spesen};
+% status-only
+\node[tfcardtitlec=tfOrange] (oT) at (12.6,-2.75) {status-only (lazy)};
+\node[gloss] (oS) at (12.6,-3.05) {counts only; full fetch when opened\\or on a full tick};
+\node[folders] (oF) at (12.6,-3.75) {Deleted Items, Junk Email,\\INBOX/reimbursements, Labels/*};
+% ignore
+\node[tfcardtitlec=tfGray] (iT) at (12.6,-5.2) {ignore};
+\node[gloss] (iS) at (12.6,-5.5) {never selected};
+\node[folders] (iF) at (12.6,-5.9) {Calendar, Contacts, Tasks, Notes,\\Journal,
+  Sync Issues/*, \textbackslash Noselect\\parents, Proton All Mail, Starred};
+
+\begin{scope}[on background layer]
+  \node[tfcardc=tfGreen,  fit=(gT)(gS)(gF)] (gCard) {};
+  \node[tfcardc=tfOrange, fit=(oT)(oS)(oF)] (oCard) {};
+  \node[tfcardc=tfGray,   fit=(iT)(iS)(iF)] (iCard) {};
+\end{scope}
+
+\begin{pgfonlayer}{grouping}
+  \node[tfpanel, fit=(sTop -| gCard.north)(gCard)(oCard)(iCard)(sBot -| gCard.south)] (pP) {};
+\end{pgfonlayer}
+\node[title] at (pP.north west) {3. Per-folder policy};
+\node[verdict, anchor=north] at ($(pP.south)+(0,-0.15)$)
+  {default from role + built-in exclude list;\\config holds overrides only};
+
+% catalogue rows feed the lanes
+\draw[tfarrowc=tfGreen]    (gCard.west -| cCard.east) -- (gCard.west);
+\draw[tfarrowc=tfOrange]   (oCard.west -| cCard.east) -- (oCard.west);
+\draw[tfarrowc=tfGray!75]  (iCard.west -| cCard.east) -- (iCard.west);
+
+% ===================================================================
+% 4. Consumers in the client
+% ===================================================================
+\foreach \nm/\ttl/\gl/\y in {
+    keys/{keys 1-9}/{bound to pinned roles\\or folders}/-0.5,
+    pick/{folder picker}/{fuzzy, over every\\catalogue entry}/-2.35,
+    srch/{search}/{local index first; server\\search on any catalogue folder}/-4.2,
+    move/{move targets}/{destination always synced}/-6.05} {
+  \node[tfcardtitlec=tfBlue] (\nm T) at (20.6,\y) {\ttl};
+  \node[gloss, text width=4.2cm] (\nm S) at (20.6,\y-0.3) {\gl};
+  \coordinate (\nm E) at (24.9,\y-0.7);
+  \begin{scope}[on background layer]
+    \node[tfcard, fit=(\nm T)(\nm S)(\nm E)] (\nm Card) {};
+  \end{scope}
+}
+
+\begin{pgfonlayer}{grouping}
+  \node[tfpanel, fit=(sTop -| keysCard.north)(keysCard)(moveCard)(sBot -| keysCard.south)] (kP) {};
+\end{pgfonlayer}
+\node[title] at (kP.north west) {4. Consumers};
+
+\foreach \nm in {keys, pick, srch, move}
+  \draw[tfarrowc=tfGray!75] (\nm Card.west -| pP.east) -- (\nm Card.west);
+
+\end{tikzpicture}}
