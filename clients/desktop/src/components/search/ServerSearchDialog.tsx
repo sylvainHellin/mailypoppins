@@ -124,7 +124,7 @@ export function ServerSearchDialog({ dialog, onOpenChange }: ServerSearchDialogP
       <DialogContent initialFocus={greyed ? advancedRef : fromRef} data-slot="server-search" className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Server Search</DialogTitle>
-          <DialogDescription>{dialog ? `Searches ${where}; the store answers first, then the server.` : ""}</DialogDescription>
+          <DialogDescription>{dialog ? `Searches ${where}: the store's hits first when its index can answer, then the server's.` : ""}</DialogDescription>
         </DialogHeader>
         <form
           aria-label="Server Search"
