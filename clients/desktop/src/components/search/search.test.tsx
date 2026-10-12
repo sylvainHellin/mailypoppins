@@ -4,6 +4,7 @@ import { renderApp, shellReady } from "@/test/render";
 import { emit, fixtures, mock } from "@/test/tauri-mock";
 import type { ServerSearchHit } from "@/protocol/types";
 import { FILTER_INPUT_ID } from "@/app/actions";
+import { REROUTED_NOTICE } from "@/app/search";
 
 const input = () => document.getElementById(FILTER_INPUT_ID) as HTMLInputElement;
 const results = () => screen.findByRole("listbox", { name: /^Search results for/ });
@@ -240,14 +241,145 @@ describe("server search", () => {
     expect(within(await results()).getAllByRole("option")).toHaveLength(1);
   });
 
-  it("ff starts the server search for the typed query", async () => {
+  it("a to: query typed in the field goes to the server, which can answer it (PERSO-115)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(input());
+    await user.keyboard("to:diyan{Enter}");
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
+    expect(mock.calls.find((c) => c.cmd === "search_server_start")?.args).toEqual({
+      params: { account: "work", query: "to:diyan" },
+    });
+    expect(await screen.findByText(REROUTED_NOTICE)).toBeInTheDocument();
+  });
+
+  it("a refusal reads whole: the status wraps instead of cutting the daemon's sentence", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const message = "message.search: the daemon refused the call: the store of work is being rebuilt, try again in a minute (-32603)";
+    mock.failing.set("search_local", { kind: "protocol", message, code: -32603 });
+    await user.click(input());
+    await user.keyboard("ledger{Enter}");
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "failed"));
+    const alert = within(status() as HTMLElement).getByRole("alert");
+    expect(alert).toHaveTextContent(`The search failed: ${message}`);
+    expect(alert).not.toHaveClass("truncate");
+    expect(alert).toHaveClass("whitespace-normal");
+  });
+});
+
+describe("the Server Search form (PERSO-115)", () => {
+  // The dialog moves the focus to From once it opens, as the TUI's form starts there.
+  async function form(): Promise<HTMLElement> {
+    const dialog = await screen.findByRole("dialog", { name: "Server Search" });
+    await waitFor(() => expect(within(dialog).getByRole("textbox", { name: "From" })).toHaveFocus());
+    return dialog;
+  }
+  const field = (dialog: HTMLElement, name: string) => within(dialog).getByRole("textbox", { name }) as HTMLInputElement;
+
+  it("ff opens it with From focused, the TUI's fields, and the typed text as its keywords", async () => {
     const { user } = renderApp();
     await shellReady();
     await user.click(input());
     await user.keyboard("handover");
-    // Out of the field, then the TUI's "Search all mail" key.
     await user.keyboard("{Escape}");
     await user.keyboard("ff");
-    await waitFor(() => expect(mock.calls.some((c) => c.cmd === "search_server_start")).toBe(true));
+    const dialog = await form();
+    expect(field(dialog, "From")).toHaveFocus();
+    for (const name of ["To", "Subject", "Keywords", "After", "Before", "Advanced"]) {
+      expect(field(dialog, name)).toBeInTheDocument();
+    }
+    expect(field(dialog, "Keywords")).toHaveValue("handover");
+    expect(within(dialog).getByRole("button", { name: "Search in: Current Account" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("checkbox", { name: "has attachment" })).not.toBeChecked();
+    expect(mock.calls.some((c) => c.cmd === "search_server_start")).toBe(false);
+  });
+
+  it("Tab moves through the fields, Enter runs a to: search on the server alone, and the results fill the list", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("ff");
+    const dialog = await form();
+    await user.keyboard("{Tab}diyan{Enter}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Server Search" })).toBeNull());
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
+    expect(mock.calls.find((c) => c.cmd === "search_query")?.args).toMatchObject({ form: { to: "diyan" } });
+    expect(mock.calls.find((c) => c.cmd === "search_server_start")?.args).toEqual({
+      params: { account: "work", query: 'to:"diyan"' },
+    });
+    // The store's index cannot answer `to:`, so no local pass ran.
+    expect(mock.calls.some((c) => c.cmd === "search_local")).toBe(false);
+    expect(dialog).not.toBeInTheDocument();
+  });
+
+  it("Space flips the scope to the current mailbox: the store answers first, then the server leg excludes its hits", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("ff");
+    const dialog = await form();
+    await user.keyboard("{Shift>}{Tab}{/Shift}");
+    expect(within(dialog).getByRole("button", { name: "Search in: Current Account" })).toHaveFocus();
+    await user.keyboard(" ");
+    expect(within(dialog).getByRole("button", { name: "Search in: Current Mailbox" })).toBeInTheDocument();
+    await user.click(field(dialog, "Keywords"));
+    await user.keyboard("ledger{Enter}");
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
+    expect(mock.calls.find((c) => c.cmd === "search_local")?.args).toEqual({
+      params: { account: "work", query: "ledger", mailbox: "Inbox" },
+    });
+    expect(mock.calls.find((c) => c.cmd === "search_server_start")?.args).toEqual({
+      params: {
+        account: "work",
+        query: "ledger",
+        mailboxes: ["Inbox"],
+        exclude_message_ids: [fixtures.messages.work.inbox[0].message_id],
+      },
+    });
+    expect(within(await results()).getAllByRole("option")).toHaveLength(1);
+    expect(status()).toHaveTextContent("Searching the server… 1 result so far");
+  });
+
+  it("a non-blank Advanced line greys the structured fields, and a refusal keeps the form open", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("ff");
+    const dialog = await form();
+    await user.keyboard("ada");
+    await user.click(field(dialog, "Advanced"));
+    await user.keyboard("subject:x");
+    for (const name of ["From", "To", "Subject", "Keywords", "After", "Before"]) expect(field(dialog, name)).toBeDisabled();
+    expect(within(dialog).getByRole("checkbox", { name: "has attachment" })).toBeDisabled();
+    await user.clear(field(dialog, "Advanced"));
+    expect(field(dialog, "From")).toBeEnabled();
+
+    await user.click(field(dialog, "Before"));
+    await user.keyboard("nope{Enter}");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("--before expects a date as YYYY-MM-DD, got 'nope'");
+    expect(screen.getByRole("dialog", { name: "Server Search" })).toBeInTheDocument();
+    expect(mock.calls.some((c) => c.cmd === "search_local" || c.cmd === "search_server_start")).toBe(false);
+  });
+
+  it("a blank form searches nothing, and Escape closes it", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("ff");
+    const dialog = await form();
+    await user.keyboard("{Enter}");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Fill the form and press Enter to search");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Server Search" })).toBeNull());
+    expect(mock.calls.some((c) => c.cmd === "search_local" || c.cmd === "search_server_start")).toBe(false);
+  });
+
+  it("opens again with the form the shown search ran", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("ff");
+    let dialog = await form();
+    await user.keyboard("{Tab}diyan{Enter}");
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
+    await user.click(screen.getByRole("button", { name: "Server Search form" }));
+    dialog = await form();
+    expect(field(dialog, "To")).toHaveValue("diyan");
   });
 });

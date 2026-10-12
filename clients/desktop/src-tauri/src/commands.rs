@@ -319,6 +319,94 @@ pub struct ServerSearchParams {
     pub exclude_message_ids: Option<Vec<String>>,
 }
 
+/// The Server Search form, the TUI overlay's fields (#0086b, PERSO-115):
+/// four text fields, two `YYYY-MM-DD` dates, the attachment toggle, and the
+/// raw-grammar Advanced line, which takes over when it holds anything. The
+/// scope toggle is the frontend's, since it names mailboxes and not terms.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+#[serde(default)]
+pub struct SearchForm {
+    pub from: String,
+    pub to: String,
+    pub subject: String,
+    /// Free text in the grammar, so `a OR b` and quoted phrases work.
+    pub keywords: String,
+    pub after: String,
+    pub before: String,
+    pub attachment: bool,
+    pub advanced: String,
+}
+
+/// What [`search_plan`] made of a [`SearchForm`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SearchPlan {
+    /// Nothing entered anywhere: Enter does not search, as in the TUI.
+    Blank,
+    /// The parser's or a date's refusal, verbatim (a parse error is three
+    /// lines, the last a caret under the offending character).
+    Invalid { message: String },
+    Query {
+        /// The query rendered back into the grammar both search methods read.
+        query: String,
+        /// Whether the store's index can answer it: `to:`, `cc:`,
+        /// `filename:`, `message-id:` and a date inside an OR group are the
+        /// server's alone, and `message.search` refuses them.
+        local: bool,
+        /// The query's own `in:` mailbox, which overrides the form's scope.
+        in_mailbox: Option<String>,
+    },
+}
+
+/// Build the query a [`SearchForm`] describes, as the TUI's
+/// `SearchForm::build_query` does: a non-blank Advanced line is parsed on its
+/// own, else `keywords` is the positional grammar and the other fields are
+/// `mp search`'s flags, through the one parser every backend reads
+/// (`mp_core::search::from_cli`).
+pub fn search_plan(form: &SearchForm) -> SearchPlan {
+    use mp_core::search;
+    let advanced = form.advanced.trim();
+    let built = if !advanced.is_empty() {
+        search::parse(advanced).map_err(|e| e.to_string())
+    } else {
+        let opt = |s: &str| Some(s.trim().to_string()).filter(|t| !t.is_empty());
+        let flags = search::Flags {
+            from: opt(&form.from),
+            to: opt(&form.to),
+            cc: None,
+            subject: opt(&form.subject),
+            body: None,
+            filename: None,
+            has_attachment: form.attachment,
+            after: opt(&form.after),
+            before: opt(&form.before),
+        };
+        let blank = form.keywords.trim().is_empty()
+            && flags.from.is_none()
+            && flags.to.is_none()
+            && flags.subject.is_none()
+            && flags.after.is_none()
+            && flags.before.is_none()
+            && !flags.has_attachment;
+        if blank {
+            return SearchPlan::Blank;
+        }
+        search::from_cli(form.keywords.trim(), &flags)
+    };
+    match built {
+        Err(message) => SearchPlan::Invalid { message },
+        Ok(query) => SearchPlan::Query {
+            query: search::to_query_string(&query),
+            local: search::to_fts(&query).is_ok(),
+            in_mailbox: query.in_mailbox.clone(),
+        },
+    }
+}
+
 /// A started server search. Hits arrive as `message.server_hit` events and
 /// the end as `operation.finished`, both carrying this id.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1643,6 +1731,13 @@ pub async fn search_local(
     with_door(&session, move |_, door| search_local_on(door, &params)).await
 }
 
+/// The Server Search form as a query, with no daemon call: the parse is
+/// `mp-core`'s, the one the daemon runs on what it is sent.
+#[tauri::command(rename_all = "snake_case")]
+pub fn search_query(form: SearchForm) -> SearchPlan {
+    search_plan(&form)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn search_server_start(
     session: State<'_, SessionHandle>,
@@ -2625,6 +2720,127 @@ mod tests {
         assert!(value["mailbox"].is_string());
         assert!(value["id"].is_i64());
         assert!(value.get("row").is_none());
+    }
+
+    /// The refusal the GUI showed truncated for `to:diyan` (PERSO-115): a
+    /// `-32602` protocol error carrying the daemon's sentence, which the
+    /// frontend reroutes to the server once `search_plan` says the store
+    /// cannot answer the query.
+    #[test]
+    fn a_recipient_query_is_refused_by_the_local_search() {
+        let error = search_local_on(
+            &door(),
+            &LocalSearchParams {
+                account: "work".into(),
+                query: "to:diyan".into(),
+                ..Default::default()
+            },
+        )
+        .expect_err("refused");
+        assert_eq!(
+            error,
+            GuiError::Protocol {
+                message: "message.search: the daemon refused the call: to: and cc: are not \
+                          indexed by --local; drop --local to search them server-side (-32602)"
+                    .into(),
+                code: Some(-32602),
+            }
+        );
+    }
+
+    /// The form lowers as the TUI's `SearchForm::build_query` does: the
+    /// structured fields are flags around the keywords, a blank form is no
+    /// search, and a non-blank Advanced line takes over (PERSO-115).
+    #[test]
+    fn the_search_form_builds_the_query_the_tui_builds() {
+        assert_eq!(search_plan(&SearchForm::default()), SearchPlan::Blank);
+        assert_eq!(
+            search_plan(&SearchForm {
+                from: " ada ".into(),
+                subject: "budget".into(),
+                keywords: "q3 OR q4".into(),
+                after: "2026-01-01".into(),
+                attachment: true,
+                ..Default::default()
+            }),
+            SearchPlan::Query {
+                query: "from:\"ada\" subject:\"budget\" (\"q3\" OR \"q4\") after:\"2026-01-01\" has:attachment"
+                    .into(),
+                local: true,
+                in_mailbox: None,
+            }
+        );
+        assert_eq!(
+            search_plan(&SearchForm {
+                from: "ignored".into(),
+                advanced: "subject:x in:Archive".into(),
+                ..Default::default()
+            }),
+            SearchPlan::Query {
+                query: "subject:\"x\" in:\"Archive\"".into(),
+                local: true,
+                in_mailbox: Some("Archive".into()),
+            }
+        );
+    }
+
+    /// `to:` is the server's alone: the store's index has no recipient
+    /// column, which is why `message.search` refused the GUI's `to:diyan`
+    /// (PERSO-115), and the plan says so before any call.
+    #[test]
+    fn a_recipient_term_is_not_one_the_store_can_answer() {
+        for form in [
+            SearchForm {
+                keywords: "to:diyan".into(),
+                ..Default::default()
+            },
+            SearchForm {
+                to: "diyan".into(),
+                ..Default::default()
+            },
+            SearchForm {
+                advanced: "cc:x".into(),
+                ..Default::default()
+            },
+        ] {
+            let SearchPlan::Query { local, .. } = search_plan(&form) else {
+                panic!("{form:?} should be a query");
+            };
+            assert!(!local, "{form:?}");
+        }
+    }
+
+    #[test]
+    fn a_bad_date_or_query_is_refused_in_the_parser_s_words() {
+        let SearchPlan::Invalid { message } = search_plan(&SearchForm {
+            before: "nope".into(),
+            ..Default::default()
+        }) else {
+            panic!("a bad date should be refused");
+        };
+        assert!(message.contains("YYYY-MM-DD"), "{message}");
+        let SearchPlan::Invalid { message } = search_plan(&SearchForm {
+            advanced: "has:document".into(),
+            ..Default::default()
+        }) else {
+            panic!("an unknown has: should be refused");
+        };
+        assert!(message.starts_with("invalid search query:"), "{message}");
+    }
+
+    #[test]
+    fn the_plan_serialises_with_a_kind_tag() {
+        let value = serde_json::to_value(search_plan(&SearchForm {
+            to: "diyan".into(),
+            ..Default::default()
+        }))
+        .expect("json");
+        assert_eq!(
+            value,
+            json!({"kind": "query", "query": "to:\"diyan\"", "local": false, "in_mailbox": null})
+        );
+        let form: SearchForm = serde_json::from_value(json!({"to": "diyan"})).expect("form");
+        assert_eq!(form.to, "diyan");
     }
 
     /// A fixture door, the fixture, and its event stream.

@@ -30,15 +30,20 @@ import type {
   VersionInfo,
 } from "@/lib/gui-types";
 import {
+  afterLocalPass,
   finishedSignal,
   hitFetched,
   isOpenable,
   localHit,
+  localRerouted,
+  openServerSearch,
+  runForm,
   serverHitSignal,
   serverStarted,
   settledSignal,
   signal,
   startSearch,
+  type FormRun,
 } from "@/app/search";
 import {
   applyMutation,
@@ -311,6 +316,12 @@ export type Action =
   | { type: "search_local"; query: string }
   | { type: "search_local_loaded"; seq: number; hits: LocalSearchHit[] }
   | { type: "search_local_failed"; seq: number; error: GuiError }
+  /** `search_local` refused a query only the server can answer: run it there. */
+  | { type: "search_local_rerouted"; seq: number }
+  /** `ff`: the Server Search form. */
+  | { type: "open_server_search" }
+  /** The Server Search form's Enter, once its query is built. */
+  | { type: "search_run"; run: FormRun }
   | { type: "search_server"; query: string }
   | { type: "search_server_started"; seq: number; operation_id: string }
   | { type: "search_server_failed"; seq: number; error: GuiError }
@@ -864,6 +875,7 @@ const LEAVES_EDITOR: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "clear_selection",
   "search_local",
   "search_server",
+  "search_run",
   "exit_search",
   "switch_view",
   "open_outbox",
@@ -1272,6 +1284,7 @@ const USER_SELECTION: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "clear_selection",
   "search_local",
   "search_server",
+  "search_run",
   "exit_search",
 ]);
 
@@ -1287,6 +1300,7 @@ const LEAVES_VIEW: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "jump_mailbox",
   "search_local",
   "search_server",
+  "search_run",
   "open_outbox",
   "compose_embedded",
   "compose_show",
@@ -1305,6 +1319,7 @@ const LEAVES_OUTBOX: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "jump_mailbox",
   "search_local",
   "search_server",
+  "search_run",
 ]);
 
 /** The reducer; the Calendar and Contacts views follow the selection's account after every action. */
@@ -1529,6 +1544,7 @@ function reduce(s: AppState, a: Action): AppState {
         attachDialog: a.overlay === "attachments" ? s.attachDialog : null,
         rsvpDialog: a.overlay === "rsvp" ? s.rsvpDialog : null,
         inviteDialog: a.overlay === "invite" ? s.inviteDialog : null,
+        serverSearchDialog: a.overlay === "server_search" ? s.serverSearchDialog : null,
         signaturesDialog: a.overlay === "signatures" ? s.signaturesDialog : null,
         passwordDialog: a.overlay === "password" ? s.passwordDialog : null,
         accountWizard: a.overlay === "account_wizard" ? s.accountWizard : null,
@@ -1624,13 +1640,19 @@ function reduce(s: AppState, a: Action): AppState {
           const e = h.row_id === null ? undefined : s.pending[targetKey({ account: h.account, row_id: h.row_id })];
           return !e?.leave;
         });
-      return { ...s, search: { ...search, status: "done", hits } };
+      return afterLocalPass({ ...s, search: { ...search, status: "done", hits } });
     }
     case "search_local_failed": {
       const search = s.search;
       if (!search || search.seq !== a.seq || search.mode !== "local") return s;
-      return { ...s, search: { ...search, status: "failed", error: a.error.message } };
+      return afterLocalPass({ ...s, search: { ...search, status: "failed", error: a.error.message } });
     }
+    case "search_local_rerouted":
+      return localRerouted(s, a.seq);
+    case "open_server_search":
+      return openServerSearch(s);
+    case "search_run":
+      return withFocus({ ...runForm(s, a.run), marked: NO_MARKS }, "list");
     case "search_server":
       return withFocus({ ...startSearch(s, "server", a.query), marked: NO_MARKS }, "list");
     case "search_server_started":

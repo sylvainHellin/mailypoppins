@@ -48,6 +48,8 @@ import type {
   OperationStarted,
   OutboxDiscarded,
   SavedAttachments,
+  SearchForm,
+  SearchPlan,
   SecretKind,
   SecretStored,
   SendStarted,
@@ -89,6 +91,9 @@ export const messageHtmlMeta = (account: string, row_id: number): Promise<Messag
 
 export const searchLocal = (params: LocalSearchParams): Promise<LocalSearchHit[]> =>
   invoke<LocalSearchHit[]>("search_local", { params });
+
+/** The Server Search form as a query, built by `mp-core`'s parser; no daemon call. */
+export const searchQuery = (form: SearchForm): Promise<SearchPlan> => invoke<SearchPlan>("search_query", { form });
 
 export const searchServerStart = (params: ServerSearchParams): Promise<{ operation_id: string }> =>
   invoke<{ operation_id: string }>("search_server_start", { params });

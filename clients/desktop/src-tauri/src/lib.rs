@@ -203,6 +203,7 @@ pub fn run() {
             commands::message_text,
             commands::message_html_meta,
             commands::search_local,
+            commands::search_query,
             commands::search_server_start,
             commands::search_server_cancel,
             commands::operation_cancel,

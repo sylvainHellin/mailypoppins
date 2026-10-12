@@ -167,14 +167,15 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     case "back":
       return dispatch({ type: "back" });
     case "search_server": {
-      // The typed query, else the one the search shows.
+      // The typed query, else the one the search shows, else the form.
       const query = s.filter.trim() || s.search?.query || "";
-      if (!query) {
-        dispatch({ type: "notice", text: "Type what to search for, then Shift+Enter searches the server" });
-        return runAction("focus_filter", s, dispatch);
-      }
+      if (!query) return dispatch({ type: "open_server_search" });
       return dispatch({ type: "search_server", query });
     }
+    case "open_server_search":
+      // The TUI's `ff`: the Server Search form. Running it brings Mail back
+      // over a full-pane view or the outbox, as a search from the header does.
+      return dispatch({ type: "open_server_search" });
     case "cancel_search": {
       const search = s.search;
       if (!search || search.mode !== "server" || search.status !== "running" || !search.operationId) {

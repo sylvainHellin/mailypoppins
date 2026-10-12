@@ -5,10 +5,11 @@ import type { SearchState } from "@/app/state";
 function describe(search: SearchState): string {
   const n = search.hits.length;
   const results = `${n} ${n === 1 ? "result" : "results"}`;
-  const where = search.mode === "server" ? "on the server" : "in the store";
+  const where = `${search.mode === "server" ? "on the server" : "in the store"}${search.mailbox ? ` in ${search.mailbox}` : ""}`;
   switch (search.status) {
     case "searching":
-      return search.mode === "server" ? `Starting the server search… ${results} so far` : "Searching the store…";
+      if (search.mode === "server") return `Starting the server search… ${results} so far`;
+      return search.chain ? "Searching the store, then the server…" : "Searching the store…";
     case "running":
       return `Searching the server… ${results} so far`;
     case "done": {
@@ -46,7 +47,12 @@ export function SearchStatusBar({
     >
       {busy ? <LoaderCircle aria-hidden="true" className="size-3.5 shrink-0 animate-spin text-link" /> : null}
       {bad ? <TriangleAlert aria-hidden="true" className="size-3.5 shrink-0 text-destructive" /> : null}
-      <span role={bad ? "alert" : "status"} className={`min-w-0 flex-1 truncate ${bad ? "text-destructive" : "text-muted-foreground"}`}>
+      {/* A failure wraps, so the daemon's whole sentence reads (PERSO-115); progress stays one line. */}
+      <span
+        role={bad ? "alert" : "status"}
+        title={describe(search)}
+        className={`min-w-0 flex-1 ${bad ? "break-words whitespace-normal text-destructive" : "truncate text-muted-foreground"}`}
+      >
         {describe(search)}
       </span>
       {search.mode === "server" && busy ? (

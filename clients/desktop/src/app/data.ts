@@ -11,6 +11,7 @@ import { accountNames, isStale, readerKey, type AppState } from "@/app/state";
 import { refusalsWanted } from "@/app/rsvp";
 import { CONTACT_LIMIT } from "@/app/contacts";
 import { signaturesWanted } from "@/app/signatures";
+import { EMPTY_SEARCH_FORM } from "@/app/search";
 
 /** Subscribe once, read the connection and version, and route menu items. */
 export function useBoot(dispatch: Dispatch<Action>, onMenuItem: (id: string) => void): void {
@@ -268,7 +269,14 @@ function useSearchSync(state: AppState, dispatch: Dispatch<Action>): void {
 
   const want =
     search && search.status === "searching"
-      ? { mode: search.mode, seq: search.seq, account: search.account, query: search.query }
+      ? {
+          mode: search.mode,
+          seq: search.seq,
+          account: search.account,
+          query: search.query,
+          mailbox: search.mailbox,
+          chain: search.chain,
+        }
       : null;
   const wantKey = want ? `${want.mode}:${want.seq}` : null;
   const exclude =
@@ -282,17 +290,32 @@ function useSearchSync(state: AppState, dispatch: Dispatch<Action>): void {
   useEffect(() => {
     if (!want || started.current === wantKey) return;
     started.current = wantKey;
-    const { mode, seq, account, query } = want;
+    const { mode, seq, account, query, mailbox, chain } = want;
     if (mode === "local") {
       cmd
-        .searchLocal({ account, query })
+        .searchLocal({ account, query, ...(mailbox ? { mailbox } : {}) })
         .then((hits) => dispatch({ type: "search_local_loaded", seq, hits }))
-        .catch((e: unknown) => dispatch({ type: "search_local_failed", seq, error: asGuiError(e) }));
+        .catch(async (e: unknown) => {
+          const error = asGuiError(e);
+          // A query the store's index cannot answer (`to:diyan` typed in
+          // the header's field) is refused as a bad parameter; the same
+          // parser says whether that is why, and the server runs it.
+          if (!chain && error.kind === "protocol" && error.code === -32602) {
+            const plan = await cmd.searchQuery({ ...EMPTY_SEARCH_FORM, keywords: query }).catch(() => null);
+            if (plan?.kind === "query" && !plan.local) return dispatch({ type: "search_local_rerouted", seq });
+          }
+          dispatch({ type: "search_local_failed", seq, error });
+        });
       return;
     }
     const ids = excludeRef.current;
     cmd
-      .searchServerStart({ account, query, ...(ids.length ? { exclude_message_ids: ids } : {}) })
+      .searchServerStart({
+        account,
+        query,
+        ...(mailbox ? { mailboxes: [mailbox] } : {}),
+        ...(ids.length ? { exclude_message_ids: ids } : {}),
+      })
       .then(({ operation_id }) => {
         const now = current.current;
         if (!now || now.seq !== seq || now.mode !== "server") {

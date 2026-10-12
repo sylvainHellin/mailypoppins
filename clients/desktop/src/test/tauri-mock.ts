@@ -45,6 +45,8 @@ import type {
   MessageText,
   MutationAck,
   MutationBatch,
+  SearchForm,
+  SearchPlan,
   UpdateCheck,
   UpdateProgress,
   UpdateStatus,
@@ -727,6 +729,44 @@ function kindOf(role: string): MailboxListing["mailboxes"][number]["kind"] {
 }
 
 /** A fixture row as `message.list` sends it: listed headers are "" when absent. */
+/** What `search_local` rejects a `to:` or `cc:` query with, the daemon's words (fixture.rs). */
+export const LOCAL_REFUSAL =
+  "message.search: the daemon refused the call: to: and cc: are not indexed by --local; drop --local to search them server-side (-32602)";
+
+/**
+ * `search_query` as commands.rs's `search_plan` answers it, for the shapes
+ * the tests type: the fields as flags around the keywords, an Advanced line
+ * that takes over, a bad date refused, and `to:`, `cc:`, `filename:` and
+ * `message-id:` the store's index cannot answer. The real lowering is
+ * mp-core's, tested on the Rust side.
+ */
+export function searchPlan(form: SearchForm): SearchPlan {
+  const t = (v: string) => v.trim();
+  const advanced = t(form.advanced);
+  let parts: string[];
+  if (advanced) {
+    parts = [advanced];
+  } else {
+    for (const [name, value] of [["after", form.after], ["before", form.before]] as const) {
+      if (t(value) && !/^\d{4}-\d{2}-\d{2}$/.test(t(value))) {
+        return { kind: "invalid", message: `--${name} expects a date as YYYY-MM-DD, got '${t(value)}'` };
+      }
+    }
+    const fields = ["from", "to", "subject"] as const;
+    parts = [
+      ...fields.filter((f) => t(form[f])).map((f) => `${f}:"${t(form[f])}"`),
+      ...(t(form.keywords) ? [t(form.keywords)] : []),
+      ...(t(form.after) ? [`after:"${t(form.after)}"`] : []),
+      ...(t(form.before) ? [`before:"${t(form.before)}"`] : []),
+      ...(form.attachment ? ["has:attachment"] : []),
+    ];
+    if (parts.length === 0) return { kind: "blank" };
+  }
+  const query = parts.join(" ");
+  const inMailbox = /(?:^|\s)in:"?([^"\s]+)"?/.exec(query)?.[1] ?? null;
+  return { kind: "query", query, local: !/(?:^|[\s(])(to|cc|filename|message-id):/i.test(query), in_mailbox: inMailbox };
+}
+
 function strip(row: FixtureRow): MessageListRow {
   const { body: _b, attachments: _a, ...wire } = row;
   return {
@@ -1129,9 +1169,14 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       // fixture.rs's `matches`: subject, sender or body, case-insensitive.
       const params = args.params as { account: string; query: string; mailbox?: string };
       const q = params.query.trim().toLowerCase();
+      // The daemon's refusal of a term its index has no column for.
+      if (/(?:^|[\s(])(to|cc):/.test(q)) {
+        throw { kind: "protocol", message: LOCAL_REFUSAL, code: -32602 } satisfies GuiError;
+      }
       const hits: LocalSearchHit[] = [];
       for (const [mailbox, rows] of Object.entries(mock.rows[params.account] ?? {})) {
-        if (params.mailbox && params.mailbox !== mailbox) continue;
+        // A slug or, as the form sends it, the sidebar label.
+        if (params.mailbox && params.mailbox.toLowerCase() !== mailbox.toLowerCase()) continue;
         for (const r of rows) {
           const text = `${r.subject ?? ""}\n${r.from ?? ""}\n${r.body ?? ""}`.toLowerCase();
           if (text.includes(q)) hits.push({ ...strip(r), id: r.id + mock.rowShift, mailbox });
@@ -1139,6 +1184,8 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       }
       return hits;
     }
+    case "search_query":
+      return searchPlan(args.form as SearchForm);
     case "search_server_start":
       return { operation_id: `op-${mock.nextOp++}` };
     case "search_server_cancel":

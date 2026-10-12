@@ -27,6 +27,7 @@ import type {
   MailboxListing,
   MessageList,
   MessageMeta,
+  SearchForm,
   SecretKind,
   SignatureListing,
   SyncMode,
@@ -134,7 +135,8 @@ export const LIST_WIDTH_STEP = 40;
  * `password` is the password dialog `passwordDialog` describes;
  * `account_wizard` is the account wizard `accountWizard` describes;
  * `device_code` is the sign-in `signIn` describes; `compose_leave` is the
- * question `composeLeave` describes.
+ * question `composeLeave` describes; `server_search` is the Server Search
+ * form `serverSearchDialog` describes.
  */
 export type Overlay =
   | "palette"
@@ -152,6 +154,7 @@ export type Overlay =
   | "account_wizard"
   | "device_code"
   | "compose_leave"
+  | "server_search"
   | null;
 
 /**
@@ -208,6 +211,20 @@ export type SearchSignal =
  */
 export type SearchStatus = "searching" | "running" | "done" | "cancelled" | "failed" | "dropped";
 
+/** The Server Search form's scope toggle, the TUI's "Search In" (#0086b). */
+export type SearchScope = "mailbox" | "account";
+
+/** What the Server Search form held: its fields and its scope. */
+export type SearchFormState = { fields: SearchForm; scope: SearchScope };
+
+/**
+ * The Server Search form (`ff`, PERSO-115): the account it searches, the
+ * selected mailbox under the name both search methods take (its sidebar
+ * label; null when no mailbox is selected or it is Drafts, which has no
+ * server folder), and what the form opens with.
+ */
+export type ServerSearchDialog = { account: string; mailbox: string | null; form: SearchFormState };
+
 export type SearchState = {
   query: string;
   account: string;
@@ -229,6 +246,12 @@ export type SearchState = {
   early: SearchSignal[];
   /** The mailbox list's selection and focus, restored when the search ends. */
   restore: { selection: Selection; focus: Pane };
+  /** The one mailbox searched (a sidebar label or the query's `in:`), or null for the whole account. */
+  mailbox: string | null;
+  /** A local pass the server leg follows once it ends, as the TUI's overlay runs both. */
+  chain: boolean;
+  /** The Server Search form this search came from, which `ff` opens with again; null for the list header's field. */
+  form: SearchFormState | null;
 };
 
 /**
@@ -752,6 +775,8 @@ export type AppState = {
   rsvpEarly: OperationEnd[];
   /** What the `invite` overlay shows; null whenever another overlay or none is open. */
   inviteDialog: InviteDialog | null;
+  /** What the `server_search` overlay shows; null whenever another overlay or none is open. */
+  serverSearchDialog: ServerSearchDialog | null;
   /** New invitations this window sent, in start order. */
   inviteSends: InviteSendRun[];
   /** Operation ends that arrived while a `send_invite` was unanswered, for its id. */
@@ -875,6 +900,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     rsvps: [],
     rsvpEarly: [],
     inviteDialog: null,
+    serverSearchDialog: null,
     inviteSends: [],
     inviteSendEarly: [],
     contacts: {},

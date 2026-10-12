@@ -38,6 +38,7 @@ export type ActionId =
   | "restart_daemon"
   | "back"
   | "search_server"
+  | "open_server_search"
   | "cancel_search"
   | "show_intercepted"
   | "archive"
@@ -132,7 +133,8 @@ const BY_ACTION: Record<string, Binding> = {
   // area's notices, never a live hold card (D12).
   "Toggle activity log": { id: "toggle_activity" },
   "Send current draft (approve + send)": { id: "send" },
-  "Search all mail (sender, subject, body)": { id: "search_server" },
+  // `ff` opens the TUI's Server Search form (PERSO-115).
+  "Search all mail (sender, subject, body)": { id: "open_server_search" },
   "New draft": { id: "new_draft" },
   "Manage signatures": { id: "manage_signatures" },
   "Go to mailboxes (sidebar)": { id: "focus_sidebar" },
@@ -246,6 +248,10 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     // The overlay's own `w`: in the desktop client a hit is a list row, so
     // `cf` forwards it (MESSAGE).
     Forward: { badge: "later" },
+    // The form is a dialog: Tab and Shift+Tab move through its fields, and
+    // Escape closes it (ServerSearchDialog.tsx).
+    "Switch focus": { badge: "key" },
+    "Close overlay": { badge: "key" },
   },
 };
 
@@ -319,7 +325,13 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   // for Updates…" runs it too. "Update to vX.Y.Z" and "Restart to finish the
   // update" join it while an update is known (`updatePaletteEntries`).
   { section: "APP", label: "Check for updates", keys: [], id: "check_updates", badge: null },
-  { section: "SEARCH", label: "Search server", keys: ["ff", "Shift+Enter"], id: "search_server", badge: null },
+  { section: "SEARCH", label: "Search server", keys: ["Shift+Enter"], id: "search_server", badge: null },
+  // The Server Search form's own keys (ServerSearchDialog.tsx), the TUI
+  // overlay's form keys; `ff` opens it ("Search all mail").
+  { section: "SEARCH", label: "Server Search form: next / previous field", keys: ["Tab", "Shift+Tab"], id: null, badge: "key" },
+  { section: "SEARCH", label: "Server Search form: toggle the scope or the attachment", keys: ["Space"], id: null, badge: "key" },
+  { section: "SEARCH", label: "Server Search form: search", keys: ["Enter"], id: null, badge: "key" },
+  { section: "SEARCH", label: "Server Search form: close", keys: ["Esc"], id: null, badge: "key" },
   { section: "SEARCH", label: "Cancel the server search", keys: [], id: "cancel_search", badge: null },
   { section: "READER", label: "Show intercepted links", keys: [], id: "show_intercepted", badge: null },
   // The reader mode (src/app/readerMode.ts), stored in desktop.json: `tt`
