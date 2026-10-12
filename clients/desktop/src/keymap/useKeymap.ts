@@ -116,7 +116,8 @@ const MAIL_COMBOS: Record<string, ActionId> = {
   gj: "next_message",
   gk: "prev_message",
   fm: "focus_filter",
-  ff: "search_server",
+  // The TUI's "Search all mail": its Server Search form (PERSO-115).
+  ff: "open_server_search",
   cn: "new_draft",
   // Mail only: a view never arms `c`, as the TUI's do not.
   cs: "manage_signatures",

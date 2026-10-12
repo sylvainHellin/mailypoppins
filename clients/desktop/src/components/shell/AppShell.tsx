@@ -16,6 +16,7 @@ import { TerminalHost, TerminalSlotProvider } from "@/components/compose/Termina
 import { AttachmentsDialog } from "@/components/attachments/AttachmentsDialog";
 import { RsvpDialog } from "@/components/calendar/RsvpDialog";
 import { NewInvitationDialog } from "@/components/calendar/NewInvitationDialog";
+import { ServerSearchDialog } from "@/components/search/ServerSearchDialog";
 import { SignaturesDialog } from "@/components/signatures/SignaturesDialog";
 import { ActivityLogDialog } from "@/components/activity/ActivityLogDialog";
 import { PasswordDialog } from "@/components/settings/PasswordDialog";
@@ -119,6 +120,7 @@ export function AppShell() {
       <AttachmentsDialog dialog={s.overlay === "attachments" ? s.attachDialog : null} onOpenChange={close} />
       <RsvpDialog dialog={s.overlay === "rsvp" ? s.rsvpDialog : null} onOpenChange={close} />
       <NewInvitationDialog dialog={s.overlay === "invite" ? s.inviteDialog : null} onOpenChange={close} />
+      <ServerSearchDialog dialog={s.overlay === "server_search" ? s.serverSearchDialog : null} onOpenChange={close} />
       <SignaturesDialog dialog={s.overlay === "signatures" ? s.signaturesDialog : null} onOpenChange={close} />
       <ActivityLogDialog open={s.overlay === "activity"} onOpenChange={close} />
       <PasswordDialog dialog={s.overlay === "password" ? s.passwordDialog : null} onOpenChange={close} />

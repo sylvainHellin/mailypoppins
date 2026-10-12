@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { emitEnvelope, emitMenu, fixtures, mock } from "@/test/tauri-mock";
 import { VIEW_KEYS } from "@/keymap/viewKeys";
-import type { ActionId } from "@/keymap/catalog";
+import { bindingFor, GUI_ENTRIES, paletteEntries, type ActionId } from "@/keymap/catalog";
 import { LINE_PX } from "@/keymap/useKeymap";
 import { HALF_PAGE } from "@/app/actions";
 
@@ -18,6 +18,30 @@ function selectedSubject(): string | null {
 }
 
 describe("keyboard routing", () => {
+  it("ff opens the Server Search form, the TUI's Search all mail, and the help and palette name it", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("ff");
+    expect(await screen.findByRole("dialog", { name: "Server Search" })).toBeInTheDocument();
+    // While the form is open its fields own the keys: `j` is a letter, not a move.
+    const before = selectedSubject();
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "From" })).toHaveFocus());
+    await user.keyboard("j");
+    expect(screen.getByRole("textbox", { name: "From" })).toHaveValue("j");
+    expect(selectedSubject()).toBe(before);
+
+    const all = paletteEntries();
+    expect(all.find((e) => e.label === "Search all mail (sender, subject, body)")).toMatchObject({ keys: ["ff"], id: "open_server_search" });
+    expect(bindingFor("SERVER SEARCH", "Close overlay")).toEqual({ badge: "key" });
+    expect(GUI_ENTRIES.filter((e) => e.label.startsWith("Server Search form")).map((e) => e.keys)).toEqual([
+      ["Tab", "Shift+Tab"],
+      ["Space"],
+      ["Enter"],
+      ["Esc"],
+    ]);
+    expect(GUI_ENTRIES.find((e) => e.id === "search_server")?.keys).toEqual(["Shift+Enter"]);
+  });
+
   it("j and k move the selection in the list and the reader follows", async () => {
     const { user } = renderApp();
     await shellReady();

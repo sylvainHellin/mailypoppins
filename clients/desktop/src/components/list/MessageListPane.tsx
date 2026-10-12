@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { Server, Search, X } from "lucide-react";
+import { Server, Search, SlidersHorizontal, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -143,15 +143,24 @@ export function MessageListPane() {
               className="h-7 pl-7 text-xs"
             />
           </div>
+          {/* With nothing typed and no search shown, the server button opens the form. */}
           <Button
             size="icon-sm"
             variant="outline"
             aria-label="Search server"
-            title="Search server (ff, Shift+Enter)"
-            disabled={!query && !search}
+            title="Search server (Shift+Enter)"
             onClick={() => runAction("search_server", s, dispatch)}
           >
             <Server aria-hidden="true" />
+          </Button>
+          <Button
+            size="icon-sm"
+            variant="outline"
+            aria-label="Server Search form"
+            title="Server Search form: from, to, subject, dates (ff)"
+            onClick={() => runAction("open_server_search", s, dispatch)}
+          >
+            <SlidersHorizontal aria-hidden="true" />
           </Button>
         </div>
         {/* Mounted with no marks, visually hidden and empty, so the first count is announced. */}

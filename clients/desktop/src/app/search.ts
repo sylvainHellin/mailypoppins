@@ -4,10 +4,23 @@
 // `operation.finished`, or with `operation_settled` / `operation_dropped`
 // when a re-bootstrap re-queried it (docs/rust-layer.md, "The event stream").
 
-import type { FetchOutcome, LocalSearchHit } from "@/lib/gui-types";
+import type { Dispatch } from "react";
+import type { FetchOutcome, LocalSearchHit, SearchForm } from "@/lib/gui-types";
 import { pushNotice } from "@/app/pending";
+import { withNotice } from "@/app/activity";
+import type { Action } from "@/app/reducer";
+import * as cmd from "@/lib/commands";
+import { asGuiError } from "@/lib/gui-types";
 import type { OperationFinishedPayload, OperationStatus, ServerHitPayload, ServerSearchHit } from "@/protocol/types";
-import type { AppState, MessageRef, SearchHit, SearchSignal, SearchState } from "@/app/state";
+import {
+  type AppState,
+  type MessageRef,
+  type SearchFormState,
+  type SearchHit,
+  type SearchScope,
+  type SearchSignal,
+  type SearchState,
+} from "@/app/state";
 
 export function localHit(account: string, h: LocalSearchHit): SearchHit {
   return {
@@ -77,16 +90,31 @@ export function isLive(search: SearchState | null): boolean {
   return search !== null && (search.status === "searching" || search.status === "running");
 }
 
+/**
+ * What a run searches beyond its query: the account (else the shown
+ * search's, else the selection's), one mailbox (else the shown search's when
+ * the query is the same, else the whole account), whether a server leg
+ * follows the local pass, and the form it came from.
+ */
+export type SearchRun = { account?: string; mailbox?: string | null; chain?: boolean; form?: SearchFormState | null };
+
 /** Start a run: a new query, or the server leg of the one shown. */
-export function startSearch(s: AppState, mode: "local" | "server", query: string): AppState {
-  const account = s.search?.account ?? s.selection.account;
+export function startSearch(s: AppState, mode: "local" | "server", query: string, run: SearchRun = {}): AppState {
+  const account = run.account ?? s.search?.account ?? s.selection.account;
   const q = query.trim();
   if (!account || !q) return s;
   const prev = s.search;
+  // The same query again (the header's server button over a form search)
+  // keeps the scope and the form it was run with.
+  const same = prev !== null && prev.account === account && prev.query === q;
+  const mailbox = run.mailbox !== undefined ? run.mailbox : same ? prev.mailbox : null;
+  const form = run.form !== undefined ? run.form : same ? prev.form : null;
   // The server leg of a finished local search keeps its hits and asks the
   // server only for what the store does not already have, as the TUI does.
   const keep =
-    mode === "server" && prev?.mode === "local" && prev.status === "done" && prev.query === q ? prev.hits : [];
+    mode === "server" && same && prev.mode === "local" && prev.status === "done" && prev.mailbox === mailbox
+      ? prev.hits
+      : [];
   const search: SearchState = {
     query: q,
     account,
@@ -99,8 +127,146 @@ export function startSearch(s: AppState, mode: "local" | "server", query: string
     summary: null,
     early: [],
     restore: prev?.restore ?? { selection: s.selection, focus: s.focus },
+    mailbox,
+    chain: mode === "local" && (run.chain ?? false),
+    form,
   };
   return { ...s, search };
+}
+
+/**
+ * The local pass ended, with hits or refused: a chained search goes on to
+ * the server leg, which keeps the hits and excludes them; a refused pass
+ * leaves the server to answer alone, as the TUI's overlay does.
+ */
+export function afterLocalPass(s: AppState): AppState {
+  const search = s.search;
+  if (!search || search.mode !== "local" || !search.chain) return s;
+  if (search.status !== "done" && search.status !== "failed") return s;
+  return startSearch(s, "server", search.query, { mailbox: search.mailbox, form: search.form });
+}
+
+/** The words the notice line says when the store cannot answer a query the list header's field ran. */
+export const REROUTED_NOTICE =
+  "The store's index cannot answer to:, cc:, filename: or message-id:, so the server searches this query";
+
+/**
+ * `search_local` refused a query the store's index cannot answer (`to:`,
+ * `cc:`, `filename:`, `message-id:`): the same query goes to the server,
+ * which can, and the notice line says why (PERSO-115).
+ */
+export function localRerouted(s: AppState, seq: number): AppState {
+  const search = s.search;
+  if (!search || search.seq !== seq || search.mode !== "local" || search.status !== "searching") return s;
+  return withNotice(startSearch(s, "server", search.query, { mailbox: search.mailbox, form: search.form }), REROUTED_NOTICE);
+}
+
+// ---------------------------------------------------------------------------
+// The Server Search form (`ff`): the TUI overlay's fields, whose results
+// land in the list pane as every search's do.
+// ---------------------------------------------------------------------------
+
+export const EMPTY_SEARCH_FORM: SearchForm = {
+  from: "",
+  to: "",
+  subject: "",
+  keywords: "",
+  after: "",
+  before: "",
+  attachment: false,
+  advanced: "",
+};
+
+export const SCOPE_LABEL: Record<SearchScope, string> = { mailbox: "Current Mailbox", account: "Current Account" };
+
+/** The TUI's words for a Current Mailbox scope with no server folder to search. */
+export const NO_MAILBOX_TARGET = "Current mailbox has no server search target";
+
+/** A non-blank Advanced line takes over: the structured fields are greyed and ignored. */
+export function advancedActive(fields: SearchForm): boolean {
+  return fields.advanced.trim() !== "";
+}
+
+/**
+ * Open the form on the account a search would run on. It opens with the
+ * shown search's form when it came from one, else blank with the list
+ * header's typed text as its keywords; the scope is the account, the TUI's
+ * default, unless the shown form searched one mailbox.
+ */
+export function openServerSearch(s: AppState): AppState {
+  const account = s.search?.account ?? s.selection.account;
+  if (!account) return withNotice(s, "No account is selected");
+  const slug = s.search ? s.search.restore.selection.mailbox : s.selection.mailbox;
+  const row = slug ? mailboxRow(s, account, slug) : null;
+  const mailbox = row && row.role !== "drafts" ? row.label : null;
+  const typed = s.filter.trim();
+  const form: SearchFormState = s.search?.form ?? {
+    fields: { ...EMPTY_SEARCH_FORM, keywords: typed && !s.search ? typed : "" },
+    scope: "account",
+  };
+  return {
+    ...s,
+    overlay: "server_search",
+    serverSearchDialog: { account, mailbox, form },
+    dialog: null,
+    composeDialog: null,
+    attachDialog: null,
+    rsvpDialog: null,
+    inviteDialog: null,
+    signaturesDialog: null,
+  };
+}
+
+/** An account's mailbox row by slug: the listing once loaded, else the snapshot's. */
+function mailboxRow(s: AppState, account: string, slug: string): { role: string; label: string } | null {
+  const rows = s.mailboxes[account]?.data?.mailboxes ?? s.bootstrap?.snapshot.mailboxes[account] ?? [];
+  const row = rows.find((m) => m.slug === slug);
+  return row ? { role: row.role, label: row.label } : null;
+}
+
+/** The form's run, once `search_query` built its query and the scope resolved. */
+export type FormRun = { account: string; query: string; local: boolean; mailbox: string | null; form: SearchFormState };
+
+/** Run the form: the overlay closes and the list pane shows the results. */
+export function runForm(s: AppState, run: FormRun): AppState {
+  const closed: AppState = { ...s, overlay: null, serverSearchDialog: null };
+  // The store answers first when its index can, then the server leg runs
+  // with the hits excluded; a query only the server can answer goes there
+  // at once.
+  return startSearch(closed, run.local ? "local" : "server", run.query, {
+    account: run.account,
+    mailbox: run.mailbox,
+    chain: run.local,
+    form: run.form,
+  });
+}
+
+/**
+ * Build the form's query with `search_query` and run it, or say why not:
+ * the parser's refusal verbatim, the TUI's prompt for a blank form, or its
+ * words for a mailbox scope with nothing to search. Null once it runs.
+ */
+export async function submitServerSearch(
+  dispatch: Dispatch<Action>,
+  dialog: { account: string; mailbox: string | null },
+  form: SearchFormState,
+): Promise<string | null> {
+  let plan;
+  try {
+    plan = await cmd.searchQuery(form.fields);
+  } catch (e) {
+    return asGuiError(e).message;
+  }
+  if (plan.kind === "blank") return "Fill the form and press Enter to search";
+  if (plan.kind === "invalid") return plan.message;
+  // The query's own `in:` names the mailbox; else the scope toggle decides.
+  let mailbox: string | null = plan.in_mailbox;
+  if (mailbox === null && form.scope === "mailbox") {
+    if (dialog.mailbox === null) return NO_MAILBOX_TARGET;
+    mailbox = dialog.mailbox;
+  }
+  dispatch({ type: "search_run", run: { account: dialog.account, query: plan.query, local: plan.local, mailbox, form } });
+  return null;
 }
 
 function addHit(search: SearchState, hit: SearchHit): SearchState {
