@@ -85,6 +85,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `message_text` | `account`, `row_id` | `MessageText`: the stored plain text, `body: null` when the store holds none; `not_found` for an unknown row |
 | `message_html_meta` | `account`, `row_id` | `MessageMeta` |
 | `search_local` | `params: LocalSearchParams` | `LocalSearchHit[]` |
+| `search_query` | `form: SearchForm` | `SearchPlan`: `blank`, `invalid { message }`, or `query { query, local, in_mailbox }`; the Server Search form's fields lowered by `mp-core`'s parser as the TUI's `SearchForm::build_query` does, `local` false for a query the store's index cannot answer; no daemon call |
 | `search_server_start` | `params: ServerSearchParams` | `{ operation_id }` |
 | `search_server_cancel` | `operation_id` | `"cancelled" \| "already_settled"`; the search is no longer awaited |
 | `operation_cancel` | `operation_id` | `"cancelled" \| "already_settled"`; the operation stays awaited until its finish (see Cancelling) |
@@ -1018,6 +1019,8 @@ Otherwise the operation runs 0.5 s: the agenda row's `rsvp` and the user's own a
 `send.invite` refuses in `plan_invite`'s order with the daemon's words: `home` with the Graph sentence, then a missing subject, a missing start, both or neither of `end` and `duration`, and no recipient in `to` or `cc`; it does not parse the times.
 Otherwise the operation runs for the send delay: the invitation joins the account's agenda as a row the user organizes (a wall-clock start read as its UTC sort key, every recipient `needs-action`), `state.invalidate` of `mailbox:<account>/sent` says its copy was filed, and it settles with a `SendOutcome` every recipient took.
 After `send_fail` it fails instead with the transport error, after a `failed` outbox row naming the recipients.
+
+`message.search` refuses a query with a term the store's index has no column for (`to:`, `cc:`, `filename:`, `message-id:`) as `-32602` in the daemon's words, since it lowers the query with `mp-core`'s `to_fts` as the daemon does; any other query matches the subject, the sender or the body as a substring.
 
 `contact.search` answers from `contacts.json`: 25 ranked contacts for `work` and 3 for `home`, each with a fixed `score` that spreads from 1000 down.
 `work` holds two display names with a comma (`Doe, Jane`, `Legal, Supplier Ltd`), one with an apostrophe (`Tom O'Brien`), one with an accent (`Sofia García`) and two addresses with no name.

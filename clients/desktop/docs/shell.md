@@ -14,7 +14,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/lib/clipboard.ts` | Every copy: `copyText(text, what, dispatch)` writes through `navigator.clipboard` from the key or click handler and says "Copied <what>" or "The clipboard refused <what>" |
 | `src/protocol/types.ts` | Wire shapes embedded in them, hand-written until ts-rs generates them |
 | `src/app/state.ts`, `reducer.ts` | The model and the one reducer: GuiEvents, answers, intents |
-| `src/app/search.ts` | Search hits in one shape, and the server search's transitions |
+| `src/app/search.ts` | Search hits in one shape, the server search's transitions, and the Server Search form's open and run |
 | `src/app/pending.ts` | The transitions of mutations, send holds and syncs |
 | `src/app/mutations.ts` | The mutation dispatch: apply, call, reconcile |
 | `src/app/compose.ts` | New draft, reply, forward, edit, recipients, approve and demote, and the editor handoff |
@@ -102,8 +102,25 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 
 The list header's field filters the shown list as it is typed, as before.
 Enter runs `search_local` over the selected account and the results replace the list, each with the mailbox it was found in as a badge.
-Shift+Enter, the header's server button, `ff` (the TUI's "Search all mail") and the palette's "Search server" run `search_server_start`; the server leg of a finished local search keeps its hits and passes their `message_id`s as `exclude_message_ids`, as the TUI does.
-`state.search` holds the query, the mode (`local` or `server`), the hits, the `operation_id`, the status (`searching`, `running`, `done`, `cancelled`, `failed`, `dropped`) and the list selection and focus to restore.
+A query the store's index cannot answer (`to:`, `cc:`, `filename:`, `message-id:`) is refused by `message.search` as `-32602`; `search_query` then confirms that is why, and the same query runs on the server with a notice saying so (PERSO-115).
+Shift+Enter, the header's server button and the palette's "Search server" run `search_server_start`; the server leg of a finished local search keeps its hits and passes their `message_id`s as `exclude_message_ids`, as the TUI does.
+With nothing typed and no search shown, the server button opens the Server Search form instead.
+`state.search` holds the query, the mode (`local` or `server`), the hits, the `operation_id`, the status (`searching`, `running`, `done`, `cancelled`, `failed`, `dropped`), the list selection and focus to restore, the one mailbox searched (`null` for the whole account), whether a server leg follows the local pass (`chain`), and the form it came from.
+A failed or dropped search's status wraps, so the daemon's whole sentence reads; progress stays on one line.
+
+### The Server Search form
+
+`ff` (the TUI's "Search all mail"), the palette's entry for it and the header's form button open `ServerSearchDialog`, the TUI overlay's form (#0086b), on the account a search would run on (`state.serverSearchDialog`).
+Its fields, in Tab order: Search In (Current Mailbox or Current Account, the account by default), From, To, Subject, Keywords (the grammar, so `a OR b` and quoted phrases work), After and Before (`YYYY-MM-DD`), the attachment toggle, and Advanced (the raw grammar).
+A non-blank Advanced line takes over: the structured fields are disabled, so Tab skips them, as in the TUI; Search In stays live, since it names mailboxes rather than terms.
+Tab and Shift+Tab move, Space flips the scope and the attachment toggle, Enter searches from any field, and Escape closes; From has the focus when it opens.
+It opens with the shown search's form when that came from it, else blank with the header's typed text as its Keywords.
+
+Enter calls `search_query`, which builds the query with `mp-core`'s parser as the TUI's `SearchForm::build_query` does and makes no daemon call.
+A blank form says "Fill the form and press Enter to search", a parse or date refusal shows verbatim in the form's alert, and Current Mailbox over Drafts or no mailbox says "Current mailbox has no server search target"; the form stays open with what was typed.
+Otherwise the form closes and the search runs as the TUI's overlay runs it: the query's own `in:` names the mailbox, else Current Mailbox names the selected one by its sidebar label (`mailbox` to `search_local`, `mailboxes` to `search_server_start`).
+When the store's index can answer the query, `search_local` runs first and its end, hits or refusal, starts the server leg, which keeps the local hits and excludes them; a query only the server can answer goes there at once.
+The results are the list pane's, so the keys that act on a hit are the list's (LST-09 in docs/parity-matrix.md), and the TUI's results pane, headers and body are the list and the reader.
 Hits stream in from `message.server_hit`; a hit or a finish that overtakes the `search_server_start` answer is held in `search.early` and replayed once the id is known.
 Cancel calls `search_server_cancel`; leaving a running search (Escape, a new query, another mailbox) cancels it too.
 A server-only hit (`row_id: null`) is listed with a "server only" badge and has no body to open until `F` fetches it into the store ([reader.md](reader.md), "Drafts and server-only hits").
@@ -1018,7 +1035,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `gg`/`G`, `Home`/`End`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`: jumps in the list or the reader.
 - `:` or `Ctrl+p`: the command palette; `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector, or in Drafts the draft's file path (PERSO-100).
 - `Escape`: in a full-pane view, back to Mail; with the outbox shown and the focus outside the reader, back to the mailbox list; else clear the marks when any are set and the outbox is not shown; else back to the list from the reader; with a search shown, back to the mailbox list; else clear the selection; in the narrow layout, up one view.
-- `Enter` in the field: search the store; `Shift+Enter` or `ff`: search the server.
+- `Enter` in the field: search the store, or the server for a query only it can answer; `Shift+Enter`: search the server; `ff`: the Server Search form (see Search).
 - `Cmd+[` or `Alt+Left`: back through the focus history.
 - `a`, `d`, `u`, `*`, `M`: archive, delete, toggle read, toggle flag, move, from the list or the reader (the TUI's MESSAGE keys); from the sidebar they do nothing, as in the TUI.
 - `v`: mark or unmark the cursor row and step to the next; `Ctrl+a`: mark every shown row; both are List keys, as in the TUI.
