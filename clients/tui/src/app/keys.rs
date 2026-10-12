@@ -549,6 +549,17 @@ impl App {
                     self.focus = Focus::List;
                 }
             }
+            // `Enter` in any reading pane reads the message: the keyboard moves
+            // into the body pane, which is the explicit open that marks it
+            // read, the same as a `Tab` landing there (#0110). `$EDITOR` is
+            // `e` (PERSO-92). Already in the body pane, there is nothing to do.
+            A::FocusBody => {
+                self.pending_prefix = None;
+                if self.focus != Focus::Preview {
+                    self.focus = Focus::Preview;
+                    self.queue_mark_open_read();
+                }
+            }
             A::ListTop => {
                 // `gg` (the leader continuation) or `Home`.
                 self.list_index = 0;
@@ -3547,6 +3558,95 @@ mod tests {
 
         assert_eq!(app.focus, Focus::Preview);
         assert_eq!(queued_mark_reads(&app), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // `Enter` reads, `e` opens `$EDITOR` (PERSO-92)
+    // -----------------------------------------------------------------------
+
+    fn queued_edits(app: &App) -> usize {
+        app.pending_actions
+            .iter()
+            .filter(|a| matches!(a, Action::EditCurrent))
+            .count()
+    }
+
+    /// `Enter` on a received row in the list moves the keyboard into the body
+    /// pane, the same as the desktop client, and is the explicit open that
+    /// marks it read. It no longer hands the terminal to `$EDITOR`.
+    #[test]
+    fn enter_on_a_received_row_focuses_the_body_pane() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+        assert_eq!(app.focus, Focus::List);
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_edits(&app), 0, "Enter must not open $EDITOR");
+        assert_eq!(queued_mark_reads(&app), 1, "Enter is an open (#0110)");
+    }
+
+    /// `Enter` from the headers pane lands in the body pane too, and a second
+    /// `Enter` there is inert: nothing more is queued.
+    #[test]
+    fn enter_in_the_headers_and_body_panes_stays_on_the_body() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+        app.focus = Focus::Headers;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Preview);
+        let queued = app.pending_actions.len();
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(app.pending_actions.len(), queued, "a second Enter is inert");
+        assert_eq!(queued_edits(&app), 0);
+    }
+
+    /// `e` on a received row opens its Markdown rendition in `$EDITOR`
+    /// (#0075) through `Action::EditCurrent`, and leaves focus on the list.
+    #[test]
+    fn e_on_a_received_row_opens_the_editor() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+
+        assert_eq!(queued_edits(&app), 1, "e must queue EditCurrent");
+        assert_eq!(app.focus, Focus::List, "e must not move focus");
+    }
+
+    /// `e` works from the body pane as well, so a message being read can be
+    /// taken into the editor without a focus hop back to the list.
+    #[test]
+    fn e_in_the_body_pane_opens_the_editor() {
+        let mut app = app_with_emails(sample());
+        app.list_index = 0;
+        app.focus = Focus::Preview;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+
+        assert_eq!(queued_edits(&app), 1);
+        assert_eq!(app.focus, Focus::Preview);
+    }
+
+    /// A draft keeps `e` = edit the draft, and `Enter` reads it in the body
+    /// pane like any other row (the desktop client does the same).
+    #[test]
+    fn a_draft_keeps_e_for_editing_and_enter_reads_it() {
+        let mut app = app_with_emails(vec![draft_entry("aaa", "One")]);
+        app.list_index = 0;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+        assert_eq!(queued_edits(&app), 1, "e must still edit a draft");
+        app.pending_actions.clear();
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(queued_edits(&app), 0);
+        assert_eq!(queued_mark_reads(&app), 0, "a draft is never marked read");
     }
 
     #[test]

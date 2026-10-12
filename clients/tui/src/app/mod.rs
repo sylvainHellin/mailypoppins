@@ -1347,7 +1347,7 @@ impl App {
         // handled before the memo, refreshing the cheap string each frame.
         if let Some(skip) = self.selected_email().and_then(|e| e.skip.clone()) {
             let text = format!(
-                "This draft could not be parsed, so it is not listed.\n\n{}\n\nParse error:\n{}\n\nPress Enter/e to open the raw file in $EDITOR and fix its frontmatter.",
+                "This draft could not be parsed, so it is not listed.\n\n{}\n\nParse error:\n{}\n\nPress e to open the raw file in $EDITOR and fix its frontmatter.",
                 skip.path,
                 skip.error,
             );

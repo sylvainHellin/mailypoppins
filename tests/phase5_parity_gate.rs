@@ -580,6 +580,29 @@ fn the_daemon_only_snapshots_are_the_two_scenes_that_have_no_hand_built_pair() {
 
 /// A sandbox for a `mp` invocation that must reach nothing: an empty root, no
 /// daemon started, every daemon hook cleared.
+/// Pre-daemon bindings retired on purpose, as `(section, key, action)`.
+///
+/// The capture stays frozen; a binding the surface deliberately gave up is
+/// listed here with its reason instead, and the gate below checks both that
+/// every other binding survives and that each one listed here is really gone,
+/// so the list cannot outlive the change it records
+/// (`docs/baselines/pre-daemon/README.md`, post-cutover divergences).
+const RETIRED_BINDINGS: &[(&str, &str, &str)] = &[
+    // PERSO-92: `Enter` focuses the body pane and `e` alone opens `$EDITOR`,
+    // as in the desktop client; both survive as their own rows.
+    (
+        "MESSAGE (list, headers, body)",
+        "Enter / e",
+        "Open in editor (mail read-only)",
+    ),
+];
+
+fn is_retired(title: &serde_json::Value, binding: &serde_json::Value) -> bool {
+    RETIRED_BINDINGS.iter().any(|(section, key, action)| {
+        title == section && binding["key"] == *key && binding["action"] == *action
+    })
+}
+
 fn quiet_sandbox(root: &Path) -> Command {
     let mut cmd = mp_command(root);
     cmd.env("MAILYPOPPINS_DAEMON_AUTOSTART", "0");
@@ -601,7 +624,8 @@ fn dump_keys_json_of_this_runs_binary_keeps_the_phase_zero_capture() {
     );
 
     // Every pre-daemon binding is still there, under the same section title:
-    // the post-cutover surface only adds (docs/baselines/pre-daemon/README.md).
+    // the post-cutover surface only adds, except for the bindings
+    // `RETIRED_BINDINGS` names (docs/baselines/pre-daemon/README.md).
     let baseline = repo().join("docs/baselines/pre-daemon/tui-keys.json");
     let parse = |bytes: &[u8], what: &Path| -> serde_json::Value {
         serde_json::from_slice(bytes)
@@ -623,11 +647,34 @@ fn dump_keys_json_of_this_runs_binary_keeps_the_phase_zero_capture() {
             .as_array()
             .expect("a bindings array");
         for binding in section["bindings"].as_array().expect("a bindings array") {
+            if is_retired(title, binding) {
+                assert!(
+                    !bindings.contains(binding),
+                    "the retired binding {binding} is back in section {title}; \
+                     drop it from RETIRED_BINDINGS"
+                );
+                continue;
+            }
             assert!(
                 bindings.contains(binding),
                 "the pre-daemon binding {binding} is gone from section {title}"
             );
         }
+    }
+    // A retired entry must name a binding the capture really has, or it is a
+    // typo that exempts nothing.
+    for (section, key, action) in RETIRED_BINDINGS {
+        let captured = frozen
+            .as_array()
+            .expect("a section array")
+            .iter()
+            .filter(|s| s["title"] == *section)
+            .flat_map(|s| s["bindings"].as_array().expect("a bindings array"))
+            .any(|b| b["key"] == *key && b["action"] == *action);
+        assert!(
+            captured,
+            "RETIRED_BINDINGS names {key:?} / {action:?} in {section}, which the capture lacks"
+        );
     }
 
     // The published key reference is this run's dump, byte for byte.

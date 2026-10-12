@@ -235,10 +235,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MBX-06 Cycle pane focus and zoom the focused pane
 
 - Classification: GUI parity
-- Source anchor: TUI `Tab` (`clients/tui/src/app/keymap.rs:559`), `Shift+Tab` (`clients/tui/src/app/keymap.rs:560`), `z` (`clients/tui/src/app/keymap.rs:569`)
+- Source anchor: TUI `Tab` (`clients/tui/src/app/keymap.rs:559`), `Shift+Tab` (`clients/tui/src/app/keymap.rs:560`), `z` (`clients/tui/src/app/keymap.rs:569`), and `Enter` in the MESSAGE section (`clients/tui/src/app/keymap.rs:870`, `KeyAction::FocusBody`), which moves the keyboard from the list or the headers into the body pane as the desktop's Enter on a row focuses the reader (PERSO-92)
 - Daemon surface: client-side
 - GUI location: clients/desktop: `Tab` and `Shift+Tab` cycle sidebar, list and reader from the pane the model holds as focused, `gm` focuses the sidebar, `gr` and the palette's "Focus reader" the reader (a desktop key), and `z` zooms the focused list or reader; the focused pane carries `data-focused="true"`, drawn as a 1px `ring` line inside its edge, square where it meets the neighbouring pane (M1, #0129; PERSO-95; shell.md, "Focus order")
-- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`Tab and Shift+Tab cycle focus through sidebar, list and reader`, `marks the pane holding the focus with data-focused, and gr or the palette's Focus reader focus the reader`), `clients/desktop/src/components/shell/layout.test.tsx` (`places the panes where index.css squares the focus ring's shared corners`), `clients/desktop/src/app/reducer.test.ts` (`cycles focus through sidebar, list and reader and walks back through history`, `focus_reader focuses the reader from any pane, brings Mail back from a view, and cycles on from there`); zoom: `keymap.test.tsx` (`z zooms the focused list pane, hiding the reader`), `clients/desktop/src/components/reader/readerMode.test.tsx` (`z zooms the reader in text mode, and j scrolls the reader's container`)
+- Validation: TUI golden frames, `clients/tui/src/app/keys.rs` (`enter_on_a_received_row_focuses_the_body_pane`, `enter_in_the_headers_and_body_panes_stays_on_the_body`); `clients/desktop/src/keymap/keymap.test.tsx` (`Tab and Shift+Tab cycle focus through sidebar, list and reader`, `marks the pane holding the focus with data-focused, and gr or the palette's Focus reader focus the reader`), `clients/desktop/src/components/shell/layout.test.tsx` (`places the panes where index.css squares the focus ring's shared corners`), `clients/desktop/src/app/reducer.test.ts` (`cycles focus through sidebar, list and reader and walks back through history`, `focus_reader focuses the reader from any pane, brings Mail back from a view, and cycles on from there`); zoom: `keymap.test.tsx` (`z zooms the focused list pane, hiding the reader`), `clients/desktop/src/components/reader/readerMode.test.tsx` (`z zooms the reader in text mode, and j scrolls the reader's container`)
 - Status: GUI shipped (M1, #0129)
 - Note: purely presentation state, so it never enters the canonical snapshot.
 
@@ -448,10 +448,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### RD-06 Open a message read-only in `$EDITOR` as a Markdown rendition
 
 - Classification: GUI parity
-- Source anchor: TUI `Enter / e` (`clients/tui/src/app/keymap.rs:611`), search overlay `e`
+- Source anchor: TUI `e` (`clients/tui/src/app/keymap.rs:882`), search overlay `e`; `Enter` on a list row focuses the body pane since PERSO-92, as in the desktop client, so `e` alone opens `$EDITOR`
 - Daemon surface: `message.materialise_markdown` `{account, row_id|id|selector, mailbox?}`, the third member of the handle family
 - GUI location: clients/desktop (M3, #0131)
-- Validation: TUI golden frames
+- Validation: TUI golden frames, `clients/tui/src/app/keys.rs` (`e_on_a_received_row_opens_the_editor`, `e_in_the_body_pane_opens_the_editor`, `a_draft_keeps_e_for_editing_and_enter_reads_it`)
 - Status: routed (P5-U10c-I1); GUI not started
 - Note: the handle keeps its blob alive until release or expiry (`ANO-6`), and the file is written 0444 so `$EDITOR` opens it read-only (#0075).
   The rendition is released when the editor exits, where the pre-daemon file was unlinked; a second open of the same row is a second handle in a directory of its own, so the mode the first one left cannot stop it.
@@ -564,7 +564,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MSG-08 Mark a message read on an explicit open
 
 - Classification: GUI parity
-- Source anchor: `mark_open_read` (`clients/tui/src/commands.rs:1445`), reached from the received-row branch of `Action::EditCurrent` and from `Action::MarkAsRead`, which `queue_mark_open_read` (defined at `clients/tui/src/app/mod.rs:1230`, pushed from `clients/tui/src/app/keys.rs:322` and `:336`) queues on a focus move into the body pane
+- Source anchor: `mark_open_read` (`clients/tui/src/commands.rs:1445`), reached from the received-row branch of `Action::EditCurrent` and from `Action::MarkAsRead`, which `queue_mark_open_read` (defined at `clients/tui/src/app/mod.rs:1230`, pushed from `clients/tui/src/app/keys.rs:322`, `:336` and `:560`) queues on a focus move into the body pane, `Tab`, `Shift+Tab` or `Enter` (PERSO-92)
 - Daemon surface: `message.set_read` carrying the opened `MessageRef` as `row_id`
 - GUI location: clients/desktop: Enter on a row, a double-click on a row or a search hit, and Tab or Shift+Tab landing in the reader each mark an unread message read once; a cursor move or a single click marks nothing (M2, #0131)
 - Validation: `clients/tui/src/commands.rs` unit tests, `src/tui_tests/actions.rs`; `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`moving the cursor marks nothing; Enter on an unread row marks it read once`, `Tab into the reader and a double-click open an unread row and mark it read`)

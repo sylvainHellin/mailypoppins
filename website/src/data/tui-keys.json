@@ -31,7 +31,8 @@
     "title": "MESSAGE (list, headers, body)",
     "bindings": [
       { "key": "J / K", "action": "Next / previous message" },
-      { "key": "Enter / e", "action": "Open in editor (mail read-only)" },
+      { "key": "Enter", "action": "Read (focus the body pane)" },
+      { "key": "e", "action": "Open in editor (mail read-only)" },
       { "key": "r", "action": "Reply" },
       { "key": "a", "action": "Archive" },
       { "key": "d", "action": "Delete" },
