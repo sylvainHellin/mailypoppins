@@ -1030,6 +1030,51 @@ async fn bootstrap(conn: &mut Connection) -> Value {
     call_ok(conn, "state.bootstrap", json!({})).await
 }
 
+/// Bootstrap, then read past the startup readiness of every account the
+/// snapshot still showed `opening`.
+///
+/// The daemon accepts connections while its runtimes start, so a bootstrap
+/// taken straight after the socket comes up can capture an account before its
+/// runtime reported, and that report then arrives as an `account.state_changed`
+/// ahead of whatever the test does next. The snapshot is captured under the
+/// same gate the report is committed under, so an account it shows `opening` is
+/// one whose report is still owed to this connection, and one it shows in any
+/// other state is one whose report it already carries: waiting for exactly the
+/// owed reports leaves nothing of the startup in the stream, whatever the load.
+/// Polling `daemon.status` instead cannot promise that, because the runtime
+/// table is filled before the change is applied.
+async fn bootstrap_settled(conn: &mut Connection) -> Value {
+    let result = bootstrap(conn).await;
+    let mut owed: Vec<String> = result["snapshot"]["accounts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the snapshot lists its accounts, got {result}"))
+        .iter()
+        .filter(|account| account["state"] == "opening")
+        .map(|account| {
+            account["name"]
+                .as_str()
+                .unwrap_or_else(|| panic!("an account name is a string, got {account}"))
+                .to_string()
+        })
+        .collect();
+    while !owed.is_empty() {
+        let notification = within("a startup readiness report", conn.next_notification())
+            .await
+            .expect("the daemon delivers a notification rather than closing");
+        if notification.method != METHOD_STATE_EVENT {
+            continue;
+        }
+        let envelope: EventEnvelope = serde_json::from_value(notification.params.clone())
+            .unwrap_or_else(|e| {
+                panic!("the params are an event envelope: {e}; got {notification:?}")
+            });
+        if envelope.kind == "account.state_changed" {
+            owed.retain(|name| envelope.payload["account"] != name.as_str());
+        }
+    }
+    result
+}
+
 /// Read `state.event` notifications until one of kind `config.changed`
 /// arrives, and return every event up to and including it.
 async fn events_through_config_changed(conn: &mut Connection) -> Vec<EventEnvelope> {
@@ -1733,7 +1778,9 @@ async fn a_reload_that_changes_nothing_still_announces_itself() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
     let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
-    bootstrap(&mut conn).await;
+    // alpha's startup report is not the reload's, and under load it lands after
+    // a bootstrap taken this early: read past it first.
+    bootstrap_settled(&mut conn).await;
 
     let result = call_ok(&mut conn, "config.reload", json!({})).await;
     assert_eq!(
@@ -1743,7 +1790,18 @@ async fn a_reload_that_changes_nothing_still_announces_itself() {
     );
 
     let first = events_through_config_changed(&mut conn).await;
-    assert_eq!(describe(&first), vec!["config.changed".to_string()]);
+    // A health check is not part of the swap: the refresh that follows alpha's
+    // startup report runs once the swap lock is free, which is beside the
+    // reload rather than before it.
+    let first: Vec<EventEnvelope> = first
+        .into_iter()
+        .filter(|event| event.kind != "diagnostic.check_changed")
+        .collect();
+    assert_eq!(
+        describe(&first),
+        vec!["config.changed".to_string()],
+        "a reload that reconciled nothing publishes no state change and no removal"
+    );
     let first: ConfigChanged =
         serde_json::from_value(first.last().expect("one event").payload.clone())
             .expect("a config.changed payload");

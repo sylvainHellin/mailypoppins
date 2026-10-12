@@ -626,6 +626,7 @@ It is what pins the exit-4 diagnostic in `tests/daemon_lifecycle.rs`.
 `MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS=<n>` flips every configured account to `ready` `n` milliseconds after the **first** `state.bootstrap`, committing one change per account in `config.toml` order.
 Phase 3a starts no account runtimes, so nothing else would ever report readiness and the snapshot would never converge by event.
 The countdown starts at the bootstrap rather than at daemon startup, so a client that bootstraps cannot lose the race against it and no test has to sleep to win it.
+A daemon with the hook set starts no account runtimes, as in Phase 3a: a runtime's own report and the health check it refreshes would otherwise reach the stream before or after the hook's `ready` depending on load, and `daemon.status` lists no accounts for the same reason it does in any daemon without runtimes.
 It is what pins the readiness event in `tests/daemon_bootstrap.rs`, and its name is `mailypoppins::daemon::state::FAKE_READY_ENV` so the test and the daemon cannot drift apart.
 
 `MAILYPOPPINS_DAEMON_FAKE_EVENT_BURST=<n>` commits `n` mailbox-count changes against the first configured account after **every** `state.bootstrap`, with mailbox slugs `burst-<i>` from a counter that starts at `0` and never restarts for the life of the process.

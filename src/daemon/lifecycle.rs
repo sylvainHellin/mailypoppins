@@ -329,7 +329,17 @@ async fn run(foreground_logs: bool) -> Result<()> {
     // this store, and nothing else re-reads the file.
     // Account runtimes are on (P5-U8): a daemon that started none would be a
     // daemon that is nobody's engine, which is what the TUI cutover ends.
-    let config = Arc::new(ConfigStore::new(config_path.clone(), state, loaded, true));
+    // The one exception is the test-only readiness hook, which reports every
+    // account's state itself: a runtime starting beside it would be a second
+    // writer of the same state, landing before or after the hook's commit by
+    // the wall clock, together with the health check its report refreshes.
+    let account_runtimes = super::state::fake_ready_delay().is_none();
+    let config = Arc::new(ConfigStore::new(
+        config_path.clone(),
+        state,
+        loaded,
+        account_runtimes,
+    ));
 
     ensure_runtime_dir()?;
     let socket = socket_path();
@@ -366,7 +376,9 @@ async fn run(foreground_logs: bool) -> Result<()> {
     drop(start_lock);
 
     let state = Arc::new(DaemonState::new(meta, config));
-    spawn_account_runtimes(Arc::clone(&state));
+    if state.config.account_runtimes {
+        spawn_account_runtimes(Arc::clone(&state));
+    }
     // Watching drafts opens no store and takes no engine lock (P3b-U10), so it
     // is started beside the runtimes rather than by one. It stops at step 6 of
     // the shutdown, which is what "closes watchers" means for the one watcher
