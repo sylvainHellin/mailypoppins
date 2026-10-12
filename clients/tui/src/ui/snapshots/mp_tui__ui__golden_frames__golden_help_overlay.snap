@@ -32,16 +32,16 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 26 |│                                  │                                                │                                  │
 27 |╰──────────────────────────────────│  MESSAGE (list, headers, body)                 │                                  │
 28 |╭ Activity ────────────────────────│  J / K       Next / previous message           │                                  │
-29 |│  No activity yet                 │  Enter / e   Open in editor (mail read-only)   │                                  │
-30 |│                                  │  r           Reply                             │                                  │
-31 |│                                  │  a           Archive                           │                                  │
-32 |│                                  │  d           Delete                            │                                  │
-33 |╰──────────────────────────────────│  u           Toggle read/unread                │                                  │
-34 |╭ View ────────────────────────────│  *           Toggle flag/star                  │                                  │
-35 |│     mail  |  contacts  |  calenda│  M           Move to mailbox (fuzzy picker)    │                                  │
-36 |╰──────────────────────────────────│  y           Copy selector (mp://)             │──────────────────────────────────╯
-37 |╭──────────────────────────────────│  Esc         Clear selection / return to list  │──────────────────────────────────╮
-38 |│ HELP                             ╰─────────────────── 1-36/114 ───────────────────╯                                  │
+29 |│  No activity yet                 │  Enter       Read (focus the body pane)        │                                  │
+30 |│                                  │  e           Open in editor (mail read-only)   │                                  │
+31 |│                                  │  r           Reply                             │                                  │
+32 |│                                  │  a           Archive                           │                                  │
+33 |╰──────────────────────────────────│  d           Delete                            │                                  │
+34 |╭ View ────────────────────────────│  u           Toggle read/unread                │                                  │
+35 |│     mail  |  contacts  |  calenda│  *           Toggle flag/star                  │                                  │
+36 |╰──────────────────────────────────│  M           Move to mailbox (fuzzy picker)    │──────────────────────────────────╯
+37 |╭──────────────────────────────────│  y           Copy selector (mp://)             │──────────────────────────────────╮
+38 |│ HELP                             ╰─────────────────── 1-36/115 ───────────────────╯                                  │
 39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
 02 |bold@36..44

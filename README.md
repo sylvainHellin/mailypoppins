@@ -266,7 +266,8 @@ Forget a chord and `:` or `Ctrl+p` opens a command palette over every runnable a
 | Key | Action |
 |-----|--------|
 | `j`/`k`, arrows | Navigate |
-| `Enter`/`e` | Open in `$EDITOR` (received mail is read-only) |
+| `Enter` | Read the message in the body pane |
+| `e` | Open in `$EDITOR` (received mail is read-only) |
 | `cn` | New draft |
 | `cs` | Manage signatures |
 | `cr`/`ca`/`cf` | Reply / Reply all / Forward |

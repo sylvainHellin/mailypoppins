@@ -308,6 +308,9 @@ pub enum KeyAction {
     /// Esc in any reading pane: clear a live selection, else return to the
     /// list (#0092, symmetric across List / Headers / Body).
     EscMessage,
+    /// `Enter` in any reading pane: move the keyboard into the body pane, the
+    /// explicit open that marks the message read (#0110, PERSO-92).
+    FocusBody,
     MovePicker,
     Rsvp,
     /// Open the conversation (threading) overlay for the cursor message (#0008).
@@ -858,17 +861,33 @@ pub static KEYMAP: &[KeyBinding] = &[
         "",
         false,
     ),
+    // `Enter` reads, `e` edits (PERSO-92): the TUI and the desktop client
+    // agree that `Enter` on a list row moves the keyboard into the message
+    // body, and that `$EDITOR` is the explicit `e` (a draft opens writable,
+    // received mail as its read-only Markdown rendition, #0075).
     short(
         bg(
-            "Enter / e",
-            Chord::CharOrCode('e', SpecialCode::Enter),
+            "Enter",
+            Chord::Code(SpecialCode::Enter),
+            KeyCtx::Message,
+            Guard::NonEmptyList,
+            KeyAction::FocusBody,
+            "Read (focus the body pane)",
+            true,
+        ),
+        "Read",
+    ),
+    short(
+        bg(
+            "e",
+            Chord::Char('e'),
             KeyCtx::Message,
             Guard::NonEmptyList,
             KeyAction::OpenEditor,
             "Open in editor (mail read-only)",
             true,
         ),
-        "Open (read-only)",
+        "Editor",
     ),
     bg(
         "r",
@@ -2102,10 +2121,20 @@ mod tests {
             resolve(KeyCtx::Global, key('c'), Some('s'), &allow),
             Some(KeyAction::OpenConfigFile)
         );
-        // Enter / e open the message from any reading pane.
+        // `e` opens the message in $EDITOR from any reading pane, and `Enter`
+        // focuses the body pane instead (PERSO-92).
         assert_eq!(
             resolve(KeyCtx::Message, key('e'), None, &allow),
             Some(KeyAction::OpenEditor)
+        );
+        assert_eq!(
+            resolve(
+                KeyCtx::Message,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                None,
+                &allow
+            ),
+            Some(KeyAction::FocusBody)
         );
         // Leader: g pending, then g -> list top.
         assert_eq!(
