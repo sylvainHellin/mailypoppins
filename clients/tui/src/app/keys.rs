@@ -553,10 +553,16 @@ impl App {
             // into the body pane, which is the explicit open that marks it
             // read, the same as a `Tab` landing there (#0110). `$EDITOR` is
             // `e` (PERSO-92). Already in the body pane, there is nothing to do.
+            // Under 80 columns the split draws no body pane (`ui::render`), so
+            // the move also zooms: the zoom follows focus, and the body then
+            // fills the content area instead of taking the keyboard unseen.
             A::FocusBody => {
                 self.pending_prefix = None;
                 if self.focus != Focus::Preview {
                     self.focus = Focus::Preview;
+                    if self.terminal_width < 80 {
+                        self.zoomed = true;
+                    }
                     self.queue_mark_open_read();
                 }
             }
@@ -3585,6 +3591,35 @@ mod tests {
         assert_eq!(app.focus, Focus::Preview);
         assert_eq!(queued_edits(&app), 0, "Enter must not open $EDITOR");
         assert_eq!(queued_mark_reads(&app), 1, "Enter is an open (#0110)");
+    }
+
+    /// Under 80 columns the split draws no body pane, so `Enter` zooms it:
+    /// focus must never land in a pane the user cannot see.
+    #[test]
+    fn enter_in_a_narrow_terminal_zooms_the_body_pane() {
+        let mut app = app_with_emails(sample());
+        app.terminal_width = 60;
+        app.list_index = 0;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(app.zoomed_pane(), Some(Focus::Preview));
+        assert_eq!(queued_mark_reads(&app), 1);
+    }
+
+    /// At a width that draws the body pane, `Enter` only moves focus and
+    /// leaves the split alone.
+    #[test]
+    fn enter_in_a_wide_terminal_keeps_the_split() {
+        let mut app = app_with_emails(sample());
+        app.terminal_width = 120;
+        app.list_index = 0;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(app.zoomed_pane(), None);
     }
 
     /// `Enter` from the headers pane lands in the body pane too, and a second

@@ -268,6 +268,8 @@ describe("what the outbox view hides", () => {
         "open_attachment",
         "open_editor",
         "open_html",
+        // Enter's action, the KEYMAP's "Read (focus the body pane)" row (PERSO-92).
+        "open_message",
         "reply",
         "reply_all",
         "rsvp",
@@ -278,8 +280,6 @@ describe("what the outbox view hides", () => {
         "toggle_read",
       ].sort(),
     );
-    // Enter's action, which has no palette row.
-    expect(hiddenByOutbox(open, "open_message")).toBe(true);
     for (const id of [
       "new_draft",
       "focus_filter",

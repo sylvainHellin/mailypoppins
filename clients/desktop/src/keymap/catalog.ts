@@ -148,6 +148,8 @@ const BY_ACTION: Record<string, Binding> = {
   "Switch to Contacts view": { id: "view_contacts" },
   "Switch to Calendar view": { id: "view_calendar" },
   "Next / previous message": { id: "next_message" },
+  // Enter on a list row focuses the reader, as in the TUI (PERSO-92).
+  "Read (focus the body pane)": { id: "open_message" },
   "Open in editor (mail read-only)": { id: "open_editor" },
   Reply: { id: "reply" },
   "Reply all": { id: "reply_all" },

@@ -578,8 +578,6 @@ fn the_daemon_only_snapshots_are_the_two_scenes_that_have_no_hand_built_pair() {
 // (c) The key dump, from this run's binary
 // ---------------------------------------------------------------------------
 
-/// A sandbox for a `mp` invocation that must reach nothing: an empty root, no
-/// daemon started, every daemon hook cleared.
 /// Pre-daemon bindings retired on purpose, as `(section, key, action)`.
 ///
 /// The capture stays frozen; a binding the surface deliberately gave up is
@@ -603,6 +601,8 @@ fn is_retired(title: &serde_json::Value, binding: &serde_json::Value) -> bool {
     })
 }
 
+/// A sandbox for a `mp` invocation that must reach nothing: an empty root, no
+/// daemon started, every daemon hook cleared.
 fn quiet_sandbox(root: &Path) -> Command {
     let mut cmd = mp_command(root);
     cmd.env("MAILYPOPPINS_DAEMON_AUTOSTART", "0");

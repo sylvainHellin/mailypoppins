@@ -104,7 +104,11 @@
         "action": "Next / previous message"
       },
       {
-        "key": "Enter / e",
+        "key": "Enter",
+        "action": "Read (focus the body pane)"
+      },
+      {
+        "key": "e",
         "action": "Open in editor (mail read-only)"
       },
       {
