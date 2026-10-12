@@ -3072,6 +3072,13 @@ impl Fixture {
                 if query.chars().all(|c| c.is_ascii_punctuation()) && !query.is_empty() {
                     return Err(refused(method, -32602, "the query has no searchable term"));
                 }
+                // The daemon's refusal of a term its index has no column for
+                // (`to:`, `cc:`, `filename:`, `message-id:`), in its words.
+                if let Ok(ast) = mp_core::search::parse(&query) {
+                    if let Err(e) = mp_core::search::to_fts(&ast) {
+                        return Err(refused(method, -32602, &e.to_string()));
+                    }
+                }
                 let limit = params["limit"]
                     .as_u64()
                     .map(|l| l as usize)

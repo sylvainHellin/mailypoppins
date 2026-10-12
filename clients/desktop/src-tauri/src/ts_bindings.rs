@@ -62,6 +62,8 @@ fn export_into(dir: &Path) -> usize {
         commands::LocalSearchParams,
         commands::LocalSearchHit,
         commands::ServerSearchParams,
+        commands::SearchForm,
+        commands::SearchPlan,
         commands::OperationStarted,
         commands::FetchOutcome,
         commands::CancelOutcome,

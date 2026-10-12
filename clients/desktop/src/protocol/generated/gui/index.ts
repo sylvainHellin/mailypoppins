@@ -64,6 +64,8 @@ export type { RsvpSettled } from "./RsvpSettled";
 export type { SaveFailure } from "./SaveFailure";
 export type { SavedAttachments } from "./SavedAttachments";
 export type { SavedFile } from "./SavedFile";
+export type { SearchForm } from "./SearchForm";
+export type { SearchPlan } from "./SearchPlan";
 export type { SecretKind } from "./SecretKind";
 export type { SecretStored } from "./SecretStored";
 export type { SendRefusal } from "./SendRefusal";
