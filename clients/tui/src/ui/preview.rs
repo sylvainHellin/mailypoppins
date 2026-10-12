@@ -66,9 +66,8 @@ pub(super) fn render_body(app: &mut App, frame: &mut Frame, area: Rect) {
         // sender's own markup in the browser when that is not enough.
         //
         // Drop the signature sentinel comments (#0106) so they never show in
-        // the preview, then substitute the quote marker for display.
-        let body = mp_core::draft::strip_signature_sentinels(app.preview_body.text())
-            .replace("{{SIGNATURE}}", "[signature]");
+        // the preview; `wrap_and_style_body` draws the quote marker as a rule.
+        let body = mp_core::draft::strip_signature_sentinels(app.preview_body.text());
         let lines = wrap_and_style_body(&body, inner_width as usize);
         app.preview_lines.fill(epoch, inner_width, lines);
     }
@@ -524,9 +523,12 @@ fn wrap_and_style_body(body: &str, width: usize) -> Vec<Line<'static>> {
     let mut in_code_block = false;
 
     for line in body.lines() {
-        if line.trim() == "[signature]" {
+        // The quote boundary of a reply/forward draft, new or legacy
+        // (PERSO-114). It carries no signature; the signature is the body text
+        // above it.
+        if mp_core::draft::is_quote_marker_line(line) {
             result.push(Line::from(Span::styled(
-                "  -- signature --".to_string(),
+                "  -- quoted message --".to_string(),
                 Style::default().fg(theme::active().text_faint),
             )));
             continue;
@@ -900,6 +902,25 @@ mod preview_cache_tests {
         for line in &lines {
             let width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
             assert!(width <= 10, "row wider than the pane: {width}");
+        }
+    }
+
+    /// PERSO-114: the quote boundary, new or legacy, is drawn as one faint
+    /// rule and never as the raw marker text.
+    #[test]
+    fn both_quote_markers_render_as_the_quoted_message_rule() {
+        for marker in [
+            mp_core::draft::QUOTE_MARKER,
+            mp_core::draft::LEGACY_QUOTE_MARKER,
+        ] {
+            let body = format!("My reply\n{marker}\n> quoted");
+            let rows: Vec<String> = wrap_and_style_body(&body, 40)
+                .iter()
+                .map(line_text)
+                .collect();
+            assert_eq!(rows.len(), 3, "{rows:?}");
+            assert_eq!(rows[1].trim(), "-- quoted message --", "{rows:?}");
+            assert!(!rows.iter().any(|r| r.contains(marker)), "{rows:?}");
         }
     }
 

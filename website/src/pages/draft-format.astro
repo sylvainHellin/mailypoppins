@@ -45,7 +45,7 @@ Your reply goes here.
 -- 
 Your Name
 
-{{SIGNATURE}}
+<!-- mp:quote -->
 
 > On 2026-01-15, sender wrote:
 >
@@ -65,7 +65,7 @@ Your note to the recipient.
 -- 
 Your Name
 
-{{SIGNATURE}}
+<!-- mp:quote -->
 
 ---------- Forwarded message ----------
 From: Original Sender <sender@example.com>
@@ -200,8 +200,8 @@ Email body here.`;
       <p>
         Reply drafts are created with <code>mp reply</code> (or <code>r</code> to reply,
         <code>ca</code> to reply-all, in the TUI). They record the source message in <code>in_reply_to</code>. The account signature
-        (if configured) is appended to the reply area, above a <code>{"{{SIGNATURE}}"}</code>
-        placeholder that marks the boundary with the quoted original message.
+        (if configured) is appended to the reply area, above a <code>&lt;!-- mp:quote --&gt;</code>
+        comment that marks the boundary with the quoted original message.
       </p>
       <p>
         A reply goes to the message's <code>Reply-To</code> address, or to its sender when it has
@@ -218,9 +218,11 @@ Email body here.`;
       </p>
       <p>
         The signature is part of the draft body, so it is visible and editable before you
-        send. The <code>{"{{SIGNATURE}}"}</code> placeholder carries no signature text of its
-        own; the send path uses it to place the quoted original below your reply. If it is
-        removed, the quote falls back to the end of the body.
+        send. The <code>&lt;!-- mp:quote --&gt;</code> marker carries no text of its own; the
+        send path uses it to place the quoted original below your reply and strips it from
+        every sent copy. If it is removed, the quote falls back to the end of the body.
+        Drafts written by older versions carry <code>{"{{SIGNATURE}}"}</code> in the same
+        place; it is read as the same boundary, so those drafts still send correctly.
       </p>
       <Code code={replyExample} lang="markdown" theme="catppuccin-mocha" />
     </section>

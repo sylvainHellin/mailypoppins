@@ -172,7 +172,14 @@ pub fn markdown_to_html(
     // CommonMark would otherwise pass them through as raw HTML comments into the
     // sent message. Stripping the lines keeps the signature content and its
     // surrounding blank lines intact.
-    let sanitized = crate::draft::strip_signature_sentinels(markdown);
+    //
+    // Rewrite the quote boundary to the one `QUOTE_MARKER` form (PERSO-114),
+    // so a legacy `{{SIGNATURE}}` draft splits on the same token as a new one.
+    // On its own line the marker is an HTML comment block, which CommonMark
+    // passes through verbatim and which interrupts the paragraph above it, so
+    // the split below lands between two closed blocks.
+    let sanitized =
+        crate::draft::normalize_quote_markers(&crate::draft::strip_signature_sentinels(markdown));
     let markdown = sanitized.as_str();
 
     let owned_body;
@@ -198,8 +205,8 @@ pub fn markdown_to_html(
     // context; the <style> block is not an attribute and takes the value raw.
     let font_family_attr = config.font_family.replace('"', "&quot;");
 
-    // The `{{SIGNATURE}}` marker (reply/forward drafts) no longer carries the
-    // signature; it is purely the boundary where the quoted section begins.
+    // The quote marker (reply/forward drafts, `draft::QUOTE_MARKER`) is the
+    // boundary where the quoted section begins; it carries no signature.
     // Split there and wrap the quoted content in a styled <div> so email clients
     // (Apple Mail, Gmail) do not collapse the reply and signature behind "see
     // more". Replace <blockquote> with styled <div> in the quoted section for
@@ -207,16 +214,11 @@ pub fn markdown_to_html(
     //
     // Each Markdown-derived fragment is then run through `inline_element_styles`
     // (#0118), which stamps the <style> block's declarations onto the individual
-    // elements. The split happens first so the marker still matches the bare
-    // `<p>{{SIGNATURE}}</p>` pulldown-cmark emits, and so the quoted original
-    // HTML of a reply passes through with its own styling untouched.
-    let body = if html_output.contains("{{SIGNATURE}}") {
-        // pulldown-cmark wraps the placeholder in <p> tags; match that form first
-        let marker = if html_output.contains("<p>{{SIGNATURE}}</p>") {
-            "<p>{{SIGNATURE}}</p>"
-        } else {
-            "{{SIGNATURE}}"
-        };
+    // elements. The split happens first so the marker still matches the raw
+    // comment pulldown-cmark emits, and so the quoted original HTML of a reply
+    // passes through with its own styling untouched.
+    let marker = crate::draft::QUOTE_MARKER;
+    let body = if html_output.contains(marker) {
         let parts: Vec<&str> = html_output.splitn(2, marker).collect();
         let reply_part = inline_element_styles(parts[0], &font_family_attr, &config.font_size);
 
@@ -231,8 +233,11 @@ pub fn markdown_to_html(
             // Fallback: convert Markdown blockquotes to styled divs. The
             // replacement runs before the stamping, or the rewritten
             // `<blockquote style="...">` would no longer match it.
+            // A second marker line (a hand-edited draft) must not ride along
+            // as a raw comment into the sent HTML.
             let quoted_part = if parts.len() > 1 { parts[1] } else { "" };
             let quoted_styled = quoted_part
+                .replace(marker, "")
                 .replace(
                     "<blockquote>",
                     "<div style=\"margin:0;padding:0 0 0 1em;border-left:2px solid #ccc\">",
@@ -404,41 +409,12 @@ fn element_declarations(name: &str, font_family_attr: &str, font_size: &str) -> 
     }
 }
 
-/// Strip the `{{SIGNATURE}}` marker out of a plain-text body (#0102).
-///
-/// Since #0099 the signature Markdown is spliced into the draft body at
-/// creation time and a bare `{{SIGNATURE}}` marker is left where the HTML send
-/// path splices the rich-HTML quote (`draft.rs`). The HTML build consumes that
-/// marker (`markdown_to_html`) and the TUI preview substitutes it for display
-/// (`tui/ui/preview.rs`), but the `text/plain` alternative shipped
-/// `body_markdown` verbatim, so a recipient reading the plain part saw the
-/// literal `{{SIGNATURE}}` mid-message. Drop the marker and collapse the blank
-/// lines it padded down to a single paragraph break so the plain text reads
-/// naturally and no double blank line is left where it stood.
 /// The plain-text body of a draft: the Markdown with the signature sentinel
-/// comments (#0106) and the `{{SIGNATURE}}` quote marker (#0102) removed, so a
-/// recipient reading the `text/plain` alternative sees neither.
+/// comments (#0106) and the quote marker, new or legacy (#0102, PERSO-114),
+/// removed, so a recipient reading the `text/plain` alternative sees neither.
+/// The blank lines that padded the marker collapse to one paragraph break.
 fn plain_text_body(body_markdown: &str) -> String {
-    strip_signature_marker(&crate::draft::strip_signature_sentinels(body_markdown))
-}
-
-fn strip_signature_marker(body: &str) -> String {
-    const MARKER: &str = "{{SIGNATURE}}";
-    let mut out = body.to_string();
-    while let Some(idx) = out.find(MARKER) {
-        let before = out[..idx].trim_end_matches(char::is_whitespace).to_string();
-        let after = out[idx + MARKER.len()..]
-            .trim_start_matches(char::is_whitespace)
-            .to_string();
-        out = if before.is_empty() {
-            after
-        } else if after.is_empty() {
-            format!("{before}\n")
-        } else {
-            format!("{before}\n\n{after}")
-        };
-    }
-    out
+    crate::draft::strip_quote_markers(&crate::draft::strip_signature_sentinels(body_markdown))
 }
 
 #[cfg(test)]
@@ -539,7 +515,10 @@ mod tests {
     fn test_markdown_to_html_with_signature_placeholder() {
         // Reply drafts carry the (Markdown) signature spliced into the body at
         // creation time (#0099); the send-time signature arg is None and the
-        // `{{SIGNATURE}}` marker is only the quote boundary.
+        // legacy `{{SIGNATURE}}` marker is only the quote boundary. The
+        // snapshots keep the legacy marker: drafts on disk still carry it, and
+        // `quote_marker_renders_like_the_legacy_one` pins the new marker to
+        // the same output.
         let md = "My reply\n\n-- Best, Alice\n\n{{SIGNATURE}}\n\n> Original message";
         let html = markdown_to_html(md, &default_settings(), None, None);
         assert_snapshot!(html);
@@ -558,6 +537,42 @@ mod tests {
         let md = "My reply\n\n-- Best, Alice\n\n{{SIGNATURE}}\n\n> Quoted text";
         let html = markdown_to_html(md, &default_settings(), None, None);
         assert_snapshot!(html);
+    }
+
+    /// PERSO-114: the `<!-- mp:quote -->` boundary renders byte for byte like
+    /// the legacy `{{SIGNATURE}}` one, with and without the rich-HTML quote, so
+    /// the snapshots above pin both.
+    #[test]
+    fn quote_marker_renders_like_the_legacy_one() {
+        let legacy = "My reply\n\n-- Best, Alice\n\n{{SIGNATURE}}\n\n> Quoted text";
+        let new = legacy.replace("{{SIGNATURE}}", crate::draft::QUOTE_MARKER);
+        for quoted in [None, Some("<p>Original HTML content</p>")] {
+            let a = markdown_to_html(legacy, &default_settings(), None, quoted);
+            let b = markdown_to_html(&new, &default_settings(), None, quoted);
+            assert_eq!(a, b, "quoted html: {quoted:?}");
+            assert!(!b.contains("mp:quote"), "marker in HTML: {b}");
+        }
+    }
+
+    /// The layout a new reply draft is written in: the signature block's
+    /// closing sentinel is directly followed by the quote marker, with no
+    /// blank line. The marker must still split cleanly between two closed
+    /// blocks, with the signature in the reply part and no raw comment left.
+    #[test]
+    fn a_signature_block_directly_above_the_quote_marker_renders_cleanly() {
+        let md = "My reply\n\n<!-- mp:sig-start -->\nBest,  \nAlice\n<!-- mp:sig-end -->\n<!-- mp:quote -->\n\nOn Mon wrote:\n> Quoted";
+        let html = markdown_to_html(md, &default_settings(), None, None);
+        for leak in ["mp:quote", "mp:sig-start", "mp:sig-end", "{{SIGNATURE}}"] {
+            assert!(!html.contains(leak), "{leak} leaked: {html}");
+        }
+        let alice = html
+            .find("Alice</p>")
+            .expect("the signature paragraph closes");
+        let quote = html
+            .find("<div style=\"padding-top:1em\">")
+            .expect("the quoted section is wrapped");
+        assert!(alice < quote, "signature below the quote: {html}");
+        assert!(html[quote..].contains("Quoted"), "quote missing: {html}");
     }
 
     #[test]
@@ -976,30 +991,45 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // strip_signature_marker (#0102)
+    // plain_text_body: quote marker (#0102, PERSO-114)
     // -----------------------------------------------------------------------
 
-    /// The marker is consumed by the HTML path and substituted in the TUI
+    /// The marker is consumed by the HTML path and dropped from the TUI
     /// preview, but the `text/plain` alternative used to ship it verbatim. It
-    /// must leave no trace, and the blank lines it padded collapse to a single
-    /// paragraph break rather than a double one.
+    /// must leave no trace, new or legacy, and the blank lines it padded
+    /// collapse to a single paragraph break rather than a double one.
     #[test]
-    fn strip_signature_marker_collapses_the_blank_lines_it_padded() {
-        let body = "My reply\n\n-- \nBest, Alice\n\n{{SIGNATURE}}\n\nOn Mon wrote:\n> Quoted";
-        let plain = strip_signature_marker(body);
-        assert!(
-            !plain.contains("{{SIGNATURE}}"),
-            "marker survived: {plain:?}"
-        );
-        // The signature Markdown (spliced in at draft time, #0099) stays; only
-        // the marker and its padding go.
+    fn plain_text_body_drops_the_quote_marker_and_its_padding() {
+        for marker in [
+            crate::draft::QUOTE_MARKER,
+            crate::draft::LEGACY_QUOTE_MARKER,
+        ] {
+            let body =
+                format!("My reply\n\n-- \nBest, Alice\n\n{marker}\n\nOn Mon wrote:\n> Quoted");
+            let plain = plain_text_body(&body);
+            assert!(!plain.contains(marker), "marker survived: {plain:?}");
+            // The signature Markdown (spliced in at draft time, #0099) stays;
+            // only the marker and its padding go.
+            assert_eq!(
+                plain,
+                "My reply\n\n-- \nBest, Alice\n\nOn Mon wrote:\n> Quoted"
+            );
+            assert!(
+                !plain.contains("\n\n\n"),
+                "double blank line left behind: {plain:?}"
+            );
+        }
+    }
+
+    /// A new draft carries both the sentinel-wrapped signature block and the
+    /// quote marker right below it: the plain part keeps the signature text
+    /// and drops all three comment lines.
+    #[test]
+    fn plain_text_body_handles_a_signature_block_and_the_quote_marker() {
+        let body = "My reply\n\n\n<!-- mp:sig-start -->\nBest,  \nAlice\n<!-- mp:sig-end -->\n<!-- mp:quote -->\n\nOn Mon wrote:\n> Quoted\n";
         assert_eq!(
-            plain,
-            "My reply\n\n-- \nBest, Alice\n\nOn Mon wrote:\n> Quoted"
-        );
-        assert!(
-            !plain.contains("\n\n\n"),
-            "double blank line left behind: {plain:?}"
+            plain_text_body(body),
+            "My reply\n\n\nBest,  \nAlice\n\nOn Mon wrote:\n> Quoted\n"
         );
     }
 
@@ -1040,58 +1070,77 @@ mod tests {
     /// A body with no marker is returned untouched, so the non-reply send
     /// paths keep byte-for-byte identical plain text.
     #[test]
-    fn strip_signature_marker_is_a_no_op_without_the_marker() {
+    fn plain_text_body_is_a_no_op_without_the_marker() {
         let body = "Just a plain note.\n\nSecond paragraph.\n";
-        assert_eq!(strip_signature_marker(body), body);
+        assert_eq!(plain_text_body(body), body);
     }
 
-    /// The reply/forward plain part built by `build_draft_message` carries no
-    /// `{{SIGNATURE}}` literal, on either the SMTP body or the invite path,
-    /// while the reply text and the quoted original still ride along.
+    /// The decoded bodies of every `text/plain` and `text/html` leaf part of a
+    /// built message, so an assertion sees the text after transfer decoding
+    /// (quoted-printable can wrap a marker across a soft line break).
+    fn text_parts(raw: &[u8]) -> (Vec<String>, Vec<String>) {
+        fn walk(part: &mailparse::ParsedMail, plain: &mut Vec<String>, html: &mut Vec<String>) {
+            if part.subparts.is_empty() {
+                let body = part.get_body().expect("the part body decodes");
+                match part.ctype.mimetype.as_str() {
+                    "text/plain" => plain.push(body),
+                    "text/html" => html.push(body),
+                    _ => {}
+                }
+            }
+            for sub in &part.subparts {
+                walk(sub, plain, html);
+            }
+        }
+        let parsed = mailparse::parse_mail(raw).expect("the built message parses");
+        let (mut plain, mut html) = (Vec::new(), Vec::new());
+        walk(&parsed, &mut plain, &mut html);
+        (plain, html)
+    }
+
+    /// The reply/forward parts built by `build_draft_message` carry no quote
+    /// marker, new (`<!-- mp:quote -->`) or legacy (`{{SIGNATURE}}`), in either
+    /// the `text/plain` or the `text/html` part, on the SMTP body and on the
+    /// invite path, while the reply text, the signature and the quoted original
+    /// still ride along. The draft has the layout `create_reply_draft_from`
+    /// writes: a sentinel-wrapped signature block right above the marker.
     #[test]
-    fn a_sent_reply_plain_part_carries_no_signature_marker() {
-        let mut draft = draft_with(Some("reply-marker"), "/drafts/reply.md");
-        draft.body_markdown =
-            "My reply\n\n\n-- \nBest, Alice\n\n{{SIGNATURE}}\n\nOn Mon, Alice wrote:\n> Original text"
-                .to_string();
-
-        // Non-invite path.
-        let built = build_draft_message(
-            &draft,
-            "fallback@example.com",
-            &EmailSettings::default(),
-            None,
-            None,
-        )
-        .expect("the reply draft builds");
-        let raw = String::from_utf8_lossy(&built.raw);
-        assert!(
-            !raw.contains("{{SIGNATURE}}"),
-            "marker leaked into the message bytes"
-        );
-        assert!(
-            raw.contains("My reply"),
-            "reply text missing from the message"
-        );
-        assert!(
-            raw.contains("Original text"),
-            "quoted text missing from the message"
-        );
-
-        // Invite path: the same body feeds the invite alternative's plain part.
-        let invited = build_draft_message(
-            &draft,
-            "fallback@example.com",
-            &EmailSettings::default(),
-            None,
-            Some("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n"),
-        )
-        .expect("the invite reply draft builds");
-        let invited_raw = String::from_utf8_lossy(&invited.raw);
-        assert!(
-            !invited_raw.contains("{{SIGNATURE}}"),
-            "marker leaked into the invite message bytes"
-        );
+    fn a_sent_reply_carries_no_quote_marker_in_either_part() {
+        for marker in [
+            crate::draft::QUOTE_MARKER,
+            crate::draft::LEGACY_QUOTE_MARKER,
+        ] {
+            let mut draft = draft_with(Some("reply-marker"), "/drafts/reply.md");
+            draft.body_markdown = format!(
+                "My reply\n\n\n<!-- mp:sig-start -->\n-- \nBest, Alice\n<!-- mp:sig-end -->\n{marker}\n\nOn Mon, Alice wrote:\n> Original text\n"
+            );
+            for invite in [None, Some("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")] {
+                let built = build_draft_message(
+                    &draft,
+                    "fallback@example.com",
+                    &EmailSettings::default(),
+                    None,
+                    invite,
+                )
+                .expect("the reply draft builds");
+                let (plain, html) = text_parts(&built.raw);
+                assert_eq!(plain.len(), 1, "one plain part (invite: {invite:?})");
+                assert_eq!(html.len(), 1, "one html part (invite: {invite:?})");
+                for part in plain.iter().chain(&html) {
+                    for leak in ["mp:quote", "{{SIGNATURE}}", "mp:sig-start", "mp:sig-end"] {
+                        assert!(
+                            !part.contains(leak),
+                            "{leak} leaked (marker {marker}, invite {invite:?}): {part}"
+                        );
+                    }
+                    for kept in ["My reply", "Best, Alice", "Original text"] {
+                        assert!(part.contains(kept), "{kept} missing: {part}");
+                    }
+                }
+                let raw = String::from_utf8_lossy(&built.raw);
+                assert!(!raw.contains(marker), "marker in the message bytes");
+            }
+        }
     }
 
     /// The unified Markdown signature (spliced into the reply body at draft
@@ -1106,7 +1155,7 @@ mod tests {
             "My reply\n\n[Robin](mailto:robin@example.com)\n\n{{SIGNATURE}}\n\nOn Mon wrote:\n> Quoted";
 
         // Plain part: marker gone, signature exactly once.
-        let plain = strip_signature_marker(body);
+        let plain = plain_text_body(body);
         assert!(
             !plain.contains("{{SIGNATURE}}"),
             "marker in plain part: {plain:?}"

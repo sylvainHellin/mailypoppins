@@ -249,8 +249,9 @@ Use `-s <name>` to pick a signature for one draft, or `--no-signature` to skip i
 Signatures used to live in `config.toml` under `[accounts.signatures.*]`.
 The first run after the upgrade copies those entries out to files, keeps the old default, and prints a notice; the tables are dead after that and can be deleted by hand, since mailypoppins never rewrites `config.toml`.
 
-Reply and forward drafts keep a `{{SIGNATURE}}` placeholder between the reply area and the quoted text.
-It no longer carries signature text; it marks where the send path splits the body to place the quoted original.
+Reply and forward drafts keep a `<!-- mp:quote -->` marker between the reply area and the quoted text.
+It carries no text; it marks where the send path splits the body to place the quoted original, and it is stripped from every sent copy.
+Drafts written by older versions carry `{{SIGNATURE}}` in that place, which is still read as the same boundary.
 
 ## TUI
 

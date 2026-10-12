@@ -167,7 +167,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### ACC-11 Signature injection into a draft
 
 - Classification: GUI parity
-- Source anchor: the `{{SIGNATURE}}` marker handling in `src/send.rs:185-268`, the file and default lookup in `src/signatures.rs`
+- Source anchor: the quote marker helpers (`QUOTE_MARKER`, legacy `{{SIGNATURE}}`, `is_quote_marker_line`) and the signature splice in `crates/mp-core/src/draft.rs`, their use in `markdown_to_html` and `plain_text_body` in `src/send.rs`, the file and default lookup in `src/signatures.rs`
 - Daemon surface: `draft.create`, `draft.reply`, `draft.forward`, and `draft.set_recipients` all re-splice
 - GUI location: clients/desktop: `draft_create` and `draft_forward` pass the new-draft and forward wizards' `signature` or `no_signature`, and the daemon splices it into the draft; a reply carries the account's default (M3, #0131)
 - Validation: `tests/draft_integration.rs`, `tests/daemon_gui_gaps.rs` (`a_reply_and_a_forward_carry_the_signature_they_name_or_none`), plus the marker assertions in `clients/tui/src/actions.rs` unit tests; `clients/desktop/src-tauri/src/commands.rs` (`validate_preview_and_signatures_answer_from_the_files`, `a_reply_and_a_forward_carry_the_signature_chosen_or_none`), `clients/desktop/src/components/compose/compose.test.tsx` (`the forward wizard picks a signature too, and none forwards without one`)
