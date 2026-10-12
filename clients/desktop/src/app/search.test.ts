@@ -125,16 +125,23 @@ describe("a header query the store cannot answer (PERSO-115)", () => {
   it("goes to the server, and the notice line says why", () => {
     let s = run(booted(), { type: "search_local", query: "to:diyan" });
     const seq = s.search!.seq;
-    s = run(s, { type: "search_local_rerouted", seq });
+    s = run(s, { type: "search_local_rerouted", seq, mailbox: null });
     expect(s.search).toMatchObject({ mode: "server", status: "searching", query: "to:diyan", seq: seq + 1 });
     expect(s.notice).toBe(REROUTED_NOTICE);
+  });
+
+  it("keeps the query's in: mailbox, so the server searches only that one", () => {
+    let s = run(booted(), { type: "search_local", query: "to:x in:Archive" });
+    const seq = s.search!.seq;
+    s = run(s, { type: "search_local_rerouted", seq, mailbox: "Archive" });
+    expect(s.search).toMatchObject({ mode: "server", status: "searching", query: "to:x in:Archive", mailbox: "Archive" });
   });
 
   it("ignores the answer of a run since replaced", () => {
     let s = run(booted(), { type: "search_local", query: "to:diyan" });
     const stale = s.search!.seq;
     s = run(s, { type: "search_local", query: "ledger" });
-    expect(run(s, { type: "search_local_rerouted", seq: stale }).search).toMatchObject({ mode: "local", query: "ledger" });
+    expect(run(s, { type: "search_local_rerouted", seq: stale, mailbox: null }).search).toMatchObject({ mode: "local", query: "ledger" });
   });
 });
 

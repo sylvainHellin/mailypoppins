@@ -102,7 +102,7 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 
 The list header's field filters the shown list as it is typed, as before.
 Enter runs `search_local` over the selected account and the results replace the list, each with the mailbox it was found in as a badge.
-A query the store's index cannot answer (`to:`, `cc:`, `filename:`, `message-id:`) is refused by `message.search` as `-32602`; `search_query` then confirms that is why, and the same query runs on the server with a notice saying so (PERSO-115).
+A query the store's index cannot answer (recipient, filename and message-id terms, or an OR group with a date or attachment term) is refused by `message.search` as `-32602`; `search_query` then confirms that is why, and the same query runs on the server, scoped to the query's own `in:` mailbox, with a notice saying so (PERSO-115).
 Shift+Enter, the header's server button and the palette's "Search server" run `search_server_start`; the server leg of a finished local search keeps its hits and passes their `message_id`s as `exclude_message_ids`, as the TUI does.
 With nothing typed and no search shown, the server button opens the Server Search form instead.
 `state.search` holds the query, the mode (`local` or `server`), the hits, the `operation_id`, the status (`searching`, `running`, `done`, `cancelled`, `failed`, `dropped`), the list selection and focus to restore, the one mailbox searched (`null` for the whole account), whether a server leg follows the local pass (`chain`), and the form it came from.

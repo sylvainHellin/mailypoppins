@@ -147,18 +147,20 @@ export function afterLocalPass(s: AppState): AppState {
 }
 
 /** The words the notice line says when the store cannot answer a query the list header's field ran. */
-export const REROUTED_NOTICE =
-  "The store's index cannot answer to:, cc:, filename: or message-id:, so the server searches this query";
+export const REROUTED_NOTICE = "The store's index cannot answer this query, so the server searches it.";
 
 /**
- * `search_local` refused a query the store's index cannot answer (`to:`,
- * `cc:`, `filename:`, `message-id:`): the same query goes to the server,
- * which can, and the notice line says why (PERSO-115).
+ * `search_local` refused a query the store's index cannot answer (recipient,
+ * filename and message-id terms, or an OR group with a date or attachment
+ * term): the same query goes to the server, which can, scoped to the query's
+ * own `in:` mailbox as the form's run is, and the notice line says why
+ * (PERSO-115).
  */
-export function localRerouted(s: AppState, seq: number): AppState {
+export function localRerouted(s: AppState, seq: number, inMailbox: string | null = null): AppState {
   const search = s.search;
   if (!search || search.seq !== seq || search.mode !== "local" || search.status !== "searching") return s;
-  return withNotice(startSearch(s, "server", search.query, { mailbox: search.mailbox, form: search.form }), REROUTED_NOTICE);
+  const mailbox = search.mailbox ?? inMailbox;
+  return withNotice(startSearch(s, "server", search.query, { mailbox, form: search.form }), REROUTED_NOTICE);
 }
 
 // ---------------------------------------------------------------------------

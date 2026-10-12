@@ -317,7 +317,7 @@ export type Action =
   | { type: "search_local_loaded"; seq: number; hits: LocalSearchHit[] }
   | { type: "search_local_failed"; seq: number; error: GuiError }
   /** `search_local` refused a query only the server can answer: run it there. */
-  | { type: "search_local_rerouted"; seq: number }
+  | { type: "search_local_rerouted"; seq: number; mailbox: string | null }
   /** `ff`: the Server Search form. */
   | { type: "open_server_search" }
   /** The Server Search form's Enter, once its query is built. */
@@ -1648,7 +1648,7 @@ function reduce(s: AppState, a: Action): AppState {
       return afterLocalPass({ ...s, search: { ...search, status: "failed", error: a.error.message } });
     }
     case "search_local_rerouted":
-      return localRerouted(s, a.seq);
+      return localRerouted(s, a.seq, a.mailbox);
     case "open_server_search":
       return openServerSearch(s);
     case "search_run":

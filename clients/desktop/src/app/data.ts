@@ -302,7 +302,9 @@ function useSearchSync(state: AppState, dispatch: Dispatch<Action>): void {
           // parser says whether that is why, and the server runs it.
           if (!chain && error.kind === "protocol" && error.code === -32602) {
             const plan = await cmd.searchQuery({ ...EMPTY_SEARCH_FORM, keywords: query }).catch(() => null);
-            if (plan?.kind === "query" && !plan.local) return dispatch({ type: "search_local_rerouted", seq });
+            if (plan?.kind === "query" && !plan.local) {
+              return dispatch({ type: "search_local_rerouted", seq, mailbox: plan.in_mailbox });
+            }
           }
           dispatch({ type: "search_local_failed", seq, error });
         });

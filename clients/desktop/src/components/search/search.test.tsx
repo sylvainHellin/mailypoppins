@@ -253,6 +253,17 @@ describe("server search", () => {
     expect(await screen.findByText(REROUTED_NOTICE)).toBeInTheDocument();
   });
 
+  it("a rerouted query keeps its in: mailbox, so the server searches only that one", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(input());
+    await user.keyboard("to:x in:Archive{Enter}");
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "running"));
+    expect(mock.calls.find((c) => c.cmd === "search_server_start")?.args).toEqual({
+      params: { account: "work", query: "to:x in:Archive", mailboxes: ["Archive"] },
+    });
+  });
+
   it("a refusal reads whole: the status wraps instead of cutting the daemon's sentence", async () => {
     const { user } = renderApp();
     await shellReady();
