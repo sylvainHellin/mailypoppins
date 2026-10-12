@@ -7,6 +7,9 @@ All notable changes to this project are documented in this file.
 ### Added
 - **Desktop: `y` on a draft copies its file path (PERSO-100).**
 - **`mp list-messages`, `mp search` and `mp contacts search` take `--json`.** Each prints one JSON object on stdout with warnings left on stderr, so a script can parse the listing: `{account, mailboxes, messages}` for `list-messages`, `{account, query, source, messages}` for `search` (the server or `--local`), `{account, query, contacts}` for `contacts search`. A message carries its selector, mailbox, Message-ID, sender, recipients, subject, the date as a UTC ISO 8601 instant beside the `Date:` header, its flags and whether it has attachments; `search --full` adds the body, and a server hit without `--full` the preview its text layout prints.
+- **Desktop: `ff` opens a Server Search form with the TUI's fields (PERSO-115).** The form has scope, From, To, Subject, Keywords, After, Before, attachment and Advanced; the store answers first, then the server.
+- **Desktop: an available update shows as a card at the bottom right with Install and Later (PERSO-97).**
+- **Desktop: `e` on a received message opens it read-only in `$EDITOR` as Markdown, as in the TUI (PERSO-92).** Enter focuses the reader.
 
 ### Fixed
 - **Reply and reply-all to a message you sent address its original recipients (PERSO-99).** They now go to its original To (and Cc for reply-all) instead of your own address.
@@ -14,9 +17,14 @@ All notable changes to this project are documented in this file.
 - **TUI: copying over ssh on a host with no clipboard works (PERSO-113).** `y`, and `c` in Contacts, send the text to the terminal via OSC 52 and show it in the status line instead of failing with "Failed to access clipboard".
 - **Desktop: opening a mailbox selects its top message, as the TUI does (PERSO-94).**
 - **Desktop: the draft preview shows the whole body (PERSO-101).** `draft.preview` takes `full: true`.
+- **Desktop: a `to:`, `cc:`, `filename:` or `message-id:` query typed in the search field searches the server (PERSO-115).** It no longer fails with a truncated refusal, and a failed search's error wraps instead of being cut off.
+- **Two daemon integration tests no longer flake under load.** The config-reload test waits for the startup reports its snapshot still owes, and the fake-ready hook starts no account runtimes.
 
 ### Changed
 - **Desktop: the focused pane's frame is square where it meets the neighbouring pane (PERSO-95).**
+- **TUI: on a list row `Enter` moves focus into the body pane and marks the message read, as in the desktop client (PERSO-92).** In a terminal under 80 columns it also zooms the body pane. `e` opens the message in `$EDITOR`: a draft for editing, received mail as its read-only Markdown copy.
+- **Reply and forward drafts mark the boundary above the quoted original with `<!-- mp:quote -->` instead of `{{SIGNATURE}}` (PERSO-114).** Drafts that still carry `{{SIGNATURE}}` keep working, and the TUI preview labels the boundary as the quoted message.
+- **Desktop: the window opens without a title bar or traffic lights on macOS (PERSO-97).** Drag it by the sidebar header or the margin around the content; Cmd+W, Cmd+M and Ctrl+Cmd+F still close, minimise and fill the screen through the app's own menu items.
 
 ### Performance
 - **Opening a large mailbox decodes the streamed rows straight into typed rows, about three times faster on the client (PERSO-106).** A broken stream shows in the desktop as a protocol error rather than an internal one.

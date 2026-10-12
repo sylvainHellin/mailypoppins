@@ -2559,3 +2559,39 @@ Write the sequence through `terminal.backend_mut()` and flush it; a second stdou
 
 The JS side's message counter never advances past the message whose handler threw, so every later message waits behind it forever.
 In Tauri 2 without the `tracing` feature, `Channel::send` fails only on a JSON error or once the event loop is gone, so the Rust side never learns the window stopped listening.
+
+## A test hook that fakes a state change has to be its only writer
+
+`MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS` dates from when the daemon started no runtimes.
+After P5-U8 the real runtime also reported `blocked` in a sandbox with no store, so the hook's guarantee quietly stopped holding and the bootstrap tests flaked under load.
+When a fake and a real producer can commit the same fact, turn the real one off under the fake.
+A daemon test that bootstraps right after the socket comes up must also read past the reports its snapshot still owes (accounts shown `opening`) rather than poll `daemon.status`, since the runtime table is filled before the change is committed.
+
+## A Tauri window without a title bar on macOS needs its own window menu items
+
+The predefined Close Window, Minimize, Zoom and Full Screen menu items only press the missing buttons, so they beep and do nothing.
+Replace them with items that call `close()`, `minimize()`, `maximize()` and `set_fullscreen()`.
+`close()` still emits `CloseRequested`, so the close guard runs.
+
+## A Tauri drag region stops at clickable children
+
+`data-tauri-drag-region="deep"` drags from a whole area but not from its buttons, inputs, links or focusable elements unless they carry the attribute too.
+The bare attribute drags only when the element itself is clicked.
+Dragging needs the `core:window:allow-start-dragging` permission, which `core:default` does not include.
+
+## A client learns what `message.search` refuses from `to_fts`, not from the error text
+
+`message.search` refuses `to:`, `cc:`, `filename:` and `message-id:` as -32602 because the local index has no column for them.
+A client finds that out with `mp_core::search::to_fts` before the call and sends the query to the server instead.
+The daemon's server search ignores the query's own `in:`, so the client turns `in:` into the `mailboxes` param, as the TUI does.
+Base UI dialogs move focus to their first field a moment after opening, so a test waits for focus before typing.
+
+## A TUI key that moves focus into a pane must check the pane is drawn
+
+Under 80 columns the split draws no body pane, so `Enter` moved focus into a pane the user could not see.
+A focus move has to zoom the target pane whenever the current width hides it.
+
+## Parallel agents must share one cargo target dir
+
+Twenty agents each building in their own `CARGO_TARGET_DIR` filled the Mac's 460 GB disk with trees of 5 to 17 GB each.
+A batch shares one target dir, which cargo's build lock makes safe, and deletes it when the batch is done.
