@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 
-/** A full-window state screen: one card, centred on the canvas. */
+/** A full-window state screen: one card, centred on the canvas, which moves the window (PERSO-97). */
 export function ScreenFrame({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
   return (
-    <main className="flex min-h-svh items-center justify-center bg-sidebar p-6" aria-labelledby="screen-title">
+    <main className="flex min-h-svh items-center justify-center bg-sidebar p-6" aria-labelledby="screen-title" data-tauri-drag-region>
       <section className="flex w-full max-w-lg flex-col gap-4 rounded-xl border border-border bg-card p-6 text-card-foreground shadow-sm">
         <div className="flex items-center gap-3">
           {icon}

@@ -303,6 +303,12 @@
     border-top-left-radius: 0;
     border-top-right-radius: 0;
   }
+  /* The narrow layout has no inset card: its panes, the sidebar's included,
+     run to the window's edges, and a window without a title bar has square
+     corners on macOS (PERSO-97), so every corner of the line is square. */
+  [data-layout="narrow"] [data-pane]::after {
+    border-radius: 0;
+  }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation-duration: 0.01ms !important;

@@ -48,6 +48,25 @@ describe("the adaptive layout", () => {
     expect(container.querySelector('[data-panes] > :first-child:last-child [data-view="settings"][data-pane="list"]')).not.toBeNull();
   });
 
+  it("moves the window, which has no title bar, by the sidebar header, the canvas and the narrow bar (PERSO-97)", async () => {
+    const wide = renderApp(1400);
+    await shellReady();
+    const header = wide.container.querySelector('[data-slot="sidebar-header"]');
+    expect(header).toHaveAttribute("data-tauri-drag-region", "deep");
+    // A press anywhere in a deep region drags, so nothing in the header takes a click.
+    expect(header?.querySelector("button, a, input, [tabindex], [role='button']")).toBeNull();
+    // The canvas drags only where it is the target: its margin around the inset card.
+    expect(wide.container.querySelector('[data-slot="sidebar-wrapper"]')).toHaveAttribute("data-tauri-drag-region", "");
+    wide.unmount();
+
+    const narrow = renderApp(600);
+    await shellReady();
+    const bar = narrow.container.querySelector('[data-slot="narrow-bar"]');
+    expect(bar).toHaveAttribute("data-tauri-drag-region", "deep");
+    // Its back button still takes the click: tauri's drag script skips a button.
+    expect(bar?.querySelector("button")).not.toBeNull();
+  });
+
   it("medium: the sidebar collapses to an icon rail, list and reader stay", async () => {
     const { container } = renderApp(900);
     await shellReady();

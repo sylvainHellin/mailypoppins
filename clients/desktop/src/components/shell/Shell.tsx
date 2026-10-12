@@ -60,6 +60,9 @@ export function Shell({ listGeometry }: { listGeometry?: RefObject<ListGeometry 
       onOpenChange={(open) => layout === "wide" && dispatch({ type: "set_sidebar_open", open })}
       className="h-svh overflow-hidden"
       data-layout={layout}
+      // The canvas around the inset card (its 8 px margin) moves the window,
+      // which has no title bar (PERSO-97); only a press on the canvas itself.
+      data-tauri-drag-region=""
     >
       {narrow && showSidebar ? (
         <div className="flex min-w-0 flex-1 flex-col bg-sidebar">

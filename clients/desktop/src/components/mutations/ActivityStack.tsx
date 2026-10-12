@@ -5,8 +5,8 @@
 // already inside may not be announced; a failure is its own `role="alert"`.
 // A hold card's end line is a status region of the card, mounted empty with
 // the card, for the same reason. Between the holds and the notices, the app
-// update's card while it downloads, asks for the restart or failed, then one
-// card per contact rebuild, RSVP and invitation this window awaits, with Cancel.
+// update's card while it is available, downloads, asks for the restart or
+// failed, then one card per contact rebuild, RSVP and invitation this window awaits, with Cancel.
 
 import { useCallback, useState, type Dispatch } from "react";
 import { CircleAlert, CircleArrowUp, CircleCheck, ExternalLink, LoaderCircle, RotateCw, Send, Undo2, X } from "lucide-react";
@@ -16,7 +16,7 @@ import { useAppState, useDispatch } from "@/app/store";
 import { FAILURES, STICKY_MS } from "@/app/activity";
 import { useWindDown } from "@/hooks/use-wind-down";
 import { RESPONSE_LABEL } from "@/app/rsvp";
-import { openReleasePage, restartIntoUpdate } from "@/app/updates";
+import { installUpdate, openReleasePage, restartIntoUpdate, updateCardShown } from "@/app/updates";
 import type { Action } from "@/app/reducer";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
@@ -270,30 +270,35 @@ export function megabytes(bytes: number): string {
 }
 
 /**
- * The app update's card (ticket 0139): "Downloading mailypoppins X…" with a
- * progress bar fed by `update_install`'s channel, then "Restart now" or
- * "Later" once the new bundle is in place, or the failure with "Open the
- * release page" and "Dismiss". One card through the three states, so its
- * status line, mounted empty with it, announces each change. Like a hold
- * card it shows while `!` hides the notices.
+ * The app update's card (ticket 0139): "mailypoppins X is available" with
+ * "Install" and "Later" once an update is known, then "Downloading
+ * mailypoppins X…" with a progress bar fed by `update_install`'s channel,
+ * then "Restart now" or "Later" once the new bundle is in place, or the
+ * failure with "Open the release page" and "Dismiss". One card through the
+ * four states, so its status line announces each change. Like a hold card it
+ * shows while `!` hides the notices.
  */
 export function UpdateToast({ update }: { update: UpdateState }) {
   const s = useAppState();
   const dispatch = useDispatch();
-  if (update.kind !== "downloading" && update.kind !== "failed" && !(update.kind === "installed" && update.asking)) return null;
+  if (update.kind === "idle" || !updateCardShown(update)) return null;
   const version = update.version;
   const label =
-    update.kind === "downloading"
-      ? `Downloading mailypoppins ${version}…`
-      : update.kind === "installed"
-        ? `mailypoppins ${version} is installed`
-        : `The update to ${version} failed`;
+    update.kind === "available"
+      ? `mailypoppins ${version} is available`
+      : update.kind === "downloading"
+        ? `Downloading mailypoppins ${version}…`
+        : update.kind === "installed"
+          ? `mailypoppins ${version} is installed`
+          : `The update to ${version} failed`;
   const end =
-    update.kind === "installed"
-      ? `mailypoppins ${version} is installed; restart to finish the update.`
-      : update.kind === "failed"
-        ? `The update to ${version} failed: ${update.reason}`
-        : "";
+    update.kind === "available"
+      ? `mailypoppins ${version} is available.`
+      : update.kind === "installed"
+        ? `mailypoppins ${version} is installed; restart to finish the update.`
+        : update.kind === "failed"
+          ? `The update to ${version} failed: ${update.reason}`
+          : "";
   const total = update.kind === "downloading" ? update.content_length : undefined;
   const done = update.kind === "downloading" ? update.downloaded : 0;
   const share = total ? Math.min(100, (100 * done) / total) : 0;
@@ -333,6 +338,17 @@ export function UpdateToast({ update }: { update: UpdateState }) {
           className="h-1 overflow-hidden rounded-full bg-muted"
         >
           <div className={`h-full bg-link ${total ? "transition-[width]" : "w-1/3 animate-pulse"}`} style={total ? { width: `${share}%` } : undefined} />
+        </div>
+      ) : null}
+      {update.kind === "available" ? (
+        <div className="flex justify-end gap-2">
+          <Button size="xs" variant="outline" onClick={() => dispatch({ type: "update_later" })}>
+            Later
+          </Button>
+          <Button size="xs" onClick={() => void installUpdate(s, dispatch)}>
+            <CircleArrowUp aria-hidden="true" />
+            Install
+          </Button>
         </div>
       ) : null}
       {update.kind === "installed" ? (

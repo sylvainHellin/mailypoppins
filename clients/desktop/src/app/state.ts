@@ -466,14 +466,15 @@ export type ComposeLeave = { kind: "navigate"; action: Action } | { kind: "close
 
 /**
  * The app's own update (ticket 0139, src/app/updates.ts): none known, one
- * available, one downloading with the bytes so far, one installed and
- * waiting for a restart (`asking` while the activity card offers Restart
- * now and Later), or an install that failed, which the card shows with its
- * reason and which can be retried as an available one.
+ * available (the activity card offers Install and Later until `dismissed`),
+ * one downloading with the bytes so far, one installed and waiting for a
+ * restart (`asking` while the activity card offers Restart now and Later),
+ * or an install that failed, which the card shows with its reason and which
+ * can be retried as an available one.
  */
 export type UpdateState =
   | { kind: "idle" }
-  | { kind: "available"; version: string; notes?: string; date?: string }
+  | { kind: "available"; version: string; notes?: string; date?: string; dismissed?: boolean }
   | { kind: "downloading"; version: string; downloaded: number; content_length?: number }
   | { kind: "installed"; version: string; asking: boolean }
   | { kind: "failed"; version: string; reason: string };

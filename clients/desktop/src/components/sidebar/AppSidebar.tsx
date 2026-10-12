@@ -68,7 +68,8 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
     : null;
   return (
     <Sidebar variant="inset" collapsible={collapsible} className={collapsible === "none" ? "w-full" : undefined}>
-      <SidebarHeader>
+      {/* The window has no title bar (PERSO-97): the header moves it. */}
+      <SidebarHeader data-tauri-drag-region="deep">
         <div className="flex h-8 items-center gap-2 px-2 text-sm font-semibold">
           <Mail className="size-4 shrink-0 text-link" aria-hidden="true" />
           <span className="truncate group-data-[collapsible=icon]:sr-only">mailypoppins</span>

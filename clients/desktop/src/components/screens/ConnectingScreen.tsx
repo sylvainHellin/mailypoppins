@@ -1,9 +1,12 @@
 import { Skeleton } from "@/components/ui/skeleton";
 
-/** Before the first bootstrap: the shell's silhouette, and what is happening. */
+/**
+ * Before the first bootstrap: the shell's silhouette, and what is happening.
+ * Nothing in it takes a click, so all of it moves the window (PERSO-97).
+ */
 export function ConnectingScreen({ reason }: { reason: string | null }) {
   return (
-    <div className="flex min-h-svh bg-sidebar" aria-busy="true">
+    <div className="flex min-h-svh bg-sidebar" aria-busy="true" data-tauri-drag-region="deep">
       <div className="hidden w-64 shrink-0 flex-col gap-2 p-4 md:flex" aria-hidden="true">
         <Skeleton className="h-6 w-32" />
         <Skeleton className="mt-4 h-4 w-20" />

@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window: core IPC, destroying itself once a close it asked about is confirmed, opening http, https and mailto URLs only, and the native open picker for a file or a folder",
+  "description": "The main window: core IPC, destroying itself once a close it asked about is confirmed, being dragged by its drag regions since it has no title bar, opening http, https and mailto URLs only, and the native open picker for a file or a folder",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-destroy",
+    "core:window:allow-start-dragging",
     "dialog:allow-open",
     {
       "identifier": "opener:allow-open-url",

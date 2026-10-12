@@ -861,35 +861,36 @@ For a removed account the daemon publishes `state.remove` of `account:<name>` fi
 ## Updates
 
 The app updates itself from GitHub Releases (#0139, stage 1); the Rust layer checks, downloads, verifies and installs ([rust-layer.md](rust-layer.md), "Updates"), and `src/app/updates.ts` shows what it knows.
-`state.update` is `idle`, `available` (version, notes, date), `downloading` (version, bytes so far, archive size when known), `installed` (version, and `asking` while the card offers the restart) or `failed` (version and the reason), and `state.updateInfo` the running version, the last successful check and the gate's sentence when the build never checks, from the last `update_status` or `update_check` answer.
+`state.update` is `idle`, `available` (version, notes, date, and `dismissed` once Later took its card away), `downloading` (version, bytes so far, archive size when known), `installed` (version, and `asking` while the card offers the restart) or `failed` (version and the reason), and `state.updateInfo` the running version, the last successful check and the gate's sentence when the build never checks, from the last `update_status` or `update_check` answer.
 
 ### Entry points
 
-- `update:available`, the Rust layer's silent startup check, makes the update known; nothing says so beyond the sidebar entry.
+- `update:available`, the Rust layer's silent startup check, makes the update known, and the activity area shows its card (see The install).
 - On mount the window reads `update_status` once, which never reaches the network: while `state.update` is still `idle`, an `installed` version becomes `installed` (with `asking` off, so the sidebar entry offers the restart and no card asks) and else an `available` one becomes `available`, so a webview reload keeps what the Rust layer knows.
 - Opening Settings reads `update_status` again for its Updates line: "mailypoppins 0.11.0, last checked …" or "…, not checked yet", and beside it the gate's sentence when the build never checks.
-- The palette's "Check for updates", always listed, the App menu's "Check for Updates…" (`update:check_requested`) and the Settings line's "Check now" run a manual check, `update_check { manual: true }`.
+- The palette's "Check for updates", always listed, the App menu's "Check for Updates…" (`update:check_requested`) and the Settings line's "Check now" run a manual check, `update_check { manual: true }`; the palette is the primary road, the menu item stays for the macOS habit.
 - The sidebar's foot shows "Update to 0.12.0" while an update is available or its install failed, and "Restart to finish the update" once one is installed and Later was chosen; it is hidden while nothing is known and while a download runs, since the card shows that.
 - The palette lists "Update to v0.12.0" and "Restart to finish the update" under the same conditions (`updatePaletteEntries`, passed to the palette as its `extra` rows); none of the three rows has a key.
 
 ### The check
 
-A manual check says how it went on the notice line: "mailypoppins 0.11.0 is up to date", "Update 0.12.0 available" (and the sidebar entry appears), the gate's sentence for a build that never checks ("Updates are off in a development build.", logged as a warning), or "The update check failed: <why>", logged as an error.
+A manual check says how it went on the notice line: "mailypoppins 0.11.0 is up to date", "Update 0.12.0 available" (and the card and the sidebar entry appear), the gate's sentence for a build that never checks ("Updates are off in a development build.", logged as a warning), or "The update check failed: <why>", logged as an error.
 A silent check says nothing, and its failure is only in the Rust layer's log; Settings runs none, it reads `update_status`.
 A check that answers `up_to_date` forgets an update that is available or failed, as the Rust layer drops the one it held; a download or an installed update stays.
 
 ### The install
 
-The sidebar entry or the palette row calls `update_install` with a `Channel<UpdateProgress>`.
-The activity area shows one card for it, after the hold cards and before the running operations, and, like them, while `!` hides the notices:
+The card's Install, the sidebar entry or the palette row calls `update_install` with a `Channel<UpdateProgress>`.
+The activity area shows one card for the update, after the hold cards and before the running operations, and, like them, while `!` hides the notices:
 
+- while an update is available, "mailypoppins 0.12.0 is available." with "Later" and "Install"; Later sets `dismissed` on the available state and takes the card away for this window, leaving the sidebar entry and the palette row, and the same version found again by the silent check stays dismissed, while a newer version or a manual check shows the card again;
 - "Downloading mailypoppins 0.12.0…" with "1.0 MB of 4.0 MB" and a progress bar from the channel's `started` and `progress`, or a pulsing bar with the bytes so far when the server sent no size;
 - on `finished`, or the command's answer, whichever lands first, "mailypoppins 0.12.0 is installed; restart to finish the update." with "Restart now" and "Later";
-- on a rejection, "The update to 0.12.0 failed: <the Rust layer's sentence>" with "Open the release page", which opens `https://github.com/sylvainHellin/mailypoppins/releases/latest` through `open_external`, and "Dismiss".
+- on a rejection, "The update to 0.12.0 failed: <the Rust layer's sentence>" with "Open the release page", which opens `https://github.com/sylvainHellin/mailypoppins/releases/latest` through `open_external`, and "Dismiss", which leaves the update available and dismissed.
 
-The card is a `group` named after its state, and its status line, mounted empty with it, announces the install and the failure.
-Later takes the card away and leaves the restart to the sidebar entry and the palette.
-A failed install stays installable: the sidebar entry and the palette row retry it while the card shows, and Dismiss takes the card away with the update `available` again.
+The card is a `group` named after its state, and its status line announces the offer, the install and the failure.
+The installed card's Later takes the card away and leaves the restart to the sidebar entry and the palette.
+A failed install stays installable: the sidebar entry and the palette row retry it while the card shows, and Dismiss takes the card away with the update `available` again, without its card.
 The install and its failure each leave a line in the activity log.
 
 ### The restart
@@ -980,6 +981,12 @@ A window that started with no account selects the first one listed, and its inbo
 | below 760 px | narrow | one of sidebar, list, reader: the focused pane, with a back button to its parent |
 
 Tailwind's `md` and shadcn's `useIsMobile` both move to 760 px, so the rail never turns into an off-screen sheet between 760 and 767.
+
+On macOS the window has no title bar and no traffic lights (PERSO-97): it opens on the sidebar and the inset card, with square corners and the system shadow.
+The page moves it through tauri's `data-tauri-drag-region`: the sidebar header (`deep`, so the whole header), the canvas around the inset card (bare, so only a press on the canvas itself, its 8 px margin), the narrow bar (`deep`; its back button still takes the click, since tauri's script skips a button), the connecting screen (`deep`) and the background of the other state screens (bare).
+A double click on a drag region zooms the window, as on a title bar.
+Close Window (Cmd+W), Minimize (Cmd+M), Zoom and Toggle Full Screen (Ctrl+Cmd+F) stay in the menu bar ([rust-layer.md](rust-layer.md), "Menus").
+In the narrow layout the panes run to the window's square edges, so `index.css` squares every corner of the focused pane's line there.
 The list width, the collapsed sidebar and whether `!` hides the notices are stored in `localStorage` (`mailypoppins.desktop.prefs.v1`), never in the daemon.
 The list is drawn at the stored width only while the reader keeps `READER_MIN` (320 px) of the pane row, measured by a ResizeObserver; a 720 px width stored in a wide window draws narrower in the medium layout, and the stored value is kept for when the window grows.
 

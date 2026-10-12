@@ -143,6 +143,36 @@ describe("a manual check", () => {
   });
 });
 
+describe("the available card", () => {
+  it("offers Install and Later as soon as an update is known", async () => {
+    const { user } = renderApp();
+    await ready();
+    expect(card(/is available$/)).toBeNull();
+    await announce();
+    const offer = await findCard("mailypoppins 0.12.0 is available");
+    expect(within(offer).getByRole("status")).toHaveTextContent("mailypoppins 0.12.0 is available.");
+    await user.click(within(offer).getByRole("button", { name: "Install" }));
+    await waitFor(() => expect(mock.updateInstalls).toHaveLength(1));
+    await waitFor(() => expect(card("Downloading mailypoppins 0.12.0…")).not.toBeNull());
+    expect(card("mailypoppins 0.12.0 is available")).toBeNull();
+  });
+
+  it("Later takes the card away and leaves the sidebar entry", async () => {
+    const { user } = renderApp();
+    await ready();
+    await announce();
+    const offer = await findCard("mailypoppins 0.12.0 is available");
+    await user.click(within(offer).getByRole("button", { name: "Later" }));
+    await waitFor(() => expect(card("mailypoppins 0.12.0 is available")).toBeNull());
+    expect(entry("Update to 0.12.0")).not.toBeNull();
+    expect(calls("update_install")).toEqual([]);
+    // A manual check shows it again.
+    mock.updateCheck = { state: "available", current: "0.11.0", version: "0.12.0" };
+    await runFromPalette(user, "Check for updates");
+    await findCard("mailypoppins 0.12.0 is available");
+  });
+});
+
 describe("the install", () => {
   it("shows the download on a running card, then asks Restart now or Later", async () => {
     const { user } = renderApp();

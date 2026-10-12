@@ -780,7 +780,7 @@ The scheme's plain-text fallback reads the same command, so the two never disagr
 
 ## Menus
 
-`menu.rs` builds the menu bar with `tauri::menu`, no plugin: the Edit and Window menus are the predefined macOS items, the App menu is too apart from "Check for Updates…" and "Settings…", and File, View and Help carry our own.
+`menu.rs` builds the menu bar with `tauri::menu`, no plugin: the Edit menu is the predefined macOS items, the App menu is too apart from "Check for Updates…" and "Settings…", and File, View, Window and Help carry our own.
 Each of ours emits its id as the `menu` event (`listen("menu", …)`, allowed by `core:default`), and the frontend runs the same action its key runs (`MENU_ACTIONS` in `src/app/actions.ts`, pinned by a Rust test that reads that file):
 
 | Id | Menu | Runs |
@@ -794,6 +794,19 @@ Each of ours emits its id as the `menu` event (`listen("menu", …)`, allowed by
 | `keyboard_shortcuts` | Help | `?` |
 
 No item takes an accelerator the webview's keymap owns, since a menu key equivalent reaches AppKit before the page and a bare `z` would stop the user typing one.
+
+The main window has no title bar on macOS (PERSO-97): `lib.rs` builds it with `decorations(false)`, a borderless, resizable window with no traffic lights.
+AppKit's predefined Close Window, Minimize, Zoom and Enter Full Screen only press the title bar's buttons (`performClose:` and the like), which a borderless window refuses with the alert sound, so the window items are ours too (`WINDOW_ITEMS`), run in Rust on the `main` window and never forwarded:
+
+| Id | Menu | Key | Runs |
+|---|---|---|---|
+| `close_window` | File | Cmd+W | `close()`, which asks the webview's close guard as the button did |
+| `minimize_window` | Window | Cmd+M | `minimize()` |
+| `zoom_window` | Window | none | `maximize()` or `unmaximize()` |
+| `toggle_fullscreen` | View | Ctrl+Cmd+F | `set_fullscreen`, which lends the window a title bar while it fills the screen |
+
+The page moves the window through `data-tauri-drag-region` ([shell.md](shell.md), "Layouts"), whose `start_dragging` the capability grants with `core:window:allow-start-dragging`.
+The alternative that keeps the traffic lights floating over the page is `.title_bar_style(TitleBarStyle::Overlay).hidden_title(true)` in place of `decorations(false)`; it keeps AppKit's own window items working as well.
 
 "Check for Updates…", under About in the App menu, is not one of these: its id `check_for_updates` emits the event `update:check_requested` with no payload, and the frontend runs `update_check` with `manual: true` so its notice line shows the answer (see Updates).
 
@@ -910,7 +923,7 @@ The policy lives in `tauri.conf.json` under `app.security.csp`:
 - `frame-src mpmsg: http://mpmsg.localhost https: http:`: `https:` and `http:` are there only so that a link clicked in the reader reaches `on_navigation`, which refuses it; with `frame-src mpmsg:` alone the CSP blocks the navigation first and the click dies silently.
 - `dangerousDisableAssetCspModification: ["style-src"]` stops Tauri from adding a nonce to `style-src` when `index.html` carries an inline `<style>`, which would switch `'unsafe-inline'` off.
 
-The capability grants `core:default`, `core:window:allow-destroy` (the close of a window that asked first, see Terminal sessions), `opener:allow-open-url` scoped to `https://*`, `http://*` and `mailto:*`, and `dialog:allow-open`, the native file and folder picker of the Save and Attach file dialogs ([reader.md](reader.md), "Attachments").
+The capability grants `core:default`, `core:window:allow-destroy` (the close of a window that asked first, see Terminal sessions), `core:window:allow-start-dragging` (the drag regions of a window with no title bar, see Menus), `opener:allow-open-url` scoped to `https://*`, `http://*` and `mailto:*`, and `dialog:allow-open`, the native file and folder picker of the Save and Attach file dialogs ([reader.md](reader.md), "Attachments").
 `tauri-plugin-updater` is registered too, for its Rust API alone (see Updates), and the webview is granted none of its commands.
 `tauri-plugin-dialog` is registered in the builder for that picker alone, which the webview calls through `@tauri-apps/plugin-dialog`; no command of this layer opens a dialog, and the plugin's save, message, ask and confirm stay unallowed.
 The picker hands back a path, and since no `fs:` permission is granted the webview reads nothing through it: `attachment_save` and `draft_attach` read and write the disk themselves, as they do for a typed path.

@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { reducer, type Action } from "@/app/reducer";
 import { initialState, type AppState } from "@/app/state";
-import { updateEntryLabel, updatePaletteEntries, updateReason } from "@/app/updates";
+import { updateCardShown, updateEntryLabel, updatePaletteEntries, updateReason } from "@/app/updates";
 
 /** The newest line of the activity log. */
 const lastLine = (s: AppState) => s.activityLog[s.activityLog.length - 1];
@@ -99,7 +99,22 @@ describe("the update state", () => {
     expect(s.update).toEqual({ kind: "failed", version: "0.12.0", reason: "signature mismatch" });
     expect(lastLine(s)).toMatchObject({ level: "error", text: "The update to 0.12.0 failed: signature mismatch" });
     s = run(s, { type: "update_dismiss" });
-    expect(s.update).toEqual({ kind: "available", version: "0.12.0" });
+    expect(s.update).toEqual({ kind: "available", version: "0.12.0", dismissed: true });
+    expect(updateCardShown(s.update)).toBe(false);
+  });
+
+  it("an available update shows its card until Later, and only a manual check brings it back", () => {
+    let s = available();
+    expect(updateCardShown(s.update)).toBe(true);
+    s = run(s, { type: "update_later" });
+    expect(s.update).toMatchObject({ kind: "available", version: "0.12.0", dismissed: true });
+    expect(updateCardShown(s.update)).toBe(false);
+    // The silent check's event for the same version leaves it dismissed.
+    expect(updateCardShown(run(s, found).update)).toBe(false);
+    expect(updateCardShown(run(s, checked({ state: "available", version: "0.12.0" }, false)).update)).toBe(false);
+    // A newer version, or a manual check, shows the card again.
+    expect(updateCardShown(run(s, { type: "update_available", update: { version: "0.13.0" } }).update)).toBe(true);
+    expect(updateCardShown(run(s, checked({ state: "available", version: "0.12.0" })).update)).toBe(true);
   });
 
   it("progress outside a download is dropped", () => {

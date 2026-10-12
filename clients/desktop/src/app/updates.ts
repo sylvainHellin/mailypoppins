@@ -61,13 +61,16 @@ export function checkNotice(check: UpdateCheck): { text: string; level: "info" |
 
 /**
  * An update became known, from the silent check's event or a check's
- * answer. A download or an installed update keeps its state: the version it
- * installs is the one the Rust layer holds.
+ * answer: the activity card offers it. A download or an installed update
+ * keeps its state: the version it installs is the one the Rust layer holds.
+ * The same version found again stays dismissed if Later dismissed it.
  */
 export function updateFound(s: AppState, found: UpdateAvailable): AppState {
   if (s.update.kind === "downloading" || s.update.kind === "installed") return s;
-  if (s.update.kind === "available" && s.update.version === found.version && s.update.notes === found.notes && s.update.date === found.date) return s;
-  return { ...s, update: { kind: "available", version: found.version, notes: found.notes, date: found.date } };
+  const same = s.update.kind === "available" && s.update.version === found.version;
+  if (same && s.update.kind === "available" && s.update.notes === found.notes && s.update.date === found.date) return s;
+  const dismissed = same && s.update.kind === "available" && s.update.dismissed ? { dismissed: true } : {};
+  return { ...s, update: { kind: "available", version: found.version, notes: found.notes, date: found.date, ...dismissed } };
 }
 
 /**
@@ -82,6 +85,11 @@ export function updateChecked(s: AppState, check: UpdateCheck, manual: boolean):
   let next: AppState = { ...s, updateInfo: { current: check.current, last_check: check.last_check ?? s.updateInfo?.last_check ?? null, reason } };
   if (check.state === "available" && check.version) {
     next = updateFound(next, { version: check.version, notes: check.notes, date: check.date });
+    // A manual check shows the card again, even for a version Later dismissed.
+    if (manual && next.update.kind === "available" && next.update.dismissed) {
+      const { version, notes, date } = next.update;
+      next = { ...next, update: { kind: "available", version, notes, date } };
+    }
   } else if (check.state === "up_to_date" && installable(next.update)) {
     next = { ...next, update: { kind: "idle" } };
   }
@@ -141,15 +149,27 @@ export function updateInstallFailed(s: AppState, reason: string): AppState {
   return logActivity({ ...s, update: { kind: "failed", version: u.version, reason } }, "error", `The update to ${u.version} failed: ${reason}`);
 }
 
-/** The card's Later: the update stays installed, and the sidebar entry offers the restart. */
+/**
+ * The card's Later: an available update stays available without its card,
+ * an installed one stays installed; the sidebar entry and the palette offer
+ * the install or the restart.
+ */
 export function updateLater(s: AppState): AppState {
+  if (s.update.kind === "available" && !s.update.dismissed) return { ...s, update: { ...s.update, dismissed: true } };
   return s.update.kind === "installed" && s.update.asking ? { ...s, update: { ...s.update, asking: false } } : s;
 }
 
-/** The failure card's Dismiss: the update is available again. */
+/** The failure card's Dismiss: the update is available again, without a card. */
 export function updateFailureDismissed(s: AppState): AppState {
   const u = s.update;
-  return u.kind === "failed" ? { ...s, update: { kind: "available", version: u.version } } : s;
+  return u.kind === "failed" ? { ...s, update: { kind: "available", version: u.version, dismissed: true } } : s;
+}
+
+/** Whether the activity area shows the update's card. */
+export function updateCardShown(u: UpdateState): boolean {
+  if (u.kind === "available") return !u.dismissed;
+  if (u.kind === "installed") return u.asking;
+  return u.kind === "downloading" || u.kind === "failed";
 }
 
 // ---------------------------------------------------------------------------

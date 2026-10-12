@@ -167,8 +167,14 @@ pub fn run() {
             let (width, height) = window_size();
             let nav_app = app.handle().clone();
             let win_app = app.handle().clone();
+            // No title bar and no traffic lights on macOS (PERSO-97): the
+            // window opens on the app itself. The page's drag regions move
+            // it, and the Window menu's own items close, minimise, zoom and
+            // fill the screen, since AppKit's predefined ones refuse a
+            // window without the buttons (menu.rs, WINDOW_ITEMS).
             WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("mailypoppins")
+                .decorations(!cfg!(target_os = "macos"))
                 .inner_size(width, height)
                 .min_inner_size(480.0, 400.0)
                 .on_navigation(move |url| {
