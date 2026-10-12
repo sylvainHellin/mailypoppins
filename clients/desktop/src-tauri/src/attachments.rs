@@ -123,10 +123,10 @@ pub struct DraftAttachments {
 
 /// A materialiser's answer, the fields this layer reads.
 #[derive(Deserialize)]
-struct Handle {
-    handle: String,
-    path: String,
-    name: String,
+pub(crate) struct Handle {
+    pub(crate) handle: String,
+    pub(crate) path: String,
+    pub(crate) name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -206,8 +206,9 @@ fn opened(path: &Path) -> OpenedFile {
 // Received messages
 // ---------------------------------------------------------------------------
 
-/// One materialisation, its file checked to be the one file it names.
-fn materialise(door: &Door, method: &str, params: Value) -> Result<Handle, GuiError> {
+/// One materialisation, its file checked to be the one file it names; the
+/// Markdown rendition (`daemon_files.rs`) is one too.
+pub(crate) fn materialise(door: &Door, method: &str, params: Value) -> Result<Handle, GuiError> {
     let answer = call(door, method, params, HANDLE_BUDGET, Addressing::Resource)?;
     let handle: Handle = crate::commands::decode(method, answer)?;
     safe_file_name(&handle.name)?;

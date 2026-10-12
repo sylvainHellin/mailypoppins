@@ -1,7 +1,8 @@
-// Attachments, the browser rendition and the fetch of a server-only hit
-// (clients/desktop/docs/reader.md, "Attachments"): the TUI's `to`, `ts`,
-// `tb` and `ta`, and its search overlay's `f`, here `F`. What the keys, the
-// palette and the buttons run; the dialogs call the helpers at the bottom.
+// Attachments, the browser and Markdown renditions and the fetch of a
+// server-only hit (clients/desktop/docs/reader.md, "Attachments"): the TUI's
+// `to`, `ts`, `tb`, `ta` and `e` on a received message, and its search
+// overlay's `f`, here `F`. What the keys, the palette and the buttons run;
+// the dialogs call the helpers at the bottom.
 
 import type { Dispatch } from "react";
 import type { Action } from "@/app/reducer";
@@ -17,7 +18,7 @@ import {
 } from "@/app/state";
 import { isOpenable } from "@/app/search";
 import * as cmd from "@/lib/commands";
-import { asGuiError, type Attachment, type DraftAttachments } from "@/lib/gui-types";
+import { asGuiError, fixtureNotice, type Attachment, type DraftAttachments } from "@/lib/gui-types";
 import { homeDir, openPicker } from "@/lib/tauri";
 
 /** What an attachment key acts on: the cursor's message, a server-only hit, or the Drafts cursor draft. */
@@ -144,6 +145,26 @@ export async function openHtml(s: AppState, dispatch: Dispatch<Action>): Promise
     return failed(dispatch, subj.account, `Open failed: ${asGuiError(e).message}`);
   }
   notice(dispatch, "Opened in browser");
+}
+
+/**
+ * `e` on a received message (PERSO-92, the TUI's read-only view): the daemon
+ * writes its Markdown rendition, read-only, and the external editor opens it.
+ * A server-only hit has no row to render, so it asks for the fetch first; a
+ * draft is the caller's (`e` edits it).
+ */
+export async function openMarkdown(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
+  const subj = cursorSubject(s);
+  if (!subj || subj.kind === "draft") return;
+  if (subj.kind === "hit") return notice(dispatch, FETCH_FIRST);
+  try {
+    const launch = await cmd.messageMarkdownOpen(subj.account, subj.row_id);
+    notice(dispatch, fixtureNotice(launch) ?? `Opened the message read-only in ${launch.editor}`);
+  } catch (e: unknown) {
+    const error = asGuiError(e);
+    if (error.kind === "not_found") return dispatch({ type: "notice", text: error.message, level: "warning" });
+    failed(dispatch, subj.account, `Open failed: ${error.message}`);
+  }
 }
 
 /** `ta`, Drafts only: the path dialog, until the native picker arrives. */

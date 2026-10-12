@@ -249,6 +249,14 @@ export const configOpen = (): Promise<EditorLaunch> => invoke<EditorLaunch>("con
 /** Opens the daemon's log file (`diagnostic.log_path`) in the resolved editor; `not_found` when it does not exist yet. */
 export const logOpen = (): Promise<EditorLaunch> => invoke<EditorLaunch>("log_open");
 
+/**
+ * Opens a received message's Markdown rendition (`message.materialise_markdown`,
+ * read-only) in the resolved editor, the TUI's `e`; `not_found` when the store
+ * no longer holds the row.
+ */
+export const messageMarkdownOpen = (account: string, row_id: number): Promise<EditorLaunch> =>
+  invoke<EditorLaunch>("message_markdown_open", { account, row_id });
+
 /** The daemon's configuration (`config.get`): its file, its state and the part the Settings view shows. */
 export const configGet = (): Promise<ConfigSnapshot> => invoke<ConfigSnapshot>("config_get");
 

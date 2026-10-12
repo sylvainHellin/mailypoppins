@@ -239,7 +239,7 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `r`, `cr` | Reply | list, reader | `draft_reply` (`all: false`) or `draft_from_message` (`reply`), then the editor |
 | `ca` | Reply all | list, reader | `draft_reply` (`all: true`) or `draft_from_message` (`reply_all`), then the editor |
 | `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `signature_list`, then `draft_forward` with `headers` and the signature, or `draft_from_message` (`forward`), then the editor |
-| `e` | Edit the draft in the editor; on a received message, open it in the reader | list, reader | `draft_path`, then the editor |
+| `e` | Edit the draft in the editor; on a received message, open its Markdown rendition read-only in the external editor, the TUI's `e` (PERSO-92); Enter focuses the reader | list, reader | `draft_path`, then the editor; `message_markdown_open` |
 | `ce` | Edit recipients, Drafts only | list, reader | `draft_set_recipients`, the dialog filled from the listed row |
 | `cA` | Approve, Drafts only | list, reader | `draft_approve` |
 | `cD` | Back to draft, Drafts only | list, reader | `draft_demote` |
@@ -772,7 +772,7 @@ In the Filter field Enter goes back to the lines with the filter kept, and Escap
 ### config.toml and the daemon log
 
 `sc` opens the daemon's `config.toml` in the external editor through `config_open`, and `sf` the daemon's log file through `log_open`; the palette's "Open config.toml in $EDITOR" and "Open log file in $EDITOR" run them too.
-Both work from every view, the TUI's view-agnostic GLOBAL keys, and take the path from the daemon ([rust-layer.md](rust-layer.md), "config.toml and the daemon log").
+Both work from every view, the TUI's view-agnostic GLOBAL keys, and take the path from the daemon ([rust-layer.md](rust-layer.md), "config.toml, the daemon log and a message's Markdown rendition").
 Neither file is a draft, so neither opens in the embedded editor: they take the external route of Compose, and a terminal editor, such as the `nvim` of the setting that runs drafts embedded, opens them in a new window of the first terminal emulator found.
 The notice line says "Opened config.toml in <editor>" or "Opened the daemon log in <editor>".
 With no configuration it says "There is no config.toml yet; add an account first", and with no log file yet "No log file found at <path>", both logged as warnings; any other failure is "Open config failed: <why>" or "Open log failed: <why>", logged as an error.
@@ -1038,6 +1038,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - In the Contacts view: `j`/`k`, `gg`/`G` move, `/` focuses the search, Enter and `n` compose to the contact, `v` sends it as a vCard, `c` copies its address, `r` rebuilds the index (see Contacts).
 - In the Calendar view: `j`/`k`, `gg`/`G` move, Enter and `e` open the entry's `invite.ics` in the editor, `t` shows or hides past events, `r` reads the agenda again (see Calendar).
 - `cn`, `r`, `cr`, `ca`, `cf`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
+  On a received message `e` opens its Markdown rendition read-only in the external editor instead, the TUI's `e`, and Enter focuses the reader (PERSO-92); on a server-only hit it says to fetch it first (`F`).
 - `cs`: the Signatures dialog, in Mail from any pane; see Signatures.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".
 - `to`, `ts`, `tb`: open an attachment, save attachments, open the HTML in the browser, from the list or the reader (the TUI's MESSAGE keys); `ta`: attach a file to the Drafts cursor draft; see [reader.md](reader.md), "Attachments".

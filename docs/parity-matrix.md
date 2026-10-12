@@ -450,10 +450,12 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `Enter / e` (`clients/tui/src/app/keymap.rs:611`), search overlay `e`
 - Daemon surface: `message.materialise_markdown` `{account, row_id|id|selector, mailbox?}`, the third member of the handle family
-- GUI location: clients/desktop (M3, #0131)
-- Validation: TUI golden frames
-- Status: routed (P5-U10c-I1); GUI not started
+- GUI location: clients/desktop: `e` on a received message, in a mailbox or on a stored search hit, calls `message_markdown_open`, which materialises the rendition and opens it in the external editor, as `sc` and `sf` open their files; Enter focuses the reader, as in the TUI the reader shows on Enter; on a draft `e` still edits it, and on a server-only hit it asks for `F` first (PERSO-92; shell.md, "Selection and message actions")
+- Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`e on a message opens its Markdown rendition in the editor and Enter focuses the reader; on a draft e edits it (PERSO-92)`, `on a server-only hit, e asks for the fetch first and opens no editor (PERSO-92)`), `clients/desktop/src-tauri/src/daemon_files.rs` (`message_markdown_open_on_journals_the_editor_on_the_daemons_rendition`, `message_markdown_open_on_a_row_the_store_lost_is_not_found_and_opens_nothing`)
+- Status: routed (P5-U10c-I1); GUI shipped (PERSO-92)
 - Note: the handle keeps its blob alive until release or expiry (`ANO-6`), and the file is written 0444 so `$EDITOR` opens it read-only (#0075).
+  The desktop leaves the handle to expire, as it does an opened attachment's, since the external route does not wait for the editor to exit; the TUI releases it on exit.
+  A terminal editor opens in a new terminal window, never in the embedded pane, which is a draft's.
   The rendition is released when the editor exits, where the pre-daemon file was unlinked; a second open of the same row is a second handle in a directory of its own, so the mode the first one left cannot stop it.
   `message.materialise_html` is not it: that renders the sender's markup for a browser, where this renders the store's own Markdown view of a message.
   The store keeps no `.md` per message, so the rendition is `store::read::render_markdown` on every call, which is what makes a handle the right shape rather than a path.
@@ -478,7 +480,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the search overlay `y`, the action set in `clients/tui/src/app/types.rs`
 - Daemon surface: `message.materialise_markdown`, then a client-side clipboard write
-- GUI location: clients/desktop, not built in M1 to M4: the palette lists the search overlay's "Copy the Markdown rendition path" with the badge "later", and the desktop calls no `message.materialise_markdown`; a hit is a list row there, so `y` copies its selector, and the rendition waits for a clipboard write that survives the call's await (`copyText` must run inside the key press)
+- GUI location: clients/desktop, not built in M1 to M4: the palette lists the search overlay's "Copy the Markdown rendition path" with the badge "later"; the desktop materialises the rendition for `e` only (`RD-06`); a hit is a list row there, so `y` copies its selector, and the rendition's path waits for a clipboard write that survives the call's await (`copyText` must run inside the key press)
 - Validation: TUI golden frames
 - Status: routed (P5-U10c-I1); GUI not started
 - Note: the path a `y` copies now names a file inside a handle directory, which the family releases after ten minutes: nothing reads a yanked path back, so what changed is how long a pasted one resolves.

@@ -227,7 +227,9 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     "Jump to top / bottom": { id: "list_top" },
     "Half-page down / up": { badge: "key" },
     "Open in the mail list": { badge: "later" },
-    "Open read-only in $EDITOR": { badge: "later" },
+    // A stored hit is a list row, so `e` opens its Markdown rendition as on
+    // any received message (PERSO-92); a server-only hit asks for `F` first.
+    "Open read-only in $EDITOR": { id: "open_editor" },
     // A hit is a list row, so `y` copies its selector here; the rendition
     // is a `message.materialise_markdown` call, and a clipboard write after
     // an await may have lost the key press's user activation

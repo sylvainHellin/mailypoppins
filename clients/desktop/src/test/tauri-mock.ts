@@ -362,6 +362,9 @@ export const MOCK_CONFIG_PATH = "/fixture/config.toml";
 /** Where `log_open` opens the daemon log in the mock, `diagnostic.log_path`'s answer. */
 export const MOCK_LOG_PATH = "/fixture/logs/mailypoppins-2026-09-30.log";
 
+/** daemon_files.rs's `MESSAGE_GONE`. */
+export const MESSAGE_GONE = "Open failed: that message is no longer in the store";
+
 /** daemon_files.rs's `NO_CONFIG`. */
 export const NO_CONFIG = "There is no config.toml yet; add an account first";
 
@@ -1393,6 +1396,16 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     }
     case "editor_open": {
       const path = String(args.path);
+      mock.editorOpens.push(path);
+      const failure = mock.editorFailure;
+      mock.editorFailure = null;
+      if (failure) throw failure;
+      return { editor: `code --wait '${path}'`, source: "probe", fixture: mock.editorFixture };
+    }
+    case "message_markdown_open": {
+      const rowId = Number(args.row_id);
+      if (!findRow(account, rowId)) throw { kind: "not_found", message: MESSAGE_GONE, code: null };
+      const path = `/fixture/runtime/handles/h-${mock.nextHandle++}/message-${rowId}.md`;
       mock.editorOpens.push(path);
       const failure = mock.editorFailure;
       mock.editorFailure = null;

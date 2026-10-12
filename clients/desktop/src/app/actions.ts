@@ -263,10 +263,10 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return compose.forward(compose.cursorSource(s), dispatch);
     case "open_editor":
       // The TUI's `e`: a draft opens in the editor; a received message opens
-      // read-only, which in the desktop client is the reader.
+      // read-only, its Markdown rendition in the editor (PERSO-92), where
+      // Enter focuses the reader.
       if (draftsShown(s) && s.selection.draft) return void compose.editDraft(s, dispatch);
-      if (s.selection.message) return runAction("open_message", s, dispatch, list);
-      return;
+      return void attachments.openMarkdown(s, dispatch);
     case "edit_recipients":
       return void compose.editRecipients(s, dispatch);
     case "approve":

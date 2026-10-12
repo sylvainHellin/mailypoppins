@@ -418,6 +418,20 @@ describe("compose keys (the TUI's)", () => {
     await waitFor(() => expect(mock.editorOpens).toHaveLength(1));
   });
 
+  it("on a server-only hit, e asks for the fetch first and opens no editor (PERSO-92)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(screen.getByRole("searchbox", { name: /Filter this list/ }));
+    await user.keyboard("thread{Shift>}{Enter}{/Shift}");
+    await waitFor(() => expect(callsOf("search_server_start")).toHaveLength(1));
+    act(() => emitEnvelope("message.server_hit", { operation_id: "op-1", hit: serverOnlyHit("The old thread") }));
+    await user.click(await screen.findByRole("option", { name: /The old thread/ }));
+    await user.keyboard("e");
+    expect(await screen.findByText("This message is on the server only: fetch it first (F)")).toBeInTheDocument();
+    expect(callsOf("message_markdown_open")).toEqual([]);
+    expect(mock.editorOpens).toEqual([]);
+  });
+
   it("on a server-only hit, r, ca and cf build the draft from the hit's own headers", async () => {
     const { user } = renderApp();
     await shellReady();
@@ -457,18 +471,28 @@ describe("compose keys (the TUI's)", () => {
     await waitFor(() => expect(mock.editorOpens).toHaveLength(3));
   });
 
-  it("e on a draft resolves its path and opens the editor; on a message it opens the reader", async () => {
+  it("e on a message opens its Markdown rendition in the editor and Enter focuses the reader; on a draft e edits it (PERSO-92)", async () => {
     const { user } = renderApp();
     await shellReady();
+    const pane = () => document.activeElement?.closest("[data-pane]")?.getAttribute("data-pane");
     await user.keyboard("j");
     await user.keyboard("e");
-    const pane = () => document.activeElement?.closest("[data-pane]")?.getAttribute("data-pane");
-    await waitFor(() => expect(pane()).toBe("reader"));
+    await waitFor(() => expect(callsOf("message_markdown_open")).toHaveLength(1));
+    const [opened] = callsOf("message_markdown_open");
+    expect(opened).toMatchObject({ account: "work" });
+    await waitFor(() => expect(mock.editorOpens).toEqual([`/fixture/runtime/handles/h-${mock.nextHandle - 1}/message-${opened?.row_id}.md`]));
+    expect(await screen.findByText(/^Opened the message read-only in code --wait/)).toBeInTheDocument();
+    // The list keeps the focus: `e` hands the message to the editor, not to the reader.
+    expect(pane()).toBe("list");
     expect(callsOf("draft_path")).toEqual([]);
-    expect(mock.editorOpens).toEqual([]);
+
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(pane()).toBe("reader"));
+    expect(callsOf("message_markdown_open")).toHaveLength(1);
 
     await user.keyboard("{Escape}");
     await drafts(user);
+    mock.editorOpens = [];
     await user.keyboard("e");
     await waitFor(() => expect(mock.editorOpens).toEqual(["/fixture/work/drafts/angebot-antwort.md"]));
     expect(callsOf("draft_path")).toEqual([{ account: "work", id: "angebot-antwort" }]);

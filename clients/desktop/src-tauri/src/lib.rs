@@ -260,6 +260,7 @@ pub fn run() {
             contacts::contact_vcard_draft,
             daemon_files::config_open,
             daemon_files::log_open,
+            daemon_files::message_markdown_open,
             configuration::config_get,
             configuration::config_reload,
             configuration::config_set_password,

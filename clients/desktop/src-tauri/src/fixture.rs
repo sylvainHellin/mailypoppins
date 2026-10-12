@@ -1415,17 +1415,21 @@ impl State {
             .map(str::to_string)
     }
 
-    /// `message.materialise_attachment` or `message.materialise_html`: the
-    /// part (a small file naming it) or the rendition, written under
-    /// `<root>/handles/<handle>/`, as the daemon writes under its runtime
-    /// directory. A message with no HTML part is `-32602`.
+    /// `message.materialise_attachment`, `message.materialise_html` or
+    /// `message.materialise_markdown`: the part (a small file naming it), the
+    /// browser rendition or the Markdown one (frontmatter and body, named
+    /// after the subject), written under `<root>/handles/<handle>/`, as the
+    /// daemon writes under its runtime directory. A message with no HTML part
+    /// is `-32602`.
     fn materialise(&mut self, method: &str, params: &Value) -> Result<Value> {
         let account = param_str(method, params, "account")?.to_string();
         let row_id = param_row_id(method, params)?;
         let (_, row) = self
             .row(&account, row_id)
             .ok_or_else(|| refused(method, -32602, &format!("no message has row_id {row_id}")))?;
-        let (name, bytes) = if method == "message.materialise_html" {
+        let (name, bytes) = if method == "message.materialise_markdown" {
+            markdown_rendition(row_id, row)
+        } else if method == "message.materialise_html" {
             let body = self
                 .html
                 .get(&row_id)
@@ -3028,9 +3032,9 @@ impl Fixture {
                 let html = rendition(body);
                 Ok(json!({"account": account, "row_id": row_id, "bytes": html.len(), "html": html}))
             }
-            "message.materialise_attachment" | "message.materialise_html" => {
-                s.materialise(method, &params)
-            }
+            "message.materialise_attachment"
+            | "message.materialise_html"
+            | "message.materialise_markdown" => s.materialise(method, &params),
             "message.release_handle" => {
                 let handle = param_str(method, &params, "handle")?;
                 if handle.is_empty()
@@ -4986,6 +4990,26 @@ fn matches(row: &Value, query: &str) -> bool {
 }
 
 /// The `message.get` record (`read_cmd::ShownMessage`).
+/// A row's Markdown rendition as the daemon names and writes it: the subject
+/// slugified, or `message-<row_id>.md`, holding YAML frontmatter and the body.
+fn markdown_rendition(row_id: i64, row: &Value) -> (String, Vec<u8>) {
+    let field = |key: &str| row[key].as_str().unwrap_or_default().to_string();
+    let subject = field("subject");
+    let slug = mp_core::parse::slugify_subject(&subject);
+    let name = if slug.is_empty() {
+        format!("message-{row_id}.md")
+    } else {
+        format!("{slug}.md")
+    };
+    let text = format!(
+        "---\nsubject: {subject:?}\nfrom: {:?}\ndate: {:?}\n---\n\n{}\n",
+        field("from"),
+        field("date_display"),
+        field("body")
+    );
+    (name, text.into_bytes())
+}
+
 fn shown(account: &str, mailbox: &str, row: &Value, body: bool) -> Value {
     let f = &row["flags"];
     let mut flags = Vec::new();

@@ -177,7 +177,7 @@ What shipped, per unit:
 - The daemon methods M4 calls joined `REQUIRED_CAPABILITIES`: `calendar.events`, `message.ics`, `message.invite`, `calendar.rsvp`, `send.invite`, `contact.search`, `contact.rebuild`, `config.get`, `diagnostic.log_path`, `config.reload`, `config.set_password`, `config.init`, `config.add_account` and `config.oauth2_login`.
 - 483 vitest tests in 34 files (286 at M3) and 205 Rust tests (135 at M3), plus the same two ignored.
 
-The unit docs are `clients/desktop/docs/rust-layer.md` ("The calendar", "The contacts", "Signatures", "config.toml and the daemon log", "Configuration and secrets", "Fixture mode"), `clients/desktop/docs/shell.md` ("Views", "Contacts", "Calendar", "Signatures", "Activity log", "Settings", "Account wizard", "First run") and `clients/desktop/docs/reader.md` ("The toolbar", "Invitations").
+The unit docs are `clients/desktop/docs/rust-layer.md` ("The calendar", "The contacts", "Signatures", "config.toml, the daemon log and a message's Markdown rendition", "Configuration and secrets", "Fixture mode"), `clients/desktop/docs/shell.md` ("Views", "Contacts", "Calendar", "Signatures", "Activity log", "Settings", "Account wizard", "First run") and `clients/desktop/docs/reader.md` ("The toolbar", "Invitations").
 
 Decisions taken in M4, each the breakdown's default:
 

@@ -121,6 +121,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `setting_set` | `key` (`SettingKey`), `value` (or `null` to remove) | `string \| null`, the value the key holds afterwards; an unknown key is `not_found`, a value the key cannot hold `setup` |
 | `config_open` | none | `EditorLaunch`; `not_found` when the daemon has no `config.toml` |
 | `log_open` | none | `EditorLaunch`; `not_found` when the daemon's log file does not exist yet |
+| `message_markdown_open` | `account`, `row_id` | `EditorLaunch`; `not_found` when the store no longer holds the row |
 | `config_get` | none | `ConfigSnapshot` |
 | `config_reload` | none | `ConfigSwap`; a file that does not load is `protocol` with code -32007 and the daemon's sentence |
 | `config_set_password` | `account`, `kind` (`"smtp"` or `"imap"`), `value` | `SecretStored` |
@@ -429,17 +430,19 @@ A refusal is `mp_core`'s sentence as it stands ("signature name '../x' cannot st
 The daemon's watcher publishes `signature.changed {name, path}` when a signature file is written or created, including by this layer, and nothing when one is deleted, since no `signature.removed` exists.
 So the frontend reads the listing again after each change it makes, and on every `signature.changed` while the Signatures dialog or the new-draft wizard is open ([shell.md](shell.md), "Signatures").
 
-## config.toml and the daemon log
+## config.toml, the daemon log and a message's Markdown rendition
 
-`config_open` is the TUI's `sc` and `log_open` its `sf` (INT-01, INT-02), in `daemon_files.rs`.
-Neither computes a path: the daemon's answer names the file it uses.
+`config_open` is the TUI's `sc`, `log_open` its `sf` (INT-01, INT-02), and `message_markdown_open` its `e` on a received message (RD-06, PERSO-92), in `daemon_files.rs`.
+None computes a path: the daemon's answer names the file it uses.
 
 - `config_open` calls `config.get` and opens its `path`; a `state` of `absent` is refused before any editor starts, as `not_found` "There is no config.toml yet; add an account first", and an `invalid` file opens, since the editor is where it gets fixed.
 - `log_open` calls `diagnostic.log_path`, the daemon's dated log (`mailypoppins-<date>.log`), and refuses a file that does not exist yet with `not_found` "No log file found at <path>".
+- `message_markdown_open` calls `message.materialise_markdown {account, row_id}`, which writes the store's Markdown view of the row (frontmatter and the plain text, mode 0444, named after the subject) as a handle of the family the attachments use (see Attachments), and opens its `path`; a row the store no longer holds (`-32602`) is `not_found` "Open failed: that message is no longer in the store", the TUI's line.
+  The handle is left to expire after its ten minutes, as an opened attachment's is: the external route does not wait for the editor, which has read the file by then.
 
-Both hand the path to `editor::open_on`, the resolver and spawn `editor_open` uses, with the setting read through `editor::read_setting_or_none`, so a fixture journals the editor and runs nothing; its refusal of a path that is no file now says "no file at <path>".
-Neither is a draft, so neither takes the embedded route: a terminal editor in the setting, such as the `nvim` that runs drafts embedded, opens the file in a terminal window (see Drafts and the editor).
-Both methods are in `REQUIRED_CAPABILITIES`.
+All three hand the path to `editor::open_on`, the resolver and spawn `editor_open` uses, with the setting read through `editor::read_setting_or_none`, so a fixture journals the editor and runs nothing; its refusal of a path that is no file now says "no file at <path>".
+None is a draft, so none takes the embedded route: a terminal editor in the setting, such as the `nvim` that runs drafts embedded, opens the file in a terminal window (see Drafts and the editor).
+The four methods are in `REQUIRED_CAPABILITIES`.
 
 ## Configuration and secrets
 
@@ -991,7 +994,7 @@ It re-arms a `failed` row to `pending_send`, publishes the invalidation, and 0.4
 The fixture files no Sent copy for a retried row, and it refuses a second retry of a re-armed row while the first runs, where the daemon admits it and settles on what it finds.
 `send.outbox_discard` removes the row, publishes the invalidation, and answers `{discarded, row_id, message_id, revision}`; a row it does not have is `-32602`.
 
-`message.materialise_attachment` writes a small file naming the part, and `message.materialise_html` the fixture's rendition of the row's HTML body, under `handles/<handle>/` in the run directory; a part the row does not have and a row with no HTML body are `-32602`.
+`message.materialise_attachment` writes a small file naming the part, `message.materialise_html` the fixture's rendition of the row's HTML body, and `message.materialise_markdown` a frontmatter of subject, sender and date over the row's body, named after the subject, under `handles/<handle>/` in the run directory; a part the row does not have, a row with no HTML body and a row that does not exist are `-32602`.
 `message.release_handle` removes the handle's directory.
 `message.fetch` settles at once: a `Message-ID` a row of the account carries answers `already_present`, the fixture's server-only hit (`<server-only@fixture.example>`) lands at the top of the mailbox the hit names, by label or slug, with a counts `state.invalidate`, and any other message fails the operation as not on the server.
 The system opener is never run in fixture mode: each file open is journalled, and the tests read the journal.

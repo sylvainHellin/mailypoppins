@@ -1,13 +1,20 @@
-//! The two files the daemon names, opened in the external editor (INT-01,
-//! INT-02, #0131): `config.toml` (the TUI's `sc`) and the daemon's dated log
-//! (the TUI's `sf`).
+//! The files the daemon names, opened in the external editor: `config.toml`
+//! (the TUI's `sc`) and the daemon's dated log (the TUI's `sf`) (INT-01,
+//! INT-02, #0131), and a received message's Markdown rendition (the TUI's
+//! `e`, RD-06, PERSO-92).
 //!
 //! The paths are the daemon's, never computed here: `config.get` answers the
-//! file it reads with its `path` and its `state`, and `diagnostic.log_path`
-//! answers the log it writes today. A daemon with no configuration answers
-//! `state: "absent"`, which is refused before any editor starts; an `invalid`
-//! file opens, since the editor is where it gets fixed. Both hand the path to
+//! file it reads with its `path` and its `state`, `diagnostic.log_path`
+//! answers the log it writes today, and `message.materialise_markdown` writes
+//! the rendition (mode 0444, named after the subject) and answers its handle
+//! and path. A daemon with no configuration answers `state: "absent"`, which
+//! is refused before any editor starts; an `invalid` file opens, since the
+//! editor is where it gets fixed. All three hand the path to
 //! [`editor::open_on`], so a fixture journals the editor and runs nothing.
+//!
+//! The rendition's handle is left to expire, as an opened attachment's is
+//! (`attachments.rs`): the external route does not wait for the editor, and
+//! the editor has read the file long before the daemon's ten minutes end.
 
 use std::path::Path;
 use std::time::Duration;
@@ -82,6 +89,33 @@ pub fn log_open_on(
     editor::open_on(fixture_of(door), lookup, path, window)
 }
 
+/// What `message_markdown_open` says when the row is gone, the TUI's words.
+pub const MESSAGE_GONE: &str = "Open failed: that message is no longer in the store";
+
+/// Open the Markdown rendition of the stored message `row_id` of `account`
+/// in the external editor (the TUI's `e` on a received message); `not_found`
+/// with [`MESSAGE_GONE`] when the store no longer holds it.
+pub fn message_markdown_open_on(
+    door: &Door,
+    lookup: &Lookup,
+    account: &str,
+    row_id: i64,
+    window: Duration,
+) -> Result<EditorLaunch, GuiError> {
+    let handle = match crate::attachments::materialise(
+        door,
+        "message.materialise_markdown",
+        json!({"account": account, "row_id": row_id}),
+    ) {
+        Ok(handle) => handle,
+        Err(GuiError::NotFound {
+            code: Some(-32602), ..
+        }) => return Err(GuiError::not_found(MESSAGE_GONE)),
+        Err(e) => return Err(e),
+    };
+    editor::open_on(fixture_of(door), lookup, &handle.path, window)
+}
+
 /// The editor lookup with the settings file's `editor`, as `editor_open` reads it.
 fn lookup_for(settings: &Path) -> Lookup<'static> {
     editor::live_lookup(editor::read_setting_or_none(settings))
@@ -96,6 +130,27 @@ pub async fn config_open(
     let settings = editor::settings_file(&app)?;
     with_door(&session, move |_, door| {
         config_open_on(door, &lookup_for(&settings), editor::EXIT_WINDOW)
+    })
+    .await
+}
+
+/// `e` on a received message: its Markdown rendition in the editor.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn message_markdown_open(
+    app: AppHandle,
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_id: i64,
+) -> Result<EditorLaunch, GuiError> {
+    let settings = editor::settings_file(&app)?;
+    with_door(&session, move |_, door| {
+        message_markdown_open_on(
+            door,
+            &lookup_for(&settings),
+            &account,
+            row_id,
+            editor::EXIT_WINDOW,
+        )
     })
     .await
 }
@@ -195,6 +250,41 @@ mod tests {
             opens[0].command.last().map(String::as_str),
             Some(opens[0].path.as_str())
         );
+    }
+
+    #[test]
+    fn message_markdown_open_on_journals_the_editor_on_the_daemons_rendition() {
+        let (door, f) = fixture_door();
+        let launch =
+            message_markdown_open_on(&door, &lookup(), "work", 1001, WINDOW).expect("opened");
+        assert_eq!(launch.pid, None, "a fixture spawns nothing");
+        let opens = f.editor_opens();
+        assert_eq!(opens.len(), 1);
+        let path = Path::new(&opens[0].path);
+        assert!(path.starts_with(f.root().join("handles")), "{path:?}");
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("quarterly-ledger-review.md")
+        );
+        let text = std::fs::read_to_string(path).expect("written by the materialiser");
+        assert!(
+            text.starts_with("---\nsubject: \"Quarterly ledger review\""),
+            "{text}"
+        );
+        assert!(text.contains("the quarterly ledger is attached"), "{text}");
+        assert_eq!(
+            opens[0].command.last().map(String::as_str),
+            Some(opens[0].path.as_str())
+        );
+    }
+
+    #[test]
+    fn message_markdown_open_on_a_row_the_store_lost_is_not_found_and_opens_nothing() {
+        let (door, f) = fixture_door();
+        let err =
+            message_markdown_open_on(&door, &lookup(), "work", 999_999, WINDOW).expect_err("gone");
+        assert_eq!(err, GuiError::not_found(MESSAGE_GONE));
+        assert!(f.editor_opens().is_empty());
     }
 
     fn ghostty_and_nvim(p: &Path) -> bool {
