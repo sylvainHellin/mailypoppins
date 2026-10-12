@@ -1,6 +1,7 @@
 use mailypoppins::draft::{
     create_forward_draft_from, create_reply_draft_from, find_drafts, mark_as_approved,
     mark_as_draft, mark_draft_sent, parse_email_draft, validate_draft, SourceMessage,
+    LEGACY_QUOTE_MARKER, QUOTE_MARKER,
 };
 use mailypoppins::types::EmailStatus;
 use std::fs;
@@ -76,16 +77,18 @@ fn test_create_reply_draft() {
     assert!(content.contains("status: draft"));
     assert!(content.contains("from: \"me@example.com\""));
 
-    // Check body structure
-    assert!(content.contains("{{SIGNATURE}}"));
+    // Check body structure: the quote boundary is the `<!-- mp:quote -->`
+    // marker, and the legacy `{{SIGNATURE}}` is never written (PERSO-114).
+    assert!(content.contains(QUOTE_MARKER), "{content}");
+    assert!(!content.contains(LEGACY_QUOTE_MARKER), "{content}");
     assert!(content.contains("> Original body"));
     assert!(content.contains("alice@example.com wrote:"));
 }
 
 /// A per-account signature (#0099) is spliced into the reply body above the
 /// quoted text, so it is visible and editable in the draft rather than
-/// injected at send time. The `{{SIGNATURE}}` placeholder is kept for the
-/// send-time quote splicing.
+/// injected at send time. The quote marker is kept for the send-time quote
+/// splicing.
 #[test]
 fn a_reply_draft_carries_the_account_signature_above_the_quote() {
     let tmp = tempdir().unwrap();
@@ -108,8 +111,9 @@ fn a_reply_draft_carries_the_account_signature_above_the_quote() {
 
     let content = fs::read_to_string(&draft_path).unwrap();
     assert!(content.contains("-- \nSylvain"), "{content}");
-    // Placeholder retained for the send path's quote splicing.
-    assert!(content.contains("{{SIGNATURE}}"), "{content}");
+    // Quote marker retained for the send path's quote splicing.
+    assert!(content.contains(QUOTE_MARKER), "{content}");
+    assert!(!content.contains(LEGACY_QUOTE_MARKER), "{content}");
     // Signature sits above the quoted attribution, not below the thread.
     let sig_pos = content.find("-- \nSylvain").unwrap();
     let quote_pos = content.find("wrote:").unwrap();
@@ -141,7 +145,8 @@ fn a_forward_draft_carries_the_account_signature_above_the_forwarded_block() {
 
     let content = fs::read_to_string(&draft_path).unwrap();
     assert!(content.contains("-- \nSylvain"), "{content}");
-    assert!(content.contains("{{SIGNATURE}}"), "{content}");
+    assert!(content.contains(QUOTE_MARKER), "{content}");
+    assert!(!content.contains(LEGACY_QUOTE_MARKER), "{content}");
     let sig_pos = content.find("-- \nSylvain").unwrap();
     let fwd_pos = content.find("Forwarded message").unwrap();
     assert!(
@@ -173,9 +178,10 @@ fn a_reply_draft_without_a_signature_has_no_signature_block() {
     .unwrap();
 
     let content = fs::read_to_string(&draft_path).unwrap();
-    // Only the placeholder anchors the (absent) signature; the body is the
-    // reply area, the placeholder, then the quote.
-    assert!(content.contains("{{SIGNATURE}}"), "{content}");
+    // Only the quote marker anchors the (absent) signature; the body is the
+    // reply area, the marker, then the quote.
+    assert!(content.contains(QUOTE_MARKER), "{content}");
+    assert!(!content.contains(LEGACY_QUOTE_MARKER), "{content}");
     assert!(content.contains("> Original body"), "{content}");
 }
 
@@ -361,7 +367,8 @@ fn test_create_forward_draft() {
 
     assert!(content.contains("subject: \"Fwd: Hello\""));
     assert!(content.contains("to: \"\""));
-    assert!(content.contains("{{SIGNATURE}}"));
+    assert!(content.contains(QUOTE_MARKER), "{content}");
+    assert!(!content.contains(LEGACY_QUOTE_MARKER), "{content}");
     assert!(content.contains("Forwarded message"));
     assert!(content.contains("From: alice@example.com"));
     assert!(content.contains("Forward me"));

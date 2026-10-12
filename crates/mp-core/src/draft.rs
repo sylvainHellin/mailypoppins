@@ -81,6 +81,79 @@ pub const SIG_START: &str = "<!-- mp:sig-start -->";
 /// The sentinel comment closing a spliced signature block (#0106).
 pub const SIG_END: &str = "<!-- mp:sig-end -->";
 
+/// The boundary between the reply area and the quoted original in a reply or
+/// forward draft (PERSO-114). The HTML send path splits on it to splice the
+/// companion rich-HTML quote below the reply; the plain-text part and the TUI
+/// preview drop it. It is an HTML comment like the signature sentinels, so on
+/// its own line CommonMark emits it as a raw HTML block that interrupts any
+/// paragraph above it.
+pub const QUOTE_MARKER: &str = "<!-- mp:quote -->";
+/// The quote boundary marker drafts carried before PERSO-114. It no longer
+/// carries a signature (#0099) and is never written any more, but draft files
+/// already on disk hold it, so every reader accepts it alongside
+/// [`QUOTE_MARKER`].
+pub const LEGACY_QUOTE_MARKER: &str = "{{SIGNATURE}}";
+
+/// Whether `line` is the quote boundary: once trimmed, it equals
+/// [`QUOTE_MARKER`] or the legacy [`LEGACY_QUOTE_MARKER`]. The one test every
+/// reader of the boundary goes through.
+pub fn is_quote_marker_line(line: &str) -> bool {
+    let t = line.trim();
+    t == QUOTE_MARKER || t == LEGACY_QUOTE_MARKER
+}
+
+/// The byte range of the first quote-marker line in `body`: from the start of
+/// the line to its end, excluding the line's `\n`. `None` for a draft without
+/// a boundary (a new message, or one whose marker was hand-deleted).
+pub fn find_quote_marker(body: &str) -> Option<std::ops::Range<usize>> {
+    let mut start = 0;
+    for line in body.split('\n') {
+        let end = start + line.len();
+        if is_quote_marker_line(line) {
+            return Some(start..end);
+        }
+        start = end + 1;
+    }
+    None
+}
+
+/// Rewrite every quote-marker line, new or legacy, to the bare
+/// [`QUOTE_MARKER`], so a renderer has one exact token to split on. Every other
+/// line is kept byte for byte.
+pub fn normalize_quote_markers(body: &str) -> String {
+    body.split('\n')
+        .map(|line| {
+            if is_quote_marker_line(line) {
+                QUOTE_MARKER
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Remove every quote-marker line, new or legacy, from `body` and collapse the
+/// blank lines that padded it to one paragraph break, so the text reads
+/// naturally with no double blank line where the marker stood (#0102). The
+/// `text/plain` part of a sent reply goes through this, so a recipient never
+/// sees the marker.
+pub fn strip_quote_markers(body: &str) -> String {
+    let mut out = body.to_string();
+    while let Some(range) = find_quote_marker(&out) {
+        let before = out[..range.start].trim_end_matches(char::is_whitespace);
+        let after = out[range.end..].trim_start_matches(char::is_whitespace);
+        out = if before.is_empty() {
+            after.to_string()
+        } else if after.is_empty() {
+            format!("{before}\n")
+        } else {
+            format!("{before}\n\n{after}")
+        };
+    }
+    out
+}
+
 /// Wrap a resolved signature Markdown snippet in the sentinel comments so the
 /// block can be located and re-spliced when the user picks a different
 /// signature (#0106). Returns `None` for empty input, matching the old
@@ -124,8 +197,9 @@ pub fn strip_signature_sentinels(body: &str) -> String {
 ///   swapped for the new wrapped block, or dropped entirely when
 ///   `new_sig_markdown` is `None`/empty.
 /// - Without sentinels (a legacy draft, or one whose block was hand-deleted),
-///   a new block is inserted just before the `{{SIGNATURE}}` quote marker when
-///   there is one, else appended at the end of the body.
+///   a new block is inserted just before the quote marker (new or legacy, see
+///   [`find_quote_marker`]) when there is one, else appended at the end of the
+///   body.
 ///
 /// One blank line separates the block from the surrounding text.
 pub fn set_signature_block(body_markdown: &str, new_sig_markdown: Option<&str>) -> String {
@@ -148,9 +222,9 @@ pub fn set_signature_block(body_markdown: &str, new_sig_markdown: Option<&str>) 
     };
 
     // Insert before the quote marker when this is a reply/forward draft.
-    if let Some(marker) = body_markdown.find("{{SIGNATURE}}") {
-        let before = &body_markdown[..marker];
-        let after = &body_markdown[marker..];
+    if let Some(marker) = find_quote_marker(body_markdown) {
+        let before = &body_markdown[..marker.start];
+        let after = &body_markdown[marker.start..];
         return splice_block(before, Some(&block), after);
     }
 
@@ -601,25 +675,27 @@ pub fn create_reply_draft_from(
     }
     fm.push_str("---\n");
 
-    // Compose full content with the {{SIGNATURE}} placeholder between the
-    // reply area and the quoted text. The placeholder is load-bearing: the
+    // Compose full content with the `QUOTE_MARKER` boundary between the
+    // reply area and the quoted text. The marker is load-bearing: the
     // send path splits on it to splice the companion rich-HTML quote, so it
     // stays even when the account has a signature. The per-account signature
-    // (#0099) is appended to the reply area above the placeholder, so it is
+    // (#0099) is appended to the reply area above the marker, so it is
     // visible and editable in the draft; the send-time signature injection is
     // then off (empty), which is why there is no double signature.
     let sig_block = signature.and_then(wrap_signature_block);
     let full_content = match sig_block {
         Some(block) => format!(
-            "{}\n\n\n{}\n{{{{SIGNATURE}}}}\n\n{}\n{}\n",
+            "{}\n\n\n{}\n{}\n\n{}\n{}\n",
             fm.trim_end(),
             block,
+            QUOTE_MARKER,
             attribution,
             quoted_body
         ),
         None => format!(
-            "{}\n\n\n{{{{SIGNATURE}}}}\n\n{}\n{}\n",
+            "{}\n\n\n{}\n\n{}\n{}\n",
             fm.trim_end(),
+            QUOTE_MARKER,
             attribution,
             quoted_body
         ),
@@ -737,20 +813,22 @@ pub fn create_forward_draft_from(
     // text/plain or the result of html_to_plain() at fetch time). Use as-is.
     let clean_body = original_body.to_string();
 
-    // See create_reply_draft_from: the placeholder stays for quote splicing,
+    // See create_reply_draft_from: the quote marker stays for splicing,
     // the per-account signature (#0099) goes above it in the reply area.
     let sig_block = signature.and_then(wrap_signature_block);
     let full_content = match sig_block {
         Some(block) => format!(
-            "{}\n\n\n{}\n{{{{SIGNATURE}}}}\n\n{}\n\n{}\n",
+            "{}\n\n\n{}\n{}\n\n{}\n\n{}\n",
             fm.trim_end(),
             block,
+            QUOTE_MARKER,
             fwd_header,
             clean_body.trim()
         ),
         None => format!(
-            "{}\n\n\n{{{{SIGNATURE}}}}\n\n{}\n\n{}\n",
+            "{}\n\n\n{}\n\n{}\n\n{}\n",
             fm.trim_end(),
+            QUOTE_MARKER,
             fwd_header,
             clean_body.trim()
         ),
@@ -2156,13 +2234,69 @@ mod tests {
 
     #[test]
     fn set_signature_block_inserts_before_the_quote_marker_when_no_sentinels() {
-        // A legacy reply draft: no sentinels, a `{{SIGNATURE}}` quote marker.
+        // A reply draft with its signature block hand-deleted: no sentinels,
+        // the `<!-- mp:quote -->` boundary.
+        let body = "My reply\n\n<!-- mp:quote -->\n\nOn Mon wrote:\n> Quoted";
+        let out = set_signature_block(body, Some("Best,\nAlice"));
+        assert_eq!(
+            out,
+            "My reply\n\n<!-- mp:sig-start -->\nBest,\nAlice\n<!-- mp:sig-end -->\n\n<!-- mp:quote -->\n\nOn Mon wrote:\n> Quoted"
+        );
+    }
+
+    #[test]
+    fn set_signature_block_inserts_before_the_legacy_quote_marker() {
+        // A draft written before PERSO-114: no sentinels, a `{{SIGNATURE}}`
+        // quote marker, which is left as it is.
         let body = "My reply\n\n{{SIGNATURE}}\n\nOn Mon wrote:\n> Quoted";
         let out = set_signature_block(body, Some("Best,\nAlice"));
         assert_eq!(
             out,
             "My reply\n\n<!-- mp:sig-start -->\nBest,\nAlice\n<!-- mp:sig-end -->\n\n{{SIGNATURE}}\n\nOn Mon wrote:\n> Quoted"
         );
+    }
+
+    #[test]
+    fn is_quote_marker_line_accepts_both_markers_on_their_own_line() {
+        assert!(is_quote_marker_line(QUOTE_MARKER));
+        assert!(is_quote_marker_line(LEGACY_QUOTE_MARKER));
+        assert!(is_quote_marker_line("  <!-- mp:quote -->  "));
+        assert!(is_quote_marker_line("{{SIGNATURE}}\r"));
+        assert!(!is_quote_marker_line("see {{SIGNATURE}} here"));
+        assert!(!is_quote_marker_line(SIG_START));
+        assert!(!is_quote_marker_line(""));
+    }
+
+    #[test]
+    fn find_quote_marker_returns_the_first_marker_line() {
+        let body = "Reply\n{{SIGNATURE}}\n\n<!-- mp:quote -->\n> q";
+        assert_eq!(find_quote_marker(body), Some(6..19));
+        assert_eq!(&body[6..19], LEGACY_QUOTE_MARKER);
+        assert_eq!(find_quote_marker("<!-- mp:quote -->"), Some(0..17));
+        assert_eq!(find_quote_marker("No boundary here.\n"), None);
+    }
+
+    #[test]
+    fn normalize_quote_markers_rewrites_only_marker_lines() {
+        let body = "Reply {{SIGNATURE}}\n  {{SIGNATURE}}\n\n> q";
+        assert_eq!(
+            normalize_quote_markers(body),
+            "Reply {{SIGNATURE}}\n<!-- mp:quote -->\n\n> q"
+        );
+    }
+
+    #[test]
+    fn strip_quote_markers_handles_new_legacy_and_both() {
+        let new = "Reply\n\n<!-- mp:quote -->\n\n> q\n";
+        assert_eq!(strip_quote_markers(new), "Reply\n\n> q\n");
+        let legacy = "Reply\n\n{{SIGNATURE}}\n\n> q\n";
+        assert_eq!(strip_quote_markers(legacy), "Reply\n\n> q\n");
+        let both = "Reply\n<!-- mp:quote -->\n\nMiddle\n\n{{SIGNATURE}}\n> q";
+        assert_eq!(strip_quote_markers(both), "Reply\n\nMiddle\n\n> q");
+        let trailing = "Reply\n\n<!-- mp:quote -->\n\n";
+        assert_eq!(strip_quote_markers(trailing), "Reply\n");
+        let plain = "No marker.\n";
+        assert_eq!(strip_quote_markers(plain), plain);
     }
 
     #[test]

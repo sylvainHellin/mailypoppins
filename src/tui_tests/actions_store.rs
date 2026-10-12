@@ -157,7 +157,11 @@ mod store_backed_drafts {
         assert!(content.contains("status: draft"), "{content}");
         // A plain reply addresses the sender only.
         assert!(!content.contains("cc: \""), "{content}");
-        assert!(content.contains("{{SIGNATURE}}"), "{content}");
+        assert!(content.contains(crate::draft::QUOTE_MARKER), "{content}");
+        assert!(
+            !content.contains(crate::draft::LEGACY_QUOTE_MARKER),
+            "{content}"
+        );
         assert!(
             content
                 .contains("On Mon, 01 Jan 2024 12:00:00 +0000, Alice <alice@example.com> wrote:"),
