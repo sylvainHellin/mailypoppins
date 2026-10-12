@@ -53,7 +53,10 @@ use snapshot::{AccountView, DraftView, MailboxView, OutboxView};
 /// readiness and the "converges by event with no second bootstrap" case would be
 /// untestable. The countdown starts at the bootstrap rather than at startup, so
 /// a client that bootstraps cannot lose the race and no test has to sleep to win
-/// it. On the [`FAIL_START_ENV`](crate::daemon::lifecycle::FAIL_START_ENV)
+/// it. A daemon with the hook set still starts no runtimes, although every other
+/// daemon does: a runtime's own report (`blocked`, in a sandbox with no store)
+/// and the health check it refreshes would otherwise land before or after the
+/// hook's `ready` by the wall clock, and the hook's promise would not hold. On the [`FAIL_START_ENV`](crate::daemon::lifecycle::FAIL_START_ENV)
 /// precedent: no flag exposes it and `mp --help` never moves.
 pub const FAKE_READY_ENV: &str = "MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS";
 
