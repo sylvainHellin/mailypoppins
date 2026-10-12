@@ -24,9 +24,13 @@ The "no migration paths until v1.0" invariant blocked the `~/.config/email` -> `
 
 Incoming HTML bodies are saved as raw bytes from the server. Browsers default to latin-1 when no charset is declared, breaking umlauts and other non-ASCII characters. Always inject `<meta charset="UTF-8">` before writing to disk -- see `ensure_utf8_charset()` in `parse.rs`.
 
-## The `{{SIGNATURE}}` placeholder is the quote boundary, not the signature (post-#0099)
+## The `<!-- mp:quote -->` marker (legacy `{{SIGNATURE}}`) is the quote boundary
 
-Reply and forward drafts still contain a `{{SIGNATURE}}` placeholder between the reply area and the quoted conversation, and `markdown_to_html` still splits on it at send time so the companion rich-HTML quote is spliced below the reply. Do not remove it: without it the quote falls to end-of-body and the rich companion HTML is dropped. What changed in #0099 is that the placeholder no longer carries the signature. The signature is a per-account Markdown snippet (`config::resolve_signature_markdown`) appended to the draft body *at creation*, above the placeholder for reply/forward and after the body for a new draft, so it is visible and editable. To avoid a double signature, `SendContext.signature` is `None` for draft sends; direct sends and invites keep the send-time append because they have no editable draft. Do not re-populate `SendContext.signature` from config for a draft send.
+Reply and forward drafts carry `<!-- mp:quote -->` (`draft::QUOTE_MARKER`) between the reply area and the quoted conversation; drafts written before PERSO-114 carry `{{SIGNATURE}}` there instead.
+`markdown_to_html` splits on it at send time so the companion rich-HTML quote is spliced below the reply. Do not remove it: without it the quote falls to end-of-body and the rich companion HTML is dropped.
+Every reader goes through `draft::is_quote_marker_line` and the helpers around it (`find_quote_marker`, `normalize_quote_markers`, `strip_quote_markers`), never a hand string compare, so both forms keep working.
+As an HTML comment on its own line the marker ends the paragraph above it in CommonMark, which is why `markdown_to_html` rewrites the old marker to the new one before rendering.
+Since #0099 the marker no longer carries the signature. The signature is a per-account Markdown snippet (`config::resolve_signature_markdown`) appended to the draft body *at creation*, above the placeholder for reply/forward and after the body for a new draft, so it is visible and editable. To avoid a double signature, `SendContext.signature` is `None` for draft sends; direct sends and invites keep the send-time append because they have no editable draft. Do not re-populate `SendContext.signature` from config for a draft send.
 
 ## Send account is resolved by `from:` address, not active TUI account
 
@@ -2140,7 +2144,7 @@ replaced, because pulldown-cmark writes `text-align` on aligned table cells and
 that declaration has to stay last so it still wins; `<pre>` and `<code>` take the
 size and line height only, or a code block loses the client's monospace family;
 and the stamping runs on the Markdown-derived fragments only, after the
-`{{SIGNATURE}}` split, so the marker still matches the bare `<p>{{SIGNATURE}}</p>`
+quote-marker split, so the marker still matches the raw `<!-- mp:quote -->` comment
 and the quoted original of a reply keeps the sender's styling byte for byte. In
 the fallback branch the `<blockquote>` string replacement runs before the
 stamping, or the rewritten `<blockquote style="...">` no longer matches it.

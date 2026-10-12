@@ -118,15 +118,17 @@ pub fn find_quote_marker(body: &str) -> Option<std::ops::Range<usize>> {
 }
 
 /// Rewrite every quote-marker line, new or legacy, to the bare
-/// [`QUOTE_MARKER`], so a renderer has one exact token to split on. Every other
+/// [`QUOTE_MARKER`], so a renderer has one exact token to split on. A legacy
+/// marker sharing its line with text (a hand edit) becomes [`QUOTE_MARKER`] in
+/// place, so it still splits the HTML as it did before PERSO-114. Every other
 /// line is kept byte for byte.
 pub fn normalize_quote_markers(body: &str) -> String {
     body.split('\n')
         .map(|line| {
             if is_quote_marker_line(line) {
-                QUOTE_MARKER
+                QUOTE_MARKER.to_string()
             } else {
-                line
+                line.replace(LEGACY_QUOTE_MARKER, QUOTE_MARKER)
             }
         })
         .collect::<Vec<_>>()
@@ -137,7 +139,8 @@ pub fn normalize_quote_markers(body: &str) -> String {
 /// blank lines that padded it to one paragraph break, so the text reads
 /// naturally with no double blank line where the marker stood (#0102). The
 /// `text/plain` part of a sent reply goes through this, so a recipient never
-/// sees the marker.
+/// sees the marker: a marker sharing its line with text (a hand edit such as
+/// `Thanks!{{SIGNATURE}}`) is removed in place after the whole-line pass.
 pub fn strip_quote_markers(body: &str) -> String {
     let mut out = body.to_string();
     while let Some(range) = find_quote_marker(&out) {
@@ -151,7 +154,8 @@ pub fn strip_quote_markers(body: &str) -> String {
             format!("{before}\n\n{after}")
         };
     }
-    out
+    out.replace(QUOTE_MARKER, "")
+        .replace(LEGACY_QUOTE_MARKER, "")
 }
 
 /// Wrap a resolved signature Markdown snippet in the sentinel comments so the
@@ -2277,12 +2281,33 @@ mod tests {
     }
 
     #[test]
-    fn normalize_quote_markers_rewrites_only_marker_lines() {
-        let body = "Reply {{SIGNATURE}}\n  {{SIGNATURE}}\n\n> q";
+    fn normalize_quote_markers_rewrites_marker_lines() {
+        let body = "Reply\n  {{SIGNATURE}}\n\n> q";
         assert_eq!(
             normalize_quote_markers(body),
-            "Reply {{SIGNATURE}}\n<!-- mp:quote -->\n\n> q"
+            "Reply\n<!-- mp:quote -->\n\n> q"
         );
+        let plain = "No marker here.\n";
+        assert_eq!(normalize_quote_markers(plain), plain);
+    }
+
+    #[test]
+    fn normalize_quote_markers_rewrites_a_mid_line_legacy_marker() {
+        // A hand edit put the legacy marker on a line with text: it still has
+        // to split the HTML, so it becomes the new marker in place.
+        let body = "Thanks!{{SIGNATURE}}\n\n> q";
+        assert_eq!(
+            normalize_quote_markers(body),
+            "Thanks!<!-- mp:quote -->\n\n> q"
+        );
+    }
+
+    #[test]
+    fn strip_quote_markers_removes_a_mid_line_marker() {
+        let legacy = "Thanks!{{SIGNATURE}}\n\n> q";
+        assert_eq!(strip_quote_markers(legacy), "Thanks!\n\n> q");
+        let new = "Thanks!<!-- mp:quote -->\n\n> q";
+        assert_eq!(strip_quote_markers(new), "Thanks!\n\n> q");
     }
 
     #[test]
