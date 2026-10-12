@@ -4996,7 +4996,6 @@ fn matches(row: &Value, query: &str) -> bool {
     })
 }
 
-/// The `message.get` record (`read_cmd::ShownMessage`).
 /// A row's Markdown rendition as the daemon names and writes it: the subject
 /// slugified, or `message-<row_id>.md`, holding YAML frontmatter and the body.
 fn markdown_rendition(row_id: i64, row: &Value) -> (String, Vec<u8>) {
@@ -5017,6 +5016,7 @@ fn markdown_rendition(row_id: i64, row: &Value) -> (String, Vec<u8>) {
     (name, text.into_bytes())
 }
 
+/// The `message.get` record (`read_cmd::ShownMessage`).
 fn shown(account: &str, mailbox: &str, row: &Value, body: bool) -> Value {
     let f = &row["flags"];
     let mut flags = Vec::new();

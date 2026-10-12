@@ -443,7 +443,7 @@ None computes a path: the daemon's answer names the file it uses.
 
 All three hand the path to `editor::open_on`, the resolver and spawn `editor_open` uses, with the setting read through `editor::read_setting_or_none`, so a fixture journals the editor and runs nothing; its refusal of a path that is no file now says "no file at <path>".
 None is a draft, so none takes the embedded route: a terminal editor in the setting, such as the `nvim` that runs drafts embedded, opens the file in a terminal window (see Drafts and the editor).
-The four methods are in `REQUIRED_CAPABILITIES`.
+The three methods are in `REQUIRED_CAPABILITIES`.
 
 ## Configuration and secrets
 

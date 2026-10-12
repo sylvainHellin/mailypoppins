@@ -165,10 +165,11 @@
 //! - **`sync_health` is an object with a `state` of `unknown`, `ok` or
 //!   `failed`**, the three variants of `mailypoppins::sync_health::SyncHealth`.
 //!   A fresh bootstrap reports `unknown`, which is that type's `Default`.
-//! - **Readiness is forced by a test-only environment hook.** Phase 3a starts
-//!   no runtimes, so nothing would ever flip an account to `ready` and the
-//!   plan's "converges by event with no second bootstrap" case would be
-//!   untestable. `MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS=<n>` flips every
+//! - **Readiness is forced by a test-only environment hook.** Under
+//!   `MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS` the daemon starts no account
+//!   runtimes, so the hook is the only writer of account state and the plan's
+//!   "converges by event with no second bootstrap" case stays testable.
+//!   `MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS=<n>` flips every
 //!   configured account to `ready` and commits one change per account, in
 //!   `config.toml` order. **The countdown starts at the first
 //!   `state.bootstrap`, not at daemon startup**, so a client that bootstraps
