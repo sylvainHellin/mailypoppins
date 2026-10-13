@@ -627,7 +627,7 @@ async fn dump_folder(
     if with_since && !same_validity {
         let _ = writeln!(
             out,
-            "UIDVALIDITY changed since the APPEND ({} then): every message counts as new",
+            "UIDVALIDITY changed since the APPEND ({} then): the since-append match is off, only marker and Message-ID matches are listed",
             opt(state.uidvalidity)
         );
     }
@@ -666,8 +666,6 @@ async fn dump_folder(
     };
     let since = if with_since && same_validity {
         state.uidnext_before
-    } else if with_since {
-        Some(0)
     } else {
         None
     };
@@ -1006,7 +1004,7 @@ fn domain_of(address: &str) -> &str {
 
 fn strip_re(subject: &str) -> &str {
     let t = subject.trim_start();
-    if t.len() >= 3 && t[..3].eq_ignore_ascii_case("re:") {
+    if t.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("re:")) {
         t[3..].trim_start()
     } else {
         t

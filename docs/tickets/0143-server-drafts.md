@@ -49,7 +49,7 @@ Two subcommands:
   It prints the id.
 - `cargo run --example draft_probe -- dump <account> <id>` prints, for every message in Drafts whose marker or Message-ID matches the id, and for every message that appeared since the APPEND: UID, UIDVALIDITY, FLAGS, INTERNALDATE, Message-ID, the marker header, In-Reply-To, References, Bcc, `BODYSTRUCTURE`, and the first 2 KiB of each text part.
   It also prints the server's `CAPABILITY` line and the Drafts folder's LIST attributes.
-  Output goes to stdout and to `/var/tmp/mp-draft-probe-<account>-<id>.txt`; it carries probe content only.
+  Output goes to stdout and to `/var/tmp/mp-draft-probe-<account>-<id>.txt`; it carries the probe's drafts plus the headers and first 2 KiB of any draft saved in the folder between the APPEND and the dump, which is what step 6 is for.
 
 The run, for each of `tum` and `proton`:
 
