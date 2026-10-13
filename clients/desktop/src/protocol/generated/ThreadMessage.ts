@@ -56,4 +56,14 @@ flags: MessageFlags,
  * first one ingest saw, so the row marked `current` can carry an `id`
  * other than the one the call addressed.
  */
-current: boolean, };
+current: boolean,
+/**
+ * The draft id of a draft member, which `message.thread` answers with
+ * `include_drafts` (#0142); absent for a message, so an answer without
+ * drafts is the one it was before the field existed.
+ *
+ * A draft member carries `id: 0`, `mailbox: "drafts"`, an empty
+ * `message_id`, the account's address as `from` and the frontmatter
+ * `date` as `date_display`.
+ */
+draft_id?: string | null, };

@@ -217,6 +217,133 @@ impl MessageRowsChunk {
     }
 }
 
+/// The operation that streams one mailbox as conversations to the calling
+/// connection (#0142, PERSO-138).
+///
+/// A twin of [`METHOD_MESSAGE_LIST_STREAM`] named after how it differs: it
+/// answers [`MessageListStreamStarted`] at once, with `total` the number of
+/// conversations, and then sends the rows as [`ConversationRowsChunk`]
+/// notifications of method [`crate::METHOD_MESSAGE_CONVERSATIONS`], on every
+/// rule of the flat stream.
+pub const METHOD_MESSAGE_LIST_CONVERSATIONS: &str = "message.list_conversations";
+
+/// One conversation of a mailbox, as `message.list_conversations` streams it
+/// (#0142, PERSO-138).
+///
+/// The fields are declared in key order on purpose, as the daemon's own wire
+/// row is: `serde_json` without `preserve_order` sorts an object's keys, so
+/// this order is the one the hand-built frame and `frame::encode` of the same
+/// value both put on the wire.
+///
+/// A conversation is the set of rows ingest gave one `thread_id`, across every
+/// mailbox, the rows of the account's `drafts` mailbox excluded; a row with no
+/// `thread_id` is a conversation of one keyed by its own `Message-ID`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ConversationRow {
+    /// The conversation's messages across every mailbox, one per `Message-ID`.
+    #[serde(default)]
+    pub count: u64,
+    /// The `Date:` of the newest member across every mailbox, which is the
+    /// date the row prints: a reply sent today lifts an inbox conversation.
+    #[serde(default)]
+    pub date_display: String,
+    /// The UTC sort key of that newest member, spelled as a listing row's.
+    #[serde(default)]
+    pub date_sort: String,
+    /// Whether a member in the listed mailbox is flagged, the members the flag
+    /// action on the row toggles.
+    #[serde(default)]
+    pub flagged: bool,
+    /// Whether any member, in any mailbox, has an attachment.
+    #[serde(default)]
+    pub has_attachments: bool,
+    /// Whether an indexed draft answers or forwards a member.
+    #[serde(default)]
+    pub has_draft: bool,
+    /// The newest copy of a member in the listed mailbox, a `message.list` row
+    /// byte for byte; the row a collapsed conversation previews.
+    #[serde(default)]
+    pub latest: MessageListRow,
+    /// The distinct mailboxes the members live in, sorted.
+    #[serde(default)]
+    pub mailboxes: Vec<String>,
+    /// The `messages.id` of every member row in the listed mailbox, newest
+    /// first, two copies of one `Message-ID` included: each is a server copy
+    /// an action on the row has to reach.
+    #[serde(default)]
+    pub member_ids: Vec<i64>,
+    /// The members' `From:` headers verbatim, one per address compared
+    /// case-insensitively, newest first, at most five.
+    #[serde(default)]
+    pub participants: Vec<String>,
+    /// The `thread_id` the members share, which `message.thread` and a
+    /// client's selection hold the row by.
+    pub thread_id: String,
+    /// The `Message-ID`s with an unseen copy in the listed mailbox.
+    #[serde(default)]
+    pub unread: u64,
+}
+
+/// The `params` of one `message.conversations` notification: a contiguous run
+/// of a `message.list_conversations` stream, under the rules of
+/// [`MessageRowsChunk`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ConversationRowsChunk {
+    /// The position of `rows[0]` in the stream.
+    pub offset: u64,
+    /// The `message.list_conversations` operation this chunk belongs to.
+    pub operation_id: String,
+    /// The conversations, newest first.
+    #[serde(default)]
+    pub rows: Vec<ConversationRow>,
+}
+
+/// How every `message.conversations` frame a daemon writes begins, the twin of
+/// [`MESSAGE_ROWS_FRAME_PREFIX`].
+pub const CONVERSATION_ROWS_FRAME_PREFIX: &str =
+    r#"{"jsonrpc":"2.0","method":"message.conversations","params":"#;
+
+impl ConversationRowsChunk {
+    /// One frame line decoded straight into the chunk it carries, as
+    /// [`MessageRowsChunk::from_frame_line`] does for the flat stream.
+    ///
+    /// `None` for a line that is not a `message.conversations` frame in the
+    /// daemon's own spelling or that does not decode as one, which the caller
+    /// then decodes generically.
+    pub fn from_frame_line(line: &str) -> Option<ConversationRowsChunk> {
+        /// The envelope around the params.
+        #[derive(Deserialize)]
+        struct Frame {
+            params: ConversationRowsChunk,
+        }
+        if !line.starts_with(CONVERSATION_ROWS_FRAME_PREFIX) {
+            return None;
+        }
+        serde_json::from_str::<Frame>(line)
+            .ok()
+            .map(|frame| frame.params)
+    }
+}
+
+/// One whole `message.list_conversations` stream, collected: the twin of
+/// [`MessageListing`] a client holds a grouped mailbox in.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ConversationListing {
+    /// The account that was listed.
+    pub account: String,
+    /// The mailbox id the daemon resolved, not the spelling that was sent.
+    pub mailbox: String,
+    /// How many conversations the stream carried.
+    #[serde(default)]
+    pub total: u64,
+    /// The conversations, newest first.
+    #[serde(default)]
+    pub conversations: Vec<ConversationRow>,
+}
+
 /// One message of a conversation, as `message.thread` answers it (P5-U10d,
 /// `LST-10`).
 ///
@@ -265,6 +392,15 @@ pub struct ThreadMessage {
     /// other than the one the call addressed.
     #[serde(default)]
     pub current: bool,
+    /// The draft id of a draft member, which `message.thread` answers with
+    /// `include_drafts` (#0142); absent for a message, so an answer without
+    /// drafts is the one it was before the field existed.
+    ///
+    /// A draft member carries `id: 0`, `mailbox: "drafts"`, an empty
+    /// `message_id`, the account's address as `from` and the frontmatter
+    /// `date` as `date_display`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_id: Option<String>,
 }
 
 /// The whole `message.thread` answer: one conversation, oldest first.
@@ -573,6 +709,110 @@ mod tests {
         assert_eq!(MessageRowsChunk::from_frame_line(&malformed), None);
     }
 
+    /// The committed conversation fixtures decode into their typed shapes, a
+    /// conversation's `latest` is the listing fixture's row exactly, and a
+    /// chunk's frame decodes straight into the chunk by its own prefix.
+    #[test]
+    fn the_committed_conversation_fixtures_decode_whole() {
+        let raw = include_str!("../fixtures/message.list_conversations.response.json");
+        let response: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let started: MessageListStreamStarted =
+            serde_json::from_value(response["result"].clone()).expect("the result decodes");
+        assert_eq!(started.total, 2);
+
+        let raw = include_str!("../fixtures/notification.message_conversations.json");
+        let notification: crate::Notification =
+            serde_json::from_str(raw).expect("the fixture is a notification");
+        assert_eq!(notification.method, crate::METHOD_MESSAGE_CONVERSATIONS);
+        let chunk: ConversationRowsChunk =
+            serde_json::from_value(notification.params.clone()).expect("the params decode");
+        assert_eq!(chunk.operation_id, started.operation_id);
+        assert_eq!(chunk.rows.len() as u64, started.total);
+        assert_eq!(chunk.rows[0].count, 2);
+        assert!(chunk.rows[0].has_draft);
+        assert_eq!(chunk.rows[0].mailboxes, ["inbox", "sent"]);
+
+        let raw = include_str!("../fixtures/message.list.response.json");
+        let response: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let listing: MessageListing =
+            serde_json::from_value(response["result"].clone()).expect("the result decodes");
+        let latest: Vec<MessageListRow> = chunk.rows.iter().map(|r| r.latest.clone()).collect();
+        assert_eq!(latest, listing.messages, "latest is a message.list row");
+
+        let frame = crate::frame::encode(&notification).expect("encodes");
+        let line = std::str::from_utf8(&frame).expect("UTF-8").trim_end();
+        assert!(line.starts_with(CONVERSATION_ROWS_FRAME_PREFIX), "{line}");
+        assert_eq!(ConversationRowsChunk::from_frame_line(line), Some(chunk));
+        assert_eq!(
+            MessageRowsChunk::from_frame_line(line),
+            None,
+            "the flat fast path leaves a conversation chunk alone"
+        );
+        let rows = include_str!("../fixtures/notification.message_rows.json");
+        let rows: crate::Notification = serde_json::from_str(rows).expect("a notification");
+        let frame = crate::frame::encode(&rows).expect("encodes");
+        let line = std::str::from_utf8(&frame).expect("UTF-8").trim_end();
+        assert_eq!(ConversationRowsChunk::from_frame_line(line), None);
+    }
+
+    /// A conversation row serialises its keys in sorted order, the bytes a
+    /// `Value` of it would encode to.
+    #[test]
+    fn a_conversation_row_serialises_in_key_order() {
+        let raw = include_str!("../fixtures/notification.message_conversations.json");
+        let notification: crate::Notification = serde_json::from_str(raw).expect("a notification");
+        let chunk: ConversationRowsChunk =
+            serde_json::from_value(notification.params).expect("the params decode");
+        for row in &chunk.rows {
+            let typed = serde_json::to_string(row).expect("encodes");
+            let value = serde_json::to_value(row).expect("encodes");
+            let top: Vec<&str> = value
+                .as_object()
+                .expect("an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let mut sorted = top.clone();
+            sorted.sort_unstable();
+            assert_eq!(top, sorted);
+            let positions: Vec<usize> = top
+                .iter()
+                .map(|key| typed.find(&format!("\"{key}\":")).expect("the key"))
+                .collect();
+            assert!(
+                positions.windows(2).all(|w| w[0] < w[1]),
+                "the struct writes its keys in sorted order: {typed}"
+            );
+        }
+    }
+
+    /// `message.thread` with `include_drafts` carries a draft member with its
+    /// id; a message member and an answer without drafts carry no `draft_id`
+    /// key at all, so the answer without the new parameters is unchanged.
+    #[test]
+    fn a_draft_member_carries_its_id_and_a_message_none() {
+        let raw = include_str!("../fixtures/message.thread.drafts.response.json");
+        let response: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let thread: ThreadListing =
+            serde_json::from_value(response["result"].clone()).expect("the result decodes");
+        let draft = thread.messages.last().expect("a draft member");
+        assert_eq!(draft.draft_id.as_deref(), Some("c3f1a2b4d5e6f708"));
+        assert_eq!((draft.id, draft.mailbox.as_str()), (0, "drafts"));
+        assert_eq!(draft.message_id, "");
+        assert!(thread.messages[..2].iter().all(|m| m.draft_id.is_none()));
+        assert!(response["result"]["messages"][0].get("draft_id").is_none());
+
+        let raw = include_str!("../fixtures/message.thread.response.json");
+        let response: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let thread: ThreadListing =
+            serde_json::from_value(response["result"].clone()).expect("the result decodes");
+        assert_eq!(
+            serde_json::to_value(&thread).expect("encodes"),
+            response["result"],
+            "an answer without drafts re-encodes to the bytes it had"
+        );
+    }
+
     /// A row from a daemon that predates `selector` still decodes: a field a
     /// client would have rendered as empty may not stop a list from painting.
     #[test]
@@ -718,6 +958,7 @@ mod tests {
                     flagged: true,
                 },
                 current: false,
+                draft_id: None,
             }],
         };
         let encoded = serde_json::to_value(&thread).expect("it serialises");

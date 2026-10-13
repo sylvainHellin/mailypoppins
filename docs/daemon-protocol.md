@@ -119,7 +119,7 @@ Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are 
 
 - **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `signature.list`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
 - **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold` and the nine `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
-- **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.list_stream`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
+- **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.list_conversations`, `message.list_stream`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
 
 A method also declares `since`, the first protocol version that served it, which is never below `1`, and `cancel_scope`, one of `durable` or `client_scoped`, which says what a disconnect of the calling connection does to the work the call started.
@@ -464,6 +464,16 @@ A client that wants the whole message asks `message.get` with the row's `id`, wh
 An empty `messages` array would be a different claim, that the store holds not even the message that was addressed, which is `-32602` instead.
 
 The address, the `mailbox` narrowing and their refusals are `message.get`'s, unchanged: naming none or more than one of the three is `-32602`, a `row_id` no message has is `-32602`, an unknown account is `-32005` and an account with no store is `-32006`.
+
+Two optional parameters make the answer the expansion of a conversation row ([The conversation listing](#the-conversation-listing)); without them the answer is the one above, byte for byte.
+
+- `prefer_mailbox: str` changes which copy of a `Message-ID` the dedup keeps: the copy in this mailbox when there is one, and otherwise the first row as above. It resolves as `message.list`'s `mailbox` does, so an unknown mailbox and Drafts are `-32602`. An expanded inbox conversation then names the inbox copy, the row an action on the collapsed row would have touched.
+- `include_drafts: bool`, `false` by default, adds the drafts that answer or forward a member of the conversation, by `Message-ID`, as members among the messages ordered by their file's `mtime` against the messages' `date_sort`. A draft with `status: sent` is left out, since the Sent copy stands for it.
+
+A draft member is a `ThreadMessage` with `draft_id` set to its draft id, `id: 0`, `mailbox: "drafts"`, an empty `message_id`, the account's `default_from` as `from`, the frontmatter `date` (or `""`) as `date_display`, no flag set and `current: false`.
+A message member carries no `draft_id` key, which is what keeps an answer without drafts unchanged.
+The drafts are read from the `drafts` table of the account's store, the index `has_draft` reads too, rather than from a scan of the drafts directory.
+The rows of the account's `drafts` mailbox, the server copy of a draft once #0143 syncs it, are left out of every conversation, so a draft is never listed twice.
 
 ### Message mutations
 
@@ -929,6 +939,60 @@ The calling connection has to be subscribed to see the finish, as for every oper
 The listing does not depend on the finish: once the contiguous rows reach `total`, at once for `total: 0`, the stream is complete and `mp-client` answers it without waiting, so a client that streams after a reconnect but before its `state.bootstrap` is served still gets its listing.
 A finish that arrives afterwards is an ordinary event whose revision moves the watermark; the finish is what settles a stream that falls short of `total`.
 
+### The conversation listing
+
+`message.list_conversations` lists one mailbox as conversations, one row per conversation with a member in the mailbox, on the stream of `message.list_stream` (#0142).
+
+```text
+message.list_conversations {account, mailbox}
+        -> {operation_id, account, mailbox, total}             total = conversations
+   streams  notification `message.conversations`,
+            params {offset, operation_id, rows: [ConversationRow]},
+            on the calling connection only
+   settles  operation.finished {operation_id, state, result: {account, mailbox, total}}
+```
+
+A method of its own rather than a parameter of `message.list_stream`, for the reasons that method is one: a client that requires it learns at the handshake that an older daemon lacks it, and `message.rows` keeps one row shape.
+Every rule of [The streamed listing](#the-streamed-listing) holds unchanged: the parameters and their refusals, the whole read before the answer, the 1 MiB chunks, the contiguous offsets, the oversized-row failure, the order of chunks and finish, `client_scoped`, and the cancel behaviour.
+The answer is `MessageListStreamStarted` with `total` the number of conversations, and each chunk is a `message.conversations` notification, `mp_protocol::listing::ConversationRowsChunk`.
+
+A conversation is the set of rows ingest gave one `thread_id`, across every mailbox; a row ingest gave no `thread_id` is a conversation of one, keyed by its `Message-ID`.
+The rows of the account's `drafts` mailbox are excluded from every field below.
+A row is `mp_protocol::listing::ConversationRow`:
+
+```json
+{
+  "count": 2,
+  "date_display": "Thu, 2 Jul 2026 15:02:11 +0200",
+  "date_sort": "2026-07-02T13:02:11",
+  "flagged": false,
+  "has_attachments": false,
+  "has_draft": true,
+  "latest": {"id": 3141, "uid": 1846, "subject": "Re: Obermeyer Center steering meeting", "...": "a message.list row"},
+  "mailboxes": ["inbox", "sent"],
+  "member_ids": [3141],
+  "participants": ["alice@example.com", "Ivana <ivana@example.com>"],
+  "thread_id": "<Bericht@example.com>",
+  "unread": 0
+}
+```
+
+- `thread_id` is the `messages.thread_id` the members share, which `message.thread` and a client's selection hold the row by.
+- `date_sort` and `date_display` are the newest member's, across every mailbox: a reply sent today lifts an inbox conversation to the top of the inbox.
+- `latest` is the newest copy of a member in the listed mailbox, a `message.list` row byte for byte; its `subject` is the row's subject.
+- `member_ids` are the `messages.id` of every member row in the listed mailbox, newest first, two copies of one `Message-ID` included, since each is a server copy an action on the row has to reach.
+- `count` is the conversation's messages across every mailbox, one per `Message-ID`, the dedup `message.thread` applies.
+- `unread` is the `Message-ID`s with an unseen copy in the listed mailbox, the members marking the row read acts on.
+- `participants` are the members' `From:` headers verbatim, one per address compared case-insensitively, newest first, at most five.
+- `mailboxes` are the distinct mailboxes the members live in, sorted.
+- `has_attachments` is true when any member, in any mailbox, has one; `flagged` when a member in the listed mailbox is flagged.
+- `has_draft` is true when a draft of the drafts index, not yet sent, answers or forwards a member, matched by `Message-ID`.
+
+The stream is ordered by the conversation's `date_sort` descending, then by `latest.id` descending.
+A draft never makes a conversation appear: a conversation is listed in a mailbox one of its messages lives in, and Drafts is refused as `message.list` refuses it.
+The sidebar counts stay per message and this method moves none of them.
+A conversation's expansion is `message.thread` with `prefer_mailbox` and `include_drafts` ([Read-only methods](#read-only-methods)).
+
 ### Long-running operations
 
 A method whose kind is *operation* answers at once with `{"operation_id": str}` and does the work in the background.
@@ -1204,7 +1268,7 @@ A client that receives `state.resync_required` discards its state and calls `sta
 
 ### Notification methods
 
-Four methods travel as notifications, and a client that reads frames off the socket has to recognise all four.
+Five methods travel as notifications, and a client that reads frames off the socket has to recognise all five.
 
 `state.event` carries one event envelope, `{instance_id, revision, kind, payload}`, and is what every kind above arrives as.
 `state.resync_required` carries `{instance_id, reason}` and is the control notification an overflow sends.
@@ -1217,6 +1281,9 @@ A daemon stopped by a signal sends no report, having no connection to send it on
 `message.rows` carries `{offset, operation_id, rows}`, one chunk of a `message.list_stream`, and is sent only on the connection that called it ([The streamed listing](#the-streamed-listing)).
 It is a method of its own rather than a `state.event` kind for the reasons given there: it is addressed to one connection, takes no revision and bypasses the outbound queue.
 A client that never calls `message.list_stream` never receives one.
+
+`message.conversations` carries `{offset, operation_id, rows}`, one chunk of a `message.list_conversations`, on the same terms as `message.rows` ([The conversation listing](#the-conversation-listing)).
+It is a method of its own rather than a second row shape under `message.rows`, so a client decodes each chunk straight from its bytes by the frame's prefix without a type switch.
 
 ## Fixtures
 
@@ -1231,6 +1298,8 @@ A new fixture whose name matches no rule fails the suite rather than being skipp
 
 `state.bootstrap` has two fixtures: `state.bootstrap.response.json`, a healthy daemon's answer with an empty `diagnostics`, and `state.bootstrap.diagnostics.response.json`, whose `diagnostics` carries one failing check.
 Both have their member set pinned down to one account and one check entry, and both decode as `mp_protocol::state::Bootstrap`; the second is in its current shape throughout, so it also survives that typed decode unchanged.
+
+The conversation listing has five: `message.list_conversations.request.json`, `message.list_conversations.response.json`, which decodes as `MessageListStreamStarted`, `notification.message_conversations.json`, which decodes as `ConversationRowsChunk` and whose rows' `latest` are the rows of `message.list.response.json` unchanged, and `message.thread.drafts.{request,response}.json`, the expansion with its two parameters and a draft member.
 
 The streamed listing has three fixtures: `message.list_stream.request.json`, `message.list_stream.response.json`, which decodes as `mp_protocol::listing::MessageListStreamStarted`, and `notification.message_rows.json`, which decodes as `MessageRowsChunk` and carries the rows of `message.list.response.json` unchanged, so the two row shapes cannot drift apart.
 
@@ -1423,3 +1492,9 @@ No fixture pinned the settle and none was added, since the success path needs a 
 PERSO-136 added `draft.html`, one query, additively; no field was renamed, none was dropped, and no command's output moved.
 `draft.html` `{account, id|selector}` -> `{account, id, selector, html, bytes}` answers the `text/html` part `send.draft` would send for a draft, hardened for a browser, so a client previews a draft before sending it; its shape is in [the family's section](#the-draft-family).
 The type is `mp_protocol::draft::DraftHtml` with the constant `METHOD_DRAFT_HTML`, the fixtures are `crates/mp-protocol/fixtures/draft.html.{request,response}.json`, and the capability list grew by its name.
+
+#0142 (PERSO-138) added `message.list_conversations`, one client-scoped operation, `message.conversations`, a fifth notification method, two optional parameters of `message.thread` and one optional member of its row, all additive; no field was renamed, none was dropped, and no command's output moved.
+`message.list_conversations` `{account, mailbox}` -> `{operation_id, account, mailbox, total}` streams one mailbox as conversation rows in `message.conversations` chunks of `{offset, operation_id, rows}` and settles with `{account, mailbox, total}`, `total` counting conversations; its shape is in [The conversation listing](#the-conversation-listing).
+`message.thread` gained `prefer_mailbox` and `include_drafts`, and `ThreadMessage` gained `draft_id`, present on a draft member only, so an answer without the two parameters is byte for byte the one before.
+The types are `mp_protocol::listing::ConversationRow`, `ConversationRowsChunk` and `ConversationListing` with the constants `METHOD_MESSAGE_LIST_CONVERSATIONS` and `mp_protocol::METHOD_MESSAGE_CONVERSATIONS`, and the fixtures are `crates/mp-protocol/fixtures/message.list_conversations.{request,response}.json`, `notification.message_conversations.json` and `message.thread.drafts.{request,response}.json`.
+It is declared in `MESSAGE_CONVERSATION_METHOD_SPECS`, an array of its own for the reason `MESSAGE_STREAM_METHOD_SPECS` is one, and the capability list grew by its name.

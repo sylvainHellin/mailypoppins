@@ -77,5 +77,15 @@ pub const METHOD_DAEMON_STOPPED: &str = "daemon.stopped";
 /// 4 MiB outbound queue that five chunks would overflow.
 pub const METHOD_MESSAGE_ROWS: &str = "message.rows";
 
+/// Method of the notification that carries one chunk of a
+/// `message.list_conversations` (#0142, PERSO-138), with a
+/// [`listing::ConversationRowsChunk`] as its params.
+///
+/// A fifth notification method beside [`METHOD_MESSAGE_ROWS`], for the same
+/// reasons, and a method of its own rather than a second row shape under
+/// `message.rows`, so the client's typed fast path decodes each by its prefix
+/// without a type switch.
+pub const METHOD_MESSAGE_CONVERSATIONS: &str = "message.conversations";
+
 /// The JSON-RPC version string every message on this protocol declares.
 pub const JSONRPC_VERSION: &str = "2.0";

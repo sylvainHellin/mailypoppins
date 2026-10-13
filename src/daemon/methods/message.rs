@@ -966,6 +966,7 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
                     flagged: flags.flagged,
                 },
                 current: member.message_id == row.message_id,
+                draft_id: None,
             }
         })
         .collect();

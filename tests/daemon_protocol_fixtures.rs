@@ -93,6 +93,20 @@ const LIST_STREAM_FIXTURES: &[&str] = &[
     "notification.message_rows.json",
 ];
 
+/// The fixtures #0142 (PERSO-138) adds for the conversation list: the call,
+/// its immediate answer, one `message.conversations` chunk, and the
+/// `message.thread` call and answer with its two new parameters.
+///
+/// Separate from the lists above for the reason they are separate from each
+/// other: each list is the record of what one change required.
+const CONVERSATION_FIXTURES: &[&str] = &[
+    "message.list_conversations.request.json",
+    "message.list_conversations.response.json",
+    "notification.message_conversations.json",
+    "message.thread.drafts.request.json",
+    "message.thread.drafts.response.json",
+];
+
 /// The two `state.bootstrap` answers: a healthy daemon's, whose `diagnostics`
 /// is empty, and one carrying a failing check, which pins the shape a client
 /// renders as a complaint (the #0125 follow-ups).
@@ -159,6 +173,7 @@ fn every_required_fixture_is_committed() {
         .chain(P5_U10C_FIXTURES)
         .chain(P5_U10D_FIXTURES)
         .chain(LIST_STREAM_FIXTURES)
+        .chain(CONVERSATION_FIXTURES)
         .chain(BOOTSTRAP_FIXTURES)
         .filter(|name| !present.contains(**name))
         .collect();
@@ -920,6 +935,128 @@ fn a_rows_chunk_carries_message_list_rows() {
         load("message.list.response.json")["result"]["messages"],
         "a streamed row is a message.list row, key for key"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #0142: the conversation list
+// ---------------------------------------------------------------------------
+
+/// `message.list_conversations` takes the account and the mailbox and nothing
+/// else, and answers with the flat stream's head, `total` counting
+/// conversations.
+#[test]
+fn the_conversation_call_and_its_answer_carry_the_documented_fields() {
+    use mp_protocol::listing::{MessageListStreamStarted, METHOD_MESSAGE_LIST_CONVERSATIONS};
+
+    let request = load("message.list_conversations.request.json");
+    assert_eq!(request["method"], json!(METHOD_MESSAGE_LIST_CONVERSATIONS));
+    assert_keys(
+        &request["params"],
+        &["account", "mailbox"],
+        "message.list_conversations params",
+    );
+
+    let name = "message.list_conversations.response.json";
+    let response = load(name);
+    assert_keys(
+        &response["result"],
+        &["account", "mailbox", "operation_id", "total"],
+        name,
+    );
+    assert_string(&response, "/result/operation_id", name);
+    let started: MessageListStreamStarted = serde_json::from_value(response["result"].clone())
+        .expect("the answer decodes into MessageListStreamStarted");
+    assert_eq!(started.total, 2);
+}
+
+/// One chunk is a `message.conversations` notification of `{offset,
+/// operation_id, rows}`; a row carries exactly the documented twelve keys and
+/// its `latest` is a `message.list` row, key for key.
+#[test]
+fn a_conversation_chunk_carries_conversation_rows() {
+    use mp_protocol::listing::{ConversationRowsChunk, MessageListStreamStarted};
+    use mp_protocol::METHOD_MESSAGE_CONVERSATIONS;
+
+    const ROW: &[&str] = &[
+        "count",
+        "date_display",
+        "date_sort",
+        "flagged",
+        "has_attachments",
+        "has_draft",
+        "latest",
+        "mailboxes",
+        "member_ids",
+        "participants",
+        "thread_id",
+        "unread",
+    ];
+
+    let name = "notification.message_conversations.json";
+    let value = load(name);
+    let typed: Notification =
+        serde_json::from_value(value.clone()).expect("the fixture is a Notification");
+    assert_eq!(typed.method, METHOD_MESSAGE_CONVERSATIONS);
+    assert_keys(&value["params"], &["offset", "operation_id", "rows"], name);
+    let chunk: ConversationRowsChunk =
+        serde_json::from_value(typed.params).expect("the params decode into ConversationRowsChunk");
+    assert_eq!(chunk.offset, 0);
+    let started: MessageListStreamStarted =
+        serde_json::from_value(load("message.list_conversations.response.json")["result"].clone())
+            .expect("the answer decodes");
+    assert_eq!(chunk.operation_id, started.operation_id);
+
+    let listed = load("message.list.response.json");
+    let rows = value["params"]["rows"].as_array().expect("rows");
+    for (index, row) in rows.iter().enumerate() {
+        assert_keys(row, ROW, &format!("rows[{index}]"));
+        assert_eq!(
+            row["latest"], listed["result"]["messages"][index],
+            "a conversation's latest is a message.list row, key for key"
+        );
+    }
+}
+
+/// `message.thread` takes `prefer_mailbox` and `include_drafts` beside its
+/// address, and a draft member is the one row that carries `draft_id`.
+#[test]
+fn the_thread_with_drafts_carries_a_draft_member() {
+    let request = load("message.thread.drafts.request.json");
+    assert_eq!(request["method"], json!("message.thread"));
+    assert_keys(
+        &request["params"],
+        &["account", "include_drafts", "prefer_mailbox", "row_id"],
+        "message.thread params",
+    );
+
+    const MESSAGE: &[&str] = &[
+        "current",
+        "date_display",
+        "flags",
+        "from",
+        "id",
+        "mailbox",
+        "message_id",
+    ];
+    let name = "message.thread.drafts.response.json";
+    let response = load(name);
+    let members = response["result"]["messages"].as_array().expect("messages");
+    let (draft, messages) = members.split_last().expect("a draft member last");
+    for (index, member) in messages.iter().enumerate() {
+        assert_keys(member, MESSAGE, &format!("messages[{index}]"));
+    }
+    let mut with_draft = MESSAGE.to_vec();
+    with_draft.push("draft_id");
+    assert_keys(draft, &with_draft, "the draft member");
+    assert_eq!(draft["id"], json!(0));
+    assert_eq!(draft["mailbox"], json!("drafts"));
+    assert_eq!(draft["message_id"], json!(""));
+
+    // The answer without the two parameters carries no draft_id key.
+    let plain = load("message.thread.response.json");
+    for member in plain["result"]["messages"].as_array().expect("messages") {
+        assert_keys(member, MESSAGE, "a message.thread member");
+    }
 }
 
 /// `initialize` is deliberately not namespaced: it is the one method a client

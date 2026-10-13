@@ -1,0 +1,9 @@
+{
+  "id": 5,
+  "jsonrpc": "2.0",
+  "method": "message.list_conversations",
+  "params": {
+    "account": "work",
+    "mailbox": "inbox"
+  }
+}
