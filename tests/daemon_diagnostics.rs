@@ -106,6 +106,7 @@
 mod support;
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::{Duration, Instant};
@@ -361,10 +362,20 @@ fn log_file(root: &Path) -> PathBuf {
 fn log_a_secret(root: &Path, marker: &str) -> String {
     let path = log_file(root);
     let message = format!("a careless library logged {marker}");
-    let mut text = fs::read_to_string(&path).expect("read the daemon log");
-    text.push_str(&format!("2026-09-21 19:25:59.921 [WARN] {message}\n"));
-    fs::write(&path, text).expect("append a line carrying a secret");
+    append_line(&path, &format!("2026-09-21 19:25:59.921 [WARN] {message}"));
     message
+}
+
+/// Append `line` to the daemon's log in one `O_APPEND` write, the way the
+/// daemon writes each of its records: it lands between two of them, never
+/// inside one. Reading the file and writing it back whole would race the
+/// daemon, which logs on, and could catch one of its records half written.
+fn append_line(path: &Path, line: &str) {
+    fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .and_then(|mut log| log.write_all(format!("{line}\n").as_bytes()))
+        .unwrap_or_else(|e| panic!("append to {}: {e}", path.display()));
 }
 
 /// Wait until every account's runtime has reported.
@@ -1302,10 +1313,7 @@ fn a_line_that_does_not_parse_is_kept_whole() {
     let diag = Diag::start();
     let path = log_file(diag.root());
     let stray = "thread 'main' panicked at src/nowhere.rs:1:1:";
-    let mut text_on_disk = fs::read_to_string(&path).expect("read the daemon log");
-    text_on_disk.push_str(stray);
-    text_on_disk.push('\n');
-    fs::write(&path, text_on_disk).expect("append a stray line");
+    append_line(&path, stray);
 
     let answer = block_on(async {
         let mut conn = client(diag.root()).await;
