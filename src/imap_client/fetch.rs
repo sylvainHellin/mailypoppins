@@ -13,7 +13,7 @@ use super::{
 use crate::config::ImapConfig;
 use crate::ingest::KnownUids;
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
-use crate::sync::{FetchedRaw, MailboxFetch, MailboxState};
+use crate::sync::{stops_at, FetchedRaw, MailboxFetch, MailboxState, Stop, StopPoint};
 use crate::timing::TimingSpan;
 use crate::types::MessageFlags;
 
@@ -587,6 +587,12 @@ pub(crate) fn stop_before_chunk(index: usize, deadline: Option<Instant>, now: In
 /// `None` is unbounded, which is what `mp sync` asks for. Running out is not an
 /// error: what was downloaded is returned with `bodies_complete: false`, the
 /// coverage arithmetic reports the pass short, and the rest resumes next pass.
+///
+/// `stop` is asked before every chunk, the first included (PERSO-127): a pass
+/// that was cancelled has no progress to make, so it stops before asking for
+/// another body, and what it already collected comes back the same way a
+/// deadline stop's does. The engine, asked the same question at the next
+/// mailbox boundary, then drops it unwritten.
 pub async fn fetch_new_raw_on_session(
     session: &mut ImapSession,
     mailbox: &str,
@@ -594,6 +600,7 @@ pub async fn fetch_new_raw_on_session(
     known: KnownUids,
     caps: ServerCaps,
     body_budget: Option<Duration>,
+    stop: Option<&Stop>,
 ) -> Result<MailboxFetch> {
     let mut span = TimingSpan::with_context("fetch_new_raw", mailbox.to_string());
     let deadline = body_budget.map(|budget| Instant::now() + budget);
@@ -818,6 +825,16 @@ pub async fn fetch_new_raw_on_session(
     let mut out = Vec::new();
     let mut bodies_complete = true;
     for (index, chunk) in chunks.iter().enumerate() {
+        if stops_at(stop, StopPoint::Chunk) {
+            bodies_complete = false;
+            info!(
+                "[sync] '{}': body fetch stopped on request after {}/{} new message(s)",
+                mailbox,
+                out.len(),
+                new_uids.len()
+            );
+            break;
+        }
         if stop_before_chunk(index, deadline, Instant::now()) {
             bodies_complete = false;
             warn!(

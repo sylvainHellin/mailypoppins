@@ -959,6 +959,13 @@ A cancel that lands before the commit point drops what was prepared: the cache s
 A cancel that lands after it cannot recall the write or the submission, which then completes under an operation that already reads `cancelled`.
 A client therefore words a cancelled end of these three as having stopped waiting rather than undone.
 
+`sync.quick` and `sync.full` look before the fetch, before every body chunk of every mailbox's download, and before each mailbox's ingest.
+A cancel stops the download at its next chunk and the ingest at its next mailbox: the mailboxes already ingested stay written, since a pass is idempotent and the next one resumes from their cursors, and the mailbox the cancel landed before is dropped unwritten, its download included.
+Every mailbox of an IMAP pass is downloaded before the first is ingested, so a cancel during the download writes nothing at all; a Graph pass fetches and ingests one mailbox at a time and looks only before each.
+A mailbox whose ingest has begun is finished with its rows, flags and cursor, because that ingest is local work with no network wait in it; the prune pass never runs after a cancel, and the outbox and mutation drains at either end of the pass are not stopped.
+A cancelled pass publishes no `sync.completed`, as a cancelled `sync.watch` publishes nothing.
+A pass that joined an account tick already running, the scheduler's, the watcher's or another client's, does not stop that tick, which then completes and publishes its outcome as usual.
+
 Cancelling an operation that has already finished is `-32602` with `data` of `{operation_id, state}`, naming the state that made the cancel impossible, and both `operation.cancel` and `operation.status` refuse an id the daemon never issued with `-32602` and `data` of `{operation_id}`.
 
 **A settled operation is remembered for the next 256 operations and then forgotten**, and an id past that window answers exactly as one this daemon never issued.

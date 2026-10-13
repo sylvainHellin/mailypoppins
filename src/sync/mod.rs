@@ -32,6 +32,55 @@ use crate::types::{MailboxRole, MessageFlags};
 
 pub use engine::run_sync;
 
+/// Where a pass asks its caller whether it has been told to stop (PERSO-127).
+///
+/// Every point is a boundary at which nothing is half done: the transport has
+/// not been asked yet, a body chunk has been collected in full, or one mailbox
+/// has been ingested and the next has not been touched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopPoint {
+    /// Before the transport is asked for anything.
+    Fetch,
+    /// Before the next `UID FETCH` of one mailbox's body pass.
+    Chunk,
+    /// Before the target at this index, in target order, is ingested.
+    Mailbox(usize),
+}
+
+/// The question a cancellable pass asks at every [`StopPoint`]: `true` means
+/// stop there.
+///
+/// A closure rather than the daemon's cancel token, so the engine and the
+/// transport stay ignorant of who asks for the stop; the daemon builds one
+/// over its operation's token (`src/daemon/methods/sync.rs`). A pass with no
+/// `Stop` runs to the end, which is what every caller outside the daemon's
+/// `sync.quick` and `sync.full` gets.
+#[derive(Clone)]
+pub struct Stop(std::sync::Arc<dyn Fn(StopPoint) -> bool + Send + Sync>);
+
+impl Stop {
+    /// Wrap `asks`, which answers whether the pass must stop at a point.
+    pub fn new(asks: impl Fn(StopPoint) -> bool + Send + Sync + 'static) -> Self {
+        Stop(std::sync::Arc::new(asks))
+    }
+
+    /// Whether the pass must stop at `point`.
+    pub fn at(&self, point: StopPoint) -> bool {
+        (self.0)(point)
+    }
+}
+
+impl std::fmt::Debug for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Stop(..)")
+    }
+}
+
+/// Whether an optional [`Stop`] says to stop at `point`; no `Stop` never does.
+pub fn stops_at(stop: Option<&Stop>, point: StopPoint) -> bool {
+    stop.is_some_and(|stop| stop.at(point))
+}
+
 /// A mailbox to sync: the configured role and the name on the server.
 ///
 /// The local directory and `.md` status the old struct carried are gone: the

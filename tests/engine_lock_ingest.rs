@@ -276,6 +276,7 @@ impl Fixture {
             targets,
             limit: usize::MAX,
             dry_run: false,
+            stop: None,
         };
         let mut span = TimingSpan::new("engine_lock_ingest");
         run_sync_guarded_at(&self.lock_path(), backend, &run, &mut span).await
@@ -576,6 +577,7 @@ async fn run_sync_itself_stays_lock_free() {
         targets: &sent_target(),
         limit: usize::MAX,
         dry_run: false,
+        stop: None,
     };
     let mut span = TimingSpan::new("engine_lock_ingest");
     let result = mailypoppins::sync::engine::run_sync(&mut backend, &run, &mut span)

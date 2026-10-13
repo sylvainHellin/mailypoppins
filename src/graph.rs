@@ -15,7 +15,7 @@ use serde::Deserialize;
 use crate::config::GraphConfig;
 use crate::ingest::pass_may_prune;
 use crate::parse::{sanitize_attachment_filename, AttachmentData, FetchedEmail};
-use crate::sync::{FreshObservation, SyncResult, SyncTarget};
+use crate::sync::{stops_at, FreshObservation, Stop, StopPoint, SyncResult, SyncTarget};
 use crate::timing::TimingSpan;
 use crate::types::MailboxRole;
 
@@ -1635,12 +1635,18 @@ fn vanished_graph_uids(
 /// enumeration ([`FolderDelta::forces_full_enumeration`]), a full sync always
 /// relists, and a token is only ever minted by a pass that saw the whole
 /// folder and wrote every message in it ([`may_record_delta_token`]).
+///
+/// `stop` is asked before each target (PERSO-127), and only there: a Graph
+/// target fetches and ingests in one step, so its mailbox boundary is the one
+/// point at which nothing is half done. A stopped pass returns what the
+/// targets before the stop wrote, and runs no prune.
 pub async fn sync_mailboxes_graph(
     config: &GraphConfig,
     account_name: &str,
     targets: &[SyncTarget],
     limit: usize,
     dry_run: bool,
+    stop: Option<&Stop>,
 ) -> Result<SyncResult> {
     info!(
         "sync_mailboxes_graph: account={account_name}, {} targets, limit={limit}, dry_run={dry_run}",
@@ -1666,7 +1672,15 @@ pub async fn sync_mailboxes_graph(
     // whether the prunes above may be applied at all: see `pass_may_prune`.
     let mut coverage: Vec<(bool, bool)> = Vec::with_capacity(targets.len());
 
-    for target in targets {
+    for (index, target) in targets.iter().enumerate() {
+        if stops_at(stop, StopPoint::Mailbox(index)) {
+            info!(
+                "[sync] {account_name}: stopped before '{}', {index} of {} mailbox(es) synced",
+                target.server_name,
+                targets.len()
+            );
+            return Ok(result);
+        }
         let known = crate::ingest::known_message_ids(&store, account_name, target.role.as_str())?;
         let mailbox = target.role.as_str();
         let stored = crate::ingest::load_mailbox_cursor(&store, account_name, mailbox)?;

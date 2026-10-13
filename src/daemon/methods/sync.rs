@@ -47,11 +47,11 @@
 //!
 //! ## Where the pass runs
 //!
-//! Through [`tick_and_commit`] when this daemon holds the account's engine lock
-//! and the request fits the runtime's tick, which is the seam the periodic
-//! scheduler will use; otherwise through [`sync_mailboxes`], which takes the
-//! engine lock for the length of the call and answers `Ok(None)` when another
-//! process already holds it. A `mp sync` therefore keeps the #0122 degrade: a
+//! Through [`tick_and_commit_until`] when this daemon holds the account's
+//! engine lock and the request fits the runtime's tick, which is the seam the
+//! periodic scheduler will use; otherwise through [`sync_mailboxes`], which
+//! takes the engine lock for the length of the call and answers `Ok(None)`
+//! when another process already holds it. A `mp sync` therefore keeps the #0122 degrade: a
 //! blocked pass is a *successful* operation whose result says nothing ran, and
 //! the client prints the skip line instead of a summary.
 //!
@@ -61,6 +61,28 @@
 //! every account has a runtime, so `mp sync --mailbox` and `mp sync --dry-run`
 //! reach that corner on a daemon that is the account's engine; it is recorded
 //! in `docs/lessons-learned.md` and in `BACKLOG.md`.
+//!
+//! ## A cancelled pass stops at the next boundary (PERSO-127)
+//!
+//! Both paths run the body under a [`Stop`] built over the operation's token
+//! ([`pass_stop`]), which the engine asks before the fetch, before every body
+//! chunk of every mailbox and before each mailbox's ingest. A cancel therefore
+//! stops the download at the next chunk and the ingest at the next mailbox:
+//! the mailboxes already ingested stay written, because a pass is idempotent
+//! and the next one resumes from their cursors, and the mailbox the cancel
+//! landed before is dropped unwritten, its download included. A mailbox whose
+//! ingest has begun is finished, rows, flags and cursor, because those are one
+//! unit of progress and the ingest is local work with no network wait in it.
+//! The prune pass never runs after a stop.
+//!
+//! The drains are not stopped: they finish work the user already committed to.
+//! A cancelled pass publishes no `sync.completed` and settles nothing of its
+//! own, exactly as a cancelled `sync.watch` returns without a result: the
+//! registry has already settled it `cancelled`.
+//!
+//! A pass that joined a runtime tick already in flight (the scheduler's, the
+//! watcher's, another client's) does not stop that tick, which is not its
+//! work; its cancel only stops it waiting.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -73,10 +95,10 @@ use mp_protocol::{ErrorCode, RpcError};
 
 use crate::config::{AccountConfig, AuthMethod, ImapConfig};
 use crate::daemon::runtime::account::{off_thread, Phase, TickKind, QUICK_TICK_LIMIT};
-use crate::daemon::state::CanonicalState;
+use crate::daemon::state::{commit_hold_marker, commit_point_blocking, CanonicalState};
 use crate::daemon::sync_outcome::from_sync_result;
 use crate::sync::tick::run_tick_with_drains;
-use crate::sync::{SyncResult, SyncTarget};
+use crate::sync::{Stop, StopPoint, SyncResult, SyncTarget};
 
 use super::super::config::ConfigStore;
 use super::super::dispatch::{
@@ -84,7 +106,7 @@ use super::super::dispatch::{
     Outcome,
 };
 use super::super::operations::{OperationHandle, OperationRegistry, Progress};
-use super::super::server::{tick_and_commit, RuntimeTable};
+use super::super::server::{tick_and_commit_until, RuntimeTable};
 use super::super::state::ConnectionId;
 use super::{invalid_params, string_param};
 
@@ -156,6 +178,8 @@ pub struct SyncPass {
 
 /// One validated pass request.
 struct PassRequest {
+    /// `sync.quick` or `sync.full`, the name the commit-hold hook records under.
+    method: &'static str,
     account: AccountConfig,
     kind: TickKind,
     /// The mailboxes `--mailbox` named, `None` for every configured one.
@@ -199,7 +223,7 @@ impl Method for SyncPass {
 /// parameters, because a caller that sent one disagrees with the contract and a
 /// pass that quietly did something else is worse than a refusal.
 fn pass_request(
-    method: &str,
+    method: &'static str,
     params: &Value,
     snapshot: &super::super::config::Snapshot,
 ) -> Result<PassRequest, RpcError> {
@@ -258,6 +282,7 @@ fn pass_request(
     };
 
     Ok(PassRequest {
+        method,
         account: account.clone(),
         kind: if quick {
             TickKind::Quick
@@ -291,14 +316,47 @@ pub(super) fn syncable_account<'a>(
     Ok(account)
 }
 
-/// One pass, from the head drain to the committed outcome.
+/// The [`Stop`] a pass of `method` runs under: the operation's token, asked at
+/// every point the engine and the transport offer (PERSO-127).
+///
+/// The second mailbox boundary, the first with an ingested mailbox behind it,
+/// is asked through [`commit_point_blocking`], which is the bare token check
+/// unless the commit-hold hook is armed, so a test can hold a pass there and
+/// cancel it deterministically. The engine asks from its own thread, which is
+/// what lets the hook block it.
+fn pass_stop(method: &'static str, token: CancelToken) -> Stop {
+    Stop::new(move |point| match point {
+        StopPoint::Mailbox(1) => !commit_point_blocking(method, &token),
+        _ => token.is_cancelled(),
+    })
+}
+
+/// One pass, then the commit-hold hook's `returned` marker, which tells a test
+/// the worker is done and anything it was going to publish is published.
 async fn run_pass(
     request: PassRequest,
     handle: OperationHandle,
     runtimes: Arc<RuntimeTable>,
     canonical: Arc<CanonicalState>,
 ) {
+    let method = request.method;
+    run_pass_to_end(request, handle, runtimes, canonical).await;
+    commit_hold_marker(method, "returned");
+}
+
+/// One pass, from the head drain to the committed outcome.
+///
+/// Every exit after the body checks the token first: a cancelled pass returns
+/// without a result and without publishing, because the registry settled it
+/// `cancelled` when the cancel landed.
+async fn run_pass_to_end(
+    request: PassRequest,
+    handle: OperationHandle,
+    runtimes: Arc<RuntimeTable>,
+    canonical: Arc<CanonicalState>,
+) {
     handle.set_running();
+    let stop = pass_stop(request.method, handle.token.clone());
     // Before the drains, exactly as `mp sync` resolved its targets before its
     // tick: a `--mailbox` nothing configures must not drain a queue on its way
     // to being refused.
@@ -316,9 +374,19 @@ async fn run_pass(
         && !request.dry_run
         && runtimes.get(request.account.name.as_str()).is_some();
     if runtime_tick {
-        let outcome = tick_and_commit(&runtimes, &canonical, &request.account.name, request.kind)
-            .await
-            .filter(|outcome| !outcome.blocked);
+        let outcome = tick_and_commit_until(
+            &runtimes,
+            &canonical,
+            &request.account.name,
+            request.kind,
+            stop,
+            &handle.token,
+        )
+        .await
+        .filter(|outcome| !outcome.blocked);
+        if handle.token.is_cancelled() {
+            return;
+        }
         return match outcome {
             None => handle.succeed(blocked_result()),
             Some(outcome) => match outcome.error {
@@ -354,11 +422,14 @@ async fn run_pass(
                 total: None,
                 message: None,
             });
-            body(&request, &targets).await
+            body(&request, &targets, stop).await
         },
         tail,
     )
     .await;
+    if handle.token.is_cancelled() {
+        return;
+    }
 
     match result {
         Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
@@ -509,7 +580,11 @@ async fn drain(
 /// passed on either transport (#0113): this is the explicit recovery path, and
 /// the pass a user runs to make the store converge is the one pass that must
 /// not stop early.
-async fn body(request: &PassRequest, targets: &[SyncTarget]) -> anyhow::Result<Option<SyncResult>> {
+async fn body(
+    request: &PassRequest,
+    targets: &[SyncTarget],
+    stop: Stop,
+) -> anyhow::Result<Option<SyncResult>> {
     let account = Arc::new(request.account.clone());
     let targets = targets.to_vec();
     let (kind, limit, dry_run) = (request.kind, request.limit, request.dry_run);
@@ -524,6 +599,7 @@ async fn body(request: &PassRequest, targets: &[SyncTarget]) -> anyhow::Result<O
                 &targets,
                 limit,
                 dry_run,
+                Some(&stop),
             )
             .await
             .map(Some);
@@ -533,8 +609,16 @@ async fn body(request: &PassRequest, targets: &[SyncTarget]) -> anyhow::Result<O
             TickKind::Quick => limit,
             TickKind::Full => usize::MAX,
         };
-        crate::imap_client::sync_mailboxes(&imap, &account.name, &targets, limit, dry_run, None)
-            .await
+        crate::imap_client::sync_mailboxes(
+            &imap,
+            &account.name,
+            &targets,
+            limit,
+            dry_run,
+            None,
+            Some(stop),
+        )
+        .await
     })
     .await
     .and_then(|inner| inner)

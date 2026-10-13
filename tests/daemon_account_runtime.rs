@@ -64,6 +64,7 @@
 //!     pub kind: TickKind,
 //!     pub phase: Phase,
 //!     pub body_deadline: Option<Duration>,
+//!     pub stop: Option<mailypoppins::sync::Stop>,   // the body slot's alone (PERSO-127)
 //! }
 //!
 //! pub type DrainHook = Arc<dyn Fn(TickContext) -> BoxFuture<'static, String> + Send + Sync>;

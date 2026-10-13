@@ -41,7 +41,7 @@ use mp_protocol::{
 };
 
 use super::config::ConfigStore;
-use super::dispatch::{Dispatcher, RowFrame, RowsSink};
+use super::dispatch::{CancelToken, Dispatcher, RowFrame, RowsSink};
 use super::operations::OperationRegistry;
 use super::runtime::account::{AccountRuntime, Readiness, TickKind, TickOutcome};
 use super::runtime::InstanceMeta;
@@ -50,6 +50,7 @@ use super::state::events::{Event, Outbound, Outgoing, Subscriber};
 use super::state::{
     seeds_from_config, CanonicalState, Change, ConnectionId, EventQueue, InstanceId, Revision,
 };
+use crate::sync::Stop;
 
 /// JSON-RPC standard codes this unit emits. The daemon range lives in
 /// [`mp_protocol::ErrorCode`] and is not reachable until P2-U9.
@@ -453,6 +454,31 @@ pub async fn tick_and_commit(
     Some(commit_tick(&runtime, canonical, kind).await)
 }
 
+/// [`tick_and_commit`] for a cancellable operation (PERSO-127): the tick's
+/// body asks `stop` at every fetch chunk and mailbox boundary, and an outcome
+/// whose operation was cancelled by the time the tick returned is not
+/// committed, so a cancelled sync publishes no `sync.completed`, as a
+/// cancelled `sync.watch` publishes nothing.
+///
+/// A call that joined a tick already running does not stop it (see
+/// [`AccountRuntime::tick_until`]); it carries no outcome to commit either
+/// way, and the tick's own runner commits it.
+pub async fn tick_and_commit_until(
+    runtimes: &RuntimeTable,
+    canonical: &CanonicalState,
+    account: &str,
+    kind: TickKind,
+    stop: Stop,
+    cancel: &CancelToken,
+) -> Option<TickOutcome> {
+    let runtime = runtimes.get(account)?;
+    let outcome = runtime.tick_until(kind, Some(stop)).await;
+    if !cancel.is_cancelled() {
+        commit_outcome(canonical, &outcome);
+    }
+    Some(outcome)
+}
+
 /// [`tick_and_commit`] on a runtime the caller already holds.
 ///
 /// The account watcher's entry point: it ticks the runtime it was spawned for,
@@ -463,10 +489,15 @@ pub async fn commit_tick(
     kind: TickKind,
 ) -> TickOutcome {
     let outcome = runtime.tick(kind).await;
+    commit_outcome(canonical, &outcome);
+    outcome
+}
+
+/// Publish a tick's `sync.completed`, when it carries one.
+fn commit_outcome(canonical: &CanonicalState, outcome: &TickOutcome) {
     if let Some(sync) = outcome.sync.clone() {
         canonical.apply(Change::SyncCompleted(sync));
     }
-    outcome
 }
 
 /// Accept connections until `shutdown` fires, then return.

@@ -28,7 +28,7 @@ use crate::config::ImapConfig;
 use crate::ingest::KnownUids;
 use crate::store::{BlobStore, Store};
 use crate::sync::engine::{run_sync_guarded, SyncRun};
-use crate::sync::{MailboxFetch, SyncBackend, SyncResult, SyncTarget};
+use crate::sync::{MailboxFetch, Stop, SyncBackend, SyncResult, SyncTarget};
 use crate::timing::TimingSpan;
 
 /// The IMAP transport behind [`crate::sync::SyncBackend`] (#0059).
@@ -44,6 +44,9 @@ pub struct ImapBackend<'a> {
     /// How long one mailbox's fetch may spend on bodies before it stops and
     /// leaves the rest for the next pass (#0113). `None` is unbounded.
     body_budget: Option<Duration>,
+    /// Asked before every body chunk of every mailbox (PERSO-127). `None`
+    /// fetches to the end.
+    stop: Option<Stop>,
 }
 
 impl<'a> ImapBackend<'a> {
@@ -51,7 +54,16 @@ impl<'a> ImapBackend<'a> {
         Self {
             config,
             body_budget: None,
+            stop: None,
         }
+    }
+
+    /// Stop each mailbox's body pass at its next chunk once `stop` says so
+    /// (PERSO-127). The same `Stop` goes into [`SyncRun::stop`], which is
+    /// where the engine drops what a stopped fetch brought back.
+    pub fn with_stop(mut self, stop: Option<Stop>) -> Self {
+        self.stop = stop;
+        self
     }
 
     /// Bound each mailbox's body download (#0113).
@@ -86,6 +98,7 @@ impl SyncBackend for ImapBackend<'_> {
         let concurrency = self.config.fetch_concurrency.clamp(1, 8);
         let config = self.config;
         let body_budget = self.body_budget;
+        let stop = self.stop.as_ref();
         futures::stream::iter(
             targets
                 .iter()
@@ -107,6 +120,7 @@ impl SyncBackend for ImapBackend<'_> {
                         known,
                         caps,
                         body_budget,
+                        stop,
                     )
                     .await;
                     pooled.check(out)
@@ -137,6 +151,10 @@ impl SyncBackend for ImapBackend<'_> {
 /// means another process is this account's engine and this call did nothing:
 /// no session, no ingest, no error. Every caller reads that as a success and
 /// says it skipped, the same way a refused outbox drain is read (#0116).
+///
+/// `stop` is asked at every body chunk and every mailbox boundary
+/// (PERSO-127); a stopped pass returns `Ok(Some(..))` with what it ingested
+/// before the stop, and the caller that owns the `Stop` knows it stopped.
 pub async fn sync_mailboxes(
     imap_config: &ImapConfig,
     account_name: &str,
@@ -144,6 +162,7 @@ pub async fn sync_mailboxes(
     limit: usize,
     dry_run: bool,
     body_budget: Option<Duration>,
+    stop: Option<Stop>,
 ) -> Result<Option<SyncResult>> {
     info!(
         "sync_mailboxes: account={account_name}, {} targets, limit={limit}, dry_run={dry_run}",
@@ -158,7 +177,9 @@ pub async fn sync_mailboxes(
 
     let store = Store::open_account(account_name)?;
     let blobs = BlobStore::for_account(account_name);
-    let mut backend = ImapBackend::new(imap_config).with_body_budget(body_budget);
+    let mut backend = ImapBackend::new(imap_config)
+        .with_body_budget(body_budget)
+        .with_stop(stop.clone());
 
     run_sync_guarded(
         &mut backend,
@@ -169,6 +190,7 @@ pub async fn sync_mailboxes(
             targets,
             limit,
             dry_run,
+            stop: stop.as_ref(),
         },
         &mut span,
     )

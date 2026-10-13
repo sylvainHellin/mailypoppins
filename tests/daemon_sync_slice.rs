@@ -246,12 +246,14 @@ use mailypoppins::daemon::methods::mailbox::MAILBOX_METHOD_SPECS;
 use mailypoppins::daemon::methods::message::MESSAGE_SERVER_METHOD_SPECS;
 use mailypoppins::daemon::methods::sync::SYNC_METHOD_SPECS;
 use mailypoppins::daemon::runtime::account::Phase;
+use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
 use mailypoppins::engine_lock::EngineLock;
 
 use support::parity::{
     assert_byte_identical, mp_command, mp_no_daemon, oracle_command, socket_path, DaemonFixture,
     EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
+use support::send_fixture::{await_commit_marker, commit_hold_dir};
 use support::sync_fixture as fixture;
 
 /// Upper bound on any single wait: a connection, a handshake, one call.
@@ -972,6 +974,74 @@ async fn a_running_sync_can_be_cancelled_by_another_connection() {
             Some("failed") | Some("cancelled")
         ),
         "the operation settled: {settled}"
+    );
+}
+
+/// PERSO-127: a pass cancelled while it runs stops at its next mailbox
+/// boundary, settles `cancelled`, and publishes no `sync.completed`.
+///
+/// With `gamma`'s secrets seeded the pass gets past its credentials and into
+/// the runtime's tick; the fetch against the discard port fails per mailbox,
+/// which the engine reads as a mailbox that did not sync and walks on from,
+/// so the ingest loop runs with no server. The commit-hold hook holds the
+/// pass at its second mailbox boundary, the test cancels it there, and the
+/// hook's markers say what the worker decided and when it was done: `dropped`
+/// before it acts on the verdict, `returned` once anything it was going to
+/// publish is published. A pass that ignored the stop would walk into the
+/// second mailbox and then commit its outcome, which `sync_health` would show.
+#[tokio::test]
+async fn a_sync_cancelled_while_it_runs_stops_before_the_next_mailbox() {
+    let tmp = TempDir::new().expect("a temporary sync-slice root");
+    fixture::seed(tmp.path());
+    let hold = commit_hold_dir(tmp.path());
+    let hold_env = hold.to_string_lossy().into_owned();
+    let daemon = DaemonFixture::start_with(tmp.path(), None, &[(FAKE_COMMIT_HOLD_ENV, &hold_env)]);
+    let slice = Slice { daemon, tmp };
+    if !fixture::seed_secrets(slice.root()) {
+        return;
+    }
+    let mut conn = slice.connect().await;
+
+    let started = call(
+        &mut conn,
+        "sync.quick",
+        json!({"account": fixture::SERVER_ACCOUNT}),
+    )
+    .await;
+    let id = operation_id(&started);
+    await_commit_marker(&hold, "sync.quick", "held", SETTLE_DEADLINE).await;
+    let held = call(&mut conn, "operation.status", json!({"operation_id": id})).await;
+    assert_eq!(held["state"], "running", "the pass is held mid-run: {held}");
+
+    let cancelled = call(&mut conn, "operation.cancel", json!({"operation_id": id})).await;
+    assert_eq!(cancelled["state"], "cancelled", "{cancelled}");
+    await_commit_marker(&hold, "sync.quick", "dropped", SETTLE_DEADLINE).await;
+    await_commit_marker(&hold, "sync.quick", "returned", SETTLE_DEADLINE).await;
+    assert!(
+        !hold.join("sync.quick.committed").exists(),
+        "the pass walked on past its cancel"
+    );
+
+    let status = call(&mut conn, "operation.status", json!({"operation_id": id})).await;
+    assert_eq!(status["state"], "cancelled", "{status}");
+    assert_eq!(
+        status["error"]["code"],
+        ErrorCode::OperationCancelled.code(),
+        "{status}"
+    );
+    let bootstrap = call(&mut conn, "state.bootstrap", json!({})).await;
+    let gamma = bootstrap["snapshot"]["accounts"]
+        .as_array()
+        .and_then(|accounts| {
+            accounts
+                .iter()
+                .find(|account| account["name"] == fixture::SERVER_ACCOUNT)
+        })
+        .unwrap_or_else(|| panic!("the snapshot lists the server account: {bootstrap}"))
+        .clone();
+    assert_eq!(
+        gamma["sync_health"]["state"], "unknown",
+        "a cancelled pass committed a sync.completed: {gamma}"
     );
 }
 
