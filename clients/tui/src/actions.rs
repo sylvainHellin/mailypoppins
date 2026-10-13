@@ -451,6 +451,17 @@ pub fn return_to_list_after_edit(app: &mut App) {
     }
 }
 
+/// Where the keyboard lands once the editor `r`, `cf` or `cn` opened on the
+/// draft it just wrote has ended: the list it was pressed over, as after `e`
+/// and as the desktop client after any embedded draft session (PERSO-129).
+/// None of the three switches to Drafts, so the list is the current one. An
+/// editor that failed keeps the focus where it was.
+pub fn land_after_draft_editor(app: &mut App, clean: bool) {
+    if clean {
+        return_to_list_after_edit(app);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Drafts written from a source message (#0052 scope items 1, 2 and 11)
 // ---------------------------------------------------------------------------
@@ -483,6 +494,9 @@ fn cursor_message(app: &mut App, what: &str) -> Option<MessageRef> {
 /// functions `mp reply` and `mp forward` run. `headers` is the compose
 /// wizard's override of the recipients and the subject it collected before the
 /// draft existed.
+///
+/// Answers whether the editor returned cleanly; a draft that could not be
+/// built opened no editor and answers `false`.
 fn write_draft_and_edit(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -490,7 +504,7 @@ fn write_draft_and_edit(
     kind: DraftFromSource,
     headers: Option<&DraftRecipientEdit>,
     what: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let account = app.account_config.name.clone();
     let built =
         commands::draft_from_source(&daemon_door(app), &account, msg.row_id(), kind, headers);
@@ -498,7 +512,7 @@ fn write_draft_and_edit(
         Ok(pair) => pair,
         Err(e) => {
             app.set_status_level(format!("{what} failed: {e}"), StatusLevel::Error);
-            return Ok(());
+            return Ok(false);
         }
     };
     edit_new_draft(
@@ -506,8 +520,7 @@ fn write_draft_and_edit(
         terminal,
         &path,
         format!("{what} draft ready: {selector}"),
-    )?;
-    Ok(())
+    )
 }
 
 /// [`write_draft_and_edit`] over a message the client already holds, which is
@@ -741,7 +754,7 @@ pub(super) fn handle_action(
             let Some(msg) = cursor_message(app, what) else {
                 return Ok(());
             };
-            write_draft_and_edit(
+            let clean = write_draft_and_edit(
                 app,
                 terminal,
                 msg,
@@ -749,6 +762,7 @@ pub(super) fn handle_action(
                 None,
                 what,
             )?;
+            land_after_draft_editor(app, clean);
         }
         Action::Send => {
             // `send.draft` with the hold the daemon owns (P6-U2). The draft is
@@ -801,13 +815,14 @@ pub(super) fn handle_action(
             match commands::create_draft(&daemon_door(app), &account, &name) {
                 Ok(path) => {
                     suspend_terminal(terminal)?;
-                    let _ = edit_file(&path);
+                    let clean = edit_file(&path).is_ok();
                     resume_terminal(terminal)?;
                     app.set_status(format!("Created: {name}.md"));
                     if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
                         app.invalidate_cache_idx(idx);
                     }
                     app.reload_current_mailbox();
+                    land_after_draft_editor(app, clean);
                 }
                 Err(e) => {
                     app.set_status_level(format!("New draft failed: {e}"), StatusLevel::Error)
@@ -1646,14 +1661,16 @@ fn submit_compose_wizard(
     // A forward keeps the wizard's recipients and subject over the ones the
     // builder derived, which is the whole reason it asks for them first.
     if let ComposeMode::Forward { msg } = wizard.mode {
-        return write_draft_and_edit(
+        let clean = write_draft_and_edit(
             app,
             terminal,
             msg,
             DraftFromSource::Forward,
             Some(&edit),
             "Forward",
-        );
+        )?;
+        land_after_draft_editor(app, clean);
+        return Ok(());
     }
 
     let draft_result = match &wizard.mode {
@@ -1694,6 +1711,7 @@ fn submit_compose_wizard(
     suspend_terminal(terminal)?;
     let edit_result = edit_file(&path);
     resume_terminal(terminal)?;
+    let clean = edit_result.is_ok();
     match edit_result {
         Ok(()) => {
             let name = path
@@ -1705,6 +1723,7 @@ fn submit_compose_wizard(
         Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
     }
     app.reload_current_mailbox();
+    land_after_draft_editor(app, clean);
     Ok(())
 }
 
@@ -2037,8 +2056,10 @@ fn search_result_draft(
 
     // A hit that resolved is the list flow exactly, addressed by the row id it
     // resolved to; one that did not has no row for the daemon to read.
+    // The overlay's own `e` leaves the focus under it alone, and so do these.
     if let Some(msg) = msg {
-        return write_draft_and_edit(app, terminal, msg, kind, None, what);
+        write_draft_and_edit(app, terminal, msg, kind, None, what)?;
+        return Ok(());
     }
     let Some(fetched) = fetched else {
         return Ok(());
@@ -2196,6 +2217,26 @@ mod tests {
             app.focus = from;
             return_to_list_after_edit(&mut app);
             assert_eq!(app.focus, to, "from {from:?}");
+        }
+    }
+
+    /// The editor `r`, `cf` and `cn` open on a fresh draft lands like `e`'s:
+    /// a clean exit puts the keyboard back on the list from the headers or the
+    /// body pane, and a failed one leaves it where it was (PERSO-129).
+    #[test]
+    fn a_clean_return_from_a_new_drafts_editor_puts_the_keyboard_back_on_the_list() {
+        let mut app = App::default_for_tests();
+        for (from, clean, to) in [
+            (Focus::Preview, true, Focus::List),
+            (Focus::Headers, true, Focus::List),
+            (Focus::List, true, Focus::List),
+            (Focus::Sidebar, true, Focus::Sidebar),
+            (Focus::Preview, false, Focus::Preview),
+            (Focus::Headers, false, Focus::Headers),
+        ] {
+            app.focus = from;
+            land_after_draft_editor(&mut app, clean);
+            assert_eq!(app.focus, to, "from {from:?}, clean {clean}");
         }
     }
 
