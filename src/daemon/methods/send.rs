@@ -65,6 +65,12 @@
 //! an invitation has no editable draft to carry a signature in the body of.
 //! Absent, the daemon mints a UID and resolves the account's own signature.
 //!
+//! An invitation observes its cancel token at its commit point, after the
+//! `VEVENT` and the message are built and immediately before the durable
+//! submission, through [`commit_point`]: an invitation cancelled before then is
+//! dropped unsent and leaves no outbox row. A cancel that lands once the
+//! submission has started cannot recall it.
+//!
 //! ## Which retries are allowed
 //!
 //! [`crate::outbox::retry`]'s rule is that only a `failed` row may be re-armed:
@@ -107,7 +113,7 @@ use super::super::dispatch::{
     ResourceId,
 };
 use super::super::operations::{OperationHandle, OperationId, OperationRegistry, Progress};
-use super::super::state::{CanonicalState, ConnectionId};
+use super::super::state::{commit_point, CanonicalState, ConnectionId};
 use super::{internal, invalid_params, server_error, string_param};
 
 pub use crate::daemon::fake_transport::FAKE_TRANSPORT_ENV;
@@ -767,13 +773,17 @@ async fn run(work: Work, handle: OperationHandle) {
             if let Err(e) = super::open_secrets(&account.name, secrets) {
                 return handle.fail(DomainError::from(e));
             }
+            let token = handle.token.clone();
             let sent = off_thread("the invitation", move || async move {
-                send_invite(&account, &plan, signature.as_deref(), &email).await
+                send_invite(&account, &plan, signature.as_deref(), &email, &token).await
             })
             .await
             .and_then(|inner| inner);
             match sent {
-                Ok(outcome) => handle.succeed(value_or_fail("send.invite", &outcome)),
+                // Cancelled at the commit point: nothing went out, and the
+                // registry has already settled the operation.
+                Ok(None) => {}
+                Ok(Some(outcome)) => handle.succeed(value_or_fail("send.invite", &outcome)),
                 Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
             }
         }
@@ -972,13 +982,15 @@ async fn send_approved(
     outcome
 }
 
-/// `send.invite`: the `VEVENT`, the iMIP MIME tree and the durable submission.
+/// `send.invite`: the `VEVENT`, the iMIP MIME tree and the durable submission,
+/// or `None` when the token was shut before the submission.
 async fn send_invite(
     account: &AccountConfig,
     plan: &crate::invite::InvitePlan,
     signature: Option<&str>,
     email: &EmailSettings,
-) -> anyhow::Result<SendOutcome> {
+    token: &CancelToken,
+) -> anyhow::Result<Option<SendOutcome>> {
     let ics = crate::invite::build_invite_ics(&plan.spec)?;
     let event =
         crate::calendar::parse_ics(ics.as_bytes()).map(|p| crate::calendar::event_frontmatter(&p));
@@ -1017,13 +1029,16 @@ async fn send_invite(
     let smtp = smtp_config(account)?;
     let built =
         crate::send::build_draft_message(&draft, &smtp.default_from, email, signature, Some(&ics))?;
+    if !commit_point("send.invite", token).await {
+        return Ok(None);
+    }
     let report = crate::send::send_durably(&built, account, &smtp).await?;
     if report.send_result.any_succeeded() {
         crate::contacts::hooks::bump_after_send(account, &draft);
     }
     let mut outcome = outcome_of(account, None, &report, None);
     outcome.message_id = built.message_id.clone();
-    Ok(outcome)
+    Ok(Some(outcome))
 }
 
 /// One retry: re-arm what can be re-armed, submit what was never submitted, and

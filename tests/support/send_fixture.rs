@@ -330,6 +330,38 @@ pub fn transport_events(log: &Path) -> Vec<TransportEvent> {
         .collect()
 }
 
+/// The directory the commit-hold hook
+/// ([`FAKE_COMMIT_HOLD_ENV`](mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV))
+/// writes its markers to, under a root the test owns, created so the daemon
+/// can write into it from its first operation.
+pub fn commit_hold_dir(root: &Path) -> PathBuf {
+    let dir = root.join("commit-hold");
+    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
+    dir
+}
+
+/// Wait until the hook has written `<dir>/<method>.<marker>`, polling, and
+/// fail the test after `limit` rather than hang it.
+///
+/// The markers are `held` (the worker reached its commit point and is waiting
+/// for its cancellation), then `dropped` or `committed` (its verdict).
+pub async fn await_commit_marker(
+    dir: &Path,
+    method: &str,
+    marker: &str,
+    limit: std::time::Duration,
+) {
+    let path = dir.join(format!("{method}.{marker}"));
+    let start = std::time::Instant::now();
+    while !path.exists() {
+        assert!(
+            start.elapsed() < limit,
+            "{method} never reached `{marker}` at its commit point within {limit:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 /// How many `APPEND`s the fake transport served for `message_id`.
 pub fn appends_of(log: &Path, message_id: &str) -> usize {
     transport_events(log)

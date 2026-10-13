@@ -238,6 +238,7 @@ use mp_protocol::{ErrorCode, RpcError};
 
 use mailypoppins::daemon::dispatch::{CancelScope, MethodKind};
 use mailypoppins::daemon::methods::send::{FAKE_TRANSPORT_ENV, SEND_METHOD_SPECS};
+use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
 use mailypoppins::outbox::OutboxState;
 
 use support::parity::{
@@ -349,6 +350,31 @@ impl Slice {
     /// copy.
     fn with_fake_transport() -> Slice {
         Slice::with_transport(fixture::fake_transport)
+    }
+
+    /// That transport, plus the hook that holds every commit point until its
+    /// operation is cancelled, its markers in [`fixture::commit_hold_dir`].
+    fn with_commit_hold() -> Slice {
+        let tmp = TempDir::new().expect("a temporary send-slice root");
+        fixture::seed(tmp.path());
+        pin_font_size(tmp.path());
+        let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
+        let hold = fixture::commit_hold_dir(tmp.path())
+            .to_string_lossy()
+            .into_owned();
+        let env = [
+            (FAKE_TRANSPORT_ENV, hook.as_str()),
+            (FAKE_COMMIT_HOLD_ENV, hold.as_str()),
+        ];
+        let daemon = DaemonFixture::start_with(tmp.path(), None, &env);
+        Slice {
+            daemon: Some(daemon),
+            env: env
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            tmp,
+        }
     }
 
     fn root(&self) -> &Path {
@@ -1139,6 +1165,60 @@ async fn send_invite_refuses_a_mixed_span_and_a_bad_sequence() {
     )
     .await;
     assert_eq!(graph.message, fixture::GRAPH_INVITE_REFUSAL);
+}
+
+/// An invitation cancelled before its submission is dropped: the transport
+/// sees nothing and no outbox row is minted for it.
+#[tokio::test]
+async fn an_invitation_cancelled_before_its_submission_sends_nothing() {
+    let slice = Slice::with_commit_hold();
+    let mut conn = slice.connect().await;
+    let hold = fixture::commit_hold_dir(slice.root());
+    let rows_before = fixture::all_rows(slice.root(), fixture::ACCOUNT);
+
+    let started = call(
+        &mut conn,
+        "send.invite",
+        json!({
+            "account": fixture::ACCOUNT,
+            "to": fixture::TO,
+            "subject": "Planning",
+            "start": "2026-07-20T14:00",
+            "duration": "1h",
+        }),
+    )
+    .await;
+    let id = operation_id(&started);
+
+    fixture::await_commit_marker(&hold, "send.invite", "held", SETTLE_DEADLINE).await;
+    let cancelled = call(&mut conn, "operation.cancel", json!({"operation_id": id})).await;
+    assert_eq!(cancelled["state"], "cancelled", "{cancelled}");
+    fixture::await_commit_marker(&hold, "send.invite", "dropped", SETTLE_DEADLINE).await;
+    assert!(
+        !hold.join("send.invite.committed").exists(),
+        "the invitation committed after its cancel"
+    );
+    // The verdict is deterministic; this grace is only so a worker that sent
+    // anyway, ignoring its own verdict, has done so before the test looks.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let status = call(&mut conn, "operation.status", json!({"operation_id": id})).await;
+    assert_eq!(status["state"], "cancelled", "{status}");
+    assert_eq!(
+        status["error"]["code"],
+        ErrorCode::OperationCancelled.code(),
+        "{status}"
+    );
+
+    let events = fixture::transport_events(&slice.log());
+    assert!(
+        events.is_empty(),
+        "a cancelled invitation reached the transport: {events:?}"
+    );
+    assert_eq!(
+        fixture::all_rows(slice.root(), fixture::ACCOUNT),
+        rows_before,
+        "a cancelled invitation left an outbox row"
+    );
 }
 
 // ---------------------------------------------------------------------------

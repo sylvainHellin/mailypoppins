@@ -329,7 +329,7 @@ The operation stays awaited, so its `operation.finished` with `state: "cancelled
 An id the daemon refuses with `-32602`, one that already ended or that it forgot, answers `already_settled`: its own end has come or will come, and says how it went.
 `search_server_cancel` is the same call followed by `forget_operation`, since the search view ends the search itself on the answer; a held send is cancelled with `send_cancel_hold`, not with this.
 
-The daemon settles a cancelled operation at once, but `contact.rebuild`, `calendar.rsvp` and `send.invite` never look at their token after the start: the rebuild may still write its index, and a reply or an invitation already on its way may still go out.
+The daemon settles a cancelled operation at once, and `contact.rebuild`, `calendar.rsvp` and `send.invite` look at their token only up to their commit point, the cache write or the SMTP submission ([daemon-protocol.md](../../../docs/daemon-protocol.md), "Long-running operations"): a cancel after it cannot stop the rebuild writing its index or a reply or an invitation already on its way going out.
 The frontend therefore words a cancelled end as having stopped waiting, never as undone (shell.md, "Actions, dialogs and the activity area").
 
 ## The outbox
@@ -833,7 +833,7 @@ A version it finds is held for `update_install`, and announced with the event `u
 A failed silent check is logged at warn and shown nowhere.
 
 `current` in every answer is `package_info().version`, the bundle's version, which `pnpm bundle` stamps with `mp`'s and the updater compares with the manifest's.
-It is not `version_info`'s `app_version`, the desktop crate's own `0.1.0`.
+`version_info`'s `app_version` is the same version; the desktop crate's own `CARGO_PKG_VERSION` stays `0.1.0` and is what the GUI's `initialize` still sends as its `ClientInfo.app_version`.
 
 ### update-state.json
 

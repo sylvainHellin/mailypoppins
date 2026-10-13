@@ -71,6 +71,58 @@ pub fn fake_ready_delay() -> Option<Duration> {
         .map(Duration::from_millis)
 }
 
+/// Test-only hook: a directory in which an operation that reaches its commit
+/// point announces itself and waits for its cancellation before it decides.
+///
+/// `contact.rebuild` (before the contacts cache write), `calendar.rsvp` and
+/// `send.invite` (before the SMTP submission) each pass through
+/// [`commit_point`] there, and nothing else would let a test put an
+/// `operation.cancel` between the work that prepares a write and the write
+/// itself: on the fake transport both sides take milliseconds. With the hook
+/// set, the worker creates `<dir>/<method>.held`, waits until its token is shut
+/// or [`COMMIT_HOLD_LIMIT`] has passed, and records its verdict as
+/// `<dir>/<method>.dropped` or `<dir>/<method>.committed` before it acts on
+/// it, so a test reads the decision instead of sleeping to guess it. On the
+/// [`FAKE_READY_ENV`] precedent: no flag exposes it, `mp --help` never moves,
+/// and an unset or empty value is no hook at all.
+pub const FAKE_COMMIT_HOLD_ENV: &str = "MAILYPOPPINS_DAEMON_FAKE_COMMIT_HOLD";
+
+/// How long [`FAKE_COMMIT_HOLD_ENV`] holds a worker that is never cancelled,
+/// so a test that forgot to cancel fails on its assertion rather than hanging.
+pub const COMMIT_HOLD_LIMIT: Duration = Duration::from_secs(10);
+
+/// The directory [`FAKE_COMMIT_HOLD_ENV`] names, or `None` when it is unset or
+/// empty.
+pub fn fake_commit_hold_dir() -> Option<std::path::PathBuf> {
+    let raw = std::env::var_os(FAKE_COMMIT_HOLD_ENV)?;
+    (!raw.is_empty()).then(|| std::path::PathBuf::from(raw))
+}
+
+/// Whether the operation `method` runs on may still commit: `false` once its
+/// token is shut, and the worker then drops what it prepared and returns
+/// without a result, because the registry has already settled it `cancelled`.
+///
+/// Every operation whose commit point is a write a cancel must prevent asks
+/// here immediately before that write, with nothing awaited between the
+/// answer and the write, so the hook in [`FAKE_COMMIT_HOLD_ENV`] observes the
+/// same check production makes.
+pub async fn commit_point(method: &str, token: &crate::daemon::dispatch::CancelToken) -> bool {
+    let Some(dir) = fake_commit_hold_dir() else {
+        return !token.is_cancelled();
+    };
+    let marker = |suffix: &str| {
+        let path = dir.join(format!("{method}.{suffix}"));
+        if let Err(e) = std::fs::write(&path, b"") {
+            log::warn!("[daemon] commit hold marker {}: {e}", path.display());
+        }
+    };
+    marker("held");
+    let _ = tokio::time::timeout(COMMIT_HOLD_LIMIT, token.cancelled()).await;
+    let proceed = !token.is_cancelled();
+    marker(if proceed { "committed" } else { "dropped" });
+    proceed
+}
+
 /// The four points inside the serialized section of [`CanonicalState::bootstrap`]
 /// where another connection's change can land.
 ///
@@ -1066,5 +1118,17 @@ mod tests {
     fn the_fake_ready_delay_is_absent_unless_it_is_a_number() {
         assert_eq!(FAKE_READY_ENV, "MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS");
         assert!(fake_ready_delay().is_none());
+    }
+
+    /// Without the hook the commit point is the bare token check: an open
+    /// token commits and a shut one does not, with no hold in between.
+    #[tokio::test]
+    async fn the_commit_point_without_its_hook_is_the_token() {
+        assert_eq!(FAKE_COMMIT_HOLD_ENV, "MAILYPOPPINS_DAEMON_FAKE_COMMIT_HOLD");
+        assert!(fake_commit_hold_dir().is_none());
+        let token = crate::daemon::dispatch::CancelToken::new();
+        assert!(commit_point("test.operation", &token).await);
+        token.cancel();
+        assert!(!commit_point("test.operation", &token).await);
     }
 }

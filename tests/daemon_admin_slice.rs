@@ -309,11 +309,14 @@ use mailypoppins::daemon::methods::config::CONFIG_METHOD_SPECS;
 use mailypoppins::daemon::methods::contact::CONTACT_METHOD_SPECS;
 use mailypoppins::daemon::methods::diagnostic::DIAGNOSTIC_METHOD_SPECS;
 
+use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
+
 use support::admin_fixture as fixture;
 use support::parity::{
     assert_byte_identical, daemon_is_listening, mp_command, mp_no_daemon, oracle_command,
     pin_font_size, socket_path, DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
+use support::send_fixture::{all_rows, await_commit_marker, commit_hold_dir};
 
 /// Upper bound on any single wait: a connection, a handshake, one call.
 const DEADLINE: Duration = Duration::from_secs(20);
@@ -447,6 +450,29 @@ impl Slice {
         Slice {
             daemon: Some(daemon),
             env: vec![(fixture::FAKE_TRANSPORT_ENV.to_string(), hook)],
+            tmp,
+        }
+    }
+
+    /// The fake transport, plus the hook that holds every commit point until
+    /// its operation is cancelled, its markers in [`commit_hold_dir`].
+    fn with_commit_hold() -> Slice {
+        let tmp = TempDir::new().expect("a temporary admin-slice root");
+        fixture::seed(tmp.path());
+        pin_font_size(tmp.path());
+        let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
+        let hold = commit_hold_dir(tmp.path()).to_string_lossy().into_owned();
+        let env = [
+            (fixture::FAKE_TRANSPORT_ENV, hook.as_str()),
+            (FAKE_COMMIT_HOLD_ENV, hold.as_str()),
+        ];
+        let daemon = DaemonFixture::start_with(tmp.path(), None, &env);
+        Slice {
+            daemon: Some(daemon),
+            env: env
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
             tmp,
         }
     }
@@ -1223,6 +1249,57 @@ async fn contact_rebuild_reports_progress_and_settles_with_the_save_verdict() {
     assert_path_free("contact.rebuild", result);
 }
 
+/// Cancel the operation `id`, held at its commit point, and wait for the
+/// worker's verdict: the answer is the registry's, the verdict the worker's.
+async fn cancel_at_commit_point(conn: &mut Connection, root: &Path, method: &str, id: &str) {
+    let hold = commit_hold_dir(root);
+    await_commit_marker(&hold, method, "held", SETTLE_DEADLINE).await;
+    let cancelled = call(conn, "operation.cancel", json!({"operation_id": id})).await;
+    assert_eq!(cancelled["state"], "cancelled", "{cancelled}");
+    await_commit_marker(&hold, method, "dropped", SETTLE_DEADLINE).await;
+    assert!(
+        !hold.join(format!("{method}.committed")).exists(),
+        "{method} committed after its cancel"
+    );
+    // The verdict is deterministic; this grace is only so a worker that wrote
+    // anyway, ignoring its own verdict, has done so before the caller looks.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let status = call(conn, "operation.status", json!({"operation_id": id})).await;
+    assert_eq!(status["state"], "cancelled", "{status}");
+    assert_eq!(
+        status["error"]["code"],
+        ErrorCode::OperationCancelled.code(),
+        "{status}"
+    );
+}
+
+/// A rebuild cancelled before its commit point drops the index it built: the
+/// cache it would have written never appears.
+#[tokio::test]
+async fn a_contact_rebuild_cancelled_before_its_cache_write_writes_nothing() {
+    let slice = Slice::with_commit_hold();
+    let cache = fixture::contacts_cache(slice.root(), fixture::ACCOUNT);
+    // The prebuilt cache goes first, so a write is a file that appears rather
+    // than bytes that may or may not differ within the same second.
+    std::fs::remove_file(&cache).expect("the fixture prebuilt a contacts cache");
+    let mut conn = slice.connect().await;
+
+    let started = call(
+        &mut conn,
+        "contact.rebuild",
+        json!({"account": fixture::ACCOUNT}),
+    )
+    .await;
+    let id = operation_id(&started);
+    cancel_at_commit_point(&mut conn, slice.root(), "contact.rebuild", &id).await;
+
+    assert!(
+        !cache.exists(),
+        "a cancelled rebuild wrote its index to {}",
+        cache.display()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. `calendar.*`
 // ---------------------------------------------------------------------------
@@ -1434,6 +1511,40 @@ async fn a_routed_rsvp_submits_the_reply_to_the_organizer() {
                 if address.contains(fixture::ORGANIZER) && *accepted
         )),
         "the organizer was the recipient of the submission: {events:?}"
+    );
+}
+
+/// An RSVP cancelled before its submission is dropped: the transport sees
+/// nothing and no outbox row is left behind.
+#[tokio::test]
+async fn an_rsvp_cancelled_before_its_submission_sends_nothing() {
+    let slice = Slice::with_commit_hold();
+    let mut conn = slice.connect().await;
+    let rows_before = all_rows(slice.root(), fixture::ACCOUNT);
+
+    let started = call(
+        &mut conn,
+        "calendar.rsvp",
+        json!({
+            "account": fixture::ACCOUNT,
+            "selector": fixture::selector(fixture::ACCOUNT, fixture::INVITATION),
+            "mailbox": fixture::MAILBOX,
+            "response": "accept",
+        }),
+    )
+    .await;
+    let id = operation_id(&started);
+    cancel_at_commit_point(&mut conn, slice.root(), "calendar.rsvp", &id).await;
+
+    let events = fixture::transport_events(&slice.log());
+    assert!(
+        events.is_empty(),
+        "a cancelled RSVP reached the transport: {events:?}"
+    );
+    assert_eq!(
+        all_rows(slice.root(), fixture::ACCOUNT),
+        rows_before,
+        "a cancelled RSVP left an outbox row"
     );
 }
 

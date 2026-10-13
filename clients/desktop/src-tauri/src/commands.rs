@@ -2170,9 +2170,9 @@ pub fn open_external(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn version_info(session: State<'_, SessionHandle>) -> VersionInfo {
+pub fn version_info(app: AppHandle, session: State<'_, SessionHandle>) -> VersionInfo {
     VersionInfo {
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        app_version: bundle_version(app.package_info()),
         protocol_min: PROTOCOL_MIN,
         protocol_max: PROTOCOL_MAX,
         daemon: if session.is_fixture() {
@@ -2182,6 +2182,13 @@ pub fn version_info(session: State<'_, SessionHandle>) -> VersionInfo {
         },
         fixture: session.is_fixture(),
     }
+}
+
+/// The bundle's version, `tauri.conf.json`'s, which `pnpm bundle` stamps with
+/// `mp`'s and the updater compares (`updates::current_version`), rather than
+/// the desktop crate's own `CARGO_PKG_VERSION`, which stays `0.1.0`.
+fn bundle_version(info: &tauri::PackageInfo) -> String {
+    info.version.to_string()
 }
 
 /// Fixture mode only: drive a connection state (`disconnect`, `reconnect`,
@@ -2201,6 +2208,20 @@ mod tests {
     use super::*;
     use crate::fixture::Fixture;
     use std::sync::Arc;
+
+    /// `version_info` reports the version the bundle carries, not the crate's.
+    #[test]
+    fn the_app_version_is_the_bundle_version() {
+        let info = tauri::PackageInfo {
+            name: "mailypoppins".to_string(),
+            version: "0.11.0".parse().expect("a semver version"),
+            authors: "",
+            description: "",
+            crate_name: "mp-desktop",
+        };
+        assert_eq!(bundle_version(&info), "0.11.0");
+        assert_ne!(bundle_version(&info), env!("CARGO_PKG_VERSION"));
+    }
 
     fn door() -> Door {
         let (tx, _rx) = std::sync::mpsc::channel();

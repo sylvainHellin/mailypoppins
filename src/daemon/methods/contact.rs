@@ -24,6 +24,15 @@
 //! `build_index_for_account` treats a storeless account as an empty index and
 //! `mp contacts rebuild` with no `--account` has always walked every
 //! configured account including those.
+//!
+//! ## A cancelled rebuild writes nothing
+//!
+//! The rebuild observes its cancel token twice: inside the walk, every 256 rows
+//! (`STOP_EVERY_ROWS`) through [`build_index_for_account_until`], and once
+//! more at the commit point, the
+//! cache write, through [`commit_point`]. A rebuild cancelled anywhere before
+//! that write drops the index it built and leaves the cache on disk exactly as
+//! it was; the registry has already settled it `cancelled`.
 
 use std::sync::Arc;
 
@@ -34,8 +43,8 @@ use mp_protocol::RpcError;
 
 use crate::config::AccountConfig;
 use crate::contacts::{
-    build_index_for_account, cache_path, load_cache, save_rebuilt_cache, search, CacheSave,
-    ContactIndex, MatchResult,
+    build_index_for_account, build_index_for_account_until, cache_path, load_cache,
+    save_rebuilt_cache, search, CacheSave, ContactIndex, MatchResult,
 };
 
 use super::super::config::ConfigStore;
@@ -43,7 +52,7 @@ use super::super::dispatch::{
     CancelToken, ClientCtx, Dispatcher, DomainError, Method, MethodKind, MethodSpec, Outcome,
 };
 use super::super::operations::{OperationHandle, OperationRegistry, Progress};
-use super::super::state::ConnectionId;
+use super::super::state::{commit_point, ConnectionId};
 use super::{internal, only_params, string_param};
 
 /// The phase a rebuild reports under, which is the family's own word.
@@ -221,6 +230,13 @@ fn load_index(account: &AccountConfig) -> Result<ContactIndex, RpcError> {
 /// One rebuild, reported under [`REBUILD_PHASE`] so a batch of five accounts is
 /// legible while it runs, and settled with the verdict `save_rebuilt_cache`
 /// reached.
+///
+/// The walk and the write are two blocking tasks with the commit point between
+/// them, on this task, so the hold of
+/// [`FAKE_COMMIT_HOLD_ENV`](super::super::state::FAKE_COMMIT_HOLD_ENV) awaits
+/// the token instead of parking a blocking thread. A shut token at either
+/// check returns without a result: the cancel has already settled the
+/// operation, and the index it built is dropped here.
 async fn rebuild(account: AccountConfig, handle: OperationHandle) {
     handle.set_running();
     handle.report(Progress {
@@ -229,20 +245,34 @@ async fn rebuild(account: AccountConfig, handle: OperationHandle) {
         total: None,
         message: Some(account.name.clone()),
     });
-    let built = tokio::task::spawn_blocking(move || rebuild_blocking(&account)).await;
-    match built {
+    let token = handle.token.clone();
+    let walked = tokio::task::spawn_blocking(move || {
+        build_index_for_account_until(&account, || token.is_cancelled())
+            .map(|index| index.map(|index| (account, index)))
+    })
+    .await;
+    let (account, index) = match walked {
+        Ok(Ok(Some(built))) => built,
+        Ok(Ok(None)) => return,
+        Ok(Err(e)) => return handle.fail(DomainError::internal(format!("{e:#}"))),
+        Err(e) => return handle.fail(DomainError::internal(format!("the rebuild task {e}"))),
+    };
+    if !commit_point("contact.rebuild", &handle.token).await {
+        return;
+    }
+    let saved = tokio::task::spawn_blocking(move || save_blocking(&account, &index)).await;
+    match saved {
         Ok(Ok(result)) => handle.succeed(result),
         Ok(Err(e)) => handle.fail(DomainError::internal(format!("{e:#}"))),
         Err(e) => handle.fail(DomainError::internal(format!("the rebuild task {e}"))),
     }
 }
 
-/// The blocking half: walk the store, rank, and offer the result to the cache.
-fn rebuild_blocking(account: &AccountConfig) -> anyhow::Result<Value> {
+/// The blocking commit: offer the ranked index to the cache.
+fn save_blocking(account: &AccountConfig, index: &ContactIndex) -> anyhow::Result<Value> {
     let root = crate::config::account_dir(&account.name);
-    let index = build_index_for_account(account)?;
     let contacts = index.contacts.len();
-    let (saved, kept) = match save_rebuilt_cache(&root, &index)? {
+    let (saved, kept) = match save_rebuilt_cache(&root, index)? {
         CacheSave::Written => ("written", 0),
         CacheSave::RefusedEmpty { kept } => ("refused_empty", kept),
         CacheSave::RefusedShrunk { kept, .. } => ("refused_shrunk", kept),

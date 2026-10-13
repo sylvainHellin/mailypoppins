@@ -21,6 +21,13 @@
 //! an RSVP abandoned half way is exactly the ambiguous submission
 //! [`crate::outbox::sweep_pending_sends`] exists to park for a human.
 //!
+//! An RSVP observes its cancel token at its commit point, after the reply is
+//! built and immediately before the durable submission, through
+//! [`commit_point`]: a reply cancelled before then is dropped unsent and leaves
+//! no outbox row. A cancel that lands once the submission has started cannot
+//! recall it; the operation still reads `cancelled`, which is why a client
+//! words that end as having stopped waiting.
+//!
 //! ## The refusals, and their order
 //!
 //! `ANO-4` first: a Graph account is refused in the sentence `mp invite` has
@@ -48,7 +55,7 @@ use super::super::dispatch::{
 };
 use super::super::operations::{OperationHandle, OperationRegistry};
 use super::super::runtime::account::off_thread;
-use super::super::state::ConnectionId;
+use super::super::state::{commit_point, ConnectionId};
 use super::{invalid_params, only_params, server_error, string_param};
 
 /// `ANO-4`, in the sentence `src/main.rs` has printed for an RSVP since #0036.
@@ -349,13 +356,17 @@ async fn run(work: Work, handle: OperationHandle) {
                 return handle.fail(DomainError::from(e));
             }
             let name = account.name.clone();
+            let token = handle.token.clone();
             let sent = off_thread("the RSVP", move || async move {
-                submit(&account, &ics, rsvp).await
+                submit(&account, &ics, rsvp, &token).await
             })
             .await
             .and_then(|inner| inner);
             match sent {
-                Ok(outcome) => handle.succeed(json!({
+                // Cancelled at the commit point: nothing went out, and the
+                // registry has already settled the operation.
+                Ok(None) => {}
+                Ok(Some(outcome)) => handle.succeed(json!({
                     "account": name,
                     "selector": selector,
                     "response": response,
@@ -386,14 +397,20 @@ fn fold(account: &str) -> anyhow::Result<Value> {
     }))
 }
 
-/// One reply, built from the invitation's own payload and submitted durably.
+/// One reply, built from the invitation's own payload and submitted durably,
+/// or `None` when the token was shut before the submission.
 async fn submit(
     account: &AccountConfig,
     ics: &[u8],
     rsvp: Rsvp,
-) -> anyhow::Result<crate::send::RsvpOutcome> {
+    token: &CancelToken,
+) -> anyhow::Result<Option<crate::send::RsvpOutcome>> {
     let smtp = super::send::smtp_config(account)?;
-    crate::send::send_rsvp(ics, account, &account.default_from, rsvp, &smtp).await
+    let prepared = crate::send::prepare_rsvp(ics, &account.default_from, rsvp)?;
+    if !commit_point("calendar.rsvp", token).await {
+        return Ok(None);
+    }
+    prepared.submit(account, &smtp).await.map(Some)
 }
 
 #[cfg(test)]

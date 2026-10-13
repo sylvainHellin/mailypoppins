@@ -1627,6 +1627,27 @@ pub async fn send_rsvp(
     rsvp: crate::invite::Rsvp,
     smtp_config: &SmtpConfig,
 ) -> Result<RsvpOutcome> {
+    prepare_rsvp(ics, account_address, rsvp)?
+        .submit(account_config, smtp_config)
+        .await
+}
+
+/// An RSVP reply built and not yet submitted: the half of [`send_rsvp`] that
+/// touches no transport, split off so `calendar.rsvp` can observe its cancel
+/// token between the two. Dropping it sends nothing.
+pub struct PreparedRsvp {
+    built: BuiltMessage,
+    organizer: String,
+    subject: String,
+}
+
+/// Build the `METHOD:REPLY` and its message, exactly as [`send_rsvp`] does
+/// before it submits.
+pub fn prepare_rsvp(
+    ics: &[u8],
+    account_address: &str,
+    rsvp: crate::invite::Rsvp,
+) -> Result<PreparedRsvp> {
     let account_address = crate::parse::extract_email_address(account_address);
     if account_address.is_empty() {
         return Err(anyhow!("Account has no usable address to RSVP as"));
@@ -1647,19 +1668,35 @@ pub async fn send_rsvp(
         &reply_ics,
     )?;
 
-    let report = send_durably(&built, account_config, smtp_config).await?;
-    let send_result = report.send_result;
-    let raw_message = built.raw;
-    let message_id = Some(built.message_id);
-
-    Ok(RsvpOutcome {
-        outbox_state: report.state,
-        send_result,
-        raw_message,
-        message_id,
+    Ok(PreparedRsvp {
+        built,
         organizer: ctx.organizer,
         subject,
     })
+}
+
+impl PreparedRsvp {
+    /// The durable submission: the commit point of an RSVP.
+    pub async fn submit(
+        self,
+        account_config: &crate::config::AccountConfig,
+        smtp_config: &SmtpConfig,
+    ) -> Result<RsvpOutcome> {
+        let PreparedRsvp {
+            built,
+            organizer,
+            subject,
+        } = self;
+        let report = send_durably(&built, account_config, smtp_config).await?;
+        Ok(RsvpOutcome {
+            outbox_state: report.state,
+            send_result: report.send_result,
+            raw_message: built.raw,
+            message_id: Some(built.message_id),
+            organizer,
+            subject,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -31,21 +31,52 @@ use mp_core::contacts::rank::ObservationField;
 /// `cache::save_rebuilt_cache`, which refuses to persist an empty rebuild over
 /// a populated cache).
 pub fn build_index_for_account(account: &AccountConfig) -> Result<ContactIndex> {
+    build_index_for_account_until(account, || false)
+        .map(|index| index.expect("a walk nothing stops always finishes"))
+}
+
+/// [`build_index_for_account`], asking `stop` every [`STOP_EVERY_ROWS`] rows
+/// whether to give up, which is how `contact.rebuild` observes its cancel token
+/// inside the walk. `None` is a walk that was stopped: the half-built index is
+/// dropped, because a partial ranking is not something any caller may cache.
+pub fn build_index_for_account_until(
+    account: &AccountConfig,
+    stop: impl Fn() -> bool,
+) -> Result<Option<ContactIndex>> {
     match open_store(&account.name) {
-        Some(store) => build_index_from_store(&store, account),
-        None => Ok(empty_index(account)),
+        Some(store) => build_index_from_store_until(&store, account, stop),
+        None => Ok(Some(empty_index(account))),
     }
 }
 
+/// How many rows the walk processes between two `stop` checks: the per-row
+/// work is a header parse, so a check per row would be noise and one per walk
+/// would not be a check at all.
+pub const STOP_EVERY_ROWS: usize = 256;
+
 /// Build a full `ContactIndex` from an already-open store.
-pub(crate) fn build_index_from_store(
+#[cfg(test)]
+fn build_index_from_store(store: &Store, account: &AccountConfig) -> Result<ContactIndex> {
+    build_index_from_store_until(store, account, || false)
+        .map(|index| index.expect("a walk nothing stops always finishes"))
+}
+
+/// The walk itself, stoppable between two batches of [`STOP_EVERY_ROWS`].
+fn build_index_from_store_until(
     store: &Store,
     account: &AccountConfig,
-) -> Result<ContactIndex> {
+    stop: impl Fn() -> bool,
+) -> Result<Option<ContactIndex>> {
     let mut index = empty_index(account);
     let self_addr = self_address(account);
 
-    for row in read::list_account(store, &account.name)? {
+    for (n, row) in read::list_account(store, &account.name)?
+        .into_iter()
+        .enumerate()
+    {
+        if n % STOP_EVERY_ROWS == 0 && stop() {
+            return Ok(None);
+        }
         let role = MailboxRole::from(row.mailbox.as_str());
         let observed_at = row
             .date_display
@@ -68,7 +99,7 @@ pub(crate) fn build_index_from_store(
         }
     }
 
-    Ok(index)
+    Ok(Some(index))
 }
 
 /// The from/to/cc headers of one row, in the order the ranker sees them.
@@ -227,6 +258,31 @@ mod tests {
         assert_eq!(index.contacts.get("carol@example.com").unwrap().sent_to, 1);
         assert_eq!(index.contacts.get("dave@example.com").unwrap().sent_cc, 1);
         assert_eq!(index.contacts.get("erin@example.com").unwrap().received, 1);
+    }
+
+    /// A walk whose `stop` answers yes gives the index up rather than handing
+    /// back a partial ranking, and one that never stops is the plain build.
+    #[test]
+    fn a_stopped_walk_returns_no_index() {
+        let fx = fixture();
+        ingest(
+            &fx,
+            "inbox",
+            1,
+            &email(
+                "Alice <alice@example.com>",
+                "me@example.com",
+                None,
+                "Mon, 05 Jan 2026 12:00:00 +0000",
+            ),
+        );
+
+        let stopped = build_index_from_store_until(&fx.store, &account(), || true).unwrap();
+        assert!(stopped.is_none(), "a stopped walk is not an index");
+        let finished = build_index_from_store_until(&fx.store, &account(), || false)
+            .unwrap()
+            .expect("a walk nothing stops finishes");
+        assert_eq!(finished.contacts.len(), 1);
     }
 
     /// A store with no rows for this account builds an empty index rather than
