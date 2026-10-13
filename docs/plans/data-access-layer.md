@@ -1,7 +1,7 @@
 ---
 id: data-access-layer
-title: "Data-access-layer redesign: server-as-truth SQLite mirror + local-only drafts"
-status: DECIDED (2026-07-14), amended 2026-07-31 for the complete-nuke greenfield rebuild
+title: "Data-access-layer redesign: server-as-truth SQLite mirror + local-truth drafts"
+status: DECIDED (2026-07-14), amended 2026-07-31 for the complete-nuke greenfield rebuild and 2026-10-13 for server drafts
 supersedes: ".agents/research/2026-07-12-architecture-rethink-decision-doc.md (Option choice), .agents/research/2026-07-12-perf-sync-improvement-plan.md (Phases 0-2)"
 next_free_ticket: 0051
 ---
@@ -22,9 +22,9 @@ This is Option B from the decision doc, with three owner amendments recorded bel
 Confirmed 2026-07-14 by the owner:
 
 1. Server is ground truth for received mail; the client mirrors it locally and reconciles.
-2. Drafts are local-only files and never sync to the server.
-   This is simpler than the decision doc's Option C (which synced drafts through `pending_ops` and needed a watched-drafts shim).
-   Trade-off accepted: drafts do not converge across the two machines.
+2. Drafts are local Markdown files and stay the local truth (amended 2026-10-13, [#0143](../tickets/0143-server-drafts.md)).
+   mp mirrors them two-way to the server Drafts folder, where Outlook and Apple Mail already converge.
+   Drafts started in another client are imported into the drafts directory and treated like mp's own from then on.
 3. Received mail is read-only.
    Editing in `$EDITOR` is for drafts only.
    This settles the decision doc's Decision 3 as option (i), the biggest behavioural change and the one the owner explicitly accepted.
@@ -96,7 +96,8 @@ This is the Mailspring / JMAP shape (research doc `.agents/workflow/2026-07-12-d
   blobs/
     ab/cd/abcd1234...  content-addressed raw RFC822 / decoded body / each attachment,
                        filename = SHA-256 of the bytes
-  drafts/              plain .md drafts, local-only, the $EDITOR + agent surface
+  drafts/              plain .md drafts, the local truth mirrored to the server
+                       Drafts folder (#0143), the $EDITOR + agent surface
 ```
 
 `store.sqlite3` sits beside the existing `mailbox-states.json` and `contacts-cache.json`, matching the current per-account cache layout.
@@ -275,7 +276,7 @@ The alternative of keeping two crates compiling side by side was rejected: it is
 - Storage backend: SQLite, not JSON, not NoSQL. Straight to SQLite because the envelope store (Stage 2) and FTS5 (Stage 5) need it and a JSON mirror becomes a full-rewrite-per-save liability.
 - Bodies: content-addressed blob files, not inline in SQLite.
 - Received mail: read-only. Drafts only in `$EDITOR`.
-- Drafts: local-only, never synced.
+- Drafts: local files are the truth, mirrored two-way to the server Drafts folder (amended 2026-10-13, [#0143](../tickets/0143-server-drafts.md)).
 - Obsidian / `grep`: dropped; FTS5 replaces search. Note the in-app search today is server-side IMAP SEARCH (`f` in the TUI, `mp search` in the CLI), not a local `grep`; FTS5 is a new local capability that also makes search work offline and without a round trip. There is no existing local full-text index to reuse.
 - Persistent connection: approved; the "one session per operation" invariant in `docs/architecture.md:23` gets rewritten in Stage 5.
 
