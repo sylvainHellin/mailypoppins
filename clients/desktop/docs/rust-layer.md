@@ -788,7 +788,7 @@ The scheme's plain-text fallback reads the same command, so the two never disagr
 
 ## Menus
 
-`menu.rs` builds the menu bar with `tauri::menu`, no plugin: the Edit menu is the predefined macOS items, the App menu is too apart from "Check for Updates…" and "Settings…", and File, View, Window and Help carry our own.
+`menu.rs` builds the menu bar with `tauri::menu`, no plugin: the Edit menu is the predefined macOS items, the App menu is too apart from "Check for Updates…" and "Settings…", and File, View and Help carry our own beside the predefined window items below.
 Each of ours emits its id as the `menu` event (`listen("menu", …)`, allowed by `core:default`), and the frontend runs the same action its key runs (`MENU_ACTIONS` in `src/app/actions.ts`, pinned by a Rust test that reads that file):
 
 | Id | Menu | Runs |
@@ -803,18 +803,12 @@ Each of ours emits its id as the `menu` event (`listen("menu", …)`, allowed by
 
 No item takes an accelerator the webview's keymap owns, since a menu key equivalent reaches AppKit before the page and a bare `z` would stop the user typing one.
 
-The main window has no title bar on macOS (PERSO-97): `lib.rs` builds it with `decorations(false)`, a borderless, resizable window with no traffic lights.
-AppKit's predefined Close Window, Minimize, Zoom and Enter Full Screen only press the title bar's buttons (`performClose:` and the like), which a borderless window refuses with the alert sound, so the window items are ours too (`WINDOW_ITEMS`), run in Rust on the `main` window and never forwarded:
-
-| Id | Menu | Key | Runs |
-|---|---|---|---|
-| `close_window` | File | Cmd+W | `close()`, which asks the webview's close guard as the button did |
-| `minimize_window` | Window | Cmd+M | `minimize()` |
-| `zoom_window` | Window | none | `maximize()` or `unmaximize()` |
-| `toggle_fullscreen` | View | Ctrl+Cmd+F | `set_fullscreen`, which lends the window a title bar while it fills the screen |
+The main window has no title bar and no traffic lights on macOS, and keeps the system's rounded corners (PERSO-97): `lib.rs` builds it with `.title_bar_style(TitleBarStyle::Overlay).hidden_title(true)`, so it stays a titled window with its close, minimise and zoom buttons, and the webview fills the whole frame.
+`chrome.rs` hides the three buttons through AppKit (`objc2-app-kit`: `standardWindowButton(…)` then `setHidden(true)` on the `NSWindow` of `ns_window()`), on the main thread through `run_on_main_thread`, once the window is built and again on every `WindowEvent::Resized`, which follows leaving full screen, where AppKit lays the title bar out afresh.
+The buttons stay in place, hidden, so the predefined Close Window (File, Cmd+W), Minimize (Cmd+M), Zoom and Enter Full Screen (View, Ctrl+Cmd+F) act as they do on any window: they press them (`performClose:` and the like), and Close Window asks the webview's close guard as the button would.
+`decorations(false)` would lose the rounded corners, the native resize and those menu items, which only press buttons a borderless window does not have.
 
 The page moves the window through `data-tauri-drag-region` ([shell.md](shell.md), "Layouts"), whose `start_dragging` the capability grants with `core:window:allow-start-dragging`.
-The alternative that keeps the traffic lights floating over the page is `.title_bar_style(TitleBarStyle::Overlay).hidden_title(true)` in place of `decorations(false)`; it keeps AppKit's own window items working as well.
 
 "Check for Updates…", under About in the App menu, is not one of these: its id `check_for_updates` emits the event `update:check_requested` with no payload, and the frontend runs `update_check` with `manual: true` so its notice line shows the answer (see Updates).
 

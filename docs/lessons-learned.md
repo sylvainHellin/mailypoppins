@@ -2567,11 +2567,11 @@ After P5-U8 the real runtime also reported `blocked` in a sandbox with no store,
 When a fake and a real producer can commit the same fact, turn the real one off under the fake.
 A daemon test that bootstraps right after the socket comes up must also read past the reports its snapshot still owes (accounts shown `opening`) rather than poll `daemon.status`, since the runtime table is filled before the change is committed.
 
-## A Tauri window without a title bar on macOS needs its own window menu items
+## A macOS window without a title bar keeps its decorations and hides its buttons
 
-The predefined Close Window, Minimize, Zoom and Full Screen menu items only press the missing buttons, so they beep and do nothing.
-Replace them with items that call `close()`, `minimize()`, `maximize()` and `set_fullscreen()`.
-`close()` still emits `CloseRequested`, so the close guard runs.
+`decorations(false)` makes a borderless window: macOS draws its corners square, and the predefined Close Window, Minimize, Zoom and Full Screen menu items only press title bar buttons it no longer has, so they beep and do nothing (PERSO-97).
+`title_bar_style(TitleBarStyle::Overlay)` with `hidden_title(true)` keeps a titled window with rounded corners, native resize and working predefined items; the traffic lights are then hidden with AppKit's `standardWindowButton(…).setHidden(true)`, since Tauri does not expose tao's `with_titlebar_buttons_hidden`.
+Hide them again after every resize: leaving full screen lays the title bar out afresh.
 
 ## A Tauri drag region stops at clickable children
 

@@ -2668,6 +2668,7 @@ dependencies = [
  "mp-client",
  "mp-core",
  "mp-protocol",
+ "objc2-app-kit",
  "objc2-foundation",
  "portable-pty",
  "serde",

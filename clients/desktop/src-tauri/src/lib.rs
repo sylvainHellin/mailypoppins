@@ -24,6 +24,7 @@
 
 pub mod attachments;
 pub mod calendar;
+pub mod chrome;
 pub mod commands;
 pub mod configuration;
 pub mod connector;
@@ -143,10 +144,14 @@ pub fn run() {
         .manage(Terminals::default())
         // Destroyed, not CloseRequested: a close the webview listens for is
         // prevented and decided there, and the user may choose to stay.
-        .on_window_event(|window, event| {
-            if let WindowEvent::Destroyed = event {
-                window.state::<Terminals>().kill_all();
+        // Resized follows leaving full screen, which may show the traffic
+        // lights again (chrome.rs).
+        .on_window_event(|window, event| match event {
+            WindowEvent::Destroyed => window.state::<Terminals>().kill_all(),
+            WindowEvent::Resized(_) if window.label() == "main" => {
+                chrome::hide_traffic_lights(window)
             }
+            _ => {}
         })
         .register_asynchronous_uri_scheme_protocol("mpmsg", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -167,14 +172,12 @@ pub fn run() {
             let (width, height) = window_size();
             let nav_app = app.handle().clone();
             let win_app = app.handle().clone();
-            // No title bar and no traffic lights on macOS (PERSO-97): the
-            // window opens on the app itself. The page's drag regions move
-            // it, and the Window menu's own items close, minimise, zoom and
-            // fill the screen, since AppKit's predefined ones refuse a
-            // window without the buttons (menu.rs, WINDOW_ITEMS).
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+            // No title bar and no traffic lights on macOS (PERSO-97), with
+            // the system's rounded corners: an overlay title bar with no
+            // title keeps the window titled, and chrome.rs hides its buttons
+            // (chrome.rs has the why).
+            let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("mailypoppins")
-                .decorations(!cfg!(target_os = "macos"))
                 .inner_size(width, height)
                 .min_inner_size(480.0, 400.0)
                 .on_navigation(move |url| {
@@ -187,8 +190,13 @@ pub fn run() {
                 .on_new_window(move |url, _features| {
                     refuse(&win_app, &url, InterceptSource::NewWindow);
                     NewWindowResponse::Deny
-                })
-                .build()?;
+                });
+            #[cfg(target_os = "macos")]
+            let builder = builder
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+            let window = builder.build()?;
+            chrome::hide_traffic_lights(&window.as_ref().window());
             updates::spawn_startup_check(app.handle().clone());
             Ok(())
         })

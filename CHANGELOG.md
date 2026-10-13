@@ -26,7 +26,7 @@ All notable changes to this project are documented in this file.
 - **Desktop: the focused pane's frame is square where it meets the neighbouring pane (PERSO-95).**
 - **TUI: on a list row `Enter` moves focus into the body pane and marks the message read, as in the desktop client (PERSO-92).** In a terminal under 80 columns it also zooms the body pane. `e` opens the message in `$EDITOR`: a draft for editing, received mail as its read-only Markdown copy.
 - **Reply and forward drafts mark the boundary above the quoted original with `<!-- mp:quote -->` instead of `{{SIGNATURE}}` (PERSO-114).** Drafts that still carry `{{SIGNATURE}}` keep working, and the TUI preview labels the boundary as the quoted message.
-- **Desktop: the window opens without a title bar or traffic lights on macOS (PERSO-97).** Drag it by the sidebar header or the margin around the content; Cmd+W, Cmd+M and Ctrl+Cmd+F still close, minimise and fill the screen through the app's own menu items.
+- **Desktop: the window opens without a title bar or traffic lights on macOS, with its rounded corners (PERSO-97).** Drag it by the sidebar header or the margin around the content, resize it from its edges; the Window menu's Close Window (Cmd+W), Minimize (Cmd+M), Zoom and Enter Full Screen (Ctrl+Cmd+F) work as on any Mac window.
 
 ### Performance
 - **Opening a large mailbox decodes the streamed rows straight into typed rows, about three times faster on the client (PERSO-106).** A broken stream shows in the desktop as a protocol error rather than an internal one.

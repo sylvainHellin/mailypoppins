@@ -55,6 +55,9 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 # through tao and wry, at this version.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSDictionary", "NSObject", "NSString", "NSUserDefaults", "NSValue"] }
+# The hidden traffic lights of the overlay title bar (src/chrome.rs,
+# PERSO-97); already in the tree through tao, at this version.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSResponder", "NSWindow", "NSView", "NSControl", "NSButton"] }
 
 # TypeScript bindings for the result and event types (src/ts_bindings.rs). A
 # dev-dependency with `cfg_attr(test, ...)` derives, so a plain `cargo test`

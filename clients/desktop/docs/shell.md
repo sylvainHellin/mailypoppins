@@ -1016,11 +1016,10 @@ A window that started with no account selects the first one listed, and its inbo
 
 Tailwind's `md` and shadcn's `useIsMobile` both move to 760 px, so the rail never turns into an off-screen sheet between 760 and 767.
 
-On macOS the window has no title bar and no traffic lights (PERSO-97): it opens on the sidebar and the inset card, with square corners and the system shadow.
+On macOS the window has no title bar and no traffic lights (PERSO-97): it opens on the sidebar and the inset card, with the system's rounded corners and shadow, as Zen or WhatsApp do ([rust-layer.md](rust-layer.md), "Menus": an overlay title bar whose buttons are hidden).
 The page moves it through tauri's `data-tauri-drag-region`: the sidebar header (`deep`, so the whole header), the canvas around the inset card (bare, so only a press on the canvas itself, its 8 px margin), the narrow bar (`deep`; its back button still takes the click, since tauri's script skips a button), the connecting screen (`deep`) and the background of the other state screens (bare).
 A double click on a drag region zooms the window, as on a title bar.
-Close Window (Cmd+W), Minimize (Cmd+M), Zoom and Toggle Full Screen (Ctrl+Cmd+F) stay in the menu bar ([rust-layer.md](rust-layer.md), "Menus").
-In the narrow layout the panes run to the window's square edges, so `index.css` squares every corner of the focused pane's line there.
+The window resizes from its edges, and the menu bar's predefined Close Window (Cmd+W), Minimize (Cmd+M), Zoom and Enter Full Screen (Ctrl+Cmd+F) act on it.
 The list width, the collapsed sidebar and whether `!` hides the notices are stored in `localStorage` (`mailypoppins.desktop.prefs.v1`), never in the daemon.
 The list is drawn at the stored width only while the reader keeps `READER_MIN` (320 px) of the pane row, measured by a ResizeObserver; a 720 px width stored in a wide window draws narrower in the medium layout, and the stored value is kept for when the window grows.
 
