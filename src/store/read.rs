@@ -279,6 +279,19 @@ const MAILBOX_TOTAL_SQL: &str = "SELECT COUNT(*) FROM messages WHERE account = ?
 /// statement rather than a copy that could drift from it.
 fn list_mailbox_sql() -> String {
     format!(
+        "{} \
+         WHERE messages.account = ?1 AND messages.mailbox = ?2 \
+         ORDER BY messages.date_sort DESC, messages.id DESC",
+        listing_select()
+    )
+}
+
+/// The `SELECT ... FROM ... LEFT JOIN` every listing statement shares: the
+/// [`row_from_sql`] columns with the invite predicate from the join, then
+/// `date_sort` at index 16. No `WHERE` and no `ORDER BY`, which are each
+/// statement's own.
+fn listing_select() -> String {
+    format!(
         "SELECT messages.id, messages.mailbox, messages.uid, messages.message_id, \
          messages.from_, messages.to_, messages.cc, messages.subject, \
          messages.date_display, messages.flags, messages.has_attachments, \
@@ -289,10 +302,297 @@ fn list_mailbox_sql() -> String {
          LEFT JOIN (SELECT DISTINCT message_row FROM message_blobs \
                      WHERE kind = 'attachment' \
                        AND filename = '{CALENDAR_SIDECAR_NAME}') invite \
-           ON invite.message_row = messages.id \
-         WHERE messages.account = ?1 AND messages.mailbox = ?2 \
-         ORDER BY messages.date_sort DESC, messages.id DESC"
+           ON invite.message_row = messages.id"
     )
+}
+
+// ---------------------------------------------------------------------------
+// The conversation listing (#0142)
+// ---------------------------------------------------------------------------
+
+/// The mailbox key whose rows no conversation counts: the account's Drafts,
+/// where the server copy of a draft lands once #0143 syncs it. The local file
+/// is the one draft member of a conversation, so the server copy would show
+/// the draft twice.
+const DRAFTS_KEY: &str = crate::selector::DRAFTS_MAILBOX;
+
+/// The members of every conversation with a row in one mailbox, statement one
+/// of [`list_conversations`].
+///
+/// The inner select walks `messages_list` over the listed mailbox, as the flat
+/// listing does, and the outer probes `messages_thread` once per conversation
+/// in index order, so the rows arrive grouped by `thread_id` and oldest first
+/// within a group without a sort (`the_conversation_listing_is_served_by_two_index_walks`).
+///
+/// The inner walk is pinned with `INDEXED BY`: left to itself the planner
+/// reads `thread_id IS NOT NULL` as a range over `messages_thread` and walks
+/// every threaded row of the account, every mailbox included, to keep the few
+/// in the listed one.
+fn conversation_members_sql() -> String {
+    format!(
+        "{} \
+         WHERE messages.account = ?1 AND messages.mailbox <> '{DRAFTS_KEY}' \
+           AND messages.thread_id IN \
+               (SELECT thread_id FROM messages INDEXED BY messages_list \
+                WHERE account = ?1 AND mailbox = ?2 AND thread_id IS NOT NULL) \
+         ORDER BY messages.thread_id, messages.date_sort, messages.id",
+        listing_select()
+    )
+}
+
+/// The mailbox's rows ingest gave no `thread_id`, statement two of
+/// [`list_conversations`]: each a conversation of one, since nothing joins it.
+///
+/// A probe of `messages_thread` for the account's `NULL`s, which a store
+/// ingest has filled reads as nothing at all, rather than a second walk of
+/// the mailbox: no `ORDER BY`, since [`list_conversations`] orders the
+/// conversations once they are all folded.
+fn unthreaded_rows_sql() -> String {
+    format!(
+        "{} \
+         WHERE messages.account = ?1 AND messages.mailbox = ?2 \
+           AND messages.thread_id IS NULL",
+        listing_select()
+    )
+}
+
+/// One conversation of a mailbox, folded from its member rows (#0142).
+///
+/// The store-side half of `mp_protocol::listing::ConversationRow`: the daemon
+/// sets `has_draft` from the drafts index and renders the wire row from this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conversation {
+    /// The `thread_id` the members share, or the one row's `Message-ID` for a
+    /// row ingest gave none.
+    pub thread_id: String,
+    /// The newest copy of a member in the listed mailbox, with its stamp.
+    pub latest: DatedRow,
+    /// The `date_sort` stamp of the newest member across every mailbox, which
+    /// orders the listing.
+    pub date_sort: Option<i64>,
+    /// That newest member's `Date:` header, which the row prints.
+    pub date_display: Option<String>,
+    /// One per `Message-ID`, across every mailbox.
+    pub count: usize,
+    /// The `Message-ID`s with an unseen copy in the listed mailbox.
+    pub unread: usize,
+    /// The member rows in the listed mailbox, newest first, copies included.
+    pub member_ids: Vec<i64>,
+    /// The `From:` headers, one per address, newest first, at most
+    /// [`MAX_PARTICIPANTS`].
+    pub participants: Vec<String>,
+    /// The distinct mailboxes the members live in, sorted.
+    pub mailboxes: Vec<String>,
+    /// Any member, anywhere, has an attachment.
+    pub has_attachments: bool,
+    /// A member in the listed mailbox is flagged.
+    pub flagged: bool,
+    /// An indexed draft answers or forwards a member. The store read leaves
+    /// it `false`; the daemon sets it from the drafts index.
+    pub has_draft: bool,
+}
+
+/// How many participants a conversation row names, so a 300-message
+/// mailing-list thread stays a small row.
+pub const MAX_PARTICIPANTS: usize = 5;
+
+/// One mailbox as conversations, newest first (#0142).
+///
+/// Two statements on one snapshot: the members of every conversation with a
+/// row in the mailbox ([`conversation_members_sql`]) and the mailbox's rows
+/// with no `thread_id` ([`unthreaded_rows_sql`]). The fold runs here, one
+/// conversation at a time, with the dedup [`thread_messages`] applies: a
+/// `Message-ID` held twice counts once, and is unread when any of its copies
+/// in the listed mailbox lacks `\Seen`. Keeping it in Rust keeps one spelling
+/// of that rule for the list and the expansion.
+///
+/// The rows of the `drafts` mailbox are no member of anything. Ordered by the
+/// newest member's `date_sort` descending, then by the latest row's id
+/// descending.
+pub fn list_conversations(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+) -> Result<Vec<Conversation>> {
+    let tx = store.conn().unchecked_transaction()?;
+    let mut out: Vec<Conversation> = Vec::new();
+    {
+        let mut stmt = tx.prepare(&conversation_members_sql())?;
+        let rows = stmt.query_map((account, mailbox), |row| {
+            Ok((row_from_sql(row)?, row.get::<_, Option<i64>>(16)?))
+        })?;
+        let mut group: Vec<DatedRow> = Vec::new();
+        for row in rows {
+            let row = row.context("reading a conversation member")?;
+            if group
+                .last()
+                .is_some_and(|(last, _)| last.thread_id != row.0.thread_id)
+            {
+                out.extend(fold_conversation(&mut group, mailbox));
+            }
+            group.push(row);
+        }
+        out.extend(fold_conversation(&mut group, mailbox));
+    }
+    {
+        let mut stmt = tx.prepare(&unthreaded_rows_sql())?;
+        let rows = stmt.query_map((account, mailbox), |row| {
+            Ok((row_from_sql(row)?, row.get::<_, Option<i64>>(16)?))
+        })?;
+        let mut one: Vec<DatedRow> = Vec::with_capacity(1);
+        for row in rows {
+            one.push(row.context("reading an unthreaded row")?);
+            out.extend(fold_conversation(&mut one, mailbox));
+        }
+    }
+    tx.finish()?;
+    out.sort_by_key(|c| std::cmp::Reverse((c.date_sort, c.latest.0.id)));
+    Ok(out)
+}
+
+/// One conversation out of its members, oldest first, or `None` when none of
+/// them is in `mailbox` (which the inner select rules out, and an empty group
+/// is). `members` is left empty, so one buffer serves every group.
+///
+/// Nothing is cloned but what the conversation keeps: the latest row moves out
+/// of the group, the newest member lends its `Date:`, and the dedup sorts
+/// borrowed `Message-ID`s rather than hashing them, which on a mailbox of
+/// one-message conversations is most of what the fold costs.
+fn fold_conversation(members: &mut Vec<DatedRow>, mailbox: &str) -> Option<Conversation> {
+    let folded = fold_members(members, mailbox);
+    members.clear();
+    folded
+}
+
+/// [`fold_conversation`]'s body, which leaves the clearing to it.
+fn fold_members(members: &mut Vec<DatedRow>, mailbox: &str) -> Option<Conversation> {
+    if members.len() == 1 {
+        return members.pop().and_then(|row| fold_one(row, mailbox));
+    }
+    let latest_at = members
+        .iter()
+        .rposition(|(row, _)| row.mailbox == mailbox)?;
+    let (newest, date_sort) = members.last()?;
+    let date_sort = *date_sort;
+    let date_display = newest.date_display.clone();
+
+    let mut ids: Vec<&str> = Vec::with_capacity(members.len());
+    let mut unread_ids: Vec<&str> = Vec::new();
+    let mut participants: Vec<String> = Vec::new();
+    let mut addresses: Vec<&str> = Vec::new();
+    let mut mailboxes: Vec<String> = Vec::new();
+    let mut member_ids: Vec<i64> = Vec::new();
+    let mut has_attachments = false;
+    let mut flagged = false;
+    for (row, _) in members.iter().rev() {
+        ids.push(row.message_id.as_str());
+        has_attachments |= row.has_attachments;
+        if !mailboxes.contains(&row.mailbox) {
+            mailboxes.push(row.mailbox.clone());
+        }
+        if participants.len() < MAX_PARTICIPANTS {
+            if let Some(from) = row.from.as_deref().filter(|f| !f.trim().is_empty()) {
+                let key = address_key(from);
+                if !addresses.iter().any(|held| same_address(held, key)) {
+                    addresses.push(key);
+                    participants.push(from.to_string());
+                }
+            }
+        }
+        if row.mailbox == mailbox {
+            member_ids.push(row.id);
+            let flags = row.flags();
+            flagged |= flags.flagged;
+            if !flags.seen {
+                unread_ids.push(row.message_id.as_str());
+            }
+        }
+    }
+    mailboxes.sort();
+    let count = distinct(&mut ids);
+    let unread = distinct(&mut unread_ids);
+    drop((ids, unread_ids, addresses));
+
+    let latest = members.swap_remove(latest_at);
+    let thread_id = latest
+        .0
+        .thread_id
+        .clone()
+        .unwrap_or_else(|| latest.0.message_id.clone());
+    Some(Conversation {
+        thread_id,
+        latest,
+        date_sort,
+        date_display,
+        count,
+        unread,
+        member_ids,
+        participants,
+        mailboxes,
+        has_attachments,
+        flagged,
+        has_draft: false,
+    })
+}
+
+/// A conversation of one message, the common case of a mailbox ingest could
+/// not thread, without the dedup's buffers.
+fn fold_one((row, date_sort): DatedRow, mailbox: &str) -> Option<Conversation> {
+    if row.mailbox != mailbox {
+        return None;
+    }
+    let flags = row.flags();
+    let participants = row
+        .from
+        .as_deref()
+        .filter(|from| !from.trim().is_empty())
+        .map(|from| vec![from.to_string()])
+        .unwrap_or_default();
+    Some(Conversation {
+        thread_id: row
+            .thread_id
+            .clone()
+            .unwrap_or_else(|| row.message_id.clone()),
+        date_sort,
+        date_display: row.date_display.clone(),
+        count: 1,
+        unread: usize::from(!flags.seen),
+        member_ids: vec![row.id],
+        participants,
+        mailboxes: vec![row.mailbox.clone()],
+        has_attachments: row.has_attachments,
+        flagged: flags.flagged,
+        has_draft: false,
+        latest: (row, date_sort),
+    })
+}
+
+/// How many distinct strings `values` holds, sorting it in place.
+fn distinct(values: &mut [&str]) -> usize {
+    if values.len() < 2 {
+        return values.len();
+    }
+    values.sort_unstable();
+    1 + values.windows(2).filter(|pair| pair[0] != pair[1]).count()
+}
+
+/// The address of a `From:` header, the comparison key of
+/// [`Conversation::participants`]: what the angle brackets enclose when there
+/// are any, the whole header otherwise.
+fn address_key(from: &str) -> &str {
+    match (from.rfind('<'), from.rfind('>')) {
+        (Some(open), Some(close)) if open < close => &from[open + 1..close],
+        _ => from,
+    }
+    .trim()
+}
+
+/// Whether two [`address_key`]s name one address, compared case-insensitively
+/// without allocating a folded copy of either.
+fn same_address(a: &str, b: &str) -> bool {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .eq(b.chars().flat_map(char::to_lowercase))
 }
 
 /// Every message of one account, newest first within each mailbox.
@@ -479,8 +779,8 @@ pub fn threading_headers_of(
 fn thread_messages_sql() -> String {
     let columns = row_columns();
     format!(
-        "SELECT {columns} FROM messages
-         WHERE account = ?1 AND thread_id = ?2
+        "SELECT {columns}, date_sort FROM messages
+         WHERE account = ?1 AND thread_id = ?2 AND mailbox <> '{DRAFTS_KEY}'
          ORDER BY date_sort ASC, id ASC"
     )
 }
@@ -504,14 +804,45 @@ fn thread_messages_sql() -> String {
 /// of a mailbox listing: a conversation reads oldest to newest, the way a mail
 /// client threads one.
 pub fn thread_messages(store: &Store, account: &str, thread_id: &str) -> Result<Vec<MessageRow>> {
+    Ok(thread_messages_preferring(store, account, thread_id, None)?
+        .into_iter()
+        .map(|(row, _)| row)
+        .collect())
+}
+
+/// [`thread_messages`], each row with its `date_sort` column, keeping the copy
+/// in `prefer` of a `Message-ID` held more than once (#0142).
+///
+/// The conversation's order is the one [`thread_messages`] answers: a message
+/// keeps the place its first copy took, and only which copy stands there
+/// changes. With `prefer: None`, or a message with no copy in `prefer`, the
+/// first copy stays, which is [`thread_messages`] exactly. The rows of the
+/// `drafts` mailbox are no member, as in [`list_conversations`].
+pub fn thread_messages_preferring(
+    store: &Store,
+    account: &str,
+    thread_id: &str,
+    prefer: Option<&str>,
+) -> Result<Vec<DatedRow>> {
     let mut stmt = store.conn().prepare(&thread_messages_sql())?;
-    let rows = stmt.query_map((account, thread_id), row_from_sql)?;
-    let mut out: Vec<MessageRow> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let rows = stmt.query_map((account, thread_id), |row| {
+        Ok((row_from_sql(row)?, row.get::<_, Option<i64>>(16)?))
+    })?;
+    let mut out: Vec<DatedRow> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
     for row in rows {
         let row = row.context("reading a message row")?;
-        if seen.insert(row.message_id.clone()) {
-            out.push(row);
+        match at.get(&row.0.message_id) {
+            None => {
+                at.insert(row.0.message_id.clone(), out.len());
+                out.push(row);
+            }
+            Some(&index) => {
+                let preferred = |candidate: &MessageRow| Some(candidate.mailbox.as_str()) == prefer;
+                if preferred(&row.0) && !preferred(&out[index].0) {
+                    out[index] = row;
+                }
+            }
         }
     }
     Ok(out)
@@ -1571,6 +1902,257 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
             "got:\n{plan}"
         );
         assert!(!plan.to_uppercase().contains("TEMP B-TREE"), "got:\n{plan}");
+    }
+
+    /// The two statements of the conversation listing are index walks with no
+    /// temp B-tree: the members off `messages_thread` probed per conversation
+    /// from a `messages_list` walk, and the unthreaded rows a `messages_thread`
+    /// probe for the NULLs, on the precedent of
+    /// `the_listing_is_served_by_the_messages_list_index`.
+    #[test]
+    fn the_conversation_listing_is_served_by_two_index_walks() {
+        let fx = fixture();
+        ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("a", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
+        let plan_of = |sql: &str| -> String {
+            let mut stmt = fx
+                .store
+                .conn()
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let plan: Vec<String> = stmt
+                .query_map(("alice", "inbox"), |row| row.get::<_, String>(3))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            plan.join("\n")
+        };
+
+        let members = plan_of(&super::conversation_members_sql());
+        assert!(
+            members.contains(&format!(
+                "SEARCH messages USING INDEX {} (account=? AND thread_id=?)",
+                crate::store::schema::THREAD_INDEX
+            )),
+            "the members are probed off messages_thread, got:\n{members}"
+        );
+        assert!(
+            members.contains("messages_list"),
+            "the conversations of the mailbox come off messages_list, got:\n{members}"
+        );
+        assert!(
+            !members.to_uppercase().contains("TEMP B-TREE"),
+            "the ORDER BY is the index order, got:\n{members}"
+        );
+        assert!(
+            !members.to_uppercase().contains("CORRELATED"),
+            "no correlated subquery runs per row, got:\n{members}"
+        );
+
+        let unthreaded = plan_of(&super::unthreaded_rows_sql());
+        assert!(
+            unthreaded.contains(&format!(
+                "SEARCH messages USING INDEX {} (account=? AND thread_id=?)",
+                crate::store::schema::THREAD_INDEX
+            )),
+            "the unthreaded rows are a probe for the NULLs, got:\n{unthreaded}"
+        );
+        assert!(
+            !unthreaded.to_uppercase().contains("TEMP B-TREE"),
+            "got:\n{unthreaded}"
+        );
+    }
+
+    /// One message ingested as a reply to `parent`, which is what threads it.
+    fn ingest_reply(fx: &Fixture, mailbox: &str, uid: i64, email: &FetchedEmail, parent: &str) {
+        let raw = format!("In-Reply-To: {parent}\r\nReferences: {parent}\r\n\r\n");
+        ingest_message(
+            &fx.store,
+            &fx.blobs,
+            &IngestInput {
+                account: "alice",
+                mailbox,
+                uid,
+                email,
+                raw: Some(raw.as_bytes()),
+            },
+        )
+        .unwrap();
+    }
+
+    /// An inbox root held twice (inbox and archive), a reply in Sent, an
+    /// unread and flagged inbox reply with an attachment, a draft-mailbox copy
+    /// and a lone inbox message: the inbox lists two conversations, the thread
+    /// newest first by its Sent reply, and Sent lists the same thread as one
+    /// row whose members are its Sent rows alone.
+    #[test]
+    fn a_conversation_folds_its_members_across_mailboxes() {
+        let fx = fixture();
+        let root = email("root", "Mon, 01 Jan 2024 09:00:00 +0000");
+        let mut root_unseen = root.clone();
+        root_unseen.flags.seen = false;
+        let root_inbox = ingest(&fx, "inbox", 1, &root_unseen);
+        let mut archived = root.clone();
+        archived.flags.seen = true;
+        let root_archive = ingest(&fx, "archive", 1, &archived);
+
+        let mut answer = email("answer", "Mon, 01 Jan 2024 10:00:00 +0000");
+        answer.from = "Bob <BOB@example.com>".into();
+        answer.flags.seen = false;
+        answer.flags.flagged = true;
+        answer.has_attachments = true;
+        ingest_reply(&fx, "inbox", 2, &answer, "<root@example.com>");
+        let mut sent = email("sent", "Mon, 01 Jan 2024 11:00:00 +0000");
+        sent.from = "Me <me@example.com>".into();
+        sent.flags.seen = true;
+        ingest_reply(&fx, "sent", 1, &sent, "<answer@example.com>");
+        let mut server_draft = email("server-draft", "Mon, 01 Jan 2024 12:00:00 +0000");
+        server_draft.from = "Me <me@example.com>".into();
+        ingest_reply(&fx, DRAFTS_KEY, 1, &server_draft, "<sent@example.com>");
+        let mut lone = email("lone", "Mon, 01 Jan 2024 10:30:00 +0000");
+        lone.flags.seen = true;
+        let lone_id = ingest(&fx, "inbox", 3, &lone);
+
+        let inbox = list_conversations(&fx.store, "alice", "inbox").unwrap();
+        assert_eq!(inbox.len(), 2, "{inbox:#?}");
+        let thread = &inbox[0];
+        assert_eq!(thread.thread_id, "<root@example.com>");
+        assert_eq!(thread.count, 3, "root, answer and sent, once each");
+        assert_eq!(
+            thread.unread, 2,
+            "the root and the answer lack \\Seen in the inbox"
+        );
+        let answer_id = thread.latest.0.id;
+        assert_eq!(thread.latest.0.message_id, "<answer@example.com>");
+        assert_eq!(thread.member_ids, [answer_id, root_inbox]);
+        assert_eq!(
+            thread.date_display.as_deref(),
+            Some("Mon, 01 Jan 2024 11:00:00 +0000"),
+            "the date of the Sent reply, the newest member"
+        );
+        assert_eq!(thread.mailboxes, ["archive", "inbox", "sent"]);
+        assert_eq!(
+            thread.participants,
+            [
+                "Me <me@example.com>",
+                "Bob <BOB@example.com>",
+                "Ada Lovelace <ada@example.com>"
+            ]
+        );
+        assert!(thread.flagged && thread.has_attachments);
+        assert_eq!(inbox[1].thread_id, "<lone@example.com>");
+        assert_eq!(inbox[1].member_ids, [lone_id]);
+        assert_eq!((inbox[1].count, inbox[1].unread), (1, 0));
+
+        let sent_view = list_conversations(&fx.store, "alice", "sent").unwrap();
+        assert_eq!(sent_view.len(), 1);
+        assert_eq!(sent_view[0].thread_id, thread.thread_id);
+        assert_eq!(sent_view[0].count, 3);
+        assert_eq!(
+            sent_view[0].unread, 0,
+            "unread counts the listed mailbox only"
+        );
+        assert!(!sent_view[0].flagged, "the flag is the inbox answer's");
+        assert_eq!(sent_view[0].member_ids.len(), 1);
+        assert_eq!(sent_view[0].latest.0.message_id, "<sent@example.com>");
+
+        let archive = list_conversations(&fx.store, "alice", "archive").unwrap();
+        assert_eq!(archive[0].member_ids, [root_archive]);
+        assert!(
+            list_conversations(&fx.store, "alice", DRAFTS_KEY)
+                .unwrap()
+                .is_empty(),
+            "a drafts row is a member of nothing"
+        );
+
+        // The expansion is the same three messages, the drafts copy excluded,
+        // and `prefer` swaps which copy of the root stands for it.
+        let plain = thread_messages(&fx.store, "alice", "<root@example.com>").unwrap();
+        assert_eq!(plain.len(), 3);
+        assert_eq!(plain[0].id, root_inbox, "the first copy ingest saw");
+        let preferred =
+            thread_messages_preferring(&fx.store, "alice", "<root@example.com>", Some("archive"))
+                .unwrap();
+        assert_eq!(preferred.len(), 3);
+        assert_eq!(preferred[0].0.id, root_archive);
+        assert_eq!(
+            preferred[1..].iter().map(|(r, _)| r.id).collect::<Vec<_>>(),
+            plain[1..].iter().map(|r| r.id).collect::<Vec<_>>()
+        );
+    }
+
+    /// A row with no `thread_id`, which a store written before the column was
+    /// filled holds, is a conversation of one keyed by its `Message-ID`, in
+    /// the listing's order among the threaded ones.
+    #[test]
+    fn an_unthreaded_row_is_a_conversation_of_one() {
+        let fx = fixture();
+        let old = ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("old", "Mon, 01 Jan 2024 12:00:00 +0000"),
+        );
+        ingest(
+            &fx,
+            "inbox",
+            2,
+            &email("new", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
+        fx.store
+            .conn()
+            .execute("UPDATE messages SET thread_id = NULL WHERE id = ?1", [old])
+            .unwrap();
+        let listed = list_conversations(&fx.store, "alice", "inbox").unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].thread_id, "<old@example.com>");
+        assert_eq!(listed[0].member_ids, [old]);
+        assert_eq!((listed[0].count, listed[0].unread), (1, 1));
+        assert_eq!(listed[1].thread_id, "<new@example.com>");
+    }
+
+    /// Participants are one per address, case folded, and at most five.
+    #[test]
+    fn a_long_thread_names_five_participants() {
+        let fx = fixture();
+        ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("root", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
+        for n in 0..8 {
+            let mut reply = email(
+                &format!("r{n}"),
+                &format!("Mon, 01 Jan 2024 1{n}:00:00 +0000"),
+            );
+            reply.from = if n == 7 {
+                "Again <P6@EXAMPLE.COM>".to_string()
+            } else {
+                format!("P{n} <p{n}@example.com>")
+            };
+            ingest_reply(&fx, "inbox", 10 + n, &reply, "<root@example.com>");
+        }
+        let listed = list_conversations(&fx.store, "alice", "inbox").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].count, 9);
+        assert_eq!(
+            listed[0].participants,
+            [
+                "Again <P6@EXAMPLE.COM>",
+                "P5 <p5@example.com>",
+                "P4 <p4@example.com>",
+                "P3 <p3@example.com>",
+                "P2 <p2@example.com>",
+            ]
+        );
+        assert_eq!(address_key(" plain@Example.com "), "plain@Example.com");
+        assert!(same_address("Ä@example.com", "ä@EXAMPLE.com"));
+        assert!(!same_address("a@example.com", "b@example.com"));
     }
 
     /// A page is the prefix of the full listing and its total is the full

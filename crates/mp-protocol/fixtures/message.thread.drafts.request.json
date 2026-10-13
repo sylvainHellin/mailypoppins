@@ -1,0 +1,11 @@
+{
+  "id": 32,
+  "jsonrpc": "2.0",
+  "method": "message.thread",
+  "params": {
+    "account": "work",
+    "include_drafts": true,
+    "prefer_mailbox": "inbox",
+    "row_id": 3141
+  }
+}

@@ -5,9 +5,13 @@
 //! [`Queries`] is an object-safe trait with one blocking `call`, implemented
 //! for [`Session`](crate::session::Session) and
 //! [`QueryHandle`](crate::session::QueryHandle), so a query layer is testable
-//! over an in-process dispatcher without a socket. Its one other method,
-//! [`Queries::list_stream`], has a default body over `call`, which the two
-//! session doors override with the streamed listing (#0138).
+//! over an in-process dispatcher without a socket. Its other methods have
+//! default bodies: [`Queries::list_stream`] over `call`, which the two session
+//! doors override with the streamed listing (#0138);
+//! [`Queries::list_conversations`], which refuses, and which the two doors
+//! override with the streamed conversation listing (#0142); and
+//! [`Queries::thread_expanded`], `message.thread` as a conversation row's
+//! expansion.
 //!
 //! Over it sit the reads a client needs, typed in the protocol's own
 //! vocabulary ([`mp_protocol`]) rather than in any client's model: a listing
@@ -57,7 +61,10 @@ use serde_json::{json, Value};
 
 use mp_protocol::calendar::{AgendaEvent, EventFrontmatter};
 use mp_protocol::draft::{DraftListing, DraftLocation};
-use mp_protocol::listing::{MessageListRow, MessageListing, ThreadListing};
+use mp_protocol::listing::{
+    ConversationListing, MessageListRow, MessageListing, ThreadListing,
+    METHOD_MESSAGE_LIST_CONVERSATIONS,
+};
 use mp_protocol::rendition::{MessageHtml, MessageHtmlParams, METHOD_MESSAGE_HTML};
 use mp_protocol::state::MailboxRow;
 use mp_protocol::EventEnvelope;
@@ -91,6 +98,41 @@ pub trait Queries {
             &self.call(method, params)?,
         ))
     }
+
+    /// One mailbox of one account as conversations, newest first (#0142).
+    ///
+    /// [`Session`](crate::session::Session) and
+    /// [`QueryHandle`](crate::session::QueryHandle) answer it through
+    /// `message.list_conversations`, collected on the session thread. Unlike
+    /// [`Queries::list_stream`], no non-streamed method answers it, so this
+    /// default body refuses with an error naming the method: an implementor
+    /// that answers only `call` serves a client that never asks for a
+    /// conversation list, and one whose tests do overrides it.
+    fn list_conversations(&self, account: &str, mailbox: &str) -> Result<ConversationListing> {
+        Err(anyhow::anyhow!(
+            "{METHOD_MESSAGE_LIST_CONVERSATIONS}: this door answers no streamed listing \
+             (asked for {account}/{mailbox})"
+        ))
+    }
+
+    /// The conversation of one listed row as its expansion under a
+    /// conversation row: `message.thread` with `prefer_mailbox` set to the
+    /// listed `mailbox` and `include_drafts` (#0142).
+    ///
+    /// Each copy of a message held twice is the one in `mailbox` when there is
+    /// one, and the drafts that answer or forward a member join it as members
+    /// whose `draft_id` is set.
+    fn thread_expanded(&self, account: &str, row_id: i64, mailbox: &str) -> Result<ThreadListing> {
+        let params = json!({
+            "account": account,
+            "row_id": row_id,
+            "prefer_mailbox": mailbox,
+            "include_drafts": true,
+        });
+        Ok(serde_json::from_value(
+            self.call("message.thread", params)?,
+        )?)
+    }
 }
 
 impl Queries for crate::session::Session {
@@ -101,6 +143,10 @@ impl Queries for crate::session::Session {
     fn list_stream(&self, account: &str, mailbox: &str) -> Result<MessageListing> {
         crate::session::Session::list_stream(self, account, mailbox)
     }
+
+    fn list_conversations(&self, account: &str, mailbox: &str) -> Result<ConversationListing> {
+        crate::session::Session::list_conversations(self, account, mailbox)
+    }
 }
 
 impl Queries for crate::session::QueryHandle {
@@ -110,6 +156,10 @@ impl Queries for crate::session::QueryHandle {
 
     fn list_stream(&self, account: &str, mailbox: &str) -> Result<MessageListing> {
         crate::session::QueryHandle::list_stream(self, account, mailbox)
+    }
+
+    fn list_conversations(&self, account: &str, mailbox: &str) -> Result<ConversationListing> {
+        crate::session::QueryHandle::list_conversations(self, account, mailbox)
     }
 }
 
@@ -638,6 +688,39 @@ mod tests {
                 listing.total
             ),
             ("work", "inbox", 1)
+        );
+    }
+
+    /// The default `list_conversations` refuses with an error naming the
+    /// method and asks the door nothing; `thread_expanded` is `message.thread`
+    /// with the listed mailbox preferred and the drafts included (#0142).
+    #[test]
+    fn the_default_conversation_list_refuses_and_the_expansion_asks_the_thread() {
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/message.thread.drafts.response.json"
+        )));
+        let error = door
+            .list_conversations("work", "inbox")
+            .expect_err("no non-streamed method answers it");
+        assert!(
+            format!("{error:#}").starts_with("message.list_conversations: "),
+            "{error:#}"
+        );
+        assert!(door.seen.borrow().is_empty(), "nothing was asked");
+
+        let thread = door
+            .thread_expanded("work", 3141, "inbox")
+            .expect("a thread");
+        assert_eq!(
+            thread.messages.last().and_then(|m| m.draft_id.as_deref()),
+            Some("c3f1a2b4d5e6f708")
+        );
+        let seen = door.seen.borrow();
+        assert_eq!(seen[0].0, "message.thread");
+        assert_eq!(
+            seen[0].1,
+            json!({"account": "work", "row_id": 3141, "prefer_mailbox": "inbox",
+                   "include_drafts": true})
         );
     }
 

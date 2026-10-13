@@ -50,6 +50,25 @@ pub struct DraftRow {
     pub subject: Option<String>,
     pub date: Option<String>,
     pub snippet: Option<String>,
+    /// The frontmatter's `in_reply_to:`, the `Message-ID` of the message this
+    /// draft answers, verbatim (#0142): what joins it to that conversation.
+    pub in_reply_to: Option<String>,
+    /// The frontmatter's `forwarded_from:`, the forward half of
+    /// [`DraftRow::in_reply_to`].
+    pub forwarded_from: Option<String>,
+}
+
+/// A draft that answers or forwards a message, as [`linked`] reads it: the
+/// half of a [`DraftRow`] that joins it to a conversation (#0142).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedDraft {
+    pub id: String,
+    pub mtime: i64,
+    pub date: Option<String>,
+    /// The `Message-ID` it answers or forwards, whichever of the two the
+    /// frontmatter carries (`in_reply_to` first: a draft is built as one or
+    /// the other).
+    pub source: String,
 }
 
 /// Two draft files claiming the same `id:`.
@@ -146,13 +165,15 @@ pub fn refresh_reporting(
     {
         let mut stmt = conn.prepare(
             "INSERT INTO drafts
-             (account, id, slug, path, mtime, size, status, to_, cc, subject, date, snippet)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             (account, id, slug, path, mtime, size, status, to_, cc, subject, date, snippet,
+              in_reply_to, forwarded_from)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT (account, id) DO UPDATE SET
                slug = excluded.slug, path = excluded.path, mtime = excluded.mtime,
                size = excluded.size, status = excluded.status, to_ = excluded.to_,
                cc = excluded.cc, subject = excluded.subject, date = excluded.date,
-               snippet = excluded.snippet",
+               snippet = excluded.snippet, in_reply_to = excluded.in_reply_to,
+               forwarded_from = excluded.forwarded_from",
         )?;
         for row in &rows {
             stmt.execute(rusqlite::params![
@@ -168,6 +189,8 @@ pub fn refresh_reporting(
                 row.subject,
                 row.date,
                 row.snippet,
+                row.in_reply_to,
+                row.forwarded_from,
             ])?;
         }
     }
@@ -251,7 +274,8 @@ pub fn refresh_account(account: &str) -> Result<Vec<DraftRow>> {
 /// by status.
 pub fn list(store: &Store, account: &str, status: Option<&str>) -> Result<Vec<DraftRow>> {
     let sql = format!(
-        "SELECT id, slug, path, mtime, size, status, to_, cc, subject, date, snippet
+        "SELECT id, slug, path, mtime, size, status, to_, cc, subject, date, snippet,
+                in_reply_to, forwarded_from
          FROM drafts WHERE account = ?1 {}
          ORDER BY mtime DESC, id ASC",
         if status.is_some() {
@@ -274,6 +298,8 @@ pub fn list(store: &Store, account: &str, status: Option<&str>) -> Result<Vec<Dr
             subject: row.get(8)?,
             date: row.get(9)?,
             snippet: row.get(10)?,
+            in_reply_to: row.get(11)?,
+            forwarded_from: row.get(12)?,
         })
     };
     let rows = match status {
@@ -290,7 +316,8 @@ pub fn list(store: &Store, account: &str, status: Option<&str>) -> Result<Vec<Dr
 /// One indexed draft by id: the single lookup a draft selector resolves to.
 pub fn find(store: &Store, account: &str, id: &str) -> Result<Option<DraftRow>> {
     let mut stmt = store.conn().prepare(
-        "SELECT id, slug, path, mtime, size, status, to_, cc, subject, date, snippet
+        "SELECT id, slug, path, mtime, size, status, to_, cc, subject, date, snippet,
+                in_reply_to, forwarded_from
          FROM drafts WHERE account = ?1 AND id = ?2",
     )?;
     let row = stmt
@@ -307,6 +334,8 @@ pub fn find(store: &Store, account: &str, id: &str) -> Result<Option<DraftRow>> 
                 subject: row.get(8)?,
                 date: row.get(9)?,
                 snippet: row.get(10)?,
+                in_reply_to: row.get(11)?,
+                forwarded_from: row.get(12)?,
             })
         })
         .optional()
@@ -432,7 +461,42 @@ fn row_for(path: &Path) -> Result<DraftRow> {
         subject: non_empty(&draft.frontmatter.subject),
         date: draft.frontmatter.date.clone(),
         snippet: snippet_of(&draft.body_markdown),
+        in_reply_to: linked_id(draft.frontmatter.in_reply_to.as_deref()),
+        forwarded_from: linked_id(draft.frontmatter.forwarded_from.as_deref()),
     })
+}
+
+/// A frontmatter `Message-ID` as the index keeps it: verbatim, `None` when
+/// blank, since `source_from_row` copies `messages.message_id` byte for byte
+/// and only an exact match finds the row again.
+fn linked_id(value: Option<&str>) -> Option<String> {
+    value.filter(|id| !id.trim().is_empty()).map(str::to_string)
+}
+
+/// The account's indexed drafts that answer or forward a message and are not
+/// yet sent, newest file first (#0142).
+///
+/// Tens of rows at most, read once per conversation listing and once per
+/// expanded conversation. A `sent` draft is left out because the Sent copy
+/// ingest threads stands for it.
+pub fn linked(store: &Store, account: &str) -> Result<Vec<LinkedDraft>> {
+    let mut stmt = store.conn().prepare(
+        "SELECT id, mtime, date, COALESCE(in_reply_to, forwarded_from)
+         FROM drafts
+         WHERE account = ?1 AND (in_reply_to IS NOT NULL OR forwarded_from IS NOT NULL)
+           AND IFNULL(status, '') <> 'sent'
+         ORDER BY mtime DESC, id ASC",
+    )?;
+    let rows = stmt.query_map([account], |row| {
+        Ok(LinkedDraft {
+            id: row.get(0)?,
+            mtime: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+            date: row.get(2)?,
+            source: row.get(3)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("reading the linked drafts")
 }
 
 fn non_empty(s: &str) -> Option<String> {
@@ -710,6 +774,8 @@ mod tests {
             subject: None,
             date: None,
             snippet: None,
+            in_reply_to: None,
+            forwarded_from: None,
         };
 
         let (kept, collisions) = dedupe_by_id(vec![row("b.md", 10), row("a.md", 20)]);
@@ -778,6 +844,87 @@ mod tests {
         let approved = list(&store, "work", Some("approved")).unwrap();
         assert_eq!(approved.len(), 1);
         assert_eq!(approved[0].id, "bbb");
+    }
+
+    /// The index keeps the message a draft answers or forwards, verbatim, and
+    /// [`linked`] reads exactly the drafts that name one and are not sent
+    /// (#0142).
+    #[test]
+    fn the_index_keeps_the_message_a_draft_answers_or_forwards() {
+        let (tmp, store) = store();
+        let dir = tmp.path().join("drafts");
+        write_draft(
+            &dir,
+            "reply.md",
+            "id: aaa\nin_reply_to: <Root@Example.com>\n",
+        );
+        write_draft(
+            &dir,
+            "fwd.md",
+            "id: bbb\nforwarded_from: <fwd@example.com>\n",
+        );
+        write_draft(&dir, "plain.md", "id: ccc\n");
+        let sent = write_draft(&dir, "sent.md", "id: ddd\nin_reply_to: <old@example.com>\n");
+        let content = fs::read_to_string(&sent)
+            .unwrap()
+            .replace("status: draft", "status: sent");
+        fs::write(&sent, content).unwrap();
+
+        refresh(&store, "work", &dir).unwrap();
+        let reply = find(&store, "work", "aaa").unwrap().unwrap();
+        assert_eq!(reply.in_reply_to.as_deref(), Some("<Root@Example.com>"));
+        assert_eq!(reply.forwarded_from, None);
+        let fwd = find(&store, "work", "bbb").unwrap().unwrap();
+        assert_eq!(fwd.forwarded_from.as_deref(), Some("<fwd@example.com>"));
+
+        let mut linked: Vec<(String, String)> = linked(&store, "work")
+            .unwrap()
+            .into_iter()
+            .map(|draft| (draft.id, draft.source))
+            .collect();
+        linked.sort();
+        assert_eq!(
+            linked,
+            [
+                ("aaa".to_string(), "<Root@Example.com>".to_string()),
+                ("bbb".to_string(), "<fwd@example.com>".to_string()),
+            ]
+        );
+    }
+
+    /// A store whose `drafts` table predates the two columns gains them on its
+    /// next open, with no rebuild, and the next refresh fills them.
+    #[test]
+    fn an_older_drafts_table_gains_the_columns_on_open() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("store.sqlite3");
+        {
+            let store = Store::open(&path).expect("store");
+            store
+                .conn()
+                .execute_batch(
+                    "INSERT INTO meta (key, value) VALUES ('marker', 'kept');
+                     ALTER TABLE drafts DROP COLUMN in_reply_to;
+                     ALTER TABLE drafts DROP COLUMN forwarded_from;",
+                )
+                .expect("drop the two columns");
+        }
+        let store = Store::open(&path).expect("reopen");
+        let kept: String = store
+            .conn()
+            .query_row("SELECT value FROM meta WHERE key = 'marker'", [], |row| {
+                row.get(0)
+            })
+            .expect("the file was not rebuilt");
+        assert_eq!(kept, "kept");
+        let dir = tmp.path().join("drafts");
+        write_draft(
+            &dir,
+            "reply.md",
+            "id: aaa\nin_reply_to: <root@example.com>\n",
+        );
+        refresh(&store, "work", &dir).unwrap();
+        assert_eq!(linked(&store, "work").unwrap().len(), 1);
     }
 
     /// A draft written with a bare `subject:` line, which is what the old

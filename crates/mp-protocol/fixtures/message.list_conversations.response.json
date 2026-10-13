@@ -1,0 +1,10 @@
+{
+  "id": 5,
+  "jsonrpc": "2.0",
+  "result": {
+    "account": "work",
+    "mailbox": "inbox",
+    "operation_id": "3b7e90c2d14f4a8e9f6c0a5d2e8b1c47",
+    "total": 2
+  }
+}

@@ -277,10 +277,17 @@ impl ListRead {
 /// second (`23:59:60`): chrono folds it into the unix time but prints the
 /// `60` from the parsed value, which only the parse can give back.
 fn wire_date_sort(row: &MessageRow, stamped: Option<i64>) -> String {
+    wire_date_sort_of(row.date_display.as_deref(), stamped)
+}
+
+/// [`wire_date_sort`] from the `Date:` header alone, which is all of the row
+/// it reads: what a conversation's dates are rendered from, since it keeps
+/// its newest member's header and stamp rather than the row (#0142).
+fn wire_date_sort_of(date_display: Option<&str>, stamped: Option<i64>) -> String {
     use chrono::{Datelike, Timelike};
 
     let at = stamped
-        .filter(|secs| *secs != 0 && !row.date_display.as_deref().unwrap_or("").contains(":60"))
+        .filter(|secs| *secs != 0 && !date_display.unwrap_or("").contains(":60"))
         .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
     match at {
         // `%Y` pads to four digits inside this range and signs outside it, so
@@ -296,7 +303,7 @@ fn wire_date_sort(row: &MessageRow, stamped: Option<i64>) -> String {
             at.second()
         ),
         Some(at) => at.format("%Y-%m-%dT%H:%M:%S").to_string(),
-        None => resolve_date(&row.date_display, &None, Path::new("")).1,
+        None => resolve_date(&date_display.map(str::to_string), &None, Path::new("")).1,
     }
 }
 
@@ -480,70 +487,143 @@ impl Method for MessageListStream {
         params: Value,
         _cancel: CancelToken,
     ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
-        Box::pin(async move {
-            let spec = self.spec();
-            only_params(spec.name, &params, &["account", "mailbox"])?;
-            let accounts = self.config.accounts();
-            // The parameters, the account gate and the store path resolve on
-            // the calling thread, for the reason `list_off_thread` gives: the
-            // data-root override of a test fixture is thread-local.
-            let ListRead {
-                name,
-                mailbox,
-                path,
-                ..
-            } = list_read(&params, &accounts)?;
-            let Some(sink) = ctx.rows.clone() else {
-                return Err(DomainError::internal(format!(
-                    "{} needs a connection to stream to, and this caller has none",
-                    spec.name
-                )));
-            };
-
-            // The whole read before the answer, on the blocking pool: every
-            // refusal is the call's own error, no operation id is issued for a
-            // call that cannot succeed, and `total` is exactly what the stream
-            // will carry.
-            let (name, mailbox, rows) = tokio::task::spawn_blocking(move || {
-                read_dated(&name, &mailbox, &path).map(|rows| (name, mailbox, rows))
-            })
-            .await
-            .map_err(|e| internal(format!("the listing worker did not finish: {e}")))??;
-            let total = rows.len();
-
-            let (id, handle) = self.operations.start(
-                ConnectionId(ctx.connection_id),
-                spec.cancel_scope,
-                spec.name,
-            );
-            handle.set_running();
-            let answer = json!({
-                "operation_id": id.as_str(),
-                "account": name,
-                "mailbox": mailbox,
-                "total": total,
-            });
-            let job = StreamJob {
-                account: name,
-                mailbox,
-                rows,
-                handle,
-                sink,
-                chunk_bytes: self.chunk_bytes,
-            };
-            tokio::task::spawn_blocking(move || job.run());
-            Ok(Outcome::query(answer))
-        })
+        Box::pin(start_stream(
+            self.spec(),
+            ctx,
+            params,
+            &self.config,
+            &self.operations,
+            self.chunk_bytes,
+            |name, mailbox, path| read_dated(name, mailbox, path).map(StreamRows::Flat),
+        ))
     }
 }
 
-/// Register `message.list_stream` on `dispatcher`.
+/// The conversation listing, declared on its own beside
+/// [`MESSAGE_STREAM_METHOD_SPECS`] for the reason that array is one (#0142).
+///
+/// The flat stream's mechanics exactly: an operation, `client_scoped`, its
+/// rows as `message.conversations` chunks of [`ROWS_CHUNK_BYTES`].
+pub const MESSAGE_CONVERSATION_METHOD_SPECS: [MethodSpec; 1] = [MethodSpec::new(
+    mp_protocol::listing::METHOD_MESSAGE_LIST_CONVERSATIONS,
+    MethodKind::Operation,
+    1,
+)
+.client_scoped()];
+
+/// `message.list_conversations`: one mailbox as conversations, read before
+/// the answer and streamed to the calling connection after it (#0142).
+pub struct MessageListConversations {
+    /// The live configuration, so a reload is visible to the next call.
+    pub config: Arc<super::super::config::ConfigStore>,
+    /// The registry the stream's operation is started in.
+    pub operations: Arc<OperationRegistry>,
+    /// The chunk budget, [`ROWS_CHUNK_BYTES`] unless a test lowered it.
+    pub chunk_bytes: usize,
+}
+
+impl Method for MessageListConversations {
+    fn spec(&self) -> MethodSpec {
+        MESSAGE_CONVERSATION_METHOD_SPECS[0]
+    }
+
+    fn call<'a>(
+        &'a self,
+        ctx: &'a ClientCtx,
+        params: Value,
+        _cancel: CancelToken,
+    ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
+        Box::pin(start_stream(
+            self.spec(),
+            ctx,
+            params,
+            &self.config,
+            &self.operations,
+            self.chunk_bytes,
+            |name, mailbox, path| {
+                read_conversations(name, mailbox, path).map(StreamRows::Conversations)
+            },
+        ))
+    }
+}
+
+/// The body both streamed listings share: validate, read the whole mailbox
+/// before the answer, start the operation, and hand the rows to a producer on
+/// the blocking pool.
+async fn start_stream(
+    spec: MethodSpec,
+    ctx: &ClientCtx,
+    params: Value,
+    config: &super::super::config::ConfigStore,
+    operations: &OperationRegistry,
+    chunk_bytes: usize,
+    read: fn(&str, &str, &Path) -> Result<StreamRows, RpcError>,
+) -> Result<Outcome, DomainError> {
+    only_params(spec.name, &params, &["account", "mailbox"])?;
+    let accounts = config.accounts();
+    // The parameters, the account gate and the store path resolve on the
+    // calling thread, for the reason `list_off_thread` gives: the data-root
+    // override of a test fixture is thread-local.
+    let ListRead {
+        name,
+        mailbox,
+        path,
+        ..
+    } = list_read(&params, &accounts)?;
+    let Some(sink) = ctx.rows.clone() else {
+        return Err(DomainError::internal(format!(
+            "{} needs a connection to stream to, and this caller has none",
+            spec.name
+        )));
+    };
+
+    // The whole read before the answer, on the blocking pool: every refusal
+    // is the call's own error, no operation id is issued for a call that
+    // cannot succeed, and `total` is exactly what the stream will carry.
+    let (name, mailbox, rows) = tokio::task::spawn_blocking(move || {
+        read(&name, &mailbox, &path).map(|rows| (name, mailbox, rows))
+    })
+    .await
+    .map_err(|e| internal(format!("the listing worker did not finish: {e}")))??;
+    let total = rows.len();
+
+    let (id, handle) = operations.start(
+        ConnectionId(ctx.connection_id),
+        spec.cancel_scope,
+        spec.name,
+    );
+    handle.set_running();
+    let answer = json!({
+        "operation_id": id.as_str(),
+        "account": name,
+        "mailbox": mailbox,
+        "total": total,
+    });
+    let job = StreamJob {
+        account: name,
+        mailbox,
+        rows,
+        handle,
+        sink,
+        chunk_bytes,
+    };
+    tokio::task::spawn_blocking(move || job.run());
+    Ok(Outcome::query(answer))
+}
+
+/// Register `message.list_stream` and `message.list_conversations` on
+/// `dispatcher`.
 pub fn register_stream(
     dispatcher: &mut Dispatcher,
     config: Arc<super::super::config::ConfigStore>,
     operations: Arc<OperationRegistry>,
 ) {
     dispatcher.register(Arc::new(MessageListStream {
+        config: Arc::clone(&config),
+        operations: Arc::clone(&operations),
+        chunk_bytes: rows_chunk_bytes(),
+    }));
+    dispatcher.register(Arc::new(MessageListConversations {
         config,
         operations,
         chunk_bytes: rows_chunk_bytes(),
@@ -559,6 +639,145 @@ fn read_dated(name: &str, mailbox: &str, path: &Path) -> Result<Vec<read::DatedR
     Ok(rows)
 }
 
+/// Every conversation of one mailbox, newest first, `has_draft` set from the
+/// drafts index (#0142).
+fn read_conversations(
+    name: &str,
+    mailbox: &str,
+    path: &Path,
+) -> Result<Vec<read::Conversation>, RpcError> {
+    let store =
+        Store::open(path).map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+    let mut conversations = read::list_conversations(&store, name, mailbox).map_err(|e| {
+        internal(format!(
+            "listing the conversations of {name}/{mailbox}: {e:#}"
+        ))
+    })?;
+    mark_drafts(&store, name, &mut conversations)?;
+    Ok(conversations)
+}
+
+/// Set `has_draft` on every listed conversation an indexed draft answers or
+/// forwards a member of (#0142).
+///
+/// The drafts are tens of rows; each names a `Message-ID`, which the
+/// `messages_message_id` index resolves to the rows that carry it and so to
+/// their conversation. A row of the `drafts` mailbox is no member of anything,
+/// and a row with no `thread_id` is the conversation its own `Message-ID`
+/// keys, as the listing keys it.
+fn mark_drafts(
+    store: &Store,
+    account: &str,
+    conversations: &mut [read::Conversation],
+) -> Result<(), RpcError> {
+    let drafts = crate::store::drafts::linked(store, account)
+        .map_err(|e| internal(format!("reading the drafts index of {account}: {e:#}")))?;
+    if drafts.is_empty() {
+        return Ok(());
+    }
+    let at: std::collections::HashMap<String, usize> = conversations
+        .iter()
+        .enumerate()
+        .map(|(index, conversation)| (conversation.thread_id.clone(), index))
+        .collect();
+    for draft in &drafts {
+        let rows = read::find_by_message_id(store, account, &draft.source)
+            .map_err(|e| internal(format!("resolving {} of {account}: {e:#}", draft.source)))?;
+        for row in rows.iter().filter(|row| row.mailbox != DRAFTS_MAILBOX) {
+            let key = row.thread_id.as_deref().unwrap_or(&row.message_id);
+            if let Some(&index) = at.get(key) {
+                conversations[index].has_draft = true;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What one stream carries, already read: the flat listing's rows or the
+/// conversation listing's conversations.
+enum StreamRows {
+    Flat(Vec<read::DatedRow>),
+    Conversations(Vec<read::Conversation>),
+}
+
+impl StreamRows {
+    fn len(&self) -> usize {
+        match self {
+            StreamRows::Flat(rows) => rows.len(),
+            StreamRows::Conversations(rows) => rows.len(),
+        }
+    }
+
+    /// The notification method the stream's chunks travel under.
+    fn method(&self) -> &'static str {
+        match self {
+            StreamRows::Flat(_) => mp_protocol::METHOD_MESSAGE_ROWS,
+            StreamRows::Conversations(_) => mp_protocol::METHOD_MESSAGE_CONVERSATIONS,
+        }
+    }
+
+    /// Encode row `index` into `chunks`.
+    fn push(
+        &self,
+        account: &str,
+        index: usize,
+        chunks: &mut ChunkEncoder,
+    ) -> Result<(), ChunkError> {
+        match self {
+            StreamRows::Flat(rows) => {
+                let (row, stamped) = &rows[index];
+                chunks.push(&WireRow::new(account, row, wire_date_sort(row, *stamped)))
+            }
+            StreamRows::Conversations(rows) => {
+                chunks.push(&WireConversation::new(account, &rows[index]))
+            }
+        }
+    }
+}
+
+/// One conversation on the wire, `mp_protocol::listing::ConversationRow`
+/// borrowing the folded one (#0142).
+///
+/// The fields are declared in key order, and `latest` is a [`WireRow`], for
+/// the reason [`WireRow`]'s are: the hand-built frame is then `frame::encode`
+/// of the same notification as a `Value`, byte for byte.
+#[derive(serde::Serialize)]
+struct WireConversation<'a> {
+    count: usize,
+    date_display: &'a str,
+    date_sort: String,
+    flagged: bool,
+    has_attachments: bool,
+    has_draft: bool,
+    latest: WireRow<'a>,
+    mailboxes: &'a [String],
+    member_ids: &'a [i64],
+    participants: &'a [String],
+    thread_id: &'a str,
+    unread: usize,
+}
+
+impl<'a> WireConversation<'a> {
+    fn new(account: &str, conversation: &'a read::Conversation) -> Self {
+        let (latest, latest_stamp) = &conversation.latest;
+        let date_display = conversation.date_display.as_deref();
+        WireConversation {
+            count: conversation.count,
+            date_display: date_display.unwrap_or_default(),
+            date_sort: wire_date_sort_of(date_display, conversation.date_sort),
+            flagged: conversation.flagged,
+            has_attachments: conversation.has_attachments,
+            has_draft: conversation.has_draft,
+            latest: WireRow::new(account, latest, wire_date_sort(latest, *latest_stamp)),
+            mailboxes: &conversation.mailboxes,
+            member_ids: &conversation.member_ids,
+            participants: &conversation.participants,
+            thread_id: &conversation.thread_id,
+            unread: conversation.unread,
+        }
+    }
+}
+
 /// One stream's producer: the owned rows of the read, encoded one chunk at a
 /// time and handed to the connection's writer.
 ///
@@ -569,7 +788,7 @@ fn read_dated(name: &str, mailbox: &str, path: &Path) -> Result<Vec<read::DatedR
 struct StreamJob {
     account: String,
     mailbox: String,
-    rows: Vec<read::DatedRow>,
+    rows: StreamRows,
     handle: OperationHandle,
     sink: RowsSink,
     chunk_bytes: usize,
@@ -595,7 +814,8 @@ impl StreamJob {
         } = self;
         let token = handle.token.clone();
         let id = handle.id();
-        let mut chunks = ChunkEncoder::new(id.as_str(), chunk_bytes, MAX_RESPONSE_BYTES);
+        let mut chunks =
+            ChunkEncoder::new(rows.method(), id.as_str(), chunk_bytes, MAX_RESPONSE_BYTES);
         let send = |chunks: &mut ChunkEncoder| -> bool {
             while let Some(frame) = chunks.next_frame() {
                 if token.is_cancelled() || !sink.blocking_send(frame, token.clone()) {
@@ -605,9 +825,8 @@ impl StreamJob {
             true
         };
 
-        for (index, (row, stamped)) in rows.iter().enumerate() {
-            let wire = WireRow::new(&account, row, wire_date_sort(row, *stamped));
-            if let Err(error) = chunks.push(&wire) {
+        for index in 0..rows.len() {
+            if let Err(error) = rows.push(&account, index, &mut chunks) {
                 handle.fail(error.into_domain(&account, &mailbox, index));
                 return;
             }
@@ -659,7 +878,8 @@ impl ChunkError {
     }
 }
 
-/// Builds `message.rows` frames as bytes, one chunk at a time.
+/// Builds `message.rows` or `message.conversations` frames as bytes, one chunk
+/// at a time; the method is the constructor's argument (#0142).
 ///
 /// The envelope is written by hand and each row with `serde_json::to_writer`,
 /// so no `Value` tree is built for a row. The keys are in sorted order at
@@ -668,6 +888,8 @@ impl ChunkError {
 /// notification as a `Value` produces
 /// (`a_chunk_frame_is_frame_encode_of_the_same_notification`).
 struct ChunkEncoder {
+    /// The notification method every frame carries.
+    method: &'static str,
     /// The operation id, already a JSON string literal.
     operation_id: String,
     /// A chunk closes once its rows reach this many bytes.
@@ -687,8 +909,9 @@ struct ChunkEncoder {
 }
 
 impl ChunkEncoder {
-    fn new(operation_id: &str, budget: usize, cap: usize) -> Self {
+    fn new(method: &'static str, operation_id: &str, budget: usize, cap: usize) -> Self {
         ChunkEncoder {
+            method,
             operation_id: Value::String(operation_id.to_string()).to_string(),
             budget,
             cap,
@@ -709,9 +932,7 @@ impl ChunkEncoder {
         let _ = write!(
             self.buf,
             r#"{{"jsonrpc":"2.0","method":"{}","params":{{"offset":{},"operation_id":{},"rows":["#,
-            mp_protocol::METHOD_MESSAGE_ROWS,
-            self.offset,
-            self.operation_id
+            self.method, self.offset, self.operation_id
         );
         self.prefix_len = self.buf.len();
     }
@@ -925,9 +1146,20 @@ pub(super) fn address(
 /// the fold keeps the first copy its order yields: the surviving row for the
 /// addressed message can carry an `id` the call did not name, and a client
 /// computing the flag from what it asked about would mark nothing.
+///
+/// `prefer_mailbox` and `include_drafts` make the answer the expansion of a
+/// conversation row (#0142): the fold keeps the copy in the preferred mailbox,
+/// and the drafts that answer or forward a member join it ([`join_drafts`]).
 pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
-    super::account::ready_account(accounts, &name)?;
+    let account = super::account::ready_account(accounts, &name)?;
+    // The two parameters of the conversation list's expansion (#0142). Absent,
+    // the answer is the one before them, byte for byte: the fold keeps the
+    // first copy and no draft joins.
+    let prefer = opt_string_param(params, "prefer_mailbox")?
+        .map(|wanted| resolve_mailbox(account, &wanted))
+        .transpose()?;
+    let include_drafts = flag_param(params, "include_drafts", false)?;
 
     let store = Store::open(crate::config::store_path(&name))
         .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
@@ -936,7 +1168,8 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
         .thread_id
         .clone()
         .unwrap_or_else(|| row.message_id.clone());
-    let mut rows = read::thread_messages(&store, &name, &thread_id).map_err(|e| {
+    let mut rows = read::thread_messages_preferring(&store, &name, &thread_id, prefer.as_deref())
+        .map_err(|e| {
         internal(format!(
             "folding the conversation {thread_id} of {name}: {e:#}"
         ))
@@ -946,14 +1179,14 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
     // nothing and would answer an empty array, which is the different claim
     // that the store holds not even the message that was addressed.
     if rows.is_empty() {
-        rows.push(row.clone());
+        rows.push((row.clone(), None));
     }
 
-    let messages: Vec<ThreadMessage> = rows
+    let mut members: Vec<(Option<i64>, ThreadMessage)> = rows
         .iter()
-        .map(|member| {
+        .map(|(member, stamped)| {
             let flags = member.flags();
-            ThreadMessage {
+            let message = ThreadMessage {
                 id: member.id,
                 mailbox: member.mailbox.clone(),
                 message_id: member.message_id.clone(),
@@ -966,9 +1199,18 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
                     flagged: flags.flagged,
                 },
                 current: member.message_id == row.message_id,
-            }
+                draft_id: None,
+            };
+            (*stamped, message)
         })
         .collect();
+    if include_drafts {
+        let ids: std::collections::HashSet<&str> = rows
+            .iter()
+            .map(|(member, _)| member.message_id.as_str())
+            .collect();
+        join_drafts(&store, account, &ids, &mut members)?;
+    }
 
     let listing = ThreadListing {
         account: name.clone(),
@@ -977,10 +1219,50 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
         // overlay's title renders its own placeholder and the wire invents
         // none.
         subject: row.subject.clone().unwrap_or_default(),
-        messages,
+        messages: members.into_iter().map(|(_, message)| message).collect(),
     };
     serde_json::to_value(&listing)
         .map_err(|e| internal(format!("serialising the conversation of {name}: {e}")))
+}
+
+/// Put the drafts that answer or forward one of `ids` among `members`, each
+/// after every member whose `date_sort` is not later than the draft file's
+/// `mtime` (#0142).
+///
+/// `members` is oldest first by `date_sort`, `NULL` first, so the place is a
+/// partition point; drafts of one `mtime` keep the index's order. A draft
+/// member is drawn from the index: its id, `mailbox: "drafts"`, no
+/// `Message-ID` of its own yet, the account's address as its sender, and the
+/// frontmatter `date` as its date.
+fn join_drafts(
+    store: &Store,
+    account: &AccountConfig,
+    ids: &std::collections::HashSet<&str>,
+    members: &mut Vec<(Option<i64>, ThreadMessage)>,
+) -> Result<(), RpcError> {
+    let name = &account.name;
+    let mut drafts: Vec<crate::store::drafts::LinkedDraft> =
+        crate::store::drafts::linked(store, name)
+            .map_err(|e| internal(format!("reading the drafts index of {name}: {e:#}")))?
+            .into_iter()
+            .filter(|draft| ids.contains(draft.source.as_str()))
+            .collect();
+    drafts.sort_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| a.id.cmp(&b.id)));
+    for draft in drafts {
+        let at = members.partition_point(|(stamped, _)| *stamped <= Some(draft.mtime));
+        let member = ThreadMessage {
+            id: 0,
+            mailbox: DRAFTS_MAILBOX.to_string(),
+            message_id: String::new(),
+            from: account.default_from.clone(),
+            date_display: draft.date.unwrap_or_default(),
+            flags: mp_protocol::listing::MessageFlags::default(),
+            current: false,
+            draft_id: Some(draft.id),
+        };
+        members.insert(at, (Some(draft.mtime), member));
+    }
+    Ok(())
 }
 
 /// The `result` of `message.search`: the ranked hits of the local index.
@@ -2444,7 +2726,12 @@ mod tests {
         let id = "8f2c41d6b0e94a7fa3c5d81e6b0947fc";
         // About three rows a chunk, so the stream has many chunks and a short
         // last one.
-        let mut chunks = ChunkEncoder::new(id, 1000, MAX_RESPONSE_BYTES);
+        let mut chunks = ChunkEncoder::new(
+            mp_protocol::METHOD_MESSAGE_ROWS,
+            id,
+            1000,
+            MAX_RESPONSE_BYTES,
+        );
         let mut frames = Vec::new();
         for row in &rows {
             chunks
@@ -2480,7 +2767,12 @@ mod tests {
         }
         assert_eq!(offset, rows.len(), "the chunks carry every row once");
 
-        let mut empty = ChunkEncoder::new(id, 1000, MAX_RESPONSE_BYTES);
+        let mut empty = ChunkEncoder::new(
+            mp_protocol::METHOD_MESSAGE_ROWS,
+            id,
+            1000,
+            MAX_RESPONSE_BYTES,
+        );
         empty.finish();
         assert_eq!(empty.next_frame(), None, "zero rows stream no chunk");
     }
@@ -2504,7 +2796,8 @@ mod tests {
 
         // A budget far above the cap: only the cap closes a chunk.
         let cap = envelope + 3 * largest;
-        let mut chunks = ChunkEncoder::new("op", usize::MAX / 2, cap);
+        let mut chunks =
+            ChunkEncoder::new(mp_protocol::METHOD_MESSAGE_ROWS, "op", usize::MAX / 2, cap);
         let mut offset = 0;
         for row in &rows {
             chunks
@@ -2521,7 +2814,12 @@ mod tests {
         assert_eq!(offset, rows.len());
 
         // A budget of one byte: every row is its own chunk.
-        let mut chunks = ChunkEncoder::new("op", 1, MAX_RESPONSE_BYTES);
+        let mut chunks = ChunkEncoder::new(
+            mp_protocol::METHOD_MESSAGE_ROWS,
+            "op",
+            1,
+            MAX_RESPONSE_BYTES,
+        );
         for row in &rows {
             chunks
                 .push(&WireRow::new("alpha", row, wire_date_sort(row, Some(0))))
@@ -2535,7 +2833,12 @@ mod tests {
         assert_eq!(frames, rows.len());
 
         // A cap below one row's frame.
-        let mut chunks = ChunkEncoder::new("op", ROWS_CHUNK_BYTES, envelope + 10);
+        let mut chunks = ChunkEncoder::new(
+            mp_protocol::METHOD_MESSAGE_ROWS,
+            "op",
+            ROWS_CHUNK_BYTES,
+            envelope + 10,
+        );
         let refused = chunks
             .push(&WireRow::new(
                 "alpha",
@@ -2571,6 +2874,105 @@ mod tests {
             super::super::super::dispatch::CancelScope::ClientScoped
         );
         assert_eq!(MESSAGE_STREAM_METHOD_SPECS[0].kind, MethodKind::Operation);
+        let conversations = MESSAGE_CONVERSATION_METHOD_SPECS[0];
+        assert_eq!(
+            conversations.name,
+            mp_protocol::listing::METHOD_MESSAGE_LIST_CONVERSATIONS
+        );
+        assert_eq!(
+            conversations.cancel_scope,
+            super::super::super::dispatch::CancelScope::ClientScoped
+        );
+        assert_eq!(conversations.kind, MethodKind::Operation);
+    }
+
+    /// A folded conversation over a [`sample_row`], the newest member in
+    /// another mailbox, so `latest` and the row's dates differ.
+    fn sample_conversation(index: i64) -> read::Conversation {
+        let latest = sample_row(index);
+        read::Conversation {
+            thread_id: latest.message_id.clone(),
+            member_ids: vec![latest.id, latest.id - 1],
+            latest: (latest, Some(1_782_993_450 + index)),
+            date_sort: Some(1_783_000_000 + index),
+            date_display: Some(format!("Fri, 3 Jul 2026 0{}:00:00 +0200", index % 10)),
+            count: 2 + index as usize % 3,
+            unread: index as usize % 2,
+            participants: vec![format!("P {index} <p{index}@example.com>")],
+            mailboxes: vec!["inbox".to_string(), "sent".to_string()],
+            has_attachments: index % 3 == 0,
+            flagged: index % 4 == 0,
+            has_draft: index % 5 == 0,
+        }
+    }
+
+    /// A `message.conversations` frame the encoder builds by hand is
+    /// `frame::encode` of the same notification as a `Value`, byte for byte,
+    /// starts with the conversation prefix, and decodes into the typed
+    /// [`mp_protocol::listing::ConversationRow`] whose `latest` is the flat
+    /// row of the same message (#0142).
+    #[test]
+    fn a_conversation_chunk_frame_is_frame_encode_of_the_same_notification() {
+        use mp_protocol::listing::{ConversationRowsChunk, MessageListRow};
+
+        let conversations: Vec<read::Conversation> = (0..30).map(sample_conversation).collect();
+        let rows = StreamRows::Conversations(conversations.clone());
+        assert_eq!(rows.method(), mp_protocol::METHOD_MESSAGE_CONVERSATIONS);
+        let id = "3b7e90c2d14f4a8e9f6c0a5d2e8b1c47";
+        let mut chunks = ChunkEncoder::new(rows.method(), id, 2000, MAX_RESPONSE_BYTES);
+        let mut frames = Vec::new();
+        for index in 0..rows.len() {
+            rows.push("alpha", index, &mut chunks)
+                .expect("a small row fits");
+        }
+        chunks.finish();
+        while let Some(frame) = chunks.next_frame() {
+            frames.push(frame);
+        }
+        assert!(frames.len() > 3, "the budget splits the rows");
+
+        let mut offset = 0;
+        for frame in &frames {
+            let line = std::str::from_utf8(frame).expect("UTF-8").trim_end();
+            let chunk = ConversationRowsChunk::from_frame_line(line).expect("the typed fast path");
+            assert_eq!(chunk.offset as usize, offset);
+            let count = chunk.rows.len();
+            let values: Vec<Value> = conversations[offset..offset + count]
+                .iter()
+                .map(|c| serde_json::to_value(WireConversation::new("alpha", c)).expect("a value"))
+                .collect();
+            let expected = mp_protocol::frame::encode(&json!({
+                "jsonrpc": "2.0",
+                "method": "message.conversations",
+                "params": {"offset": offset, "operation_id": id, "rows": values},
+            }))
+            .expect("encodes");
+            assert_eq!(
+                frame, &expected,
+                "the chunk at {offset} is frame::encode's bytes"
+            );
+            for (row, conversation) in chunk.rows.iter().zip(&conversations[offset..]) {
+                let (latest, stamped) = &conversation.latest;
+                let flat: MessageListRow = serde_json::from_value(
+                    serde_json::to_value(WireRow::new(
+                        "alpha",
+                        latest,
+                        wire_date_sort(latest, *stamped),
+                    ))
+                    .expect("a value"),
+                )
+                .expect("a row");
+                assert_eq!(row.latest, flat, "latest is the flat row byte for byte");
+                assert_eq!(row.member_ids, conversation.member_ids);
+                assert_eq!(
+                    row.date_display,
+                    conversation.date_display.clone().unwrap_or_default()
+                );
+                assert_eq!(row.has_draft, conversation.has_draft);
+            }
+            offset += count;
+        }
+        assert_eq!(offset, conversations.len());
     }
 
     /// `message.list` with `limit: null` over a large mailbox, timed in process:
@@ -2678,7 +3080,12 @@ mod tests {
         // handler makes before it answers, then every row encoded into
         // `message.rows` frames as bytes, the producer's work minus the writes.
         let encode_chunks = |dated: &[read::DatedRow]| -> Vec<Vec<u8>> {
-            let mut chunks = ChunkEncoder::new("op-bench", ROWS_CHUNK_BYTES, MAX_RESPONSE_BYTES);
+            let mut chunks = ChunkEncoder::new(
+                mp_protocol::METHOD_MESSAGE_ROWS,
+                "op-bench",
+                ROWS_CHUNK_BYTES,
+                MAX_RESPONSE_BYTES,
+            );
             let mut frames = Vec::new();
             for (row, stamped) in dated {
                 chunks
@@ -2698,6 +3105,55 @@ mod tests {
             let dated = read_dated("alpha", &resolved, &path).expect("rows");
             std::hint::black_box(encode_chunks(&dated));
         });
+        // `message.list_conversations` (#0142), the daemon's side on the same
+        // terms: the two-statement read, the fold and the drafts join, then
+        // every conversation encoded into `message.conversations` frames.
+        let encode_conversations = |conversations: &[read::Conversation]| -> Vec<Vec<u8>> {
+            let rows = StreamRows::Conversations(conversations.to_vec());
+            let mut chunks = ChunkEncoder::new(
+                rows.method(),
+                "op-bench",
+                ROWS_CHUNK_BYTES,
+                MAX_RESPONSE_BYTES,
+            );
+            let mut frames = Vec::new();
+            for index in 0..rows.len() {
+                rows.push("alpha", index, &mut chunks).expect("a row fits");
+                while let Some(frame) = chunks.next_frame() {
+                    frames.push(frame);
+                }
+            }
+            chunks.finish();
+            while let Some(frame) = chunks.next_frame() {
+                frames.push(frame);
+            }
+            frames
+        };
+        let conversations_read = sample(|| {
+            std::hint::black_box(read_conversations("alpha", &resolved, &path).expect("rows"));
+        });
+        let conversations_daemon = sample(|| {
+            let conversations = read_conversations("alpha", &resolved, &path).expect("rows");
+            std::hint::black_box(encode_conversations(&conversations));
+        });
+        let conversations = read_conversations("alpha", &resolved, &path).expect("rows");
+        let conversation_frames = encode_conversations(&conversations);
+        let largest_conversation = conversations
+            .iter()
+            .map(|c| {
+                serde_json::to_vec(&WireConversation::new("alpha", c))
+                    .expect("encodes")
+                    .len()
+            })
+            .max()
+            .unwrap_or(0);
+        let largest_conversation_frame =
+            conversation_frames.iter().map(Vec::len).max().unwrap_or(0);
+        assert!(
+            largest_conversation_frame <= ROWS_CHUNK_BYTES + largest_conversation + 256,
+            "a {largest_conversation_frame}-byte frame is over the budget plus one row plus the envelope"
+        );
+
         let frames = encode_chunks(&dated);
         let stream_bytes: usize = frames.iter().map(Vec::len).sum();
         let largest_frame = frames.iter().map(Vec::len).max().unwrap_or(0);
@@ -2792,6 +3248,21 @@ mod tests {
         eprintln!(
             "  same through a Value (ref) ms median min max: {}",
             show(stream_client_value)
+        );
+        eprintln!(
+            "conversations: {} rows, {} frames, {} bytes, the largest {largest_conversation_frame}",
+            conversations.len(),
+            conversation_frames.len(),
+            conversation_frames.iter().map(Vec::len).sum::<usize>()
+        );
+        eprintln!(
+            "  list_conversations read    ms median min max: {}",
+            show(conversations_read)
+        );
+        eprintln!(
+            "list_conversations + chunks ms median min max: {} ({:.2}x the stream)",
+            show(conversations_daemon),
+            conversations_daemon.0 / stream_daemon.0
         );
     }
 }
