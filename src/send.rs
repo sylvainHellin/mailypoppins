@@ -2242,8 +2242,7 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
 
             // The Graph API takes a rendered body rather than bytes: the same
             // HTML part the SMTP bytes carry, quoted reply included.
-            let html_body =
-                draft_html_body(draft, &ctx.email_settings, ctx.signature.as_deref());
+            let html_body = draft_html_body(draft, &ctx.email_settings, ctx.signature.as_deref());
             let att_data = draft_attachments(draft)?;
             let client = crate::graph::GraphClient::new_async(graph_config).await?;
             // Graph files its own copy in Sent Items, so the outbox row never

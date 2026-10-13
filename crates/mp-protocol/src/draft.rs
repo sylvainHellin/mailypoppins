@@ -437,7 +437,10 @@ mod tests {
         let raw = include_str!("../fixtures/draft.html.request.json");
         let request: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
         assert_eq!(request["method"], json!(METHOD_DRAFT_HTML));
-        assert_eq!(request["params"], json!({"account": "work", "id": "0123456789abcdef"}));
+        assert_eq!(
+            request["params"],
+            json!({"account": "work", "id": "0123456789abcdef"})
+        );
 
         let raw = include_str!("../fixtures/draft.html.response.json");
         let response: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
@@ -449,7 +452,7 @@ mod tests {
         assert_eq!(html.bytes, html.html.len() as u64);
         assert!(html
             .html
-            .starts_with("<meta http-equiv=\"Content-Security-Policy\""));
+            .starts_with("<!DOCTYPE html><meta http-equiv=\"Content-Security-Policy\""));
         assert_eq!(
             serde_json::to_value(&html).expect("serialises"),
             response["result"],
