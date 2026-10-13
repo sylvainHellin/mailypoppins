@@ -319,8 +319,7 @@ pub fn html_rendition_for_row(app: &mut App, row_id: i64) -> Option<PathBuf> {
 /// `draft.html` answers exactly that: the signature the body carries, the
 /// configured font, and the quoted original of a reply or a forward. It is
 /// written where a server-search hit's markup goes, keyed by the draft id, so
-/// a second `tb` on the same draft overwrites the first preview rather than
-/// piling up files.
+/// a second `tb` on the same draft overwrites the first preview.
 pub fn html_rendition_for_draft(app: &mut App, id: &str) -> Option<PathBuf> {
     let account = app.account_config.name.clone();
     match commands::draft_html(&daemon_door(app), &account, id) {
