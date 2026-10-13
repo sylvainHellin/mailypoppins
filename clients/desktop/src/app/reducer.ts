@@ -992,12 +992,16 @@ export function applyBootstrap(s: AppState, bootstrap: Bootstrap): AppState {
   const hit = sameInstance ? s.selection.message : null;
   const serverHit = sameInstance ? s.selection.hit : null;
   const rerun = search.mode === "local" && !sameInstance;
+  // The re-run draws its number from the counter, as `startSearch` does, so
+  // the next search cannot land on a number the effect has already started.
+  const seq = s.searchSeq + 1;
   return {
     ...base,
+    ...(rerun ? { searchSeq: seq } : {}),
     search: {
       ...search,
       restore: { ...search.restore, selection: base.selection },
-      ...(rerun ? { status: "searching" as const, seq: search.seq + 1, error: null } : {}),
+      ...(rerun ? { status: "searching" as const, seq, error: null } : {}),
     },
     selection: { ...base.selection, message: hit, draft: null, hit: serverHit },
     reader: hit ? { ...s.reader, load: markStale(s.reader.load) } : emptyReader(),

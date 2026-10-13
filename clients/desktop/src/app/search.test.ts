@@ -188,4 +188,15 @@ describe("a search's seq", () => {
     const late = run(next, { type: "search_local_loaded", seq: 1, hits: [localHit(1001, "<late@fixture.example>")] });
     expect(late.search).toEqual(next.search);
   });
+
+  it("keeps counting across a daemon restart's re-run, so the next search gets a fresh number", () => {
+    const first = run(booted(), { type: "search_local", query: "ledger" });
+    const rerun = run(first, {
+      type: "gui_event",
+      event: { type: "rebootstrapped", cause: "instance_changed", bootstrap: { ...fixtures.bootstrap, instance_id: "fixture-instance-2" } },
+    });
+    expect(rerun.search).toMatchObject({ status: "searching", seq: 2 });
+    const next = run(rerun, { type: "search_local", query: "borrmann" });
+    expect(next.search?.seq).toBe(3);
+  });
 });
