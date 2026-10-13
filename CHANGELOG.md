@@ -25,6 +25,8 @@ All notable changes to this project are documented in this file.
 - **Two daemon integration tests no longer flake under load.** The config-reload test waits for the startup reports its snapshot still owes, and the fake-ready hook starts no account runtimes.
 - **`operation.cancel` stops `contact.rebuild`, `calendar.rsvp` and `send.invite` before their commit point.** A rebuild cancelled before its cache write leaves the cache untouched, and an RSVP or invitation cancelled before its SMTP submission is not sent and leaves no outbox row; before, the cancel only stopped the client waiting.
 - **Desktop: `version_info.app_version` reports the bundle version instead of the desktop crate's 0.1.0.**
+- **Desktop: the app announces its bundle version to the daemon in `initialize` instead of the desktop crate's 0.1.0 (PERSO-128).** A bundled app sends `mp`'s version and `tauri dev` still sends 0.1.0; the daemon does not check the client's version, so no handshake changes.
+- **TUI: quitting the editor that `r`, `cf` or `cn` opened puts the focus back on the list, as `e` does (PERSO-129).** An editor that exits with an error keeps the focus.
 - **Log records from concurrent `mp` processes no longer interleave mid-line.** Each record reaches the dated log file in one append.
 
 ### Changed
