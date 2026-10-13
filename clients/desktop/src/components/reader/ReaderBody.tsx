@@ -114,7 +114,7 @@ export type ReaderBodyProps = {
   htmlUrl: string;
   /** The message subject, for the frame's accessible name. */
   subject: string | null;
-  /** What the frame's accessible name calls the document; a draft's preview says "Draft body". */
+  /** What the frame's accessible name calls the document; a draft's preview says "Draft as sent". */
   label?: string;
 };
 

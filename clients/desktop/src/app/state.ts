@@ -1116,5 +1116,7 @@ export function readerDraftKey(s: AppState): string | null {
   const summary = shown && !editor ? draftOfKey(shown) : null;
   if (summary) return targetKey(summary);
   const { account, draft } = s.selection;
-  return draft && account ? targetKey({ account, draft }) : null;
+  if (!draft || !account) return null;
+  const row = filteredDrafts(s.messages.data, "").find((d) => d.id === draft);
+  return row ? targetKey({ account, draft }) : null;
 }

@@ -2646,3 +2646,7 @@ A TUI key handler reads its door off `app.session`, so the recording `Fixture` i
 ## lettre typed headers fold and encode, they do not inject
 
 `HeaderValue::new` folds at spaces and RFC 2047-encodes any word containing CR or LF, so an id read from a draft or the store cannot inject a header through lettre's `InReplyTo`/`References`; dedupe and order the ids yourself, lettre does not (PERSO-137).
+
+## A draft preview frame needs no cache-busting URL
+
+`DraftPreview` drops its loaded record when the row key changes, which unmounts the frame, and the remount fetches `mpmsg://.../drafts/<id>` again since the response is `no-store` (PERSO-136).
