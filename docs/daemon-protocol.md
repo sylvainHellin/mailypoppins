@@ -970,7 +970,8 @@ A client therefore words a cancelled end of these three as having stopped waitin
 A cancel stops the download at its next chunk and the ingest at its next mailbox: the mailboxes already ingested stay written, since a pass is idempotent and the next one resumes from their cursors, and the mailbox the cancel landed before is dropped unwritten, its download included.
 Every mailbox of an IMAP pass is downloaded before the first is ingested, so a cancel during the download writes nothing at all; a Graph pass fetches and ingests one mailbox at a time and looks only before each.
 A mailbox whose ingest has begun is finished with its rows, flags and cursor, because that ingest is local work with no network wait in it; the prune pass never runs after a cancel, and the outbox and mutation drains at either end of the pass are not stopped.
-A cancelled pass publishes no `sync.completed`, as a cancelled `sync.watch` publishes nothing.
+A cancelled pass publishes no `sync.completed` and leaves the account's `sync_health` as it was.
+It does announce the mailboxes it kept: one `state.invalidate` of `mailbox:<account>/<slug>` with scope `{"query": "counts"}` per mailbox whose counts it moved, before its worker returns, so another client re-reads them without waiting for the next tick; a cancelled dry run announces nothing.
 A pass that joined an account tick already running, the scheduler's, the watcher's or another client's, does not stop that tick, which then completes and publishes its outcome as usual.
 
 Cancelling an operation that has already finished is `-32602` with `data` of `{operation_id, state}`, naming the state that made the cancel impossible, and both `operation.cancel` and `operation.status` refuse an id the daemon never issued with `-32602` and `data` of `{operation_id}`.

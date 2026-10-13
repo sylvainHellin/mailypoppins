@@ -78,7 +78,10 @@
 //! The drains are not stopped: they finish work the user already committed to.
 //! A cancelled pass publishes no `sync.completed` and settles nothing of its
 //! own, exactly as a cancelled `sync.watch` returns without a result: the
-//! registry has already settled it `cancelled`.
+//! registry has already settled it `cancelled`. It does publish the counts of
+//! the mailboxes it moved ([`publish_changed_counts`], PERSO-133), because
+//! the rows it kept are in the store and a `sync.completed` is what every
+//! other client would otherwise have refreshed them on.
 //!
 //! A pass that joined a runtime tick already in flight (the scheduler's, the
 //! watcher's, another client's) does not stop that tick, which is not its
@@ -106,6 +109,7 @@ use super::super::dispatch::{
     Outcome,
 };
 use super::super::operations::{OperationHandle, OperationRegistry, Progress};
+use super::super::runtime::publish::publish_changed_counts;
 use super::super::server::{tick_and_commit_until, RuntimeTable};
 use super::super::state::ConnectionId;
 use super::{invalid_params, string_param};
@@ -347,8 +351,9 @@ async fn run_pass(
 /// One pass, from the head drain to the committed outcome.
 ///
 /// Every exit after the body checks the token first: a cancelled pass returns
-/// without a result and without publishing, because the registry settled it
-/// `cancelled` when the cancel landed.
+/// without a result and without a `sync.completed`, because the registry
+/// settled it `cancelled` when the cancel landed, and publishes only the
+/// counts of what it ingested before the stop ([`publish_cancelled`]).
 async fn run_pass_to_end(
     request: PassRequest,
     handle: OperationHandle,
@@ -385,7 +390,7 @@ async fn run_pass_to_end(
         .await
         .filter(|outcome| !outcome.blocked);
         if handle.token.is_cancelled() {
-            return;
+            return publish_cancelled(&request, &canonical).await;
         }
         return match outcome {
             None => handle.succeed(blocked_result()),
@@ -428,7 +433,7 @@ async fn run_pass_to_end(
     )
     .await;
     if handle.token.is_cancelled() {
-        return;
+        return publish_cancelled(&request, &canonical).await;
     }
 
     match result {
@@ -458,6 +463,21 @@ async fn run_pass_to_end(
                 "new_inbox_mail": arrivals,
             }));
         }
+    }
+}
+
+/// What a cancelled pass publishes: the counts of the mailboxes it ingested
+/// before the stop, and nothing else (PERSO-133).
+///
+/// The mailboxes it kept are in the store, and no `sync.completed` will tell
+/// another client to re-read them, so their counts are announced exactly as a
+/// drain announces its own: compared against the canonical state, which skips
+/// every mailbox the pass did not move. No outcome is committed, so the
+/// account's `sync_health` is untouched. A dry run wrote nothing and
+/// publishes nothing.
+async fn publish_cancelled(request: &PassRequest, canonical: &Arc<CanonicalState>) {
+    if !request.dry_run {
+        publish_changed_counts(canonical, &request.account.name).await;
     }
 }
 

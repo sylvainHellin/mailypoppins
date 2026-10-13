@@ -253,6 +253,7 @@ use support::parity::{
     assert_byte_identical, mp_command, mp_no_daemon, oracle_command, socket_path, DaemonFixture,
     EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
+use support::read_fixture;
 use support::send_fixture::{await_commit_marker, commit_hold_dir};
 use support::sync_fixture as fixture;
 
@@ -500,6 +501,29 @@ async fn settle(conn: &mut Connection, id: &str) -> Value {
         assert!(
             start.elapsed() < SETTLE_DEADLINE,
             "operation {id} was still {state} after {SETTLE_DEADLINE:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Poll the daemon's log under `root` until a line carries `needle`.
+///
+/// For a background task that publishes nothing a client can wait on.
+async fn await_daemon_log(root: &Path, needle: &str) {
+    let start = Instant::now();
+    loop {
+        let logged = std::fs::read_dir(root.join("logs"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .any(|log| log.contains(needle));
+        if logged {
+            return;
+        }
+        assert!(
+            start.elapsed() < SETTLE_DEADLINE,
+            "the daemon logged no {needle:?} within {SETTLE_DEADLINE:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -978,7 +1002,8 @@ async fn a_running_sync_can_be_cancelled_by_another_connection() {
 }
 
 /// PERSO-127: a pass cancelled while it runs stops at its next mailbox
-/// boundary, settles `cancelled`, and publishes no `sync.completed`.
+/// boundary, settles `cancelled`, and publishes no `sync.completed`; since
+/// PERSO-133 it still announces the counts of what it ingested.
 ///
 /// With `gamma`'s secrets seeded the pass gets past its credentials and into
 /// the runtime's tick; the fetch against the discard port fails per mailbox,
@@ -987,9 +1012,14 @@ async fn a_running_sync_can_be_cancelled_by_another_connection() {
 /// pass at its second mailbox boundary, the test cancels it there, and the
 /// hook's markers say what the worker decided and when it was done: `dropped`
 /// before it acts on the verdict, `returned` once anything it was going to
-/// publish is published. The test pins the skipped commit and the cancelled
-/// settle; the stop at the mailbox boundary itself is pinned by the engine
-/// unit tests in `src/sync/engine.rs`.
+/// publish is published. The fixture has no server to ingest from, so while
+/// the pass is held the test writes one row into `gamma`'s inbox itself,
+/// standing in for the mailbox the pass ingested before the boundary; the
+/// cancelled pass must invalidate that mailbox's counts, which is the only
+/// thing that tells another client the mail is there. The test pins the
+/// skipped commit, the counts and the cancelled settle; the stop at the
+/// mailbox boundary itself is pinned by the engine unit tests in
+/// `src/sync/engine.rs`.
 #[tokio::test]
 async fn a_sync_cancelled_while_it_runs_stops_before_the_next_mailbox() {
     let tmp = TempDir::new().expect("a temporary sync-slice root");
@@ -1002,6 +1032,15 @@ async fn a_sync_cancelled_while_it_runs_stops_before_the_next_mailbox() {
         return;
     }
     let mut conn = slice.connect().await;
+    call(&mut conn, "state.bootstrap", json!({})).await;
+    // The runtime's startup drain publishes the counts that moved too, so it
+    // must be over before the row lands, or it would announce the row in the
+    // pass's place.
+    await_daemon_log(
+        slice.root(),
+        &format!("[drainer] drained {}", fixture::SERVER_ACCOUNT),
+    )
+    .await;
 
     let started = call(
         &mut conn,
@@ -1013,6 +1052,19 @@ async fn a_sync_cancelled_while_it_runs_stops_before_the_next_mailbox() {
     await_commit_marker(&hold, "sync.quick", "held", SETTLE_DEADLINE).await;
     let held = call(&mut conn, "operation.status", json!({"operation_id": id})).await;
     assert_eq!(held["state"], "running", "the pass is held mid-run: {held}");
+    read_fixture::ingest(
+        slice.root(),
+        fixture::SERVER_ACCOUNT,
+        "inbox",
+        1,
+        &read_fixture::email(
+            "someone@example.com",
+            "gamma@example.com",
+            "Ingested before the cancel",
+            "Fri, 1 May 2026 05:00:00 +0000",
+            "first mailbox\n",
+        ),
+    );
 
     let cancelled = call(&mut conn, "operation.cancel", json!({"operation_id": id})).await;
     assert_eq!(cancelled["state"], "cancelled", "{cancelled}");
@@ -1022,6 +1074,30 @@ async fn a_sync_cancelled_while_it_runs_stops_before_the_next_mailbox() {
         !hold.join("sync.quick.committed").exists(),
         "the pass walked on past its cancel"
     );
+
+    // PERSO-133: everything the worker publishes is queued by `returned`, so
+    // the invalidation is in the stream now, and a `sync.completed` would
+    // have been committed ahead of it.
+    let resource = format!("mailbox:{}/inbox", fixture::SERVER_ACCOUNT);
+    let start = Instant::now();
+    loop {
+        let notification = within("state.event", conn.next_notification())
+            .await
+            .expect("the daemon keeps the stream open");
+        let params = &notification.params;
+        assert_ne!(
+            params["kind"], KIND_SYNC_COMPLETED,
+            "a cancelled pass published a sync.completed: {params}"
+        );
+        if params["kind"] == "state.invalidate" && params["payload"]["resource"] == resource {
+            assert_eq!(params["payload"]["scope"], json!({"query": "counts"}));
+            break;
+        }
+        assert!(
+            start.elapsed() < SETTLE_DEADLINE,
+            "the cancelled pass announced no counts for {resource} within {SETTLE_DEADLINE:?}"
+        );
+    }
 
     let status = call(&mut conn, "operation.status", json!({"operation_id": id})).await;
     assert_eq!(status["state"], "cancelled", "{status}");
@@ -1043,6 +1119,16 @@ async fn a_sync_cancelled_while_it_runs_stops_before_the_next_mailbox() {
     assert_eq!(
         gamma["sync_health"]["state"], "unknown",
         "a cancelled pass committed a sync.completed: {gamma}"
+    );
+    let inbox = bootstrap["snapshot"]["mailboxes"][fixture::SERVER_ACCOUNT]
+        .as_array()
+        .and_then(|mailboxes| mailboxes.iter().find(|mailbox| mailbox["slug"] == "inbox"))
+        .unwrap_or_else(|| panic!("the snapshot lists gamma's inbox: {bootstrap}"))
+        .clone();
+    assert_eq!(
+        (inbox["total"].clone(), inbox["unread"].clone()),
+        (json!(1), json!(1)),
+        "the state holds the ingested mailbox's counts: {inbox}"
     );
 }
 
