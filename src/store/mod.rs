@@ -312,6 +312,14 @@ fn open_validated(path: &Path) -> Result<Connection> {
             path.display()
         );
     }
+    // Unlike a missing index, a missing column fails the drafts refresh, so
+    // the warning is the one place it is reported; the next open tries again.
+    if let Err(e) = schema::ensure_additive_columns(&conn) {
+        warn!(
+            "[store] could not add an additive column to {}: {e:#}",
+            path.display()
+        );
+    }
 
     // One-shot, and not a reason to reject the file: a store that cannot be
     // written to here is still perfectly readable, and the sweep is a fix for

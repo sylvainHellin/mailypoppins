@@ -348,6 +348,7 @@ pub fn create(conn: &Connection) -> Result<()> {
     conn.execute_batch(&format!("BEGIN;{SCHEMA_SQL}COMMIT;"))
         .with_context(|| format!("creating store schema v{SCHEMA_VERSION}"))?;
     ensure_additive_indexes(conn)?;
+    ensure_additive_columns(conn)?;
     set_meta(conn, META_SCHEMA_VERSION, &SCHEMA_VERSION.to_string())?;
     set_meta(conn, META_APP_VERSION, env!("CARGO_PKG_VERSION"))?;
     // Nothing to sweep in a file that starts empty, and stamping it here is
@@ -412,6 +413,45 @@ pub fn ensure_additive_indexes(conn: &Connection) -> Result<()> {
         if !present {
             conn.execute_batch(&sql)
                 .with_context(|| format!("creating the {name} index"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Every column added after [`SCHEMA_VERSION`] was last bumped, as
+/// `(table, column, type)`.
+///
+/// The two `drafts` columns name the message a draft answers or forwards, the
+/// frontmatter's `in_reply_to` and `forwarded_from`, which is what joins a
+/// draft to its conversation (#0142). Nullable and in a derived table:
+/// [`super::drafts::refresh_reporting`] deletes and rewrites an account's rows
+/// on every refresh, so the columns fill at the next one with nothing to
+/// migrate, and a version bump, which makes an existing store unusable until
+/// it is rebuilt from the server, would buy nothing.
+const ADDITIVE_COLUMNS: [(&str, &str, &str); 2] = [
+    ("drafts", "in_reply_to", "TEXT"),
+    ("drafts", "forwarded_from", "TEXT"),
+];
+
+/// Add the columns created after [`SCHEMA_VERSION`] was last bumped, beside
+/// [`ensure_additive_indexes`] and on its terms: additive, idempotent, looked
+/// up before it is written, so an open of a store that has them writes nothing.
+///
+/// Two connections opening one old store at once can both find a column
+/// missing; the one that loses the race fails its `ALTER TABLE` with a
+/// duplicate column, which is the state it wanted, so a failure is checked
+/// against the table before it is reported.
+pub fn ensure_additive_columns(conn: &Connection) -> Result<()> {
+    for (table, column, kind) in ADDITIVE_COLUMNS {
+        if column_present(conn, table, column)? {
+            continue;
+        }
+        if let Err(e) =
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))
+        {
+            if !column_present(conn, table, column)? {
+                return Err(e).with_context(|| format!("adding {table}.{column}"));
+            }
         }
     }
     Ok(())

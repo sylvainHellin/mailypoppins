@@ -539,6 +539,7 @@ mod tests {
                 "message.ics".to_string(),
                 "message.invite".to_string(),
                 "message.list".to_string(),
+                "message.list_conversations".to_string(),
                 "message.list_server".to_string(),
                 "message.list_stream".to_string(),
                 "message.materialise_attachment".to_string(),

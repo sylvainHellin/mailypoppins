@@ -76,7 +76,18 @@ struct Args {
     /// Size of the one oversized body, in MiB.
     #[arg(long, default_value_t = 10)]
     big_mb: usize,
+    /// Thread the `Bulk` mailbox into conversations of
+    /// [`THREAD_LENGTH`] messages, each with one reply in `sent`, so the
+    /// conversation listing is measured on conversations of several members
+    /// as well as on the singleton worst case (#0142). Off, the fixture is
+    /// byte for byte the one it always was.
+    #[arg(long)]
+    threaded: bool,
 }
+
+/// How many `Bulk` messages one `--threaded` conversation holds: a root and
+/// the replies to it.
+const THREAD_LENGTH: usize = 5;
 
 /// The whole generator's randomness: a 64-bit LCG, so the fixture depends on
 /// no crate that is not already a dependency and cannot drift with one.
@@ -170,6 +181,10 @@ fn main() -> Result<()> {
         for n in 0..plan.count {
             let uid = n as i64 + 1;
             let email = message(&mut rng, plan, n);
+            // A reply carries the headers ingest threads on, and nothing else
+            // of an RFC822 message: the body is the parsed one either way.
+            let raw = (args.threaded && plan.mailbox == "Bulk" && n % THREAD_LENGTH != 0)
+                .then(|| threading_headers(&bulk_root_id(n)));
             ingest_message(
                 store,
                 blobs,
@@ -178,7 +193,7 @@ fn main() -> Result<()> {
                     mailbox: plan.mailbox,
                     uid,
                     email: &email,
-                    raw: None,
+                    raw: raw.as_deref(),
                 },
             )
             .with_context(|| format!("ingesting {}/{} uid {uid}", plan.account, plan.mailbox))?;
@@ -188,6 +203,27 @@ fn main() -> Result<()> {
 
     // The oversized body, last so its uid does not shift when --rows changes.
     let (store, blobs) = stores.get("alpha").expect("alpha was planned");
+
+    // One `sent` reply per `--threaded` conversation, after every plan so the
+    // generator's draws, and with them every other message, are unchanged.
+    if args.threaded {
+        for n in (0..args.rows).step_by(THREAD_LENGTH) {
+            let reply = sent_reply(n);
+            ingest_message(
+                store,
+                blobs,
+                &IngestInput {
+                    account: "alpha",
+                    mailbox: "sent",
+                    uid: 100_000 + n as i64,
+                    email: &reply,
+                    raw: Some(&threading_headers(&bulk_root_id(n))),
+                },
+            )
+            .with_context(|| format!("ingesting the sent reply to Bulk {n}"))?;
+            total += 1;
+        }
+    }
     let big = big_message(args.big_mb);
     ingest_message(
         store,
@@ -214,6 +250,11 @@ fn main() -> Result<()> {
         args.rows, args.big_mb
     );
     println!("  needles:   {} bodies carry '{NEEDLE}'", args.rows / 250);
+    if args.threaded {
+        println!(
+            "  threaded:  alpha/Bulk in conversations of {THREAD_LENGTH}, one sent reply each"
+        );
+    }
     println!("  build:     {:.2} s", elapsed.as_secs_f64());
     println!(
         "  store:     {bytes} bytes ({:.1} MiB)",
@@ -306,6 +347,42 @@ fn message(rng: &mut Lcg, plan: &Plan, n: usize) -> FetchedEmail {
             Vec::new()
         },
         flags: MessageFlags::seen(seq.is_multiple_of(3)),
+        calendar_ics: None,
+        event: None,
+    }
+}
+
+/// The `Message-ID` of the root of the `--threaded` conversation `Bulk`
+/// message `n` belongs to, as [`message`] spells it.
+fn bulk_root_id(n: usize) -> String {
+    let root = n - n % THREAD_LENGTH + 1;
+    format!("<alpha-bulk-{root}@fixture.invalid>")
+}
+
+/// A header block naming `parent` as the message answered, which is all ingest
+/// reads from the raw bytes to thread a message.
+fn threading_headers(parent: &str) -> Vec<u8> {
+    format!("In-Reply-To: {parent}\r\nReferences: {parent}\r\n\r\n").into_bytes()
+}
+
+/// The `sent` reply to the `--threaded` conversation whose root is `Bulk`
+/// message `n`, dated after the conversation's last message.
+fn sent_reply(n: usize) -> FetchedEmail {
+    let seq = n + 1;
+    FetchedEmail {
+        from: "Alpha <alpha@fixture.invalid>".to_string(),
+        to: format!("sender{seq}@fixture.invalid"),
+        cc: None,
+        reply_to: None,
+        bcc: None,
+        subject: format!("Re: Bulk thread {seq}"),
+        date: date_of(n + THREAD_LENGTH),
+        body_text: "noted, thanks\n".to_string(),
+        html_body: None,
+        has_attachments: false,
+        message_id: Some(format!("<alpha-sent-reply-{seq}@fixture.invalid>")),
+        attachments: Vec::new(),
+        flags: MessageFlags::seen(true),
         calendar_ics: None,
         event: None,
     }
