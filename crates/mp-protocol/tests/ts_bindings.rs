@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mp_protocol::{
-    calendar, diagnostic, draft, events, listing, operation, rendition, send, state,
+    calendar, diagnostic, draft, events, listing, operation, rendition, send, signature, state,
 };
 use ts_rs::{Config, TS};
 
@@ -66,6 +66,8 @@ fn export_into(dir: &Path) -> usize {
         draft::DraftPreview,
         draft::DraftKind,
         draft::DraftMessage,
+        draft::DraftAttachment,
+        draft::DraftAttachments,
         events::Arrival,
         events::Severity,
         events::SyncCompleted,
@@ -75,6 +77,7 @@ fn export_into(dir: &Path) -> usize {
         events::DraftChanged,
         events::DraftInvalid,
         events::SignatureChanged,
+        signature::SignatureListing,
         events::ConfigInvalid,
         listing::MessageFlags,
         listing::MessageListRow,
