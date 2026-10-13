@@ -2447,11 +2447,18 @@ The bundler drops the triple: `binaries/mp-aarch64-apple-darwin` becomes `mailyp
 A blocking call's error now wraps `mp_client::session::Refused`, whose `Display` is the old text byte for byte, so `GuiError::from_call` and every `rpc_code` read stay as they were; `mp_client::session::refusal(&error)` reads the typed `RpcError` back.
 A fake that should look like the daemon (the desktop fixture's `refused`) has to build that same type: an `anyhow!` with the right text classifies correctly and still carries no `data`.
 A command that wants the payload reads it before turning the error into a `GuiError`, which keeps only the text.
-## `operation.cancel` settles an operation without stopping a worker that ignores its token
+## `operation.cancel` settles an operation; only a worker that checks its token before its commit point stops
 
 The registry's `cancel` (`src/daemon/operations.rs`) shuts the token, marks the operation `cancelled` and publishes the finish before it answers, whatever the worker is doing.
-Only a worker that checks `handle.token` stops: `sync` does, while `contact.rebuild`, `calendar.rsvp` and `send.invite` never look after the start, so a cancelled rebuild still writes its index and a cancelled RSVP or invitation may still be submitted; the worker's later result is dropped as an invalid transition.
-A client that offers Cancel on such an operation must word the cancelled end as "stopped waiting", never as undone, which is what the desktop's generic `operation_cancel` does (`clients/desktop/docs/rust-layer.md`, "Cancelling").
+A worker that never reads `handle.token` keeps going and its later result is dropped as an invalid transition: until 2026-10-13 `contact.rebuild`, `calendar.rsvp` and `send.invite` were such workers, so a cancelled rebuild still wrote its index and a cancelled RSVP or invitation could still go out.
+They now call `commit_point(method, &token)` (`src/daemon/state/mod.rs`) right before the cache write or the SMTP submission, and the rebuild's walk checks the token every 256 rows; `MAILYPOPPINS_DAEMON_FAKE_COMMIT_HOLD=<dir>` holds a worker at that point so a test can cancel it deterministically.
+Only a cancel that lands between `commit_point` returning true and the write still loses the race, which is why the desktop's Cancel keeps its "stopped waiting" wording (`clients/desktop/docs/rust-layer.md`, "Cancelling").
+
+## `simplelog` writes one record in a dozen `write` calls
+
+`WriteLogger` formats a record straight into the writer: `time`'s `format_into` makes one call per timestamp component, then level, target and message follow separately.
+Every `mp` process (CLI, TUI, daemon) appends to the same dated log file, so a passthrough writer let records from two processes interleave mid-timestamp, and a test that read the log and wrote it back glued its fixture line into a half-written daemon record about once in eighty runs under load.
+`RotatingLog` (`crates/mp-core/src/logfile.rs`) now holds the record and emits it in one `O_APPEND` write on flush, which `CrateLevels::log` calls after every record; a test that appends a fixture line to a live log uses one `O_APPEND` write too, never a read-and-rewrite.
 
 ## `tauri-plugin-dialog` carries `tauri-plugin-fs` without granting it anything
 
@@ -2591,10 +2598,12 @@ Base UI dialogs move focus to their first field a moment after opening, so a tes
 Under 80 columns the split draws no body pane, so `Enter` moved focus into a pane the user could not see.
 A focus move has to zoom the target pane whenever the current width hides it.
 
-## Parallel agents must share one cargo target dir
+## Agents in one checkout share a cargo target dir; agents in different worktrees must not
 
 Twenty agents each building in their own `CARGO_TARGET_DIR` filled the Mac's 460 GB disk with trees of 5 to 17 GB each.
-A batch shares one target dir, which cargo's build lock makes safe, and deletes it when the batch is done.
+Agents working in the same checkout share one target dir, which cargo's build lock makes safe, and the batch deletes it when it is done.
+Two worktrees cannot share one: cargo hashes workspace crates relative to the workspace root, so both write the same artifact names, one build overwrites the other mid-run (it surfaces as "function not found" for code that is in the tree), tests run the other tree's binaries and insta writes `.snap.new` into the other tree.
+A worktree gets its own dir, cloned from the shared one with `cp -cR` (APFS copy-on-write, seconds) followed by `cargo clean -p <workspace crates>`, so dependencies stay warm and only the tree's own crates rebuild.
 
 ## A file the desktop opens in an editor has to read the draft's route, not the external editor's resolver
 

@@ -7,6 +7,7 @@ All notable changes to this project are documented in this file.
 ### Added
 - **Desktop: `y` on a draft copies its file path (PERSO-100).**
 - **`mp list-messages`, `mp search` and `mp contacts search` take `--json`.** Each prints one JSON object on stdout with warnings left on stderr, so a script can parse the listing: `{account, mailboxes, messages}` for `list-messages`, `{account, query, source, messages}` for `search` (the server or `--local`), `{account, query, contacts}` for `contacts search`. A message carries its selector, mailbox, Message-ID, sender, recipients, subject, the date as a UTC ISO 8601 instant beside the `Date:` header, its flags and whether it has attachments; `search --full` adds the body, and a server hit without `--full` the preview its text layout prints.
+- **`mp search` names the terms the local store answered on stdout (PERSO-122).** On plain IMAP `has:attachment` is answered from the local store; the result header now says `local store only: has:attachment` and `--json` carries `"coverage": "server"|"local"` with `"local_terms"`, so a piped search no longer reads an un-synced gap as "no such mail". The stderr warning stays.
 - **Desktop: `ff` opens a Server Search form with the TUI's fields (PERSO-115).** The form has scope, From, To, Subject, Keywords, After, Before, attachment and Advanced; the store answers first, then the server.
 - **Desktop: an available update shows as a card at the bottom right with Install and Later (PERSO-97).**
 - **Desktop: `e` on a received message opens it read-only in `$EDITOR` as Markdown, as in the TUI (PERSO-92).** Enter focuses the reader.
@@ -22,6 +23,9 @@ All notable changes to this project are documented in this file.
 - **Desktop: a search typed in the list header after leaving another one runs, where it kept spinning (PERSO-115).** A query that does not parse, such as `from: borrmann` with a space after the colon, ends the search with the parser's own message and its caret, the words the TUI's search form shows; the TUI and the desktop now build the query through one shared function in `mp-core`.
 - **Desktop and TUI: quitting the editor with `:wq` puts the focus back on the list (PERSO-124).** This holds for a draft and for a received message opened read-only; an editor that exits with an error keeps the pane and the focus.
 - **Two daemon integration tests no longer flake under load.** The config-reload test waits for the startup reports its snapshot still owes, and the fake-ready hook starts no account runtimes.
+- **`operation.cancel` stops `contact.rebuild`, `calendar.rsvp` and `send.invite` before their commit point.** A rebuild cancelled before its cache write leaves the cache untouched, and an RSVP or invitation cancelled before its SMTP submission is not sent and leaves no outbox row; before, the cancel only stopped the client waiting.
+- **Desktop: `version_info.app_version` reports the bundle version instead of the desktop crate's 0.1.0.**
+- **Log records from concurrent `mp` processes no longer interleave mid-line.** Each record reaches the dated log file in one append.
 
 ### Changed
 - **Desktop: the focused pane's frame is square where it meets the neighbouring pane (PERSO-95).**
