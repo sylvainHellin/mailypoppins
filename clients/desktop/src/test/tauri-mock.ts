@@ -755,7 +755,7 @@ export function parseRefusal(query: string): string | null {
  * `search_query` as commands.rs's `search_plan` answers it, for the shapes
  * the tests type: the fields as flags around the keywords, an Advanced line
  * that takes over, a bad date or a field with no value refused, and `to:`,
- * `cc:`, `filename:` and `message-id:` the store's index cannot answer. The
+ * `cc:` and `message-id:` the store's index cannot answer. The
  * real lowering is mp-core's, tested on the Rust side.
  */
 export function searchPlan(form: SearchForm): SearchPlan {
@@ -784,7 +784,7 @@ export function searchPlan(form: SearchForm): SearchPlan {
   }
   const query = parts.join(" ");
   const inMailbox = /(?:^|\s)in:"?([^"\s]+)"?/.exec(query)?.[1] ?? null;
-  return { kind: "query", query, local: !/(?:^|[\s(])(to|cc|filename|message-id):/i.test(query), in_mailbox: inMailbox };
+  return { kind: "query", query, local: !/(?:^|[\s(])(to|cc|message-id):/i.test(query), in_mailbox: inMailbox };
 }
 
 function strip(row: FixtureRow): MessageListRow {

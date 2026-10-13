@@ -54,8 +54,9 @@ pub enum Term {
     /// A free-text term (a bare word or an explicit `text:`), matched across
     /// every field a backend searches by default.
     Text(String),
-    /// An attachment filename. Native on Gmail and Graph; unsupported on plain
-    /// IMAP and the local FTS index, which say so rather than guess.
+    /// An attachment filename. Native on Gmail and Graph; a case-insensitive
+    /// substring match on the stored attachment names on the local index;
+    /// unsupported on plain IMAP, which says so rather than guess.
     Filename(String),
     /// `has:attachment`. Server-side on Gmail/Graph; a store post-filter on
     /// plain IMAP; a column predicate on the local index.
@@ -973,12 +974,19 @@ pub fn to_graph(q: &Query) -> Result<(Option<String>, Option<String>), RenderErr
 // ---------------------------------------------------------------------------
 
 /// The result of lowering a [`Query`] to the local FTS index. `match_expr` is
-/// the FTS5 `MATCH` string (absent when the query has only attachment/date
-/// predicates); the rest are SQL predicates the index cannot express.
+/// the FTS5 `MATCH` string (absent when the query has only attachment,
+/// filename or date predicates); the rest are SQL predicates the index cannot
+/// express.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FtsRender {
     pub match_expr: Option<String>,
     pub has_attachment: bool,
+    /// `filename:` terms, answered from the stored attachment names rather
+    /// than the index. Each inner list is one OR group of case-insensitive
+    /// substrings (a lone `filename:x` is a group of one); the groups are
+    /// AND-ed. A trailing `*` is already stripped, since a substring match
+    /// subsumes a prefix one.
+    pub filenames: Vec<Vec<String>>,
     pub before: Option<String>,
     pub after: Option<String>,
 }
@@ -1008,8 +1016,14 @@ fn fts_text_term(column: Option<&str>, value: &str) -> Option<String> {
     })
 }
 
+/// A `filename:` value as the substring the store matches: a trailing `*` is
+/// a prefix query elsewhere, and a substring match already covers it.
+fn filename_needle(value: &str) -> String {
+    value.strip_suffix('*').unwrap_or(value).to_string()
+}
+
 /// Map a text term to its FTS column, or report the fields the index cannot
-/// answer (`to`/`cc` are not indexed; `filename` has no column).
+/// answer (`to`/`cc` are not indexed).
 fn fts_term(term: &Term) -> Result<Option<String>, RenderError> {
     match term {
         Term::From(s) => Ok(fts_text_term(Some("from_"), s)),
@@ -1020,19 +1034,16 @@ fn fts_term(term: &Term) -> Result<Option<String>, RenderError> {
             "to: and cc: are not indexed by --local; drop --local to search them server-side"
                 .into(),
         )),
-        Term::Filename(_) => Err(RenderError(
-            "filename: search is not available on --local".into(),
-        )),
-        Term::HasAttachment | Term::Before(_) | Term::After(_) => {
-            unreachable!("attachment/date handled by the clause walker")
+        Term::Filename(_) | Term::HasAttachment | Term::Before(_) | Term::After(_) => {
+            unreachable!("attachment/filename/date handled by the clause walker")
         }
     }
 }
 
 /// Lower a [`Query`] to an FTS `MATCH` expression plus the SQL predicates
-/// (attachment, date range) the contentless index cannot carry. This is the
-/// renderer that closes the #0043 two-grammar debt: `--local` now parses the
-/// same input as the server path.
+/// (attachment, attachment name, date range) the contentless index cannot
+/// carry. This is the renderer that closes the #0043 two-grammar debt:
+/// `--local` now parses the same input as the server path.
 pub fn to_fts(q: &Query) -> Result<FtsRender, RenderError> {
     if q.message_id.is_some() {
         return Err(RenderError(
@@ -1045,6 +1056,22 @@ pub fn to_fts(q: &Query) -> Result<FtsRender, RenderError> {
     for clause in &q.clauses {
         match clause {
             Clause::Single(Term::HasAttachment) => render.has_attachment = true,
+            Clause::Single(Term::Filename(f)) => render.filenames.push(vec![filename_needle(f)]),
+            // An OR group of names alone is one attachment-name predicate. A
+            // group mixing a name with an indexed term would need the SQL
+            // predicate and the FTS `MATCH` OR-ed together, which this split
+            // cannot express, so it is refused like the date/attachment mix.
+            Clause::Or(terms) if terms.iter().all(|t| matches!(t, Term::Filename(_))) => {
+                render.filenames.push(
+                    terms
+                        .iter()
+                        .filter_map(|t| match t {
+                            Term::Filename(f) => Some(filename_needle(f)),
+                            _ => None,
+                        })
+                        .collect(),
+                );
+            }
             // Every date term narrows, as it does in `to_imap`: the latest
             // `after` and the earliest `before` win. A date is a strict
             // `YYYY-MM-DD` by the time it is a term, so the strings order as
@@ -1071,6 +1098,11 @@ pub fn to_fts(q: &Query) -> Result<FtsRender, RenderError> {
                         Term::HasAttachment | Term::Before(_) | Term::After(_) => {
                             return Err(RenderError(
                                 "an OR group with attachment or date terms is not supported on --local".into(),
+                            ))
+                        }
+                        Term::Filename(_) => {
+                            return Err(RenderError(
+                                "an OR group mixing filename: with other terms is not supported on --local".into(),
                             ))
                         }
                         _ => {
@@ -1555,10 +1587,37 @@ mod tests {
     }
 
     #[test]
-    fn fts_refuses_to_cc_and_filename() {
+    fn fts_refuses_to_and_cc() {
         assert!(to_fts(&q("to:bob")).is_err());
         assert!(to_fts(&q("cc:x")).is_err());
-        assert!(to_fts(&q("filename:pdf")).is_err());
+    }
+
+    #[test]
+    fn fts_filename_is_an_attachment_name_predicate() {
+        let r = to_fts(&q("filename:invoice.pdf")).unwrap();
+        assert!(r.match_expr.is_none());
+        assert_eq!(r.filenames, vec![vec!["invoice.pdf".to_string()]]);
+
+        // A trailing star is dropped: the substring match covers the prefix.
+        let r = to_fts(&q("filename:invoi* ledger")).unwrap();
+        assert_eq!(r.match_expr.as_deref(), Some("\"ledger\""));
+        assert_eq!(r.filenames, vec![vec!["invoi".to_string()]]);
+
+        // Separate terms AND; an all-filename OR group is one predicate.
+        let r = to_fts(&q("filename:pdf (filename:a OR filename:b)")).unwrap();
+        assert_eq!(
+            r.filenames,
+            vec![
+                vec!["pdf".to_string()],
+                vec!["a".to_string(), "b".to_string()]
+            ]
+        );
+    }
+
+    #[test]
+    fn fts_refuses_an_or_group_mixing_filename_with_other_terms() {
+        let err = to_fts(&q("(filename:pdf OR invoice)")).unwrap_err();
+        assert!(err.to_string().contains("filename:"), "{err}");
     }
 
     #[test]

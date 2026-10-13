@@ -354,8 +354,9 @@ pub enum SearchPlan {
         /// The query rendered back into the grammar both search methods read.
         query: String,
         /// Whether the store's index can answer it: `to:`, `cc:`,
-        /// `filename:`, `message-id:` and a date inside an OR group are the
-        /// server's alone, and `message.search` refuses them.
+        /// `message-id:`, a date inside an OR group and an OR group mixing
+        /// `filename:` with another term are the server's alone, and
+        /// `message.search` refuses them.
         local: bool,
         /// The query's own `in:` mailbox, which overrides the form's scope.
         in_mailbox: Option<String>,

@@ -988,8 +988,8 @@ pub(super) fn handle_action(
 
             // Local-first pass (#0105): the FTS index answers in milliseconds,
             // so its hits render before the server round trip starts. A query
-            // the local grammar cannot lower (to:/cc:/filename:, mixed OR
-            // groups) skips the pass silently; the server covers those terms.
+            // the local grammar cannot lower (to:/cc:, mixed OR groups)
+            // skips the pass silently; the server covers those terms.
             app.server_search_results.clear();
             app.server_search_index = 0;
             app.server_search_scroll = 0;

@@ -9,7 +9,7 @@
 use mailypoppins::ingest::{
     ingest_message, ingest_message_with_policy, prune_vanished, IngestInput, RebindPolicy,
 };
-use mailypoppins::parse::FetchedEmail;
+use mailypoppins::parse::{AttachmentData, FetchedEmail};
 use mailypoppins::store::search::{fts_expression, index_drift, search};
 use mailypoppins::store::{BlobStore, Store};
 use tempfile::TempDir;
@@ -103,6 +103,111 @@ fn email(message_id: &str, from: &str, subject: &str, body: &str) -> FetchedEmai
         calendar_ics: None,
         event: None,
     }
+}
+
+/// [`email`] carrying attachments under these names.
+fn with_attachments(mut message: FetchedEmail, names: &[&str]) -> FetchedEmail {
+    message.has_attachments = !names.is_empty();
+    message.attachments = names
+        .iter()
+        .map(|name| AttachmentData {
+            filename: (*name).to_string(),
+            content: format!("bytes of {name}").into_bytes(),
+            content_id: None,
+        })
+        .collect();
+    message
+}
+
+/// `filename:` (PERSO-130) matches the attachment names ingest recorded, as a
+/// case-insensitive substring, and narrows like any other term.
+#[test]
+fn filename_matches_a_stored_attachment_name() {
+    let f = Fixture::new();
+    let invoice = f.ingest(
+        "inbox",
+        1,
+        &with_attachments(
+            email("a", "a@example.com", "Billing", "see attached"),
+            &["Invoice-2026_03.PDF", "logo.png"],
+        ),
+    );
+    let notes = f.ingest(
+        "archive",
+        2,
+        &with_attachments(
+            email("b", "b@example.com", "Minutes", "see attached"),
+            &["notes.txt"],
+        ),
+    );
+    // A body that says the name is not an attachment that carries it.
+    f.ingest(
+        "inbox",
+        3,
+        &email("c", "c@example.com", "Plain", "invoice.pdf is coming"),
+    );
+
+    assert_eq!(f.hits("filename:invoice-2026_03.pdf"), vec![invoice]);
+    assert_eq!(
+        f.hits("filename:pdf"),
+        vec![invoice],
+        "an extension matches"
+    );
+    assert_eq!(f.hits("filename:INVOI*"), vec![invoice], "a prefix matches");
+    assert_eq!(f.hits("filename:notes"), vec![notes]);
+    assert!(f.hits("filename:budget").is_empty());
+
+    // AND with indexed terms and the mailbox scope.
+    assert_eq!(f.hits("filename:pdf billing"), vec![invoice]);
+    assert!(f.hits("filename:pdf minutes").is_empty());
+    assert!(f.hits_in("filename:notes", "inbox").is_empty());
+
+    // Separate terms AND; an all-filename OR group ORs.
+    assert_eq!(f.hits("filename:pdf filename:logo"), vec![invoice]);
+    assert!(f.hits("filename:pdf filename:notes").is_empty());
+    let mut either = f.hits("(filename:logo OR filename:notes)");
+    either.sort_unstable();
+    assert_eq!(either, vec![invoice, notes].tap_sorted());
+}
+
+/// `%` and `_` in a `filename:` value are literal characters, not `LIKE`
+/// wildcards: `filename:a_b` must not match `axb`.
+#[test]
+fn filename_wildcard_characters_match_literally() {
+    let f = Fixture::new();
+    let underscored = f.ingest(
+        "inbox",
+        1,
+        &with_attachments(email("a", "a@example.com", "One", "x"), &["a_b 100%.txt"]),
+    );
+    f.ingest(
+        "inbox",
+        2,
+        &with_attachments(email("b", "b@example.com", "Two", "x"), &["axb 1000.txt"]),
+    );
+    assert_eq!(f.hits("filename:a_b"), vec![underscored]);
+    assert_eq!(f.hits("filename:\"100%\""), vec![underscored]);
+}
+
+/// The iMIP sidecar ingest stores as an attachment blob is not a user-facing
+/// attachment, so `filename:` does not see its name.
+#[test]
+fn filename_does_not_match_the_invite_sidecar() {
+    let f = Fixture::new();
+    let mut invite = email("a", "a@example.com", "Kickoff", "join us");
+    invite.calendar_ics = Some(b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".to_vec());
+    f.ingest("inbox", 1, &invite);
+    assert!(f.hits("filename:invite").is_empty());
+    assert!(f.hits("filename:ics").is_empty());
+}
+
+/// An OR group mixing a name with an indexed term cannot be split into the
+/// FTS `MATCH` and the SQL predicate, so it is refused rather than narrowed.
+#[test]
+fn an_or_group_mixing_filename_and_text_is_refused() {
+    let f = Fixture::new();
+    let err = search(&f.store, "acct", "(filename:pdf OR invoice)", None, 20).unwrap_err();
+    assert!(err.to_string().contains("filename:"), "{err}");
 }
 
 /// The base assertion of the whole feature: a word in a body that was never

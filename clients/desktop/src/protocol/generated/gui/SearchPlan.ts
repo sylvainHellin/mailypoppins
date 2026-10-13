@@ -10,8 +10,9 @@ export type SearchPlan = { "kind": "blank" } | { "kind": "invalid", message: str
 query: string,
 /**
  * Whether the store's index can answer it: `to:`, `cc:`,
- * `filename:`, `message-id:` and a date inside an OR group are the
- * server's alone, and `message.search` refuses them.
+ * `message-id:`, a date inside an OR group and an OR group mixing
+ * `filename:` with another term are the server's alone, and
+ * `message.search` refuses them.
  */
 local: boolean,
 /**

@@ -1034,7 +1034,7 @@ Otherwise the operation runs 0.5 s: the agenda row's `rsvp` and the user's own a
 Otherwise the operation runs for the send delay: the invitation joins the account's agenda as a row the user organizes (a wall-clock start read as its UTC sort key, every recipient `needs-action`), `state.invalidate` of `mailbox:<account>/sent` says its copy was filed, and it settles with a `SendOutcome` every recipient took.
 After `send_fail` it fails instead with the transport error, after a `failed` outbox row naming the recipients.
 
-`message.search` refuses a query with a term the store's index has no column for (`to:`, `cc:`, `filename:`, `message-id:`) as `-32602` in the daemon's words, since it lowers the query with `mp-core`'s `to_fts` as the daemon does; any other query matches the subject, the sender or the body as a substring.
+`message.search` refuses a query with a term the store's index has no column for (`to:`, `cc:`, `message-id:`) as `-32602` in the daemon's words, since it lowers the query with `mp-core`'s `to_fts` as the daemon does; any other query matches the subject, the sender or the body as a substring.
 
 `contact.search` answers from `contacts.json`: 25 ranked contacts for `work` and 3 for `home`, each with a fixed `score` that spreads from 1000 down.
 `work` holds two display names with a comma (`Doe, Jane`, `Legal, Supplier Ltd`), one with an apostrophe (`Tom O'Brien`), one with an accent (`Sofia García`) and two addresses with no name.
