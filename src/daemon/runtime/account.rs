@@ -84,7 +84,7 @@ use crate::config::AccountConfig;
 use crate::daemon::sync_outcome::from_sync_result;
 use crate::engine_lock::EngineLock;
 use crate::sync::tick::run_tick_with_drains;
-use crate::sync::SyncResult;
+use crate::sync::{Stop, SyncResult};
 
 use super::pool::{PooledRead, ReadPool};
 
@@ -225,6 +225,11 @@ pub struct TickContext {
     pub phase: Phase,
     /// The body-fetch budget the tick carries, `None` for unbounded.
     pub body_deadline: Option<Duration>,
+    /// What the body asks at every fetch chunk and mailbox boundary
+    /// (PERSO-127): the stop of the call that started this tick, `None` for
+    /// a tick nothing can stop (the scheduler's, the watcher's) and for every
+    /// drain slot.
+    pub stop: Option<Stop>,
 }
 
 /// One half of a drain: it does its work and returns the status suffix it wants
@@ -536,6 +541,18 @@ impl AccountRuntime {
 
     /// Run one tick, or attach to the one already running.
     pub async fn tick(&self, kind: TickKind) -> TickOutcome {
+        self.tick_until(kind, None).await
+    }
+
+    /// [`AccountRuntime::tick`], whose body asks `stop` at every fetch chunk
+    /// and mailbox boundary when this call is the one that runs it
+    /// (PERSO-127).
+    ///
+    /// A call that joins a tick already in flight does not stop it: that tick
+    /// is another caller's work, and its `stop` (or its lack of one) is the
+    /// one it runs under. A tick that is stopped ends with what it ingested
+    /// before the stop, and a caller that joined it is handed that outcome.
+    pub async fn tick_until(&self, kind: TickKind, stop: Option<Stop>) -> TickOutcome {
         if self.readiness != Readiness::Ready {
             // No phase, no hook, no login: the holder is doing the work.
             debug!("[daemon] {} refused a {kind:?} tick: blocked", self.account);
@@ -633,7 +650,7 @@ impl AccountRuntime {
                     sync: None,
                 }
             } else {
-                let outcome = self.run_tick(kind).await;
+                let outcome = self.run_tick(kind, stop).await;
                 // Whatever asked for it: a manual sync, the watcher, a
                 // client's startup fetch or the scheduler all push the next
                 // scheduled tick back (#0134).
@@ -671,6 +688,7 @@ impl AccountRuntime {
             kind: TickKind::Quick,
             phase,
             body_deadline: self.body_deadline,
+            stop: None,
         };
         // The tick's order, for the tick's reason: the outbox first.
         let outbox = (self.hooks.outbox)(context(Phase::DrainOutbox)).await;
@@ -694,7 +712,7 @@ impl AccountRuntime {
     }
 
     /// The tick itself: [`run_tick_with_drains`] over the installed hooks.
-    async fn run_tick(&self, kind: TickKind) -> TickOutcome {
+    async fn run_tick(&self, kind: TickKind, stop: Option<Stop>) -> TickOutcome {
         self.report.reset();
         let phases = Mutex::new(Vec::with_capacity(5));
         let context = |phase: Phase| {
@@ -704,6 +722,10 @@ impl AccountRuntime {
                 kind,
                 phase,
                 body_deadline: self.body_deadline,
+                // The body's alone: the drains finish work the user already
+                // committed to (a send, a queued mutation), which a cancelled
+                // sync has no business leaving half done.
+                stop: (phase == Phase::Body).then(|| stop.clone()).flatten(),
             }
         };
         // The order inside a drain is the invariant: the outbox first, so a
@@ -934,8 +956,9 @@ async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<SyncResult>
     // (docs/baselines/decisions/read-pool.md).
     let store = Store::open(crate::config::store_path(&cfg.name))?;
     let blobs = BlobStore::for_account(&cfg.name);
-    let mut backend =
-        crate::imap_client::ImapBackend::new(&imap_config).with_body_budget(ctx.body_deadline);
+    let mut backend = crate::imap_client::ImapBackend::new(&imap_config)
+        .with_body_budget(ctx.body_deadline)
+        .with_stop(ctx.stop.clone());
     let mut span = crate::timing::TimingSpan::with_context("daemon_tick", cfg.name.clone());
 
     // Unguarded on purpose: this runtime is holding `store.lock` already. See
@@ -952,6 +975,7 @@ async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<SyncResult>
                 TickKind::Full => usize::MAX,
             },
             dry_run: false,
+            stop: ctx.stop.as_ref(),
         },
         &mut span,
     )

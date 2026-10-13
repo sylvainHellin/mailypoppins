@@ -21,7 +21,9 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use anyhow::Result;
 use log::{info, warn};
 
-use super::{FreshObservation, MailboxFetch, SyncBackend, SyncResult, SyncTarget};
+use super::{
+    stops_at, FreshObservation, MailboxFetch, Stop, StopPoint, SyncBackend, SyncResult, SyncTarget,
+};
 use crate::ingest::{self, IngestInput, MailboxCursor, RebindPolicy};
 use crate::parse::parse_rfc822_to_fetched_email;
 use crate::store::{schema, BlobStore, Store};
@@ -146,6 +148,11 @@ pub struct SyncRun<'a> {
     pub limit: usize,
     /// Count what would be ingested without touching the store or the blobs.
     pub dry_run: bool,
+    /// Asked before the fetch and before each target's ingest (PERSO-127);
+    /// `None` runs the pass to the end. A pass told to stop returns what it
+    /// has done so far: the targets already ingested stay written, the rest
+    /// and the prune pass are not touched.
+    pub stop: Option<&'a Stop>,
 }
 
 /// The IMAP half of [`ingest::note_ingest_failure`]: the same give-up bound,
@@ -256,6 +263,12 @@ pub async fn run_sync_guarded_at(
 ///    interleave and the prune ordering below holds;
 /// 4. every prune runs after every target has been ingested, gated on the whole
 ///    pass's coverage.
+///
+/// [`SyncRun::stop`] is asked before phase 2 and before each target of phase
+/// 3 (PERSO-127). A target's ingest is never interrupted, because its rows,
+/// flags and cursor are written as one unit of progress, and a pass that
+/// stops skips the prune pass altogether: it has not ingested every target, so
+/// the coverage gate would refuse it anyway.
 pub async fn run_sync(
     backend: &mut impl SyncBackend,
     run: &SyncRun<'_>,
@@ -268,9 +281,14 @@ pub async fn run_sync(
         targets,
         limit,
         dry_run,
+        stop,
     } = *run;
 
     let mut result = SyncResult::default();
+    if stops_at(stop, StopPoint::Fetch) {
+        info!("[sync] {account}: stopped before the fetch");
+        return Ok(result);
+    }
     // Every prune this run will apply, collected here and applied after the
     // loop: see the second pass below for why it cannot run per target.
     let mut prunes: Vec<(MailboxRole, Vec<u32>)> = Vec::new();
@@ -302,7 +320,17 @@ pub async fn run_sync(
     span.mark("fetch");
 
     // Phase 3: ingest serially, in target order.
-    for (target, fetched) in targets.iter().zip(fetched_results) {
+    for (index, (target, fetched)) in targets.iter().zip(fetched_results).enumerate() {
+        // The mailbox boundary (PERSO-127): what earlier targets wrote stays,
+        // and this one's download, fetched or not, is dropped unwritten.
+        if stops_at(stop, StopPoint::Mailbox(index)) {
+            info!(
+                "[sync] {account}: stopped before '{}', {index} of {} mailbox(es) ingested",
+                target.server_name,
+                targets.len()
+            );
+            return Ok(result);
+        }
         let fetched: MailboxFetch = match fetched {
             Ok(v) => v,
             Err(e) => {
@@ -826,6 +854,17 @@ mod tests {
             limit: usize,
             dry_run: bool,
         ) -> SyncResult {
+            self.run_until(backend, targets, limit, dry_run, None)
+        }
+
+        fn run_until(
+            &self,
+            backend: &mut FakeBackend,
+            targets: &[SyncTarget],
+            limit: usize,
+            dry_run: bool,
+            stop: Option<&Stop>,
+        ) -> SyncResult {
             let run = SyncRun {
                 store: &self.store,
                 blobs: &self.blobs,
@@ -833,6 +872,7 @@ mod tests {
                 targets,
                 limit,
                 dry_run,
+                stop,
             };
             let mut span = TimingSpan::new("test");
             futures::executor::block_on(run_sync(backend, &run, &mut span)).unwrap()
@@ -918,6 +958,80 @@ mod tests {
     // -----------------------------------------------------------------------
     // Engine tests: the loop itself, driven by the fake backend
     // -----------------------------------------------------------------------
+
+    /// A `Stop` that answers yes from `from` on, recording every point it was
+    /// asked at.
+    fn stop_from(from: StopPoint) -> (Stop, std::sync::Arc<std::sync::Mutex<Vec<StopPoint>>>) {
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&asked);
+        let stop = Stop::new(move |point| {
+            let mut log = log.lock().unwrap();
+            log.push(point);
+            log.contains(&from)
+        });
+        (stop, asked)
+    }
+
+    /// PERSO-127: a pass told to stop at the second mailbox keeps what the
+    /// first one wrote, rows and cursor, and leaves the second untouched,
+    /// downloaded or not. Nothing is asked after the stop, and the prune pass
+    /// does not run.
+    #[test]
+    fn a_pass_stopped_at_a_mailbox_boundary_keeps_the_mailboxes_before_it() {
+        let fx = Fixture::new();
+        // A row the server no longer lists, which a finished pass would prune.
+        let mut first = FakeBackend::default();
+        // Archive is left unscripted, so it fails and records no cursor.
+        first.script("INBOX", vec![Ok(fetch(vec![(90, raw("gone"))]))]);
+        fx.run(&mut first, &targets());
+        assert_eq!(fx.rows("inbox"), vec![90]);
+
+        let mut backend = FakeBackend::default();
+        let mut inbox = fetch(vec![(101, raw("in"))]);
+        inbox.vanished = vec![90];
+        backend.script("INBOX", vec![Ok(inbox)]);
+        backend.script("Archive", vec![Ok(fetch(vec![(201, raw("arch"))]))]);
+        let (stop, asked) = stop_from(StopPoint::Mailbox(1));
+        let result = fx.run_until(&mut backend, &targets(), usize::MAX, false, Some(&stop));
+
+        assert_eq!(fx.rows("inbox"), vec![90, 101], "the first mailbox stays");
+        assert!(fx.rows("archive").is_empty(), "the second is not written");
+        assert!(
+            ingest::load_mailbox_cursor(&fx.store, "acct", "archive")
+                .unwrap()
+                .is_none(),
+            "a mailbox the pass stopped before records no cursor"
+        );
+        assert_eq!(result.saved, 1);
+        assert_eq!(result.pruned, 0, "a stopped pass prunes nothing");
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![
+                StopPoint::Fetch,
+                StopPoint::Mailbox(0),
+                StopPoint::Mailbox(1)
+            ],
+            "the stop is the last question the pass asks"
+        );
+    }
+
+    /// A pass told to stop before its fetch asks the transport for nothing
+    /// and writes nothing.
+    #[test]
+    fn a_pass_stopped_before_its_fetch_asks_the_transport_for_nothing() {
+        let fx = Fixture::new();
+        let mut backend = FakeBackend::default();
+        backend.script("INBOX", vec![Ok(fetch(vec![(101, raw("in"))]))]);
+        let (stop, _) = stop_from(StopPoint::Fetch);
+        fx.run_until(&mut backend, &targets(), usize::MAX, false, Some(&stop));
+
+        assert!(
+            backend.seen.is_empty(),
+            "the transport was asked: {:?}",
+            backend.seen
+        );
+        assert!(fx.rows("inbox").is_empty());
+    }
 
     /// #0115, the pure half: only an identical fingerprint continues a streak,
     /// and the log line is throttled to 2, 3, then every tenth.

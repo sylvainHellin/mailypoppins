@@ -76,7 +76,11 @@ pub fn fake_ready_delay() -> Option<Duration> {
 ///
 /// `contact.rebuild` (before the contacts cache write), `calendar.rsvp` and
 /// `send.invite` (before the SMTP submission) each pass through
-/// [`commit_point`] there, and nothing else would let a test put an
+/// [`commit_point`] there, and `sync.quick` and `sync.full` pass through
+/// [`commit_point_blocking`] at their second mailbox boundary, the first one
+/// with an ingested mailbox behind it (PERSO-127), recording
+/// `<dir>/<method>.returned` once the worker has returned; nothing else would
+/// let a test put an
 /// `operation.cancel` between the work that prepares a write and the write
 /// itself: on the fake transport both sides take milliseconds. With the hook
 /// set, the worker creates `<dir>/<method>.held`, waits until its token is shut
@@ -107,20 +111,47 @@ pub fn fake_commit_hold_dir() -> Option<std::path::PathBuf> {
 /// answer and the write, so the hook in [`FAKE_COMMIT_HOLD_ENV`] observes the
 /// same check production makes.
 pub async fn commit_point(method: &str, token: &crate::daemon::dispatch::CancelToken) -> bool {
-    let Some(dir) = fake_commit_hold_dir() else {
+    if fake_commit_hold_dir().is_none() {
         return !token.is_cancelled();
-    };
-    let marker = |suffix: &str| {
-        let path = dir.join(format!("{method}.{suffix}"));
-        if let Err(e) = std::fs::write(&path, b"") {
-            log::warn!("[daemon] commit hold marker {}: {e}", path.display());
-        }
-    };
-    marker("held");
+    }
+    commit_hold_marker(method, "held");
     let _ = tokio::time::timeout(COMMIT_HOLD_LIMIT, token.cancelled()).await;
     let proceed = !token.is_cancelled();
-    marker(if proceed { "committed" } else { "dropped" });
+    commit_hold_marker(method, if proceed { "committed" } else { "dropped" });
     proceed
+}
+
+/// [`commit_point`] for a worker that cannot await it: a sync pass runs on a
+/// thread of its own and asks its [`crate::sync::Stop`] from there
+/// (PERSO-127).
+///
+/// While the hook holds it, it blocks the calling thread, polling the token,
+/// so it is only ever called from such a thread and never from a tokio
+/// worker. Without the hook it is the bare token check.
+pub fn commit_point_blocking(method: &str, token: &crate::daemon::dispatch::CancelToken) -> bool {
+    if fake_commit_hold_dir().is_none() {
+        return !token.is_cancelled();
+    }
+    commit_hold_marker(method, "held");
+    let started = std::time::Instant::now();
+    while !token.is_cancelled() && started.elapsed() < COMMIT_HOLD_LIMIT {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let proceed = !token.is_cancelled();
+    commit_hold_marker(method, if proceed { "committed" } else { "dropped" });
+    proceed
+}
+
+/// Record `<dir>/<method>.<suffix>` when [`FAKE_COMMIT_HOLD_ENV`] is armed,
+/// and do nothing otherwise.
+pub fn commit_hold_marker(method: &str, suffix: &str) {
+    let Some(dir) = fake_commit_hold_dir() else {
+        return;
+    };
+    let path = dir.join(format!("{method}.{suffix}"));
+    if let Err(e) = std::fs::write(&path, b"") {
+        log::warn!("[daemon] commit hold marker {}: {e}", path.display());
+    }
 }
 
 /// The four points inside the serialized section of [`CanonicalState::bootstrap`]
@@ -1128,7 +1159,9 @@ mod tests {
         assert!(fake_commit_hold_dir().is_none());
         let token = crate::daemon::dispatch::CancelToken::new();
         assert!(commit_point("test.operation", &token).await);
+        assert!(commit_point_blocking("test.operation", &token));
         token.cancel();
         assert!(!commit_point("test.operation", &token).await);
+        assert!(!commit_point_blocking("test.operation", &token));
     }
 }
