@@ -208,10 +208,17 @@ Toggling read or flag over several rows follows the TUI: flagging wins when any 
 The activity area is a stack at the bottom right of the window, raised above the reader's blocked-link notice while that shows.
 Held sends come first, then the app update's card (see Updates), then the running operations, then the failures, then the applied notices of `state.activity`:
 
-- An applied batch is a notice that leaves after five seconds.
-- A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, a draft that could not be written or an editor that did not open, a send or an outbox retry that failed, went to only some recipients or was interrupted, and a refused retry or discard are `role="alert"` notices that leave after twenty seconds (`STICKY_MS` in `src/app/activity.ts`); the failure stays in the activity log, and a failed send in the outbox.
-- Every notice has a Dismiss button.
-- A notice, or a hold card's end, under the pointer does not leave: its time stands still from `pointerenter` and runs on with what it had left at `pointerleave` (`useWindDown` in `src/hooks/use-wind-down.ts`).
+Every notice leaves by itself, and its line stays in the activity log, the record (PERSO-82).
+The lifetimes are one table, `LIFETIME_MS` in `src/app/activity.ts`, whose `notice` row names every kind of `state.activity`, so a new kind does not compile without one:
+
+- An applied batch, a cancelled hold and an operation this window stopped waiting for inform: they leave after eight seconds (`READ_MS`).
+- A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, a draft that could not be written or an editor that did not open, a send or an outbox retry that failed, went to only some recipients or was interrupted, a refused retry or discard, and a contact rebuild that kept the cached index are `role="alert"` notices that leave after twenty seconds (`STICKY_MS`); the failure stays in the activity log, and a failed send in the outbox.
+- The notice line at the bottom centre ("Copied …", "Opened …", "This message is on the server only: fetch it first (F)", a refused open or a preference that was not saved) leaves after eight seconds whatever its level, as the TUI's status line has one timer.
+- The reader's blocked-link notice is a warning and leaves after eight seconds too; a newer blocked link starts the time again ([reader.md](reader.md)).
+- A hold card's plain end leaves after three seconds (`HOLD_END_MS`), its failure or partial delivery after twenty, and the update card's failure after twenty, as its Dismiss does.
+- Every notice of the activity area has a Dismiss button, and so have a hold card's failure and the blocked-link notice.
+- A notice, a hold card's end, the update card's failure or the notice line under the pointer does not leave: its time stands still from `pointerenter` and runs on with what it had left at `pointerleave` (`useWindDown` in `src/hooks/use-wind-down.ts`), the one timer every lifetime runs on.
+- A card that waits for a decision has no lifetime: a held send counting down, a running operation with its Cancel, and the update card while an update is available, downloading or installed.
 - A cancelled hold's own notice is not shown, since the hold says so itself.
 
 `!` hides the notices and shows them again, the TUI's toggle of its log pane, which the desktop does not have.
@@ -236,9 +243,9 @@ A running card (`OperationToast`, a `group` named after its line) shows each con
 Like a hold card it shows while `!` hides the notices, and its Cancel ("Cancel the contact rebuild", "Cancel the RSVP", "Cancel the invitation") calls `operation_cancel` and reads "Cancelling…" until the operation's end takes the card away ([rust-layer.md](rust-layer.md), "Cancelling").
 A cancel the daemon refuses says "The cancel failed: <why>" on the notice line and enables Cancel again; one that came too late changes nothing, and the operation's own end says how it went.
 The daemon settles a cancelled operation at once without stopping its worker, so the cancelled end is an `operation_cancelled` notice that says the window stopped waiting: "Stopped waiting for the contact index of <account>; the daemon may still finish the rebuild", which also makes the account's contacts stale, and "Stopped waiting for the RSVP to <summary>" or "… for the invitation <subject>", each followed by "; the daemon may still send it, check the outbox", which also make the outbox counts stale.
-The notice is not a failure, so it leaves after five seconds and stays in the activity log.
+The notice is not a failure, so it leaves after eight seconds and stays in the activity log.
 A hold another client armed says "Sent" when it fires and "Send cancelled" when it is cancelled; a send this window started says "Sending…" from the fire until its operation settles, then its outcome (Compose, "Send").
-An ended card leaves after three seconds through `dismiss_hold`, except a failure or a partial delivery of one draft, which has a Dismiss button and leaves after twenty seconds (`STICKY_MS`).
+An ended card leaves after three seconds through `dismiss_hold`, except a failure or a partial delivery of one draft, which has a Dismiss button and leaves after twenty seconds (`LIFETIME_MS.holdSticky`).
 The fixture seeds one hold (`fixture-hold-seed`, 60 s), so `MP_DESKTOP_FIXTURE=1` shows it at start.
 
 ## Compose
@@ -622,7 +629,7 @@ While it runs, the header's status line says "Rebuilding the contact index of <a
 The settle says the TUI's words:
 
 - "Contacts refreshed (N)" when the index was written, and the list is read again;
-- "Contacts rebuild found none, kept K cached" and "Contacts rebuild found only N, kept K cached" when the cache guard kept the old index, as a notice that stays until dismissed;
+- "Contacts rebuild found none, kept K cached" and "Contacts rebuild found only N, kept K cached" when the cache guard kept the old index, as an alert notice that leaves after twenty seconds or when dismissed;
 - "Contacts refresh failed: <why>" for a failure, a refused start or a drop by a daemon restart.
 
 ### Staleness
@@ -921,7 +928,7 @@ The activity area shows one card for the update, after the hold cards and before
 - while an update is available, "mailypoppins 0.12.0 is available." with "Later" and "Install"; Later sets `dismissed` on the available state and takes the card away for this window, leaving the sidebar entry and the palette row, and the same version found again by the silent check stays dismissed, while a newer version or a manual check shows the card again;
 - "Downloading mailypoppins 0.12.0…" with "1.0 MB of 4.0 MB" and a progress bar from the channel's `started` and `progress`, or a pulsing bar with the bytes so far when the server sent no size;
 - on `finished`, or the command's answer, whichever lands first, "mailypoppins 0.12.0 is installed; restart to finish the update." with "Restart now" and "Later";
-- on a rejection, "The update to 0.12.0 failed: <the Rust layer's sentence>" with "Open the release page", which opens `https://github.com/sylvainHellin/mailypoppins/releases/latest` through `open_external`, and "Dismiss", which leaves the update available and dismissed.
+- on a rejection, "The update to 0.12.0 failed: <the Rust layer's sentence>" with "Open the release page", which opens `https://github.com/sylvainHellin/mailypoppins/releases/latest` through `open_external`, and "Dismiss", which leaves the update available and dismissed; the card does the same by itself after twenty seconds, held while the pointer rests on it (PERSO-82).
 
 The card is a `group` named after its state, and its status line announces the offer, the install and the failure.
 The installed card's Later takes the card away and leaves the restart to the sidebar entry and the palette.

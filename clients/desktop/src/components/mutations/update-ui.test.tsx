@@ -3,11 +3,12 @@
 // Settings, the activity card fed by the install's channel, the restart and
 // the failure. The command layer is the mock's (src/test/tauri-mock.ts).
 
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { emitAppEvent, mock, settleUpdateInstall, updateProgress } from "@/test/tauri-mock";
 import { RELEASE_PAGE } from "@/app/updates";
+import { LIFETIME_MS } from "@/app/activity";
 import { terms } from "@/test/xterm-fake";
 
 vi.mock("@xterm/xterm", () => import("@/test/xterm-fake"));
@@ -270,6 +271,48 @@ describe("the install", () => {
     await user.click(entry("Update to 0.12.0") as HTMLElement);
     await waitFor(() => expect(calls("update_install")).toHaveLength(2));
     expect(card("Downloading mailypoppins 0.12.0…")).not.toBeNull();
+  });
+
+  it("a failed install's card leaves by itself after a failure's time, held while the pointer rests on it (PERSO-82)", async () => {
+    const { user } = renderApp();
+    await ready();
+    await announce();
+    await startInstall(user);
+    // waitFor polls on setTimeout, so nothing below waits through it.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      act(() => settleUpdateInstall({ fail: "the signature does not match" }));
+      // The rejection settles within a few ticks of the card's twenty seconds.
+      await act(() => vi.advanceTimersByTimeAsync(100));
+      const failed = card("The update to 0.12.0 failed") as HTMLElement;
+      expect(failed).not.toBeNull();
+      fireEvent.pointerEnter(failed);
+      act(() => vi.advanceTimersByTime(LIFETIME_MS.updateFailed * 2));
+      expect(card("The update to 0.12.0 failed")).not.toBeNull();
+      fireEvent.pointerLeave(failed);
+      act(() => vi.advanceTimersByTime(LIFETIME_MS.updateFailed - 1000));
+      expect(card("The update to 0.12.0 failed")).not.toBeNull();
+      act(() => vi.advanceTimersByTime(1000));
+      expect(card("The update to 0.12.0 failed")).toBeNull();
+      // As Dismiss does: the sidebar entry still offers the update.
+      expect(entry("Update to 0.12.0")).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an available update's card waits for a decision and does not leave by itself", async () => {
+    renderApp();
+    await ready();
+    await announce();
+    await findCard("mailypoppins 0.12.0 is available");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      act(() => vi.advanceTimersByTime(LIFETIME_MS.updateFailed * 3));
+      expect(card("mailypoppins 0.12.0 is available")).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

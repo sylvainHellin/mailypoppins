@@ -3,21 +3,22 @@ import { Copy, ExternalLink, ShieldAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { canOpenExternally, copyLink, openInBrowser } from "@/components/reader/links";
 import { useDispatch } from "@/app/store";
-import { STICKY_MS } from "@/app/activity";
+import { LIFETIME_MS } from "@/app/activity";
 import { useWindDown } from "@/hooks/use-wind-down";
 import type { InterceptedUrl } from "@/lib/gui-types";
 
 /**
  * The reader footer's notice for a link the frame was refused. Non-modal:
  * nothing opens until the user clicks "Open in browser". It leaves after
- * STICKY_MS, held while the pointer rests on it, and a newer blocked link
- * starts the time again; the intercept log keeps every one.
+ * LIFETIME_MS's blockedLink, a warning's time, held while the pointer rests
+ * on it, and a newer blocked link starts the time again; the intercept log
+ * keeps every one.
  */
 export function InterceptedLinkNotice({ entry }: { entry: InterceptedUrl }) {
   const dispatch = useDispatch();
   const url = entry.url;
   const done = useCallback(() => dispatch({ type: "dismiss_intercept", entry }), [dispatch, entry]);
-  const hover = useWindDown(STICKY_MS, done, entry);
+  const hover = useWindDown(LIFETIME_MS.blockedLink, done, entry);
   return (
     <div
       role="region"

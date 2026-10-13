@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { emit, emitEnvelope, fixtures, mock } from "@/test/tauri-mock";
-import { APPLIED_MS, HOLD_END_MS, HoldToast, NoticeToast, STICKY_MS } from "@/components/mutations/ActivityStack";
+import { HoldToast, NoticeToast } from "@/components/mutations/ActivityStack";
+import { HOLD_END_MS, READ_MS, STICKY_MS } from "@/app/activity";
 import type { ActivityNotice, HoldEntry } from "@/app/state";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
@@ -254,12 +255,12 @@ describe("activity notices", () => {
     expect(screen.queryByRole("status")).toBeNull();
     expect(screen.getByText("Archived 1 message").closest("[role]")).toBeNull();
     expect(screen.getByRole("alert")).toHaveTextContent("Could not archive 1 message");
-    act(() => vi.advanceTimersByTime(APPLIED_MS - 1));
+    act(() => vi.advanceTimersByTime(READ_MS - 1));
     expect(onDismiss).not.toHaveBeenCalled();
     act(() => vi.advanceTimersByTime(1));
     expect(onDismiss).toHaveBeenCalledWith(1);
     expect(onDismiss).toHaveBeenCalledTimes(1);
-    act(() => vi.advanceTimersByTime(STICKY_MS - APPLIED_MS - 1));
+    act(() => vi.advanceTimersByTime(STICKY_MS - READ_MS - 1));
     expect(onDismiss).toHaveBeenCalledTimes(1);
     act(() => vi.advanceTimersByTime(1));
     expect(onDismiss).toHaveBeenLastCalledWith(2);
@@ -283,6 +284,47 @@ describe("activity notices", () => {
     expect(onDismiss).not.toHaveBeenCalled();
     act(() => vi.advanceTimersByTime(1));
     expect(onDismiss).toHaveBeenCalledWith(7);
+  });
+
+  it("every kind leaves after its lifetime from the one table: a cancel like an applied notice, a refused rebuild like a failure (PERSO-82)", () => {
+    vi.useFakeTimers();
+    const onDismiss = vi.fn();
+    const notices: ActivityNotice[] = [
+      { id: 11, kind: "operation_cancelled", account: "work", text: "Stopped waiting for the RSVP to Standup", rows: [] },
+      { id: 12, kind: "rebuild_refused", account: "work", text: "Contacts rebuild found none, kept 3 cached", rows: [] },
+    ];
+    render(
+      <>
+        {notices.map((n) => (
+          <NoticeToast key={n.id} notice={n} onDismiss={onDismiss} />
+        ))}
+      </>,
+    );
+    act(() => vi.advanceTimersByTime(READ_MS));
+    expect(onDismiss.mock.calls).toEqual([[11]]);
+    act(() => vi.advanceTimersByTime(STICKY_MS - READ_MS));
+    expect(onDismiss.mock.calls).toEqual([[11], [12]]);
+  });
+
+  it("the notice line leaves after a warning's time, held while the pointer rests on it (PERSO-82)", async () => {
+    renderApp();
+    await shellReady();
+    vi.useFakeTimers();
+    const press = (key: string) => act(() => void fireEvent.keyDown(document.activeElement ?? document.body, { key }));
+    const line = () => document.querySelector<HTMLElement>('[data-slot="notice-line"]');
+    // `gt`, the TUI's jump to date, which the desktop does not bind, says so on the line.
+    press("g");
+    press("t");
+    expect(line()).toHaveTextContent(/Jump to date/);
+    act(() => vi.advanceTimersByTime(READ_MS - 1000));
+    fireEvent.pointerEnter(line()!);
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(line()).not.toBeNull();
+    fireEvent.pointerLeave(line()!);
+    act(() => vi.advanceTimersByTime(999));
+    expect(line()).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(line()).toBeNull();
   });
 
   it("Dismiss still removes a failure at once", () => {

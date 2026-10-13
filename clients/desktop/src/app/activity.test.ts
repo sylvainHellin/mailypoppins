@@ -6,6 +6,10 @@ import {
   configInvalidLine,
   FAILURES,
   filterLog,
+  LIFETIME_MS,
+  noticeLifetime,
+  READ_MS,
+  STICKY_MS,
   logActivity,
   noticeLevel,
   syncLine,
@@ -148,6 +152,24 @@ describe("the activity log", () => {
     expect(filterLog(s.activityLog, "error").map((e) => e.text)).toEqual(["Open log failed: gone"]);
     expect(filterLog(s.activityLog, "warn").map((e) => e.text)).toEqual(["No log file found"]);
     expect(filterLog(s.activityLog, "nothing")).toEqual([]);
+  });
+});
+
+describe("the notices' lifetimes", () => {
+  it("gives every kind one from the table: a failure twenty seconds, anything else eight (PERSO-82)", () => {
+    expect(READ_MS).toBe(8_000);
+    expect(STICKY_MS).toBe(20_000);
+    const kinds = Object.keys(LIFETIME_MS.notice) as (keyof typeof LIFETIME_MS.notice)[];
+    for (const kind of FAILURES) expect(kinds).toContain(kind);
+    for (const kind of kinds) expect(noticeLifetime(kind)).toBe(FAILURES.has(kind) ? STICKY_MS : READ_MS);
+  });
+
+  it("gives the notice line and the blocked-link warning a warning's time, a failed hold or update a failure's", () => {
+    expect(LIFETIME_MS.line).toBe(READ_MS);
+    expect(LIFETIME_MS.blockedLink).toBe(READ_MS);
+    expect(LIFETIME_MS.holdSticky).toBe(STICKY_MS);
+    expect(LIFETIME_MS.updateFailed).toBe(STICKY_MS);
+    expect(LIFETIME_MS.holdEnd).toBeLessThan(READ_MS);
   });
 });
 

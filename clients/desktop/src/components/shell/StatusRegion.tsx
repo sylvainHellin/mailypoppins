@@ -1,10 +1,30 @@
-import { useEffect } from "react";
+import { useCallback } from "react";
 import { CloudOff, RefreshCw, Power } from "lucide-react";
 import { bannerFor, type AppState } from "@/app/state";
 import { queueDepth, queueText } from "@/app/outbox";
 import { useDispatch } from "@/app/store";
+import { LIFETIME_MS } from "@/app/activity";
+import { useWindDown } from "@/hooks/use-wind-down";
 
-const NOTICE_MS = 4000;
+/**
+ * The notice line: it leaves after LIFETIME_MS's line, held while the pointer
+ * rests on it, and a new text starts the time again. Its own component, so
+ * its timer and hover end with it.
+ */
+function NoticeLine({ text }: { text: string }) {
+  const dispatch = useDispatch();
+  const done = useCallback(() => dispatch({ type: "notice", text: null }), [dispatch]);
+  const hover = useWindDown(LIFETIME_MS.line, done, text);
+  return (
+    <div
+      data-slot="notice-line"
+      {...hover}
+      className="fixed bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-lg border border-border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md"
+    >
+      {text}
+    </div>
+  );
+}
 
 /**
  * The connection banners, the transient notices and the queue depth
@@ -12,15 +32,9 @@ const NOTICE_MS = 4000;
  * reader hears each change.
  */
 export function StatusRegion({ state }: { state: AppState }) {
-  const dispatch = useDispatch();
   const banner = bannerFor(state);
   const notice = state.notice;
   const queue = queueText(queueDepth(state));
-  useEffect(() => {
-    if (!notice) return;
-    const t = setTimeout(() => dispatch({ type: "notice", text: null }), NOTICE_MS);
-    return () => clearTimeout(t);
-  }, [notice, dispatch]);
 
   return (
     <div aria-live="polite" role="status" className="contents">
@@ -40,11 +54,7 @@ export function StatusRegion({ state }: { state: AppState }) {
           <span>The daemon is shutting down.</span>
         </div>
       ) : null}
-      {notice ? (
-        <div className="pointer-events-none fixed bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-lg border border-border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md">
-          {notice}
-        </div>
-      ) : null}
+      {notice ? <NoticeLine text={notice} /> : null}
       {/* Mounted at 0, visually hidden and empty, so the first depth is announced. */}
       <div
         data-slot="queue-depth"

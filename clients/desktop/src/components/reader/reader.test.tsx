@@ -2,7 +2,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { emit, emitEnvelope, mock } from "@/test/tauri-mock";
-import { STICKY_MS } from "@/app/activity";
+import { LIFETIME_MS } from "@/app/activity";
 import type { InterceptedUrl } from "@/lib/gui-types";
 import { READER_SANDBOX } from "@/components/reader/ReaderBody";
 
@@ -103,10 +103,10 @@ describe("intercepted links", () => {
       const notice = () => screen.queryByRole("region", { name: "Blocked link" });
       intercept("https://evil.example/first");
       expect(notice()).not.toBeNull();
-      act(() => vi.advanceTimersByTime(STICKY_MS - 1000));
+      act(() => vi.advanceTimersByTime(LIFETIME_MS.blockedLink - 1000));
       // A newer blocked link replaces the entry and gets the full time.
       intercept("https://evil.example/second");
-      act(() => vi.advanceTimersByTime(STICKY_MS - 1000));
+      act(() => vi.advanceTimersByTime(LIFETIME_MS.blockedLink - 1000));
       expect(notice()).toHaveTextContent("https://evil.example/second");
       // Under the pointer the time stands still, and resumes when it leaves.
       fireEvent.pointerEnter(notice()!);

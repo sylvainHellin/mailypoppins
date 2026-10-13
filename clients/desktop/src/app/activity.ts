@@ -10,13 +10,57 @@ import type { ActivityKind, ActivityLevel, ActivityLogEntry, ActivityNotice, App
 /** How many lines the log keeps, the TUI's `STATUS_LOG_CAPACITY`; a newer one drops the oldest. */
 export const ACTIVITY_LOG_CAP = 100;
 
+/** How long a notice that informs or warns stays: an applied batch, a cancel, a blocked link, the notice line. */
+export const READ_MS = 8_000;
+
 /**
- * How long a notice that needs reading stays: a failure, a send that failed or
- * went to only some recipients, and the reader's blocked-link notice. A
- * pointer resting on the notice holds it (useWindDown). The failure stays in
- * the activity log, and a failed send in the outbox.
+ * How long a notice that reports a failure stays: a failed batch, sync,
+ * draft, send or update, and a send that went to only some recipients. The
+ * failure stays in the activity log, and a failed send in the outbox.
  */
 export const STICKY_MS = 20_000;
+
+/** How long a hold card shows a plain end, "Sent" or "Send cancelled". */
+export const HOLD_END_MS = 3_000;
+
+/**
+ * Every notice's lifetime, in one table (PERSO-82): each leaves by itself
+ * after its time, held while the pointer rests on it (useWindDown), and its
+ * line stays in the activity log. `notice` is keyed by every kind of
+ * `state.activity`, so a new kind does not compile until it has a lifetime;
+ * a failure kind there is a member of FAILURES. Only a card that waits for a
+ * decision (a held send counting down, a running operation, an available or
+ * installed update) has none.
+ */
+export const LIFETIME_MS = {
+  notice: {
+    applied: READ_MS,
+    hold_cancelled: READ_MS,
+    operation_cancelled: READ_MS,
+    failed: STICKY_MS,
+    rolled_back: STICKY_MS,
+    hold_cancel_failed: STICKY_MS,
+    sync_failed: STICKY_MS,
+    compose_failed: STICKY_MS,
+    send_failed: STICKY_MS,
+    send_partial: STICKY_MS,
+    rebuild_refused: STICKY_MS,
+  } satisfies Record<ActivityKind, number>,
+  /** The notice line at the bottom centre, whatever its level, as the TUI's status line has one timer. */
+  line: READ_MS,
+  /** The reader's blocked-link notice, a warning. */
+  blockedLink: READ_MS,
+  /** A hold card's plain end, and its failure or partial delivery of one draft. */
+  holdEnd: HOLD_END_MS,
+  holdSticky: STICKY_MS,
+  /** The app update's card once the install failed. */
+  updateFailed: STICKY_MS,
+} as const;
+
+/** How long a notice of `kind` stays. */
+export function noticeLifetime(kind: ActivityKind): number {
+  return LIFETIME_MS.notice[kind];
+}
 
 /** Kinds that report a failure: they stay for STICKY_MS or until dismissed, are alerts, and log as errors. */
 export const FAILURES: ReadonlySet<ActivityKind> = new Set<ActivityKind>([
