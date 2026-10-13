@@ -71,6 +71,31 @@ What each dump records:
 - Whether `\Draft` and `\Seen` are set.
 - `UIDPLUS`, `CONDSTORE`, `SPECIAL-USE` and the Drafts folder's `\Drafts` attribute.
 
+#### Running the probe
+
+The commands run from the repository root on the Mac, once with `tum` and once with `proton` in place of `<account>`.
+`append` prints the draft's id; `<id1>`, `<id2>` and `<id3>` stand for the ids of the three appends.
+The probe draft is addressed to the account's own address in To, Cc and Bcc, so the send of step 4 reaches only Sylvain; `--to`, `--cc` and `--bcc` override that.
+Each `dump` appends its output to `/var/tmp/mp-draft-probe-<account>-<id>.txt`, so one file holds the history of one draft across the steps.
+`append` keeps its state and the appended bytes beside it, as `.json` and `.eml`.
+Each dump also searches the account's Trash folder for the draft, the folder carrying `\Trash` or else the one named `Deleted Items` or `Trash`, so step 5 shows a move there.
+
+1. `cargo run --example draft_probe -- append <account>`
+   `cargo run --example draft_probe -- dump <account> <id1> --label "1 append"`
+2. Edit the draft in Outlook (change a word, add a recipient, save, close), then:
+   `cargo run --example draft_probe -- dump <account> <id1> --label "2 Outlook edit"`
+3. Edit the same draft in Apple Mail (change a word, save, close), then:
+   `cargo run --example draft_probe -- dump <account> <id1> --label "3 Apple Mail edit"`
+4. `cargo run --example draft_probe -- append <account>`
+   Send that draft from Outlook, then:
+   `cargo run --example draft_probe -- dump <account> <id2> --label "4 sent from Outlook"`
+5. `cargo run --example draft_probe -- append <account>`
+   Delete that draft in Apple Mail, then:
+   `cargo run --example draft_probe -- dump <account> <id3> --label "5 deleted in Apple Mail"`
+6. Start a draft in Outlook and one in Apple Mail, save both, then:
+   `cargo run --example draft_probe -- dump <account> <id3> --label "6 foreign drafts"`
+   Every message that reached Drafts after the third append is listed as `since-append`.
+
 ### How the probe's outcome selects the linking rule
 
 A link ties a local draft file to its server copy across an edit made elsewhere.
