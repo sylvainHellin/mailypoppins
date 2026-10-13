@@ -833,7 +833,7 @@ A version it finds is held for `update_install`, and announced with the event `u
 A failed silent check is logged at warn and shown nowhere.
 
 `current` in every answer is `package_info().version`, the bundle's version, which `pnpm bundle` stamps with `mp`'s and the updater compares with the manifest's.
-It is not `version_info`'s `app_version`, the desktop crate's own `0.1.0`.
+`version_info`'s `app_version` is the same version; the desktop crate's own `CARGO_PKG_VERSION` stays `0.1.0` and is what the GUI's `initialize` still sends as its `ClientInfo.app_version`.
 
 ### update-state.json
 
