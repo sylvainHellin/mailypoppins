@@ -426,7 +426,8 @@ enum Commands {
         /// coverage: server|local, local_terms: [...], messages: [...]} on
         /// stdout, messages as in `mp list-messages --json` plus body (--full)
         /// or preview (server hit); coverage is local when the store answered
-        /// any term, which local_terms names; warnings stay on stderr
+        /// any term, which local_terms names (empty under --local, where the
+        /// store answered the whole query); warnings stay on stderr
         #[arg(long)]
         json: bool,
     },

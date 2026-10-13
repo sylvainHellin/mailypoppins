@@ -516,7 +516,7 @@ Options:
           Search the local store's full-text index instead of the server (offline, ranked, covers every synced mailbox at once)
 
       --json
-          Emit one JSON object {account, query, source: local|server, coverage: server|local, local_terms: [...], messages: [...]} on stdout, messages as in `mp list-messages --json` plus body (--full) or preview (server hit); coverage is local when the store answered any term, which local_terms names; warnings stay on stderr
+          Emit one JSON object {account, query, source: local|server, coverage: server|local, local_terms: [...], messages: [...]} on stdout, messages as in `mp list-messages --json` plus body (--full) or preview (server hit); coverage is local when the store answered any term, which local_terms names (empty under --local, where the store answered the whole query); warnings stay on stderr
 
   -s, --signature <SIGNATURE>
           Signature to use (overrides config default)
