@@ -149,6 +149,46 @@ describe("server search", () => {
     expect(within(list).getAllByRole("option")).toHaveLength(2);
   });
 
+  it("names the terms the local store answered beside the count, as mp search does (PERSO-131)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await searchServer(user, "has:attachment");
+    event("message.server_hit", { operation_id: "op-1", hit: serverHit("Inbox", 1005, "Re: BIM model handover") });
+    const list = await results();
+    await waitFor(() => expect(within(list).getAllByRole("option")).toHaveLength(1));
+
+    event("operation.finished", {
+      operation_id: "op-1",
+      state: "succeeded",
+      result: {
+        account: "work",
+        query: "has:attachment",
+        hits: 1,
+        deduplicated: 0,
+        unreachable: [{ mailbox: "Archive", error: "timeout" }],
+        coverage: "local",
+        local_terms: ["has:attachment"],
+      },
+    });
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
+    expect(status()).toHaveTextContent(
+      "1 result on the server (local store only: has:attachment), 1 mailbox unreachable",
+    );
+  });
+
+  it("keeps the plain count when the server answered every term", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await searchServer(user, "handover");
+    event("operation.finished", {
+      operation_id: "op-1",
+      state: "succeeded",
+      result: { account: "work", query: "handover", hits: 0, deduplicated: 0, unreachable: [], coverage: "server", local_terms: [] },
+    });
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
+    expect(status()).toHaveTextContent(/^0 results on the server$/);
+  });
+
   it("the server leg of a local search keeps its hits and excludes them", async () => {
     const { user } = renderApp();
     await shellReady();

@@ -11,7 +11,13 @@ import { withNotice } from "@/app/activity";
 import type { Action } from "@/app/reducer";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
-import type { OperationFinishedPayload, OperationStatus, ServerHitPayload, ServerSearchHit } from "@/protocol/types";
+import type {
+  OperationFinishedPayload,
+  OperationStatus,
+  ServerHitPayload,
+  ServerSearchHit,
+  ServerSearchSettled,
+} from "@/protocol/types";
 import {
   type AppState,
   type MessageRef,
@@ -284,10 +290,16 @@ function addHit(search: SearchState, hit: SearchHit): SearchState {
 
 function summaryOf(result: unknown): SearchState["summary"] {
   if (typeof result !== "object" || result === null) return null;
-  const r = result as { hits?: unknown; unreachable?: unknown };
+  // A daemon that predates PERSO-131 sends neither `coverage` nor `local_terms`.
+  const r = result as Partial<Record<keyof ServerSearchSettled, unknown>>;
+  const localTerms =
+    r.coverage === "local" && Array.isArray(r.local_terms)
+      ? r.local_terms.filter((t): t is string => typeof t === "string")
+      : [];
   return {
     hits: typeof r.hits === "number" ? r.hits : 0,
     unreachable: Array.isArray(r.unreachable) ? r.unreachable.length : 0,
+    localTerms,
   };
 }
 
