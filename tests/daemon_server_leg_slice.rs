@@ -17,8 +17,13 @@
 //!                                                           -> {operation_id}
 //!   streams             state.event kind `message.server_hit`
 //!                       payload {operation_id, hit: ServerSearchHit}
-//!   settles with        {account, query, hits, deduplicated, unreachable: [{mailbox, error}]}
+//!   settles with        {account, query, hits, deduplicated, unreachable: [{mailbox, error}],
+//!                        coverage: server|local, local_terms}
 //! ```
+//!
+//! `coverage` and `local_terms` joined the settle in PERSO-131: on a plain IMAP
+//! server `has:attachment` is answered from the local store, and the settle
+//! names it as `mp search --json` does.
 //!
 //! # Why `message.search_server` and not `message.list_server`
 //!
@@ -148,7 +153,15 @@ const FETCH_RESULT: [&str; 6] = [
 ];
 
 /// The keys a settled `message.search_server` answers with.
-const SEARCH_RESULT: [&str; 5] = ["account", "deduplicated", "hits", "query", "unreachable"];
+const SEARCH_RESULT: [&str; 7] = [
+    "account",
+    "coverage",
+    "deduplicated",
+    "hits",
+    "local_terms",
+    "query",
+    "unreachable",
+];
 
 // ---------------------------------------------------------------------------
 // The fixture

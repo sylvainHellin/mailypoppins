@@ -371,10 +371,123 @@ pub struct ServerSearchHit {
     pub html_body: Option<String>,
 }
 
+/// Whether un-synced mail can be missing from a server search's hits, the
+/// `coverage` of [`ServerSearchSettled`] and of `mp search --json` (PERSO-122,
+/// PERSO-131).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum SearchCoverage {
+    /// The server answered every term.
+    #[default]
+    Server,
+    /// The local store answered at least one term, which `local_terms` names,
+    /// so a message the account has not synced cannot be among the hits.
+    Local,
+}
+
+/// One mailbox a server search could not search, which does not fail it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct UnreachableMailbox {
+    /// The sidebar label of the mailbox.
+    pub mailbox: String,
+    /// What the server answered, as one sentence.
+    #[serde(default)]
+    pub error: String,
+}
+
+/// What a `message.search_server` settles with (P5-U10c, `LST-08`).
+///
+/// The hits are not here: each streamed as a `message.server_hit` event while
+/// the search ran. What settles is the count, the hits dropped because the
+/// local pass was already showing them, the mailboxes that refused, and the
+/// coverage (PERSO-131): on a plain IMAP server `has:attachment` has no search
+/// key, so the daemon keeps only the hits the local store marks as carrying an
+/// attachment, and an un-synced message cannot be among them. The two fields
+/// mean what `mp search --json`'s do (PERSO-122).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ServerSearchSettled {
+    /// The account the search ran against.
+    pub account: String,
+    /// The query as the caller sent it.
+    #[serde(default)]
+    pub query: String,
+    /// The hits published, one `message.server_hit` each.
+    #[serde(default)]
+    pub hits: u64,
+    /// The hits dropped because `exclude_message_ids` named them.
+    #[serde(default)]
+    pub deduplicated: u64,
+    /// The mailboxes the server refused, in search order.
+    #[serde(default)]
+    pub unreachable: Vec<UnreachableMailbox>,
+    /// `local` when the store answered a term, `server` otherwise. Absent from
+    /// a daemon that predates PERSO-131, which reads as `server`.
+    #[serde(default)]
+    pub coverage: SearchCoverage,
+    /// The terms the store answered, in the grammar's own spelling
+    /// (`has:attachment`), and `[]` when the server answered every term.
+    #[serde(default)]
+    pub local_terms: Vec<String>,
+}
+
+impl ServerSearchSettled {
+    /// The caveat a client appends to its hit count, `local store only:
+    /// has:attachment`, or `None` when the server answered every term: the
+    /// words `mp search` prints in its result header.
+    pub fn local_store_note(&self) -> Option<String> {
+        (self.coverage == SearchCoverage::Local && !self.local_terms.is_empty())
+            .then(|| format!("local store only: {}", self.local_terms.join(", ")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A settle that names a locally answered term round-trips and carries
+    /// the CLI's caveat; one from a daemon that predates the two fields reads
+    /// as a search the server answered whole (PERSO-131).
+    #[test]
+    fn a_server_search_settle_carries_its_coverage() {
+        let settled = ServerSearchSettled {
+            account: "tum".to_string(),
+            query: "has:attachment".to_string(),
+            hits: 3,
+            deduplicated: 1,
+            unreachable: vec![UnreachableMailbox {
+                mailbox: "Archive".to_string(),
+                error: "timeout".to_string(),
+            }],
+            coverage: SearchCoverage::Local,
+            local_terms: vec!["has:attachment".to_string()],
+        };
+        let encoded = serde_json::to_value(&settled).expect("it serialises");
+        assert_eq!(encoded["coverage"], json!("local"));
+        assert_eq!(encoded["local_terms"], json!(["has:attachment"]));
+        assert_eq!(
+            encoded["unreachable"],
+            json!([{"mailbox": "Archive", "error": "timeout"}])
+        );
+        let decoded: ServerSearchSettled = serde_json::from_value(encoded).expect("it decodes");
+        assert_eq!(decoded, settled);
+        assert_eq!(
+            settled.local_store_note().as_deref(),
+            Some("local store only: has:attachment")
+        );
+
+        let older: ServerSearchSettled = serde_json::from_value(json!({
+            "account": "work", "query": "handover", "hits": 2,
+            "deduplicated": 0, "unreachable": [],
+        }))
+        .expect("a settle without the two fields decodes");
+        assert_eq!(older.coverage, SearchCoverage::Server);
+        assert!(older.local_terms.is_empty());
+        assert_eq!(older.local_store_note(), None);
+    }
 
     /// The committed fixture decodes into the typed row, `selector` included.
     #[test]

@@ -39,6 +39,15 @@
 //! list and the operation still succeeds. What does fail it is a credential
 //! that cannot be resolved, which happens once, before any mailbox is
 //! selected.
+//!
+//! # What the settle says about coverage
+//!
+//! A plain IMAP server has no search key for `has:attachment`, so the leg
+//! keeps the hits the local store marks as carrying an attachment and the
+//! settle names the term in `local_terms` with `coverage: "local"`
+//! (PERSO-131), the two fields `mp search --json` carries (PERSO-122): an
+//! un-synced message cannot be among those hits, and a client says so beside
+//! its count.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -46,7 +55,9 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
-use mp_protocol::listing::{MessageFlags, ServerSearchHit};
+use mp_protocol::listing::{
+    MessageFlags, SearchCoverage, ServerSearchHit, ServerSearchSettled, UnreachableMailbox,
+};
 use mp_protocol::{ErrorCode, RpcError};
 
 use crate::config::{AccountConfig, AuthMethod};
@@ -566,13 +577,10 @@ async fn run_search(
         search_imap(&request, &handle, &canonical).await
     };
     match outcome {
-        Ok((hits, deduplicated, unreachable)) => handle.succeed(json!({
-            "account": name,
-            "query": request.query,
-            "hits": hits,
-            "deduplicated": deduplicated,
-            "unreachable": unreachable,
-        })),
+        Ok(settled) => match serde_json::to_value(&settled) {
+            Ok(settled) => handle.succeed(settled),
+            Err(e) => handle.fail(DomainError::from(internal(format!("{e:#}")))),
+        },
         Err(e) => handle.fail(DomainError::from(super::server_error(&name, &e))),
     }
 }
@@ -592,32 +600,29 @@ async fn search_imap(
     request: &SearchRequest,
     handle: &OperationHandle,
     canonical: &CanonicalState,
-) -> anyhow::Result<(usize, usize, Vec<Value>)> {
+) -> anyhow::Result<ServerSearchSettled> {
     // One grammar (#0086a): the caller already parsed to the shared AST, so
     // this renders it for *this* server. Gmail runs has:attachment through
     // X-GM-RAW; a plain server has no attachment key, so the residue is
-    // post-filtered against the store.
+    // post-filtered against the store, and the settle names it in
+    // `local_terms` (PERSO-131) as `mp search --json` does (PERSO-122).
     let imap = crate::config::ImapConfig::load(&request.account)?;
     let host = imap.host.to_ascii_lowercase();
     let gmail = host == "imap.gmail.com"
         || host.ends_with(".gmail.com")
         || host.ends_with("googlemail.com");
-    let (imap_search, attachment_postfilter) = if gmail {
-        (
-            crate::search::to_gmail_search_command(&request.parsed)
-                .map_err(|e| anyhow::anyhow!("{e}"))?,
-            false,
-        )
-    } else {
-        let lowered =
-            crate::search::to_imap(&request.parsed).map_err(|e| anyhow::anyhow!("{e}"))?;
-        (lowered.search, lowered.attachment_postfilter)
-    };
+    let (imap_search, attachment_postfilter, local_terms) = imap_lowering(&request.parsed, gmail)?;
     let message_id = request.parsed.message_id.clone();
 
     let mut session = crate::imap_client::open_imap_session(&imap).await?;
     let per_mailbox = per_mailbox(request.limit, request.targets.len());
-    let mut state = Stream::new(request, handle, canonical, attachment_postfilter);
+    let mut state = Stream::new(
+        request,
+        handle,
+        canonical,
+        attachment_postfilter,
+        local_terms,
+    );
 
     for target in &request.targets {
         if state.spent >= request.limit {
@@ -646,16 +651,45 @@ async fn search_imap(
     Ok(state.settle())
 }
 
+/// The `SEARCH` command one IMAP server runs for `parsed`, whether the hits
+/// must be post-filtered against the store's attachment index, and the terms
+/// that post-filter answers, which is the settle's `local_terms`.
+///
+/// The same lowering `mp search` runs on a server search: Gmail runs every
+/// term through `X-GM-RAW`, and a plain server has no attachment key.
+fn imap_lowering(
+    parsed: &crate::search::Query,
+    gmail: bool,
+) -> anyhow::Result<(String, bool, Vec<String>)> {
+    if gmail {
+        let search =
+            crate::search::to_gmail_search_command(parsed).map_err(|e| anyhow::anyhow!("{e}"))?;
+        return Ok((search, false, Vec::new()));
+    }
+    let lowered = crate::search::to_imap(parsed).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let local_terms = lowered.local_terms();
+    Ok((lowered.search, lowered.attachment_postfilter, local_terms))
+}
+
+/// `local` when the store answered any term, `server` otherwise.
+fn coverage_of(local_terms: &[String]) -> SearchCoverage {
+    if local_terms.is_empty() {
+        SearchCoverage::Server
+    } else {
+        SearchCoverage::Local
+    }
+}
+
 /// The Graph leg, which searches a folder at a time over HTTP.
 async fn search_graph(
     request: &SearchRequest,
     handle: &OperationHandle,
     canonical: &CanonicalState,
-) -> anyhow::Result<(usize, usize, Vec<Value>)> {
+) -> anyhow::Result<ServerSearchSettled> {
     let config = crate::config::GraphConfig::load(&request.account)?;
     let client = crate::graph::GraphClient::new_async(&config).await?;
     let per_mailbox = per_mailbox(request.limit, request.targets.len());
-    let mut state = Stream::new(request, handle, canonical, false);
+    let mut state = Stream::new(request, handle, canonical, false, Vec::new());
 
     for target in &request.targets {
         if state.spent >= request.limit {
@@ -685,6 +719,9 @@ struct Stream<'a> {
     /// Whether a plain-IMAP `has:attachment` residue must be post-filtered
     /// against the store, which is #0086a option (b).
     attachment_postfilter: bool,
+    /// The terms the store answered rather than the server, which the settle
+    /// reports so a client can say un-synced mail is not covered (PERSO-131).
+    local_terms: Vec<String>,
     /// Hits taken against the budget, dropped ones included: the budget is
     /// what the server was asked for, not what survived the dedup.
     spent: usize,
@@ -693,7 +730,7 @@ struct Stream<'a> {
     /// Hits the local pass was already showing.
     deduplicated: usize,
     /// One `{mailbox, error}` per mailbox that refused.
-    unreachable: Vec<Value>,
+    unreachable: Vec<UnreachableMailbox>,
     /// Message-IDs this search has already published, so two mailboxes holding
     /// one message report it once.
     seen: HashSet<String>,
@@ -705,12 +742,14 @@ impl<'a> Stream<'a> {
         handle: &'a OperationHandle,
         canonical: &'a CanonicalState,
         attachment_postfilter: bool,
+        local_terms: Vec<String>,
     ) -> Stream<'a> {
         Stream {
             request,
             handle,
             canonical,
             attachment_postfilter,
+            local_terms,
             spent: 0,
             published: 0,
             deduplicated: 0,
@@ -786,13 +825,24 @@ impl<'a> Stream<'a> {
     /// One mailbox the server refused, which does not fail the search.
     fn refused(&mut self, label: &str, error: &anyhow::Error) {
         log::warn!("[search_server] search in {label} failed: {error}");
-        self.unreachable
-            .push(json!({"mailbox": label, "error": format!("{error}")}));
+        self.unreachable.push(UnreachableMailbox {
+            mailbox: label.to_string(),
+            error: format!("{error}"),
+        });
     }
 
-    /// `(hits, deduplicated, unreachable)`.
-    fn settle(self) -> (usize, usize, Vec<Value>) {
-        (self.published, self.deduplicated, self.unreachable)
+    /// What the operation settles with.
+    fn settle(self) -> ServerSearchSettled {
+        let coverage = coverage_of(&self.local_terms);
+        ServerSearchSettled {
+            account: self.request.account.name.clone(),
+            query: self.request.query.clone(),
+            hits: self.published as u64,
+            deduplicated: self.deduplicated as u64,
+            unreachable: self.unreachable,
+            coverage,
+            local_terms: self.local_terms,
+        }
     }
 }
 
@@ -880,6 +930,32 @@ mod tests {
             50,
             "a search with no target spends none"
         );
+    }
+
+    /// A plain IMAP server answers `has:attachment` from the store and the
+    /// settle says so; Gmail answers it itself (PERSO-131).
+    #[test]
+    fn a_plain_imap_attachment_term_is_reported_as_local() {
+        let parsed = crate::search::from_cli(
+            "from:borrmann has:attachment",
+            &crate::search::Flags::default(),
+        )
+        .expect("the query parses");
+
+        let (_, postfilter, local_terms) = imap_lowering(&parsed, false).expect("plain IMAP");
+        assert!(postfilter);
+        assert_eq!(local_terms, vec!["has:attachment".to_string()]);
+        assert_eq!(coverage_of(&local_terms), SearchCoverage::Local);
+
+        let (_, postfilter, local_terms) = imap_lowering(&parsed, true).expect("Gmail");
+        assert!(!postfilter);
+        assert!(local_terms.is_empty());
+        assert_eq!(coverage_of(&local_terms), SearchCoverage::Server);
+
+        let plain = crate::search::from_cli("from:borrmann", &crate::search::Flags::default())
+            .expect("the query parses");
+        let (_, _, local_terms) = imap_lowering(&plain, false).expect("plain IMAP");
+        assert_eq!(coverage_of(&local_terms), SearchCoverage::Server);
     }
 
     /// A target is named by its label or by its server name, and anything else
