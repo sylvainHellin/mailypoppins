@@ -670,6 +670,12 @@ export type AppState = {
   theme: Theme;
   /** How the reader shows a message, as stored in desktop.json (src/app/readerMode.ts); html until it is read. */
   readerMode: ReaderMode;
+  /**
+   * The `targetKey` of the one draft whose preview shows its send HTML rather
+   * than its Markdown, which `tt` flips on a draft; never stored, and cleared
+   * when the preview goes, so every draft opens on its Markdown (PERSO-136).
+   */
+  draftHtml: string | null;
   bootstrap: Bootstrap | null;
   accounts: Loadable<AccountInfo[]>;
   mailboxes: Record<string, Loadable<MailboxListing>>;
@@ -873,6 +879,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     theme: "dark",
     // readerMode.ts's DEFAULT_READER_MODE, spelled out for the same reason.
     readerMode: "html",
+    draftHtml: null,
     bootstrap: null,
     accounts: emptyLoadable(),
     mailboxes: {},
@@ -1095,4 +1102,19 @@ export function filteredDrafts(list: MessageList | null, filter: string): DraftI
 /** The Drafts list is shown (not a search over it). */
 export function draftsShown(s: AppState): boolean {
   return !s.search && s.messages.data?.kind === "drafts";
+}
+
+/**
+ * The `targetKey` of the draft the reader pane shows, by `ReaderPane`'s own
+ * test: an embedded editor's exit summary, else a selected draft; null while
+ * an embedded editor fills the pane, or when the pane shows anything else.
+ */
+export function readerDraftKey(s: AppState): string | null {
+  const shown = s.composeShown;
+  const editor = shown ? s.compose[shown] : undefined;
+  if (editor?.kind === "embedded") return null;
+  const summary = shown && !editor ? draftOfKey(shown) : null;
+  if (summary) return targetKey(summary);
+  const { account, draft } = s.selection;
+  return draft && account ? targetKey({ account, draft }) : null;
 }

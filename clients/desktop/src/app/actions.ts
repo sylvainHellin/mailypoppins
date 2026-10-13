@@ -25,6 +25,7 @@ import {
   liveHolds,
   LIST_WIDTH_MIN,
   LIST_WIDTH_STEP,
+  readerDraftKey,
   readerKey,
   sendingRefusal,
   visibleNotices,
@@ -324,8 +325,12 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return void saveTheme(dispatch, "light");
     case "theme_system":
       return void saveTheme(dispatch, "system");
-    case "toggle_reader_mode":
+    case "toggle_reader_mode": {
+      // On a draft `tt` flips its Markdown and its send HTML, and stores nothing (PERSO-136).
+      const draftKey = readerDraftKey(s);
+      if (draftKey) return dispatch({ type: "draft_view_toggled", key: draftKey });
       return void toggleReaderMode(s, dispatch);
+    }
     case "reader_html":
       return void saveReaderMode(dispatch, "html");
     case "reader_text":

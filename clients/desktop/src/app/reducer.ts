@@ -236,6 +236,8 @@ export type Action =
   | { type: "version_info"; info: VersionInfo }
   | { type: "theme_set"; theme: Theme }
   | { type: "reader_mode_set"; mode: ReaderMode }
+  | { type: "draft_view_toggled"; key: string }
+  | { type: "draft_view_reset" }
   | { type: "accounts_loaded"; gen: number; accounts: AccountInfo[] }
   | { type: "accounts_failed"; gen: number; error: GuiError }
   | { type: "mailboxes_loaded"; account: string; gen: number; listing: MailboxListing }
@@ -1357,6 +1359,10 @@ function reduce(s: AppState, a: Action): AppState {
       return s.theme === a.theme ? s : { ...s, theme: a.theme };
     case "reader_mode_set":
       return s.readerMode === a.mode ? s : { ...s, readerMode: a.mode };
+    case "draft_view_toggled":
+      return { ...s, draftHtml: s.draftHtml === a.key ? null : a.key };
+    case "draft_view_reset":
+      return s.draftHtml === null ? s : { ...s, draftHtml: null };
 
     case "accounts_loaded": {
       let next: AppState = { ...s, accounts: loaded(s.accounts, a.gen, a.accounts) };

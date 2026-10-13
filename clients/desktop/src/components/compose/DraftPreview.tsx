@@ -2,10 +2,11 @@
 // status and the body the dry run renders), `draft_validate`'s report and
 // the `attachments:` list `draft_attachments` reads from the file, read
 // again whenever the listing's row changes (a save in the editor).
-// The body follows the reader mode (docs/reader.md, "Drafts and server-only
-// hits"): in text mode the Markdown as written, in html mode the HTML a send
-// would build (`draft.html`, PERSO-136) in the reader's sandboxed frame,
-// fetched again with the rest when the row changes.
+// The body is the Markdown as written; `tt` switches it to the HTML a send
+// would build (`draft.html`, PERSO-136) in the reader's sandboxed frame and
+// back, through `state.draftHtml`, whatever the reader mode is (docs/reader.md,
+// "Drafts and server-only hits"). The frame is fetched again with the rest
+// when the row changes, and every draft opens on its Markdown.
 // `ComposeSummary` is the same preview after an embedded editor exited with
 // 0 on a draft the selection does not show.
 
@@ -64,6 +65,10 @@ export function DraftPreview({ account, draft, standalone = false }: { account: 
   // A row that changed (a save, an approve) is read again.
   const key = `${account}/${draft.id}|${draft.path}|${draft.status}|${draft.subject}|${draft.to}|${draft.valid}|${s.messages.loadedGen}`;
   const invalid = draft.diagnostic !== null || !draft.valid;
+  const showsHtml = s.draftHtml === targetKey({ account, draft: draft.id });
+
+  // The next draft, or this one shown again, opens on its Markdown.
+  useEffect(() => () => dispatch({ type: "draft_view_reset" }), [dispatch]);
 
   useEffect(() => {
     if (invalid) return;
@@ -232,7 +237,7 @@ export function DraftPreview({ account, draft, standalone = false }: { account: 
               ))}
             </ul>
           ) : null}
-          {s.readerMode === "html" ? (
+          {showsHtml ? (
             // Keyed on the row, so a save or a reload fetches the rendition again.
             <ReaderBody key={key} htmlUrl={draftReaderUrl(account, draft.id)} subject={subject} label="Draft as sent" />
           ) : (

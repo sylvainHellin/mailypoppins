@@ -774,7 +774,7 @@ The frontend keeps each awaited operation's last report (`progress` in the model
 ## The reader
 
 `message_html_meta` answers the headers and `html_url`, `mpmsg://localhost/<account>/<row_id>`.
-A draft's preview in html mode loads `mpmsg://localhost/<account>/drafts/<id>` (`reader::draft_url`, spelled the same by the frontend's `draftReaderUrl`), which the scheme answers with `draft.html`'s `html` under the same policy and bridge as a message (PERSO-136).
+A draft's preview, after `tt` (the Markdown shows first), loads `mpmsg://localhost/<account>/drafts/<id>` (`reader::draft_url`, spelled the same by the frontend's `draftReaderUrl`), which the scheme answers with `draft.html`'s `html` under the same policy and bridge as a message (PERSO-136).
 The iframe loads that URL with `sandbox="allow-popups allow-scripts"` and never `allow-same-origin`; the plan's section "Reading HTML bodies" explains both.
 The frontend side, the bridge, the refused-link notice and the guard's verification in a real webview are in [reader.md](reader.md).
 The header is built from constants and never from a policy read out of the message: a sender can hide a meta-looking policy inside the doctype, ahead of the daemon's tag, and a header may carry `report-uri`.
