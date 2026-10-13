@@ -1097,6 +1097,132 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         );
     }
 
+    /// An app on the Drafts mailbox with the cursor on the one draft `file`
+    /// holds, and a session that records what it asks the daemon.
+    fn app_on_drafts_row(
+        fx: &Fixture,
+        file: &str,
+        id: &str,
+    ) -> (App, super::super::daemon::CallLog) {
+        let dir = crate::config::drafts_dir("alice");
+        let store = fx.store();
+        crate::store::drafts::refresh(&store, "alice", &dir).unwrap();
+        assert!(dir.join(file).exists());
+
+        let log = super::super::daemon::CallLog::default();
+        let mut app = App::default_for_tests();
+        app.account_config.name = "alice".to_string();
+        app.mailboxes = crate::tui::app::build_mailboxes(&app.account_config);
+        app.active_mailbox = app
+            .find_mailbox_by_kind(crate::tui::app::MailboxKind::Drafts)
+            .expect("the Drafts mailbox is one of the four roles");
+        app.session = Some(TestDaemon::new(&["alice"]).recording_session(log.clone()));
+        app.emails = std::sync::Arc::new(vec![draft_entry(Some(id))]);
+        app.rebuild_visible();
+        app.list_index = 0;
+        (app, log)
+    }
+
+    fn press(app: &mut App, chord: &str) {
+        for c in chord.chars() {
+            app.handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char(c),
+            ));
+        }
+    }
+
+    /// `tb` on a reply draft (PERSO-136): the Markdown file has no markup, so
+    /// the key asks `draft.html` for the HTML part the send would build and
+    /// hands the browser that, signature once and the companion's quoted
+    /// original below it, hardened like a received message's rendition.
+    #[test]
+    fn tb_on_a_drafts_row_opens_the_html_the_send_would_build() {
+        let fx = Fixture::new();
+        let dir = crate::config::drafts_dir("alice");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("re-hello.md"),
+            format!(
+                "---\nid: re0000000000001\nto: bob@example.com\nsubject: \"Re: Hello\"\n\
+                 status: draft\n---\n\nDanke, passt.\n\n{}\nGruss aus dem Test\n{}\n\n{}\n\n\
+                 > hello there\n",
+                crate::draft::SIG_START,
+                crate::draft::SIG_END,
+                crate::draft::QUOTE_MARKER,
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("re-hello.html"),
+            "<p style=\"color:#666\">On Monday, bob wrote:</p>\n<div><p>the original markup</p></div>",
+        )
+        .unwrap();
+        let (mut app, log) = app_on_drafts_row(&fx, "re-hello.md", "re0000000000001");
+
+        press(&mut app, "tb");
+
+        let calls = log.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![(
+                "draft.html".to_string(),
+                serde_json::json!({"account": "alice", "id": "re0000000000001"})
+            )],
+            "tb on a draft asks draft.html and nothing else"
+        );
+        let path = match app.pending_actions.back() {
+            Some(crate::tui::app::Action::OpenHtmlInBrowser(path)) => path.clone(),
+            other => panic!("tb queued no browser open: {other:?}"),
+        };
+        assert_eq!(path.extension().unwrap(), "html");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("Danke, passt."), "{written}");
+        assert_eq!(
+            written.matches("Gruss aus dem Test").count(),
+            1,
+            "{written}"
+        );
+        assert!(written.contains("the original markup"), "{written}");
+        assert!(
+            !written.contains("hello there"),
+            "the companion replaces the Markdown quote, as on the send: {written}"
+        );
+        assert!(
+            written.contains("<meta http-equiv=\"Content-Security-Policy\""),
+            "{written}"
+        );
+        assert!(written.contains("<meta charset=\"UTF-8\">"), "{written}");
+        assert!(app.status_message.is_none(), "{:?}", app.status_message);
+    }
+
+    /// A draft the daemon cannot find says so on the status line and opens
+    /// nothing, rather than the received-message line about missing markup.
+    #[test]
+    fn tb_on_a_vanished_draft_says_the_preview_failed() {
+        let fx = Fixture::new();
+        let dir = crate::config::drafts_dir("alice");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("gone.md"),
+            "---\nid: gone000000000001\nto: bob@example.com\nsubject: Gone\nstatus: draft\n---\n\nBody\n",
+        )
+        .unwrap();
+        let (mut app, log) = app_on_drafts_row(&fx, "gone.md", "gone000000000001");
+        std::fs::remove_file(dir.join("gone.md")).unwrap();
+
+        press(&mut app, "tb");
+
+        assert_eq!(log.lock().unwrap().len(), 1, "one draft.html call");
+        assert!(
+            !app.pending_actions
+                .iter()
+                .any(|a| matches!(a, crate::tui::app::Action::OpenHtmlInBrowser(_))),
+            "nothing to open"
+        );
+        let status = app.status_message.clone().unwrap();
+        assert!(status.starts_with("Draft preview failed: "), "{status}");
+    }
+
     /// The server-search hit that resolved to no local row: its attachments
     /// and its markup are the bytes the overlay is already holding, written
     /// out so the picker and the browser see files either way.

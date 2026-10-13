@@ -103,6 +103,38 @@ impl TestDaemon {
     }
 }
 
+/// Every call a recording session forwarded, as `(method, params)` in order.
+pub(super) type CallLog = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+/// A [`TestDaemon`] that writes down each call before it answers it.
+struct Recording {
+    daemon: TestDaemon,
+    log: CallLog,
+}
+
+impl Queries for Recording {
+    fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        self.log
+            .lock()
+            .expect("the call log")
+            .push((method.to_string(), params.clone()));
+        self.daemon.call(method, params)
+    }
+}
+
+impl TestDaemon {
+    /// [`Self::session`], with every call the `App` makes through it written
+    /// to `log` first: what a key handler that reads its door off
+    /// `app.session` asked the daemon for, which a test asserts on.
+    pub(super) fn recording_session(self, log: CallLog) -> Session {
+        let root = self.root.clone();
+        Session::serving(move || {
+            std::mem::forget(crate::config::test_env::DataDirOverride::set(&root));
+            Recording { daemon: self, log }
+        })
+    }
+}
+
 impl Queries for TestDaemon {
     fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
         let ctx = ClientCtx {

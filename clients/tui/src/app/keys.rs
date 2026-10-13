@@ -833,8 +833,13 @@ impl App {
                 // The markup is a blob (or the html part of the raw message),
                 // not a `.html` beside a `.md`, so it is written to a temp
                 // file on demand and that is what the browser opens (#0052
-                // scope item 9).
-                if let Some(msg) = self.selected_email_ref() {
+                // scope item 9). A Drafts row has no markup of its own, so it
+                // opens the HTML part the send would build (PERSO-136).
+                if let Some(id) = self.selected_email().and_then(|e| e.draft_id.clone()) {
+                    if let Some(path) = crate::actions::html_rendition_for_draft(self, &id) {
+                        self.push_action(Action::OpenHtmlInBrowser(path));
+                    }
+                } else if let Some(msg) = self.selected_email_ref() {
                     if let Some(path) = crate::actions::html_rendition_for_row(self, msg.row_id()) {
                         self.push_action(Action::OpenHtmlInBrowser(path));
                     }

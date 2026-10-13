@@ -938,6 +938,25 @@ pub fn html_rendition(
         .ok_or_else(|| "the rendition was materialised without a path".to_string())
 }
 
+/// The HTML part `send.draft` would send for one draft, as a browser
+/// rendition (PERSO-136).
+///
+/// `draft.html` builds it with the send path's own renderer, signature and
+/// quoted original included, and hardens it the way `message.html` is, so the
+/// caller only writes it to a file. A draft has no handle method: the answer
+/// is the string, inline.
+pub fn draft_html(commands: &dyn Queries, account: &str, id: &str) -> Result<String, String> {
+    let answer = commands
+        .call(
+            mp_protocol::draft::METHOD_DRAFT_HTML,
+            json!({"account": account, "id": id}),
+        )
+        .map_err(|e| format!("{e:#}"))?;
+    serde_json::from_value::<mp_protocol::draft::DraftHtml>(answer)
+        .map(|rendition| rendition.html)
+        .map_err(|e| format!("draft.html answered something else: {e}"))
+}
+
 /// One materialised handle: the id that releases it and the file it wrote.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rendition {

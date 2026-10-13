@@ -312,6 +312,41 @@ pub fn html_rendition_for_row(app: &mut App, row_id: i64) -> Option<PathBuf> {
     }
 }
 
+/// The browser rendition of a draft, or `None` with the status line saying
+/// why (PERSO-136).
+///
+/// The Markdown file has no markup of its own, but the send renders one, and
+/// `draft.html` answers exactly that: the signature the body carries, the
+/// configured font, and the quoted original of a reply or a forward. It is
+/// written where a server-search hit's markup goes, keyed by the draft id, so
+/// a second `tb` on the same draft overwrites the first preview rather than
+/// piling up files.
+pub fn html_rendition_for_draft(app: &mut App, id: &str) -> Option<PathBuf> {
+    let account = app.account_config.name.clone();
+    match commands::draft_html(&daemon_door(app), &account, id) {
+        Ok(html) => {
+            // A hand-written `id:` is any string, and this one names a
+            // directory.
+            let stem: String = id
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            html_rendition(app, &html, &format!("draft-{stem}"))
+        }
+        Err(e) => {
+            log::warn!("[actions] no browser rendition for draft {id}: {e}");
+            app.set_status_level(format!("Draft preview failed: {e}"), StatusLevel::Error);
+            None
+        }
+    }
+}
+
 /// [`html_rendition_for_row`] over markup already in hand, which is the
 /// server-search hit that resolved to no row.
 pub fn html_rendition(app: &mut App, html: &str, stem: &str) -> Option<PathBuf> {
