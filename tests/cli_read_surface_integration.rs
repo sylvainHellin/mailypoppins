@@ -425,6 +425,39 @@ fn search_local_json_prints_the_hits_as_one_object() {
     assert_eq!(results["messages"][0]["body"], "kickoff\n", "{stdout}");
 }
 
+/// `mp search --local` answers `filename:` and `--filename` from the stored
+/// attachment names (PERSO-130), case-insensitively, instead of refusing them.
+#[test]
+fn search_local_json_matches_an_attachment_filename() {
+    let tmp = fixture_tree();
+    for args in [
+        &["search", "--local", "--json", "filename:NOTES.pdf"][..],
+        &["search", "--local", "--json", "--filename", "notes"][..],
+    ] {
+        let (ok, stdout, stderr) = run(&tmp, args);
+        assert!(ok, "{args:?} failed: {stderr}");
+        let results: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {stdout}"));
+        assert_eq!(results["source"], "local", "{stdout}");
+        let selectors: Vec<&str> = results["messages"]
+            .as_array()
+            .expect("a messages array")
+            .iter()
+            .filter_map(|m| m["selector"].as_str())
+            .collect();
+        assert_eq!(
+            selectors,
+            vec!["mp://alpha/inbox/Bericht@example.com"],
+            "{args:?}: {stdout}"
+        );
+    }
+
+    let (ok, stdout, stderr) = run(&tmp, &["search", "--local", "--json", "filename:agenda"]);
+    assert!(ok, "a filename with no match is not an error: {stderr}");
+    let results: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(results["messages"], serde_json::json!([]), "{stdout}");
+}
+
 /// `mp contacts search --json` is one object whose rows carry the address, the
 /// name and the counts the tier glyph is drawn from.
 #[test]

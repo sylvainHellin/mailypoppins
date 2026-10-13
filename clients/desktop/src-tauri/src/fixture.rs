@@ -3077,7 +3077,7 @@ impl Fixture {
                     return Err(refused(method, -32602, "the query has no searchable term"));
                 }
                 // The daemon's refusal of a term its index has no column for
-                // (`to:`, `cc:`, `filename:`, `message-id:`), in its words.
+                // (`to:`, `cc:`, `message-id:`), in its words.
                 if let Ok(ast) = mp_core::search::parse(&query) {
                     if let Err(e) = mp_core::search::to_fts(&ast) {
                         return Err(refused(method, -32602, &e.to_string()));

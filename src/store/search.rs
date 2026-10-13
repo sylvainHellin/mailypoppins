@@ -24,14 +24,15 @@
 //! quote), so the query goes through the one shared parser in
 //! [`crate::search`] (#0086a) and is lowered here by [`crate::search::to_fts`]
 //! into a quoted `MATCH` expression plus the SQL predicates the contentless
-//! index cannot carry (an attachment column test and a date range). That single
+//! index cannot carry (an attachment column test, an attachment-name match
+//! against `message_blobs.filename`, and a date range). That single
 //! parser is what closes the #0043 two-grammar debt: `--local` and the server
 //! path now read the same input. [`fts_expression`] survives as a thin renderer
 //! for the callers and tests that only want the `MATCH` string.
 
 use anyhow::{Context, Result};
 
-use super::read::{row_columns, row_from_sql, MessageRow};
+use super::read::{row_columns, row_from_sql, MessageRow, CALENDAR_SIDECAR_NAME};
 use super::Store;
 
 pub use crate::search::fts_expression;
@@ -52,6 +53,21 @@ fn date_to_timestamp(date: &str) -> Option<i64> {
     chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
         .ok()
         .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
+}
+
+/// A `filename:` substring as a `LIKE` pattern: `%`, `_` and the escape
+/// character itself match literally, so `filename:100%` is not a wildcard.
+fn filename_like_pattern(needle: &str) -> String {
+    let mut out = String::with_capacity(needle.len() + 2);
+    out.push('%');
+    for c in needle.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('%');
+    out
 }
 
 /// Search one account's messages, best match first.
@@ -90,6 +106,7 @@ pub fn search_ast(
     // nothing to answer, the same honest refusal the old parser gave.
     if render.match_expr.is_none()
         && !render.has_attachment
+        && render.filenames.is_empty()
         && render.before.is_none()
         && render.after.is_none()
     {
@@ -99,8 +116,9 @@ pub fn search_ast(
     let columns = row_columns();
 
     // The predicates the contentless FTS index cannot carry ride as ordinary
-    // SQL over the joined `messages` row: an attachment column test and a date
-    // range against the same `date_sort` unix seconds ingest stamped.
+    // SQL over the joined `messages` row: an attachment column test, an
+    // attachment-name match, and a date range against the same `date_sort`
+    // unix seconds ingest stamped.
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut predicates = String::new();
 
@@ -123,6 +141,23 @@ pub fn search_ast(
     }
     if render.has_attachment {
         predicates.push_str(" AND messages.has_attachments = 1");
+    }
+    // `filename:` matches the names ingest recorded on `message_blobs`, which
+    // stay after retention evicts the bytes. The iMIP sidecar is excluded, as
+    // the read path excludes it from a message's attachments. `LIKE` folds
+    // ASCII case only: a non-ASCII letter must match its stored case.
+    for group in &render.filenames {
+        let mut alternatives: Vec<String> = Vec::new();
+        for needle in group {
+            alternatives.push(format!("b.filename LIKE ?{} ESCAPE '\\'", binds.len() + 1));
+            binds.push(Box::new(filename_like_pattern(needle)));
+        }
+        predicates.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM message_blobs b \
+             WHERE b.message_row = messages.id AND b.kind = 'attachment' \
+               AND b.filename <> '{CALENDAR_SIDECAR_NAME}' AND ({}))",
+            alternatives.join(" OR ")
+        ));
     }
     if let Some(ref after) = render.after {
         let ts = date_to_timestamp(after)

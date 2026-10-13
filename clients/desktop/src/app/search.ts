@@ -150,11 +150,11 @@ export function afterLocalPass(s: AppState): AppState {
 export const REROUTED_NOTICE = "The store's index cannot answer this query, so the server searches it.";
 
 /**
- * `search_local` refused a query the store's index cannot answer (recipient,
- * filename and message-id terms, or an OR group with a date or attachment
- * term): the same query goes to the server, which can, scoped to the query's
- * own `in:` mailbox as the form's run is, and the notice line says why
- * (PERSO-115).
+ * `search_local` refused a query the store's index cannot answer (recipient
+ * and message-id terms, an OR group with a date or attachment term, or one
+ * mixing a filename with another term): the same query goes to the server,
+ * which can, scoped to the query's own `in:` mailbox as the form's run is,
+ * and the notice line says why (PERSO-115).
  */
 export function localRerouted(s: AppState, seq: number, inMailbox: string | null = null): AppState {
   const search = s.search;
