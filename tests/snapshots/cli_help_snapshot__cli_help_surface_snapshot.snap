@@ -461,8 +461,9 @@ Examples:
 
 Backend honesty: on Gmail and Exchange every term runs server-side. On plain
 IMAP has:attachment has no server key, so it is answered from the local store
-(synced mail only) and the run prints a warning. filename: is Gmail/Exchange/
---local only.
+(synced mail only): the run warns on stderr, the result header on stdout says
+"local store only: has:attachment", and --json sets coverage to "local" with
+the term in local_terms. filename: is Gmail/Exchange/--local only.
 
 Usage: mp search [OPTIONS] [QUERY]
 
@@ -515,7 +516,7 @@ Options:
           Search the local store's full-text index instead of the server (offline, ranked, covers every synced mailbox at once)
 
       --json
-          Emit one JSON object {account, query, source: local|server, messages: [...]} on stdout, messages as in `mp list-messages --json` plus body (--full) or preview (server hit); warnings stay on stderr
+          Emit one JSON object {account, query, source: local|server, coverage: server|local, local_terms: [...], messages: [...]} on stdout, messages as in `mp list-messages --json` plus body (--full) or preview (server hit); coverage is local when the store answered any term, which local_terms names; warnings stay on stderr
 
   -s, --signature <SIGNATURE>
           Signature to use (overrides config default)

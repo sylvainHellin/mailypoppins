@@ -403,6 +403,9 @@ fn search_local_json_prints_the_hits_as_one_object() {
     assert_eq!(results["account"], "alpha");
     assert_eq!(results["query"], "Bericht");
     assert_eq!(results["source"], "local");
+    // The store answered everything, so un-synced mail is not covered.
+    assert_eq!(results["coverage"], "local");
+    assert_eq!(results["local_terms"], serde_json::json!([]));
     let messages = results["messages"].as_array().expect("a messages array");
     assert!(
         messages

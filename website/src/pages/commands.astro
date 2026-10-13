@@ -463,6 +463,12 @@ mp send --invite --to me@example.com --subject "Kita closed" --start 2026-12-24 
         Plain IMAP (RFC 3501) has <em>no</em> attachment search key, so <code>mp</code>
         answers that part from the local store's synced mail and prints a warning that
         un-synced mail is not covered -- run <code>mp sync</code> for full coverage.
+        The result header on stdout repeats it, as in
+        <code>Fetched Emails (3 results, local store only: has:attachment)</code> or
+        <code>No results found (local store only: has:attachment)</code>, so a
+        script that drops stderr still sees it, and <code>--json</code> carries
+        <code>"coverage": "local"</code> with the term in <code>local_terms</code>
+        (<code>"coverage": "server"</code> when the server answered every term).
       </p>
 
       <h3 id="local-search-syntax">Local full-text search (<code>--local</code>)</h3>

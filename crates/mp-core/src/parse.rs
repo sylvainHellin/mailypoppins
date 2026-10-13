@@ -1200,16 +1200,35 @@ pub fn extract_email_address(raw: &str) -> String {
 }
 
 pub fn display_fetched_emails(emails: &[FetchedEmail], full_body: bool) {
+    display_fetched_emails_with_note(emails, full_body, None);
+}
+
+/// The parenthesis after `Fetched Emails`: the count, then `note` when there
+/// is one (`mp search` names the terms the local store answered there).
+pub fn fetched_emails_count(count: usize, note: Option<&str>) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    match note {
+        Some(note) => format!("({count} result{plural}, {note})"),
+        None => format!("({count} result{plural})"),
+    }
+}
+
+/// [`display_fetched_emails`] with `note` repeated in the header, which is on
+/// stdout and so survives a caller that drops stderr.
+pub fn display_fetched_emails_with_note(
+    emails: &[FetchedEmail],
+    full_body: bool,
+    note: Option<&str>,
+) {
     if emails.is_empty() {
         println!("No emails found matching the criteria.");
         return;
     }
 
     println!(
-        "\n{} ({} result{})\n",
+        "\n{} {}\n",
         "Fetched Emails".bold().cyan(),
-        emails.len(),
-        if emails.len() == 1 { "" } else { "s" }
+        fetched_emails_count(emails.len(), note)
     );
 
     for (i, email) in emails.iter().enumerate() {

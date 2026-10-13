@@ -496,12 +496,75 @@ pub struct MessageListingJson {
 
 /// `mp search --json`: one object, the hits best first (`--local`) or newest
 /// first (server). `source` is `"local"` or `"server"`.
+///
+/// `coverage` says whether un-synced mail can be among the hits: `"server"`
+/// when the server answered every term, `"local"` when the store answered at
+/// least one (a server search on plain IMAP with `has:attachment`) or all of
+/// them (`--local`). `local_terms` names the terms a server search had to
+/// answer from the store; a `--local` search answers the whole query there and
+/// leaves it empty.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SearchResultsJson {
     pub account: String,
     pub query: String,
     pub source: &'static str,
+    pub coverage: &'static str,
+    pub local_terms: Vec<String>,
     pub messages: Vec<ListedMessage>,
+}
+
+impl SearchResultsJson {
+    /// A `--local` search: the store answered everything.
+    pub fn local(account: &str, query: &str, messages: Vec<ListedMessage>) -> SearchResultsJson {
+        SearchResultsJson {
+            account: account.to_string(),
+            query: query.to_string(),
+            source: "local",
+            coverage: "local",
+            local_terms: Vec::new(),
+            messages,
+        }
+    }
+
+    /// A server search, `local_terms` being what the server had no key for.
+    pub fn server(
+        account: &str,
+        query: &str,
+        local_terms: &[String],
+        messages: Vec<ListedMessage>,
+    ) -> SearchResultsJson {
+        SearchResultsJson {
+            account: account.to_string(),
+            query: query.to_string(),
+            source: "server",
+            coverage: if local_terms.is_empty() {
+                "server"
+            } else {
+                "local"
+            },
+            local_terms: local_terms.to_vec(),
+            messages,
+        }
+    }
+}
+
+/// The coverage caveat of a server search's stdout header, `local store only:
+/// has:attachment`, or `None` when the server answered every term.
+///
+/// The stderr warning says the same at length; this is the copy that survives
+/// a caller piping stdout and dropping stderr, where an empty result would
+/// otherwise read as "no such mail" rather than "none synced".
+pub fn local_store_note(local_terms: &[String]) -> Option<String> {
+    (!local_terms.is_empty()).then(|| format!("local store only: {}", local_terms.join(", ")))
+}
+
+/// The line a server search with no hits prints, carrying the coverage caveat
+/// when the store answered a term.
+pub fn no_server_results(local_terms: &[String]) -> String {
+    match local_store_note(local_terms) {
+        Some(note) => format!("No results found ({note})"),
+        None => "No results found".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -794,5 +857,58 @@ mod tests {
         colored::control::set_override(false);
         let text = render_list("acct", &[("Inbox".into(), 0, Vec::new())]);
         assert_eq!(text, "No messages in the local store for acct\n");
+    }
+
+    /// A server search whose `has:attachment` the local store answered says so
+    /// on stdout, in the header and in the empty line, because an agent piping
+    /// stdout never sees the stderr warning (PERSO-122).
+    #[test]
+    fn a_locally_answered_term_is_named_on_stdout() {
+        let local = vec!["has:attachment".to_string()];
+        let note = local_store_note(&local);
+        assert_eq!(note.as_deref(), Some("local store only: has:attachment"));
+        assert_eq!(
+            crate::parse::fetched_emails_count(0, note.as_deref()),
+            "(0 results, local store only: has:attachment)"
+        );
+        assert_eq!(
+            crate::parse::fetched_emails_count(1, note.as_deref()),
+            "(1 result, local store only: has:attachment)"
+        );
+        assert_eq!(
+            no_server_results(&local),
+            "No results found (local store only: has:attachment)"
+        );
+
+        // A search the server answered in full keeps the old header.
+        assert_eq!(local_store_note(&[]), None);
+        assert_eq!(crate::parse::fetched_emails_count(20, None), "(20 results)");
+        assert_eq!(no_server_results(&[]), "No results found");
+    }
+
+    /// `mp search --json` carries the coverage a script tests before trusting
+    /// an empty or short answer (PERSO-122).
+    #[test]
+    fn the_search_json_carries_its_coverage() {
+        let render = crate::search::to_imap(&crate::search::parse("has:attachment").unwrap())
+            .expect("plain IMAP renders has:attachment as a post-filter");
+        let fallback =
+            SearchResultsJson::server("tum", "has:attachment", &render.local_terms(), Vec::new());
+        let json = serde_json::to_value(&fallback).unwrap();
+        assert_eq!(json["source"], "server");
+        assert_eq!(json["coverage"], "local");
+        assert_eq!(json["local_terms"], serde_json::json!(["has:attachment"]));
+        assert_eq!(json["messages"], serde_json::json!([]));
+
+        let full = SearchResultsJson::server("tum", "from:borrmann", &[], Vec::new());
+        let json = serde_json::to_value(&full).unwrap();
+        assert_eq!(json["coverage"], "server");
+        assert_eq!(json["local_terms"], serde_json::json!([]));
+
+        let offline = SearchResultsJson::local("tum", "ledger", Vec::new());
+        let json = serde_json::to_value(&offline).unwrap();
+        assert_eq!(json["source"], "local");
+        assert_eq!(json["coverage"], "local");
+        assert_eq!(json["local_terms"], serde_json::json!([]));
     }
 }
