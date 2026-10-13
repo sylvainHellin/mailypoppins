@@ -1,0 +1,9 @@
+{
+  "id": 61,
+  "jsonrpc": "2.0",
+  "method": "draft.html",
+  "params": {
+    "account": "work",
+    "id": "0123456789abcdef"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "id": 61,
+  "jsonrpc": "2.0",
+  "result": {
+    "account": "work",
+    "bytes": 655,
+    "html": "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'\"><!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"UTF-8\">\n</head>\n<body>\n<div style=\"font-family:Aptos, sans-serif;font-size:11pt\"><p style=\"margin:0 0 1em 0\">Danke, passt.</p>\n<p style=\"margin:0 0 1em 0\">Gruss aus dem Daemon</p>\n<div style=\"padding-top:1em\">\n<p style=\"color:#666\">On Mon, 29 Jun 2026 08:15:00 +0200, Ivana &lt;ivana@example.com&gt; wrote:</p>\n<div style=\"margin:0;padding:0 0 0 1em;border-left:2px solid #ccc\">\n<p>hier ist das Angebot</p>\n</div>\n</div></div>\n</body>\n</html>\n",
+    "id": "0123456789abcdef",
+    "selector": "mp://work/drafts/0123456789abcdef"
+  }
+}

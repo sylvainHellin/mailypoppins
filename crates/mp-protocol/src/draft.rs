@@ -236,6 +236,39 @@ pub struct DraftPreview {
     pub signature: Option<String>,
 }
 
+/// The method name of the draft's HTML rendition (PERSO-136).
+pub const METHOD_DRAFT_HTML: &str = "draft.html";
+
+/// The `result` of `draft.html`: the `text/html` part `send.draft` would send
+/// for this draft, as a browser rendition, inline in the answer (PERSO-136).
+///
+/// What a user previews before sending: the Markdown body rendered by the
+/// send path's own renderer, with the signature the body already carries
+/// (#0099), the configured font, and the quoted original HTML a reply or a
+/// forward keeps in the companion `.html` beside the draft. It is then
+/// hardened the way `message.html` is, with a UTF-8 charset and the
+/// `Content-Security-Policy` meta tag, because the quoted original is a
+/// sender's markup and a browser opens the file with no headers to lean on.
+/// `cid:` references in that quote stay as they are: the sent message carries
+/// no part for them either, and the policy blocks them.
+///
+/// The status does not matter: a `draft` previews as well as an `approved`
+/// one, and nothing here validates the recipients.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct DraftHtml {
+    /// The account the draft belongs to.
+    pub account: String,
+    /// The draft id.
+    pub id: String,
+    /// The canonical selector.
+    pub selector: String,
+    /// The rendition.
+    pub html: String,
+    /// The UTF-8 length of `html`.
+    pub bytes: u64,
+}
+
 /// One entry of a draft's `attachments:` list (#0131).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -393,6 +426,34 @@ mod tests {
         assert_eq!(
             created.subject, "Re: Angebot",
             "the subject the file was written with"
+        );
+    }
+
+    /// The committed `draft.html` pair decodes into its types: the request
+    /// addresses one draft by id, and the result's `bytes` is the length of
+    /// the hardened rendition it travels beside.
+    #[test]
+    fn the_committed_draft_html_fixtures_decode_whole() {
+        let raw = include_str!("../fixtures/draft.html.request.json");
+        let request: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        assert_eq!(request["method"], json!(METHOD_DRAFT_HTML));
+        assert_eq!(request["params"], json!({"account": "work", "id": "0123456789abcdef"}));
+
+        let raw = include_str!("../fixtures/draft.html.response.json");
+        let response: serde_json::Value = serde_json::from_str(raw).expect("the fixture is JSON");
+        let html: DraftHtml =
+            serde_json::from_value(response["result"].clone()).expect("the result decodes");
+        assert_eq!(html.account, "work");
+        assert_eq!(html.id, "0123456789abcdef");
+        assert_eq!(html.selector, "mp://work/drafts/0123456789abcdef");
+        assert_eq!(html.bytes, html.html.len() as u64);
+        assert!(html
+            .html
+            .starts_with("<meta http-equiv=\"Content-Security-Policy\""));
+        assert_eq!(
+            serde_json::to_value(&html).expect("serialises"),
+            response["result"],
+            "the result round-trips field for field"
         );
     }
 

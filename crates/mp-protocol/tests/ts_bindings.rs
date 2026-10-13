@@ -68,6 +68,7 @@ fn export_into(dir: &Path) -> usize {
         draft::DraftMessage,
         draft::DraftAttachment,
         draft::DraftAttachments,
+        draft::DraftHtml,
         events::Arrival,
         events::Severity,
         events::SyncCompleted,
