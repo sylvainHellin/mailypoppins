@@ -20,4 +20,4 @@ pub use mp_core::contacts::{
 mod extractor;
 pub mod hooks;
 
-pub use extractor::build_index_for_account;
+pub use extractor::{build_index_for_account, build_index_for_account_until};

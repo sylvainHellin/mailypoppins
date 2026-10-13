@@ -953,6 +953,11 @@ It is synchronous and terminal at once: it shuts the operation's token, settles 
 The worker observes its token whenever it next looks, and its later result is the ignored invalid transition above.
 The answer is therefore a fact and not a promise.
 
+Where a worker looks is part of its method's contract, and a method whose work ends in a write looks immediately before that write, its commit point.
+`contact.rebuild` looks every 256 rows of its walk and once more before the contacts cache write; `calendar.rsvp` and `send.invite` look once the reply or the invitation is built, before the durable submission.
+A cancel that lands before the commit point drops what was prepared: the cache stays as it was, nothing is submitted and no outbox row is minted.
+A cancel that lands after it cannot recall the write or the submission, which then completes under an operation that already reads `cancelled`, so a client words a cancelled end of these three as having stopped waiting, never as undone.
+
 Cancelling an operation that has already finished is `-32602` with `data` of `{operation_id, state}`, naming the state that made the cancel impossible, and both `operation.cancel` and `operation.status` refuse an id the daemon never issued with `-32602` and `data` of `{operation_id}`.
 
 **A settled operation is remembered for the next 256 operations and then forgotten**, and an id past that window answers exactly as one this daemon never issued.
