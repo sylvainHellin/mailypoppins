@@ -830,7 +830,8 @@ Two operations carry what the TUI's search overlay still does in process: the me
 message.search_server {account, query, mailboxes?: [str], limit?, exclude_message_ids?: [str]}
         -> {operation_id}
    streams  state.event kind `message.server_hit`, payload {operation_id, hit}
-   settles  {account, query, hits, deduplicated, unreachable: [{mailbox, error}]}
+   settles  {account, query, hits, deduplicated, unreachable: [{mailbox, error}],
+             coverage: "server"|"local", local_terms: [str]}
 
 message.fetch {account, mailbox, message_id} -> {operation_id}
    settles  {account, mailbox, uid, row_id, selector, already_present}
@@ -858,6 +859,12 @@ A hit that resolves to a local row is not dropped: it arrives with its `row_id` 
 The in-process leg logs a warning per mailbox and keeps going, because four folders of answers are worth having when the fifth is refused; `unreachable` is that list and the operation still `succeeded`.
 What does fail the operation is a credential that cannot be resolved, which happens once, before any mailbox is selected.
 An account that configures no server at all is `-32006` with `{account, state: "local_only"}` at the call, the same refusal a sync of it makes.
+
+**The settle says which terms the store answered.**
+A plain IMAP server has no search key for `has:attachment`, so the daemon searches without it and keeps the hits the local store marks as carrying an attachment; a message the account has not synced cannot be among them.
+The settle then carries `coverage: "local"` and `local_terms: ["has:attachment"]`, and `coverage: "server"` with `local_terms: []` when the server answered every term, as on Gmail and Graph; the two fields mean what `mp search --json`'s do.
+A client puts the caveat `mp search` prints, `local store only: has:attachment`, after its count, so an empty or short answer does not read as "no such mail".
+The settle is `mp_protocol::listing::ServerSearchSettled`.
 
 **`message.fetch` is idempotent rather than a refusal.**
 A message the account's store already holds answers with that row and `already_present: true`, opening no session at all; the overlay keeps its "Already in the local store" line by branching on the boolean.
@@ -1398,3 +1405,8 @@ On the client side, `mp_client::session` stopped flattening a refusal into its t
 The types are `mp_protocol::listing::MessageListStreamStarted` and `MessageRowsChunk` with the constants `METHOD_MESSAGE_LIST_STREAM` and `mp_protocol::METHOD_MESSAGE_ROWS`, and the fixtures are `crates/mp-protocol/fixtures/message.list_stream.{request,response}.json` and `notification.message_rows.json`.
 `message.list` is unchanged, `limit: null` included, which keeps its cap and is now the small-mailbox path.
 It is declared in `MESSAGE_STREAM_METHOD_SPECS`, an array of its own for the reason `MESSAGE_HTML_METHOD_SPECS` is one, and the capability list grew by its name.
+
+PERSO-131 added two members to `message.search_server`'s settle, additively; no field was renamed, none was dropped, and no command's output moved.
+`coverage` is `"server"` or `"local"` and `local_terms` names the terms the store answered, today `has:attachment` on a plain IMAP server, with the semantics of `mp search --json`'s two fields (PERSO-122); both are `default` on the way in, so a settle from a daemon that predates them reads as a search the server answered whole.
+The settle is typed for the first time, as `mp_protocol::listing::ServerSearchSettled` with `SearchCoverage` and `UnreachableMailbox`, whose TypeScript bindings the desktop reads; the shape it carried before is unchanged.
+No fixture pinned the settle and none was added, since the success path needs a server; the key list in `tests/daemon_server_leg_slice.rs` is seven names.

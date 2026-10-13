@@ -1148,6 +1148,31 @@ fn a_settled_rebuild_paints_the_lines_the_synchronous_one_painted() {
     }
 }
 
+/// A settled server search whose `has:attachment` the store answered says so
+/// in the overlay's footer, as `mp search` says it in its header (PERSO-131).
+#[test]
+fn a_settled_server_search_names_the_terms_the_store_answered() {
+    let mut app = App::default_for_tests();
+    app.server_search_generation = 4;
+    app.server_search_loading = true;
+    let awaited = Awaited::ServerSearch { generation: 4 };
+    let payload = json!({
+        "state": "succeeded",
+        "result": {
+            "account": ACCOUNT, "query": "has:attachment", "hits": 0,
+            "deduplicated": 0, "unreachable": [],
+            "coverage": "local", "local_terms": ["has:attachment"],
+        },
+    });
+    crate::tui::bg::handle_bg_result(&mut app, settled(&awaited, &payload));
+    assert!(!app.server_search_loading);
+    assert_eq!(
+        app.server_search_status.as_deref(),
+        Some("0 results (local store only: has:attachment)"),
+        "an empty answer must not read as \"no such mail\" when the store answered the term"
+    );
+}
+
 /// The finished-operation payload of the operation the fixture last started,
 /// driving its runtime until the operation is terminal.
 ///

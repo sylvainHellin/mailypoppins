@@ -14,7 +14,10 @@ function describe(search: SearchState): string {
       return `Searching the server… ${results} so far`;
     case "done": {
       const unreachable = search.summary?.unreachable ?? 0;
-      return `${results} ${where}${unreachable ? `, ${unreachable} mailbox${unreachable === 1 ? "" : "es"} unreachable` : ""}`;
+      // The CLI's caveat (PERSO-122): un-synced mail is not covered by a term the store answered.
+      const localTerms = search.summary?.localTerms ?? [];
+      const local = localTerms.length ? ` (local store only: ${localTerms.join(", ")})` : "";
+      return `${results} ${where}${local}${unreachable ? `, ${unreachable} mailbox${unreachable === 1 ? "" : "es"} unreachable` : ""}`;
     }
     case "cancelled":
       return `Server search cancelled, ${results}`;

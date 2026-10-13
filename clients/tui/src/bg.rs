@@ -140,6 +140,29 @@ pub(super) fn land_rollback(app: &mut App, account_index: usize, failed: u64) {
 
 /// ` (name)` for a known account of a multi-account setup, empty otherwise,
 /// for status lines that would not otherwise say which account they are about.
+/// The overlay footer a settled `message.search_server` paints: the count of
+/// hits in the list, the CLI's caveat when the store answered a term (`local
+/// store only: has:attachment`, PERSO-131), and the mailboxes that refused.
+///
+/// `count` is the list's, not the settle's `hits`: the list also holds the
+/// local pass's hits, which the daemon deduplicated against.
+pub(crate) fn server_search_footer(count: usize, settled: &serde_json::Value) -> String {
+    let settled: mp_protocol::listing::ServerSearchSettled =
+        serde_json::from_value(settled.clone()).unwrap_or_default();
+    let mut line = format!("{count} result{}", if count == 1 { "" } else { "s" });
+    if let Some(note) = settled.local_store_note() {
+        line.push_str(&format!(" ({note})"));
+    }
+    let unreachable = settled.unreachable.len();
+    if unreachable > 0 {
+        line.push_str(&format!(
+            "; {unreachable} mailbox{} unreachable",
+            if unreachable == 1 { "" } else { "es" }
+        ));
+    }
+    line
+}
+
 fn account_label(app: &App, account_index: usize) -> String {
     match app.accounts.get(account_index) {
         Some(acct) if app.accounts.len() > 1 => format!(" ({})", acct.account_config.name),
@@ -360,17 +383,10 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
                     // `message.server_hit` event while the search ran, and the
                     // dedup against the local pass was the daemon's. What is
                     // left is the count the footer prints and the mailboxes
-                    // that refused, which do not fail the search.
+                    // that refused, which do not fail the search, and the
+                    // terms the store answered (PERSO-131).
                     let count = app.server_search_results.len();
-                    let unreachable = settled["unreachable"].as_array().map(Vec::len).unwrap_or(0);
-                    let mut line = format!("{count} result{}", if count == 1 { "" } else { "s" });
-                    if unreachable > 0 {
-                        line.push_str(&format!(
-                            "; {unreachable} mailbox{} unreachable",
-                            if unreachable == 1 { "" } else { "es" }
-                        ));
-                    }
-                    app.server_search_status = Some(line);
+                    app.server_search_status = Some(server_search_footer(count, &settled));
                     if count > 0 {
                         app.server_search_focus = SearchOverlayFocus::List;
                     }
@@ -602,6 +618,54 @@ mod tests {
     // -----------------------------------------------------------------------
     // drained_sync_level (#0039 review note)
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // server_search_footer (PERSO-131)
+    // -----------------------------------------------------------------------
+
+    /// A settle whose `has:attachment` the store answered carries the CLI's
+    /// caveat beside the count; one the server answered whole, or one from a
+    /// daemon that predates the field, keeps the plain count.
+    #[test]
+    fn a_locally_answered_term_is_named_in_the_overlay_footer() {
+        let local = serde_json::json!({
+            "account": "tum", "query": "has:attachment", "hits": 2,
+            "deduplicated": 0, "unreachable": [],
+            "coverage": "local", "local_terms": ["has:attachment"],
+        });
+        assert_eq!(
+            server_search_footer(2, &local),
+            "2 results (local store only: has:attachment)"
+        );
+        assert_eq!(
+            server_search_footer(0, &local),
+            "0 results (local store only: has:attachment)"
+        );
+
+        let mut refused = local.clone();
+        refused["unreachable"] = serde_json::json!([{"mailbox": "Archive", "error": "timeout"}]);
+        assert_eq!(
+            server_search_footer(1, &refused),
+            "1 result (local store only: has:attachment); 1 mailbox unreachable"
+        );
+
+        let server = serde_json::json!({
+            "account": "tum", "query": "from:borrmann", "hits": 3,
+            "deduplicated": 0, "unreachable": [],
+            "coverage": "server", "local_terms": [],
+        });
+        assert_eq!(server_search_footer(3, &server), "3 results");
+
+        let older = serde_json::json!({
+            "account": "tum", "query": "from:borrmann", "hits": 3,
+            "deduplicated": 0,
+            "unreachable": [{"mailbox": "Archive", "error": "timeout"}, {"mailbox": "Sent", "error": "no"}],
+        });
+        assert_eq!(
+            server_search_footer(3, &older),
+            "3 results; 2 mailboxes unreachable"
+        );
+    }
 
     #[test]
     fn a_rollback_suffix_downgrades_the_sync_status_to_warning() {

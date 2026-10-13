@@ -4119,9 +4119,22 @@ impl Fixture {
                 );
             }
             if fixture.running(&op) {
+                // The fixture's accounts are plain IMAP, where the daemon
+                // answers `has:attachment` from the store (PERSO-131).
+                let local_terms: Vec<&str> = query
+                    .as_str()
+                    .filter(|q| q.contains("has:attachment"))
+                    .map(|_| vec!["has:attachment"])
+                    .unwrap_or_default();
+                let coverage = if local_terms.is_empty() {
+                    "server"
+                } else {
+                    "local"
+                };
                 let result = json!({
                     "account": account, "query": query, "hits": total,
-                    "deduplicated": 0, "unreachable": []
+                    "deduplicated": 0, "unreachable": [],
+                    "coverage": coverage, "local_terms": local_terms
                 });
                 fixture.settle(&op, "succeeded", Some(result));
             }

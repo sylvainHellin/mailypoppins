@@ -236,8 +236,13 @@ export type SearchState = {
   /** Moves with every run, so a late answer to an older run is dropped. */
   seq: number;
   error: string | null;
-  /** The settled summary: hits the server counted, mailboxes it could not reach. */
-  summary: { hits: number; unreachable: number } | null;
+  /**
+   * The settled summary: hits the server counted, mailboxes it could not
+   * reach, and the terms the local store answered rather than the server
+   * (`local_terms` of a `coverage: "local"` settle, PERSO-131), empty when the
+   * server answered every term.
+   */
+  summary: { hits: number; unreachable: number; localTerms: string[] } | null;
   /**
    * Server signals that arrived before `search_server_start` answered with
    * their id; the Rust layer registers the id before it answers, so its

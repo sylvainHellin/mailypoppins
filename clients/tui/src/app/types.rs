@@ -732,8 +732,9 @@ pub enum BgResult {
     ///
     /// The hits are not here: they streamed as `message.server_hit` events
     /// while it ran and are already in the list. What settles is
-    /// `{account, query, hits, deduplicated, unreachable}`, which is the
-    /// footer's count and the per-mailbox failures.
+    /// `mp_protocol::listing::ServerSearchSettled`, which is the footer's
+    /// count, the per-mailbox failures and the terms the local store answered
+    /// (PERSO-131).
     ServerSearch {
         /// Matched against `App::server_search_generation`: a settle for a
         /// search the user has since re-submitted is stale and dropped

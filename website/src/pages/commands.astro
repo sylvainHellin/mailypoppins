@@ -469,6 +469,9 @@ mp send --invite --to me@example.com --subject "Kita closed" --start 2026-12-24 
         script that drops stderr still sees it, and <code>--json</code> carries
         <code>"coverage": "local"</code> with the term in <code>local_terms</code>
         (<code>"coverage": "server"</code> when the server answered every term).
+        The TUI's server search overlay and the desktop app's search bar put the
+        same caveat after their count, as in
+        <code>2 results (local store only: has:attachment)</code>.
       </p>
 
       <h3 id="local-search-syntax">Local full-text search (<code>--local</code>)</h3>
