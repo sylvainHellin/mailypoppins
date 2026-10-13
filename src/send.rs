@@ -784,6 +784,191 @@ mod tests {
         assert_eq!(source_to_flag(&blank), None);
     }
 
+    /// The `In-Reply-To` and `References` values a built message carries,
+    /// unfolded the way a reading client sees them.
+    fn threading_of(raw: &[u8]) -> (Option<String>, Option<String>) {
+        use mailparse::MailHeaderMap;
+        let parsed = mailparse::parse_mail(raw).expect("the built message parses");
+        (
+            parsed.headers.get_first_value("In-Reply-To"),
+            parsed.headers.get_first_value("References"),
+        )
+    }
+
+    fn build_with_ancestry(draft: &EmailDraft, ancestry: Option<&str>) -> BuiltMessage {
+        build_draft_message(
+            draft,
+            "me@example.com",
+            &EmailSettings::default(),
+            None,
+            None,
+            ancestry,
+        )
+        .expect("the draft builds")
+    }
+
+    /// A reply names its parent in `In-Reply-To` and appends it to the
+    /// parent's own `References`, each id once (PERSO-137, RFC 5322 3.6.4).
+    #[test]
+    fn a_reply_carries_in_reply_to_and_the_parents_references() {
+        let mut reply = draft_with(None, "/drafts/r.md");
+        reply.frontmatter.in_reply_to = Some("  <parent@example.com> ".to_string());
+
+        let built = build_with_ancestry(&reply, Some("<root@example.com> <mid@example.com>"));
+        assert_eq!(
+            threading_of(&built.raw),
+            (
+                Some("<parent@example.com>".to_string()),
+                Some("<root@example.com> <mid@example.com> <parent@example.com>".to_string()),
+            )
+        );
+
+        // A repeated ancestor, and the parent already listed in its own
+        // ancestry, are written once, the parent last.
+        let built = build_with_ancestry(
+            &reply,
+            Some("<root@example.com> <parent@example.com>\r\n <root@example.com>"),
+        );
+        assert_eq!(
+            threading_of(&built.raw).1.as_deref(),
+            Some("<root@example.com> <parent@example.com>")
+        );
+
+        // A bare id from a hand-edited draft is bracketed.
+        reply.frontmatter.in_reply_to = Some("parent@example.com".to_string());
+        let built = build_with_ancestry(&reply, None);
+        assert_eq!(
+            threading_of(&built.raw).0.as_deref(),
+            Some("<parent@example.com>")
+        );
+    }
+
+    /// A parent the store does not hold leaves `References` as the parent
+    /// alone, which still threads the reply (PERSO-137).
+    #[test]
+    fn a_reply_to_an_unknown_parent_references_the_parent_alone() {
+        let mut reply = draft_with(None, "/drafts/r.md");
+        reply.frontmatter.in_reply_to = Some("<parent@example.com>".to_string());
+        let built = build_with_ancestry(&reply, None);
+        assert_eq!(
+            threading_of(&built.raw),
+            (
+                Some("<parent@example.com>".to_string()),
+                Some("<parent@example.com>".to_string()),
+            )
+        );
+    }
+
+    /// A forward, a blank `in_reply_to:` and a fresh draft carry neither
+    /// header, whatever ancestry the caller hands in (PERSO-137).
+    #[test]
+    fn a_forward_or_a_blank_reply_id_carries_no_threading_headers() {
+        let mut forward = draft_with(None, "/drafts/f.md");
+        forward.frontmatter.forwarded_from = Some("<src@example.com>".to_string());
+        let mut blank = draft_with(None, "/drafts/b.md");
+        blank.frontmatter.in_reply_to = Some("   ".to_string());
+        let mut blank_brackets = draft_with(None, "/drafts/bb.md");
+        blank_brackets.frontmatter.in_reply_to = Some(" <> ".to_string());
+        let fresh = draft_with(None, "/drafts/n.md");
+        for draft in [&forward, &blank, &blank_brackets, &fresh] {
+            let built = build_with_ancestry(draft, Some("<root@example.com>"));
+            assert_eq!(
+                threading_of(&built.raw),
+                (None, None),
+                "{}",
+                draft.path.display()
+            );
+        }
+    }
+
+    /// The parent's ancestry is its `References`, else a single-id
+    /// `In-Reply-To`, else nothing (RFC 5322 3.6.4).
+    #[test]
+    fn the_parents_ancestry_falls_back_to_a_single_in_reply_to() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            parent_ancestry(s("<a@x>"), s("<r@x> <a@x>")),
+            s("<r@x> <a@x>")
+        );
+        assert_eq!(parent_ancestry(s("<a@x>"), None), s("<a@x>"));
+        assert_eq!(parent_ancestry(s("<a@x>"), s("   ")), s("<a@x>"));
+        assert_eq!(parent_ancestry(s("<a@x> <b@x>"), None), None);
+        assert_eq!(parent_ancestry(None, None), None);
+    }
+
+    /// End to end through the store: the reply is built from the ancestry the
+    /// store holds for its parent, and ingesting the built bytes (what the
+    /// outbox APPENDs and files locally as the Sent copy) lands the reply in
+    /// the parent's thread instead of a thread of its own (PERSO-137).
+    #[test]
+    fn an_ingested_reply_joins_its_parents_thread() {
+        use crate::ingest::{ingest_message, IngestInput};
+        use crate::parse::parse_rfc822_to_fetched_email;
+        use crate::store::{BlobStore, Store};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(tmp.path().join("blobs"));
+        let ingest = |mailbox: &str, uid: i64, raw: &[u8]| {
+            let email = parse_rfc822_to_fetched_email(raw).expect("the message parses");
+            ingest_message(
+                &store,
+                &blobs,
+                &IngestInput {
+                    account: "acct",
+                    mailbox,
+                    uid,
+                    email: &email,
+                    raw: Some(raw),
+                },
+            )
+            .unwrap()
+        };
+
+        let root = ingest(
+            "inbox",
+            1,
+            b"From: a@example.com\r\nTo: me@example.com\r\nSubject: Plan\r\n\
+              Message-ID: <root@example.com>\r\n\r\nroot\r\n",
+        );
+        let parent = ingest(
+            "inbox",
+            2,
+            b"From: b@example.com\r\nTo: me@example.com\r\nSubject: Re: Plan\r\n\
+              Message-ID: <parent@example.com>\r\nIn-Reply-To: <root@example.com>\r\n\
+              References: <root@example.com>\r\n\r\nparent\r\n",
+        );
+        assert_eq!(parent.thread_id, root.message_id);
+
+        let (irt, refs) =
+            crate::store::read::threading_headers_of(&store, "acct", "<parent@example.com>")
+                .unwrap()
+                .expect("the parent is in the store");
+        let ancestry = parent_ancestry(irt, refs);
+        assert_eq!(ancestry.as_deref(), Some("<root@example.com>"));
+        assert_eq!(
+            crate::store::read::threading_headers_of(&store, "acct", "<absent@example.com>")
+                .unwrap(),
+            None
+        );
+
+        let mut reply = draft_with(None, "/drafts/r.md");
+        reply.frontmatter.subject = "Re: Plan".to_string();
+        reply.frontmatter.in_reply_to = Some("<parent@example.com>".to_string());
+        let built = build_with_ancestry(&reply, ancestry.as_deref());
+        assert_eq!(
+            threading_of(&built.raw).1.as_deref(),
+            Some("<root@example.com> <parent@example.com>")
+        );
+
+        let sent = ingest("sent", 1, &built.raw);
+        assert_eq!(sent.message_id, built.message_id);
+        assert_eq!(
+            sent.thread_id, root.message_id,
+            "the Sent copy joins the conversation it answers"
+        );
+    }
+
     /// The local half of the post-send hook flags *every* copy of the source,
     /// because one message is one row per mailbox and the archived copy is as
     /// likely to be the one on screen (#TKT-0051).
@@ -958,6 +1143,7 @@ mod tests {
             &EmailSettings::default(),
             None,
             None,
+            None,
         )
         .expect("the build accepts a display name it can quote");
         assert_eq!(built.from, "\"Doe, Jane\" <jane@example.com>");
@@ -1121,6 +1307,7 @@ mod tests {
                     &EmailSettings::default(),
                     None,
                     invite,
+                    None,
                 )
                 .expect("the reply draft builds");
                 let (plain, html) = text_parts(&built.raw);
@@ -2220,12 +2407,14 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
             "this draft is already being sent; it is sent once, not twice".to_string(),
         ))
     })?;
+    let ancestry = reply_ancestry(draft, &ctx.account.name);
     let built = build_draft_message(
         draft,
         ctx.default_from()?,
         &ctx.email_settings,
         ctx.signature.as_deref(),
         None,
+        ancestry.as_deref(),
     )?;
 
     let report = match ctx.graph.as_ref() {
@@ -2299,6 +2488,65 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
         message_id: built.message_id.clone(),
         settle_error,
     })
+}
+
+/// The `Message-ID` a reply draft answers, read off its `in_reply_to:`
+/// (PERSO-137).
+///
+/// Trimmed and `None` when blank, the same reading [`source_to_flag`] gives
+/// the key; a bare id from a hand-edited draft gets the angle brackets the
+/// header grammar requires. A forward's `forwarded_from:` is not read: a
+/// forward starts a conversation of its own rather than joining its source's.
+fn reply_parent_id(draft: &EmailDraft) -> Option<String> {
+    let id = draft.frontmatter.in_reply_to.as_deref()?.trim();
+    let bare = id.trim_start_matches('<').trim_end_matches('>').trim();
+    (!bare.is_empty()).then(|| format!("<{bare}>"))
+}
+
+/// The `References` value of a reply: the parent's own ancestry, then the
+/// parent, each id once (RFC 5322 section 3.6.4).
+fn references_for_reply(parent: &str, parent_references: Option<&str>) -> String {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut ids: Vec<String> = parent_references
+        .map(crate::ingest::split_message_ids)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|id| id != parent && seen.insert(id.clone()))
+        .collect();
+    ids.push(parent.to_string());
+    ids.join(" ")
+}
+
+/// The ancestry a reply's parent carried, from the store's copy of it
+/// (PERSO-137): its `References`, or, when it has none, an `In-Reply-To` that
+/// names a single id, the fallback RFC 5322 section 3.6.4 gives.
+fn parent_ancestry(in_reply_to: Option<String>, references: Option<String>) -> Option<String> {
+    references
+        .filter(|refs| !crate::ingest::split_message_ids(refs).is_empty())
+        .or_else(|| in_reply_to.filter(|irt| crate::ingest::split_message_ids(irt).len() == 1))
+}
+
+/// What [`build_draft_message`] takes as `parent_references` for one draft,
+/// looked up in the account's store; `None` for anything but a reply.
+///
+/// Best effort: a store that cannot be read costs the reply its grandparents
+/// in `References`, never the send, and `In-Reply-To` still threads it.
+pub fn reply_ancestry(draft: &EmailDraft, account: &str) -> Option<String> {
+    let parent = reply_parent_id(draft)?;
+    let store = match crate::store::Store::open_account(account) {
+        Ok(store) => store,
+        Err(e) => {
+            warn!("[send] could not open the store to thread the reply to {parent}: {e:#}");
+            return None;
+        }
+    };
+    match crate::store::read::threading_headers_of(&store, account, &parent) {
+        Ok(found) => found.and_then(|(irt, refs)| parent_ancestry(irt, refs)),
+        Err(e) => {
+            warn!("[send] could not read the threading headers of {parent}: {e:#}");
+            None
+        }
+    }
 }
 
 /// The source a sent draft has something to say about, and which bit it sets:
@@ -2754,12 +3002,19 @@ pub fn message_id_of(raw: &[u8]) -> String {
 /// `default_from` is the account's address, used when the draft names no
 /// `from:` of its own. It is passed in rather than read off the SMTP config so
 /// the Graph path, which has no SMTP config, builds identical bytes.
+///
+/// A reply draft (`in_reply_to:`) gets `In-Reply-To` and `References` headers
+/// (PERSO-137). `parent_references` is the ancestry the parent itself carried,
+/// which the caller reads off the store ([`reply_ancestry`]); `None` when the
+/// parent is not held locally, in which case `References` names the parent
+/// alone. A forward and a fresh draft get neither header.
 pub fn build_draft_message(
     draft: &EmailDraft,
     default_from: &str,
     email_config: &EmailSettings,
     signature: Option<&str>,
     invite_ics: Option<&str>,
+    parent_references: Option<&str>,
 ) -> Result<BuiltMessage> {
     // Check status
     if draft.frontmatter.status != EmailStatus::Approved {
@@ -2830,6 +3085,13 @@ pub fn build_draft_message(
         .from(from_mailbox.clone())
         .subject(&draft.frontmatter.subject)
         .message_id(None);
+
+    // Threading (RFC 5322 section 3.6.4): what the recipient's client and
+    // mp's own ingest (`resolve_thread_id`) group the reply on.
+    if let Some(parent) = reply_parent_id(draft) {
+        let references = references_for_reply(&parent, parent_references);
+        builder = builder.in_reply_to(parent).references(references);
+    }
 
     // Add To recipients to headers
     for (addr, role) in &recipients {

@@ -608,7 +608,7 @@ fn resolve_thread_id(
 }
 
 /// Split a `References` / `In-Reply-To` header value into bracketed ids.
-fn split_message_ids(value: &str) -> Vec<String> {
+pub(crate) fn split_message_ids(value: &str) -> Vec<String> {
     value
         .split('>')
         .filter_map(|part| {
