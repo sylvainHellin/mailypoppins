@@ -2606,3 +2606,14 @@ A non-draft session takes an id with a `/` (`message/<row_id>`), which no draft 
 
 The desktop's search effect starts each run once per `mode:seq` (a `useRef` guard), and every new search took `seq` from the shown search, so after Escape the next local search got `seq` 1 again, matched the guard, and never started: the list spun forever (PERSO-115).
 A counter that identifies runs across their lifetime lives beside the state it numbers (`state.searchSeq`), not inside the object that gets cleared, or a late answer of an ended run can also land on the new one.
+
+## A hover-paused timer belongs to the element it times
+
+`useWindDown` keeps whether the pointer rests on its element in React state, and the element only clears it on `pointerleave`.
+Called from a component that outlives the element (the always-mounted `StatusRegion`, or `UpdateToast` while it renders null), the flag would stay true after the element is dismissed under the pointer, and the next notice would never time out (PERSO-82).
+The hook goes into a component rendered only while its element shows (`NoticeLine`, `UpdateCard`), so the flag ends with it.
+
+## Testing Library's `waitFor` hangs under vitest fake timers
+
+With `vi.useFakeTimers()` in force, `waitFor` and the `find*` queries poll on a `setTimeout` that never fires, so the test times out at 20 s and the leaked fake timers then break the tests after it.
+Wait for what needs waiting with real timers first, or flush with `await act(() => vi.advanceTimersByTimeAsync(n))` and query synchronously; restore with `vi.useRealTimers()` in a `finally` or an `afterEach`.

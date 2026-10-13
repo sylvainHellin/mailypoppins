@@ -20,6 +20,7 @@ All notable changes to this project are documented in this file.
 - **Desktop: a `to:`, `cc:`, `filename:` or `message-id:` query typed in the search field searches the server (PERSO-115).** It no longer fails with a truncated refusal, and a failed search's error wraps instead of being cut off.
 - **Desktop: `e` on a received message opens its read-only Markdown copy in the window's embedded editor when your editor is a terminal editor, as a draft does (PERSO-92).** It opened in a new terminal window before; the pane closes when the editor exits, and a GUI editor still gets the file outside the app.
 - **Desktop: a search typed in the list header after leaving another one runs, where it kept spinning (PERSO-115).** A query that does not parse, such as `from: borrmann` with a space after the colon, ends the search with the parser's own message and its caret, the words the TUI's search form shows; the TUI and the desktop now build the query through one shared function in `mp-core`.
+- **Desktop and TUI: quitting the editor with `:wq` puts the focus back on the list (PERSO-124).** This holds for a draft and for a received message opened read-only; an editor that exits with an error keeps the pane and the focus.
 - **Two daemon integration tests no longer flake under load.** The config-reload test waits for the startup reports its snapshot still owes, and the fake-ready hook starts no account runtimes.
 
 ### Changed
@@ -27,6 +28,7 @@ All notable changes to this project are documented in this file.
 - **TUI: on a list row `Enter` moves focus into the body pane and marks the message read, as in the desktop client (PERSO-92).** In a terminal under 80 columns it also zooms the body pane. `e` opens the message in `$EDITOR`: a draft for editing, received mail as its read-only Markdown copy.
 - **Reply and forward drafts mark the boundary above the quoted original with `<!-- mp:quote -->` instead of `{{SIGNATURE}}` (PERSO-114).** Drafts that still carry `{{SIGNATURE}}` keep working, and the TUI preview labels the boundary as the quoted message.
 - **Desktop: the window opens without a title bar or traffic lights on macOS, with its rounded corners (PERSO-97).** Drag it by the sidebar header or the margin around the content, resize it from its edges; the Window menu's Close Window (Cmd+W), Minimize (Cmd+M), Zoom and Enter Full Screen (Ctrl+Cmd+F) work as on any Mac window.
+- **Desktop: every notice disappears by itself (PERSO-82).** Information and warnings, including the blocked-link notice and the notice line, leave after 8 seconds; failures, including a failed update, leave after 20 seconds and keep their Dismiss button. A notice under the pointer stays, and the activity log keeps every line.
 
 ### Performance
 - **Opening a large mailbox decodes the streamed rows straight into typed rows, about three times faster on the client (PERSO-106).** A broken stream shows in the desktop as a protocol error rather than an internal one.
