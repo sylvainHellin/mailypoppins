@@ -31,9 +31,9 @@
 //!
 //! Every connection is opened through [`Store::open`], so it carries the
 //! store's pragmas - WAL, `busy_timeout`, `synchronous = NORMAL`,
-//! `foreign_keys = ON` - and a pool opened over a path that has no store yet
-//! creates one, which is how a runtime's first read also brings the account's
-//! store into existence.
+//! `foreign_keys = ON` - and its SQL functions (`mp_fold`), and a pool
+//! opened over a path that has no store yet creates one, which is how a
+//! runtime's first read also brings the account's store into existence.
 
 use std::ops::Deref;
 use std::path::Path;

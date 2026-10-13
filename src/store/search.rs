@@ -33,7 +33,7 @@
 use anyhow::{Context, Result};
 
 use super::read::{row_columns, row_from_sql, MessageRow, CALENDAR_SIDECAR_NAME};
-use super::Store;
+use super::{fold_case, Store, FOLD_FUNCTION};
 
 pub use crate::search::fts_expression;
 
@@ -55,12 +55,13 @@ fn date_to_timestamp(date: &str) -> Option<i64> {
         .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
 }
 
-/// A `filename:` substring as a `LIKE` pattern: `%`, `_` and the escape
-/// character itself match literally, so `filename:100%` is not a wildcard.
+/// A `filename:` substring as a `LIKE` pattern over the [`fold_case`]d name:
+/// the needle is folded the same way, and `%`, `_` and the escape character
+/// itself match literally, so `filename:100%` is not a wildcard.
 fn filename_like_pattern(needle: &str) -> String {
     let mut out = String::with_capacity(needle.len() + 2);
     out.push('%');
-    for c in needle.chars() {
+    for c in fold_case(needle).chars() {
         if matches!(c, '%' | '_' | '\\') {
             out.push('\\');
         }
@@ -145,11 +146,16 @@ pub fn search_ast(
     // `filename:` matches the names ingest recorded on `message_blobs`, which
     // stay after retention evicts the bytes. The iMIP sidecar is excluded, as
     // the read path excludes it from a message's attachments. `LIKE` folds
-    // ASCII case only: a non-ASCII letter must match its stored case.
+    // ASCII case only, so both sides are folded first: the stored name by the
+    // store's `mp_fold` function, the pattern by the same Rust fold
+    // (PERSO-134). `ß` and `SS` still differ, as a per-character fold leaves them.
     for group in &render.filenames {
         let mut alternatives: Vec<String> = Vec::new();
         for needle in group {
-            alternatives.push(format!("b.filename LIKE ?{} ESCAPE '\\'", binds.len() + 1));
+            alternatives.push(format!(
+                "{FOLD_FUNCTION}(b.filename) LIKE ?{} ESCAPE '\\'",
+                binds.len() + 1
+            ));
             binds.push(Box::new(filename_like_pattern(needle)));
         }
         predicates.push_str(&format!(

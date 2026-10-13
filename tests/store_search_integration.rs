@@ -189,6 +189,40 @@ fn filename_wildcard_characters_match_literally() {
     assert_eq!(f.hits("filename:\"100%\""), vec![underscored]);
 }
 
+/// `filename:` folds case beyond ASCII (PERSO-134): an umlaut matches across
+/// case both ways, and `ẞ` folds to `ß`. `ß` against `SS` is not folded, so
+/// `filename:STRASSE` misses `straße.pdf`; the test pins that as the known
+/// limit of a per-character fold rather than leaving it unstated.
+#[test]
+fn filename_folds_case_beyond_ascii() {
+    let f = Fixture::new();
+    let overview = f.ingest(
+        "inbox",
+        1,
+        &with_attachments(email("a", "a@example.com", "One", "x"), &["Übersicht.pdf"]),
+    );
+    let street = f.ingest(
+        "inbox",
+        2,
+        &with_attachments(email("b", "b@example.com", "Two", "x"), &["straße.pdf"]),
+    );
+    let greek = f.ingest(
+        "inbox",
+        3,
+        &with_attachments(email("c", "c@example.com", "Three", "x"), &["ΟΔΟΣ.pdf"]),
+    );
+
+    assert_eq!(f.hits("filename:übersicht"), vec![overview]);
+    assert_eq!(f.hits("filename:ÜBERSICHT"), vec![overview]);
+    assert_eq!(f.hits("filename:STRAßE"), vec![street]);
+    assert_eq!(f.hits("filename:STRAẞE"), vec![street], "capital sharp s");
+    assert!(
+        f.hits("filename:STRASSE").is_empty(),
+        "ß and SS are not folded together"
+    );
+    assert_eq!(f.hits("filename:οδος"), vec![greek], "final sigma");
+}
+
 /// The iMIP sidecar ingest stores as an attachment blob is not a user-facing
 /// attachment, so `filename:` does not see its name.
 #[test]

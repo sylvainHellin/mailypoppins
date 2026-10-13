@@ -340,8 +340,47 @@ fn create_fresh(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// WAL, busy timeout and `synchronous = NORMAL`. WAL is a property of the file
-/// and survives; the other two are per-connection and are set on every open.
+/// The SQL function [`fold_case`] is registered under, as `mp_fold(text)`.
+pub const FOLD_FUNCTION: &str = "mp_fold";
+
+/// Fold `text` for a case-insensitive comparison that covers more than ASCII:
+/// each character's Unicode lowercase, with the final sigma folded to `σ`
+/// as Unicode case folding does.
+///
+/// Per character rather than [`str::to_lowercase`], whose final-sigma rule
+/// depends on what follows: `ΟΔΟΣ` alone and `ΟΔΟΣ.pdf` would fold to
+/// different letters, and a substring match must fold a needle and the text
+/// it is found in the same way. One character to many still folds (`ẞ` to
+/// `ß`, `İ` to `i̇`), but a one-to-many *case fold* does not: `ß` and `SS`
+/// stay different.
+pub fn fold_case(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| if c == 'ς' { 'σ' } else { c })
+        .collect()
+}
+
+/// Register the scalar functions the store's queries call, which are
+/// per-connection like the pragmas: `mp_fold(text)` is [`fold_case`], NULL
+/// in, NULL out. SQLite's own `LIKE` and `lower()` fold ASCII only, which is
+/// what made `filename:übersicht` miss `Übersicht.pdf` (PERSO-134).
+fn register_functions(conn: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        FOLD_FUNCTION,
+        1,
+        FunctionFlags::SQLITE_UTF8
+            | FunctionFlags::SQLITE_DETERMINISTIC
+            | FunctionFlags::SQLITE_INNOCUOUS,
+        |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|s| fold_case(&s))),
+    )
+    .with_context(|| format!("registering the {FOLD_FUNCTION} SQL function"))
+}
+
+/// WAL, busy timeout and `synchronous = NORMAL`, plus the SQL functions of
+/// [`register_functions`]. WAL is a property of the file and survives; the
+/// rest is per-connection and is set on every open, which is why both open
+/// paths ([`open_validated`], [`create_fresh`]) go through here.
 fn apply_pragmas(conn: &Connection) -> Result<()> {
     let mode: String = conn
         .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
@@ -357,6 +396,7 @@ fn apply_pragmas(conn: &Connection) -> Result<()> {
     // is what keeps a message's blob-reference list from outliving the row.
     conn.pragma_update(None, "foreign_keys", "ON")
         .context("setting foreign_keys = ON")?;
+    register_functions(conn)?;
     Ok(())
 }
 
@@ -785,6 +825,36 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), Some(SCHEMA_VERSION));
         assert!(schema::all_tables_present(store.conn()).unwrap());
+    }
+
+    /// `mp_fold` exists on a connection from either open path, the fresh
+    /// file and the validated reopen, and folds beyond ASCII.
+    #[test]
+    fn fold_function_is_registered_on_every_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        for _ in 0..2 {
+            let store = Store::open(&path).unwrap();
+            let folded: Option<String> = store
+                .conn()
+                .query_row("SELECT mp_fold('ÜBERSICHT Straẞe ΟΔΟΣ')", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(folded.as_deref(), Some("übersicht straße οδοσ"));
+            let null: Option<String> = store
+                .conn()
+                .query_row("SELECT mp_fold(NULL)", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(null, None);
+        }
+    }
+
+    #[test]
+    fn fold_case_folds_a_needle_and_its_haystack_alike() {
+        assert_eq!(fold_case("ΟΔΟΣ"), fold_case("ΟΔΟΣ.pdf")[.."οδοσ".len()]);
+        assert_eq!(fold_case("οδος"), "οδοσ");
+        assert_ne!(fold_case("STRASSE"), fold_case("straße"));
     }
 
     #[test]
