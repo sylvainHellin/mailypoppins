@@ -76,8 +76,9 @@ Examples:
 
 Backend honesty: on Gmail and Exchange every term runs server-side. On plain
 IMAP has:attachment has no server key, so it is answered from the local store
-(synced mail only) and the run prints a warning. filename: is Gmail/Exchange/
---local only.";
+(synced mail only): the run warns on stderr, the result header on stdout says
+\"local store only: has:attachment\", and --json sets coverage to \"local\" with
+the term in local_terms. filename: is Gmail/Exchange/--local only.";
 
 #[derive(Subcommand)]
 enum Commands {
@@ -422,9 +423,10 @@ enum Commands {
         #[arg(long)]
         local: bool,
         /// Emit one JSON object {account, query, source: local|server,
-        /// messages: [...]} on stdout, messages as in `mp list-messages
-        /// --json` plus body (--full) or preview (server hit); warnings stay
-        /// on stderr
+        /// coverage: server|local, local_terms: [...], messages: [...]} on
+        /// stdout, messages as in `mp list-messages --json` plus body (--full)
+        /// or preview (server hit); coverage is local when the store answered
+        /// any term, which local_terms names; warnings stay on stderr
         #[arg(long)]
         json: bool,
     },
@@ -738,19 +740,20 @@ fn fetched_newest_first(a: &FetchedEmail, b: &FetchedEmail) -> std::cmp::Orderin
 }
 
 /// `mp search --json` for a server search: each hit with the store's id of the
-/// mailbox it was found in, when the search knows it.
+/// mailbox it was found in, when the search knows it, and the terms the local
+/// store answered because the server had no key for them.
 fn print_server_search_json(
     account: &str,
     query: &str,
+    local_terms: &[String],
     hits: &[(Option<String>, FetchedEmail)],
     full: bool,
 ) -> Result<()> {
-    let results = mailypoppins::read_cmd::SearchResultsJson {
-        account: account.to_string(),
-        query: query.to_string(),
-        source: "server",
-        messages: hits
-            .iter()
+    let results = mailypoppins::read_cmd::SearchResultsJson::server(
+        account,
+        query,
+        local_terms,
+        hits.iter()
             .map(|(mailbox, email)| {
                 mailypoppins::read_cmd::ListedMessage::from_fetched(
                     account,
@@ -760,7 +763,7 @@ fn print_server_search_json(
                 )
             })
             .collect(),
-    };
+    );
     println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())
 }
@@ -4240,12 +4243,10 @@ async fn main() -> Result<()> {
                 )
                 .await?;
                 if json {
-                    let results = mailypoppins::read_cmd::SearchResultsJson {
-                        account: account_config.name.clone(),
-                        query: query.clone(),
-                        source: "local",
-                        messages: hits
-                            .iter()
+                    let results = mailypoppins::read_cmd::SearchResultsJson::local(
+                        &account_config.name,
+                        &query,
+                        hits.iter()
                             .map(|hit| {
                                 mailypoppins::read_cmd::ListedMessage::from_wire(
                                     &account_config.name,
@@ -4255,7 +4256,7 @@ async fn main() -> Result<()> {
                                 )
                             })
                             .collect(),
-                    };
+                    );
                     println!("{}", serde_json::to_string_pretty(&results)?);
                 } else {
                     let rows: Vec<_> = hits
@@ -4288,7 +4289,7 @@ async fn main() -> Result<()> {
                         .as_deref()
                         .and_then(|mb| resolve_mailbox_key(&account_config, mb).ok());
                     let tagged: Vec<_> = emails.into_iter().map(|e| (key.clone(), e)).collect();
-                    print_server_search_json(&account_config.name, &query, &tagged, full)?;
+                    print_server_search_json(&account_config.name, &query, &[], &tagged, full)?;
                 } else if emails.is_empty() {
                     println!("{}", "No results found".yellow());
                 } else {
@@ -4303,16 +4304,18 @@ async fn main() -> Result<()> {
                 let gmail = host_lc == "imap.gmail.com"
                     || host_lc.ends_with(".gmail.com")
                     || host_lc.ends_with("googlemail.com");
-                let (imap_search, attachment_postfilter) = if gmail {
+                let (imap_search, attachment_postfilter, local_terms) = if gmail {
                     (
                         mailypoppins::search::to_gmail_search_command(&query_ast)
                             .map_err(|e| anyhow!("{e}"))?,
                         false,
+                        Vec::new(),
                     )
                 } else {
                     let r =
                         mailypoppins::search::to_imap(&query_ast).map_err(|e| anyhow!("{e}"))?;
-                    (r.search, r.attachment_postfilter)
+                    let local_terms = r.local_terms();
+                    (r.search, r.attachment_postfilter, local_terms)
                 };
                 let msg_id = query_ast.message_id.clone();
 
@@ -4386,21 +4389,34 @@ async fn main() -> Result<()> {
                         })
                     });
                     eprintln!(
-                        "{} has:attachment on plain IMAP is answered from the local store, so \
+                        "{} {} on plain IMAP is answered from the local store, so \
                          un-synced mail is not covered. Run `mp sync` for full coverage.",
-                        "\u{26a0}".yellow()
+                        "\u{26a0}".yellow(),
+                        local_terms.join(", ")
                     );
                 }
 
+                // The stderr warning is lost to a caller that pipes stdout, so
+                // the header repeats it (PERSO-122).
+                let note = mailypoppins::read_cmd::local_store_note(&local_terms);
                 all_emails.sort_by(|(_, a), (_, b)| fetched_newest_first(a, b));
                 if json {
-                    print_server_search_json(&account_config.name, &query, &all_emails, full)?;
+                    print_server_search_json(
+                        &account_config.name,
+                        &query,
+                        &local_terms,
+                        &all_emails,
+                        full,
+                    )?;
                 } else if all_emails.is_empty() {
-                    println!("{}", "No results found".yellow());
+                    println!(
+                        "{}",
+                        mailypoppins::read_cmd::no_server_results(&local_terms).yellow()
+                    );
                 } else {
                     let emails: Vec<FetchedEmail> =
                         all_emails.into_iter().map(|(_, e)| e).collect();
-                    display_fetched_emails(&emails, full);
+                    display_fetched_emails_with_note(&emails, full, note.as_deref());
                 }
             }
         }

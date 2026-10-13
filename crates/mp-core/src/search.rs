@@ -713,6 +713,20 @@ pub struct ImapRender {
     pub attachment_postfilter: bool,
 }
 
+impl ImapRender {
+    /// The terms this render leaves to the local store, in the grammar's own
+    /// spelling: what `mp search` names in its warning, its result header and
+    /// its `--json` `local_terms`, so a reader knows un-synced mail is not
+    /// covered. Empty when the server answers every term.
+    pub fn local_terms(&self) -> Vec<String> {
+        if self.attachment_postfilter {
+            vec!["has:attachment".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 /// One term as an RFC 3501 search key. `HasAttachment` never reaches here (it
 /// is stripped before rendering); it is an error inside an `OR` group because
 /// a post-filter cannot resolve half of an alternation.
@@ -1363,6 +1377,7 @@ mod tests {
         let r = to_imap(&q("from:alice subject:invoice")).unwrap();
         assert_eq!(r.search, "FROM \"alice\" SUBJECT \"invoice\"");
         assert!(!r.attachment_postfilter);
+        assert!(r.local_terms().is_empty());
     }
 
     #[test]
@@ -1386,6 +1401,7 @@ mod tests {
             "FROM \"boss@corp.com\" OR TEXT \"invoice\" TEXT \"receipt\""
         );
         assert!(r.attachment_postfilter);
+        assert_eq!(r.local_terms(), vec!["has:attachment".to_string()]);
     }
 
     #[test]
