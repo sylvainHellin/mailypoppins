@@ -33,7 +33,7 @@ Its source is the constant `BRIDGE` in `src-tauri/src/reader.rs`, minified by ha
 - A nonce rather than the bridge's hash: under CSP Level 3 a hash source also admits `<script src=… integrity="sha256-<the same hash>">`, and the bridge's hash is public, so a sender could have made the frame fetch one URL.
 - The text rendition, the plain-text document the handler builds for a message without markup, gets the bridge the same way, under its own fresh nonce, with `message_csp(nonce)` in the header and in its meta; it holds no sender markup, since the app writes it from constants and the escaped stored text.
 - A rendition without the daemon's meta is served as it came, with no bridge and under the daemon's policy alone, and so is any response for which no nonce could be drawn.
-- The browser rendition (`tb`, `html_open`) is the daemon's file and keeps its script-free meta.
+- The browser rendition (`tb`, `html_open`, `draft_html_open`) is a file the browser opens on its own and keeps its script-free meta.
 
 The parent posts `{type: "scroll", dy}` and `{type: "scrollTo", y: "top" | "bottom"}` to the frame's window with target `"*"`, the only target an opaque origin matches (`scrollReaderFrame`, `scrollReaderFrameTo` in `ReaderBody.tsx`).
 The bridge obeys a message only from `window.parent` and only in those two shapes with a finite `dy`, and scrolls `document.scrollingElement`.
@@ -57,12 +57,13 @@ The text flows in `#mp-reader-scroll`, so `j`/`k`, `Ctrl+d`/`Ctrl+u`, `PageDown`
 A message whose store holds no text says "No text body" with a hint that `t t` shows the HTML version, and the mode stays text.
 A read that fails says "The text did not load: <why>".
 
-`tt` from the list or the reader toggles the mode, and from the sidebar does nothing.
+`tt` from the list or the reader toggles the mode, and from the sidebar does nothing; on a draft it switches the draft's preview instead and leaves the mode alone (see Drafts and server-only hits).
 The toolbar's "Reader mode" group holds HTML and Text, the current one pressed, and Settings has the same pair under "Reader".
-The palette's READER rows are "Toggle reader text mode" (`tt`), "Reader: HTML" and "Reader: text".
+The palette's READER rows are "Toggle reader text mode" (`tt`), "Reader: HTML" and "Reader: text"; the last two set the mode, which a message follows and a draft does not.
 The mode is the `reader_mode` key of `desktop.json` ([rust-layer.md](rust-layer.md), "Desktop settings"), read once at startup into `state.readerMode`, which is html until the read answers.
 A change shows at once and is then stored; a refused write keeps the mode for this window and says "The reader mode was not saved: <why>".
 `tb` still opens the HTML in the browser from text mode.
+The mode applies to messages only: a draft opens on its Markdown in either mode.
 The TUI's `tt` is its thread view, which the desktop does not have yet; the KEYMAP row "Show conversation (thread)" stays badged and lists no key.
 
 ## The toolbar
@@ -130,18 +131,23 @@ A save that went through closes the dialog and says "Saved 2 files to ~/Download
 
 `tb`, the toolbar's Open in browser, or the palette's "Open HTML in browser" hands the message to the default browser through `html_open`: the daemon's rendition, with the charset, the CSP tag and the `cid:` images inlined.
 The status line says "Opened in browser", or "No HTML version available" for a message whose sender wrote no markup.
-On a server-only hit, `tb` writes the hit's own markup into the app cache through `hit_html_open`, and a hit without markup gets the same line; a draft has no rendition.
+On a server-only hit, `tb` writes the hit's own markup into the app cache through `hit_html_open`, and a hit without markup gets the same line.
+On a draft in Drafts, `tb` opens the HTML the send would build, `draft.html` written into the app cache through `draft_html_open`, the TUI's `tb` on a Drafts row (PERSO-136); a draft that does not parse says to fix it in the editor first, and a refusal says "Draft preview failed: <why>".
 
 ## Drafts and server-only hits
 
-The reader pane shows no frame for these two.
+A server-only hit shows no frame; a draft shows one only after `tt`.
 
-A selected draft shows `DraftPreview.tsx` (`src/components/compose/`): the `draft_preview` record, which is the headers (From, To, Cc, Bcc), the status pill, the whole body, which `draft_preview` asks with `full: true` where the CLI's dry run cuts it at 500 characters (PERSO-101), and the file path.
+A selected draft shows `DraftPreview.tsx` (`src/components/compose/`): the `draft_preview` record, which is the headers (From, To, Cc, Bcc), the status pill, the body, and the file path.
+The body is the whole Markdown body, what the editor holds, which `draft_preview` asks with `full: true` where the CLI's dry run cuts it at 500 characters (PERSO-101).
+`tt` switches it to the HTML the send would build, with the signature and the quoted original, in the reader frame on `mpmsg://localhost/<account>/drafts/<id>`, under the same sandbox, policy and bridge as a message, and `tt` again back to the Markdown (PERSO-136).
+That switch is `state.draftHtml`, the key of the one draft showing its HTML, apart from the reader mode: it is never stored, the preview clears it when it goes, so every draft opens on its Markdown, and a message keeps the saved mode.
+The frame shows the file as it was when it loaded; it loads again with the rest of the preview, after a save in the editor or any change to the draft's row, and on each `tt` to the HTML.
 Under the headers, `draft_validate`'s report says "Valid" or "Not sendable" with the error, and lists the warnings.
 Under the report, the "Attachments" list shows each entry of the draft's `attachments:` as the file spells it, from `draft_attachments`, with "Open <entry>" and "Remove <entry>" buttons.
 An entry with no file behind it carries a "missing" badge and its Open is disabled, since the send would fail on it.
 Remove calls `draft_attachment_remove`, which takes the entry out of the file and leaves the file it named alone.
-The three are read again whenever the listing's row or the list itself changes, which is what a save in the editor or an attach does through `draft.changed`.
+The three, and the frame while it is shown, are read again whenever the listing's row or the list itself changes, which is what a save in the editor or an attach does through `draft.changed`.
 Its toolbar, "Draft actions", has Edit in editor (`e`), Edit recipients (`ce`), Attach file (`ta`), and Approve (`cA`) or Back to draft (`cD`).
 Approve and Back to draft act on the draft the preview shows and ask nothing, even with drafts marked; a draft being sent is refused with a notice, as by the keys.
 
@@ -204,7 +210,7 @@ Also observed in the same run:
 ## Manual verification
 
 Cases (a), (b) and (c) of the table above need a real click, which the agent cannot post (see the run above); the owner ran these steps on 2026-09-30 and all three held, including step 6, whose stub line replaces the browser.
-Steps 7 to 10 cover the bridge (PERSO-81) and have not been run yet.
+Steps 7 to 10 cover the bridge (PERSO-81) and step 11 a draft's frame (PERSO-136); none has been run yet.
 Repeat them after any change to the scheme handler, the bridge, the navigation hooks or the frame's `sandbox`.
 
 1. In a herdr tab: `cd clients/desktop && MP_DESKTOP_STUB_OPENER=1 MP_DESKTOP_FIXTURE=1 pnpm tauri dev`, and keep its output in view (it also goes to `<data>/logs/mp-desktop.log`).
@@ -229,5 +235,7 @@ Repeat them after any change to the scheme handler, the bridge, the navigation h
    Expected: `j` and `G` scroll the body as in step 8, `Space` opens the which-key popup of the Space family and does not page the frame, `Escape` closes it, and `J` opens the next message; Cmd+C on selected message text still copies it.
 10. Case (i), the text rendition: in html mode open row 1002 (no markup; shrink the window until its text overflows), press `j`, `Ctrl+d` and `G`, then click in its text and press `j` and `Escape`.
     Expected: the plain text scrolls in its frame as in steps 8 and 9, and the keys after the click reach the app; in the Web Inspector the `mpmsg` response carries `X-Mp-Rendition: text` and a `script-src 'nonce-<n>'` matching the meta and the one `<script>`.
+11. Case (j), a draft (PERSO-136): in html mode press `2` for Drafts and select "Re: Angebot Dachsanierung"; press `tt`, then `gr`, `j` and `G`, then `tt`; press `tt`, click the next draft in the list and then this one again; press `tb`; press `1` and open a message.
+    Expected: the draft opens on its Markdown body; `tt` shows a white frame with the draft's paragraphs, which `j` and `G` scroll, and `tt` again the Markdown; after the next draft and back the draft is on its Markdown again; the message opens in its HTML frame and Settings still shows HTML pressed under "Reader"; `tb` logs `[open] stubbed: <cache>/renditions/draft-angebot-antwort/message.html` and says "Opened in browser"; in the Web Inspector the `mpmsg://localhost/work/drafts/angebot-antwort` response carries `X-Mp-Rendition: html` and the nonce policy.
 
 The verdict of each step goes into the table above, with the date of the run.

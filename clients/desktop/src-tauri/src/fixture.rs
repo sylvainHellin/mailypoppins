@@ -121,8 +121,8 @@ use mp_core::draft::{DraftRecipientEdit, SourceMessage};
 use mp_core::selector::{message_key, Selector};
 use mp_protocol::calendar::{AgendaEvent, EventFrontmatter};
 use mp_protocol::draft::{
-    DraftCreated, DraftEntry, DraftKind, DraftListing, DraftLocation, DraftMessage, DraftPreview,
-    DraftReport, DraftSkip, DraftSource, DraftValidation,
+    DraftCreated, DraftEntry, DraftHtml, DraftKind, DraftListing, DraftLocation, DraftMessage,
+    DraftPreview, DraftReport, DraftSkip, DraftSource, DraftValidation,
 };
 use mp_protocol::events::{
     Diagnostic, DraftInvalid, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK,
@@ -1907,6 +1907,39 @@ impl State {
                 };
                 Ok((serde_json::to_value(answer)?, Vec::new()))
             }
+            "draft.html" => {
+                // The daemon renders the body with the send path's own
+                // Markdown renderer, which lives in the engine; the fixture
+                // writes each line as a paragraph in the configured font,
+                // and appends the companion `.html` quote a reply keeps,
+                // then hardens it as the daemon does.
+                let id = param_str(method, params, "id")?;
+                let entry = self.parseable(method, &account, id)?;
+                let path = PathBuf::from(&entry.path);
+                let draft = mp_core::draft::parse_email_draft(&path)
+                    .map_err(|e| refused(method, -32010, &one_line(&e)))?;
+                let mut body = String::from(
+                    "<!DOCTYPE html>\n<html>\n<head>\n</head>\n<body>\n\
+                     <div style=\"font-family: Calibri, sans-serif; font-size: 11pt;\">\n",
+                );
+                for line in draft.body_markdown.lines().filter(|l| !l.trim().is_empty()) {
+                    body.push_str(&format!("<p>{}</p>\n", escape_html(line)));
+                }
+                if let Ok(quote) = fs::read_to_string(path.with_extension("html")) {
+                    body.push_str(&quote);
+                }
+                body.push_str("</div>\n</body>\n</html>\n");
+                let html =
+                    mp_core::parse::inject_csp_meta(&mp_core::parse::ensure_utf8_charset(&body));
+                let answer = DraftHtml {
+                    account: account.clone(),
+                    id: entry.id.clone(),
+                    selector: entry.selector.clone(),
+                    bytes: html.len() as u64,
+                    html,
+                };
+                Ok((serde_json::to_value(answer)?, Vec::new()))
+            }
             other => Err(refused(other, -32601, "method not found")),
         }
     }
@@ -2989,7 +3022,8 @@ impl Fixture {
             | "draft.approve"
             | "draft.demote"
             | "draft.validate"
-            | "draft.preview" => {
+            | "draft.preview"
+            | "draft.html" => {
                 let (answer, events) = s.draft_method(method, &params)?;
                 for (kind, payload) in events {
                     self.emit_locked(&mut s, kind, payload);
@@ -5084,6 +5118,14 @@ fn server_only_hit(account: &str, query: &str) -> Value {
 /// A body as the daemon's rendition shapes it: the CSP meta tag first, after
 /// a leading doctype, which ends at its first `>` (`parse.rs`'s
 /// `insert_at_document_start`).
+/// Text as HTML character data.
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 fn rendition(body: &str) -> String {
     let tag = format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{DAEMON_CSP}\">\n");
     let lead = body.len() - body.trim_start().len();
@@ -6084,7 +6126,7 @@ mod tests {
             .find(|d| d.id == "offsite-note")
             .expect("the invalid row");
         assert_eq!((row.status.as_str(), row.valid), ("invalid", false));
-        for method in ["draft.approve", "draft.preview"] {
+        for method in ["draft.approve", "draft.preview", "draft.html"] {
             let e = f
                 .call(method, json!({"account": "work", "id": "offsite-note"}))
                 .expect_err("unparseable");

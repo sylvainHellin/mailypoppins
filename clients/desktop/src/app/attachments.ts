@@ -126,13 +126,22 @@ export async function saveAttachment(s: AppState, dispatch: Dispatch<Action>): P
 }
 
 /**
- * `tb`: the daemon's rendition of a stored message, or a server-only hit's
- * own markup, in the default browser.
+ * `tb`: the daemon's rendition of a stored message, a server-only hit's own
+ * markup, or a draft as its send would build it (`draft.html`, PERSO-136),
+ * in the default browser.
  */
 export async function openHtml(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
   const subj = cursorSubject(s);
   if (!subj) return;
-  if (subj.kind === "draft") return notice(dispatch, NO_HTML);
+  if (subj.kind === "draft") {
+    if (!subj.valid) return notice(dispatch, "This draft does not parse; fix it in the editor first");
+    try {
+      await cmd.draftHtmlOpen(subj.account, subj.draftId);
+    } catch (e: unknown) {
+      return failed(dispatch, subj.account, `Draft preview failed: ${asGuiError(e).message}`);
+    }
+    return notice(dispatch, "Opened in browser");
+  }
   try {
     if (subj.kind === "hit") {
       const html = subj.hit.source?.html_body;

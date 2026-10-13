@@ -2,6 +2,11 @@
 // status and the body the dry run renders), `draft_validate`'s report and
 // the `attachments:` list `draft_attachments` reads from the file, read
 // again whenever the listing's row changes (a save in the editor).
+// The body is the Markdown as written; `tt` switches it to the HTML a send
+// would build (`draft.html`, PERSO-136) in the reader's sandboxed frame and
+// back, through `state.draftHtml`, whatever the reader mode is (docs/reader.md,
+// "Drafts and server-only hits"). The frame is fetched again with the rest
+// when the row changes, and every draft opens on its Markdown.
 // `ComposeSummary` is the same preview after an embedded editor exited with
 // 0 on a draft the selection does not show.
 
@@ -13,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { runAction } from "@/app/actions";
 import { openInEditor, setShownStatus } from "@/app/compose";
 import { draftItemsOf, openItem, removeItem } from "@/app/attachments";
+import { ReaderBody, draftReaderUrl } from "@/components/reader/ReaderBody";
 import { useAppState, useDispatch } from "@/app/store";
 import { draftsShown, filteredDrafts, targetKey, type DraftItem } from "@/app/state";
 import * as cmd from "@/lib/commands";
@@ -59,6 +65,10 @@ export function DraftPreview({ account, draft, standalone = false }: { account: 
   // A row that changed (a save, an approve) is read again.
   const key = `${account}/${draft.id}|${draft.path}|${draft.status}|${draft.subject}|${draft.to}|${draft.valid}|${s.messages.loadedGen}`;
   const invalid = draft.diagnostic !== null || !draft.valid;
+  const showsHtml = s.draftHtml === targetKey({ account, draft: draft.id });
+
+  // The next draft, or this one shown again, opens on its Markdown.
+  useEffect(() => () => dispatch({ type: "draft_view_reset" }), [dispatch]);
 
   useEffect(() => {
     if (invalid) return;
@@ -94,7 +104,7 @@ export function DraftPreview({ account, draft, standalone = false }: { account: 
   const owner = { kind: "draft" as const, account, draftId: draft.id };
 
   return (
-    <article aria-label={`Draft: ${subject}`} data-slot="draft-preview" className="flex flex-col gap-3 px-5 py-4 text-sm">
+    <article aria-label={`Draft: ${subject}`} data-slot="draft-preview" className="flex flex-1 flex-col gap-3 px-5 py-4 text-sm">
       <div role="toolbar" aria-label="Draft actions" aria-busy={pending || undefined} className="flex flex-wrap items-center gap-1">
         <Button
           size="sm"
@@ -227,9 +237,14 @@ export function DraftPreview({ account, draft, standalone = false }: { account: 
               ))}
             </ul>
           ) : null}
-          <pre data-slot="draft-body" className="font-sans break-words whitespace-pre-wrap">
-            {p.body_truncated ? `${p.body}…` : p.body}
-          </pre>
+          {showsHtml ? (
+            // Keyed on the row, so a save or a reload fetches the rendition again.
+            <ReaderBody key={key} htmlUrl={draftReaderUrl(account, draft.id)} subject={subject} label="Draft as sent" />
+          ) : (
+            <pre data-slot="draft-body" className="font-sans break-words whitespace-pre-wrap">
+              {p.body_truncated ? `${p.body}…` : p.body}
+            </pre>
+          )}
         </>
       )}
       <p className="font-mono text-xs break-all text-muted-foreground">{draft.path}</p>

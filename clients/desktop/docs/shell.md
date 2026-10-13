@@ -1083,8 +1083,8 @@ The keymap follows the TUI's, from the generated `keymap.json`:
   On a received message `e` opens its Markdown rendition read-only instead, by a draft's route, the TUI's `e`, and Enter focuses the reader (PERSO-92); on a server-only hit it says to fetch it first (`F`) (see Compose, "A message's rendition").
 - `cs`: the Signatures dialog, in Mail from any pane; see Signatures.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".
-- `to`, `ts`, `tb`: open an attachment, save attachments, open the HTML in the browser, from the list or the reader (the TUI's MESSAGE keys); `ta`: attach a file to the Drafts cursor draft; see [reader.md](reader.md), "Attachments".
-- `tt`: toggle the reader between html and text mode, from the list or the reader, a desktop key that takes the TUI's thread key, which the desktop does not have yet; the palette's row is "Toggle reader text mode", beside "Reader: HTML" and "Reader: text" (see [reader.md](reader.md), "Text mode").
+- `to`, `ts`, `tb`: open an attachment, save attachments, open the HTML in the browser (on a draft, the HTML its send would build), from the list or the reader (the TUI's MESSAGE keys); `ta`: attach a file to the Drafts cursor draft; see [reader.md](reader.md), "Attachments".
+- `tt`: toggle the reader between html and text mode, a draft's preview included, from the list or the reader, a desktop key that takes the TUI's thread key, which the desktop does not have yet; the palette's row is "Toggle reader text mode", beside "Reader: HTML" and "Reader: text" (see [reader.md](reader.md), "Text mode").
   The search overlay's `o`, `O` and `b` are these same keys on a hit, which is a list row here.
 - `F`: fetch the server-only hit under the cursor into the store, from the list or the reader, a desktop key: the TUI's overlay binds `f`, which is the find family's prefix in the desktop (`fm`, `ff`), and a bare `F` is free in every TUI mail context.
   The palette's row for it shows `F`.

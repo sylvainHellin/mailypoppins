@@ -91,19 +91,39 @@ export function forwardedKey(e: MessageEvent): { frame: HTMLIFrameElement; init:
   };
 }
 
+/** `s` as one path segment, byte for byte as src-tauri's `reader::percent_encode` writes it. */
+function segment(s: string): string {
+  let out = "";
+  for (const b of new TextEncoder().encode(s)) {
+    const c = String.fromCharCode(b);
+    out += /[A-Za-z0-9\-_.~]/.test(c) ? c : `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+/**
+ * The reader URL of a draft's send rendition, `draft.html` served by the same
+ * scheme under the same policy and bridge (src-tauri `reader::draft_url`).
+ */
+export function draftReaderUrl(account: string, id: string): string {
+  return `mpmsg://localhost/${segment(account)}/drafts/${segment(id)}`;
+}
+
 export type ReaderBodyProps = {
-  /** `MessageMeta.html_url`, as the Rust layer hands it over. */
+  /** `MessageMeta.html_url`, as the Rust layer hands it over, or a draft's `draftReaderUrl`. */
   htmlUrl: string;
   /** The message subject, for the frame's accessible name. */
   subject: string | null;
+  /** What the frame's accessible name calls the document; a draft's preview says "Draft body". */
+  label?: string;
 };
 
-export function ReaderBody({ htmlUrl, subject }: ReaderBodyProps) {
+export function ReaderBody({ htmlUrl, subject, label }: ReaderBodyProps) {
   // Keyed on the URL, so a new message starts with the skeleton again.
-  return <ReaderFrame key={htmlUrl} htmlUrl={htmlUrl} subject={subject} />;
+  return <ReaderFrame key={htmlUrl} htmlUrl={htmlUrl} subject={subject} label={label} />;
 }
 
-function ReaderFrame({ htmlUrl, subject }: ReaderBodyProps) {
+function ReaderFrame({ htmlUrl, subject, label = "Message body" }: ReaderBodyProps) {
   const [loaded, setLoaded] = useState(false);
   return (
     <div data-slot="reader-body" className="relative min-h-80 flex-1">
@@ -120,7 +140,7 @@ function ReaderFrame({ htmlUrl, subject }: ReaderBodyProps) {
         src={htmlUrl}
         sandbox={READER_SANDBOX}
         referrerPolicy="no-referrer"
-        title={`Message body: ${subject ?? "(no subject)"}`}
+        title={`${label}: ${subject ?? "(no subject)"}`}
         onLoad={() => setLoaded(true)}
         className={`absolute inset-0 size-full border-0 bg-reader-canvas ${loaded ? "" : "invisible"}`}
       />

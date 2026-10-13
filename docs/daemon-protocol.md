@@ -731,7 +731,7 @@ All three answer the list as the file has it afterwards, refuse a draft that wil
 It is then hardened as `message.html` is, with a UTF-8 charset and the `Content-Security-Policy` meta tag after the doctype, because the quote is a sender's markup; `cid:` references in it stay as they are, since the sent message carries no part for them either.
 The status is not checked, so a `draft` previews as well as an `approved` one, and nothing validates the recipients.
 A file that will not parse is `-32010`, and a rendition over 8 MiB is `-32004 frame_too_large` with `{limit, seen}` and no `fallback`, since no file path serves a draft's rendition.
-It is declared in `DRAFT_HTML_METHOD_SPECS`, an array of its own for the reason `DRAFT_FROM_MESSAGE_METHOD_SPECS` is one, and the TUI's `tb` on a Drafts row writes its `html` to a file and opens the browser on it.
+It is declared in `DRAFT_HTML_METHOD_SPECS`, an array of its own for the reason `DRAFT_FROM_MESSAGE_METHOD_SPECS` is one, and the TUI's `tb` on a Drafts row writes its `html` to a file and opens the browser on it, as the desktop's `tb` on a draft does; the desktop's draft preview also shows it in the reader frame in html mode.
 
 **`draft.path` is the family's resolver.**
 It takes what the user typed (`<id>`, `drafts/<id>`, `mp://<account>/drafts/<id>`) and answers the canonical selector, the canonical path and the current status; which *account* a selector names stays a client-side decision, because `Selector::parse` needs no store.

@@ -4,7 +4,7 @@ import { parseReaderMode } from "@/app/readerMode";
 import { GUI_ENTRIES, paletteEntries } from "@/keymap/catalog";
 import * as cmd from "@/lib/commands";
 import { renderApp, shellReady } from "@/test/render";
-import { emit, fixtures, mock, resetMock } from "@/test/tauri-mock";
+import { emit, emitEnvelope, fixtures, mock, resetMock } from "@/test/tauri-mock";
 
 const reader = () => screen.getByRole("complementary", { name: "Reader" });
 const frame = () => reader().querySelector("iframe");
@@ -108,6 +108,91 @@ describe("the reader mode", () => {
     await user.keyboard("tt");
     await textPane();
     expect(await screen.findByText("The reader mode was not saved: could not write desktop.json")).toBeInTheDocument();
+  });
+});
+
+describe("tt on a draft (PERSO-136)", () => {
+  const preview = () => within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" });
+  const draftFrame = () => reader().querySelector('iframe[data-slot="reader-frame"]');
+  const draftBody = () => reader().querySelector('[data-slot="draft-body"]');
+  const DRAFT_URL = "mpmsg://localhost/work/drafts/angebot-antwort";
+
+  /** Drafts of `work`, the first draft's Markdown shown. */
+  async function openDraft(user: ReturnType<typeof renderApp>["user"]) {
+    await user.keyboard("2");
+    await screen.findByRole("listbox", { name: "Drafts messages" });
+    await preview();
+    await waitFor(() => expect(draftBody()).toHaveTextContent("vielen Dank für das Angebot"));
+  }
+
+  it("a draft opens on its Markdown in html mode, tt shows the send's HTML in the frame, tt again the Markdown, and nothing is stored", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await openDraft(user);
+    expect(draftFrame()).toBeNull();
+
+    await user.keyboard("tt");
+    await waitFor(() => expect(draftFrame()).not.toBeNull());
+    const shown = draftFrame();
+    expect(shown).toHaveAttribute("src", DRAFT_URL);
+    expect(shown).toHaveAttribute("sandbox", "allow-popups allow-scripts");
+    expect(shown).toHaveAttribute("title", "Draft as sent: Re: Angebot Dachsanierung");
+    expect(draftBody()).toBeNull();
+
+    await user.keyboard("tt");
+    await waitFor(() => expect(draftBody()).toHaveTextContent("vielen Dank für das Angebot"));
+    expect(draftFrame()).toBeNull();
+    expect(mock.settings.has("reader_mode")).toBe(false);
+    expect(calls("setting_set").filter((c) => (c.args as { key?: string }).key === "reader_mode")).toEqual([]);
+  });
+
+  it("a save of the draft reloads the frame while it is shown", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await openDraft(user);
+    await user.keyboard("tt");
+    await waitFor(() => expect(draftFrame()).not.toBeNull());
+    const before = draftFrame();
+    const loads = calls("draft_preview").length;
+    // A body-only save in the editor: draft.changed, which reloads the Drafts listing.
+    act(() =>
+      emitEnvelope("draft.changed", {
+        account: "work",
+        id: "angebot-antwort",
+        path: "/fixture/work/drafts/angebot-antwort.md",
+        status: "draft",
+      }),
+    );
+    await waitFor(() => expect(calls("draft_preview").length).toBeGreaterThan(loads));
+    await waitFor(() => expect(draftFrame()).not.toBeNull());
+    expect(draftFrame()).not.toBe(before);
+    expect(draftFrame()).toHaveAttribute("src", DRAFT_URL);
+    expect(draftBody()).toBeNull();
+  });
+
+  it("another draft and back opens on the Markdown again, and a message keeps the html default", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await openDraft(user);
+    await user.keyboard("tt");
+    await waitFor(() => expect(draftFrame()).not.toBeNull());
+
+    await user.keyboard("j");
+    const other = await within(reader()).findByRole("article", { name: "Draft: (no subject)" });
+    await waitFor(() => expect(other.querySelector('[data-slot="draft-body"]')).toHaveTextContent("Notes for the offsite agenda."));
+    expect(draftFrame()).toBeNull();
+
+    await user.keyboard("k");
+    await preview();
+    await waitFor(() => expect(draftBody()).toHaveTextContent("vielen Dank für das Angebot"));
+    expect(draftFrame()).toBeNull();
+
+    await user.keyboard("1");
+    await within(reader()).findByRole("toolbar", { name: "Message actions" });
+    await waitFor(() => expect(frame()).not.toBeNull());
+    expect(frame()?.getAttribute("src")).not.toContain("/drafts/");
+    expect(within(reader()).queryByLabelText(/^Message text: /)).toBeNull();
+    expect(mock.settings.has("reader_mode")).toBe(false);
   });
 });
 

@@ -17,7 +17,9 @@
 //!
 //! A server-only search hit has no row to materialise; its markup is in the
 //! hit, and is written with the charset and CSP tags the TUI adds into this
-//! app's cache directory before the browser opens it.
+//! app's cache directory before the browser opens it. A draft's send
+//! rendition (`draft.html`, PERSO-136) is inline in the answer too, and goes
+//! the same way, one directory per draft id.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -375,6 +377,57 @@ pub fn hit_html_open_on(door: &Door, cache_dir: &Path, html: &str) -> Result<Ope
     Ok(opened(&path))
 }
 
+/// Where a draft's send rendition goes: `renditions/draft-<id>/message.html`,
+/// the id kept to ASCII letters, digits, `-` and `_` (anything else `_`),
+/// since a hand-written `id:` is any string and this one names a directory,
+/// the TUI's `html_rendition_for_draft` stem. A second `tb` on the same draft
+/// rewrites the one file.
+pub fn draft_rendition_path(cache_dir: &Path, id: &str) -> PathBuf {
+    let stem: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    cache_dir
+        .join(RENDITIONS)
+        .join(format!("draft-{stem}"))
+        .join("message.html")
+}
+
+/// Open the draft `id` in the browser as its send would build it (ATT-05 on a
+/// draft, the TUI's `tb` on a Drafts row): `draft.html` answers the HTML part
+/// with the signature the body carries and the quoted original, already
+/// hardened; the charset and CSP tags go on again, as for a hit, since they
+/// are idempotent and the browser has no header to lean on.
+pub fn draft_html_open_on(
+    door: &Door,
+    cache_dir: &Path,
+    account: &str,
+    id: &str,
+) -> Result<OpenedFile, GuiError> {
+    let answer = call(
+        door,
+        "draft.html",
+        json!({"account": account, "id": id}),
+        HANDLE_BUDGET,
+        Addressing::Resource,
+    )?;
+    let html = answer["html"]
+        .as_str()
+        .ok_or_else(|| GuiError::protocol("draft.html answered no `html`"))?;
+    sweep_renditions(cache_dir, SystemTime::now());
+    let path = draft_rendition_path(cache_dir, id);
+    let page = mp_core::parse::inject_csp_meta(&mp_core::parse::ensure_utf8_charset(html));
+    write_private(cache_dir, &path, page.as_bytes())?;
+    open_file(door, &path)?;
+    Ok(opened(&path))
+}
+
 /// Write a rendition readable by its owner only, as the daemon's handles and
 /// the TUI's temp files are: `renditions/` and the `hit-*` directory 0700
 /// (tightened if they exist wider), the file 0600.
@@ -603,6 +656,20 @@ pub async fn hit_html_open(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn draft_html_open(
+    app: AppHandle,
+    session: State<'_, SessionHandle>,
+    account: String,
+    id: String,
+) -> Result<OpenedFile, GuiError> {
+    with_door(&session, move |_, door| {
+        let cache = cache_dir(&app, door)?;
+        draft_html_open_on(door, &cache, &account, &id)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn draft_attachments(
     session: State<'_, SessionHandle>,
     account: String,
@@ -812,6 +879,54 @@ mod tests {
         assert!(page.to_lowercase().contains("charset=\"utf-8\""), "{page}");
         assert!(page.contains("Grüße"));
         assert_eq!(fixture.opened(), vec![file.path]);
+    }
+
+    #[test]
+    fn a_drafts_send_rendition_is_written_per_draft_and_opened() {
+        let (door, fixture) = fixture_door();
+        let cache = scratch("draft-html");
+        let file = draft_html_open_on(&door, &cache, "work", "angebot-antwort").unwrap();
+        assert_eq!(
+            Path::new(&file.path),
+            cache
+                .join(RENDITIONS)
+                .join("draft-angebot-antwort/message.html")
+        );
+        assert_eq!(file.name, "message.html");
+        let page = fs::read_to_string(&file.path).unwrap();
+        assert!(page.contains("vielen Dank für das Angebot"), "{page}");
+        assert!(page.contains("Content-Security-Policy"), "{page}");
+        assert_eq!(page.matches("Content-Security-Policy").count(), 1);
+        assert!(page.to_lowercase().contains("charset=\"utf-8\""), "{page}");
+        assert_eq!(fixture.opened(), vec![file.path.clone()]);
+        assert_eq!(
+            calls_of(&fixture, "draft.html"),
+            vec![json!({"account": "work", "id": "angebot-antwort"})]
+        );
+        // A second open rewrites the one file.
+        let again = draft_html_open_on(&door, &cache, "work", "angebot-antwort").unwrap();
+        assert_eq!(again.path, file.path);
+        // A draft that is gone opens nothing.
+        let gone = draft_html_open_on(&door, &cache, "work", "nope").unwrap_err();
+        assert!(matches!(gone, GuiError::NotFound { .. }), "{gone:?}");
+        assert_eq!(fixture.opened().len(), 2);
+    }
+
+    #[test]
+    fn a_draft_id_names_one_directory_under_the_renditions() {
+        let cache = Path::new("/cache");
+        for (id, dir) in [
+            ("0123abcd", "draft-0123abcd"),
+            ("../etc/x", "draft-___etc_x"),
+            ("a b.ü", "draft-a_b__"),
+        ] {
+            let path = draft_rendition_path(cache, id);
+            assert_eq!(
+                path,
+                cache.join(RENDITIONS).join(dir).join("message.html"),
+                "{id}"
+            );
+        }
     }
 
     /// The rendition is the owner's only, like the daemon's handles: the

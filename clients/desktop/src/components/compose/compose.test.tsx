@@ -289,7 +289,9 @@ describe("the draft preview", () => {
     expect(await within(preview).findByText("robin@example.com")).toBeInTheDocument();
     expect(within(preview).getByText("Valid")).toBeInTheDocument();
     expect(preview.querySelector('[data-slot="draft-status"]')).toHaveTextContent("draft");
+    // A draft opens on its Markdown, whatever the reader mode; `tt` shows the send's HTML (PERSO-136).
     expect(preview.querySelector('[data-slot="draft-body"]')).toHaveTextContent("vielen Dank für das Angebot");
+    expect(preview.querySelector('[data-slot="reader-frame"]')).toBeNull();
     expect(callsOf("draft_validate")).toContainEqual({ account: "work", id: "angebot-antwort" });
 
     await user.keyboard("j");

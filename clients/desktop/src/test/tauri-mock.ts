@@ -1339,6 +1339,16 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       mock.opened.push(path);
       return { name: "message.html", path };
     }
+    case "draft_html_open": {
+      knownAccount(cmd, account);
+      const id = String(args.id);
+      const invalid = invalidDraft(account, id);
+      if (invalid) throw draftInvalidError("draft.html", invalid);
+      findDraft("draft.html", account, id);
+      const path = `/fixture/cache/renditions/draft-${id.replace(/[^A-Za-z0-9_-]/g, "_")}/message.html`;
+      mock.opened.push(path);
+      return { name: "message.html", path };
+    }
     case "draft_attachments":
       knownAccount(cmd, account);
       return draftAttachmentsOf(account, String(args.id));
