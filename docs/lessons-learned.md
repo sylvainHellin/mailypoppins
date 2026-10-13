@@ -2452,6 +2452,7 @@ A command that wants the payload reads it before turning the error into a `GuiEr
 The registry's `cancel` (`src/daemon/operations.rs`) shuts the token, marks the operation `cancelled` and publishes the finish before it answers, whatever the worker is doing.
 A worker that never reads `handle.token` keeps going and its later result is dropped as an invalid transition: until 2026-10-13 `contact.rebuild`, `calendar.rsvp` and `send.invite` were such workers, so a cancelled rebuild still wrote its index and a cancelled RSVP or invitation could still go out.
 They now call `commit_point(method, &token)` (`src/daemon/state/mod.rs`) right before the cache write or the SMTP submission, and the rebuild's walk checks the token every 256 rows; `MAILYPOPPINS_DAEMON_FAKE_COMMIT_HOLD=<dir>` holds a worker at that point so a test can cancel it deterministically.
+Since PERSO-127 `sync.quick` and `sync.full` ask a `crate::sync::Stop` built over their token before the fetch, before every body chunk and before each mailbox's ingest; the engine runs on its own thread, so the hook holds it through `commit_point_blocking` at `StopPoint::Mailbox(1)`, and a `<method>.returned` marker tells a test the worker has finished publishing.
 Only a cancel that lands between `commit_point` returning true and the write still loses the race, which is why the desktop's Cancel keeps its "stopped waiting" wording (`clients/desktop/docs/rust-layer.md`, "Cancelling").
 
 ## `simplelog` writes one record in a dozen `write` calls
@@ -2626,3 +2627,8 @@ The hook goes into a component rendered only while its element shows (`NoticeLin
 
 With `vi.useFakeTimers()` in force, `waitFor` and the `find*` queries poll on a `setTimeout` that never fires, so the test times out at 20 s and the leaked fake timers then break the tests after it.
 Wait for what needs waiting with real timers first, or flush with `await act(() => vi.advanceTimersByTimeAsync(n))` and query synchronously; restore with `vi.useRealTimers()` in a `finally` or an `afterEach`.
+
+## `every_ts_type_is_listed` only runs under `--features ts`
+
+`crates/mp-protocol/tests/ts_bindings.rs` gates `every_ts_type_is_listed` behind the `ts` feature, so `cargo test --workspace` never runs it and it drifted to 74 types counted against 71 listed without anyone noticing (seen while adding `ServerSearchSettled`, PERSO-131).
+Run `cargo test -p mp-protocol --features ts --test ts_bindings` after adding a `#[ts(export)]` type.

@@ -987,8 +987,9 @@ async fn a_running_sync_can_be_cancelled_by_another_connection() {
 /// pass at its second mailbox boundary, the test cancels it there, and the
 /// hook's markers say what the worker decided and when it was done: `dropped`
 /// before it acts on the verdict, `returned` once anything it was going to
-/// publish is published. A pass that ignored the stop would walk into the
-/// second mailbox and then commit its outcome, which `sync_health` would show.
+/// publish is published. The test pins the skipped commit and the cancelled
+/// settle; the stop at the mailbox boundary itself is pinned by the engine
+/// unit tests in `src/sync/engine.rs`.
 #[tokio::test]
 async fn a_sync_cancelled_while_it_runs_stops_before_the_next_mailbox() {
     let tmp = TempDir::new().expect("a temporary sync-slice root");

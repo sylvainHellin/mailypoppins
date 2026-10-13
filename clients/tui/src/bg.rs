@@ -138,8 +138,6 @@ pub(super) fn land_rollback(app: &mut App, account_index: usize, failed: u64) {
     refresh_after_server_sync(app, account_index);
 }
 
-/// ` (name)` for a known account of a multi-account setup, empty otherwise,
-/// for status lines that would not otherwise say which account they are about.
 /// The overlay footer a settled `message.search_server` paints: the count of
 /// hits in the list, the CLI's caveat when the store answered a term (`local
 /// store only: has:attachment`, PERSO-131), and the mailboxes that refused.
@@ -163,6 +161,8 @@ pub(crate) fn server_search_footer(count: usize, settled: &serde_json::Value) ->
     line
 }
 
+/// ` (name)` for a known account of a multi-account setup, empty otherwise,
+/// for status lines that would not otherwise say which account they are about.
 fn account_label(app: &App, account_index: usize) -> String {
     match app.accounts.get(account_index) {
         Some(acct) if app.accounts.len() > 1 => format!(" ({})", acct.account_config.name),
