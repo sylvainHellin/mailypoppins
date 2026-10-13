@@ -1033,12 +1033,12 @@ async fn a_sync_cancelled_while_it_runs_stops_before_the_next_mailbox() {
     }
     let mut conn = slice.connect().await;
     call(&mut conn, "state.bootstrap", json!({})).await;
-    // The runtime's startup drain publishes the counts that moved too, so it
-    // must be over before the row lands, or it would announce the row in the
-    // pass's place.
+    // The runtime's startup drain publishes the counts that moved too. Its
+    // publish must be over before the row lands, or it would announce the row
+    // in the pass's place; the `published` line is written after the publish.
     await_daemon_log(
         slice.root(),
-        &format!("[drainer] drained {}", fixture::SERVER_ACCOUNT),
+        &format!("[drainer] published {}", fixture::SERVER_ACCOUNT),
     )
     .await;
 

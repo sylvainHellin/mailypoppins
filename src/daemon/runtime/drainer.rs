@@ -199,6 +199,7 @@ async fn run(
         if outcome.ran {
             debug!("[drainer] drained {account}{}", outcome.status);
             publish(&runtime, outcome).await;
+            debug!("[drainer] published {account}");
         }
         if !busy {
             refused = 0;

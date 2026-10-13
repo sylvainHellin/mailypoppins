@@ -2453,6 +2453,7 @@ The registry's `cancel` (`src/daemon/operations.rs`) shuts the token, marks the 
 A worker that never reads `handle.token` keeps going and its later result is dropped as an invalid transition: until 2026-10-13 `contact.rebuild`, `calendar.rsvp` and `send.invite` were such workers, so a cancelled rebuild still wrote its index and a cancelled RSVP or invitation could still go out.
 They now call `commit_point(method, &token)` (`src/daemon/state/mod.rs`) right before the cache write or the SMTP submission, and the rebuild's walk checks the token every 256 rows; `MAILYPOPPINS_DAEMON_FAKE_COMMIT_HOLD=<dir>` holds a worker at that point so a test can cancel it deterministically.
 Since PERSO-127 `sync.quick` and `sync.full` ask a `crate::sync::Stop` built over their token before the fetch, before every body chunk and before each mailbox's ingest; the engine runs on its own thread, so the hook holds it through `commit_point_blocking` at `StopPoint::Mailbox(1)`, and a `<method>.returned` marker tells a test the worker has finished publishing.
+Since PERSO-133 a cancelled sync calls `publish_changed_counts` before its `returned` marker; a test that wants to see that event first waits for the runtime's startup drain (`[drainer] published <account>`, written after the drain's own publish), which would otherwise announce the same counts and hide a missing publish.
 Only a cancel that lands between `commit_point` returning true and the write still loses the race, which is why the desktop's Cancel keeps its "stopped waiting" wording (`clients/desktop/docs/rust-layer.md`, "Cancelling").
 
 ## `simplelog` writes one record in a dozen `write` calls
@@ -2632,3 +2633,8 @@ Wait for what needs waiting with real timers first, or flush with `await act(() 
 
 `crates/mp-protocol/tests/ts_bindings.rs` gates `every_ts_type_is_listed` behind the `ts` feature, so `cargo test --workspace` never runs it and it drifted to 74 types counted against 71 listed without anyone noticing (seen while adding `ServerSearchSettled`, PERSO-131).
 Run `cargo test -p mp-protocol --features ts --test ts_bindings` after adding a `#[ts(export)]` type.
+
+## SQLite folds ASCII case only
+
+`LIKE`, `lower()` and `NOCASE` ignore ASCII case and nothing else, so a case-insensitive match on user text needs a function registered on every connection: `mp_fold` (`src/store/mod.rs`, registered in `apply_pragmas` so the read pool and every reopen carry it), with the needle folded by the same Rust function (PERSO-134).
+FTS5's default `unicode61` tokenizer already folds Unicode case and strips accents, so text search is looser than `filename:`, which keeps accents significant.

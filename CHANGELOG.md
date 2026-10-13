@@ -10,11 +10,14 @@ All notable changes to this project are documented in this file.
 - **`mp search` names the terms the local store answered on stdout (PERSO-122).** On plain IMAP `has:attachment` is answered from the local store; the result header now says `local store only: has:attachment` and `--json` carries `"coverage": "server"|"local"` with `"local_terms"`, so a piped search no longer reads an un-synced gap as "no such mail". The stderr warning stays.
 - **The TUI search overlay and the desktop search bar name the terms the local store answered (PERSO-131).** `message.search_server` settles with `coverage` and `local_terms`; both clients append "local store only: has:attachment" to the count when plain IMAP answered that term from the local store, as `mp search` does.
 - **Cancelling a running `sync.quick` or `sync.full` stops it (PERSO-127).** The pass stops at the next body chunk and the next mailbox boundary; the mailboxes already ingested stay, the rest waits for the next pass, and no `sync.completed` is published.
+- **A cancelled sync announces the mailboxes it did pull in (PERSO-133).** The counts of every mailbox the pass ingested reach the other clients at once, still without a completed sync.
+- **`filename:` ignores case beyond ASCII (PERSO-134).** `filename:übersicht` finds `Übersicht.pdf`; accents still count and ß is not SS.
 - **Desktop: `ff` opens a Server Search form with the TUI's fields (PERSO-115).** The form has scope, From, To, Subject, Keywords, After, Before, attachment and Advanced; the store answers first, then the server.
 - **Desktop: an available update shows as a card at the bottom right with Install and Later (PERSO-97).**
 - **Desktop: `e` on a received message opens it read-only in `$EDITOR` as Markdown, as in the TUI (PERSO-92).** Enter focuses the reader.
 
 ### Fixed
+- **The desktop log's startup line names the bundle version, and the unreachable TUI `Action::NewDraft` is gone (PERSO-135).**
 - **Reply and reply-all to a message you sent address its original recipients (PERSO-99).** They now go to its original To (and Cc for reply-all) instead of your own address.
 - **`mp daemon start` and `mp daemon restart` go through the installed systemd unit or launchd agent when it serves this data directory and runs this `mp` (PERSO-109).** A restart no longer leaves `mailypoppins.service` dead beside a detached daemon.
 - **TUI: copying over ssh on a host with no clipboard works (PERSO-113).** `y`, and `c` in Contacts, send the text to the terminal via OSC 52 and show it in the status line instead of failing with "Failed to access clipboard".
