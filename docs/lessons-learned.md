@@ -2650,3 +2650,11 @@ A TUI key handler reads its door off `app.session`, so the recording `Fixture` i
 ## A draft preview frame needs no cache-busting URL
 
 `DraftPreview` drops its loaded record when the row key changes, which unmounts the frame, and the remount fetches `mpmsg://.../drafts/<id>` again since the response is `no-store` (PERSO-136).
+
+## A `thread_id IS NOT NULL` inside an `IN` subquery walks the whole account
+
+SQLite reads it as a range over `messages_thread` and walks every threaded row of the account; pin the mailbox walk with `INDEXED BY messages_list`, which fails at prepare time rather than falling back if the index is ever missing (PERSO-138).
+
+## The grouped listing's cost is in the per-thread probes
+
+On 50 000 one-message conversations the `messages_thread` probes cost 60 ms of SQL against the flat walk's 19 ms, and the Rust fold is a small share; a covering `(account, thread_id, mailbox)` index or a summary table is the lever, not the fold (PERSO-138).
