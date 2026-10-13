@@ -8,16 +8,23 @@
 //! streaming the listing rather than answering it in one frame. The store is
 //! seeded as that file seeds it, one row through ingest and the rest copied
 //! from it in one transaction.
+//!
+//! The same stream collected by `mp-client`'s session thread yields every
+//! conversation on the wire, in order. One [`Session`] per test binary, for
+//! the reason `daemon_list_stream_cap.rs` gives, so this binary holds one test.
 
 mod support;
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+use mp_client::session::{Connector, ReopenSession, Session};
 use mp_client::{ClientInfo, ClientKind, Connection, Identity};
 use mp_protocol::listing::{
     ConversationRow, ConversationRowsChunk, MessageListStreamStarted, MessageListing,
@@ -56,6 +63,46 @@ server = "INBOX"
 [[accounts.mailboxes.extra]]
 server = "Bulk"
 "#;
+
+/// The socket the session's connector opens, set once per test binary.
+static SOCKET: OnceLock<PathBuf> = OnceLock::new();
+
+fn open() -> Pin<Box<dyn Future<Output = Connection> + Send>> {
+    Box::pin(async {
+        let socket = SOCKET.get().expect("the socket is set");
+        let root = socket
+            .parent()
+            .and_then(Path::parent)
+            .expect("<root>/runtime/daemon.sock");
+        let (connection, _hello) = Connection::open_requiring(
+            socket,
+            client_info(),
+            identity(root),
+            &[METHOD_MESSAGE_LIST_CONVERSATIONS],
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("the daemon accepts a session requiring the conversations");
+        connection
+    })
+}
+
+/// No second connection: the test ends with the first.
+const REOPEN: ReopenSession = || Box::pin(async { None });
+
+fn client_info() -> ClientInfo {
+    ClientInfo {
+        kind: ClientKind::Tui,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+fn identity(root: &Path) -> Identity {
+    Identity {
+        data_dir: root.to_path_buf(),
+        config_dir: root.to_path_buf(),
+    }
+}
 
 /// A mailbox of [`ROWS`] one-message conversations streams in frames no larger
 /// than the budget plus one row plus the envelope, every conversation's
@@ -126,6 +173,37 @@ fn no_conversation_frame_passes_the_budget_on_the_large_mailbox() {
         assert_eq!(row.member_ids, [listed.id]);
         assert_eq!(row.count, 1);
     }
+
+    // Through `mp-client`'s collector, as a client lists conversations.
+    SOCKET
+        .set(socket_path(root))
+        .expect("set once per test binary");
+    let session = Session::connect(Connector {
+        open,
+        reopen: REOPEN,
+    })
+    .expect("a session");
+    session
+        .call_within("state.bootstrap", json!({}), DEADLINE)
+        .expect("the session subscribes, so it sees the stream's finish");
+    let collecting = Instant::now();
+    let listing = session
+        .list_conversations_within(ACCOUNT, MAILBOX, DEADLINE)
+        .expect("the stream lists the whole mailbox");
+    eprintln!(
+        "collected {} conversations in {:.0} ms",
+        listing.conversations.len(),
+        collecting.elapsed().as_secs_f64() * 1000.0
+    );
+    assert_eq!(listing.account, ACCOUNT);
+    assert_eq!(listing.mailbox, MAILBOX);
+    assert_eq!(listing.total, ROWS as u64);
+    assert!(
+        listing.conversations.iter().eq(streamed.iter().copied()),
+        "the collected conversations are the ones on the wire"
+    );
+    let mut session = session;
+    session.close();
     daemon.stop();
 }
 
@@ -200,14 +278,8 @@ async fn connect(root: &Path) -> Connection {
         "Connection::open_requiring",
         Connection::open_requiring(
             &socket_path(root),
-            ClientInfo {
-                kind: ClientKind::Tui,
-                app_version: env!("CARGO_PKG_VERSION").to_string(),
-            },
-            Identity {
-                data_dir: root.to_path_buf(),
-                config_dir: root.to_path_buf(),
-            },
+            client_info(),
+            identity(root),
             &[METHOD_MESSAGE_LIST_CONVERSATIONS],
             Duration::from_secs(10),
         ),

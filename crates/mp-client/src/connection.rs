@@ -33,10 +33,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use mp_protocol::frame::{self, Decoder, FrameError};
-use mp_protocol::listing::MessageRowsChunk;
+use mp_protocol::listing::{ConversationRowsChunk, MessageRowsChunk};
 use mp_protocol::{
-    Notification, Request, RequestId, RpcError, JSONRPC_VERSION, METHOD_MESSAGE_ROWS, PROTOCOL_MAX,
-    PROTOCOL_MIN,
+    Notification, Request, RequestId, RpcError, JSONRPC_VERSION, METHOD_MESSAGE_CONVERSATIONS,
+    METHOD_MESSAGE_ROWS, PROTOCOL_MAX, PROTOCOL_MIN,
 };
 
 use crate::types::{
@@ -59,6 +59,10 @@ pub enum Inbound {
     /// [`Inbound::Notification`] of method `message.rows` instead, for the
     /// reader to decode and refuse.
     Rows(MessageRowsChunk),
+    /// A `message.conversations` chunk in the daemon's own spelling, decoded
+    /// the same way (#0142); spelled otherwise, it arrives as an
+    /// [`Inbound::Notification`] of method `message.conversations`.
+    Conversations(ConversationRowsChunk),
 }
 
 /// One decoded frame, before it is sorted into replies and notifications.
@@ -69,6 +73,8 @@ enum Decoded {
     /// A `message.rows` frame, decoded straight into its chunk, which spares
     /// the `Value` tree of a chunk of about 1 MiB.
     Rows(MessageRowsChunk),
+    /// A `message.conversations` frame, decoded straight into its chunk.
+    Conversations(ConversationRowsChunk),
 }
 
 /// Decode one frame line: a `message.rows` chunk straight into its typed
@@ -77,6 +83,9 @@ enum Decoded {
 fn decode_line(line: &str) -> Result<Decoded, FrameError> {
     if let Some(chunk) = MessageRowsChunk::from_frame_line(line) {
         return Ok(Decoded::Rows(chunk));
+    }
+    if let Some(chunk) = ConversationRowsChunk::from_frame_line(line) {
+        return Ok(Decoded::Conversations(chunk));
     }
     serde_json::from_str(line)
         .map(Decoded::Json)
@@ -275,6 +284,11 @@ impl Connection {
                 // A struct of strings, numbers and booleans always serialises.
                 params: serde_json::to_value(chunk).unwrap_or_default(),
             },
+            Inbound::Conversations(chunk) => Notification {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                method: METHOD_MESSAGE_CONVERSATIONS.to_string(),
+                params: serde_json::to_value(chunk).unwrap_or_default(),
+            },
         })
     }
 
@@ -295,6 +309,7 @@ impl Connection {
             if let Some(frame) = self.notifications.pop_front() {
                 match frame {
                     Decoded::Rows(chunk) => return Some(Inbound::Rows(chunk)),
+                    Decoded::Conversations(chunk) => return Some(Inbound::Conversations(chunk)),
                     Decoded::Json(value) => match serde_json::from_value(value) {
                         Ok(notification) => return Some(Inbound::Notification(notification)),
                         // A frame shaped like a notification that does not
@@ -337,7 +352,7 @@ impl Connection {
             while let Some(frame) = self.pending.pop_front() {
                 let value = match frame {
                     // A chunk is a notification, kept like any other below.
-                    Decoded::Rows(_) => {
+                    Decoded::Rows(_) | Decoded::Conversations(_) => {
                         self.notifications.push_back(frame);
                         continue;
                     }
@@ -731,6 +746,49 @@ mod tests {
         assert_eq!(rebuilt.method, METHOD_MESSAGE_ROWS);
         assert_eq!(
             serde_json::from_value::<MessageRowsChunk>(rebuilt.params).expect("the params"),
+            chunk
+        );
+        daemon.abort();
+    }
+
+    /// A `message.conversations` chunk in the daemon's spelling arrives typed
+    /// as well, through a call and between calls, and one spelled otherwise
+    /// arrives generically (#0142).
+    #[tokio::test]
+    async fn a_conversation_chunk_is_decoded_typed() {
+        let canonical = r#"{"jsonrpc":"2.0","method":"message.conversations","params":{"offset":0,"operation_id":"op","rows":[{"count":2,"latest":{"id":7},"thread_id":"<t@x>"}]}}"#;
+        let spaced = r#"{"jsonrpc": "2.0", "method": "message.conversations", "params": {"offset": 1, "operation_id": "op", "rows": []}}"#;
+        let (listener, socket) = listener("conversations");
+        let daemon = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await.expect("the request");
+            let frames = format!(
+                "{canonical}\n{spaced}\n{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}\n{canonical}\n"
+            );
+            stream.write_all(frames.as_bytes()).await.expect("written");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let mut conn = Connection::connect(&socket).await.expect("connect");
+        conn.call("account.list", json!({}))
+            .await
+            .expect("answered");
+        let chunk = ConversationRowsChunk::from_frame_line(canonical).expect("canonical");
+        assert_eq!(chunk.rows[0].latest.id, 7);
+        assert_eq!(
+            conn.next_inbound().await,
+            Some(Inbound::Conversations(chunk.clone()))
+        );
+        let notification: Notification = serde_json::from_str(spaced).expect("a notification");
+        assert_eq!(
+            conn.next_inbound().await,
+            Some(Inbound::Notification(notification))
+        );
+        let rebuilt = conn.next_notification().await.expect("the chunk");
+        assert_eq!(rebuilt.method, METHOD_MESSAGE_CONVERSATIONS);
+        assert_eq!(
+            serde_json::from_value::<ConversationRowsChunk>(rebuilt.params).expect("the params"),
             chunk
         );
         daemon.abort();

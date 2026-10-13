@@ -80,13 +80,15 @@ use tokio::sync::mpsc as async_mpsc;
 
 use crate::types::ClientError;
 use crate::{Connection, Inbound};
-use mp_protocol::listing::METHOD_MESSAGE_LIST_STREAM;
 use mp_protocol::listing::{
-    MessageListRow, MessageListStreamStarted, MessageListing, MessageRowsChunk,
+    ConversationListing, ConversationRow, ConversationRowsChunk, MessageListRow,
+    MessageListStreamStarted, MessageListing, MessageRowsChunk, METHOD_MESSAGE_LIST_CONVERSATIONS,
+    METHOD_MESSAGE_LIST_STREAM,
 };
 use mp_protocol::state::Bootstrap;
 use mp_protocol::{
-    EventEnvelope, RpcError, METHOD_MESSAGE_ROWS, METHOD_STATE_EVENT, METHOD_STATE_RESYNC_REQUIRED,
+    EventEnvelope, RpcError, METHOD_MESSAGE_CONVERSATIONS, METHOD_MESSAGE_ROWS, METHOD_STATE_EVENT,
+    METHOD_STATE_RESYNC_REQUIRED,
 };
 
 use crate::events::{Incoming, Subscription};
@@ -141,7 +143,8 @@ enum Call {
         params: Value,
         then: Box<dyn FnOnce(Result<Value, Failure>) + Send>,
     },
-    /// One `message.list_stream`, collected into a listing (#0138).
+    /// One `message.list_stream` or `message.list_conversations`, collected
+    /// into a listing (#0138, #0142); which one is the kind of `then`.
     ///
     /// The deadline travels with the call because the session thread is the
     /// only place that can act on it: at the deadline it cancels the stream,
@@ -152,20 +155,144 @@ enum Call {
         mailbox: String,
         deadline: std::time::Instant,
         budget: Duration,
-        then: ListingReply,
+        then: StreamReply,
     },
 }
 
 /// What a streamed listing's caller is answered through.
-type ListingReply = Box<dyn FnOnce(Result<MessageListing, Failure>) + Send>;
+type Reply<L> = Box<dyn FnOnce(Result<L, Failure>) + Send>;
+
+/// The caller of one stream, by the kind of listing it waits for.
+enum StreamReply {
+    /// A `message.list_stream`.
+    Messages(Reply<MessageListing>),
+    /// A `message.list_conversations`.
+    Conversations(Reply<ConversationListing>),
+}
 
 impl Call {
     /// Answer the call with `failure`, whichever kind it is.
     fn fail(self, failure: Failure) {
         match self {
             Call::Plain { then, .. } => then(Err(failure)),
-            Call::Stream { then, .. } => then(Err(failure)),
+            Call::Stream {
+                then: StreamReply::Messages(then),
+                ..
+            } => then(Err(failure)),
+            Call::Stream {
+                then: StreamReply::Conversations(then),
+                ..
+            } => then(Err(failure)),
         }
+    }
+}
+
+/// One kind of streamed listing, as the session thread collects it: the flat
+/// `message.list_stream` or the grouped `message.list_conversations` (#0142).
+///
+/// The collector, the deadline, the cancel, the contiguity checks and the drop
+/// of a stray chunk are written once over this, so the second stream inherits
+/// every rule of the first rather than a copy of them.
+trait StreamChunk: serde::de::DeserializeOwned + Sized + Send + 'static {
+    /// One row of the stream.
+    type Row: Send + 'static;
+    /// What the collected rows make up.
+    type Listing: Send + 'static;
+    /// The method that starts the stream.
+    const METHOD: &'static str;
+    /// The notification method its chunks travel under.
+    const NOTIFICATION: &'static str;
+
+    fn operation_id(&self) -> &str;
+    fn offset(&self) -> u64;
+    fn into_rows(self) -> Vec<Self::Row>;
+    /// The chunk an inbound frame is when the connection decoded it typed as
+    /// one of this kind, or the frame back.
+    fn from_inbound(inbound: Inbound) -> Result<Self, Inbound>;
+    /// The listing the stream's head and its rows make up.
+    fn listing(started: MessageListStreamStarted, rows: Vec<Self::Row>) -> Self::Listing;
+    /// The caller's reply, as the call carries it.
+    fn reply(then: Reply<Self::Listing>) -> StreamReply;
+}
+
+impl StreamChunk for MessageRowsChunk {
+    type Row = MessageListRow;
+    type Listing = MessageListing;
+    const METHOD: &'static str = METHOD_MESSAGE_LIST_STREAM;
+    const NOTIFICATION: &'static str = METHOD_MESSAGE_ROWS;
+
+    fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn into_rows(self) -> Vec<MessageListRow> {
+        self.rows
+    }
+
+    fn from_inbound(inbound: Inbound) -> Result<Self, Inbound> {
+        match inbound {
+            Inbound::Rows(chunk) => Ok(chunk),
+            other => Err(other),
+        }
+    }
+
+    fn listing(started: MessageListStreamStarted, rows: Vec<MessageListRow>) -> MessageListing {
+        MessageListing {
+            account: started.account,
+            mailbox: started.mailbox,
+            total: started.total,
+            messages: rows,
+        }
+    }
+
+    fn reply(then: Reply<MessageListing>) -> StreamReply {
+        StreamReply::Messages(then)
+    }
+}
+
+impl StreamChunk for ConversationRowsChunk {
+    type Row = ConversationRow;
+    type Listing = ConversationListing;
+    const METHOD: &'static str = METHOD_MESSAGE_LIST_CONVERSATIONS;
+    const NOTIFICATION: &'static str = METHOD_MESSAGE_CONVERSATIONS;
+
+    fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn into_rows(self) -> Vec<ConversationRow> {
+        self.rows
+    }
+
+    fn from_inbound(inbound: Inbound) -> Result<Self, Inbound> {
+        match inbound {
+            Inbound::Conversations(chunk) => Ok(chunk),
+            other => Err(other),
+        }
+    }
+
+    fn listing(
+        started: MessageListStreamStarted,
+        rows: Vec<ConversationRow>,
+    ) -> ConversationListing {
+        ConversationListing {
+            account: started.account,
+            mailbox: started.mailbox,
+            total: started.total,
+            conversations: rows,
+        }
+    }
+
+    fn reply(then: Reply<ConversationListing>) -> StreamReply {
+        StreamReply::Conversations(then)
     }
 }
 
@@ -370,9 +497,19 @@ impl Session {
                         Call::Stream {
                             account,
                             mailbox,
-                            then,
+                            then: StreamReply::Messages(then),
                             ..
                         } => then(queries.list_stream(&account, &mailbox).map_err(failure)),
+                        Call::Stream {
+                            account,
+                            mailbox,
+                            then: StreamReply::Conversations(then),
+                            ..
+                        } => then(
+                            queries
+                                .list_conversations(&account, &mailbox)
+                                .map_err(failure),
+                        ),
                     }
                 }
             })
@@ -461,9 +598,32 @@ impl Session {
         budget: Duration,
     ) -> Result<MessageListing> {
         match self.calls.as_ref() {
-            Some(calls) => stream_on(calls, account, mailbox, budget),
+            Some(calls) => stream_on::<MessageRowsChunk>(calls, account, mailbox, budget),
             None => Err(anyhow!(
                 "{METHOD_MESSAGE_LIST_STREAM}: the daemon session is closed"
+            )),
+        }
+    }
+
+    /// One mailbox as conversations through `message.list_conversations`,
+    /// collected as [`Session::list_stream`] collects the flat stream (#0142),
+    /// within [`DEFAULT_CALL_TIMEOUT`].
+    pub fn list_conversations(&self, account: &str, mailbox: &str) -> Result<ConversationListing> {
+        self.list_conversations_within(account, mailbox, DEFAULT_CALL_TIMEOUT)
+    }
+
+    /// [`Session::list_conversations`] under a budget of the caller's
+    /// choosing, with [`Session::list_stream_within`]'s meaning.
+    pub fn list_conversations_within(
+        &self,
+        account: &str,
+        mailbox: &str,
+        budget: Duration,
+    ) -> Result<ConversationListing> {
+        match self.calls.as_ref() {
+            Some(calls) => stream_on::<ConversationRowsChunk>(calls, account, mailbox, budget),
+            None => Err(anyhow!(
+                "{METHOD_MESSAGE_LIST_CONVERSATIONS}: the daemon session is closed"
             )),
         }
     }
@@ -586,9 +746,29 @@ impl QueryHandle {
         budget: Duration,
     ) -> Result<MessageListing> {
         match self.calls.as_ref().and_then(|calls| calls.upgrade()) {
-            Some(calls) => stream_on(&calls, account, mailbox, budget),
+            Some(calls) => stream_on::<MessageRowsChunk>(&calls, account, mailbox, budget),
             None => Err(anyhow!(
                 "{METHOD_MESSAGE_LIST_STREAM}: the daemon session is closed"
+            )),
+        }
+    }
+
+    /// [`Session::list_conversations`], on whatever thread holds this.
+    pub fn list_conversations(&self, account: &str, mailbox: &str) -> Result<ConversationListing> {
+        self.list_conversations_within(account, mailbox, DEFAULT_CALL_TIMEOUT)
+    }
+
+    /// [`Session::list_conversations_within`], on whatever thread holds this.
+    pub fn list_conversations_within(
+        &self,
+        account: &str,
+        mailbox: &str,
+        budget: Duration,
+    ) -> Result<ConversationListing> {
+        match self.calls.as_ref().and_then(|calls| calls.upgrade()) {
+            Some(calls) => stream_on::<ConversationRowsChunk>(&calls, account, mailbox, budget),
+            None => Err(anyhow!(
+                "{METHOD_MESSAGE_LIST_CONVERSATIONS}: the daemon session is closed"
             )),
         }
     }
@@ -634,21 +814,31 @@ async fn serve(
                         then(answer);
                     }
                     Some(Call::Stream { account, mailbox, deadline, budget, then }) => {
-                        let stream = StreamCall {
-                            account,
-                            mailbox,
-                            deadline: tokio::time::Instant::from_std(deadline),
-                            budget,
-                            answer: Some(then),
+                        let deadline = tokio::time::Instant::from_std(deadline);
+                        let lost = match then {
+                            StreamReply::Messages(then) => {
+                                StreamCall::<MessageRowsChunk>::new(
+                                    account, mailbox, deadline, budget, then,
+                                )
+                                .serve(&mut connection, &events)
+                                .await
+                            }
+                            StreamReply::Conversations(then) => {
+                                StreamCall::<ConversationRowsChunk>::new(
+                                    account, mailbox, deadline, budget, then,
+                                )
+                                .serve(&mut connection, &events)
+                                .await
+                            }
                         };
-                        if let Some(lost) = stream.serve(&mut connection, &events).await {
+                        if let Some(lost) = lost {
                             break lost;
                         }
                     }
                 },
                 inbound = connection.next_inbound() => match inbound {
                     Some(Inbound::Notification(notification)) => publish(&events, notification),
-                    Some(Inbound::Rows(_)) => drop_rows(),
+                    Some(Inbound::Rows(_) | Inbound::Conversations(_)) => drop_rows(),
                     None => break "the daemon closed the connection".to_string(),
                 },
             }
@@ -713,7 +903,7 @@ fn publish(events: &sync_mpsc::Sender<Incoming>, notification: mp_protocol::Noti
                 .unwrap_or_default()
                 .to_string(),
         },
-        METHOD_MESSAGE_ROWS => return drop_rows(),
+        METHOD_MESSAGE_ROWS | METHOD_MESSAGE_CONVERSATIONS => return drop_rows(),
         other => return info!("[tui] ignoring the {other} notification"),
     };
     let _ = events.send(incoming);
@@ -724,7 +914,7 @@ fn publish(events: &sync_mpsc::Sender<Incoming>, notification: mp_protocol::Noti
 /// cannot produce) one past a stream already answered whole. Dropped quietly,
 /// since a stream is dozens of them.
 fn drop_rows() {
-    debug!("[tui] dropping a message.rows chunk nobody awaits");
+    debug!("[tui] dropping a streamed chunk nobody awaits");
 }
 
 /// Post one call and block for its answer, which is what both doors do.
@@ -758,22 +948,22 @@ fn call_on(
 
 /// Post one streamed listing and block for its answer, which is what both
 /// doors do.
-fn stream_on(
+fn stream_on<C: StreamChunk>(
     calls: &async_mpsc::UnboundedSender<Call>,
     account: &str,
     mailbox: &str,
     budget: Duration,
-) -> Result<MessageListing> {
-    let method = METHOD_MESSAGE_LIST_STREAM;
-    let (answer, wait) = sync_mpsc::sync_channel::<Result<MessageListing, Failure>>(1);
+) -> Result<C::Listing> {
+    let method = C::METHOD;
+    let (answer, wait) = sync_mpsc::sync_channel::<Result<C::Listing, Failure>>(1);
     let call = Call::Stream {
         account: account.to_string(),
         mailbox: mailbox.to_string(),
         deadline: std::time::Instant::now() + budget,
         budget,
-        then: Box::new(move |result| {
+        then: C::reply(Box::new(move |result| {
             let _ = answer.send(result);
-        }),
+        })),
     };
     if calls.send(call).is_err() {
         return Err(anyhow!("{method}: the daemon session is closed"));
@@ -790,8 +980,9 @@ fn stream_on(
 }
 
 /// One streamed listing on the session thread (#0138): the call, the rows it
-/// collects, and the caller still waiting for an answer.
-struct StreamCall {
+/// collects, and the caller still waiting for an answer, for either kind of
+/// stream (#0142).
+struct StreamCall<C: StreamChunk> {
     account: String,
     mailbox: String,
     deadline: tokio::time::Instant,
@@ -799,15 +990,31 @@ struct StreamCall {
     /// `None` once the caller has been answered with a failure, after which
     /// the stream's rows are discarded until its finish arrives or the grace
     /// runs out; a caller answered with a listing leaves the stream at once.
-    answer: Option<ListingReply>,
+    answer: Option<Reply<C::Listing>>,
 }
 
-impl StreamCall {
+impl<C: StreamChunk> StreamCall<C> {
+    fn new(
+        account: String,
+        mailbox: String,
+        deadline: tokio::time::Instant,
+        budget: Duration,
+        then: Reply<C::Listing>,
+    ) -> Self {
+        StreamCall {
+            account,
+            mailbox,
+            deadline,
+            budget,
+            answer: Some(then),
+        }
+    }
+
     /// Answer the caller, once; a second answer is dropped.
-    fn reply(&mut self, result: Result<MessageListing, Failure>) {
+    fn reply(&mut self, result: Result<C::Listing, Failure>) {
         if let Some(then) = self.answer.take() {
             if let Err(ref e) = result {
-                warn!("[tui] {METHOD_MESSAGE_LIST_STREAM} failed: {e}");
+                warn!("[tui] {} failed: {e}", C::METHOD);
             }
             then(result);
         }
@@ -849,7 +1056,7 @@ impl StreamCall {
             return None;
         }
         let params = json!({"account": self.account, "mailbox": self.mailbox});
-        let started = match connection.call(METHOD_MESSAGE_LIST_STREAM, params).await {
+        let started = match connection.call(C::METHOD, params).await {
             Ok(started) => started,
             Err(ClientError::Rpc(error)) => {
                 self.reply(Err(Failure::Refused(error)));
@@ -866,13 +1073,14 @@ impl StreamCall {
             Ok(started) => started,
             Err(e) => {
                 self.reply(Err(Failure::Protocol(format!(
-                    "the {METHOD_MESSAGE_LIST_STREAM} answer did not decode: {e}"
+                    "the {} answer did not decode: {e}",
+                    C::METHOD
                 ))));
                 return None;
             }
         };
         let id = started.operation_id.clone();
-        let mut rows = RowsCollector::new(started);
+        let mut rows = RowsCollector::<C>::new(started);
         if rows.complete() {
             self.reply(Ok(rows.into_listing()));
             return None;
@@ -889,27 +1097,27 @@ impl StreamCall {
                     // from its bytes, and as a generic notification when it
                     // was spelled otherwise or did not decode, which the
                     // collector then decodes or refuses.
-                    let pushed = match inbound {
-                        None => {
-                            self.reply(Err(Failure::Other(
-                                "the daemon closed the connection before the stream finished"
-                                    .to_string(),
-                            )));
-                            return Some("the daemon closed the connection".to_string());
-                        }
+                    let Some(inbound) = inbound else {
+                        self.reply(Err(Failure::Other(
+                            "the daemon closed the connection before the stream finished"
+                                .to_string(),
+                        )));
+                        return Some("the daemon closed the connection".to_string());
+                    };
+                    let pushed = match C::from_inbound(inbound) {
                         // The caller was answered with a failure: the rows
                         // still on their way are discarded until the finish.
-                        Some(Inbound::Rows(_)) if self.answer.is_none() => continue,
-                        Some(Inbound::Rows(chunk)) => rows.push(chunk),
-                        Some(Inbound::Notification(notification))
-                            if notification.method == METHOD_MESSAGE_ROWS =>
+                        Ok(_) if self.answer.is_none() => continue,
+                        Ok(chunk) => rows.push(chunk),
+                        Err(Inbound::Notification(notification))
+                            if notification.method == C::NOTIFICATION =>
                         {
                             if self.answer.is_none() {
                                 continue;
                             }
                             rows.push_params(notification.params)
                         }
-                        Some(Inbound::Notification(notification)) => {
+                        Err(Inbound::Notification(notification)) => {
                             let finish = finish_payload(&notification, &id);
                             publish(events, notification);
                             if let Some(payload) = finish {
@@ -917,6 +1125,12 @@ impl StreamCall {
                                 self.reply(result);
                                 return None;
                             }
+                            continue;
+                        }
+                        // A typed chunk of the other kind of stream, which
+                        // this one does not await.
+                        Err(Inbound::Rows(_) | Inbound::Conversations(_)) => {
+                            drop_rows();
                             continue;
                         }
                     };
@@ -934,8 +1148,9 @@ impl StreamCall {
                 _ = tokio::time::sleep_until(wake) => {
                     if settle_by.is_some() {
                         warn!(
-                            "[tui] the {METHOD_MESSAGE_LIST_STREAM} operation {id} sent no \
-                             finish after its cancel; serving the next call"
+                            "[tui] the {} operation {id} sent no finish after its cancel; \
+                             serving the next call",
+                            C::METHOD
                         );
                         return None;
                     }
@@ -992,18 +1207,19 @@ fn finish_payload(notification: &mp_protocol::Notification, id: &str) -> Option<
     .then(|| params["payload"].clone())
 }
 
-/// The rows of one `message.list_stream`, checked as they arrive (#0138).
+/// The rows of one streamed listing, checked as they arrive (#0138), generic
+/// over the kind of chunk (#0142).
 ///
 /// The stream is contiguous by contract: each chunk starts where the last one
 /// ended and none runs past the answer's `total`, and a success carries exactly
 /// `total` rows. A stream that breaks any of the three is a protocol error and
 /// no listing, so the caller keeps the list it held.
-struct RowsCollector {
+struct RowsCollector<C: StreamChunk> {
     started: MessageListStreamStarted,
-    rows: Vec<MessageListRow>,
+    rows: Vec<C::Row>,
 }
 
-impl RowsCollector {
+impl<C: StreamChunk> RowsCollector<C> {
     fn new(started: MessageListStreamStarted) -> Self {
         let capacity = usize::try_from(started.total).unwrap_or(0).min(1 << 20);
         RowsCollector {
@@ -1012,40 +1228,41 @@ impl RowsCollector {
         }
     }
 
-    /// Fold one typed `message.rows` chunk in, answering `false` for a chunk
-    /// of another stream, which is dropped.
+    /// Fold one typed chunk in, answering `false` for a chunk of another
+    /// stream, which is dropped.
     ///
     /// The chunk is typed whole (PERSO-106): the connection decoded it from
-    /// its bytes into [`MessageRowsChunk`], so a row is never a `Value` on the
-    /// way, and a chunk with a row that does not decode never gets here (see
+    /// its bytes, so a row is never a `Value` on the way, and a chunk with a
+    /// row that does not decode never gets here (see
     /// [`RowsCollector::push_params`]). A field a newer daemon adds is
-    /// ignored and one it omits defaults, as for any [`MessageListRow`].
-    fn push(&mut self, chunk: MessageRowsChunk) -> Result<bool, Failure> {
+    /// ignored and one it omits defaults.
+    fn push(&mut self, chunk: C) -> Result<bool, Failure> {
         let id = &self.started.operation_id;
-        if chunk.operation_id != *id {
+        if chunk.operation_id() != id {
             return Ok(false);
         }
-        let offset = chunk.offset;
+        let offset = chunk.offset();
         let held = self.rows.len() as u64;
+        let what = C::NOTIFICATION;
         if offset != held {
             return Err(Failure::Protocol(format!(
-                "a message.rows chunk of operation {id} starts at offset {offset}, \
+                "a {what} chunk of operation {id} starts at offset {offset}, \
                  where the stream is at {held}"
             )));
         }
-        if held + chunk.rows.len() as u64 > self.started.total {
+        let rows = chunk.into_rows();
+        if held + rows.len() as u64 > self.started.total {
             return Err(Failure::Protocol(format!(
-                "a message.rows chunk of operation {id} runs past the announced total of {}",
+                "a {what} chunk of operation {id} runs past the announced total of {}",
                 self.started.total
             )));
         }
-        self.rows.extend(chunk.rows);
+        self.rows.extend(rows);
         Ok(true)
     }
 
-    /// Fold in a `message.rows` chunk the connection handed over generically,
-    /// one spelled otherwise than the daemon spells it or one that does not
-    /// decode as a [`MessageRowsChunk`].
+    /// Fold in a chunk the connection handed over generically, one spelled
+    /// otherwise than the daemon spells it or one that does not decode.
     ///
     /// A chunk of this stream that does not decode is a protocol error, as a
     /// gap is: dropping it would leave a hole the next chunk's offset reports
@@ -1056,10 +1273,11 @@ impl RowsCollector {
         if params["operation_id"].as_str() != Some(id.as_str()) {
             return Ok(false);
         }
-        match serde_json::from_value::<MessageRowsChunk>(params) {
+        match serde_json::from_value::<C>(params) {
             Ok(chunk) => self.push(chunk),
             Err(e) => Err(Failure::Protocol(format!(
-                "a message.rows chunk of operation {id} did not decode: {e}"
+                "a {} chunk of operation {id} did not decode: {e}",
+                C::NOTIFICATION
             ))),
         }
     }
@@ -1071,13 +1289,8 @@ impl RowsCollector {
     }
 
     /// The listing the rows held make up.
-    fn into_listing(self) -> MessageListing {
-        MessageListing {
-            account: self.started.account,
-            mailbox: self.started.mailbox,
-            total: self.started.total,
-            messages: self.rows,
-        }
+    fn into_listing(self) -> C::Listing {
+        C::listing(self.started, self.rows)
     }
 
     /// The listing a `succeeded` finish completes, or why there is none.
@@ -1088,7 +1301,7 @@ impl RowsCollector {
     /// A failed or cancelled finish answers the error it carries as a
     /// refusal, so its `data` (a `frame_too_large`'s `{limit, seen}`) reaches
     /// the caller through [`refusal`].
-    fn finish(self, payload: &Value) -> Result<MessageListing, Failure> {
+    fn finish(self, payload: &Value) -> Result<C::Listing, Failure> {
         let id = &self.started.operation_id;
         match payload["state"].as_str() {
             Some("succeeded") => {
@@ -1252,7 +1465,7 @@ mod tests {
                         log.lock().expect("the log").push(request.clone());
                         let mut frames = Vec::new();
                         match request["method"].as_str() {
-                            Some("message.list_stream") => {
+                            Some("message.list_stream" | "message.list_conversations") => {
                                 frames.push(answer(
                                     &request,
                                     json!({"operation_id": OP, "account": "work",
@@ -1341,6 +1554,33 @@ mod tests {
             .collect();
         json!({"jsonrpc": "2.0", "method": "message.rows",
                "params": {"offset": offset, "operation_id": OP, "rows": rows}})
+    }
+
+    /// A `message.conversations` chunk of [`OP`] carrying conversations whose
+    /// `latest` rows have these ids.
+    fn conversations(offset: u64, ids: &[i64]) -> Value {
+        let rows: Vec<Value> = ids
+            .iter()
+            .map(|id| {
+                json!({"count": 2, "latest": {"id": id, "subject": format!("row {id}")},
+                       "member_ids": [id], "thread_id": format!("<t{id}@x>")})
+            })
+            .collect();
+        json!({"jsonrpc": "2.0", "method": "message.conversations",
+               "params": {"offset": offset, "operation_id": OP, "rows": rows}})
+    }
+
+    /// [`conversations`], written verbatim with spaces, so the connection
+    /// hands it over generically.
+    fn spaced_conversations(offset: u64, ids: &[i64]) -> Value {
+        let rows: Vec<String> = ids
+            .iter()
+            .map(|id| format!(r#"{{"latest": {{"id": {id}}}, "thread_id": "<t{id}@x>"}}"#))
+            .collect();
+        Value::String(format!(
+            r#"{{"jsonrpc": "2.0", "method": "message.conversations", "params": {{"offset": {offset}, "operation_id": "{OP}", "rows": [{}]}}}}"#,
+            rows.join(", ")
+        ))
     }
 
     /// [`rows`], written verbatim with spaces after every separator, so the
@@ -1691,6 +1931,201 @@ mod tests {
             );
             daemon.finish(session);
         }
+    }
+
+    /// A conversation stream collects through the same collector: typed and
+    /// generically handed chunks fold in order into one listing, a stray
+    /// `message.rows` chunk is dropped rather than published, every other
+    /// notification is published, and the session serves the next call
+    /// (#0142).
+    #[test]
+    fn a_conversation_stream_collects_into_one_listing() {
+        let daemon = Canned::new(
+            "conversations",
+            3,
+            vec![
+                conversations(0, &[3, 2]),
+                unrelated(5),
+                rows(0, &[9]),
+                spaced_conversations(2, &[1]),
+                succeeded(6, 3),
+            ],
+            Vec::new(),
+        );
+        let mut session = daemon.session();
+        let events = session.events().expect("the event stream");
+
+        let listing = session
+            .list_conversations_within("work", "inbox", Duration::from_secs(10))
+            .expect("a listing");
+        assert_eq!(
+            (listing.account.as_str(), listing.mailbox.as_str()),
+            ("work", "inbox")
+        );
+        assert_eq!(listing.total, 3);
+        assert_eq!(
+            listing
+                .conversations
+                .iter()
+                .map(|row| (row.latest.id, row.thread_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(3, "<t3@x>"), (2, "<t2@x>"), (1, "<t1@x>")]
+        );
+        assert_eq!(listing.conversations[0].count, 2);
+        assert_eq!(
+            session.call("account.list", json!({})).expect("served"),
+            json!({"echo": "account.list"})
+        );
+        assert_eq!(
+            published(&events),
+            vec![
+                "state.invalidate".to_string(),
+                "operation.finished".to_string()
+            ]
+        );
+        assert_eq!(
+            daemon.methods(),
+            ["message.list_conversations", "account.list"]
+        );
+        daemon.finish(session);
+    }
+
+    /// A session served in process answers `list_conversations` from its
+    /// door's override, and from the trait's refusal when the door has none.
+    #[test]
+    fn a_served_session_asks_its_door_for_conversations() {
+        struct Door(bool);
+        impl crate::queries::Queries for Door {
+            fn call(&self, method: &str, _params: Value) -> Result<Value> {
+                Err(anyhow!("{method}: not served"))
+            }
+            fn list_conversations(
+                &self,
+                account: &str,
+                mailbox: &str,
+            ) -> Result<ConversationListing> {
+                if !self.0 {
+                    return Err(anyhow!("{METHOD_MESSAGE_LIST_CONVERSATIONS}: refused"));
+                }
+                Ok(ConversationListing {
+                    account: account.to_string(),
+                    mailbox: mailbox.to_string(),
+                    total: 0,
+                    conversations: Vec::new(),
+                })
+            }
+        }
+        let served = Session::serving(|| Door(true));
+        let listing = served
+            .list_conversations("work", "inbox")
+            .expect("the door's listing");
+        assert_eq!((listing.account.as_str(), listing.total), ("work", 0));
+        let refused = Session::serving(|| Door(false));
+        let error = refused
+            .list_conversations("work", "inbox")
+            .expect_err("refused");
+        assert!(
+            format!("{error:#}").starts_with("message.list_conversations: "),
+            "{error:#}"
+        );
+    }
+
+    /// A conversation stream that breaks contiguity, overruns its total or
+    /// carries a chunk that does not decode answers a protocol error naming
+    /// `message.conversations`, is cancelled, and leaves the session serving.
+    #[test]
+    fn a_broken_conversation_stream_answers_an_error() {
+        let cases = [
+            (
+                "cgap",
+                3,
+                vec![
+                    conversations(0, &[3]),
+                    conversations(2, &[1]),
+                    succeeded(9, 3),
+                ],
+                "a message.conversations chunk of operation",
+            ),
+            (
+                "cpast",
+                1,
+                vec![conversations(0, &[3, 2]), succeeded(9, 1)],
+                "past the announced total of 1",
+            ),
+            (
+                "cbad",
+                2,
+                vec![
+                    json!({"jsonrpc": "2.0", "method": "message.conversations",
+                           "params": {"offset": 0, "operation_id": OP, "rows": [{"count": "x"}]}}),
+                    succeeded(9, 2),
+                ],
+                "did not decode",
+            ),
+        ];
+        for (name, total, frames, says) in cases {
+            let daemon = Canned::new(name, total, frames, Vec::new());
+            let session = daemon.session();
+            let error = session
+                .list_conversations_within("work", "inbox", Duration::from_secs(10))
+                .expect_err(name);
+            let text = format!("{error:#}");
+            assert!(
+                text.starts_with("message.list_conversations: ")
+                    && text.contains("the daemon broke the protocol: ")
+                    && text.contains(says),
+                "{name}: {text}"
+            );
+            assert_eq!(
+                session.call("account.list", json!({})).expect("served"),
+                json!({"echo": "account.list"}),
+                "{name}"
+            );
+            assert!(
+                daemon.methods().contains(&"operation.cancel".to_string()),
+                "{name}: the stream still running is cancelled"
+            );
+            daemon.finish(session);
+        }
+    }
+
+    /// A conversation stream past its deadline is cancelled and answers the
+    /// timeout, as the flat stream does.
+    #[test]
+    fn a_conversation_stream_past_its_deadline_is_cancelled() {
+        let daemon = Canned::new(
+            "cdeadline",
+            5,
+            vec![conversations(0, &[5, 4])],
+            vec![finished(
+                8,
+                json!({"operation_id": OP, "state": "cancelled", "error": {
+                    "code": -32008, "message": "cancelled", "data": {"operation_id": OP},
+                }}),
+            )],
+        );
+        let session = daemon.session();
+        let error = session
+            .list_conversations_within("work", "inbox", Duration::from_millis(300))
+            .expect_err("the stream never finishes on its own");
+        let text = format!("{error:#}");
+        assert!(
+            text.starts_with("message.list_conversations: ") && text.contains("went unanswered"),
+            "{text}"
+        );
+        assert_eq!(
+            session.call("account.list", json!({})).expect("served"),
+            json!({"echo": "account.list"})
+        );
+        assert_eq!(
+            daemon.methods(),
+            [
+                "message.list_conversations",
+                "operation.cancel",
+                "account.list"
+            ]
+        );
+        daemon.finish(session);
     }
 
     /// A deadline that passes mid-stream sends `operation.cancel`, answers the
