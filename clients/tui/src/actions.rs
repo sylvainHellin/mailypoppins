@@ -798,38 +798,6 @@ pub(super) fn handle_action(
             }
             commands::start_draft_send(app, &door, &account_config.name, account_index, &id);
         }
-        // `draft.create` since P5-U10d (#0126), which `ACTION_ROUTING` has
-        // claimed since the table was written: minting the id, writing the
-        // skeleton with the account's `default_from` and signature already in
-        // it, and the `.md` suffixing are the daemon's, because the daemon
-        // owns the drafts directory the file lands in.
-        //
-        // One refusal where there were two: a name the directory already holds
-        // and a write that failed both come back as the method's own sentence,
-        // which names the path in the first case.
-        Action::NewDraft => {
-            let account = app.account_config.name.clone();
-            let name = chrono::Local::now()
-                .format("draft-%Y%m%d-%H%M%S")
-                .to_string();
-            match commands::create_draft(&daemon_door(app), &account, &name) {
-                Ok(path) => {
-                    suspend_terminal(terminal)?;
-                    let clean = edit_file(&path).is_ok();
-                    resume_terminal(terminal)?;
-                    app.set_status(format!("Created: {name}.md"));
-                    if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
-                        app.invalidate_cache_idx(idx);
-                    }
-                    app.reload_current_mailbox();
-                    land_after_draft_editor(app, clean);
-                }
-                Err(e) => {
-                    app.set_status_level(format!("New draft failed: {e}"), StatusLevel::Error)
-                }
-            }
-        }
-
         Action::CopyMessageRef => match selected_selector(app) {
             Some(text) => {
                 let (line, level) = super::clipboard::copy_text(terminal, &text).status(&text);
@@ -2195,7 +2163,7 @@ mod tests {
             .collect();
         assert_eq!(
             sites.len(),
-            10,
+            9,
             "the number of {needle}) call sites changed (now at lines {sites:?}); \
              re-derive the Action::suspends_terminal mapping before updating this count"
         );

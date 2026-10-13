@@ -101,7 +101,6 @@ pub fn route(action: &Action) -> ActionRoute {
         Action::Send => ActionRoute::Daemon(&["send.draft"]),
         Action::SendApproved => ActionRoute::Daemon(&["send.approved"]),
         Action::CancelHeldSend => ActionRoute::Daemon(&["send.cancel_hold"]),
-        Action::NewDraft => ActionRoute::Daemon(&["draft.create"]),
         Action::Approve | Action::BatchApprove(_) => ActionRoute::Daemon(&["draft.approve"]),
         Action::MarkDraft | Action::BatchMarkDraft(_) => ActionRoute::Daemon(&["draft.demote"]),
         Action::Archive => ActionRoute::Daemon(&["message.archive"]),
@@ -1052,29 +1051,6 @@ pub(super) fn draft_from_source(
         .ok_or_else(|| format!("{method} wrote a draft it did not name"))?;
     let selector = created["selector"].as_str().unwrap_or_default().to_string();
     Ok((path, selector))
-}
-
-/// The skeleton draft `n` creates, as its path and the file name to report.
-///
-/// `draft.create` `{account, name}`, which is what the handler did by hand:
-/// mint an id through the drafts index, write `mp_core::draft`'s skeleton with
-/// it and the account's signature already in the file, and hand back the
-/// selector that names it. The `.md` suffixing is the daemon's, because the
-/// daemon owns the directory the file lands in, and the account's
-/// `default_from` and signature are resolved there off the same configured
-/// account this client reads (P5-U10d, #0126).
-pub(super) fn create_draft(
-    commands: &dyn Queries,
-    account: &str,
-    name: &str,
-) -> Result<PathBuf, String> {
-    let created = commands
-        .call("draft.create", json!({"account": account, "name": name}))
-        .map_err(|e| format!("{e:#}"))?;
-    created["path"]
-        .as_str()
-        .map(PathBuf::from)
-        .ok_or_else(|| "draft.create wrote a draft it did not name".to_string())
 }
 
 /// The draft a reply, a reply-all or a forward of a message the client *holds*

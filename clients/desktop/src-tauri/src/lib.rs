@@ -120,12 +120,7 @@ pub fn run() {
     let paths = paths::Paths::resolve();
     logging::init(&paths);
     let fixture = fixture_requested();
-    tracing::info!(
-        "[app] mp-desktop {} starting{}; data dir {}",
-        env!("CARGO_PKG_VERSION"),
-        if fixture { " in fixture mode" } else { "" },
-        paths.data_dir.display()
-    );
+    let data_dir = paths.data_dir.display().to_string();
     key_repeat();
     let session = SessionHandle::new(fixture);
     let setup_session = session.clone();
@@ -163,7 +158,15 @@ pub fn run() {
             });
         })
         .setup(move |app| {
-            connector::set_app_version(commands::bundle_version(app.package_info()));
+            // Logged here, the first point the bundle's version is known: the
+            // crate's own `CARGO_PKG_VERSION` stays `0.1.0` whatever `mp`
+            // release the bundle carries (`commands::bundle_version`).
+            let version = commands::bundle_version(app.package_info());
+            tracing::info!(
+                "[app] mp-desktop {version} starting{}; data dir {data_dir}",
+                if fixture { " in fixture mode" } else { "" },
+            );
+            connector::set_app_version(version);
             setup_session.start();
             let dev_origin = if cfg!(debug_assertions) {
                 app.config().build.dev_url.clone()
