@@ -1434,7 +1434,6 @@ pub enum Action {
     /// stopped: a client that cleared it optimistically would hide a hold
     /// whose cancel was refused.
     CancelHeldSend,
-    NewDraft,
     Approve,
     /// Batch variant for `Action::Approve`: the indexed `id:` of every draft
     /// in the selection (#0052). Draft ids rather than [`MessageRef`]s
@@ -1622,8 +1621,6 @@ impl Action {
             Action::EditCurrent => true,
             // `write_draft_and_edit` -> `edit_new_draft`.
             Action::Reply(_) => true,
-            // Writes the skeleton, then edits it in place.
-            Action::NewDraft => true,
             Action::OpenLogFile => true,
             Action::OpenConfigFile => true,
             // Opens the invite email an agenda row came from.
@@ -2174,7 +2171,7 @@ mod tests {
     /// derived by reading `src/tui/actions.rs`. `EditCurrent` and
     /// `SearchResultOpen` go through `open_readonly_view`; `Reply`,
     /// `SearchResultReply` and `SearchResultForward` through
-    /// `write_draft_and_edit`; `NewDraft`, `OpenLogFile`, `OpenConfigFile` and
+    /// `write_draft_and_edit`; `OpenLogFile`, `OpenConfigFile` and
     /// `OpenEventSource` edit inline in their own arm; `SendContactVcard`,
     /// `ComposeEditSignature`, `EditSignatureFile` and `ComposeWizardSubmit`
     /// through their named helpers.
@@ -2187,7 +2184,6 @@ mod tests {
             Action::EditCurrent,
             Action::Reply(false),
             Action::Reply(true),
-            Action::NewDraft,
             Action::OpenLogFile,
             Action::OpenConfigFile,
             Action::OpenEventSource {

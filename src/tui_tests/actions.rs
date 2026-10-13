@@ -215,7 +215,6 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
         ActionRoute::Daemon(&["send.cancel_hold"]),
         false,
     ),
-    ("NewDraft", ActionRoute::Daemon(&["draft.create"]), true),
     ("Approve", ActionRoute::Daemon(&["draft.approve"]), false),
     (
         "BatchApprove",
@@ -434,7 +433,6 @@ fn one_of_each_action() -> Vec<Action> {
         Action::Send,
         Action::SendApproved,
         Action::CancelHeldSend,
-        Action::NewDraft,
         Action::Approve,
         Action::BatchApprove(Vec::new()),
         Action::MarkDraft,
@@ -530,7 +528,6 @@ fn variant_name(action: &Action) -> &'static str {
         Action::Send => "Send",
         Action::SendApproved => "SendApproved",
         Action::CancelHeldSend => "CancelHeldSend",
-        Action::NewDraft => "NewDraft",
         Action::Approve => "Approve",
         Action::BatchApprove(_) => "BatchApprove",
         Action::MarkDraft => "MarkDraft",

@@ -457,8 +457,8 @@ pub async fn tick_and_commit(
 /// [`tick_and_commit`] for a cancellable operation (PERSO-127): the tick's
 /// body asks `stop` at every fetch chunk and mailbox boundary, and an outcome
 /// whose operation was cancelled by the time the tick returned is not
-/// committed, so a cancelled sync publishes no `sync.completed`, as a
-/// cancelled `sync.watch` publishes nothing.
+/// committed, so a cancelled sync publishes no `sync.completed`; the caller
+/// announces the counts the stopped tick moved (PERSO-133).
 ///
 /// A call that joined a tick already running does not stop it (see
 /// [`AccountRuntime::tick_until`]); it carries no outcome to commit either
