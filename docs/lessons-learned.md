@@ -2440,7 +2440,7 @@ A click on a row would also blur that field, since cmdk's root is focusable (`ta
 tauri-build (2.7) copies each `bundle.externalBin` entry, suffixed with the target triple, next to the compiled executable on every build of the crate, `cargo test`, `cargo clippy` and `tauri dev` included, and fails the build when `binaries/mp-<triple>` is missing.
 So the entry lives in `clients/desktop/src-tauri/tauri.bundle.conf.json`, merged only by `pnpm bundle` (`tauri build --config <file>`), and a checkout builds and tests without a staged `mp`.
 The bundler drops the triple: `binaries/mp-aarch64-apple-darwin` becomes `mailypoppins.app/Contents/MacOS/mp`, beside the main executable `mp-desktop`, which is where `connector.rs` looks first.
-`tauri build --config '{"version":"X"}'` sets `CFBundleShortVersionString` and the DMG's name (`mailypoppins_X_aarch64.dmg`, `_x64` for Intel) but not the crate's `CARGO_PKG_VERSION`, so the app's own `app_version` stays the `mp-desktop` crate's.
+`tauri build --config '{"version":"X"}'` sets `CFBundleShortVersionString` and the DMG's name (`mailypoppins_X_aarch64.dmg`, `_x64` for Intel) but not the crate's `CARGO_PKG_VERSION`, which stays the `mp-desktop` crate's `0.1.0`, so whatever reports the app's version (`version_info`, the GUI's `initialize`, the updater) reads `package_info().version`.
 ## A refusal's `data` survives the session only as `mp_client::session::Refused`
 
 `mp_client::session` used to flatten every daemon refusal into its text before the answer crossed the call channel, so a `-32010` `draft_invalid` reached the desktop without the `draft.invalid` payload the daemon had put in `data`, and the Tauri layer rebuilt it from a `draft.list` read (#0131).

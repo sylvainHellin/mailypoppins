@@ -163,6 +163,7 @@ pub fn run() {
             });
         })
         .setup(move |app| {
+            connector::set_app_version(commands::bundle_version(app.package_info()));
             setup_session.start();
             let dev_origin = if cfg!(debug_assertions) {
                 app.config().build.dev_url.clone()

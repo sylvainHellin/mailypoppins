@@ -42,7 +42,7 @@ The bundle's version is therefore the root `Cargo.toml` version, not the tag.
 Nothing in the workflow checks that the tag matches it; `docs/release-process.md` step 1 asks for the bump by hand, and the changelog extraction only warns on a missing section.
 The updater compares `latest.json`'s `version` with the running app's `package_info().version`.
 That this reads the `--config` override rather than the file's `0.1.0` is inferred: the Tauri CLI hands the merged config to the build, and #0132's local bundle carried 0.10.0, but nobody has printed `package_info().version` from a bundled app yet.
-The desktop crate's own `CARGO_PKG_VERSION` stays `0.1.0` and is what the GUI announces as its `app_version` in `initialize`; the handshake compares the daemon with the bundled `mp`, so that number does not matter here.
+The desktop crate's own `CARGO_PKG_VERSION` stays `0.1.0`; the GUI announces the bundle's version as its `app_version` in `initialize` (PERSO-128), and the handshake compares the daemon with the bundled `mp`, so that number does not matter here.
 
 ## Design
 

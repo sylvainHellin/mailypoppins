@@ -36,8 +36,9 @@
 //! and the TUI check only the protocol range, since each is the `mp` that would
 //! start the daemon; the app ships its own and so checks the version too.
 //!
-//! `Connector` is two function pointers, so what they need (the paths, the last
-//! handshake, the last reconnect failure) lives in statics here.
+//! `Connector` is two function pointers, so what they need (the paths, the
+//! app's version, the last handshake, the last reconnect failure) lives in
+//! statics here.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -225,6 +226,7 @@ impl From<&InitializeResult> for Hello {
 }
 
 static PATHS: OnceLock<Paths> = OnceLock::new();
+static APP_VERSION: OnceLock<String> = OnceLock::new();
 static LAST_HELLO: Mutex<Option<Hello>> = Mutex::new(None);
 static LAST_REOPEN_FAILURE: Mutex<Option<ConnectError>> = Mutex::new(None);
 static LAST_AUTOSTART: Mutex<Option<Instant>> = Mutex::new(None);
@@ -237,6 +239,25 @@ static REOPEN_LISTENER: Mutex<Option<ReopenListener>> = Mutex::new(None);
 
 fn paths() -> &'static Paths {
     PATHS.get_or_init(Paths::resolve)
+}
+
+/// Record the version the GUI announces in `initialize`, the bundle's
+/// (`package_info().version`), before the session first connects. The first
+/// call wins.
+pub fn set_app_version(version: String) {
+    let _ = APP_VERSION.set(version);
+}
+
+/// The GUI's `ClientInfo`: the bundle's version once [`set_app_version`] ran,
+/// else the desktop crate's own, which only a test without a Tauri app sees.
+/// The daemon ignores the client's version, so neither can refuse a handshake.
+fn client_info(app_version: Option<&String>) -> ClientInfo {
+    ClientInfo {
+        kind: ClientKind::Gui,
+        app_version: app_version
+            .cloned()
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+    }
 }
 
 /// The handshake the GUI's session last completed.
@@ -307,10 +328,7 @@ async fn handshake() -> Result<(Connection, InitializeResult), ClientError> {
         let mut connection = Connection::connect(&paths.socket).await?;
         let hello = connection
             .initialize(
-                ClientInfo {
-                    kind: ClientKind::Gui,
-                    app_version: env!("CARGO_PKG_VERSION").to_string(),
-                },
+                client_info(APP_VERSION.get()),
                 Identity {
                     data_dir: paths.data_dir.clone(),
                     config_dir: paths.config_dir.clone(),
@@ -969,6 +987,17 @@ mod tests {
         let found = resolve_mp_binary(&search);
         // A Homebrew or /usr/local `mp` on this machine sorts after it.
         assert_eq!(found, Ok(root.join(".cargo/bin/mp")));
+    }
+
+    /// `initialize` announces the bundle's version once the app recorded it,
+    /// and the crate's only without one.
+    #[test]
+    fn the_gui_announces_the_bundle_version() {
+        let bundle = "0.11.0".to_string();
+        let info = client_info(Some(&bundle));
+        assert_eq!(info.kind, ClientKind::Gui);
+        assert_eq!(info.app_version, "0.11.0");
+        assert_eq!(client_info(None).app_version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

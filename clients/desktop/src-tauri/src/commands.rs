@@ -2186,8 +2186,9 @@ pub fn version_info(app: AppHandle, session: State<'_, SessionHandle>) -> Versio
 
 /// The bundle's version, `tauri.conf.json`'s, which `pnpm bundle` stamps with
 /// `mp`'s and the updater compares (`updates::current_version`), rather than
-/// the desktop crate's own `CARGO_PKG_VERSION`, which stays `0.1.0`.
-fn bundle_version(info: &tauri::PackageInfo) -> String {
+/// the desktop crate's own `CARGO_PKG_VERSION`, which stays `0.1.0`. The GUI's
+/// `initialize` announces it too (`connector::set_app_version`).
+pub(crate) fn bundle_version(info: &tauri::PackageInfo) -> String {
     info.version.to_string()
 }
 

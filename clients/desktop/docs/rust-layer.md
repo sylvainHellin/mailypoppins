@@ -833,7 +833,9 @@ A version it finds is held for `update_install`, and announced with the event `u
 A failed silent check is logged at warn and shown nowhere.
 
 `current` in every answer is `package_info().version`, the bundle's version, which `pnpm bundle` stamps with `mp`'s and the updater compares with the manifest's.
-`version_info`'s `app_version` is the same version; the desktop crate's own `CARGO_PKG_VERSION` stays `0.1.0` and is what the GUI's `initialize` still sends as its `ClientInfo.app_version`.
+`version_info`'s `app_version` is the same version, and so is the `ClientInfo.app_version` the GUI's `initialize` sends (`connector::set_app_version`, called in setup before the session connects): `mp`'s in a bundle, `tauri.conf.json`'s `0.1.0` under `tauri dev`.
+The desktop crate's own `CARGO_PKG_VERSION` stays `0.1.0` and is sent only by a test that runs no Tauri app.
+The daemon does not compare the client's version with anything, so neither value can refuse a handshake; the version check runs the other way, on the daemon's version (`check_version`).
 
 ### update-state.json
 
