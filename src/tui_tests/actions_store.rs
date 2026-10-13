@@ -1206,7 +1206,10 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
 
         let rendition = readonly_view_for_row(&mut app, row.id).unwrap();
         assert!(rendition.path.exists());
-        finish_readonly_view(&mut app, &rendition, Ok(()));
+        assert!(
+            finish_readonly_view(&mut app, &rendition, Ok(())),
+            "a clean exit is what returns the keyboard to the list (PERSO-124)"
+        );
         assert!(
             !rendition.path.exists(),
             "a clean exit releases the handle, which unlinks the rendition"
@@ -1220,11 +1223,11 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         // behind either -- the status line is the only difference.
         let rendition = readonly_view_for_row(&mut app, row.id).unwrap();
         assert!(rendition.path.exists());
-        finish_readonly_view(
+        assert!(!finish_readonly_view(
             &mut app,
             &rendition,
             Err(anyhow::anyhow!("editor exited with 1")),
-        );
+        ));
         assert!(
             !rendition.path.exists(),
             "a failed editor takes the rendition with it too"

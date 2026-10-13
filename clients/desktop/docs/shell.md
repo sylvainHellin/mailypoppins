@@ -281,7 +281,7 @@ On a draft, reply and forward say that a draft has nothing to quote.
 - On the external route `message_markdown_open` writes the file and opens it in the external editor, which the notice names ("Opened the message read-only in <editor>"); no session is kept, as for `sc` and `sf`.
 
 A rendition's editor never saves or sends anything.
-Code 0 (`:q`) forgets the session and the reader shows the selection again; a nonzero code or a signal keeps the pane with the banner's status and no mention of a save, and Reopen writes the rendition again, since the daemon's handle expires after ten minutes.
+Code 0 (`:q`) forgets the session, the reader shows the selection again and the focus goes back to the list; a nonzero code or a signal keeps the pane with the banner's status and no mention of a save, and Reopen writes the rendition again, since the daemon's handle expires after ten minutes.
 The banner says "Reading <file> read-only in <editor>" while the reader area shows it, and "<file> is open read-only in <editor> in the background" otherwise; the navigate-away question says "<file> is open read-only in the editor", and closing it changes nothing.
 `e` on a message whose rendition still runs shows that editor again rather than spawning a second one.
 A row the store no longer holds is a warning notice, "Open failed: that message is no longer in the store", the TUI's line.
@@ -357,7 +357,8 @@ So a session the model forgets, by "Close the editor", a discard or Done, takes 
 What follows depends on how the editor ended:
 
 - Code 0 (`:wq`, `:q`) ends the session, and the reader area shows the draft's summary: `DraftPreview` over a fresh `draft_preview`, with Edit and Close, until a navigation or Close brings the selection back. When the selection is the draft already, the reader shows its usual preview. A draft that is gone (`draft_preview` refused) shows the selection, the message the reader showed before.
-- A nonzero code or a signal keeps the session and the pane, whose last output stays readable, and the banner shows the status with Reopen, which spawns again on the same path.
+- Code 0 also gives the focus back to the list, on the row it was on, so `j` and `k` move in the Drafts list at once (PERSO-124); the TUI's `e` returns to its list the same way. An editor that ends in the background moves no focus.
+- A nonzero code or a signal keeps the session and the pane, whose last output stays readable, and the banner shows the status with Reopen, which spawns again on the same path; the focus stays on the reader.
 - A spawn `terminal_spawn` refused turns the session to `failed` with a failure notice, and the reader shows the selection again.
 
 `:q!` writes nothing, so the canonical draft stays as last saved; no exit path deletes a file.

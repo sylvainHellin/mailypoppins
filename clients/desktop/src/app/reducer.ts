@@ -837,20 +837,22 @@ function composeEmbedded(s: AppState, account: string, draftId: string, path: st
  * The exit frame of an embedded session. Code 0 ends it: the reader shows
  * the draft's summary, or the selection when that is the draft already; a
  * received message's rendition has nothing to summarise, so the reader shows
- * the selection again. Anything else keeps the session, and its pane's last
- * output, with the status the banner shows.
+ * the selection again. Either way the focus the reader held while it showed
+ * the editor goes back to the list (PERSO-124). Anything else keeps the
+ * session, and its pane's last output, with the status the banner shows.
  */
 function composeExited(s: AppState, a: Extract<Action, { type: "compose_exited" }>): AppState {
   const key = targetKey({ account: a.account, draft: a.draftId });
   const c = embeddedAt(s, key, a.spawn);
   if (!c || c.status.kind !== "running") return s;
-  if (a.code === 0 && a.signal === null && c.view) return composeForget(s, key);
   if (a.code === 0 && a.signal === null) {
+    const toList = (next: AppState) => (s.composeShown === key && s.focus === "reader" ? withFocus(next, "list") : next);
+    if (c.view) return toList(composeForget(s, key));
     const compose = { ...s.compose };
     delete compose[key];
     const selected = draftsShown(s) && s.selection.account === a.account && s.selection.draft === a.draftId;
     const composeShown = s.composeShown === key && selected ? null : s.composeShown;
-    return { ...s, compose, composeShown };
+    return toList({ ...s, compose, composeShown });
   }
   const status: ComposeSession["status"] =
     a.code !== null && a.signal === null ? { kind: "exited", code: a.code } : { kind: "crashed", code: a.code, signal: a.signal };

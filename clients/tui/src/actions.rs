@@ -387,14 +387,14 @@ pub fn validate_then_approve(path: &Path) -> Result<mp_core::types::EmailDraft> 
 /// Same suspend / launch / resume dance as the draft flow and the event
 /// source; what differs is the end, where the file is removed. Nothing read it
 /// back, so an edit forced past the read-only buffer reaches nothing, and the
-/// status line says so.
+/// status line says so. Answers whether the editor returned cleanly.
 fn open_readonly_view(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     row_id: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let Some(rendition) = readonly_view_for_row(app, row_id) else {
-        return Ok(());
+        return Ok(false);
     };
     // Neither half of the terminal dance may return before the rendition is
     // discarded: a terminal that cannot be suspended or restored must not
@@ -405,8 +405,8 @@ fn open_readonly_view(
     }
     let result = edit_file(&rendition.path);
     let resumed = resume_terminal(terminal);
-    finish_readonly_view(app, &rendition, result);
-    resumed
+    let clean = finish_readonly_view(app, &rendition, result);
+    resumed.map(|()| clean)
 }
 
 /// Release the read-only view's handle, which is what unlinks it (#0075).
@@ -419,14 +419,35 @@ fn discard_readonly_view(app: &mut App, rendition: &commands::Rendition) {
     commands::release_rendition(&daemon_door(app), &rendition.handle);
 }
 
-/// Discard the read-only view and say how the editor session ended (#0075).
-pub fn finish_readonly_view(app: &mut App, rendition: &commands::Rendition, result: Result<()>) {
+/// Discard the read-only view and say how the editor session ended (#0075);
+/// answers whether the editor returned cleanly.
+pub fn finish_readonly_view(
+    app: &mut App,
+    rendition: &commands::Rendition,
+    result: Result<()>,
+) -> bool {
     discard_readonly_view(app, rendition);
     match result {
-        Ok(()) => app.set_status(
-            "Returned from the read-only copy (edits do not reach the message)".to_string(),
-        ),
-        Err(e) => app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error),
+        Ok(()) => {
+            app.set_status(
+                "Returned from the read-only copy (edits do not reach the message)".to_string(),
+            );
+            true
+        }
+        Err(e) => {
+            app.set_status_level(format!("Open failed: {e}"), StatusLevel::Error);
+            false
+        }
+    }
+}
+
+/// Where the keyboard lands once `e`'s editor returned cleanly: the list,
+/// from the headers or the body pane `e` was pressed in, as the desktop
+/// client's reader gives its focus back to the list when the embedded editor
+/// exits with code 0 (PERSO-124). The sidebar and the list keep theirs.
+pub fn return_to_list_after_edit(app: &mut App) {
+    if matches!(app.focus, Focus::Headers | Focus::Preview) {
+        app.focus = Focus::List;
     }
 }
 
@@ -485,7 +506,8 @@ fn write_draft_and_edit(
         terminal,
         &path,
         format!("{what} draft ready: {selector}"),
-    )
+    )?;
+    Ok(())
 }
 
 /// [`write_draft_and_edit`] over a message the client already holds, which is
@@ -522,11 +544,13 @@ fn write_fetched_draft_and_edit(
         terminal,
         &path,
         format!("{what} draft ready: {selector}"),
-    )
+    )?;
+    Ok(())
 }
 
 /// Hand a freshly written draft to `$EDITOR` and put `ready` on the status
-/// line, with the list and the sidebar caught up afterwards.
+/// line, with the list and the sidebar caught up afterwards; answers whether
+/// the editor returned cleanly.
 ///
 /// The recount and the reload on the way out are what shows the subject and
 /// the recipients the user just typed: the editor session is a write this
@@ -539,20 +563,21 @@ fn edit_new_draft(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     path: &Path,
     ready: String,
-) -> Result<()> {
+) -> Result<bool> {
     if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
         app.invalidate_cache_idx(idx);
     }
     suspend_terminal(terminal)?;
     let result = edit_file(path);
     resume_terminal(terminal)?;
+    let clean = result.is_ok();
     match result {
         Ok(()) => app.set_status(ready),
         Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
     }
     app.recount_all_mailboxes();
     app.reload_current_mailbox();
-    Ok(())
+    Ok(clean)
 }
 
 /// The draft under the cursor, as its indexed id and the file that id names,
@@ -683,26 +708,33 @@ pub(super) fn handle_action(
                 // any reload can read the row back unread (see
                 // lessons-learned, the #0004 ordering trap).
                 commands::mark_open_read(app, &door, msg);
-                return open_readonly_view(app, terminal, msg.row_id());
+                if open_readonly_view(app, terminal, msg.row_id())? {
+                    return_to_list_after_edit(app);
+                }
+                return Ok(());
             }
             // A parse-skipped draft (#0080) has no index row to resolve, so it
             // opens its raw file writable: the whole point of the error row is
             // to let the user reach the broken YAML and fix it. The index
             // refresh on the way out then lists it as a normal draft.
             if let Some(skip) = app.selected_email().and_then(|e| e.skip.clone()) {
-                edit_new_draft(
+                if edit_new_draft(
                     app,
                     terminal,
                     std::path::Path::new(&skip.path),
                     "Returned from editor".to_string(),
-                )?;
+                )? {
+                    return_to_list_after_edit(app);
+                }
                 return Ok(());
             }
             let Some((_id, path)) = cursor_draft(app, "Open in $EDITOR needs a message or a draft")
             else {
                 return Ok(());
             };
-            edit_new_draft(app, terminal, &path, "Returned from editor".to_string())?;
+            if edit_new_draft(app, terminal, &path, "Returned from editor".to_string())? {
+                return_to_list_after_edit(app);
+            }
         }
         Action::Reply(reply_all) => {
             let what = if reply_all { "Reply-all" } else { "Reply" };
@@ -2146,6 +2178,25 @@ mod tests {
             "the number of {needle}) call sites changed (now at lines {sites:?}); \
              re-derive the Action::suspends_terminal mapping before updating this count"
         );
+    }
+
+    /// Once `e`'s editor returned cleanly the keyboard is back on the list,
+    /// from the body pane or the headers it was pressed in, as the desktop
+    /// client's reader gives its focus back when the embedded editor exits
+    /// with code 0 (PERSO-124); the sidebar and the list keep theirs.
+    #[test]
+    fn a_clean_return_from_e_puts_the_keyboard_back_on_the_list() {
+        let mut app = App::default_for_tests();
+        for (from, to) in [
+            (Focus::Preview, Focus::List),
+            (Focus::Headers, Focus::List),
+            (Focus::List, Focus::List),
+            (Focus::Sidebar, Focus::Sidebar),
+        ] {
+            app.focus = from;
+            return_to_list_after_edit(&mut app);
+            assert_eq!(app.focus, to, "from {from:?}");
+        }
     }
 
     // -----------------------------------------------------------------------

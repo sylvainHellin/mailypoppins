@@ -26,6 +26,9 @@ const panes = () => [...document.querySelectorAll<HTMLElement>('[data-slot="term
 const shownPane = () => panes().find((p) => !p.hidden) ?? null;
 const cmds = (...names: string[]) => mock.calls.map((c) => c.cmd).filter((c) => names.includes(c));
 const kills = () => mock.terminal.of("kill").map((k) => k.session);
+/** The panes the model holds as focused (`data-focused`), and the pane the DOM focus sits in. */
+const focusedPanes = () => [...document.querySelectorAll('[data-pane][data-focused="true"]')].map((e) => e.getAttribute("data-pane"));
+const domPane = () => document.activeElement?.closest("[data-pane]")?.getAttribute("data-pane");
 /** A row's identity: a draft's id, or a message row's element id. */
 const rowKey = (el: Element | null | undefined) => el?.getAttribute("data-draft-id") ?? el?.id;
 const selectedRow = () => rowKey(document.querySelector('[role="option"][aria-selected="true"]'));
@@ -169,6 +172,44 @@ describe("the exit", () => {
     expect(panes()).toEqual([]);
     await user.click(within(summary).getByRole("button", { name: "Close" }));
     expect(await within(reader()).findByRole("article", { name: message! })).toBeInTheDocument();
+  });
+
+  it("0 from a draft edited in the Drafts list gives the focus back to the list, on the draft's row (PERSO-124)", async () => {
+    const { user } = renderApp(1400, nvim);
+    await shellReady();
+    await editDraftEmbedded(user, "j");
+    const edited = selectedRow();
+    await waitFor(() => expect(focusedPanes()).toEqual(["reader"]));
+    act(() => mock.terminal.exit(1, { code: 0, signal: null }));
+    await waitFor(() => expect(banner()).toBeEmptyDOMElement());
+    await waitFor(() => expect(focusedPanes()).toEqual(["list"]));
+    await waitFor(() => expect(domPane()).toBe("list"));
+    expect(selectedRow()).toBe(edited);
+    await user.keyboard("k");
+    expect(selectedRow()).not.toBe(edited);
+  });
+
+  it("0 from a message's rendition gives the focus back to the list too (PERSO-124)", async () => {
+    const { user } = renderApp(1400, nvim);
+    await shellReady();
+    await user.keyboard("j");
+    await within(reader()).findByRole("article");
+    await user.keyboard("e");
+    await waitFor(() => expect(line()).toHaveAttribute("data-status", "editing"));
+    await waitFor(() => expect(focusedPanes()).toEqual(["reader"]));
+    act(() => mock.terminal.exit(1, { code: 0, signal: null }));
+    await waitFor(() => expect(banner()).toBeEmptyDOMElement());
+    await waitFor(() => expect(focusedPanes()).toEqual(["list"]));
+    await waitFor(() => expect(domPane()).toBe("list"));
+  });
+
+  it("a nonzero code keeps the focus on the reader, where the pane and its output stay (PERSO-124)", async () => {
+    const { user } = renderApp(1400, nvim);
+    await shellReady();
+    await editDraftEmbedded(user, "j");
+    act(() => mock.terminal.exit(1, { code: 1, signal: null }));
+    await waitFor(() => expect(line()).toHaveAttribute("data-status", "exited"));
+    expect(focusedPanes()).toEqual(["reader"]);
   });
 
   it("0 on a draft that is gone shows the previous message", async () => {

@@ -1059,6 +1059,16 @@ describe("the embedded editor's sessions", () => {
     expect(exited(started(), null, null).compose[key]?.status).toEqual({ kind: "crashed", code: null, signal: null });
   });
 
+  it("0 gives the reader's focus back to the list, a failure keeps it, and a background editor moves nothing (PERSO-124)", () => {
+    expect(exited(started(), 0, null).focus).toBe("list");
+    expect(exited(started(), 1, null).focus).toBe("reader");
+    expect(exited(started(), null, 9).focus).toBe("reader");
+    const elsewhere = run(started(), { type: "focus", pane: "sidebar" });
+    expect(exited(elsewhere, 0, null).focus).toBe("sidebar");
+    // In the background the reader shows something else, which keeps the focus.
+    expect(exited({ ...started(), composeShown: null }, 0, null).focus).toBe("reader");
+  });
+
   it("drops a frame of an older spawn, and Reopen spawns again on the same path", () => {
     const dead = exited(started(), 1, null);
     const again = run(dead, { type: "compose_embedded", ...draft });
