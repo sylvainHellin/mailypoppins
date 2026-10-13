@@ -4,7 +4,7 @@ import { parseReaderMode } from "@/app/readerMode";
 import { GUI_ENTRIES, paletteEntries } from "@/keymap/catalog";
 import * as cmd from "@/lib/commands";
 import { renderApp, shellReady } from "@/test/render";
-import { emit, fixtures, mock, resetMock } from "@/test/tauri-mock";
+import { emit, emitEnvelope, fixtures, mock, resetMock } from "@/test/tauri-mock";
 
 const reader = () => screen.getByRole("complementary", { name: "Reader" });
 const frame = () => reader().querySelector("iframe");
@@ -108,6 +108,57 @@ describe("the reader mode", () => {
     await user.keyboard("tt");
     await textPane();
     expect(await screen.findByText("The reader mode was not saved: could not write desktop.json")).toBeInTheDocument();
+  });
+});
+
+describe("the reader mode on a draft (PERSO-136)", () => {
+  const preview = () => within(reader()).findByRole("article", { name: "Draft: Re: Angebot Dachsanierung" });
+  const draftFrame = () => reader().querySelector('iframe[data-slot="reader-frame"]');
+  const draftBody = () => reader().querySelector('[data-slot="draft-body"]');
+
+  it("html shows the send's HTML in the sandboxed frame, tt the Markdown, and tt again the frame", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("2");
+    await screen.findByRole("listbox", { name: "Drafts messages" });
+    await preview();
+    await waitFor(() => expect(draftFrame()).not.toBeNull());
+    const first = draftFrame();
+    expect(first).toHaveAttribute("src", "mpmsg://localhost/work/drafts/angebot-antwort");
+    expect(first).toHaveAttribute("sandbox", "allow-popups allow-scripts");
+    expect(first).toHaveAttribute("title", "Draft as sent: Re: Angebot Dachsanierung");
+    expect(draftBody()).toBeNull();
+
+    await user.keyboard("tt");
+    await waitFor(() => expect(draftBody()).toHaveTextContent("vielen Dank für das Angebot"));
+    expect(draftFrame()).toBeNull();
+    await waitFor(() => expect(mock.settings.get("reader_mode")).toBe("text"));
+
+    await user.keyboard("tt");
+    await waitFor(() => expect(draftFrame()).toHaveAttribute("src", "mpmsg://localhost/work/drafts/angebot-antwort"));
+    expect(draftBody()).toBeNull();
+  });
+
+  it("a save of the draft reloads the frame, so it shows the file as it is now", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("2");
+    await preview();
+    await waitFor(() => expect(draftFrame()).not.toBeNull());
+    const before = draftFrame();
+    const loads = calls("draft_preview").length;
+    // A body-only save in the editor: draft.changed, which reloads the Drafts listing.
+    act(() =>
+      emitEnvelope("draft.changed", {
+        account: "work",
+        id: "angebot-antwort",
+        path: "/fixture/work/drafts/angebot-antwort.md",
+        status: "draft",
+      }),
+    );
+    await waitFor(() => expect(calls("draft_preview").length).toBeGreaterThan(loads));
+    await waitFor(() => expect(draftFrame()).not.toBeNull());
+    expect(draftFrame()).not.toBe(before);
   });
 });
 

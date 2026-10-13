@@ -1,5 +1,8 @@
 //! The `mpmsg` custom URI scheme: `mpmsg://localhost/<account>/<row_id>`
-//! answers the `message.html` rendition as its own document.
+//! answers the `message.html` rendition as its own document, and
+//! `mpmsg://localhost/<account>/drafts/<id>` the `draft.html` one, the HTML a
+//! send of the draft would build (PERSO-136), under the same policy and with
+//! the same bridge.
 //!
 //! The plan's reader rule (docs/plans/native-gui.md, "Reading HTML bodies"):
 //! the document carries the reader policy as its `Content-Security-Policy`
@@ -34,7 +37,8 @@
 //! and no script. A rendition over 8 MiB is refused inline with `-32004`, and
 //! the handler falls back to `message.materialise_html`, reads the file and
 //! releases the handle at once; a row that does not exist is 404 and a
-//! malformed URL 400.
+//! malformed URL 400. A draft has no such fallback: over 8 MiB, a draft that
+//! does not parse or one that is gone is the failure page.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -160,32 +164,70 @@ pub fn message_url(account: &str, row_id: i64) -> String {
     format!("mpmsg://localhost/{}/{row_id}", percent_encode(account))
 }
 
+/// Build the reader URL of one draft's send rendition; the frontend's
+/// `draftReaderUrl` spells it the same way.
+pub fn draft_url(account: &str, id: &str) -> String {
+    format!(
+        "mpmsg://localhost/{}/drafts/{}",
+        percent_encode(account),
+        percent_encode(id)
+    )
+}
+
 /// A reader request that could not be parsed.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Malformed(pub String);
 
-/// `/<account>/<row_id>` from a scheme request path.
-pub fn parse_path(path: &str) -> Result<(String, i64), Malformed> {
+/// What a reader URL names.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Target {
+    /// `/<account>/<row_id>`: a stored message.
+    Message { account: String, row_id: i64 },
+    /// `/<account>/drafts/<id>`: a draft, as its send would render it.
+    Draft { account: String, id: String },
+}
+
+/// The target of a scheme request path.
+pub fn parse_target(path: &str) -> Result<Target, Malformed> {
     let trimmed = path.strip_prefix('/').unwrap_or(path);
     let trimmed = trimmed.strip_suffix('/').unwrap_or(trimmed);
-    let mut parts = trimmed.split('/');
-    let (Some(account), Some(row), None) = (parts.next(), parts.next(), parts.next()) else {
-        return Err(Malformed(format!(
-            "expected /<account>/<row_id>, got {path}"
-        )));
+    let parts: Vec<&str> = trimmed.split('/').collect();
+    let decode = |s: &str, what: &str| {
+        let decoded = percent_decode(s).ok_or_else(|| Malformed("bad percent-encoding".into()))?;
+        if decoded.is_empty() {
+            return Err(Malformed(format!("empty {what}")));
+        }
+        Ok(decoded)
     };
-    let account =
-        percent_decode(account).ok_or_else(|| Malformed("bad percent-encoding".into()))?;
-    if account.is_empty() {
-        return Err(Malformed("empty account".into()));
+    match parts.as_slice() {
+        [account, row] => {
+            let account = decode(account, "account")?;
+            let row_id: i64 = row
+                .parse()
+                .map_err(|_| Malformed(format!("row id `{row}` is not an integer")))?;
+            if row_id <= 0 {
+                return Err(Malformed(format!("row id {row_id} is not positive")));
+            }
+            Ok(Target::Message { account, row_id })
+        }
+        [account, "drafts", id] => Ok(Target::Draft {
+            account: decode(account, "account")?,
+            id: decode(id, "draft id")?,
+        }),
+        _ => Err(Malformed(format!(
+            "expected /<account>/<row_id> or /<account>/drafts/<id>, got {path}"
+        ))),
     }
-    let row_id: i64 = row
-        .parse()
-        .map_err(|_| Malformed(format!("row id `{row}` is not an integer")))?;
-    if row_id <= 0 {
-        return Err(Malformed(format!("row id {row_id} is not positive")));
+}
+
+/// `/<account>/<row_id>` from a scheme request path.
+pub fn parse_path(path: &str) -> Result<(String, i64), Malformed> {
+    match parse_target(path)? {
+        Target::Message { account, row_id } => Ok((account, row_id)),
+        Target::Draft { .. } => Err(Malformed(format!(
+            "expected /<account>/<row_id>, got {path}"
+        ))),
     }
-    Ok((account, row_id))
 }
 
 fn percent_decode(s: &str) -> Option<String> {
@@ -251,6 +293,21 @@ pub fn render(door: &Door, account: &str, row_id: i64) -> Result<Rendered, GuiEr
             _ => Err(GuiError::from_call(&e, Addressing::Resource)),
         },
     }
+}
+
+/// A draft's send rendition, `draft.html`'s `html`: already carrying the
+/// daemon's charset and CSP meta, so [`html_document`] puts the bridge in.
+pub fn render_draft(door: &Door, account: &str, id: &str) -> Result<Rendered, GuiError> {
+    let answer = door
+        .call_within(
+            "draft.html",
+            json!({"account": account, "id": id}),
+            HTML_BUDGET,
+        )
+        .map_err(|e| GuiError::from_call(&e, Addressing::Resource))?;
+    Ok(Rendered::Html(
+        answer["html"].as_str().unwrap_or_default().to_string(),
+    ))
 }
 
 /// The over-8-MiB route: write the file, read it, release the handle.
@@ -343,11 +400,14 @@ pub fn respond(method: &str, path: &str, door: Result<Door, GuiError>) -> Respon
     if method != "GET" {
         return failure(StatusCode::METHOD_NOT_ALLOWED, "only GET is served");
     }
-    let (account, row_id) = match parse_path(path) {
-        Ok(parsed) => parsed,
+    let target = match parse_target(path) {
+        Ok(target) => target,
         Err(Malformed(why)) => return failure(StatusCode::BAD_REQUEST, &why),
     };
-    let rendered = door.and_then(|door| render(&door, &account, row_id));
+    let rendered = door.and_then(|door| match &target {
+        Target::Message { account, row_id } => render(&door, account, *row_id),
+        Target::Draft { account, id } => render_draft(&door, account, id),
+    });
     answer(path, rendered)
 }
 
@@ -404,6 +464,66 @@ mod tests {
         ] {
             assert!(parse_path(bad).is_err(), "{bad} is malformed");
         }
+    }
+
+    #[test]
+    fn a_draft_path_parses_into_an_account_and_an_id() {
+        assert_eq!(
+            parse_target("/work/drafts/angebot-antwort"),
+            Ok(Target::Draft {
+                account: "work".into(),
+                id: "angebot-antwort".into()
+            })
+        );
+        assert_eq!(
+            parse_target("/work/42"),
+            Ok(Target::Message {
+                account: "work".into(),
+                row_id: 42
+            })
+        );
+        for bad in [
+            "/work/drafts/",
+            "/work/drafts",
+            "/work/inbox/x",
+            "//drafts/x",
+            "/work/drafts/a/b",
+            "/work/drafts/%zz",
+        ] {
+            assert!(parse_target(bad).is_err(), "{bad} is malformed");
+        }
+        assert!(parse_path("/work/drafts/x").is_err(), "not a message");
+        let url = draft_url("my mail", "a/b ü");
+        let parsed = tauri::Url::parse(&url).expect("a url");
+        assert_eq!(
+            parse_target(parsed.path()),
+            Ok(Target::Draft {
+                account: "my mail".into(),
+                id: "a/b ü".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_draft_is_served_as_its_send_rendition_with_the_bridge() {
+        let (response, body, nonce) = served("/work/drafts/angebot-antwort");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["X-Mp-Rendition"], "html");
+        assert_eq!(header_csp(&response), message_csp(&nonce));
+        assert!(body.contains("vielen Dank für das Angebot"), "{body}");
+        assert_eq!(body.matches(&bridge_script(&nonce)).count(), 1);
+        assert!(
+            !body.contains(daemon_meta()),
+            "the daemon's tag is replaced"
+        );
+        assert_eq!(
+            respond("GET", "/work/drafts/nope", Ok(fixture_door())).status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            respond("GET", "/work/drafts/x/y", Ok(fixture_door())).status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
