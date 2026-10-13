@@ -290,8 +290,11 @@ export type Action =
   /** Forget a session, of either route; the embedded child is killed by its pane's unmount. */
   | { type: "compose_done"; account: string; draftId: string }
   // The embedded sessions (app/compose.ts and components/compose/TerminalHost.tsx).
-  /** Open the draft in the embedded editor, or show its running one; a dead one spawns again. */
-  | { type: "compose_embedded"; account: string; draftId: string; path: string }
+  /**
+   * Open the draft in the embedded editor, or show its running one; a dead one spawns again.
+   * `view` opens a received message's read-only rendition instead, under `viewId(row_id)`.
+   */
+  | { type: "compose_embedded"; account: string; draftId: string; path: string; view?: { row_id: number } }
   | { type: "compose_started"; account: string; draftId: string; spawn: number; session: number; editor: string }
   | { type: "compose_spawn_failed"; account: string; draftId: string; spawn: number; error: GuiError }
   | { type: "compose_exited"; account: string; draftId: string; spawn: number; code: number | null; signal: number | null }
@@ -810,7 +813,7 @@ function embeddedAt(s: AppState, key: string, spawn: number) {
  * fresh session whose pane spawns on mount. Another session the reader
  * showed keeps running in the background.
  */
-function composeEmbedded(s: AppState, account: string, draftId: string, path: string): AppState {
+function composeEmbedded(s: AppState, account: string, draftId: string, path: string, view?: { row_id: number }): AppState {
   const key = targetKey({ account, draft: draftId });
   const prev = s.compose[key];
   if (isRunning(prev)) return withFocus({ ...s, composeShown: key }, "reader");
@@ -822,6 +825,7 @@ function composeEmbedded(s: AppState, account: string, draftId: string, path: st
     name: fileName(path),
     editor: prev?.editor ?? null,
     message: null,
+    ...(view ? { view } : {}),
     session: null,
     status: { kind: "running" },
     spawn: (prev?.kind === "embedded" ? prev.spawn : 0) + 1,
@@ -831,14 +835,16 @@ function composeEmbedded(s: AppState, account: string, draftId: string, path: st
 
 /**
  * The exit frame of an embedded session. Code 0 ends it: the reader shows
- * the draft's summary, or the selection when that is the draft already.
- * Anything else keeps the session, and its pane's last output, with the
- * status the banner shows.
+ * the draft's summary, or the selection when that is the draft already; a
+ * received message's rendition has nothing to summarise, so the reader shows
+ * the selection again. Anything else keeps the session, and its pane's last
+ * output, with the status the banner shows.
  */
 function composeExited(s: AppState, a: Extract<Action, { type: "compose_exited" }>): AppState {
   const key = targetKey({ account: a.account, draft: a.draftId });
   const c = embeddedAt(s, key, a.spawn);
   if (!c || c.status.kind !== "running") return s;
+  if (a.code === 0 && a.signal === null && c.view) return composeForget(s, key);
   if (a.code === 0 && a.signal === null) {
     const compose = { ...s.compose };
     delete compose[key];
@@ -1582,7 +1588,7 @@ function reduce(s: AppState, a: Action): AppState {
     case "compose_done":
       return composeForget(s, targetKey({ account: a.account, draft: a.draftId }));
     case "compose_embedded":
-      return composeEmbedded(s, a.account, a.draftId, a.path);
+      return composeEmbedded(s, a.account, a.draftId, a.path, a.view);
     case "compose_started": {
       const key = targetKey({ account: a.account, draft: a.draftId });
       const c = embeddedAt(s, key, a.spawn);

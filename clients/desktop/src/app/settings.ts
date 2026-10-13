@@ -195,7 +195,7 @@ export function editorHint(setting: EditorSetting | null): string {
   if (setting?.env_override) return `MP_DESKTOP_EDITOR is set and wins: ${setting.env_override}`;
   const effective = setting?.effective ?? "the first editor found";
   if (setting?.route === "embedded") {
-    return `Drafts open in the embedded terminal editor; config.toml and the log open in ${effective}. {path} stands for the file.`;
+    return `Drafts and received messages (e) open in the embedded terminal editor; config.toml and the log open in ${effective}. {path} stands for the file.`;
   }
   return `Opens drafts, config.toml and the log; {path} stands for the file. Empty uses ${effective}.`;
 }
@@ -203,7 +203,7 @@ export function editorHint(setting: EditorSetting | null): string {
 /** What the notice line says once the setting is cleared. */
 export function clearedNotice(setting: EditorSetting): string {
   if (setting.route === "embedded") {
-    return `The editor setting is cleared; drafts open in the embedded terminal editor, and config.toml and the log in ${setting.effective}`;
+    return `The editor setting is cleared; drafts and received messages open in the embedded terminal editor, and config.toml and the log in ${setting.effective}`;
   }
   return `The editor setting is cleared; ${setting.effective} is used`;
 }

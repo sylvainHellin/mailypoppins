@@ -16,6 +16,7 @@ import {
   readerKey,
   sendingRefusal,
   targetKey,
+  viewId,
   type AppState,
   type ComposeDialog,
   type ComposeSession,
@@ -103,13 +104,7 @@ export async function openInEditor(
     dispatch({ type: "compose_embedded", account, draftId, path });
     return;
   }
-  let embedded = false;
-  try {
-    embedded = (await cmd.editorSettingGet()).route === "embedded";
-  } catch {
-    // The external route reports its own failure.
-  }
-  if (embedded) {
+  if (await embeddedRoute()) {
     dispatch({ type: "compose_embedded", account, draftId, path });
     return;
   }
@@ -124,12 +119,71 @@ export async function openInEditor(
   }
 }
 
+/** Whether a file opens on the embedded route now; a route that cannot be read is external. */
+async function embeddedRoute(): Promise<boolean> {
+  try {
+    return (await cmd.editorSettingGet()).route === "embedded";
+  } catch {
+    // The external route reports its own failure.
+    return false;
+  }
+}
+
+/**
+ * `e` on a received message (PERSO-92, the TUI's read-only view): the
+ * daemon writes its Markdown rendition, mode 0444, and it opens by a
+ * draft's route. On the embedded route it is a session of `state.compose`
+ * under `viewId(row_id)`, in the reader area's terminal pane as a draft's
+ * editor is, and its exit brings the message back; a view of the same
+ * message still running is shown again rather than spawned twice. On the
+ * external route `message_markdown_open` hands it to the external editor
+ * and keeps no session. A row the store lost is a warning notice.
+ */
+export async function viewInEditor(
+  dispatch: Dispatch<Action>,
+  account: string,
+  row_id: number,
+  sessions: AppState["compose"] = {},
+): Promise<void> {
+  const running = sessions[targetKey({ account, draft: viewId(row_id) })];
+  if (running && isRunning(running)) {
+    dispatch({ type: "compose_embedded", account, draftId: running.draftId, path: running.path, view: { row_id } });
+    return;
+  }
+  if (await embeddedRoute()) return viewEmbedded(dispatch, account, row_id);
+  try {
+    const launch = await cmd.messageMarkdownOpen(account, row_id);
+    notice(dispatch, fixtureNotice(launch) ?? `Opened the message read-only in ${launch.editor}`);
+  } catch (e: unknown) {
+    viewFailed(dispatch, account, e);
+  }
+}
+
+/** Write the rendition afresh and open it in a new embedded session. */
+async function viewEmbedded(dispatch: Dispatch<Action>, account: string, row_id: number): Promise<void> {
+  try {
+    const file = await cmd.messageMarkdownPath(account, row_id);
+    dispatch({ type: "compose_embedded", account, draftId: viewId(row_id), path: file.path, view: { row_id } });
+  } catch (e: unknown) {
+    viewFailed(dispatch, account, e);
+  }
+}
+
+/** A row the store lost is a warning, the TUI's line; anything else a failure notice. */
+function viewFailed(dispatch: Dispatch<Action>, account: string, e: unknown): void {
+  const error = asGuiError(e);
+  if (error.kind === "not_found") return dispatch({ type: "notice", text: error.message, level: "warning" });
+  dispatch({ type: "activity", kind: "failed", account, text: `Open failed: ${error.message}` });
+}
+
 /**
  * The banner's Reopen: an embedded session spawns again on the same path,
- * whatever the route says now; an external one runs `editor_open` again.
+ * whatever the route says now; an external one runs `editor_open` again. A
+ * message's rendition is written afresh first, since its handle expires.
  */
 export function reopen(c: ComposeSession, dispatch: Dispatch<Action>): void {
-  if (c.kind === "embedded") dispatch({ type: "compose_embedded", account: c.account, draftId: c.draftId, path: c.path });
+  if (c.view) void viewEmbedded(dispatch, c.account, c.view.row_id);
+  else if (c.kind === "embedded") dispatch({ type: "compose_embedded", account: c.account, draftId: c.draftId, path: c.path });
   else void openInEditor(dispatch, c.account, c.draftId, c.path);
 }
 

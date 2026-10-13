@@ -20,8 +20,9 @@
 //!
 //! Any of the first three that names a terminal-only editor
 //! ([`TERMINAL_EDITORS`]) runs inside the first terminal emulator found
-//! ([`terminal_template`]), and is skipped when there is none. A draft never
-//! gets here with such an editor when the embedded route finds it (#0130),
+//! ([`terminal_template`]), and is skipped when there is none. A draft or a
+//! message's Markdown rendition never gets here with such an editor when the
+//! embedded route finds it (#0130, PERSO-92),
 //! but `config.toml`, the daemon's log, a signature and an `invite.ics` do,
 //! so a setting of `nvim` opens them in a terminal rather than starting a
 //! Neovim with no terminal at all. A template whose program is anything else

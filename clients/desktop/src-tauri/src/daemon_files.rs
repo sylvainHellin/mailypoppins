@@ -1,7 +1,9 @@
 //! The files the daemon names, opened in the external editor: `config.toml`
 //! (the TUI's `sc`) and the daemon's dated log (the TUI's `sf`) (INT-01,
 //! INT-02, #0131), and a received message's Markdown rendition (the TUI's
-//! `e`, RD-06, PERSO-92).
+//! `e`, RD-06, PERSO-92), which takes a draft's route: `message_markdown_path`
+//! materialises it for the embedded terminal, `message_markdown_open` opens it
+//! in the external editor.
 //!
 //! The paths are the daemon's, never computed here: `config.get` answers the
 //! file it reads with its `path` and its `state`, `diagnostic.log_path`
@@ -22,6 +24,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
+use crate::attachments::OpenedFile;
 use crate::commands::{call, with_door};
 use crate::editor::{self, EditorLaunch, Lookup};
 use crate::error::{Addressing, GuiError};
@@ -92,9 +95,35 @@ pub fn log_open_on(
 /// What `message_markdown_open` says when the row is gone, the TUI's words.
 pub const MESSAGE_GONE: &str = "Open failed: that message is no longer in the store";
 
+/// Write the Markdown rendition of the stored message `row_id` of `account`
+/// (mode 0444, named after the subject) and answer its file, for the
+/// embedded terminal to open; `not_found` with [`MESSAGE_GONE`] when the
+/// store no longer holds it.
+pub fn message_markdown_path_on(
+    door: &Door,
+    account: &str,
+    row_id: i64,
+) -> Result<OpenedFile, GuiError> {
+    match crate::attachments::materialise(
+        door,
+        "message.materialise_markdown",
+        json!({"account": account, "row_id": row_id}),
+    ) {
+        Ok(handle) => Ok(OpenedFile {
+            name: handle.name,
+            path: handle.path,
+        }),
+        Err(GuiError::NotFound {
+            code: Some(-32602), ..
+        }) => Err(GuiError::not_found(MESSAGE_GONE)),
+        Err(e) => Err(e),
+    }
+}
+
 /// Open the Markdown rendition of the stored message `row_id` of `account`
-/// in the external editor (the TUI's `e` on a received message); `not_found`
-/// with [`MESSAGE_GONE`] when the store no longer holds it.
+/// in the external editor (the TUI's `e` on a received message, on the
+/// external route); `not_found` with [`MESSAGE_GONE`] when the store no
+/// longer holds it.
 pub fn message_markdown_open_on(
     door: &Door,
     lookup: &Lookup,
@@ -102,18 +131,8 @@ pub fn message_markdown_open_on(
     row_id: i64,
     window: Duration,
 ) -> Result<EditorLaunch, GuiError> {
-    let handle = match crate::attachments::materialise(
-        door,
-        "message.materialise_markdown",
-        json!({"account": account, "row_id": row_id}),
-    ) {
-        Ok(handle) => handle,
-        Err(GuiError::NotFound {
-            code: Some(-32602), ..
-        }) => return Err(GuiError::not_found(MESSAGE_GONE)),
-        Err(e) => return Err(e),
-    };
-    editor::open_on(fixture_of(door), lookup, &handle.path, window)
+    let file = message_markdown_path_on(door, account, row_id)?;
+    editor::open_on(fixture_of(door), lookup, &file.path, window)
 }
 
 /// The editor lookup with the settings file's `editor`, as `editor_open` reads it.
@@ -134,7 +153,22 @@ pub async fn config_open(
     .await
 }
 
-/// `e` on a received message: its Markdown rendition in the editor.
+/// `e` on a received message, the embedded route: its Markdown rendition's
+/// file, which `terminal_spawn` then opens.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn message_markdown_path(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_id: i64,
+) -> Result<OpenedFile, GuiError> {
+    with_door(&session, move |_, door| {
+        message_markdown_path_on(door, &account, row_id)
+    })
+    .await
+}
+
+/// `e` on a received message, the external route: its Markdown rendition in
+/// the external editor.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn message_markdown_open(
     app: AppHandle,
@@ -276,6 +310,27 @@ mod tests {
             opens[0].command.last().map(String::as_str),
             Some(opens[0].path.as_str())
         );
+    }
+
+    #[test]
+    fn message_markdown_path_on_answers_the_read_only_rendition_and_opens_nothing() {
+        let (door, f) = fixture_door();
+        let file = message_markdown_path_on(&door, "work", 1001).expect("written");
+        assert_eq!(file.name, "quarterly-ledger-review.md");
+        let path = Path::new(&file.path);
+        assert!(path.starts_with(f.root().join("handles")), "{path:?}");
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("quarterly-ledger-review.md")
+        );
+        let text = std::fs::read_to_string(path).expect("written by the materialiser");
+        assert!(text.contains("the quarterly ledger is attached"), "{text}");
+        assert!(
+            f.editor_opens().is_empty(),
+            "the embedded route's terminal_spawn opens it, not this command"
+        );
+        let err = message_markdown_path_on(&door, "work", 999_999).expect_err("gone");
+        assert_eq!(err, GuiError::not_found(MESSAGE_GONE));
     }
 
     #[test]

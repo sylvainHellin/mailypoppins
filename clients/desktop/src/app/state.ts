@@ -458,6 +458,12 @@ export type EmbeddedStatus =
  * reader area by `TerminalHost.tsx`: `session` is the PTY's id once
  * `terminal_spawn` answered, and `spawn` moves with every Reopen, which
  * mounts a fresh pane and so starts a fresh process on the same path.
+ *
+ * A received message's Markdown rendition (`e`, PERSO-92) opens on the
+ * embedded route as a session too, with `view` naming its row and
+ * `draftId` its `viewId`: it is read-only, saves nothing, and its exit
+ * brings the reader back to the message. On the external route it gets no
+ * session, as `sc` and `sf` get none.
  */
 export type ComposeSession = {
   account: string;
@@ -468,12 +474,22 @@ export type ComposeSession = {
   /** The editor command as it ran, once `editor_open` or `terminal_spawn` answered. */
   editor: string | null;
   message: string | null;
+  /** The received message whose read-only rendition this is; absent for a draft. */
+  view?: { row_id: number };
 } & (
   | { kind: "external"; status: "opening" | "editing" | "error" }
   | { kind: "embedded"; session: number | null; status: EmbeddedStatus; spawn: number }
 );
 
 export type EmbeddedSession = Extract<ComposeSession, { kind: "embedded" }>;
+
+/**
+ * The session id of a received message's rendition: a slash, which no
+ * draft file name holds, keeps it apart from every draft's.
+ */
+export function viewId(row_id: number): string {
+  return `message/${row_id}`;
+}
 
 /** An embedded session whose child still runs. */
 export function isRunning(c: ComposeSession | undefined): boolean {

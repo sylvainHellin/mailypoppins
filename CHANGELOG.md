@@ -18,6 +18,7 @@ All notable changes to this project are documented in this file.
 - **Desktop: opening a mailbox selects its top message, as the TUI does (PERSO-94).**
 - **Desktop: the draft preview shows the whole body (PERSO-101).** `draft.preview` takes `full: true`.
 - **Desktop: a `to:`, `cc:`, `filename:` or `message-id:` query typed in the search field searches the server (PERSO-115).** It no longer fails with a truncated refusal, and a failed search's error wraps instead of being cut off.
+- **Desktop: `e` on a received message opens its read-only Markdown copy in the window's embedded editor when your editor is a terminal editor, as a draft does (PERSO-92).** It opened in a new terminal window before; the pane closes when the editor exits, and a GUI editor still gets the file outside the app.
 - **Two daemon integration tests no longer flake under load.** The config-reload test waits for the startup reports its snapshot still owes, and the fake-ready hook starts no account runtimes.
 
 ### Changed

@@ -42,13 +42,17 @@ export function ComposeLeaveDialog() {
   const stay = () => dispatch({ type: "overlay", overlay: null });
   const open = runningEditors(s);
   const stillOpen = `${names(open.map((c) => c.name))} ${open.length > 1 ? "are" : "is"} still open in the editor.`;
+  // A message's read-only rendition (PERSO-92) has nothing to keep.
+  const kept = open.some((c) => !c.view) ? "; the draft keeps what was last saved." : ".";
 
   const title = restarting ? "Restart to finish the update?" : closing ? "Close the window?" : "Leave the editor?";
   const detail = restarting
-    ? `${stillOpen} Restarting closes the editor; the draft keeps what was last saved.`
+    ? `${stillOpen} Restarting closes the editor${kept}`
     : closing
-      ? `${stillOpen} Closing the window closes the editor; the draft keeps what was last saved.`
-      : `${shown?.name ?? "The draft"} is still open in the editor. In the background it keeps running and the banner lists it; closed, the draft keeps what was last saved.`;
+      ? `${stillOpen} Closing the window closes the editor${kept}`
+      : shown?.view
+        ? `${shown.name} is open read-only in the editor. In the background it keeps running and the banner lists it; closed, nothing changes.`
+        : `${shown?.name ?? "The draft"} is still open in the editor. In the background it keeps running and the banner lists it; closed, the draft keeps what was last saved.`;
   const confirm = () => {
     if (restarting) return void restartNow(s, dispatch);
     return void (closing ? closeWindow(s, dispatch) : leaveClosingEditor(s, dispatch));

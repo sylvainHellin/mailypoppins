@@ -496,6 +496,9 @@ describe("compose keys (the TUI's)", () => {
   });
 
   it("e on a message opens its Markdown rendition in the editor and Enter focuses the reader; on a draft e edits it (PERSO-92)", async () => {
+    // The mock's editor is the probed `code --wait`, a GUI editor: the external
+    // route, as for a draft. A terminal editor's embedded route is in
+    // components/compose/embedded.test.tsx.
     const { user } = renderApp();
     await shellReady();
     const pane = () => document.activeElement?.closest("[data-pane]")?.getAttribute("data-pane");
@@ -509,6 +512,7 @@ describe("compose keys (the TUI's)", () => {
     // The list keeps the focus: `e` hands the message to the editor, not to the reader.
     expect(pane()).toBe("list");
     expect(callsOf("draft_path")).toEqual([]);
+    expect(callsOf("message_markdown_path")).toEqual([]);
 
     await user.keyboard("{Enter}");
     await waitFor(() => expect(pane()).toBe("reader"));

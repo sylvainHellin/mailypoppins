@@ -71,7 +71,7 @@ describe("the Settings view", () => {
     await user.type(field, "nvim{Enter}");
     await waitFor(() =>
       expect(field).toHaveAccessibleDescription(
-        "Drafts open in the embedded terminal editor; config.toml and the log open in nvim. {path} stands for the file.",
+        "Drafts and received messages (e) open in the embedded terminal editor; config.toml and the log open in nvim. {path} stands for the file.",
       ),
     );
   });

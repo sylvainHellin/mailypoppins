@@ -123,6 +123,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `config_open` | none | `EditorLaunch`; `not_found` when the daemon has no `config.toml` |
 | `log_open` | none | `EditorLaunch`; `not_found` when the daemon's log file does not exist yet |
 | `message_markdown_open` | `account`, `row_id` | `EditorLaunch`; `not_found` when the store no longer holds the row |
+| `message_markdown_path` | `account`, `row_id` | `OpenedFile`, the rendition's file for `terminal_spawn`; `not_found` when the store no longer holds the row |
 | `config_get` | none | `ConfigSnapshot` |
 | `config_reload` | none | `ConfigSwap`; a file that does not load is `protocol` with code -32007 and the daemon's sentence |
 | `config_set_password` | `account`, `kind` (`"smtp"` or `"imap"`), `value` | `SecretStored` |
@@ -433,16 +434,18 @@ So the frontend reads the listing again after each change it makes, and on every
 
 ## config.toml, the daemon log and a message's Markdown rendition
 
-`config_open` is the TUI's `sc`, `log_open` its `sf` (INT-01, INT-02), and `message_markdown_open` its `e` on a received message (RD-06, PERSO-92), in `daemon_files.rs`.
+`config_open` is the TUI's `sc`, `log_open` its `sf` (INT-01, INT-02), and `message_markdown_path` and `message_markdown_open` its `e` on a received message (RD-06, PERSO-92), in `daemon_files.rs`.
 None computes a path: the daemon's answer names the file it uses.
 
 - `config_open` calls `config.get` and opens its `path`; a `state` of `absent` is refused before any editor starts, as `not_found` "There is no config.toml yet; add an account first", and an `invalid` file opens, since the editor is where it gets fixed.
 - `log_open` calls `diagnostic.log_path`, the daemon's dated log (`mailypoppins-<date>.log`), and refuses a file that does not exist yet with `not_found` "No log file found at <path>".
-- `message_markdown_open` calls `message.materialise_markdown {account, row_id}`, which writes the store's Markdown view of the row (frontmatter and the plain text, mode 0444, named after the subject) as a handle of the family the attachments use (see Attachments), and opens its `path`; a row the store no longer holds (`-32602`) is `not_found` "Open failed: that message is no longer in the store", the TUI's line.
-  The handle is left to expire after its ten minutes, as an opened attachment's is: the external route does not wait for the editor, which has read the file by then.
+- `message_markdown_path` calls `message.materialise_markdown {account, row_id}`, which writes the store's Markdown view of the row (frontmatter and the plain text, mode 0444, named after the subject) as a handle of the family the attachments use (see Attachments), and answers its file as an `OpenedFile`; a row the store no longer holds (`-32602`) is `not_found` "Open failed: that message is no longer in the store", the TUI's line.
+- `message_markdown_open` does the same and opens the `path` in the external editor.
+  The handle is left to expire after its ten minutes, as an opened attachment's is: neither route waits for the editor, which has read the file by then.
 
-All three hand the path to `editor::open_on`, the resolver and spawn `editor_open` uses, with the setting read through `editor::read_setting_or_none`, so a fixture journals the editor and runs nothing; its refusal of a path that is no file now says "no file at <path>".
-None is a draft, so none takes the embedded route: a terminal editor in the setting, such as the `nvim` that runs drafts embedded, opens the file in a terminal window (see Drafts and the editor).
+The rendition takes a draft's route, which the frontend reads from `editor_setting_get` before each open ([shell.md](shell.md), "Compose"): on the embedded route it calls `message_markdown_path` and `terminal_spawn` runs the terminal editor on the file in the reader area, read-only since the file is 0444; on the external route it calls `message_markdown_open`.
+`config_open`, `log_open` and `message_markdown_open` hand the path to `editor::open_on`, the resolver and spawn `editor_open` uses, with the setting read through `editor::read_setting_or_none`, so a fixture journals the editor and runs nothing; its refusal of a path that is no file now says "no file at <path>".
+`config.toml` and the log take no embedded route: a terminal editor in the setting, such as the `nvim` that runs drafts embedded, opens them in a terminal window (see Drafts and the editor).
 The three methods are in `REQUIRED_CAPABILITIES`.
 
 ## Configuration and secrets
@@ -575,7 +578,7 @@ The editor is a command template, resolved in this order:
 
 Any of the first three that names a terminal editor (`vi`, `vim`, `nvim`, `hx`, `nano` and a few more) runs inside the first terminal emulator found, and is skipped when there is none.
 The wrapped command keeps the source `env` or `setting`, so a failed launch names what to fix, and one from `$VISUAL` or `$EDITOR` has the source `terminal`.
-A draft whose editor the embedded route finds never reaches `editor_open` (see Terminal sessions), but `config.toml`, the daemon's log, a signature and an `invite.ics` do: with the setting `nvim` they open in a terminal window, where a bare `nvim` with null stdio would have no terminal at all.
+A draft or a received message's rendition whose editor the embedded route finds never reaches `editor_open` (see Terminal sessions), but `config.toml`, the daemon's log, a signature and an `invite.ics` do: with the setting `nvim` they open in a terminal window, where a bare `nvim` with null stdio would have no terminal at all.
 
 The template is split with shell-words rules and run without a shell.
 `{path}` in any word is replaced by the path; a template without it gets the path as its last argument.
@@ -604,7 +607,8 @@ The route needs the login shell's `PATH`, which the first call per process reads
 
 ## Terminal sessions
 
-`terminal_spawn` runs a terminal editor on a draft in a native PTY (`portable-pty`), which the webview renders with xterm.js; it is the embedded route of M5 (#0130), beside `editor_open`'s external one.
+`terminal_spawn` runs a terminal editor on a draft, or on a received message's read-only Markdown rendition (`message_markdown_path`, PERSO-92), in a native PTY (`portable-pty`), which the webview renders with xterm.js; it is the embedded route of M5 (#0130), beside `editor_open`'s external one.
+Its `account` and `id` only label the session in the log; the rendition's `id` is `message/<row_id>`, which no draft file name can be.
 
 The editor is resolved before any wrapping in a terminal emulator:
 

@@ -171,10 +171,10 @@ describe("the editor field's hint and the cleared notice", () => {
 
   it("on the embedded route say drafts open in the terminal editor and effective opens config.toml and the log", () => {
     expect(editorHint(setting("embedded"))).toBe(
-      "Drafts open in the embedded terminal editor; config.toml and the log open in code --wait {path}. {path} stands for the file.",
+      "Drafts and received messages (e) open in the embedded terminal editor; config.toml and the log open in code --wait {path}. {path} stands for the file.",
     );
     expect(clearedNotice(setting("embedded"))).toBe(
-      "The editor setting is cleared; drafts open in the embedded terminal editor, and config.toml and the log in code --wait {path}",
+      "The editor setting is cleared; drafts and received messages open in the embedded terminal editor, and config.toml and the log in code --wait {path}",
     );
   });
 

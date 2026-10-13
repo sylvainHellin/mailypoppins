@@ -2595,3 +2595,9 @@ A focus move has to zoom the target pane whenever the current width hides it.
 
 Twenty agents each building in their own `CARGO_TARGET_DIR` filled the Mac's 460 GB disk with trees of 5 to 17 GB each.
 A batch shares one target dir, which cargo's build lock makes safe, and deletes it when the batch is done.
+
+## A file the desktop opens in an editor has to read the draft's route, not the external editor's resolver
+
+`editor::open_on` wraps a terminal editor in a new terminal window, which is right for `config.toml` and the log but not for a file the user reads in the app: the message's Markdown rendition (PERSO-92) went to a new Ghostty window while drafts ran in the embedded pane.
+A file that should behave like a draft asks `editor_setting_get` for the route and, on `embedded`, opens through `terminal_spawn` and the `state.compose` session machinery, which only labels a session by `account` and `id`.
+A non-draft session takes an id with a `/` (`message/<row_id>`), which no draft file name can hold, so it cannot collide with a real draft's key.

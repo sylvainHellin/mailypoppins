@@ -65,6 +65,51 @@ async function clickOtherRow(user: User) {
 }
 
 describe("the route", () => {
+  it("e on a received message opens its read-only rendition in the reader area like a draft, and code 0 brings the message back (PERSO-92)", async () => {
+    const { user } = renderApp(1400, nvim);
+    await shellReady();
+    await user.keyboard("j");
+    const message = (await within(reader()).findByRole("article")).getAttribute("aria-label");
+    await user.keyboard("e");
+    await waitFor(() => expect(line()).toHaveAttribute("data-status", "editing"));
+    expect(cmds("message_markdown_path")).toHaveLength(1);
+    expect(cmds("message_markdown_open", "editor_open", "draft_path")).toEqual([]);
+    expect(mock.editorOpens).toEqual([]);
+    const [spawn] = mock.terminal.of("spawn").map((c) => c.req);
+    expect(spawn).toMatchObject({ account: "work", theme: "dark" });
+    expect(spawn?.id).toMatch(/^message\/\d+$/);
+    expect(spawn?.path).toMatch(/^\/fixture\/runtime\/handles\/h-\d+\/message-\d+\.md$/);
+    expect(line()).toHaveTextContent(/^Reading message-\d+\.md read-only in nvim '/);
+    expect(line()).toHaveAttribute("data-route", "embedded");
+    expect(shownPane()).not.toBeNull();
+    expect(within(reader()).queryByRole("article")).toBeNull();
+
+    act(() => mock.terminal.exit(1, { code: 0, signal: null }));
+    await waitFor(() => expect(banner()).toBeEmptyDOMElement());
+    expect(kills()).toEqual([1]);
+    expect(panes()).toEqual([]);
+    expect(await within(reader()).findByRole("article", { name: message! })).toBeInTheDocument();
+    expect(cmds("draft_preview", "draft_discard", "send_draft")).toEqual([]);
+  });
+
+  it("a rendition's editor that fails keeps its pane, says nothing of a save, and Reopen writes the rendition again (PERSO-92)", async () => {
+    const { user } = renderApp(1400, nvim);
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("e");
+    await waitFor(() => expect(line()).toHaveAttribute("data-status", "editing"));
+    act(() => mock.terminal.exit(1, { code: 1, signal: null }));
+    await waitFor(() => expect(line()).toHaveAttribute("data-status", "exited"));
+    expect(line()?.querySelector("span")).toHaveTextContent(/^The editor of message-\d+\.md exited with status 1$/);
+    await user.click(within(banner()).getByRole("button", { name: /^Reopen in editor: message-/ }));
+    await waitFor(() => expect(mock.terminal.of("spawn")).toHaveLength(2));
+    expect(cmds("message_markdown_path")).toHaveLength(2);
+    const [first, second] = mock.terminal.of("spawn").map((c) => c.req.path);
+    expect(second).not.toBe(first);
+    await waitFor(() => expect(line()).toHaveAttribute("data-status", "editing"));
+    expect(panes()).toHaveLength(1);
+  });
+
   it("a terminal editor opens the reply in the reader area, and editor_open is not called", async () => {
     const { user } = renderApp(1400, nvim);
     await shellReady();

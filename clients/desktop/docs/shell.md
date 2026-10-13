@@ -256,7 +256,7 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `r`, `cr` | Reply | list, reader | `draft_reply` (`all: false`) or `draft_from_message` (`reply`), then the editor |
 | `ca` | Reply all | list, reader | `draft_reply` (`all: true`) or `draft_from_message` (`reply_all`), then the editor |
 | `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `signature_list`, then `draft_forward` with `headers` and the signature, or `draft_from_message` (`forward`), then the editor |
-| `e` | Edit the draft in the editor; on a received message, open its Markdown rendition read-only in the external editor, the TUI's `e` (PERSO-92); Enter focuses the reader | list, reader | `draft_path`, then the editor; `message_markdown_open` |
+| `e` | Edit the draft in the editor; on a received message, open its Markdown rendition read-only by the same route, the TUI's `e` (PERSO-92); Enter focuses the reader | list, reader | `draft_path`, then the editor; `message_markdown_path`, then the embedded editor, or `message_markdown_open` |
 | `ce` | Edit recipients, Drafts only | list, reader | `draft_set_recipients`, the dialog filled from the listed row |
 | `cA` | Approve, Drafts only | list, reader | `draft_approve` |
 | `cD` | Back to draft, Drafts only | list, reader | `draft_demote` |
@@ -268,6 +268,20 @@ The keys are the TUI's (`clients/tui/src/app/keymap.rs`), and like its MESSAGE a
 `ce`, `cA`, `cD` and `cX` outside the Drafts list say that they are only available in Drafts, in the TUI's words.
 A reply or a forward acts on the cursor row, or on the server-only hit under the cursor, which has no row: `draft_from_message` then builds the draft from the hit's headers and bodies, with no attachments.
 On a draft, reply and forward say that a draft has nothing to quote.
+
+### A message's rendition
+
+`e` on a received message, in a mailbox or on a stored search hit, opens the daemon's Markdown rendition of it (`message.materialise_markdown`: the frontmatter and the plain text, mode 0444, named after the subject), the TUI's read-only view (RD-06, PERSO-92).
+`viewInEditor` in `src/app/compose.ts` reads the route from `editor_setting_get` as `openInEditor` does for a draft, so the two cannot open in different places:
+
+- On the embedded route `message_markdown_path` writes the file and answers its path, and the rendition opens as a session of `state.compose` under the id `message/<row_id>`, which no draft file name can be, with `view` naming the row. Its pane, its focus, its background and its navigate-away question are a draft's (see "The embedded editor"); the editor shows the file read-only, since it is 0444.
+- On the external route `message_markdown_open` writes the file and opens it in the external editor, which the notice names ("Opened the message read-only in <editor>"); no session is kept, as for `sc` and `sf`.
+
+A rendition's editor never saves or sends anything.
+Code 0 (`:q`) forgets the session and the reader shows the selection again; a nonzero code or a signal keeps the pane with the banner's status and no mention of a save, and Reopen writes the rendition again, since the daemon's handle expires after ten minutes.
+The banner says "Reading <file> read-only in <editor>" while the reader area shows it, and "<file> is open read-only in <editor> in the background" otherwise; the navigate-away question says "<file> is open read-only in the editor", and closing it changes nothing.
+`e` on a message whose rendition still runs shows that editor again rather than spawning a second one.
+A row the store no longer holds is a warning notice, "Open failed: that message is no longer in the store", the TUI's line.
 
 ### The wizard
 
@@ -819,7 +833,7 @@ On a switch the focus follows into the view, on its "Mail" button, as in the oth
 - Theme: Dark, Light and System, the `theme` key of `desktop.json` (see Theme).
 - Reader: HTML and Text, the current one pressed, the `reader_mode` key of `desktop.json`; `tt` and the palette's "Reader: HTML" and "Reader: text" do the same ([reader.md](reader.md), "Text mode").
 - Editor command: the M3 editor setting through `editor_setting_get|set`, its placeholder the template in effect; Save with an empty field clears it, and the hint names `MP_DESKTOP_EDITOR` when that wins.
-  On the embedded route the hint and the notice of a cleared setting say that drafts open in the embedded terminal editor, and that the template in effect opens config.toml and the log.
+  On the embedded route the hint and the notice of a cleared setting say that drafts and received messages open in the embedded terminal editor, and that the template in effect opens config.toml and the log.
 - Editor colours: "Follow the app" and "The editor's own", the current one pressed, the `editor_colors` key of `desktop.json` (`app` or `editor`, unset is `app`); the next embedded editor started takes a change, and a refused write says "The editor colours were not saved: <why>" (see Compose, "The editor's colours").
 
 A reload says what the swap did on the notice line, in the activity log's words: "Configuration reloaded: no account changed" or "Configuration reloaded: added ...; updated ...; removed ...".
@@ -1055,7 +1069,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - In the Contacts view: `j`/`k`, `gg`/`G` move, `/` focuses the search, Enter and `n` compose to the contact, `v` sends it as a vCard, `c` copies its address, `r` rebuilds the index (see Contacts).
 - In the Calendar view: `j`/`k`, `gg`/`G` move, Enter and `e` open the entry's `invite.ics` in the editor, `t` shows or hides past events, `r` reads the agenda again (see Calendar).
 - `cn`, `r`, `cr`, `ca`, `cf`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
-  On a received message `e` opens its Markdown rendition read-only in the external editor instead, the TUI's `e`, and Enter focuses the reader (PERSO-92); on a server-only hit it says to fetch it first (`F`).
+  On a received message `e` opens its Markdown rendition read-only instead, by a draft's route, the TUI's `e`, and Enter focuses the reader (PERSO-92); on a server-only hit it says to fetch it first (`F`) (see Compose, "A message's rendition").
 - `cs`: the Signatures dialog, in Mail from any pane; see Signatures.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".
 - `to`, `ts`, `tb`: open an attachment, save attachments, open the HTML in the browser, from the list or the reader (the TUI's MESSAGE keys); `ta`: attach a file to the Drafts cursor draft; see [reader.md](reader.md), "Attachments".

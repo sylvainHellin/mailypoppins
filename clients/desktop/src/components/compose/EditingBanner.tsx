@@ -1,6 +1,8 @@
 // The drafts open in an editor, one line each above the panes: the
 // external editor's, and the embedded editor's (ticket 0130) while it runs,
-// shown or in the background, or once it ended without code 0.
+// shown or in the background, or once it ended without code 0. A received
+// message's read-only rendition in the embedded editor (PERSO-92) has a line
+// too, in words that promise no save.
 // The region is mounted empty, since a live region that mounts with its
 // text already inside may not be announced.
 
@@ -19,18 +21,20 @@ export function bannerLine(c: ComposeSession, shown: boolean): string {
     return `Editing ${c.name} in ${editor}; each save updates the list`;
   }
   const st = c.status;
+  const kept = c.view ? "" : "; the draft keeps what was saved";
   switch (st.kind) {
     case "running":
       if (c.session === null) return `Opening ${c.name} in the editor…`;
+      if (c.view) return shown ? `Reading ${c.name} read-only in ${editor}` : `${c.name} is open read-only in ${editor} in the background`;
       return shown
         ? `Editing ${c.name} in ${editor}; each save updates the list`
         : `${c.name} is open in ${editor} in the background`;
     case "exited":
-      return `The editor of ${c.name} exited with status ${st.code}; the draft keeps what was saved`;
+      return `The editor of ${c.name} exited with status ${st.code}${kept}`;
     case "crashed":
       return st.signal !== null
-        ? `The editor of ${c.name} was ended by signal ${st.signal}; the draft keeps what was saved`
-        : `The editor of ${c.name} ended with no status; the draft keeps what was saved`;
+        ? `The editor of ${c.name} was ended by signal ${st.signal}${kept}`
+        : `The editor of ${c.name} ended with no status${kept}`;
     case "failed":
       return `${c.name} did not open in the editor`;
   }

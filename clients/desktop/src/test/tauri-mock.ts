@@ -1449,6 +1449,12 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (failure) throw failure;
       return { editor: `code --wait '${path}'`, source: "probe", fixture: mock.editorFixture };
     }
+    case "message_markdown_path": {
+      const rowId = Number(args.row_id);
+      if (!findRow(account, rowId)) throw { kind: "not_found", message: MESSAGE_GONE, code: null };
+      const name = `message-${rowId}.md`;
+      return { name, path: `/fixture/runtime/handles/h-${mock.nextHandle++}/${name}` };
+    }
     case "message_markdown_open": {
       const rowId = Number(args.row_id);
       if (!findRow(account, rowId)) throw { kind: "not_found", message: MESSAGE_GONE, code: null };

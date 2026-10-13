@@ -255,9 +255,17 @@ export const configOpen = (): Promise<EditorLaunch> => invoke<EditorLaunch>("con
 export const logOpen = (): Promise<EditorLaunch> => invoke<EditorLaunch>("log_open");
 
 /**
+ * Writes a received message's Markdown rendition (`message.materialise_markdown`,
+ * mode 0444) and answers its file, which the embedded route's `terminal_spawn`
+ * opens, the TUI's `e`; `not_found` when the store no longer holds the row.
+ */
+export const messageMarkdownPath = (account: string, row_id: number): Promise<OpenedFile> =>
+  invoke<OpenedFile>("message_markdown_path", { account, row_id });
+
+/**
  * Opens a received message's Markdown rendition (`message.materialise_markdown`,
- * read-only) in the resolved editor, the TUI's `e`; `not_found` when the store
- * no longer holds the row.
+ * read-only) in the resolved external editor, the TUI's `e` on the external
+ * route; `not_found` when the store no longer holds the row.
  */
 export const messageMarkdownOpen = (account: string, row_id: number): Promise<EditorLaunch> =>
   invoke<EditorLaunch>("message_markdown_open", { account, row_id });
