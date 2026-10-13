@@ -21,7 +21,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `signatures.rs` | The Signatures dialog's reads and changes over `mp_core::signatures` |
 | `daemon_files.rs` | The daemon's `config.toml` and its log file in the editor |
 | `configuration.rs` | The Settings view's `config.get`, reload and password store, the account wizard's writes and the device-code sign-in |
-| `reader.rs` | The `mpmsg` scheme serving `message.html` |
+| `reader.rs` | The `mpmsg` scheme serving `message.html`, and `draft.html` for a draft |
 | `navigation.rs` | The webview's navigation allowlist and the intercepted-URL log |
 | `fixture.rs` | The daemon stand-in behind `MP_DESKTOP_FIXTURE=1` |
 | `menu.rs` | The native menus (App, File, Edit, View, Window, Help) and their `menu` event |
@@ -142,6 +142,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `attachment_save` | `account`, `row_id`, `parts`, `dest_dir` (absolute or `~`) | `SavedAttachments` |
 | `html_open` | `account`, `row_id` | `OpenedFile`, or `null` for a message with no HTML part |
 | `hit_html_open` | `html` | `OpenedFile` |
+| `draft_html_open` | `account`, `id` | `OpenedFile` |
 | `draft_attachments` | `account`, `id` | `DraftAttachments` |
 | `draft_attach` | `account`, `id`, `path` (absolute or `~`) | `DraftAttachments` |
 | `draft_attachment_remove` | `account`, `id`, `index` | `DraftAttachments` |
@@ -706,6 +707,10 @@ The app cache is Tauri's `app_cache_dir`, `~/Library/Caches/dev.mailypoppins.des
 On unix `renditions/` and each `hit-<hash>/` are 0700, tightened if found wider (`mp_core::config::create_private_dir_all`), and `message.html` is 0600, as the daemon's handles and the TUI's temp files are.
 Each write first removes the renditions older than a day.
 
+A draft has no row either, and its HTML is the one its send would build: `draft.html {account, id}` answers it inline, with the signature the body carries, the configured font and the quoted original a reply keeps, already hardened (PERSO-136).
+`draft_html_open` writes it the way `hit_html_open` writes a hit, the charset and CSP tags put on again since they are idempotent, to `<app cache>/renditions/draft-<id>/message.html`, the id kept to ASCII letters, digits, `-` and `_` (anything else `_`), as the TUI's `tb` names it, so a second open of the same draft rewrites one file.
+A draft that will not parse is `-32010`, `protocol`, and one that is gone `-32602`, `not_found`; the frontend says "Draft preview failed: <why>".
+
 A draft's attachments are the paths its `attachments:` frontmatter lists, and the daemon reads and rewrites them (#0131), so no command here writes the file:
 
 - `draft_attachments` is `draft.attachments`: each entry as typed, where the send path finds it, and whether a file is there: `~` expands against the daemon's `$HOME`, and a relative entry resolves against the draft's own directory (`ATT-03`).
@@ -769,6 +774,7 @@ The frontend keeps each awaited operation's last report (`progress` in the model
 ## The reader
 
 `message_html_meta` answers the headers and `html_url`, `mpmsg://localhost/<account>/<row_id>`.
+A draft's preview in html mode loads `mpmsg://localhost/<account>/drafts/<id>` (`reader::draft_url`, spelled the same by the frontend's `draftReaderUrl`), which the scheme answers with `draft.html`'s `html` under the same policy and bridge as a message (PERSO-136).
 The iframe loads that URL with `sandbox="allow-popups allow-scripts"` and never `allow-same-origin`; the plan's section "Reading HTML bodies" explains both.
 The frontend side, the bridge, the refused-link notice and the guard's verification in a real webview are in [reader.md](reader.md).
 The header is built from constants and never from a policy read out of the message: a sender can hide a meta-looking policy inside the doctype, ahead of the daemon's tag, and a header may carry `report-uri`.
@@ -778,9 +784,9 @@ The scheme answers:
 
 - 200 with the rendition, the daemon's meta replaced by one carrying `message_csp(nonce)` and `<script nonce="<n>">` with the bridge right after it, the same policy as a `Content-Security-Policy` header, `X-Content-Type-Options: nosniff` and `X-Mp-Rendition: html`;
 - 200 with the stored plain text, escaped, in a minimal document the handler builds with the same `message_csp(nonce)` meta and the bridge after it, the same header, and `X-Mp-Rendition: text` when the message has no markup, read through `message_text_on`;
-- 404 for an unknown account or row, 400 for a malformed URL, 503 while no daemon answers, 504 on a timeout.
+- 404 for an unknown account, row or draft, 400 for a malformed URL, 503 while no daemon answers, 504 on a timeout, and 502 for a draft that will not parse.
 
-A rendition over 8 MiB goes through `message.materialise_html`, and the handle is released as soon as the file is read.
+A rendition over 8 MiB goes through `message.materialise_html`, and the handle is released as soon as the file is read; a draft's has no such route, and over 8 MiB it is the 502 page.
 
 `message_text` answers the reader's text mode: `message.get {account, row_id, body: true}`, whose `body` is the stored plain text the TUI's preview shows (`mp_client::queries::message_body`).
 A row the store has no body for answers `body: null`, and the frontend says so rather than switching modes; a row that does not exist is `not_found`.
