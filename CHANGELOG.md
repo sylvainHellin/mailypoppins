@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **`tb` on a draft opens it as it will be sent (PERSO-136).** The new `draft.html` daemon method renders the signature and the quoted reply through the same `send::draft_html_body` as `mp send`; TUI first, desktop follows.
 - **Desktop: `y` on a draft copies its file path (PERSO-100).**
 - **`mp list-messages`, `mp search` and `mp contacts search` take `--json`.** Each prints one JSON object on stdout with warnings left on stderr, so a script can parse the listing: `{account, mailboxes, messages}` for `list-messages`, `{account, query, source, messages}` for `search` (the server or `--local`), `{account, query, contacts}` for `contacts search`. A message carries its selector, mailbox, Message-ID, sender, recipients, subject, the date as a UTC ISO 8601 instant beside the `Date:` header, its flags and whether it has attachments; `search --full` adds the body, and a server hit without `--full` the preview its text layout prints.
 - **`mp search` names the terms the local store answered on stdout (PERSO-122).** On plain IMAP `has:attachment` is answered from the local store; the result header now says `local store only: has:attachment` and `--json` carries `"coverage": "server"|"local"` with `"local_terms"`, so a piped search no longer reads an un-synced gap as "no such mail". The stderr warning stays.
@@ -17,6 +18,7 @@ All notable changes to this project are documented in this file.
 - **Desktop: `e` on a received message opens it read-only in `$EDITOR` as Markdown, as in the TUI (PERSO-92).** Enter focuses the reader.
 
 ### Fixed
+- **A sent reply carries `In-Reply-To` and `References` (PERSO-137).** The parent's References plus the parent, so recipients' clients thread it and mp files the Sent copy in the parent's conversation instead of a new one.
 - **The desktop log's startup line names the bundle version, and the unreachable TUI `Action::NewDraft` is gone (PERSO-135).**
 - **Reply and reply-all to a message you sent address its original recipients (PERSO-99).** They now go to its original To (and Cc for reply-all) instead of your own address.
 - **`mp daemon start` and `mp daemon restart` go through the installed systemd unit or launchd agent when it serves this data directory and runs this `mp` (PERSO-109).** A restart no longer leaves `mailypoppins.service` dead beside a detached daemon.

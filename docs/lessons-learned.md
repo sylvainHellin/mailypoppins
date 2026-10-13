@@ -2638,3 +2638,11 @@ Run `cargo test -p mp-protocol --features ts --test ts_bindings` after adding a 
 
 `LIKE`, `lower()` and `NOCASE` ignore ASCII case and nothing else, so a case-insensitive match on user text needs a function registered on every connection: `mp_fold` (`src/store/mod.rs`, registered in `apply_pragmas` so the read pool and every reopen carry it), with the needle folded by the same Rust function (PERSO-134).
 FTS5's default `unicode61` tokenizer already folds Unicode case and strips accents, so text search is looser than `filename:`, which keeps accents significant.
+
+## Asserting what a TUI key asked the daemon
+
+A TUI key handler reads its door off `app.session`, so the recording `Fixture` in `src/tui_tests/actions.rs`, which only sees `dispatch()`, cannot see its calls; use `TestDaemon::recording_session(log)` to assert the methods a key sent (PERSO-136).
+
+## lettre typed headers fold and encode, they do not inject
+
+`HeaderValue::new` folds at spaces and RFC 2047-encodes any word containing CR or LF, so an id read from a draft or the store cannot inject a header through lettre's `InReplyTo`/`References`; dedupe and order the ids yourself, lettre does not (PERSO-137).
