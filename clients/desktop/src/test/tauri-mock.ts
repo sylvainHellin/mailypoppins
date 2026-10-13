@@ -734,15 +734,35 @@ export const LOCAL_REFUSAL =
   "message.search: the daemon refused the call: to: and cc: are not indexed by --local; drop --local to search them server-side (-32602)";
 
 /**
+ * `mp_core::search::parse`'s refusal of a field with no value, such as
+ * `from: borrmann` with a space after the colon: three lines, the caret
+ * under the field. Null when no field is left empty.
+ */
+export function emptyFieldRefusal(query: string): string | null {
+  const m = /(?:^|[\s(])((from|to|cc|subject|body|text|filename|in|message-id):)(?=\s|$)/i.exec(query);
+  if (!m) return null;
+  const at = m.index + m[0].length - m[1].length;
+  return `invalid search query: ${m[2].toLowerCase()}: needs a value\n  ${query}\n  ${" ".repeat(at)}^`;
+}
+
+/** What `search_local` rejects an unparseable query with, the daemon's frame around the parser's lines. */
+export function parseRefusal(query: string): string | null {
+  const why = emptyFieldRefusal(query);
+  return why === null ? null : `message.search: the daemon refused the call: ${why} (-32602)`;
+}
+
+/**
  * `search_query` as commands.rs's `search_plan` answers it, for the shapes
  * the tests type: the fields as flags around the keywords, an Advanced line
- * that takes over, a bad date refused, and `to:`, `cc:`, `filename:` and
- * `message-id:` the store's index cannot answer. The real lowering is
- * mp-core's, tested on the Rust side.
+ * that takes over, a bad date or a field with no value refused, and `to:`,
+ * `cc:`, `filename:` and `message-id:` the store's index cannot answer. The
+ * real lowering is mp-core's, tested on the Rust side.
  */
 export function searchPlan(form: SearchForm): SearchPlan {
   const t = (v: string) => v.trim();
   const advanced = t(form.advanced);
+  const unparsed = emptyFieldRefusal(advanced || t(form.keywords));
+  if (unparsed !== null) return { kind: "invalid", message: unparsed };
   let parts: string[];
   if (advanced) {
     parts = [advanced];
@@ -1169,6 +1189,9 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       // fixture.rs's `matches`: subject, sender or body, case-insensitive.
       const params = args.params as { account: string; query: string; mailbox?: string };
       const q = params.query.trim().toLowerCase();
+      // The daemon's refusal of a query that does not parse.
+      const unparsed = parseRefusal(params.query.trim());
+      if (unparsed !== null) throw { kind: "protocol", message: unparsed, code: -32602 } satisfies GuiError;
       // The daemon's refusal of a term its index has no column for.
       if (/(?:^|[\s(])(to|cc):/.test(q)) {
         throw { kind: "protocol", message: LOCAL_REFUSAL, code: -32602 } satisfies GuiError;

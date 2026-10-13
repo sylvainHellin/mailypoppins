@@ -2601,3 +2601,8 @@ A batch shares one target dir, which cargo's build lock makes safe, and deletes 
 `editor::open_on` wraps a terminal editor in a new terminal window, which is right for `config.toml` and the log but not for a file the user reads in the app: the message's Markdown rendition (PERSO-92) went to a new Ghostty window while drafts ran in the embedded pane.
 A file that should behave like a draft asks `editor_setting_get` for the route and, on `embedded`, opens through `terminal_spawn` and the `state.compose` session machinery, which only labels a session by `account` and `id`.
 A non-draft session takes an id with a `/` (`message/<row_id>`), which no draft file name can hold, so it cannot collide with a real draft's key.
+
+## A sequence number that keys a React effect must never go back
+
+The desktop's search effect starts each run once per `mode:seq` (a `useRef` guard), and every new search took `seq` from the shown search, so after Escape the next local search got `seq` 1 again, matched the guard, and never started: the list spun forever (PERSO-115).
+A counter that identifies runs across their lifetime lives beside the state it numbers (`state.searchSeq`), not inside the object that gets cleared, or a late answer of an ended run can also land on the new one.

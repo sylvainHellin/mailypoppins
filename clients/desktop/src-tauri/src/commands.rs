@@ -362,44 +362,28 @@ pub enum SearchPlan {
     },
 }
 
-/// Build the query a [`SearchForm`] describes, as the TUI's
-/// `SearchForm::build_query` does: a non-blank Advanced line is parsed on its
-/// own, else `keywords` is the positional grammar and the other fields are
-/// `mp search`'s flags, through the one parser every backend reads
-/// (`mp_core::search::from_cli`).
+/// Build the query a [`SearchForm`] describes with
+/// `mp_core::search::SearchFields::build_query`, the lowering the TUI's
+/// `SearchForm::build_query` calls too, so the two clients cannot drift: a
+/// non-blank Advanced line is parsed on its own, else `keywords` is the
+/// positional grammar and the other fields are `mp search`'s flags. The list
+/// header's typed query goes through it as `keywords`.
 pub fn search_plan(form: &SearchForm) -> SearchPlan {
     use mp_core::search;
-    let advanced = form.advanced.trim();
-    let built = if !advanced.is_empty() {
-        search::parse(advanced).map_err(|e| e.to_string())
-    } else {
-        let opt = |s: &str| Some(s.trim().to_string()).filter(|t| !t.is_empty());
-        let flags = search::Flags {
-            from: opt(&form.from),
-            to: opt(&form.to),
-            cc: None,
-            subject: opt(&form.subject),
-            body: None,
-            filename: None,
-            has_attachment: form.attachment,
-            after: opt(&form.after),
-            before: opt(&form.before),
-        };
-        let blank = form.keywords.trim().is_empty()
-            && flags.from.is_none()
-            && flags.to.is_none()
-            && flags.subject.is_none()
-            && flags.after.is_none()
-            && flags.before.is_none()
-            && !flags.has_attachment;
-        if blank {
-            return SearchPlan::Blank;
-        }
-        search::from_cli(form.keywords.trim(), &flags)
+    let fields = search::SearchFields {
+        from: form.from.clone(),
+        to: form.to.clone(),
+        subject: form.subject.clone(),
+        keywords: form.keywords.clone(),
+        after: form.after.clone(),
+        before: form.before.clone(),
+        attachment: form.attachment,
+        advanced: form.advanced.clone(),
     };
-    match built {
+    match fields.build_query() {
+        Ok(None) => SearchPlan::Blank,
         Err(message) => SearchPlan::Invalid { message },
-        Ok(query) => SearchPlan::Query {
+        Ok(Some(query)) => SearchPlan::Query {
             query: search::to_query_string(&query),
             local: search::to_fts(&query).is_ok(),
             in_mailbox: query.in_mailbox.clone(),
@@ -2826,6 +2810,30 @@ mod tests {
             panic!("an unknown has: should be refused");
         };
         assert!(message.starts_with("invalid search query:"), "{message}");
+    }
+
+    /// The list header's `from: borrmann` (PERSO-115): the TUI's words,
+    /// since both build the query through `mp_core`.
+    #[test]
+    fn a_field_with_a_space_before_its_value_is_the_tui_s_refusal() {
+        let form = SearchForm {
+            keywords: "from: borrmann".into(),
+            ..Default::default()
+        };
+        let tui = mp_core::search::SearchFields {
+            keywords: form.keywords.clone(),
+            ..Default::default()
+        }
+        .build_query()
+        .expect_err("refused");
+        assert_eq!(search_plan(&form), SearchPlan::Invalid { message: tui });
+        let SearchPlan::Invalid { message } = search_plan(&form) else {
+            unreachable!()
+        };
+        assert_eq!(
+            message,
+            "invalid search query: from: needs a value\n  from: borrmann\n  ^"
+        );
     }
 
     #[test]

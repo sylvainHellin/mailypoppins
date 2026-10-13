@@ -103,6 +103,9 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 The list header's field filters the shown list as it is typed, as before.
 Enter runs `search_local` over the selected account and the results replace the list, each with the mailbox it was found in as a badge.
 A query the store's index cannot answer (recipient, filename and message-id terms, or an OR group with a date or attachment term) is refused by `message.search` as `-32602`; `search_query` then confirms that is why, and the same query runs on the server, scoped to the query's own `in:` mailbox, with a notice saying so (PERSO-115).
+A query that does not parse, such as `from: borrmann` with a space after the colon, is refused the same way; `search_query` answers `invalid` with the parser's three lines, and the search ends `failed` with them under "The search failed:", in monospace so the caret sits under the query.
+They are the TUI's words for that query in its search form, since both clients build the query through `mp_core::search::SearchFields::build_query`; the TUI's `/` filter never parses, it matches the typed text literally, as the header's field does while it is typed.
+Each run's `seq` comes from `state.searchSeq`, which never goes back when a search ends: the effect that starts a run (`useSearchSync` in `src/app/data.ts`) starts each `mode:seq` once, so a run after Escape that reused the ended one's seq never started and spun forever.
 Shift+Enter, the header's server button and the palette's "Search server" run `search_server_start`; the server leg of a finished local search keeps its hits and passes their `message_id`s as `exclude_message_ids`, as the TUI does.
 With nothing typed and no search shown, the server button opens the Server Search form instead.
 `state.search` holds the query, the mode (`local` or `server`), the hits, the `operation_id`, the status (`searching`, `running`, `done`, `cancelled`, `failed`, `dropped`), the list selection and focus to restore, the one mailbox searched (`null` for the whole account), whether a server leg follows the local pass (`chain`), and the form it came from.
@@ -116,7 +119,7 @@ A non-blank Advanced line takes over: the structured fields are disabled, so Tab
 Tab and Shift+Tab move, Space flips the scope and the attachment toggle, Enter searches from any field, and Escape closes; From has the focus when it opens.
 It opens with the shown search's form when that came from it, else blank with the header's typed text as its Keywords.
 
-Enter calls `search_query`, which builds the query with `mp-core`'s parser as the TUI's `SearchForm::build_query` does and makes no daemon call.
+Enter calls `search_query`, which builds the query with `mp_core::search::SearchFields::build_query`, the lowering the TUI's `SearchForm::build_query` calls, and makes no daemon call.
 A blank form says "Fill the form and press Enter to search", a parse or date refusal shows verbatim in the form's alert, and Current Mailbox over Drafts or no mailbox says "Current mailbox has no server search target"; the form stays open with what was typed.
 Otherwise the form closes and the search runs as the TUI's overlay runs it: the query's own `in:` names the mailbox, else Current Mailbox names the selected one by its sidebar label (`mailbox` to `search_local`, `mailboxes` to `search_server_start`).
 When the store's index can answer the query, `search_local` runs first and its end, hits or refusal, starts the server leg, which keeps the local hits and excludes them; a query only the server can answer goes there at once.

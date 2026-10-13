@@ -690,6 +690,13 @@ export type AppState = {
   view: View;
   /** Search results replace the mailbox list while this is set. */
   search: SearchState | null;
+  /**
+   * The `seq` of the last run started. It never goes back when a search
+   * ends, so a run after Escape is never taken for the one before it: the
+   * search effect starts a run once per `mode:seq`, and a late answer of
+   * an ended search must not land on a new one.
+   */
+  searchSeq: number;
   sidebarCursor: { account: string; slug: string } | null;
   focus: Pane;
   /** Moves whenever the DOM focus should follow `focus` (keyboard-driven). */
@@ -870,6 +877,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     selectionAuto: false,
     view: "mail",
     search: null,
+    searchSeq: 0,
     sidebarCursor: null,
     focus: "list",
     focusSeq: 0,

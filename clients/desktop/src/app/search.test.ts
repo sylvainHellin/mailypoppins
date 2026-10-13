@@ -178,3 +178,14 @@ describe("submitting the form", () => {
     ]);
   });
 });
+
+describe("a search's seq", () => {
+  it("never goes back after Escape, so the ended search's late answer does not land on the next one", () => {
+    const first = run(booted(), { type: "search_local", query: "ledger" });
+    expect(first.search?.seq).toBe(1);
+    const next = run(first, { type: "exit_search" }, { type: "search_local", query: "from: borrmann" });
+    expect(next.search?.seq).toBe(2);
+    const late = run(next, { type: "search_local_loaded", seq: 1, hits: [localHit(1001, "<late@fixture.example>")] });
+    expect(late.search).toEqual(next.search);
+  });
+});

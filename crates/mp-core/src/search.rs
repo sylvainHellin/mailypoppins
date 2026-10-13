@@ -435,6 +435,80 @@ pub fn from_cli(positional: &str, flags: &Flags) -> Result<Query, String> {
 }
 
 // ---------------------------------------------------------------------------
+// The search form both clients show
+// ---------------------------------------------------------------------------
+
+/// The fields of the search form the TUI's overlay and the desktop's Server
+/// Search dialog show, and the desktop's list header fills as `keywords`.
+///
+/// [`SearchFields::build_query`] is the one lowering both clients call, so a
+/// query typed anywhere means the same thing and refuses with the same words.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchFields {
+    pub from: String,
+    pub to: String,
+    pub subject: String,
+    /// Free text in the grammar, so `a OR b`, quoted phrases and `from:x` work.
+    pub keywords: String,
+    pub after: String,
+    pub before: String,
+    pub attachment: bool,
+    /// A raw query that, when non-blank, replaces every other field.
+    pub advanced: String,
+}
+
+impl SearchFields {
+    /// True when the Advanced line is the active input: it takes precedence
+    /// over every structured field once it holds anything non-blank.
+    pub fn advanced_active(&self) -> bool {
+        !self.advanced.trim().is_empty()
+    }
+
+    /// True when nothing was entered anywhere: neither the Advanced line nor
+    /// a structured field nor the attachment toggle.
+    pub fn is_blank(&self) -> bool {
+        !self.advanced_active()
+            && self.from.trim().is_empty()
+            && self.to.trim().is_empty()
+            && self.subject.trim().is_empty()
+            && self.keywords.trim().is_empty()
+            && self.after.trim().is_empty()
+            && self.before.trim().is_empty()
+            && !self.attachment
+    }
+
+    /// The [`Query`] the form describes, `Ok(None)` for a blank form.
+    ///
+    /// An active Advanced line is parsed on its own with [`parse`]; otherwise
+    /// `keywords` is the positional grammar and the other fields are
+    /// [`from_cli`]'s flags. The refusal is the parser's or the date check's
+    /// message verbatim, a parse error with its caret line.
+    pub fn build_query(&self) -> Result<Option<Query>, String> {
+        if self.advanced_active() {
+            return parse(self.advanced.trim())
+                .map(Some)
+                .map_err(|e| e.to_string());
+        }
+        if self.is_blank() {
+            return Ok(None);
+        }
+        let opt = |s: &str| Some(s.trim().to_string()).filter(|t| !t.is_empty());
+        let flags = Flags {
+            from: opt(&self.from),
+            to: opt(&self.to),
+            cc: None,
+            subject: opt(&self.subject),
+            body: None,
+            filename: None,
+            has_attachment: self.attachment,
+            after: opt(&self.after),
+            before: opt(&self.before),
+        };
+        from_cli(self.keywords.trim(), &flags).map(Some)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Renderer: back to the grammar `parse` reads
 // ---------------------------------------------------------------------------
 
@@ -1024,6 +1098,62 @@ mod tests {
 
     fn q(input: &str) -> Query {
         parse(input).expect("should parse")
+    }
+
+    // -- the search form ----------------------------------------------------
+
+    fn keywords(text: &str) -> SearchFields {
+        SearchFields {
+            keywords: text.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_blank_form_builds_no_query() {
+        assert_eq!(SearchFields::default().build_query(), Ok(None));
+        assert_eq!(keywords("   ").build_query(), Ok(None));
+    }
+
+    #[test]
+    fn the_form_lowers_through_from_cli_and_the_advanced_line_takes_over() {
+        let form = SearchFields {
+            from: " ada ".into(),
+            keywords: "report".into(),
+            after: "2026-01-01".into(),
+            attachment: true,
+            ..Default::default()
+        };
+        let flags = Flags {
+            from: Some("ada".into()),
+            has_attachment: true,
+            after: Some("2026-01-01".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            form.build_query(),
+            Ok(Some(from_cli("report", &flags).expect("cli")))
+        );
+        let advanced = SearchFields {
+            advanced: "to:bob".into(),
+            ..form
+        };
+        assert_eq!(advanced.build_query(), Ok(Some(q("to:bob"))));
+    }
+
+    /// `from: borrmann`, a space after the colon, is a field with no value:
+    /// both clients refuse it with these three lines, the caret under the
+    /// field (PERSO-115).
+    #[test]
+    fn a_field_with_a_space_before_its_value_is_refused_with_the_caret() {
+        assert_eq!(
+            keywords("from: borrmann").build_query(),
+            Err("invalid search query: from: needs a value\n  from: borrmann\n  ^".to_string())
+        );
+        assert_eq!(
+            keywords("from:borrmann").build_query(),
+            Ok(Some(q("from:borrmann")))
+        );
     }
 
     // -- parser -------------------------------------------------------------

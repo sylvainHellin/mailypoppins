@@ -85,7 +85,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `message_text` | `account`, `row_id` | `MessageText`: the stored plain text, `body: null` when the store holds none; `not_found` for an unknown row |
 | `message_html_meta` | `account`, `row_id` | `MessageMeta` |
 | `search_local` | `params: LocalSearchParams` | `LocalSearchHit[]` |
-| `search_query` | `form: SearchForm` | `SearchPlan`: `blank`, `invalid { message }`, or `query { query, local, in_mailbox }`; the Server Search form's fields lowered by `mp-core`'s parser as the TUI's `SearchForm::build_query` does, `local` false for a query the store's index cannot answer; no daemon call |
+| `search_query` | `form: SearchForm` | `SearchPlan`: `blank`, `invalid { message }`, or `query { query, local, in_mailbox }`; the Server Search form's fields lowered by `mp_core::search::SearchFields::build_query`, which the TUI's `SearchForm::build_query` calls too, `local` false for a query the store's index cannot answer; no daemon call |
 | `search_server_start` | `params: ServerSearchParams` | `{ operation_id }` |
 | `search_server_cancel` | `operation_id` | `"cancelled" \| "already_settled"`; the search is no longer awaited |
 | `operation_cancel` | `operation_id` | `"cancelled" \| "already_settled"`; the operation stays awaited until its finish (see Cancelling) |

@@ -122,7 +122,7 @@ export function startSearch(s: AppState, mode: "local" | "server", query: string
     hits: keep,
     operationId: null,
     status: "searching",
-    seq: (prev?.seq ?? 0) + 1,
+    seq: s.searchSeq + 1,
     error: null,
     summary: null,
     early: [],
@@ -131,7 +131,7 @@ export function startSearch(s: AppState, mode: "local" | "server", query: string
     chain: mode === "local" && (run.chain ?? false),
     form,
   };
-  return { ...s, search };
+  return { ...s, search, searchSeq: search.seq };
 }
 
 /**

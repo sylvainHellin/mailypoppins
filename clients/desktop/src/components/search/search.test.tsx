@@ -241,6 +241,39 @@ describe("server search", () => {
     expect(within(await results()).getAllByRole("option")).toHaveLength(1);
   });
 
+  it("from: borrmann ends the search with the parser's lines, the TUI's words, and no spinner (PERSO-115)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(input());
+    await user.keyboard("from: borrmann{Enter}");
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "failed"));
+    const lines = "invalid search query: from: needs a value\n  from: borrmann\n  ^";
+    expect(document.querySelector('[data-slot="search-parse-error"]')?.textContent).toBe(lines);
+    expect(within(status() as HTMLElement).getByRole("alert")).toHaveTextContent(/^The search failed:invalid search query: from: needs a value/);
+    expect(status()?.querySelector(".animate-spin")).toBeNull();
+    const cmds = mock.calls.map((c) => c.cmd).filter((c) => c.startsWith("search_"));
+    expect(cmds).toEqual(["search_local", "search_query"]);
+    expect(mock.calls.find((c) => c.cmd === "search_query")?.args).toMatchObject({ form: { keywords: "from: borrmann" } });
+  });
+
+  it("a search after Escape runs, where it used to spin with the seq the ended one had (PERSO-115)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(input());
+    await user.keyboard("ledger{Enter}");
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(status()).toBeNull());
+    await user.click(input());
+    await user.keyboard("from: borrmann{Enter}");
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "failed"));
+    await user.keyboard("{Escape}");
+    await user.click(input());
+    await user.keyboard("ledger{Enter}");
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
+    expect(mock.calls.filter((c) => c.cmd === "search_local")).toHaveLength(3);
+  });
+
   it("a to: query typed in the field goes to the server, which can answer it (PERSO-115)", async () => {
     const { user } = renderApp();
     await shellReady();

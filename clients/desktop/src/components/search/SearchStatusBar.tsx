@@ -25,6 +25,11 @@ function describe(search: SearchState): string {
   }
 }
 
+/** A failure in the parser's lines (a message with a caret line under the query), or null. */
+function parseError(search: SearchState): string | null {
+  return search.status === "failed" && search.error?.includes("\n") ? search.error : null;
+}
+
 /** The search's progress, its outcome, and the cancel while the server runs. */
 export function SearchStatusBar({
   search,
@@ -53,7 +58,17 @@ export function SearchStatusBar({
         title={describe(search)}
         className={`min-w-0 flex-1 ${bad ? "break-words whitespace-normal text-destructive" : "truncate text-muted-foreground"}`}
       >
-        {describe(search)}
+        {parseError(search) !== null ? (
+          <>
+            The search failed:
+            {/* The parser's three lines, as the TUI and the Server Search dialog show them: the caret under the query. */}
+            <span data-slot="search-parse-error" className="block font-mono whitespace-pre-wrap">
+              {parseError(search)}
+            </span>
+          </>
+        ) : (
+          describe(search)
+        )}
       </span>
       {search.mode === "server" && busy ? (
         <Button size="xs" variant="outline" disabled={search.status !== "running"} onClick={onCancel}>

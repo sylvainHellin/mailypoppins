@@ -299,11 +299,16 @@ function useSearchSync(state: AppState, dispatch: Dispatch<Action>): void {
           const error = asGuiError(e);
           // A query the store's index cannot answer (`to:diyan` typed in
           // the header's field) is refused as a bad parameter; the same
-          // parser says whether that is why, and the server runs it.
+          // parser says whether that is why, and the server runs it. A
+          // query that does not parse (`from: borrmann`) ends the search
+          // with the parser's own lines, the TUI's words for it.
           if (!chain && error.kind === "protocol" && error.code === -32602) {
             const plan = await cmd.searchQuery({ ...EMPTY_SEARCH_FORM, keywords: query }).catch(() => null);
             if (plan?.kind === "query" && !plan.local) {
               return dispatch({ type: "search_local_rerouted", seq, mailbox: plan.in_mailbox });
+            }
+            if (plan?.kind === "invalid") {
+              return dispatch({ type: "search_local_failed", seq, error: { ...error, message: plan.message } });
             }
           }
           dispatch({ type: "search_local_failed", seq, error });

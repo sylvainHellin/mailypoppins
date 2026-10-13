@@ -959,6 +959,21 @@ impl Default for SearchScopeState {
 }
 
 impl SearchForm {
+    /// The fields as `mp_core`'s form lowering reads them, the one the
+    /// desktop's Server Search dialog and list header call too.
+    pub fn fields(&self) -> mp_core::search::SearchFields {
+        mp_core::search::SearchFields {
+            from: self.from.clone(),
+            to: self.to.clone(),
+            subject: self.subject.clone(),
+            keywords: self.keywords.clone(),
+            after: self.after.clone(),
+            before: self.before.clone(),
+            attachment: self.attachment,
+            advanced: self.advanced.clone(),
+        }
+    }
+
     /// True when the Advanced line is the active input (it takes precedence
     /// over every structured field once it holds anything non-blank).
     pub fn advanced_active(&self) -> bool {
@@ -969,14 +984,7 @@ impl SearchForm {
     /// nor any structured field nor the attachment toggle. An empty form is a
     /// no-op (Enter does not dispatch a search).
     pub fn is_blank(&self) -> bool {
-        !self.advanced_active()
-            && self.from.trim().is_empty()
-            && self.to.trim().is_empty()
-            && self.subject.trim().is_empty()
-            && self.keywords.trim().is_empty()
-            && self.after.trim().is_empty()
-            && self.before.trim().is_empty()
-            && !self.attachment
+        self.fields().is_blank()
     }
 
     /// A mutable handle to the text of the focused field, or `None` for the
@@ -994,42 +1002,13 @@ impl SearchForm {
         }
     }
 
-    /// Build the [`mp_core::search::Query`] this form describes.
-    ///
-    /// When the Advanced line is active it is parsed directly. Otherwise the
-    /// structured fields lower through [`mp_core::search::from_cli`]: `keywords`
-    /// is the positional grammar (so `a OR b` and quoted phrases work) and the
-    /// rest are flags. Returns the `ParseError` / validation message verbatim
-    /// for the overlay to surface. Returns `Ok(None)` for a blank form.
+    /// Build the [`mp_core::search::Query`] this form describes, through
+    /// [`mp_core::search::SearchFields::build_query`]: an active Advanced line
+    /// is parsed on its own, otherwise `keywords` is the positional grammar
+    /// and the rest are flags. Returns the `ParseError` / validation message
+    /// verbatim for the overlay to surface, and `Ok(None)` for a blank form.
     pub fn build_query(&self) -> Result<Option<mp_core::search::Query>, String> {
-        if self.advanced_active() {
-            return mp_core::search::parse(self.advanced.trim())
-                .map(Some)
-                .map_err(|e| e.to_string());
-        }
-        if self.is_blank() {
-            return Ok(None);
-        }
-        let opt = |s: &str| {
-            let t = s.trim();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t.to_string())
-            }
-        };
-        let flags = mp_core::search::Flags {
-            from: opt(&self.from),
-            to: opt(&self.to),
-            cc: None,
-            subject: opt(&self.subject),
-            body: None,
-            filename: None,
-            has_attachment: self.attachment,
-            after: opt(&self.after),
-            before: opt(&self.before),
-        };
-        mp_core::search::from_cli(self.keywords.trim(), &flags).map(Some)
+        self.fields().build_query()
     }
 }
 
