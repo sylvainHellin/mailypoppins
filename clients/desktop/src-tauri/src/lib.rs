@@ -15,7 +15,7 @@
 //! - [`calendar`]: the agenda and an entry's `invite.ics` in the editor.
 //! - [`daemon_files`]: `config.toml` and the daemon log in the editor.
 //! - [`configuration`]: the Settings view's `config.get`, reload and passwords.
-//! - [`reader`]: the `mpmsg` scheme serving `message.html`.
+//! - [`reader`]: the `mpmsg` scheme serving `message.html`, and `draft.html`.
 //! - [`navigation`]: the webview's navigation allowlist and intercept log.
 //! - [`fixture`]: the daemon stand-in behind `MP_DESKTOP_FIXTURE=1`.
 //! - [`menu`]: the native macOS menus, forwarded to the frontend's actions.
@@ -258,6 +258,7 @@ pub fn run() {
             attachments::attachment_save,
             attachments::html_open,
             attachments::hit_html_open,
+            attachments::draft_html_open,
             attachments::draft_attachments,
             attachments::draft_attach,
             attachments::draft_attachment_remove,

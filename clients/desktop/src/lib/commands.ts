@@ -422,6 +422,10 @@ export const htmlOpen = (account: string, row_id: number): Promise<OpenedFile | 
 /** A server-only hit's markup, written into the app cache and opened in the browser. */
 export const hitHtmlOpen = (html: string): Promise<OpenedFile> => invoke<OpenedFile>("hit_html_open", { html });
 
+/** A draft as its send would build it (`draft.html`), written into the app cache and opened in the browser. */
+export const draftHtmlOpen = (account: string, id: string): Promise<OpenedFile> =>
+  invoke<OpenedFile>("draft_html_open", { account, id });
+
 export const draftAttachments = (account: string, id: string): Promise<DraftAttachments> =>
   invoke<DraftAttachments>("draft_attachments", { account, id });
 

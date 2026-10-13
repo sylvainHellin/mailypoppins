@@ -146,6 +146,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "draft.attachments",
     "draft.attach",
     "draft.detach",
+    "draft.html",
 ];
 
 /// Why a connect failed, for the connection screen.
