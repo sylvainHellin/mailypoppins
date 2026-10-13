@@ -448,6 +448,32 @@ pub fn find_by_message_id(
     Ok(out)
 }
 
+/// The `In-Reply-To` and `References` header values one message carried, as
+/// ingest stored them, or `None` when the account holds no row for it
+/// (PERSO-137).
+///
+/// What a reply to that message needs to write its own `References`. Every
+/// copy of one `Message-ID` carries the same headers, so the first row with
+/// either value set answers for all of them.
+pub fn threading_headers_of(
+    store: &Store,
+    account: &str,
+    message_id: &str,
+) -> Result<Option<(Option<String>, Option<String>)>> {
+    store
+        .conn()
+        .query_row(
+            "SELECT in_reply_to, references_ FROM messages
+             WHERE account = ?1 AND message_id = ?2
+             ORDER BY (in_reply_to IS NULL AND references_ IS NULL), id
+             LIMIT 1",
+            (account, message_id),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .context("reading a message's threading headers")
+}
+
 /// The conversation read [`thread_messages`] runs, kept apart so the
 /// query-plan test asserts against the exact SQL.
 fn thread_messages_sql() -> String {

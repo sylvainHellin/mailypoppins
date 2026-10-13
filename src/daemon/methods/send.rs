@@ -1027,8 +1027,15 @@ async fn send_invite(
     };
 
     let smtp = smtp_config(account)?;
-    let built =
-        crate::send::build_draft_message(&draft, &smtp.default_from, email, signature, Some(&ics))?;
+    // An invite is a fresh message, never a reply: no parent to thread under.
+    let built = crate::send::build_draft_message(
+        &draft,
+        &smtp.default_from,
+        email,
+        signature,
+        Some(&ics),
+        None,
+    )?;
     if !commit_point("send.invite", token).await {
         return Ok(None);
     }
