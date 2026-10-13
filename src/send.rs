@@ -2240,20 +2240,9 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
             let bcc_refs: Vec<(&str, &str)> =
                 bcc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
 
-            // The quoted reply lives in the companion HTML the draft builder
-            // wrote; the Graph API takes a rendered body rather than bytes.
-            let quoted_html = draft.path.with_extension("html");
-            let quoted = if quoted_html.exists() {
-                fs::read_to_string(&quoted_html).ok()
-            } else {
-                None
-            };
-            let html_body = markdown_to_html(
-                &draft.body_markdown,
-                &ctx.email_settings,
-                ctx.signature.as_deref(),
-                quoted.as_deref(),
-            );
+            // The Graph API takes a rendered body rather than bytes: the same
+            // HTML part the SMTP bytes carry, quoted reply included.
+            let html_body = draft_html_body(draft, &ctx.email_settings, ctx.signature.as_deref());
             let att_data = draft_attachments(draft)?;
             let client = crate::graph::GraphClient::new_async(graph_config).await?;
             // Graph files its own copy in Sent Items, so the outbox row never
@@ -2749,6 +2738,38 @@ pub fn message_id_of(raw: &[u8]) -> String {
     }
 }
 
+/// The `text/html` part a draft is sent with: its Markdown body rendered by
+/// [`markdown_to_html`], with the quoted original taken from the companion
+/// `.html` the reply and forward builders write beside the draft.
+///
+/// The one place a draft's HTML is built, shared by the SMTP bytes
+/// ([`build_draft_message`]), the Graph body ([`send_draft`]) and the
+/// daemon's `draft.html` preview (PERSO-136), so what a user previews is what
+/// a recipient gets. `signature` is the send-time one: `None` for every draft
+/// send, whose signature was spliced into the body when the draft was written
+/// (#0099), and `Some` only on the invite path, which has no editable draft.
+///
+/// A companion that is missing or unreadable renders the Markdown quote
+/// instead, which is what the send has always done with one.
+pub fn draft_html_body(
+    draft: &EmailDraft,
+    email_config: &EmailSettings,
+    signature: Option<&str>,
+) -> String {
+    let companion = draft.path.with_extension("html");
+    let quoted_html = if companion.exists() {
+        fs::read_to_string(&companion).ok()
+    } else {
+        None
+    };
+    markdown_to_html(
+        &draft.body_markdown,
+        email_config,
+        signature,
+        quoted_html.as_deref(),
+    )
+}
+
 /// Build the message a draft describes, without touching the network.
 ///
 /// `default_from` is the account's address, used when the draft names no
@@ -2863,21 +2884,7 @@ pub fn build_draft_message(
         builder = builder.reply_to(reply_mailbox);
     }
 
-    // Load companion HTML for quoted section if available
-    let html_companion_path = draft.path.with_extension("html");
-    let quoted_html = if html_companion_path.exists() {
-        fs::read_to_string(&html_companion_path).ok()
-    } else {
-        None
-    };
-
-    // Generate HTML with signature (and original HTML for quoted section if available)
-    let body_html = markdown_to_html(
-        &draft.body_markdown,
-        email_config,
-        signature,
-        quoted_html.as_deref(),
-    );
+    let body_html = draft_html_body(draft, email_config, signature);
 
     // Build the plain/html alternative part (non-invite path).
     let body_multipart = MultiPart::alternative()

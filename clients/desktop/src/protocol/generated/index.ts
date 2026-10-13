@@ -16,6 +16,7 @@ export type { DraftChanged } from "./DraftChanged";
 export type { DraftCollision } from "./DraftCollision";
 export type { DraftCreated } from "./DraftCreated";
 export type { DraftEntry } from "./DraftEntry";
+export type { DraftHtml } from "./DraftHtml";
 export type { DraftInvalid } from "./DraftInvalid";
 export type { DraftKind } from "./DraftKind";
 export type { DraftListing } from "./DraftListing";

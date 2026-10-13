@@ -49,9 +49,9 @@ use futures::future::BoxFuture;
 use serde_json::{json, Value};
 
 use mp_protocol::draft::{
-    DraftAttachment, DraftAttachments, DraftCollision, DraftCreated, DraftEntry, DraftKind,
-    DraftListing, DraftLocation, DraftMessage, DraftPreview, DraftReport, DraftSkip, DraftSource,
-    DraftValidation,
+    DraftAttachment, DraftAttachments, DraftCollision, DraftCreated, DraftEntry, DraftHtml,
+    DraftKind, DraftListing, DraftLocation, DraftMessage, DraftPreview, DraftReport, DraftSkip,
+    DraftSource, DraftValidation,
 };
 use mp_protocol::events::{DraftInvalid, KIND_DRAFT_INVALID};
 use mp_protocol::{ErrorCode, RpcError};
@@ -119,6 +119,14 @@ pub const DRAFT_ATTACHMENT_METHOD_SPECS: [MethodSpec; 3] = [
     MethodSpec::new("draft.detach", MethodKind::Command, 1),
 ];
 
+/// The HTML part a draft would be sent with, as a browser rendition
+/// (PERSO-136): what the TUI's `tb` previews on a Drafts row.
+///
+/// A query, since it reads the draft and writes nothing, and in an array of
+/// its own for the reason [`DRAFT_FROM_MESSAGE_METHOD_SPECS`] is one.
+pub const DRAFT_HTML_METHOD_SPECS: [MethodSpec; 1] =
+    [MethodSpec::new("draft.html", MethodKind::Query, 1)];
+
 /// One of the ten, selected by its own [`MethodSpec`].
 ///
 /// One type for the family because they share every dependency and differ only
@@ -146,6 +154,7 @@ pub fn register(
         .into_iter()
         .chain(DRAFT_FROM_MESSAGE_METHOD_SPECS)
         .chain(DRAFT_ATTACHMENT_METHOD_SPECS)
+        .chain(DRAFT_HTML_METHOD_SPECS)
     {
         dispatcher.register(Arc::new(DraftMethod {
             spec,
@@ -181,6 +190,7 @@ impl Method for DraftMethod {
                 "draft.demote" => self.set_status(&params, accounts, false),
                 "draft.discard" => discard(&params, accounts),
                 "draft.forward" => from_source(&params, accounts, email, false),
+                "draft.html" => html(&params, accounts, email),
                 "draft.list" => list(&params, accounts),
                 "draft.path" => path(&params, accounts),
                 "draft.preview" => preview(&params, accounts, email),
@@ -463,6 +473,60 @@ fn preview(
             // Always absent for the CLI dry run: the body already carries the
             // signature (#0099).
             signature: None,
+        },
+    )
+}
+
+/// The `result` of `draft.html` `{account, id|selector}`: the `text/html`
+/// part `send.draft` would send for this draft, hardened for a browser
+/// (PERSO-136).
+///
+/// The body is [`crate::send::draft_html_body`], the function the SMTP bytes
+/// and the Graph body are both built by, over the same `[email]` settings the
+/// send reads and with the same send-time signature, which is none: the
+/// draft's body already carries its signature (#0099), which is why
+/// `send.draft`'s context passes `None` too. The quoted original of a reply
+/// or a forward is the companion `.html` beside the draft, as on the send.
+///
+/// The hardening is `message.html`'s: a UTF-8 charset and the CSP meta tag,
+/// since the quote is a sender's markup and a browser opens the file with no
+/// headers. The status is not checked, so an unapproved draft previews too;
+/// a file that will not parse is the family's `-32010`, and one over the
+/// 8 MiB inline limit is `-32004 frame_too_large` with `{limit, seen}`.
+fn html(
+    params: &Value,
+    accounts: &[AccountConfig],
+    email: &EmailSettings,
+) -> Result<Value, RpcError> {
+    use mp_protocol::rendition::MAX_INLINE_HTML_BYTES;
+
+    let account = configured(accounts, &string_param(params, "account")?)?;
+    let row = resolve(&account.name, &addressed_one(params, &account.name)?)?;
+    let draft = crate::draft::parse_email_draft(&row.path)
+        .map_err(|_| refuse_unparseable(&account.name, &row.id, &row.path))?;
+    let body = crate::send::draft_html_body(&draft, email, None);
+    let rendition = crate::parse::inject_csp_meta(&crate::parse::ensure_utf8_charset(&body));
+
+    let bytes = rendition.len();
+    if bytes > MAX_INLINE_HTML_BYTES {
+        return Err(RpcError {
+            code: ErrorCode::FrameTooLarge.code(),
+            message: format!(
+                "the HTML rendition of draft {} is {bytes} bytes, over the \
+                 {MAX_INLINE_HTML_BYTES}-byte inline limit",
+                row.id
+            ),
+            data: Some(json!({"limit": MAX_INLINE_HTML_BYTES, "seen": bytes})),
+        });
+    }
+    to_value(
+        "draft.html",
+        &DraftHtml {
+            account: account.name.clone(),
+            id: row.id.clone(),
+            selector: Selector::for_draft(&account.name, &row.id).to_string(),
+            html: rendition,
+            bytes: bytes as u64,
         },
     )
 }

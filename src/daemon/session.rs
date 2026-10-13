@@ -520,6 +520,7 @@ mod tests {
                 "draft.detach".to_string(),
                 "draft.discard".to_string(),
                 "draft.forward".to_string(),
+                "draft.html".to_string(),
                 "draft.list".to_string(),
                 "draft.path".to_string(),
                 "draft.preview".to_string(),
