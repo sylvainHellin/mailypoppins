@@ -2588,7 +2588,7 @@ Dragging needs the `core:window:allow-start-dragging` permission, which `core:de
 
 ## A client learns what `message.search` refuses from `to_fts`, not from the error text
 
-`message.search` refuses `to:`, `cc:`, `filename:` and `message-id:` as -32602 because the local index has no column for them.
+`message.search` refuses `to:`, `cc:` and `message-id:`, an OR group with a date or attachment term, and an OR group mixing `filename:` with another term as -32602 because the local index cannot answer them; `filename:` alone is answered from `message_blobs.filename` (PERSO-130).
 A client finds that out with `mp_core::search::to_fts` before the call and sends the query to the server instead.
 The daemon's server search ignores the query's own `in:`, so the client turns `in:` into the `mailboxes` param, as the TUI does.
 Base UI dialogs move focus to their first field a moment after opening, so a test waits for focus before typing.
