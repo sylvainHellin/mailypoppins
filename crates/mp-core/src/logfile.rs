@@ -16,6 +16,14 @@
 //! A file rolled for size is `mailypoppins-YYYY-MM-DDTHHMMSSmmm.log`: `T` sorts
 //! after `.`, so the lexicographic order [`crate::config::latest_log_file`]
 //! relies on is still the chronological one.
+//!
+//! `simplelog` writes one record in a dozen calls (the timestamp alone is one
+//! per component), and several processes append to the same file. Written
+//! through as they came, those calls were as many `write(2)`s, so another
+//! process's record could land inside this one, and a reader could see half
+//! of it. [`RotatingLog`] therefore holds a record until it is flushed and
+//! hands it to the file in one `O_APPEND` write, and [`CrateLevels`] flushes
+//! after every record.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -87,9 +95,12 @@ impl<L: Log> Log for CrateLevels<L> {
         metadata.level() <= level_for(metadata.target()) && self.inner.enabled(metadata)
     }
 
+    /// Log the record, then flush it: the flush is what ends the record for
+    /// [`RotatingLog`], which writes it out in one call.
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
             self.inner.log(record);
+            self.inner.flush();
         }
     }
 
@@ -108,13 +119,11 @@ pub struct RotatingLog {
     day: NaiveDate,
     /// The file's size as last seen, plus what this process wrote since.
     size: u64,
-    /// Records started since `size` was last read off the file, which other
+    /// Records written since `size` was last read off the file, which other
     /// processes append to as well.
     records_since_stat: u32,
-    /// Whether the last byte written ended a line. `simplelog` writes one
-    /// record in several calls, and a roll between two of them would split
-    /// the record across two files.
-    at_line_start: bool,
+    /// The record being written, which reaches the file whole on `flush`.
+    pending: Vec<u8>,
 }
 
 /// How many records go by between two reads of the file's real size.
@@ -144,7 +153,7 @@ impl RotatingLog {
             day: now.date_naive(),
             size,
             records_since_stat: 0,
-            at_line_start: true,
+            pending: Vec::new(),
         })
     }
 
@@ -179,26 +188,42 @@ impl RotatingLog {
 }
 
 impl RotatingLog {
-    fn write_at(&mut self, buf: &[u8], now: DateTime<Utc>) -> io::Result<usize> {
-        if self.at_line_start && !buf.is_empty() {
-            self.roll_if_due(now);
+    /// Hand the pending record to the file as of `now`, in one write.
+    ///
+    /// The roll comes first, so a record never straddles two files. A failed
+    /// write drops the record rather than prefix the next one with it.
+    fn flush_at(&mut self, now: DateTime<Utc>) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
         }
-        let n = self.file.write(buf)?;
-        self.size += n as u64;
-        if n > 0 {
-            self.at_line_start = buf[n - 1] == b'\n';
-        }
-        Ok(n)
+        self.roll_if_due(now);
+        let record = std::mem::take(&mut self.pending);
+        let written = self.file.write_all(&record);
+        self.size += record.len() as u64;
+        // Keep the allocation for the next record.
+        self.pending = record;
+        self.pending.clear();
+        written?;
+        self.file.flush()
     }
 }
 
 impl Write for RotatingLog {
+    /// Add to the pending record; nothing reaches the file before `flush`.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.write_at(buf, Utc::now())
+        self.pending.extend_from_slice(buf);
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.file.flush()
+        self.flush_at(Utc::now())
+    }
+}
+
+impl Drop for RotatingLog {
+    /// A record left unflushed is still written.
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 
@@ -291,14 +316,11 @@ mod tests {
         Utc.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
     }
 
-    /// Write all of `buf` as of `now`, the way `Write::write_all` would at
-    /// that moment instead of at the real clock.
+    /// Write `buf` as one record as of `now`, the way `CrateLevels` logs and
+    /// flushes one, at that moment instead of at the real clock.
     fn put(log: &mut RotatingLog, buf: &[u8], now: DateTime<Utc>) {
-        let mut rest = buf;
-        while !rest.is_empty() {
-            let n = log.write_at(rest, now).unwrap();
-            rest = &rest[n..];
-        }
+        log.write_all(buf).unwrap();
+        log.flush_at(now).unwrap();
     }
 
     fn names(dir: &Path) -> Vec<String> {
@@ -363,8 +385,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut log =
             RotatingLog::with_caps(tmp.path(), 1000, 10_000, at(2026, 9, 28, 23)).unwrap();
-        log.write_at(b"late\n", at(2026, 9, 28, 23)).unwrap();
-        log.write_at(b"early\n", at(2026, 9, 29, 0)).unwrap();
+        put(&mut log, b"late\n", at(2026, 9, 28, 23));
+        put(&mut log, b"early\n", at(2026, 9, 29, 0));
         assert_eq!(
             names(tmp.path()),
             ["mailypoppins-2026-09-28.log", "mailypoppins-2026-09-29.log"]
@@ -376,11 +398,58 @@ mod tests {
     fn a_record_split_across_writes_is_not_split_across_files() {
         let tmp = tempfile::tempdir().unwrap();
         let mut log = RotatingLog::with_caps(tmp.path(), 4, 10_000, at(2026, 9, 28, 10)).unwrap();
-        put(&mut log, b"2026 ", at(2026, 9, 28, 10));
-        put(&mut log, b"[INFO] ", at(2026, 9, 28, 10));
-        put(&mut log, b"message\n", at(2026, 9, 28, 10));
+        log.write_all(b"2026 ").unwrap();
+        log.write_all(b"[INFO] ").unwrap();
+        log.write_all(b"message\n").unwrap();
+        log.flush_at(at(2026, 9, 28, 10)).unwrap();
         let text = fs::read_to_string(tmp.path().join("mailypoppins-2026-09-28.log")).unwrap();
         assert_eq!(text, "2026 [INFO] message\n");
+    }
+
+    /// Another process appends to the same file, so a record written in
+    /// pieces must reach it in one write: nothing of it before the flush.
+    #[test]
+    fn a_record_reaches_the_file_only_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut log =
+            RotatingLog::with_caps(tmp.path(), 1000, 10_000, at(2026, 9, 28, 10)).unwrap();
+        let path = log.path().to_path_buf();
+        log.write_all(b"2026-09-28 10:00:").unwrap();
+        log.write_all(b"00.000 [INFO] ").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "", "half a record");
+        let mut other = OpenOptions::new().append(true).open(&path).unwrap();
+        other.write_all(b"another process\n").unwrap();
+        log.write_all(b"message\n").unwrap();
+        log.flush_at(at(2026, 9, 28, 10)).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "another process\n2026-09-28 10:00:00.000 [INFO] message\n"
+        );
+    }
+
+    /// `CrateLevels` ends every record with a flush, which is what writes it.
+    #[test]
+    fn crate_levels_writes_each_record_as_it_is_logged() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The real clock: a logged record is flushed as of now.
+        let log = RotatingLog::with_caps(tmp.path(), 1000, 10_000, Utc::now()).unwrap();
+        let logger = CrateLevels::new(*simplelog::WriteLogger::new(
+            LevelFilter::Debug,
+            simplelog::Config::default(),
+            log,
+        ));
+        logger.log(
+            &Record::builder()
+                .args(format_args!("one record"))
+                .level(log::Level::Info)
+                .target("mailypoppins::daemon")
+                .build(),
+        );
+        let text: String = names(tmp.path())
+            .iter()
+            .map(|name| fs::read_to_string(tmp.path().join(name)).unwrap())
+            .collect();
+        assert!(text.ends_with("one record\n"), "{text:?}");
     }
 
     #[test]
