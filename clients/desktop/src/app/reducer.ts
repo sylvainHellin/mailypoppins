@@ -13,6 +13,7 @@ import type {
   StateInvalidatePayload,
   StateRemovePayload,
   SyncCompletedPayload,
+  ThreadListing,
 } from "@/protocol/types";
 import type {
   AccountInfo,
@@ -77,13 +78,20 @@ import {
 } from "@/app/pending";
 import {
   accountNames,
+  conversationEntries,
   draftItems,
   draftsShown,
   emptyLoadable,
   emptyReader,
+  expandable,
   filteredDrafts,
   filteredRows,
   isRunning,
+  listsConversations,
+  memberKey,
+  threadKey,
+  type ConversationCursor,
+  type Expansion,
   isStale,
   LIST_WIDTH_MAX,
   LIST_WIDTH_MIN,
@@ -249,6 +257,17 @@ export type Action =
    */
   | { type: "messages_loaded"; key: string; gen: number; lgen?: number; list: MessageList }
   | { type: "messages_failed"; key: string; gen: number; error: GuiError }
+  /** List `account`'s mailboxes one row per conversation, or flat again (ticket 0142). */
+  | { type: "conversation_mode"; account: string; on: boolean }
+  /** Show the members under the conversation row of `thread_id`; the cursor stays where it is. */
+  | { type: "conversation_expand"; thread_id: string }
+  /** Hide them; a cursor on one of them goes to the header. */
+  | { type: "conversation_collapse"; thread_id: string }
+  /** `message_thread` answered for the expansion of `thread_id` in the list `key`. */
+  | { type: "thread_loaded"; key: string; thread_id: string; gen: number; thread: ThreadListing }
+  | { type: "thread_failed"; key: string; thread_id: string; gen: number; error: GuiError }
+  /** A click on a conversation header (`member` null) or on one of its members (`memberKey`). */
+  | { type: "select_conversation"; thread_id: string; member: string | null; focus?: Pane }
   | { type: "reader_loaded"; key: string; gen: number; meta: MessageMeta }
   | { type: "reader_failed"; key: string; gen: number; error: GuiError }
   | { type: "select_account"; account: string }
@@ -492,7 +511,15 @@ function retarget(s: AppState, sel: Selection, pickTop = false): AppState {
   const cursor =
     sel.account && sel.mailbox ? { account: sel.account, slug: sel.mailbox } : s.sidebarCursor;
   const same = key === s.messages.key;
-  return { ...s, selection: sel, messages, sidebarCursor: cursor, filter: same ? s.filter : "", marked: same ? s.marked : NO_MARKS };
+  return {
+    ...s,
+    selection: sel,
+    messages,
+    sidebarCursor: cursor,
+    filter: same ? s.filter : "",
+    marked: same ? s.marked : NO_MARKS,
+    expanded: same ? s.expanded : {},
+  };
 }
 
 /**
@@ -546,7 +573,11 @@ function selectMailbox(s: AppState, account: string, slug: string): AppState {
 type ListItem =
   | { kind: "message"; ref: Omit<MessageRef, "verified"> }
   | { kind: "draft"; id: string }
-  | { kind: "hit"; key: string };
+  | { kind: "hit"; key: string }
+  /** A conversation header (ticket 0142): `ref` is its `latest`, what the reader shows. */
+  | { kind: "conversation"; thread_id: string; ref: Omit<MessageRef, "verified">; member_ids: number[] }
+  /** An expanded member: a message (`ref`) in any mailbox, or a draft. */
+  | { kind: "member"; thread_id: string; key: string; ref: Omit<MessageRef, "verified"> | null; draft: string | null };
 
 /**
  * The rows the list pane shows, after the local filter, or the search's
@@ -564,6 +595,27 @@ export function visibleItems(s: AppState): ListItem[] {
   if (list?.kind === "drafts") {
     return filteredDrafts(list, s.filter).map((d) => ({ kind: "draft", id: d.id }));
   }
+  if (list?.kind === "conversations") {
+    return conversationEntries(list, s.expanded, s.filter).map((e): ListItem => {
+      if (e.kind === "header") {
+        const l = e.row.latest;
+        return {
+          kind: "conversation",
+          thread_id: e.row.thread_id,
+          ref: { row_id: l.id, message_id: l.message_id, selector: l.selector },
+          member_ids: e.row.member_ids,
+        };
+      }
+      const m = e.member;
+      return {
+        kind: "member",
+        thread_id: e.thread_id,
+        key: memberKey(m),
+        ref: m.draft_id ? null : { row_id: m.id, message_id: m.message_id, selector: "" },
+        draft: m.draft_id ?? null,
+      };
+    });
+  }
   return filteredRows(list, s.filter).map((r) => ({
     kind: "message",
     ref: { row_id: r.id, message_id: r.message_id, selector: r.selector },
@@ -572,14 +624,26 @@ export function visibleItems(s: AppState): ListItem[] {
 
 function currentIndex(s: AppState, items: ListItem[]): number {
   const sel = s.selection;
+  const c = sel.conversation ?? null;
   return items.findIndex((it) =>
     it.kind === "draft"
       ? sel.draft === it.id
       : it.kind === "hit"
         ? sel.hit === it.key
-        : sel.message !== null && sel.message.message_id === it.ref.message_id &&
-          sel.message.selector === it.ref.selector,
+        : it.kind === "conversation"
+          ? c !== null && c.member === null && c.thread_id === it.thread_id
+          : it.kind === "member"
+            ? c !== null && c.thread_id === it.thread_id && c.member === it.key
+            : sel.message !== null && sel.message.message_id === it.ref.message_id &&
+              sel.message.selector === it.ref.selector,
   );
+}
+
+/** The `itemKey` of the row under the cursor, what `v` marks; null with no cursor row. */
+export function cursorKey(s: AppState): string | null {
+  const items = visibleItems(s);
+  const cur = currentIndex(s, items);
+  return cur >= 0 ? itemKey(shownAccount(s), items[cur]) : null;
 }
 
 /** The account the shown list or search belongs to. */
@@ -587,26 +651,41 @@ function shownAccount(s: AppState): string {
   return s.search?.account ?? s.selection.account ?? "";
 }
 
-/** A list item's `targetKey`. */
+/**
+ * A list item's `targetKey`; a conversation header's is its thread's
+ * (`threadKey`), since it stands for several rows.
+ */
 function itemKey(account: string, it: ListItem): string {
   if (it.kind === "hit") return `${account}#hit:${it.key}`;
+  if (it.kind === "conversation") return threadKey(account, it.thread_id);
+  if (it.kind === "member") return it.draft !== null ? targetKey({ account, draft: it.draft }) : targetKey({ account, row_id: it.ref!.row_id });
   return it.kind === "draft" ? targetKey({ account, draft: it.id }) : targetKey({ account, row_id: it.ref.row_id });
 }
 
-/** What a mutation names an item by; a server-only hit has nothing to name. */
-function itemTarget(account: string, it: ListItem): Target | null {
-  if (it.kind === "hit") return null;
-  return it.kind === "draft" ? { account, draft: it.id } : { account, row_id: it.ref.row_id };
+/**
+ * What a mutation names an item by; a server-only hit has nothing to name.
+ * A conversation header names its members in the listed mailbox, the
+ * `member_ids`, and nothing in another mailbox (ticket 0142).
+ */
+function itemTargets(account: string, it: ListItem): Target[] {
+  if (it.kind === "hit") return [];
+  if (it.kind === "conversation") return it.member_ids.map((row_id) => ({ account, row_id }));
+  if (it.kind === "member") return it.draft !== null ? [{ account, draft: it.draft }] : [{ account, row_id: it.ref!.row_id }];
+  return it.kind === "draft" ? [{ account, draft: it.id }] : [{ account, row_id: it.ref.row_id }];
 }
 
 /**
  * What a mutation acts on: the marked rows in list order, or else the
- * selected one. A mark the list no longer shows is not acted on.
+ * selected one. A mark the list no longer shows is not acted on. Marked
+ * conversation rows are the union of their members, each row once.
  */
 export function actionTargets(s: AppState): Target[] {
   const account = shownAccount(s);
   const items = visibleItems(s);
-  const targets = (its: ListItem[]) => its.flatMap((it) => itemTarget(account, it) ?? []);
+  const targets = (its: ListItem[]) => {
+    const seen = new Set<string>();
+    return its.flatMap((it) => itemTargets(account, it)).filter((t) => !seen.has(targetKey(t)) && !!seen.add(targetKey(t)));
+  };
   if (s.marked.keys.size > 0) return targets(items.filter((it) => s.marked.keys.has(itemKey(account, it))));
   const cur = currentIndex(s, items);
   return cur >= 0 ? targets([items[cur]]) : [];
@@ -636,7 +715,9 @@ function pruneMarks(s: AppState, list: MessageList): AppState {
   const present = new Set(
     list.kind === "drafts"
       ? draftItems(list).map((d) => targetKey({ account: list.account, draft: d.id }))
-      : list.rows.map((r) => targetKey({ account: list.account, row_id: r.id })),
+      : list.kind === "conversations"
+        ? visibleItems({ ...s, filter: "" }).map((it) => itemKey(list.account, it))
+        : list.rows.map((r) => targetKey({ account: list.account, row_id: r.id })),
   );
   const keys = new Set([...s.marked.keys].filter((k) => present.has(k)));
   if (keys.size === s.marked.keys.size) return s;
@@ -655,6 +736,16 @@ function marks(s: AppState, a: Extract<Action, { type: `mark_${string}` }>): App
       for (const k of a.keys) {
         if (a.on) keys.add(k);
         else keys.delete(k);
+      }
+      // A conversation row is unmarked with its members: the batch that
+      // unmarks them by row is the one that acted on the row (ticket 0142).
+      if (!a.on) {
+        const off = new Set(a.keys);
+        for (const it of visibleItems(s)) {
+          if (it.kind === "conversation" && it.member_ids.length > 0 && it.member_ids.every((id) => off.has(targetKey({ account, row_id: id })))) {
+            keys.delete(itemKey(account, it));
+          }
+        }
       }
       return { ...s, marked: { keys, anchor: a.on && a.keys.length > 0 ? a.keys[a.keys.length - 1] : s.marked.anchor } };
     case "mark_range": {
@@ -684,12 +775,123 @@ function marks(s: AppState, a: Extract<Action, { type: `mark_${string}` }>): App
 
 function selectItem(s: AppState, it: ListItem): AppState {
   if (it.kind === "draft") {
-    return { ...s, selection: { ...s.selection, message: null, hit: null, draft: it.id } };
+    return { ...s, selection: { ...s.selection, message: null, hit: null, draft: it.id, conversation: null } };
   }
   if (it.kind === "hit") {
-    return { ...s, selection: { ...s.selection, message: null, draft: null, hit: it.key }, reader: emptyReader() };
+    return { ...s, selection: { ...s.selection, message: null, draft: null, hit: it.key, conversation: null }, reader: emptyReader() };
   }
-  return { ...s, selection: { ...s.selection, draft: null, hit: null, message: { ...it.ref, verified: true } } };
+  if (it.kind === "conversation") {
+    const conversation: ConversationCursor = { thread_id: it.thread_id, member: null };
+    return { ...s, selection: { ...s.selection, draft: null, hit: null, message: { ...it.ref, verified: true }, conversation } };
+  }
+  if (it.kind === "member") {
+    const conversation: ConversationCursor = { thread_id: it.thread_id, member: it.key };
+    const message = it.ref ? { ...it.ref, verified: true } : null;
+    return { ...s, selection: { ...s.selection, hit: null, draft: it.draft, message, conversation } };
+  }
+  return { ...s, selection: { ...s.selection, draft: null, hit: null, message: { ...it.ref, verified: true }, conversation: null } };
+}
+
+/** The item a conversation cursor names in the shown list, if it shows it. */
+function conversationItem(s: AppState, c: ConversationCursor): ListItem | null {
+  return (
+    visibleItems(s).find((it) =>
+      it.kind === "conversation" ? c.member === null && it.thread_id === c.thread_id : it.kind === "member" && it.thread_id === c.thread_id && it.key === c.member,
+    ) ?? null
+  );
+}
+
+/** Expand the conversation row of `threadId`, read through its `latest`. */
+function expand(s: AppState, threadId: string): AppState {
+  const list = s.messages.data;
+  if (list?.kind !== "conversations" || s.expanded[threadId]) return s;
+  const row = list.rows.find((r) => r.thread_id === threadId);
+  if (!row || !expandable(row)) return s;
+  const e: Expansion = { ...emptyLoadable<ThreadListing>(), row_id: row.latest.id };
+  return { ...s, expanded: { ...s.expanded, [threadId]: e } };
+}
+
+/** Collapse it; a cursor on one of its members goes to its header. */
+function collapse(s: AppState, threadId: string): AppState {
+  if (!s.expanded[threadId]) return s;
+  const expanded = { ...s.expanded };
+  delete expanded[threadId];
+  let next: AppState = { ...s, expanded };
+  const c = s.selection.conversation;
+  if (c && c.thread_id === threadId && c.member !== null) {
+    const header = conversationItem(next, { thread_id: threadId, member: null });
+    if (header) next = { ...selectItem(next, header), focusSeq: next.focusSeq + 1 };
+  }
+  return next;
+}
+
+/**
+ * After a conversation list loaded: the expansions of the rows still listed
+ * are read again from their (maybe new) `latest`, the others go, and the
+ * cursor follows its header by `thread_id`, or a member by its key once the
+ * expansion answers. Without a conversation cursor (a list just switched to
+ * conversations, a re-bootstrap) the header whose `latest` is the selected
+ * message takes the cursor.
+ */
+function reverifyConversations(s: AppState, list: Extract<MessageList, { kind: "conversations" }>): AppState {
+  const byThread = new Map(list.rows.map((r) => [r.thread_id, r]));
+  const expanded: Record<string, Expansion> = {};
+  for (const [tid, e] of Object.entries(s.expanded)) {
+    const row = byThread.get(tid);
+    if (row) expanded[tid] = { ...markStale(e), row_id: row.latest.id };
+  }
+  let next: AppState = { ...s, expanded };
+  const sel = listSelection(next);
+  const c = sel.conversation ?? null;
+  const lost = (n: AppState) => {
+    const cleared = setListSelection(n, { ...sel, message: null, draft: null, conversation: null });
+    return n.search ? cleared : { ...cleared, reader: emptyReader() };
+  };
+  if (c) {
+    const row = byThread.get(c.thread_id);
+    if (!row) return lost(next);
+    if (c.member !== null && expanded[c.thread_id]) return next;
+    const l = row.latest;
+    const message = { row_id: l.id, message_id: l.message_id, selector: l.selector, verified: true };
+    return setListSelection(next, { ...sel, draft: null, message, conversation: { thread_id: c.thread_id, member: null } });
+  }
+  if (!sel.message || sel.message.verified) return next;
+  const want = sel.message;
+  const row = list.rows.find((r) => r.latest.message_id === want.message_id) ?? list.rows.find((r) => r.member_ids.includes(want.row_id));
+  if (!row) return lost(next);
+  const l = row.latest;
+  next = setListSelection(next, {
+    ...sel,
+    message: { row_id: l.id, message_id: l.message_id, selector: l.selector, verified: true },
+    conversation: { thread_id: row.thread_id, member: null },
+  });
+  return next;
+}
+
+/**
+ * An expansion answered: its members show, and a cursor on one of them is
+ * confirmed by its key, else by its `Message-ID` (a row id another daemon
+ * instance gave it), else it goes to the header.
+ */
+function threadLoaded(s: AppState, a: Extract<Action, { type: "thread_loaded" | "thread_failed" }>): AppState {
+  const e = s.expanded[a.thread_id];
+  if (a.key !== s.messages.key || !e || a.gen < e.loadedGen) return s;
+  const settled: Expansion =
+    a.type === "thread_loaded" ? { ...e, data: a.thread, loadedGen: a.gen, error: null } : { ...e, loadedGen: a.gen, error: a.error };
+  let next: AppState = { ...s, expanded: { ...s.expanded, [a.thread_id]: settled } };
+  const sel = listSelection(next);
+  const c = sel.conversation;
+  if (!c || c.thread_id !== a.thread_id || c.member === null || a.gen !== e.gen) return next;
+  const members = settled.data?.messages ?? [];
+  const byKey = members.find((m) => memberKey(m) === c.member);
+  const byId = byKey ?? (sel.message ? members.find((m) => !m.draft_id && m.message_id === sel.message!.message_id) : undefined);
+  if (byId) {
+    const message = byId.draft_id ? null : { row_id: byId.id, message_id: byId.message_id, selector: "", verified: true };
+    return setListSelection(next, { ...sel, message, draft: byId.draft_id ?? null, conversation: { thread_id: c.thread_id, member: memberKey(byId) } });
+  }
+  const header = conversationItem({ ...next, filter: "" }, { thread_id: c.thread_id, member: null });
+  if (header && !next.search) next = selectItem(next, header);
+  return next;
 }
 
 /** Flattened sidebar entries, for the cursor. */
@@ -719,6 +921,19 @@ function staleListIf(s: AppState, match: (account: string, mailbox: string) => b
   // an open search hit is the search's, not the list's, and stays open.
   const message = sel.message ? { ...sel.message, verified: false } : null;
   return setListSelection({ ...s, messages: { ...markStale(s.messages), key: s.messages.key } }, { ...sel, message });
+}
+
+/**
+ * In conversation mode a change anywhere in the account can change a listed
+ * conversation (ticket 0142): a reply filed in Sent, a draft that answers one, a
+ * message archived from it. So the shown conversation list of `account` is
+ * read again on any of them; the loader keeps one read in flight and one
+ * owed, so a sync burst costs two reads.
+ */
+function staleConversations(s: AppState, account: string): AppState {
+  const sel = listSelection(s);
+  if (sel.account !== account || !listsConversations(s, sel.account, sel.mailbox)) return s;
+  return staleListIf(s, (a) => a === account);
 }
 
 function patchAccount(s: AppState, name: string, patch: Partial<AccountInfo>): AppState {
@@ -876,6 +1091,8 @@ const LEAVES_EDITOR: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "select_account",
   "select_mailbox",
   "select_message",
+  "select_conversation",
+  "conversation_collapse",
   "select_draft",
   "select_hit",
   "move_selection",
@@ -964,8 +1181,10 @@ function bootstrapModel(s: AppState, bootstrap: Bootstrap): AppState {
   const same = keepMailbox && account === prev.account;
   const message = same && prev.message ? { ...prev.message, verified: false } : null;
   const draft = same ? prev.draft : null;
+  // A conversation cursor is a `thread_id`, which outlives the instance.
+  const conversation = same ? (prev.conversation ?? null) : null;
 
-  next = retarget(next, { account, mailbox, message, draft, hit: null });
+  next = retarget(next, { account, mailbox, message, draft, hit: null, conversation });
   if (same) next = { ...next, messages: { ...markStale(next.messages), key: next.messages.key } };
   // The reader refetches once the list re-verifies the row.
   next = { ...next, reader: { ...next.reader, load: markStale(next.reader.load) } };
@@ -1039,6 +1258,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const account = parts[0] ?? "";
       // No resource names the agenda: it is a fold over the account's mail.
       if (family === "mailbox" || family === "message") s = staleInvitations(s, account);
+      if (family === "mailbox" || family === "message" || family === "draft") s = staleConversations(s, account);
       if (family === "mailbox") {
         const slug = parts[1] ?? "";
         return staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === slug);
@@ -1058,6 +1278,7 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const { family, parts } = parseResource(resource);
       const account = parts[0] ?? "";
       if (family === "mailbox" || family === "message") s = staleInvitations(s, account);
+      if (family === "message" || family === "draft") s = staleConversations(s, account);
       if (family === "account") return removeAccount(s, account);
       if (family === "mailbox") {
         const slug = parts[1] ?? "";
@@ -1105,7 +1326,8 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
     case "draft.changed":
     case "draft.invalid": {
       const account = (payload as { account: string }).account;
-      return staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === "drafts");
+      const next = staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === "drafts");
+      return staleConversations(next, account);
     }
     // A signature file was written or created, here or in another client;
     // the files are global, so every account's listing is stale.
@@ -1263,6 +1485,7 @@ function failed<T>(l: Loadable<T>, gen: number, error: GuiError): Loadable<T> {
 /** After a listing reload, confirm the list's selected message by message_id or drop it. */
 function reverify(s: AppState, list: MessageList): AppState {
   const sel = listSelection(s);
+  if (list.kind === "conversations") return reverifyConversations(s, list);
   if (list.kind === "drafts") {
     if (sel.draft && !draftItems(list).some((d) => d.id === sel.draft)) {
       return setListSelection(s, { ...sel, draft: null });
@@ -1290,6 +1513,7 @@ const USER_SELECTION: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "select_account",
   "select_mailbox",
   "select_message",
+  "select_conversation",
   "select_draft",
   "move_selection",
   "sidebar_enter",
@@ -1402,7 +1626,18 @@ function reduce(s: AppState, a: Action): AppState {
     }
     case "messages_loaded": {
       if (a.key !== s.messages.key) return s;
-      if (listAnswerIsStale(s, a.key, a.lgen, a.gen)) return dropListAnswer(s, a.gen);
+      const sel = listSelection(s);
+      const grouped = listsConversations(s, sel.account, sel.mailbox);
+      // The conversation loader keeps one read in flight and starts the owed
+      // one when the list changes after an answer: a dropped answer still
+      // hands it a new `messages`, so a list stale meanwhile is read again.
+      const drop = () => {
+        const next = dropListAnswer(s, a.gen);
+        return grouped ? { ...next, messages: { ...next.messages } } : next;
+      };
+      if (listAnswerIsStale(s, a.key, a.lgen, a.gen)) return drop();
+      // An answer of the mode the list was in before a switch is not this list's.
+      if (a.list.kind !== "drafts" && (a.list.kind === "conversations") !== grouped) return drop();
       const list = overlayPending(s, a.list);
       const next = { ...s, messages: { ...loaded(s.messages, a.gen, list), key: s.messages.key } };
       return pickTopRow(pruneMarks(reverify(next, list), list));
@@ -1410,6 +1645,34 @@ function reduce(s: AppState, a: Action): AppState {
     case "messages_failed":
       if (a.key !== s.messages.key) return s;
       return { ...s, messages: { ...failed(s.messages, a.gen, a.error), key: s.messages.key } };
+    case "conversation_mode": {
+      if ((s.conversationMode[a.account] === true) === a.on) return s;
+      const next: AppState = { ...s, conversationMode: { ...s.conversationMode, [a.account]: a.on } };
+      const sel = listSelection(next);
+      if (sel.account !== a.account || sel.mailbox === "drafts") return next;
+      // The shown list is read again in the other shape; the selected
+      // message is found again in it by its `Message-ID`.
+      const message = sel.message ? { ...sel.message, verified: false } : null;
+      const draft = sel.conversation?.member?.startsWith("draft:") ? null : sel.draft;
+      const listed = setListSelection(
+        { ...next, messages: { ...markStale(next.messages), data: null, key: next.messages.key }, expanded: {}, marked: NO_MARKS },
+        { ...sel, message, draft, conversation: null },
+      );
+      return listed;
+    }
+    case "conversation_expand":
+      return expand(s, a.thread_id);
+    case "conversation_collapse":
+      return collapse(s, a.thread_id);
+    case "thread_loaded":
+    case "thread_failed":
+      return threadLoaded(s, a);
+    case "select_conversation": {
+      const item = conversationItem(s, { thread_id: a.thread_id, member: a.member });
+      if (!item) return s;
+      const next = selectItem(s, item);
+      return a.focus ? withFocus(next, a.focus) : next;
+    }
     case "reader_loaded": {
       const m = s.selection.message;
       if (!m || !s.selection.account || readerKey(s.selection.account, m.row_id) !== a.key) return s;
@@ -1433,11 +1696,11 @@ function reduce(s: AppState, a: Action): AppState {
       return a.focus ? withFocus(next, a.focus) : next;
     }
     case "select_message": {
-      const next = { ...s, selection: { ...s.selection, draft: null, hit: null, message: { ...a.message, verified: true } } };
+      const next = { ...s, selection: { ...s.selection, draft: null, hit: null, message: { ...a.message, verified: true }, conversation: null } };
       return a.focus ? withFocus(next, a.focus) : next;
     }
     case "select_draft": {
-      const next = { ...s, selection: { ...s.selection, message: null, hit: null, draft: a.id } };
+      const next = { ...s, selection: { ...s.selection, message: null, hit: null, draft: a.id, conversation: null } };
       return a.focus ? withFocus(next, a.focus) : next;
     }
     case "select_hit": {
@@ -1527,7 +1790,7 @@ function reduce(s: AppState, a: Action): AppState {
       return {
         ...s,
         messages: s.messages.pickTop ? { ...s.messages, pickTop: false } : s.messages,
-        selection: { ...s.selection, message: null, draft: null, hit: null },
+        selection: { ...s.selection, message: null, draft: null, hit: null, conversation: null },
         reader: emptyReader(),
       };
     case "toggle_zoom":
@@ -1704,6 +1967,13 @@ function reduce(s: AppState, a: Action): AppState {
       let next = applyMutation(s, a.batch, a.kind, a.targets, a.destination ?? null, a.value ?? null);
       if (!leaves(a.kind)) return next;
       const gone = new Set(a.targets.map(targetKey));
+      // In a conversation list a row leaves when its last member here did,
+      // and a member when it did: whatever the list no longer shows.
+      if (!s.search && s.messages.data?.kind === "conversations") {
+        const account = shownAccount(s);
+        const after = new Set(visibleItems(next).map((it) => itemKey(account, it)));
+        for (const it of before) if (!after.has(itemKey(account, it))) gone.add(itemKey(account, it));
+      }
       next = cursorAfterLeave(next, before, gone);
       // The mailbox list's own selection, kept under a search, lets go too.
       const kept = next.search?.restore.selection;

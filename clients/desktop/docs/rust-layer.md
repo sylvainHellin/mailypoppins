@@ -81,7 +81,8 @@ The type blocks in this document are for reading, and the generated files are th
 | `bootstrap` | none | `Bootstrap`, also sent on the channel as `rebootstrapped` with `cause: "requested"` |
 | `list_accounts` | none | `AccountInfo[]` |
 | `list_mailboxes` | `account` | `MailboxListing` |
-| `list_messages` | `account`, `mailbox` (slug) | `MessageList`; a received mailbox is `message.list_stream` collected whole on the session thread under the 15 s list budget, so a mailbox past the 16 MiB response cap lists, and the Drafts mailbox is `draft.list` (#0138) |
+| `list_messages` | `account`, `mailbox` (slug), `conversations` (optional, default false) | `MessageList`; a received mailbox is `message.list_stream` collected whole on the session thread under the 15 s list budget, so a mailbox past the 16 MiB response cap lists, and the Drafts mailbox is `draft.list` (#0138); with `conversations` it is the `conversations` variant, `message.list_conversations` collected the same way, one row per conversation, Drafts still `draft.list` (#0142) |
+| `message_thread` | `account`, `row_id`, `mailbox` (slug) | `ThreadListing`: the conversation of the row as the expansion under its conversation row, `message.thread` with `prefer_mailbox` the listed mailbox and `include_drafts`, oldest first (#0142) |
 | `message_text` | `account`, `row_id` | `MessageText`: the stored plain text, `body: null` when the store holds none; `not_found` for an unknown row |
 | `message_html_meta` | `account`, `row_id` | `MessageMeta` |
 | `search_local` | `params: LocalSearchParams` | `LocalSearchHit[]` |
@@ -955,8 +956,9 @@ The picker hands back a path, and since no `fs:` permission is granted the webvi
 
 ## Fixture mode
 
-The fixtures hold 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies, 1 armed send hold, 6 agenda events and 28 contacts.
+The fixtures hold 2 accounts, 6 mailboxes, 22 messages, 2 drafts, 3 HTML bodies, 1 armed send hold, 6 agenda events and 28 contacts.
 Row 1021 has no `Subject:` and no `Date:`, so `message_html_meta` answers `null` for both.
+`message.list_conversations` answers the collected `ConversationListing` in one call, and `message.thread` its `prefer_mailbox` and `include_drafts` (#0142, `src/fixture/conversations.rs`): every message is its own conversation but one canned thread, `work`'s offsite question (row 1007, inbox), the agenda and the reply in Sent (rows 1010 and 1000) and the draft `offsite-note`, listed in the inbox as one row of three with the draft marker and four members on expansion.
 Row 1006 is the hostile one: a policy with `report-uri` hidden inside the doctype, a script, a meta refresh, a `target=_blank` link, remote images, a form, an iframe and a lax CSP meta of its own.
 Its meta refresh is kept on purpose, where the daemon would strip it, so the reader's own defences are what the fixture tests.
 `fixture_simulate` drives `disconnect`, `reconnect`, `restart`, `resync`, `new_mail` and `shutdown` through the same pump a daemon feeds, and `rollback`, `hold`, `editor_save`, `editor_invalid`, `send_fail`, `send_partial`, `send_pending_append`, `send_hold:<secs>`, `invite_update`, `invite_cancel`, `rsvp_fail`, `rebuild_refused`, `signature_changed`, `config_invalid`, `config_absent`, `oauth_approve` and `oauth_deny` below; `send_fail` also fails the next invitation.

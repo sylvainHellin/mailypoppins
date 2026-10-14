@@ -8,6 +8,7 @@ import type {
   AgendaEvent,
   Bootstrap,
   ConfigInvalid,
+  ConversationRow,
   EventFrontmatter,
   DraftEntry,
   DraftMessage,
@@ -16,6 +17,8 @@ import type {
   MessageListRow,
   OutboxListing,
   Progress,
+  ThreadListing,
+  ThreadMessage,
 } from "@/protocol/types";
 import type {
   AccountInfo,
@@ -103,11 +106,37 @@ export type Selection = {
   account: string | null;
   mailbox: string | null;
   message: MessageRef | null;
-  /** A draft id when the Drafts mailbox is selected. */
+  /** A draft id when the Drafts mailbox is selected, or a conversation's draft member is. */
   draft: string | null;
   /** The key of a server-only search hit under the cursor, which has no row to open. */
   hit: string | null;
+  /**
+   * In a conversation list (ticket 0142), the row under the cursor: a header by its
+   * `thread_id`, with `message` its `latest`, or one of its expanded members
+   * by `memberKey`, with `message` (or `draft`) that member. Absent or null
+   * everywhere else; a list of messages ignores it.
+   */
+  conversation?: ConversationCursor | null;
 };
+
+/**
+ * Where the cursor is in a conversation list: on the header of `thread_id`
+ * (`member` null) or on one of its expanded members, `row:<id>` for a message
+ * and `draft:<id>` for a draft (`memberKey`).
+ */
+export type ConversationCursor = { thread_id: string; member: string | null };
+
+/** A member's key in a `ConversationCursor`: its row id, or its draft id. */
+export function memberKey(m: ThreadMessage): string {
+  return m.draft_id ? `draft:${m.draft_id}` : `row:${m.id}`;
+}
+
+/**
+ * The members under one expanded conversation row, oldest first: the
+ * `message_thread` of `row_id` (its `latest`), which every reload of the list
+ * reads again, since a delta about any mailbox can change them.
+ */
+export type Expansion = Loadable<ThreadListing> & { row_id: number };
 
 export type Prefs = {
   sidebarCollapsed: boolean;
@@ -342,6 +371,12 @@ export type PendingChange = {
   leave: PendingLeave | null;
   /** A draft's approve or demote. */
   status: PendingStatus | null;
+  /**
+   * The conversation list (its list key) that showed the row as a member
+   * (ticket 0142): its rows fold several messages, so a refusal reads it again
+   * rather than putting a row back.
+   */
+  shown?: string | null;
 };
 
 /** Where a hold stands, from the `send.hold_*` event that last moved it. */
@@ -686,6 +721,17 @@ export type AppState = {
    * the cursor.
    */
   messages: Loadable<MessageList> & { key: string | null; pickTop?: boolean };
+  /**
+   * The accounts whose mailboxes list one row per conversation (ticket 0142).
+   * Absent is the flat list until the setting lands (ticket 0142's step 6), which
+   * stores the choice and turns the default on.
+   */
+  conversationMode: Record<string, boolean>;
+  /**
+   * The shown conversation list's expanded rows, by `thread_id`; a list of
+   * another mailbox starts with none.
+   */
+  expanded: Record<string, Expansion>;
   reader: ReaderState;
   selection: Selection;
   /**
@@ -884,6 +930,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     accounts: emptyLoadable(),
     mailboxes: {},
     messages: { ...emptyLoadable<MessageList>(), key: null },
+    conversationMode: {},
+    expanded: {},
     reader: emptyReader(),
     selection: { account: null, mailbox: null, message: null, draft: null, hit: null },
     selectionAuto: false,
@@ -1054,6 +1102,90 @@ export function filteredRows(list: MessageList | null, filter: string): MessageL
 }
 
 /**
+ * Whether `account`'s `mailbox` lists by conversation: the account is in
+ * conversation mode and the mailbox is not Drafts, which stays the flat
+ * `draft.list` (ticket 0142).
+ */
+export function listsConversations(s: AppState, account: string | null, mailbox: string | null): boolean {
+  return account !== null && mailbox !== null && mailbox !== "drafts" && s.conversationMode[account] === true;
+}
+
+/** The conversation list's filter: the participants and the latest row's subject and sender. */
+export function filteredConversations(list: MessageList | null, filter: string): ConversationRow[] {
+  if (!list || list.kind !== "conversations") return [];
+  const f = filter.trim().toLowerCase();
+  if (!f) return list.rows;
+  return list.rows.filter((r) => `${r.latest.subject} ${r.latest.from} ${r.participants.join(" ")}`.toLowerCase().includes(f));
+}
+
+/** Whether a conversation row expands: more than one member, a draft counted. */
+export function expandable(row: ConversationRow): boolean {
+  return row.count > 1 || row.has_draft;
+}
+
+/** One line of a conversation list: a header, or a member under its expanded header. */
+export type ConversationEntry =
+  | { kind: "header"; row: ConversationRow; expanded: boolean }
+  | { kind: "member"; thread_id: string; member: ThreadMessage };
+
+/**
+ * The visible sequence of a conversation list, after the filter: each
+ * header, followed by its members, oldest first, once its expansion read
+ * them. A filter matches headers only; an expanded header keeps its members.
+ */
+export function conversationEntries(list: MessageList | null, expanded: Record<string, Expansion>, filter: string): ConversationEntry[] {
+  return filteredConversations(list, filter).flatMap((row): ConversationEntry[] => {
+    const e = expanded[row.thread_id];
+    if (!e) return [{ kind: "header", row, expanded: false }];
+    const members = e.data?.messages ?? [];
+    return [
+      { kind: "header", row, expanded: true },
+      ...members.map((member): ConversationEntry => ({ kind: "member", thread_id: row.thread_id, member })),
+    ];
+  });
+}
+
+/** Whether an entry is the one a conversation cursor names. */
+export function entryAtCursor(e: ConversationEntry, c: ConversationCursor | null | undefined): boolean {
+  if (!c) return false;
+  return e.kind === "header"
+    ? c.member === null && c.thread_id === e.row.thread_id
+    : c.thread_id === e.thread_id && c.member === memberKey(e.member);
+}
+
+/** The mark and list key of a conversation header: the thread, not one of its rows. */
+export function threadKey(account: string, threadId: string): string {
+  return `${account}#thread:${threadId}`;
+}
+
+/**
+ * A stored row as the shown list has it: a flat list's row, or the `latest`
+ * of a conversation row; null when the list does not show it.
+ */
+export function listedRow(list: MessageList | null, account: string, rowId: number): MessageListRow | null {
+  if (!list || list.account !== account) return null;
+  if (list.kind === "messages") return list.rows.find((r) => r.id === rowId) ?? null;
+  if (list.kind === "conversations") return list.rows.find((r) => r.latest.id === rowId)?.latest ?? null;
+  return null;
+}
+
+/** The conversation row of the shown list that holds `rowId` among its `member_ids`. */
+export function conversationOf(list: MessageList | null, account: string, rowId: number): ConversationRow | null {
+  if (list?.kind !== "conversations" || list.account !== account) return null;
+  return list.rows.find((r) => r.member_ids.includes(rowId)) ?? null;
+}
+
+/** An expanded member of the shown conversation list with this row id. */
+export function expandedMember(s: AppState, account: string, rowId: number): ThreadMessage | null {
+  if (s.messages.data?.kind !== "conversations" || s.messages.data.account !== account) return null;
+  for (const e of Object.values(s.expanded)) {
+    const m = e.data?.messages.find((x) => !x.draft_id && x.id === rowId);
+    if (m) return m;
+  }
+  return null;
+}
+
+/**
  * A row of the Drafts list: a listed draft, or a file the listing skipped
  * because it does not parse, as an `invalid` row named by its file stem
  * (the id `draft.invalid` gives it), with why in `diagnostic`.
@@ -1118,5 +1250,12 @@ export function readerDraftKey(s: AppState): string | null {
   const { account, draft } = s.selection;
   if (!draft || !account) return null;
   const row = filteredDrafts(s.messages.data, "").find((d) => d.id === draft);
-  return row ? targetKey({ account, draft }) : null;
+  if (row || conversationDraft(s) === draft) return targetKey({ account, draft });
+  return null;
+}
+
+/** The draft member of a conversation under the cursor (ticket 0142), else null. */
+export function conversationDraft(s: AppState): string | null {
+  const member = s.search ? null : s.selection.conversation?.member;
+  return member?.startsWith("draft:") ? member.slice("draft:".length) : null;
 }

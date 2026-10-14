@@ -3,6 +3,8 @@ import { Server, Search, SlidersHorizontal, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ConversationMemberRow } from "@/components/list/ConversationMemberRow";
+import { ConversationRow } from "@/components/list/ConversationRow";
 import { DraftRow } from "@/components/list/DraftRow";
 import { MessageRow } from "@/components/list/MessageRow";
 import { revealRow, useWindow, WINDOW_FROM } from "@/components/list/useWindow";
@@ -11,8 +13,18 @@ import { SearchStatusBar } from "@/components/search/SearchStatusBar";
 import { FILTER_INPUT_ID, markOpenRead, runAction, runMutation } from "@/app/actions";
 import { useAppState, useDispatch } from "@/app/store";
 import { usePaneFocused } from "@/hooks/use-pane-focused";
-import { filteredDrafts, filteredRows, sendingKeys, targetKey } from "@/app/state";
-import type { MessageListRow } from "@/protocol/types";
+import {
+  conversationEntries,
+  entryAtCursor,
+  expandable,
+  filteredDrafts,
+  filteredRows,
+  memberKey,
+  sendingKeys,
+  targetKey,
+  threadKey,
+} from "@/app/state";
+import type { ConversationRow as Conversation, MessageListRow, ThreadMessage } from "@/protocol/types";
 
 export function MessageListPane() {
   const s = useAppState();
@@ -27,7 +39,10 @@ export function MessageListPane() {
   const f = s.filter.trim();
   const rows = filteredRows(list, s.filter);
   const drafts = filteredDrafts(list, s.filter);
-  const count = list?.kind === "drafts" ? drafts.length : rows.length;
+  // A conversation list (ticket 0142) shows its headers and, under each expanded
+  // one, its members: one sequence, every line of the same fixed height.
+  const entries = list?.kind === "conversations" ? conversationEntries(list, s.expanded, s.filter) : [];
+  const count = list?.kind === "drafts" ? drafts.length : list?.kind === "conversations" ? entries.length : rows.length;
   const win = useWindow(scrollRef, count);
 
   const account = s.selection.account;
@@ -40,7 +55,9 @@ export function MessageListPane() {
   const selectedIndex =
     list?.kind === "drafts"
       ? drafts.findIndex((d) => d.id === s.selection.draft)
-      : sel
+      : list?.kind === "conversations"
+        ? entries.findIndex((e) => entryAtCursor(e, s.selection.conversation))
+        : sel
         ? rows.findIndex((r) => r.message_id === sel.message_id && r.selector === sel.selector)
         : -1;
   const tabIndexRow = selectedIndex >= 0 ? selectedIndex : 0;
@@ -95,13 +112,77 @@ export function MessageListPane() {
       account && runMutation("toggle_read", [{ account, row_id: row.id }], stateRef.current, dispatch, false),
     [account, dispatch],
   );
+  const onSelectConversation = useCallback(
+    (thread_id: string) => dispatch({ type: "select_conversation", thread_id, member: null }),
+    [dispatch],
+  );
+  const onOpenConversation = useCallback(
+    (thread_id: string) => {
+      const cur = stateRef.current;
+      const row = cur.messages.data?.kind === "conversations" ? cur.messages.data.rows.find((r) => r.thread_id === thread_id) : undefined;
+      if (!row) return;
+      // A double-click is Enter: a collapsed conversation of several opens, any other reads.
+      if (expandable(row) && !cur.expanded[thread_id]) {
+        dispatch({ type: "select_conversation", thread_id, member: null });
+        return dispatch({ type: "conversation_expand", thread_id });
+      }
+      dispatch({ type: "select_conversation", thread_id, member: null, focus: "reader" });
+      markOpenRead(account ? { account, row_id: row.latest.id } : null, row.latest.flags.seen, dispatch);
+    },
+    [account, dispatch],
+  );
+  const onToggleExpand = useCallback(
+    (thread_id: string) =>
+      dispatch({ type: stateRef.current.expanded[thread_id] ? "conversation_collapse" : "conversation_expand", thread_id }),
+    [dispatch],
+  );
+  const onMarkConversation = useCallback(
+    (thread_id: string, range: boolean) => account && mark(threadKey(account, thread_id), range),
+    [account, mark],
+  );
+  // The toggles on a header act on its members here, as the keys do.
+  const onToggleFlagConversation = useCallback(
+    (row: Conversation) =>
+      account && runMutation("toggle_flag", row.member_ids.map((row_id) => ({ account, row_id })), stateRef.current, dispatch, false),
+    [account, dispatch],
+  );
+  const onToggleReadConversation = useCallback(
+    (row: Conversation) =>
+      account && runMutation("toggle_read", row.member_ids.map((row_id) => ({ account, row_id })), stateRef.current, dispatch, false),
+    [account, dispatch],
+  );
+  const onSelectMember = useCallback(
+    (thread_id: string, member: string) => dispatch({ type: "select_conversation", thread_id, member }),
+    [dispatch],
+  );
+  const onOpenMember = useCallback(
+    (thread_id: string, member: string) => {
+      dispatch({ type: "select_conversation", thread_id, member, focus: "reader" });
+      const m = Object.values(stateRef.current.expanded)
+        .flatMap((e) => e.data?.messages ?? [])
+        .find((x) => memberKey(x) === member);
+      if (m && !m.draft_id) markOpenRead(account ? { account, row_id: m.id } : null, m.flags.seen, dispatch);
+    },
+    [account, dispatch],
+  );
+  const onMarkMember = useCallback(
+    (m: ThreadMessage, range: boolean) =>
+      account && mark(m.draft_id ? targetKey({ account, draft: m.draft_id }) : targetKey({ account, row_id: m.id }), range),
+    [account, mark],
+  );
+  const mailboxLabel = (slug: string) =>
+    slug === "drafts"
+      ? "Drafts"
+      : ((account && s.mailboxes[account]?.data?.mailboxes.find((m) => m.slug === slug)?.label) ?? slug);
   const markedCount = s.marked.keys.size;
   const anyMarked = markedCount > 0;
   const rowKey = (id: number) => targetKey({ account: account ?? "", row_id: id });
   const draftKey = (id: string) => targetKey({ account: account ?? "", draft: id });
   const sending = sendingKeys(s);
 
-  const total = list?.kind === "messages" ? list.total : list?.kind === "drafts" ? list.listing.drafts.length : null;
+  const total =
+    list?.kind === "messages" || list?.kind === "conversations" ? list.total : list?.kind === "drafts" ? list.listing.drafts.length : null;
+  const noun = list?.kind === "drafts" ? "drafts" : list?.kind === "conversations" ? "conversations" : "messages";
   const search = s.search;
   const query = s.filter.trim();
 
@@ -120,7 +201,7 @@ export function MessageListPane() {
             <span className="text-xs text-muted-foreground tabular-nums">{`${search.hits.length} results`}</span>
           ) : total !== null ? (
             <span className="text-xs text-muted-foreground tabular-nums">
-              {f ? `${count} of ${total}` : `${total} ${list?.kind === "drafts" ? "drafts" : "messages"}`}
+              {f ? `${count} of ${total}` : `${total} ${noun}`}
             </span>
           ) : null}
         </div>
@@ -225,7 +306,56 @@ export function MessageListPane() {
                     onMark={onMarkDraft}
                   />
                 ))
-              : rows.slice(win.start, win.end).map((r, i) => (
+              : list.kind === "conversations"
+                ? entries.slice(win.start, win.end).map((e, i) => {
+                    const at = win.start + i;
+                    if (e.kind === "header") {
+                      const r = e.row;
+                      return (
+                        <ConversationRow
+                          key={`h:${r.thread_id}`}
+                          row={r}
+                          expanded={e.expanded}
+                          expandable={expandable(r)}
+                          cursor={at === selectedIndex}
+                          marked={s.marked.keys.has(threadKey(account ?? "", r.thread_id))}
+                          anyMarked={anyMarked}
+                          pending={r.member_ids.some((id) => rowKey(id) in s.pending)}
+                          tabStop={at === tabIndexRow}
+                          position={at + 1}
+                          setSize={count}
+                          onSelect={onSelectConversation}
+                          onOpen={onOpenConversation}
+                          onMark={onMarkConversation}
+                          onToggleExpand={onToggleExpand}
+                          onToggleFlag={onToggleFlagConversation}
+                          onToggleRead={onToggleReadConversation}
+                        />
+                      );
+                    }
+                    const m = e.member;
+                    const key = m.draft_id ? draftKey(m.draft_id) : rowKey(m.id);
+                    return (
+                      <ConversationMemberRow
+                        key={`m:${e.thread_id}:${memberKey(m)}`}
+                        threadId={e.thread_id}
+                        member={m}
+                        memberKey={memberKey(m)}
+                        mailboxLabel={mailboxLabel(m.mailbox)}
+                        cursor={at === selectedIndex}
+                        marked={s.marked.keys.has(key)}
+                        anyMarked={anyMarked}
+                        pending={key in s.pending}
+                        tabStop={at === tabIndexRow}
+                        position={at + 1}
+                        setSize={count}
+                        onSelect={onSelectMember}
+                        onOpen={onOpenMember}
+                        onMark={onMarkMember}
+                      />
+                    );
+                  })
+                : rows.slice(win.start, win.end).map((r, i) => (
                   <MessageRow
                     key={r.id}
                     row={r}

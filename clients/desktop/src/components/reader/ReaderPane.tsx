@@ -13,7 +13,7 @@ import * as compose from "@/app/compose";
 import { fetchHit, openHtml } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
 import { usePaneFocused } from "@/hooks/use-pane-focused";
-import { draftOfKey, filteredDrafts, isStale, readerKey, type SearchHit } from "@/app/state";
+import { conversationDraft, draftOfKey, filteredDrafts, isStale, readerKey, type SearchHit } from "@/app/state";
 
 /**
  * A server-only search hit: the store holds no row, so there is no body to
@@ -126,7 +126,12 @@ export function ReaderPane() {
         {summary ? (
           <ComposeSummary key={shown} account={summary.account} draftId={summary.draft} />
         ) : draft && account ? (
-          draftRow ? <DraftPreview key={`${account}/${draft}`} account={account} draft={draftRow} /> : null
+          draftRow ? (
+            <DraftPreview key={`${account}/${draft}`} account={account} draft={draftRow} />
+          ) : conversationDraft(s) === draft ? (
+            // A conversation's draft member (ticket 0142): no Drafts listing to read it from.
+            <ComposeSummary key={`${account}/${draft}`} account={account} draftId={draft} />
+          ) : null
         ) : serverHit ? (
           <ServerHitSummary hit={serverHit} />
         ) : !message ? (

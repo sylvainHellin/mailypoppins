@@ -259,6 +259,30 @@
     "attachments": []
    },
    {
+    "id": 1000,
+    "uid": 4,
+    "message_id": "<re-team-offsite-in-octob-1000@fixture.example>",
+    "from": "Me <me@example.com>",
+    "to": "marta@example.com",
+    "cc": null,
+    "reply_to": null,
+    "bcc": null,
+    "subject": "Re: Team offsite in October",
+    "date_sort": "2026-09-27T09:20:00",
+    "date_display": "Sun, 27 Sep 2026 09:20:00 +0200",
+    "flags": {
+     "seen": true,
+     "answered": false,
+     "forwarded": false,
+     "flagged": false
+    },
+    "has_attachments": false,
+    "is_invite": false,
+    "selector": "mp://work/sent/re-team-offsite-in-octob-1000@fixture.example",
+    "body": "Both dates work for me; the agenda went out yesterday.\n",
+    "attachments": []
+   },
+   {
     "id": 1010,
     "uid": 2,
     "message_id": "<draft-agenda-for-the-off-1010@fixture.example>",

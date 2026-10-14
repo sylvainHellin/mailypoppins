@@ -92,6 +92,8 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "mailbox.list",
     "message.list",
     "message.list_stream",
+    "message.list_conversations",
+    "message.thread",
     "message.get",
     "message.html",
     "message.search",
@@ -1150,6 +1152,16 @@ mod tests {
     fn the_required_capabilities_cover_the_streamed_listing() {
         assert!(REQUIRED_CAPABILITIES.contains(&"message.list_stream"));
         assert!(REQUIRED_CAPABILITIES.contains(&"message.list"));
+    }
+
+    /// A mailbox in conversation mode opens through
+    /// `message.list_conversations` and expands through `message.thread`
+    /// (#0142), so a daemon without them is a `capability_missing` at the
+    /// handshake rather than a list that will not open.
+    #[test]
+    fn the_required_capabilities_cover_the_conversation_list() {
+        assert!(REQUIRED_CAPABILITIES.contains(&"message.list_conversations"));
+        assert!(REQUIRED_CAPABILITIES.contains(&"message.thread"));
     }
 
     #[test]

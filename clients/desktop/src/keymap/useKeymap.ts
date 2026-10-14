@@ -395,6 +395,12 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       }
       // While a send is held, `u` cancels it before it is toggle read (the TUI's rule).
       if (e.key === "u" && liveHolds(s).length > 0) return handled(), run("cancel_hold");
+      // `l` expands and `h` collapses the conversation under the cursor, from
+      // its header or any of its members (ticket 0142); a flat list binds neither.
+      if ((e.key === "l" || e.key === "h") && s.focus === "list" && !s.search && s.messages.data?.kind === "conversations") {
+        handled();
+        return run(e.key === "l" ? "expand_conversation" : "collapse_conversation");
+      }
       // The MESSAGE keys act from the list and the reader, as the TUI's do
       // from its list, headers and body; `v` is a List key.
       const message = MESSAGE_KEYS[e.key];

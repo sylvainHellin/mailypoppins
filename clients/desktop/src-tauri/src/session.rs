@@ -38,7 +38,9 @@ use mp_client::events::Incoming;
 use mp_client::session::{QueryHandle, Session};
 use mp_client::{Observe, StateTracker};
 use mp_protocol::events::{KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS};
-use mp_protocol::listing::MessageListing;
+use mp_protocol::listing::{
+    ConversationListing, MessageListing, METHOD_MESSAGE_LIST_CONVERSATIONS,
+};
 use mp_protocol::operation::OperationStatus;
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
@@ -102,6 +104,21 @@ impl mp_client::queries::Queries for Budgeted<'_> {
                 Ok(mp_client::queries::decode_message_listing(
                     account, mailbox, &answer,
                 ))
+            }
+        }
+    }
+
+    /// The daemon door streams `message.list_conversations` under this
+    /// budget, as [`Budgeted::list_stream`] does (#0142). The fixture door
+    /// answers the method itself with the collected listing, the one place
+    /// the method is a plain call, so fixture mode needs no stream either.
+    fn list_conversations(&self, account: &str, mailbox: &str) -> Result<ConversationListing> {
+        match self.door {
+            Door::Daemon(handle) => handle.list_conversations_within(account, mailbox, self.budget),
+            Door::Fixture(_) => {
+                let params = json!({"account": account, "mailbox": mailbox});
+                let answer = self.call(METHOD_MESSAGE_LIST_CONVERSATIONS, params)?;
+                Ok(serde_json::from_value(answer)?)
             }
         }
     }

@@ -104,6 +104,13 @@
 //! fixture names every file it builds `<id>.md` (a created draft keeps its
 //! given name), so a draft whose frontmatter breaks is still addressed by
 //! its id, the file stem the daemon's watcher falls back to.
+//!
+//! `message.list_conversations` answers the whole collected listing in one
+//! call, with no stream, and `message.thread` answers with its
+//! `prefer_mailbox` and `include_drafts` (#0142): every message is its own
+//! conversation but one canned thread (`fixture/conversations.rs`).
+
+mod conversations;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -495,6 +502,26 @@ impl State {
                     .find(|r| r["id"].as_i64() == Some(row_id))
                     .map(|r| (mailbox.as_str(), r))
             })
+    }
+
+    /// The drafts that join a conversation, from the last rescan: the
+    /// canned thread's draft while it is there and not sent.
+    fn conversation_drafts(&self, account: &str) -> Vec<conversations::DraftMember> {
+        let (canned_account, canned_id) = conversations::CANNED_DRAFT;
+        if account != canned_account {
+            return Vec::new();
+        }
+        self.drafts
+            .get(account)
+            .into_iter()
+            .flat_map(|l| l.drafts.iter())
+            .filter(|d| d.id == canned_id && d.status != "sent")
+            .map(|d| conversations::DraftMember {
+                id: d.id.clone(),
+                date: d.date.clone().unwrap_or_default(),
+                thread_id: conversations::CANNED_THREAD.to_string(),
+            })
+            .collect()
     }
 
     fn mailbox_rows(&self, account: &str) -> Vec<Value> {
@@ -3003,6 +3030,54 @@ impl Fixture {
                 Ok(
                     json!({"account": account, "mailbox": mailbox, "total": rows.len(), "messages": rows}),
                 )
+            }
+            // The daemon streams it; the fixture answers the collected
+            // `ConversationListing` at once, which is what the session thread
+            // hands the door after the stream.
+            "message.list_conversations" => {
+                only(method, &params, &["account", "mailbox"])?;
+                let account = param_str(method, &params, "account")?;
+                let mailbox = param_str(method, &params, "mailbox")?;
+                let Some(boxes) = s.messages.get(account) else {
+                    return Err(refused(
+                        method,
+                        -32005,
+                        &format!("account_unknown: {account}"),
+                    ));
+                };
+                if mailbox.eq_ignore_ascii_case("drafts") {
+                    return Err(refused(method, -32602, "drafts are listed by draft.list"));
+                }
+                let known = s.mailbox_rows(account).iter().any(|r| r["slug"] == mailbox);
+                if !known {
+                    return Err(refused(method, -32602, &format!("no mailbox `{mailbox}`")));
+                }
+                let drafts = s.conversation_drafts(account);
+                let listing = conversations::list(account, mailbox, boxes, &drafts);
+                Ok(serde_json::to_value(listing)?)
+            }
+            "message.thread" => {
+                let account = param_str(method, &params, "account")?;
+                let row_id = params["row_id"].as_i64().unwrap_or(-1);
+                let Some(boxes) = s.messages.get(account) else {
+                    return Err(refused(
+                        method,
+                        -32005,
+                        &format!("account_unknown: {account}"),
+                    ));
+                };
+                let drafts = if params["include_drafts"] == true {
+                    s.conversation_drafts(account)
+                } else {
+                    Vec::new()
+                };
+                let prefer = params["prefer_mailbox"].as_str();
+                let thread =
+                    conversations::thread(account, boxes, row_id, prefer, &drafts, FIXTURE_FROM)
+                        .ok_or_else(|| {
+                            refused(method, -32602, &format!("no message has row_id {row_id}"))
+                        })?;
+                Ok(serde_json::to_value(thread)?)
             }
             "draft.list" => {
                 let account = param_str(method, &params, "account")?;

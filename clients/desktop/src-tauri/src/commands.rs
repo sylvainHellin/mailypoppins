@@ -26,7 +26,7 @@ use mp_protocol::draft::{
     DraftValidation,
 };
 use mp_protocol::events::DraftInvalid;
-use mp_protocol::listing::MessageListRow;
+use mp_protocol::listing::{ConversationRow, MessageListRow, ThreadListing};
 use mp_protocol::send::{HoldListing, OutboxListing};
 use mp_protocol::state::{AccountState, Bootstrap, OutboxCounts, SyncHealthState};
 use mp_protocol::{PROTOCOL_MAX, PROTOCOL_MIN};
@@ -190,6 +190,15 @@ pub enum MessageList {
     Drafts {
         account: String,
         listing: DraftListing,
+    },
+    // One row per conversation (#0142), from `message.list_conversations`:
+    // `total` is the conversation count, and Drafts never lists this way.
+    Conversations {
+        account: String,
+        /// The resolved mailbox slug.
+        mailbox: String,
+        total: u64,
+        rows: Vec<ConversationRow>,
     },
 }
 
@@ -800,6 +809,49 @@ pub fn list_messages_on(
         total: listing.total,
         rows: listing.messages,
     })
+}
+
+/// [`list_messages_on`] in conversation mode (#0142): one row per
+/// conversation through `Budgeted`'s `list_conversations`, the streamed
+/// `message.list_conversations` against a daemon. Drafts stays the flat
+/// `draft.list`, which no conversation groups.
+pub fn list_conversations_on(
+    door: &Door,
+    account: &str,
+    mailbox: &str,
+) -> Result<MessageList, GuiError> {
+    if mailbox.eq_ignore_ascii_case(DRAFTS_MAILBOX) {
+        return list_messages_on(door, account, mailbox);
+    }
+    let q = Budgeted {
+        door,
+        budget: LIST_BUDGET,
+    };
+    let listing = queries::Queries::list_conversations(&q, account, mailbox)
+        .map_err(|e| GuiError::from_call(&e, Addressing::Resource))?;
+    Ok(MessageList::Conversations {
+        account: account.to_string(),
+        mailbox: listing.mailbox,
+        total: listing.total,
+        rows: listing.conversations,
+    })
+}
+
+/// The members of one listed conversation, the expansion under its row
+/// (#0142): `message.thread` of the row with `prefer_mailbox` set to the
+/// listed mailbox and the drafts that answer it, oldest first.
+pub fn message_thread_on(
+    door: &Door,
+    account: &str,
+    row_id: i64,
+    mailbox: &str,
+) -> Result<ThreadListing, GuiError> {
+    let q = Budgeted {
+        door,
+        budget: MESSAGE_BUDGET,
+    };
+    queries::Queries::thread_expanded(&q, account, row_id, mailbox)
+        .map_err(|e| GuiError::from_call(&e, Addressing::Resource))
 }
 
 pub fn message_text_on(door: &Door, account: &str, row_id: i64) -> Result<MessageText, GuiError> {
@@ -1677,9 +1729,27 @@ pub async fn list_messages(
     session: State<'_, SessionHandle>,
     account: String,
     mailbox: String,
+    conversations: Option<bool>,
 ) -> Result<MessageList, GuiError> {
     with_door(&session, move |_, door| {
-        list_messages_on(door, &account, &mailbox)
+        if conversations.unwrap_or(false) {
+            list_conversations_on(door, &account, &mailbox)
+        } else {
+            list_messages_on(door, &account, &mailbox)
+        }
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn message_thread(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_id: i64,
+    mailbox: String,
+) -> Result<ThreadListing, GuiError> {
+    with_door(&session, move |_, door| {
+        message_thread_on(door, &account, row_id, &mailbox)
     })
     .await
 }
@@ -2608,7 +2678,7 @@ mod tests {
         let listing = list_mailboxes_on(&door(), None, "work").expect("mailboxes");
         assert_eq!(listing.mailboxes.len(), 4);
         assert_eq!(listing.mailboxes[1].kind, MailboxKind::Drafts);
-        assert_eq!(listing.total, 8 + 2 + 3 + 3);
+        assert_eq!(listing.total, 8 + 2 + 4 + 3);
         assert!(matches!(
             list_mailboxes_on(&door(), None, "nobody"),
             Err(GuiError::NotFound { .. })
@@ -2644,6 +2714,70 @@ mod tests {
         let value =
             serde_json::to_value(list_messages_on(&d, "work", "drafts").expect("d")).expect("json");
         assert_eq!(value["kind"], "drafts");
+    }
+
+    /// Conversation mode (#0142): the inbox lists one row per conversation,
+    /// the canned offsite thread as one row of three with the draft marker
+    /// and the date of its later sent reply; Sent lists the same thread; the
+    /// expansion names four members oldest first; Drafts stays flat.
+    #[test]
+    fn conversation_mode_lists_and_expands_the_canned_thread() {
+        let d = door();
+        let inbox = match list_conversations_on(&d, "work", "inbox").expect("inbox") {
+            MessageList::Conversations { rows, total, .. } => {
+                assert_eq!(total, 8, "one conversation per inbox message");
+                rows
+            }
+            other => panic!("expected conversations, got {other:?}"),
+        };
+        let offsite = inbox
+            .iter()
+            .find(|r| r.member_ids == [1007])
+            .expect("the offsite thread");
+        assert_eq!(offsite.count, 3);
+        assert!(offsite.has_draft);
+        assert_eq!(offsite.date_sort, "2026-09-27T09:20:00");
+        assert_eq!(offsite.mailboxes, ["inbox", "sent"]);
+        let value = serde_json::to_value(list_conversations_on(&d, "work", "inbox").expect("i"))
+            .expect("json");
+        assert_eq!(value["kind"], "conversations");
+
+        match list_conversations_on(&d, "work", "sent").expect("sent") {
+            MessageList::Conversations { rows, .. } => {
+                let sent = rows
+                    .iter()
+                    .find(|r| r.thread_id == offsite.thread_id)
+                    .expect("the same thread in Sent");
+                assert_eq!(sent.member_ids, [1000, 1010]);
+                assert_eq!(sent.count, 3);
+            }
+            other => panic!("expected conversations, got {other:?}"),
+        }
+        assert!(matches!(
+            list_conversations_on(&d, "work", "drafts").expect("drafts"),
+            MessageList::Drafts { .. }
+        ));
+
+        let thread = message_thread_on(&d, "work", 1007, "inbox").expect("thread");
+        let members: Vec<(&str, i64)> = thread
+            .messages
+            .iter()
+            .map(|m| (m.mailbox.as_str(), m.id))
+            .collect();
+        assert_eq!(
+            members,
+            [
+                ("inbox", 1007),
+                ("sent", 1010),
+                ("sent", 1000),
+                ("drafts", 0)
+            ]
+        );
+        assert_eq!(thread.messages[3].draft_id.as_deref(), Some("offsite-note"));
+        assert!(matches!(
+            message_thread_on(&d, "work", 424242, "inbox"),
+            Err(GuiError::NotFound { .. })
+        ));
     }
 
     #[test]
