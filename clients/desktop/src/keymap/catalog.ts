@@ -27,6 +27,8 @@ export type ActionId =
   /** `l` and `h` on a conversation row or one of its members (ticket 0142). */
   | "expand_conversation"
   | "collapse_conversation"
+  /** `tc`: the account under the cursor between the conversation list and the flat list (ticket 0142). */
+  | "toggle_conversation_mode"
   | "select_mailbox"
   | "copy_selector"
   | "clear_selection"
@@ -168,6 +170,9 @@ const BY_ACTION: Record<string, Binding> = {
   // The desktop has no thread view yet, and its `tt` toggles the reader's
   // text mode (GUI_ENTRIES), so the row lists no key.
   "Show conversation (thread)": { badge: "later", keys: [] },
+  "Conversation view on / off for this account": { id: "toggle_conversation_mode" },
+  "Expand the conversation (conversation view)": { id: "expand_conversation" },
+  "Collapse the conversation (conversation view)": { id: "collapse_conversation" },
   "Open attachment": { id: "open_attachment" },
   "Save attachment to disk": { id: "save_attachment" },
   "Open HTML in browser": { id: "open_html" },

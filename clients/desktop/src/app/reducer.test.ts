@@ -2,13 +2,14 @@ import { describe, expect, it } from "vitest";
 import { actionTargets, progressAction, reducer, type Action } from "@/app/reducer";
 import { runAction } from "@/app/actions";
 import { ACTIVITY_CAP } from "@/app/pending";
-import { initialState, isStale, listKey, type AppState } from "@/app/state";
+import { isStale, listKey, type AppState } from "@/app/state";
 import { CLOSE_OUTBOX_FIRST } from "@/app/outbox";
 import { BACK_TO_MAIL_FIRST, hiddenByView, hiddenNotice } from "@/app/views";
 import { openableHits } from "@/app/search";
 import { fixtures, mailboxListing } from "@/test/tauri-mock";
 import type { Bootstrap, MessageListRow } from "@/protocol/types";
 import type { AccountInfo, MessageList } from "@/lib/gui-types";
+import { flatState } from "@/test/prefs";
 
 const run = (s: AppState, ...actions: Action[]) => actions.reduce(reducer, s);
 
@@ -18,7 +19,7 @@ function inbox(account: string, mailbox: string, idShift = 0): MessageList {
 }
 
 function booted(): AppState {
-  let s = run(initialState(), {
+  let s = run(flatState(), {
     type: "gui_event",
     event: { type: "rebootstrapped", cause: "subscribed", bootstrap: fixtures.bootstrap },
   });
@@ -203,7 +204,7 @@ describe("the reducer", () => {
 
     it("moves the bootstrap's pick to the default account", () => {
       const reversed = { ...fixtures.bootstrap, snapshot: { ...fixtures.bootstrap.snapshot, accounts: [...fixtures.bootstrap.snapshot.accounts].reverse() } };
-      let s = run(initialState(), { type: "gui_event", event: { type: "rebootstrapped", cause: "subscribed", bootstrap: reversed } });
+      let s = run(flatState(), { type: "gui_event", event: { type: "rebootstrapped", cause: "subscribed", bootstrap: reversed } });
       expect(s.selection.account).toBe("home");
       expect(s.selectionAuto).toBe(true);
       s = run(s, { type: "accounts_loaded", gen: s.accounts.gen, accounts: accounts("work") });

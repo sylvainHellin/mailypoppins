@@ -1,6 +1,8 @@
 import "@testing-library/jest-dom/vitest";
-import { afterEach, vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
+import { PREFS_KEY } from "@/app/prefs";
+import { FLAT_PREFS } from "@/test/prefs";
 
 // No test reaches the real Tauri bridge: src/lib/tauri.ts is the one module
 // that imports @tauri-apps/api, and every test gets the fixture-backed mock.
@@ -38,6 +40,13 @@ Element.prototype.scrollIntoView ??= function scrollIntoView() {};
 Element.prototype.hasPointerCapture ??= () => false;
 Element.prototype.setPointerCapture ??= () => {};
 Element.prototype.releasePointerCapture ??= () => {};
+
+// The whole app reads its prefs from localStorage: it starts with the fixture
+// accounts listed flat, as the tests written before the conversation list
+// expect; a test of that list renders with `initialState()` (ticket 0142).
+beforeEach(() => {
+  localStorage.setItem(PREFS_KEY, JSON.stringify(FLAT_PREFS));
+});
 
 afterEach(() => {
   cleanup();

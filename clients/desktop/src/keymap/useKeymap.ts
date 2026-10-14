@@ -14,7 +14,7 @@ import { draftsShown, liveHolds, screenFor, type AppState } from "@/app/state";
 import { hiddenNotice } from "@/app/views";
 import { FILTER_INPUT_ID, HALF_PAGE, PAGE, READER_SCROLL_ID, runAction } from "@/app/actions";
 import { CONTACTS_SEARCH_ID } from "@/app/contacts";
-import { describeKey, type ActionId, type Badge } from "@/keymap/catalog";
+import { describeKey, paletteEntries, type ActionId, type Badge } from "@/keymap/catalog";
 import { VIEW_AGNOSTIC_COMBOS, VIEW_SHARED_KEYS, viewKeyTable } from "@/keymap/viewKeys";
 import { setPendingPrefix } from "@/keymap/pendingPrefix";
 import { forwardedKey, scrollReaderFrame, scrollReaderFrameTo } from "@/components/reader/ReaderBody";
@@ -118,10 +118,19 @@ const MAIL_COMBOS: Record<string, ActionId> = {
   fm: "focus_filter",
   // The TUI's "Search all mail": its Server Search form (PERSO-115).
   ff: "open_server_search",
+  // The conversation view of the selected account (ticket 0142), from any pane.
+  tc: "toggle_conversation_mode",
   cn: "new_draft",
   // Mail only: a view never arms `c`, as the TUI's do not.
   cs: "manage_signatures",
 };
+
+/** The keys keymap.json binds to expanding and folding a conversation row: `l` and `h`. */
+const CONVERSATION_KEYS: ReadonlyMap<string, ActionId> = new Map(
+  paletteEntries()
+    .filter((p) => p.section === "EMAIL LIST" && (p.id === "expand_conversation" || p.id === "collapse_conversation"))
+    .flatMap((p) => p.keys.map((k): [string, ActionId] => [k, p.id as ActionId])),
+);
 
 /** The `c` and `t` row keys whose action answers outside Drafts with a notice only. */
 const DRAFTS_ONLY: ReadonlySet<ActionId> = new Set(["edit_recipients", "approve", "demote", "send_all", "attach_file"]);
@@ -396,10 +405,12 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       // While a send is held, `u` cancels it before it is toggle read (the TUI's rule).
       if (e.key === "u" && liveHolds(s).length > 0) return handled(), run("cancel_hold");
       // `l` expands and `h` collapses the conversation under the cursor, from
-      // its header or any of its members (ticket 0142); a flat list binds neither.
-      if ((e.key === "l" || e.key === "h") && s.focus === "list" && !s.search && s.messages.data?.kind === "conversations") {
+      // its header or any of its members (ticket 0142), read from keymap.json's
+      // EMAIL LIST rows; a flat list binds neither.
+      const fold = CONVERSATION_KEYS.get(e.key);
+      if (fold && s.focus === "list" && !s.search && s.messages.data?.kind === "conversations") {
         handled();
-        return run(e.key === "l" ? "expand_conversation" : "collapse_conversation");
+        return run(fold);
       }
       // The MESSAGE keys act from the list and the reader, as the TUI's do
       // from its list, headers and body; `v` is a List key.

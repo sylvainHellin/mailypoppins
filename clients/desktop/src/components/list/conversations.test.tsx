@@ -2,10 +2,11 @@
 // expansion on Enter, `l` and `h`, the actions on a collapsed row, and the
 // re-read on any change of the account, against the fixture mock.
 
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import App from "@/App";
+import { PREFS_KEY } from "@/app/prefs";
 import { initialState } from "@/app/state";
 import { shellReady } from "@/test/render";
 import { setWidth } from "@/test/setup";
@@ -17,12 +18,12 @@ const offsite = () => header(CANNED_THREAD);
 const members = () => [...document.querySelectorAll<HTMLElement>('[role="option"][data-member]')];
 const cursorRow = () => document.querySelector<HTMLElement>('[role="option"][data-cursor="true"]');
 
-/** The app with `work` listed by conversation, as step 6's setting will turn it on. */
+/** The app with every account listed by conversation, the default the stored prefs start from. */
 function renderGrouped() {
   resetMock();
   setWidth(1400);
   const user = userEvent.setup();
-  render(<App initial={{ ...initialState(), conversationMode: { work: true } }} />);
+  render(<App initial={initialState()} />);
   return { user };
 }
 
@@ -142,5 +143,45 @@ describe("the conversation list", () => {
     await user.keyboard("2");
     await screen.findByRole("listbox", { name: "Drafts messages" });
     expect(screen.getByText("2 drafts")).toBeInTheDocument();
+  });
+});
+
+describe("the conversation view setting", () => {
+  const stored = () => JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}") as { flatListAccounts?: string[] };
+  const lastRead = () => {
+    const reads = callsOf("list_messages").filter((a) => a?.account === "work" && a?.mailbox === "inbox");
+    return reads[reads.length - 1];
+  };
+
+  it("is on for an account the stored prefs do not name", async () => {
+    localStorage.removeItem(PREFS_KEY);
+    resetMock();
+    setWidth(1400);
+    render(<App />);
+    await shellReady();
+    await waitFor(() => expect(offsite()).not.toBeNull());
+    expect(lastRead()).toEqual({ account: "work", mailbox: "inbox", conversations: true });
+  });
+
+  it("switches with `tc`, and the choice survives a restart", async () => {
+    const { user } = renderGrouped();
+    await shellReady();
+    await waitFor(() => expect(offsite()).not.toBeNull());
+    await user.keyboard("tc");
+    await waitFor(() => expect(lastRead()).toEqual({ account: "work", mailbox: "inbox", conversations: false }));
+    await waitFor(() => expect(screen.queryByText("8 conversations")).toBeNull());
+    expect(offsite()).toBeNull();
+    await waitFor(() => expect(stored().flatListAccounts).toEqual(["work"]));
+
+    // A restart reads the stored prefs: `work` comes back flat.
+    cleanup();
+    resetMock();
+    render(<App />);
+    await shellReady();
+    await waitFor(() => expect(lastRead()).toEqual({ account: "work", mailbox: "inbox", conversations: false }));
+
+    await user.keyboard("tc");
+    await waitFor(() => expect(offsite()).not.toBeNull());
+    await waitFor(() => expect(stored().flatListAccounts).toEqual([]));
   });
 });

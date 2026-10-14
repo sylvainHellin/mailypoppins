@@ -1,5 +1,6 @@
-// Presentation preferences (pane sizes, sidebar collapsed, notices hidden) live in the GUI's
-// localStorage, never in the daemon: they are not domain state.
+// Presentation preferences (pane sizes, sidebar collapsed, notices hidden, the accounts listed
+// flat rather than by conversation) live in the GUI's localStorage, never in the daemon: they
+// are not domain state.
 
 import { DEFAULT_PREFS, LIST_WIDTH_MAX, LIST_WIDTH_MIN, type Prefs } from "@/app/state";
 
@@ -18,6 +19,10 @@ export function loadPrefs(storage: Storage | undefined = globalThis.localStorage
       sidebarCollapsed: typeof p.sidebarCollapsed === "boolean" ? p.sidebarCollapsed : false,
       listWidth,
       activityHidden: typeof p.activityHidden === "boolean" ? p.activityHidden : false,
+      flatListAccounts:
+        Array.isArray(p.flatListAccounts) && p.flatListAccounts.every((a) => typeof a === "string")
+          ? [...new Set(p.flatListAccounts)]
+          : DEFAULT_PREFS.flatListAccounts,
     };
   } catch {
     return DEFAULT_PREFS;

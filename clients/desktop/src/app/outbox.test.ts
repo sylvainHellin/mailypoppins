@@ -5,6 +5,7 @@ import { initialState, isStale, type AppState } from "@/app/state";
 import { fixtures, outboxListing, mock, resetMock } from "@/test/tauri-mock";
 import { GUI_ENTRIES, paletteEntries, type ActionId } from "@/keymap/catalog";
 import type { OperationStatus, OutboxListing, OutboxRow } from "@/protocol/types";
+import { flatState } from "@/test/prefs";
 
 const run = (s: AppState, ...actions: Action[]) => actions.reduce(reducer, s);
 
@@ -33,7 +34,7 @@ function listing(account: string, rows: OutboxRow[]): OutboxListing {
 }
 
 function booted(): AppState {
-  return run(initialState(), {
+  return run(flatState(), {
     type: "gui_event",
     event: { type: "rebootstrapped", cause: "subscribed", bootstrap: fixtures.bootstrap },
   });
@@ -251,6 +252,8 @@ describe("what the outbox view hides", () => {
         "approve",
         "archive",
         "attach_file",
+        // `h` and `l`, the KEYMAP's conversation rows (ticket 0142).
+        "collapse_conversation",
         "copy_link",
         "copy_selector",
         "copy_sender",
@@ -258,6 +261,7 @@ describe("what the outbox view hides", () => {
         "delete",
         "demote",
         "edit_recipients",
+        "expand_conversation",
         "fetch_hit",
         "forward",
         "mark_all",
@@ -282,6 +286,7 @@ describe("what the outbox view hides", () => {
     );
     for (const id of [
       "new_draft",
+      "toggle_conversation_mode",
       "focus_filter",
       "open_outbox",
       "outbox_retry",

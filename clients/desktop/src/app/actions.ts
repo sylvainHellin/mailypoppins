@@ -20,6 +20,7 @@ import { saveReaderMode, toggleReaderMode } from "@/app/readerMode";
 import { checkForUpdates, installUpdate, restartIntoUpdate } from "@/app/updates";
 import { actionTargets, cursorKey, type Action } from "@/app/reducer";
 import {
+  conversationModeOn,
   conversationOf,
   draftItems,
   draftsShown,
@@ -120,6 +121,13 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       const c = s.search ? null : s.selection.conversation;
       if (!c) return;
       return dispatch({ type: id === "expand_conversation" ? "conversation_expand" : "conversation_collapse", thread_id: c.thread_id });
+    }
+    case "toggle_conversation_mode": {
+      // The selected account's choice, stored in the prefs (ticket 0142); the
+      // Drafts mailbox stays flat whatever it is.
+      const account = s.selection.account;
+      if (!account) return dispatch({ type: "notice", text: "Select an account first: the conversation view is per account" });
+      return dispatch({ type: "conversation_mode", account, on: !conversationModeOn(s, account) });
     }
     case "select_mailbox":
       return dispatch({ type: "sidebar_enter" });

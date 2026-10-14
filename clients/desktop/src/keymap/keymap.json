@@ -168,6 +168,10 @@
         "action": "Show conversation (thread)"
       },
       {
+        "key": "tc",
+        "action": "Conversation view on / off for this account"
+      },
+      {
         "key": "to",
         "action": "Open attachment"
       },
@@ -232,6 +236,14 @@
       {
         "key": "Ctrl+a",
         "action": "Select all visible"
+      },
+      {
+        "key": "l",
+        "action": "Expand the conversation (conversation view)"
+      },
+      {
+        "key": "h",
+        "action": "Collapse the conversation (conversation view)"
       },
       {
         "key": "ce",

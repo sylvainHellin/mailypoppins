@@ -144,9 +144,15 @@ export type Prefs = {
   listWidth: number;
   /** `!`: the activity area hides its notices; a live hold card still shows. */
   activityHidden: boolean;
+  /**
+   * The accounts listed one row per message (ticket 0142): every other
+   * account lists one row per conversation, so a new account starts grouped.
+   * `tc`, its palette entry and the Settings switch add and remove an account.
+   */
+  flatListAccounts: string[];
 };
 
-export const DEFAULT_PREFS: Prefs = { sidebarCollapsed: false, listWidth: 420, activityHidden: false };
+export const DEFAULT_PREFS: Prefs = { sidebarCollapsed: false, listWidth: 420, activityHidden: false, flatListAccounts: [] };
 export const LIST_WIDTH_MIN = 260;
 export const LIST_WIDTH_MAX = 720;
 /** The reader keeps at least this much of the pane row, whatever the list width. */
@@ -722,12 +728,6 @@ export type AppState = {
    */
   messages: Loadable<MessageList> & { key: string | null; pickTop?: boolean };
   /**
-   * The accounts whose mailboxes list one row per conversation (ticket 0142).
-   * Absent is the flat list until the setting lands (ticket 0142's step 6), which
-   * stores the choice and turns the default on.
-   */
-  conversationMode: Record<string, boolean>;
-  /**
    * The shown conversation list's expanded rows, by `thread_id`; a list of
    * another mailbox starts with none.
    */
@@ -930,7 +930,6 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     accounts: emptyLoadable(),
     mailboxes: {},
     messages: { ...emptyLoadable<MessageList>(), key: null },
-    conversationMode: {},
     expanded: {},
     reader: emptyReader(),
     selection: { account: null, mailbox: null, message: null, draft: null, hit: null },
@@ -1101,13 +1100,18 @@ export function filteredRows(list: MessageList | null, filter: string): MessageL
   return f ? list.rows.filter((r) => `${r.subject} ${r.from}`.toLowerCase().includes(f)) : list.rows;
 }
 
+/** Whether `account` is in conversation mode: on unless `prefs.flatListAccounts` names it (ticket 0142). */
+export function conversationModeOn(s: AppState, account: string): boolean {
+  return !s.prefs.flatListAccounts.includes(account);
+}
+
 /**
  * Whether `account`'s `mailbox` lists by conversation: the account is in
  * conversation mode and the mailbox is not Drafts, which stays the flat
  * `draft.list` (ticket 0142).
  */
 export function listsConversations(s: AppState, account: string | null, mailbox: string | null): boolean {
-  return account !== null && mailbox !== null && mailbox !== "drafts" && s.conversationMode[account] === true;
+  return account !== null && mailbox !== null && mailbox !== "drafts" && conversationModeOn(s, account);
 }
 
 /** The conversation list's filter: the participants and the latest row's subject and sender. */

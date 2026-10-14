@@ -3,13 +3,14 @@ import * as cmd from "@/lib/commands";
 import { runAction } from "@/app/actions";
 import { createMutations } from "@/app/mutations";
 import { reducer, type Action } from "@/app/reducer";
-import { initialState, listKey, type AppState } from "@/app/state";
+import { listKey, type AppState } from "@/app/state";
 import { fixtures, mailboxListing, mock, resetMock } from "@/test/tauri-mock";
 import type { MessageList } from "@/lib/gui-types";
+import { flatState } from "@/test/prefs";
 
 /** The reducer behind a plain variable, with the fixture's work inbox shown. */
 async function store(mailbox = "inbox") {
-  let s = reducer(initialState(), { type: "gui_event", event: { type: "rebootstrapped", cause: "subscribed", bootstrap: fixtures.bootstrap } });
+  let s = reducer(flatState(), { type: "gui_event", event: { type: "rebootstrapped", cause: "subscribed", bootstrap: fixtures.bootstrap } });
   const dispatch = (a: Action) => {
     s = reducer(s, a);
   };

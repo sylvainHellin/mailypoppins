@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/shell/AppShell";
 import { StoreProvider, useAppState } from "@/app/store";
+import { PREFS_KEY } from "@/app/prefs";
 import type { AppState } from "@/app/state";
 import { shellReady } from "@/test/render";
 import { setWidth } from "@/test/setup";
@@ -188,6 +189,25 @@ describe("the Settings view", () => {
     );
     const banner = await screen.findByRole("alert", { name: "Configuration problem" });
     expect(banner).toHaveTextContent(`config.toml did not load (${MOCK_CONFIG_PATH}); the daemon serves no configuration until a reload loads it`);
+  });
+});
+
+describe("the conversation view switch", () => {
+  it("shows each account's choice and flips it, stored with the prefs", async () => {
+    const { user, probe, view } = await openSettings();
+    // The tests start with the fixture accounts listed flat (src/test/setup.ts).
+    const work = within(card(view, "work")).getByRole("switch", { name: "Conversation view" });
+    const home = within(card(view, "home")).getByRole("switch", { name: "Conversation view" });
+    expect(work).toHaveAttribute("aria-checked", "false");
+    expect(home).toHaveAttribute("aria-checked", "false");
+    await user.click(work);
+    expect(work).toHaveAttribute("aria-checked", "true");
+    expect(home).toHaveAttribute("aria-checked", "false");
+    expect(probe.state.prefs.flatListAccounts).toEqual(["home"]);
+    await waitFor(() => expect(JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}").flatListAccounts).toEqual(["home"]));
+    await user.click(work);
+    expect(work).toHaveAttribute("aria-checked", "false");
+    expect(probe.state.prefs.flatListAccounts).toEqual(["home", "work"]);
   });
 });
 

@@ -5,9 +5,13 @@
 import { describe, expect, it } from "vitest";
 import { actionTargets, reducer, visibleItems, type Action } from "@/app/reducer";
 import { overlayPending } from "@/app/pending";
-import { conversationEntries, initialState, isStale, listKey, threadKey, type AppState } from "@/app/state";
+import { runAction } from "@/app/actions";
+import { loadPrefs, PREFS_KEY, savePrefs } from "@/app/prefs";
+import { conversationEntries, DEFAULT_PREFS, initialState, isStale, listKey, listsConversations, threadKey, type AppState } from "@/app/state";
+import { paletteEntries } from "@/keymap/catalog";
 import { CANNED_THREAD, conversationListing, fixtures, mailboxListing, resetMock, threadListing } from "@/test/tauri-mock";
 import type { MessageList } from "@/lib/gui-types";
+import { flatState } from "@/test/prefs";
 
 const run = (s: AppState, ...actions: Action[]) => actions.reduce(reducer, s);
 type Conversations = Extract<MessageList, { kind: "conversations" }>;
@@ -105,7 +109,7 @@ describe("the conversation list", () => {
 
   it("switches an account's list to conversations and back, finding the selected message again", () => {
     resetMock();
-    let s = run(initialState(), { type: "gui_event", event: { type: "rebootstrapped", cause: "subscribed", bootstrap: fixtures.bootstrap } });
+    let s = run(flatState(), { type: "gui_event", event: { type: "rebootstrapped", cause: "subscribed", bootstrap: fixtures.bootstrap } });
     s = run(s, { type: "mailboxes_loaded", account: "work", gen: 1, listing: mailboxListing("work") });
     const rows = (fixtures.messages.work.inbox as Conversations["rows"][number]["latest"][]).map((r) => ({ ...r }));
     s = run(s, { type: "messages_loaded", key: INBOX, gen: s.messages.gen, list: { kind: "messages", account: "work", mailbox: "inbox", total: rows.length, rows } });
@@ -222,5 +226,50 @@ describe("the conversation list", () => {
       expect(r.member_ids.every((id) => id !== 0)).toBe(true);
     }
     expect(rows.find((r) => r.latest.id === 1021)?.latest).toMatchObject({ subject: "", date_display: "" });
+  });
+});
+
+describe("the conversation view setting", () => {
+  it("is on for every account the prefs do not name, and `conversation_mode` writes the prefs", () => {
+    let s = initialState();
+    expect(listsConversations(s, "work", "inbox")).toBe(true);
+    expect(listsConversations(s, "work", "drafts")).toBe(false);
+    s = run(s, { type: "conversation_mode", account: "work", on: false });
+    expect(s.prefs.flatListAccounts).toEqual(["work"]);
+    expect(listsConversations(s, "work", "inbox")).toBe(false);
+    expect(listsConversations(s, "home", "inbox")).toBe(true);
+    expect(run(s, { type: "conversation_mode", account: "work", on: false })).toBe(s);
+    s = run(s, { type: "conversation_mode", account: "work", on: true });
+    expect(s.prefs.flatListAccounts).toEqual([]);
+  });
+
+  it("reads the stored list, and defaults to none on a value of the wrong shape", () => {
+    const store = new Map<string, string>();
+    const storage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) } as Storage;
+    expect(loadPrefs(storage).flatListAccounts).toEqual([]);
+    savePrefs({ ...DEFAULT_PREFS, flatListAccounts: ["work"] }, storage);
+    expect(loadPrefs(storage).flatListAccounts).toEqual(["work"]);
+    for (const bad of ["work", [1], null]) {
+      store.set(PREFS_KEY, JSON.stringify({ flatListAccounts: bad }));
+      expect(loadPrefs(storage).flatListAccounts).toEqual([]);
+    }
+  });
+
+  it("puts `tc`, `l` and `h` in the palette from the generated keymap", () => {
+    const entry = (label: string) => paletteEntries().find((e) => e.label === label);
+    expect(entry("Conversation view on / off for this account")).toMatchObject({ keys: ["tc"], id: "toggle_conversation_mode", badge: null });
+    expect(entry("Expand the conversation (conversation view)")).toMatchObject({ section: "EMAIL LIST", keys: ["l"], id: "expand_conversation" });
+    expect(entry("Collapse the conversation (conversation view)")).toMatchObject({ section: "EMAIL LIST", keys: ["h"], id: "collapse_conversation" });
+  });
+
+  it("toggles the selected account from the palette action", () => {
+    const s = grouped();
+    const seen: Action[] = [];
+    runAction("toggle_conversation_mode", s, (a) => seen.push(a));
+    expect(seen).toEqual([{ type: "conversation_mode", account: "work", on: false }]);
+    const flat = run(s, ...seen);
+    expect(flat.prefs.flatListAccounts).toEqual(["work"]);
+    expect(flat.messages.data).toBeNull();
+    expect(isStale(flat.messages)).toBe(true);
   });
 });

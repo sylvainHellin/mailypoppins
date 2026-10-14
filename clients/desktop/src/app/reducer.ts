@@ -79,6 +79,7 @@ import {
 import {
   accountNames,
   conversationEntries,
+  conversationModeOn,
   draftItems,
   draftsShown,
   emptyLoadable,
@@ -1646,8 +1647,10 @@ function reduce(s: AppState, a: Action): AppState {
       if (a.key !== s.messages.key) return s;
       return { ...s, messages: { ...failed(s.messages, a.gen, a.error), key: s.messages.key } };
     case "conversation_mode": {
-      if ((s.conversationMode[a.account] === true) === a.on) return s;
-      const next: AppState = { ...s, conversationMode: { ...s.conversationMode, [a.account]: a.on } };
+      if (conversationModeOn(s, a.account) === a.on) return s;
+      const others = s.prefs.flatListAccounts.filter((name) => name !== a.account);
+      const flatListAccounts = a.on ? others : [...others, a.account];
+      const next: AppState = { ...s, prefs: { ...s.prefs, flatListAccounts } };
       const sel = listSelection(next);
       if (sel.account !== a.account || sel.mailbox === "drafts") return next;
       // The shown list is read again in the other shape; the selected

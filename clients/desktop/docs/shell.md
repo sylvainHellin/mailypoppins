@@ -69,10 +69,11 @@ An event that arrives mid-fetch thus leaves the answer stale when it lands, and 
 Selection is held by stable identifiers: account name, mailbox slug, and for a message its `message_id` and `selector` next to the `row_id`.
 Opening another mailbox or account puts the cursor on the top row once its list lands, as the TUI does (PERSO-94): `retarget` flags the fresh list `pickTop`, and its first answer selects the first visible row or draft unless a selection exists by then; Escape before the answer, a refetch of the same list and a re-bootstrap move no cursor, and the launch's first list keeps nothing selected.
 A `rebootstrapped` keeps what still exists, falls back to the default account's inbox for what does not, and marks the message `verified: false`; the reloaded list confirms it by `message_id` (taking the new `row_id` after a daemon restart) or clears it.
-In conversation mode (#0142; `conversationMode` per account, flat until the setting lands) a mailbox lists one `ConversationRow` per conversation and Drafts stays flat.
+In conversation mode (#0142), on for every account `prefs.flatListAccounts` does not name, a mailbox lists one `ConversationRow` per conversation and Drafts stays flat.
+`tc`, the palette's "Conversation view on / off for this account" and the switch on the account's Settings card flip the selected account (`conversation_mode`), and the choice is stored with the other prefs.
 The pane draws the visible sequence of headers, each followed by its members once expanded (`expanded`, by `thread_id`, each a `Loadable` of `message_thread` read again on every reload of the list), every line of the list's one row height.
 The cursor is `selection.conversation`: a header by `thread_id`, with `message` its `latest`, or a member by `row:<id>` or `draft:<id>`; a reload follows the header by `thread_id` and an expansion's answer confirms a member by its key, then by `Message-ID`, else the header takes the cursor.
-`Enter` expands a collapsed header of more than one member and keeps the cursor on it, and reads anything else; `l` expands and `h` collapses from a header or any of its members (`expand_conversation`, `collapse_conversation`, keyed in `useKeymap.ts` until the KEYMAP rows arrive).
+`Enter` expands a collapsed header of more than one member and keeps the cursor on it, and reads anything else; `l` expands and `h` collapses from a header or any of its members (`expand_conversation`, `collapse_conversation`, the keys keymap.json gives the two EMAIL LIST rows).
 An action on a header acts on its `member_ids`, the members in the listed mailbox only, and on a member on that member alone; marked headers are the union of their members.
 The list is read again on any change in the account (a `mailbox:`, `message:` or `draft:` resource, `draft.changed`), the counts scope included, since the daemon publishes no row deltas: one read in flight and one owed, so a burst costs two.
 An optimistic change shows on the row at once (`member_ids`, `unread`, `flagged`, `latest`) and a refusal reads the list again.
@@ -874,6 +875,7 @@ The TUI's own theme is the `theme` key of config.toml (OBS-07), which the deskto
 ### Accounts
 
 One card per configured account, named after it: how it signs in ("Password", "Microsoft 365 (OAuth2)", "Microsoft 365 (Graph)"), its From address, its SMTP and IMAP servers as `host:port as username` (none for Graph), and the app registration's client and tenant for OAuth2 and Graph.
+Each card carries a "Conversation view" switch, On or Off, the account's entry in `prefs.flatListAccounts` (#0142; see Model); `tc` flips the same choice for the selected account.
 A password account has "Set SMTP password" and "Set IMAP password".
 An OAuth2 or Graph account has "Sign in", which opens the device-code dialog on a new sign-in of that account (see Account wizard); while a sign-in runs, it shows that one again instead, with a notice when it is another account's.
 Below the cards "Add account" opens the account wizard, as does the palette's "Add account".
@@ -1036,7 +1038,7 @@ On macOS the window has no title bar and no traffic lights (PERSO-97): it opens 
 The page moves it through tauri's `data-tauri-drag-region`: the sidebar header (`deep`, so the whole header), the canvas around the inset card (bare, so only a press on the canvas itself, its 8 px margin), the narrow bar (`deep`; its back button still takes the click, since tauri's script skips a button), the connecting screen (`deep`) and the background of the other state screens (bare).
 A double click on a drag region zooms the window, as on a title bar.
 The window resizes from its edges, and the menu bar's predefined Close Window (Cmd+W), Minimize (Cmd+M), Zoom and Enter Full Screen (Ctrl+Cmd+F) act on it.
-The list width, the collapsed sidebar and whether `!` hides the notices are stored in `localStorage` (`mailypoppins.desktop.prefs.v1`), never in the daemon.
+The list width, the collapsed sidebar, whether `!` hides the notices and the accounts listed flat rather than by conversation are stored in `localStorage` (`mailypoppins.desktop.prefs.v1`), never in the daemon.
 The list is drawn at the stored width only while the reader keeps `READER_MIN` (320 px) of the pane row, measured by a ResizeObserver; a 720 px width stored in a wide window draws narrower in the medium layout, and the stored value is kept for when the window grows.
 
 ## Focus order
@@ -1093,6 +1095,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `to`, `ts`, `tb`: open an attachment, save attachments, open the HTML in the browser (on a draft, the HTML its send would build), from the list or the reader (the TUI's MESSAGE keys); `ta`: attach a file to the Drafts cursor draft; see [reader.md](reader.md), "Attachments".
 - `tt`: toggle the reader between html and text mode, a draft's preview included, from the list or the reader, a desktop key that takes the TUI's thread key, which the desktop does not have yet; the palette's row is "Toggle reader text mode", beside "Reader: HTML" and "Reader: text" (see [reader.md](reader.md), "Text mode").
   The search overlay's `o`, `O` and `b` are these same keys on a hit, which is a list row here.
+- `tc`: the selected account between the conversation list and the flat list, in Mail from any pane, stored with the prefs; `l` and `h` expand and collapse the conversation under the list's cursor (see Model).
 - `F`: fetch the server-only hit under the cursor into the store, from the list or the reader, a desktop key: the TUI's overlay binds `f`, which is the find family's prefix in the desktop (`fm`, `ff`), and a bare `F` is free in every TUI mail context.
   The palette's row for it shows `F`.
 - Shift+click marks the range from the last mark to the row, and Cmd+click or Ctrl+click marks one row; the palette's "Mark range" does the same from the cursor.

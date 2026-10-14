@@ -21,6 +21,7 @@ import { saveTheme, THEME_LABELS, THEMES, type Theme } from "@/app/theme";
 import { READER_MODE_LABELS, READER_MODES, saveReaderMode } from "@/app/readerMode";
 import { checkForUpdates, readUpdateStatus } from "@/app/updates";
 import { useAppState, useDispatch } from "@/app/store";
+import { conversationModeOn } from "@/app/state";
 import { usePaneFocused } from "@/hooks/use-pane-focused";
 import * as cmd from "@/lib/commands";
 import type { ConfigAccount, ConfigServer, EditorSetting, SecretKind } from "@/lib/gui-types";
@@ -52,12 +53,50 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+/**
+ * The account's conversation view (ticket 0142): one row per conversation, or
+ * one per message. Stored in the prefs with the pane sizes; `tc` and the
+ * palette flip the same choice for the selected account.
+ */
+function ConversationViewSwitch({ account, on, onChange }: { account: string; on: boolean; onChange: (on: boolean) => void }) {
+  const id = useId();
+  return (
+    <div className="grid grid-cols-[9rem_1fr] items-center gap-2 py-0.5">
+      <span id={`${id}-label`} className="text-muted-foreground">
+        Conversation view
+      </span>
+      <div className="flex min-w-0 items-center gap-2">
+        <Button
+          size="xs"
+          variant="outline"
+          role="switch"
+          aria-checked={on}
+          aria-labelledby={`${id}-label`}
+          aria-describedby={`${id}-hint`}
+          data-account={account}
+          className="aria-checked:border-framing aria-checked:bg-selection aria-checked:text-selection-foreground"
+          onClick={() => onChange(!on)}
+        >
+          {on ? "On" : "Off"}
+        </Button>
+        <span id={`${id}-hint`} className="text-xs text-muted-foreground">
+          {on ? "One row per conversation; t c switches from the list." : "One row per message; t c switches from the list."}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function AccountCard({
   account,
+  conversations,
+  onConversations,
   onPassword,
   onSignIn,
 }: {
   account: ConfigAccount;
+  conversations: boolean;
+  onConversations: (on: boolean) => void;
   onPassword: (kind: SecretKind) => void;
   onSignIn: () => void;
 }) {
@@ -81,6 +120,7 @@ function AccountCard({
           <Field label="App registration">{`client ${account.oauth2.client_id}, tenant ${account.oauth2.tenant_id}`}</Field>
         ) : null}
       </dl>
+      <ConversationViewSwitch account={account.name} on={conversations} onChange={onConversations} />
       <div className="mt-2 flex flex-wrap gap-2">
         {password ? (
           (["smtp", "imap"] as const).map((kind) => (
@@ -410,6 +450,8 @@ export function SettingsView() {
                   <AccountCard
                     key={account.name}
                     account={account}
+                    conversations={conversationModeOn(s, account.name)}
+                    onConversations={(on) => dispatch({ type: "conversation_mode", account: account.name, on })}
                     onPassword={(kind) => dispatch({ type: "open_password", account: account.name, kind })}
                     onSignIn={() => signInOrShow(s, dispatch, account.name)}
                   />
