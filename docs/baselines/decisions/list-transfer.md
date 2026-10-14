@@ -105,10 +105,22 @@ Adopted:
   `{"operation_id":str,"account":str,"mailbox":str,"total":u64}` and then streams the rows to the
   calling connection as `message.rows` notifications, params `{offset, operation_id, rows}`, each
   chunk closing once its rows reach 1 MiB, and settles with `operation.finished` (#0138).
-  This is how both clients open a mailbox.
+  This is how both clients open a mailbox listed flat.
   The rows are `message.list` rows byte for byte, read in one snapshot before the answer, so the
   stream is the whole-list transfer of this decision split into frames, with no page a client could
   ask for.
+- `message.list_conversations`, params `{"account":str,"mailbox":str}`, the same mailbox grouped
+  one row per conversation (#0142): it answers the same
+  `{"operation_id":str,"account":str,"mailbox":str,"total":u64}`, `total` counting conversations,
+  and streams `ConversationRow`s as `message.conversations` notifications on the same transport,
+  same 1 MiB chunks, same snapshot read before the answer, same settle on `operation.finished`.
+  It is one more whole list on this stream, not a page: both clients list a received mailbox
+  through it by default since #0142's step 6, and through `message.list_stream` for an account
+  the user switched to the flat list.
+  A conversation row cannot take a row delta, since a change in Sent moves a conversation listed
+  in the inbox and the delta names no `thread_id`, so a client in conversation mode re-streams the
+  listing on any change in the account, one stream in flight and one owed; the 50 000-row figures
+  are in [../message-list-unbounded.md](../message-list-unbounded.md), "The conversation listing".
 - `message.list`, params `{"account":str,"mailbox":str,"limit":u32|null}`, answering
   `{"account":str,"mailbox":str,"total":u64,"messages":[...]}`, exactly the shape P2-U10 pins.
   It serves the bounded callers (`mp list-messages -n`, the envelope projection of

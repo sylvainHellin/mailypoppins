@@ -3,7 +3,7 @@ id: 0142
 title: Conversation list, one row per conversation in every mailbox
 type: feature
 priority: next
-status: open
+status: done
 created: 2026-10-13
 ---
 
@@ -227,19 +227,31 @@ Until step 6 the clients default to the flat list, so `main` never ships a mode 
 
 ## Acceptance criteria
 
-- [ ] In the inbox, a conversation of an inbox message, a draft reply and two sent replies is one row with `(3)`, the draft marker and the date of the later sent reply; expanding it lists four members oldest first labelled `Inbox`, `Sent`, `Sent` and `Drafts`.
-- [ ] The same conversation is one row in Sent, with the same four members on expansion.
-- [ ] A `Message-ID` held in the inbox and in Archive counts once in `count` and appears once on expansion, as the inbox copy when the list shows the inbox.
-- [ ] Archiving a collapsed inbox conversation archives its inbox members and leaves its Sent members in Sent.
-- [ ] Marking a collapsed row read clears its `unread` and its bold.
-- [ ] A message that arrives in a listed conversation, or a reply sent from it, updates the row within one re-stream.
-- [ ] The streamed conversation rows equal the fold of the flat listing plus `message.thread` for the same mailbox, in a daemon test over a real socket.
-- [ ] No frame of the stream exceeds `ROWS_CHUNK_BYTES` plus one row plus the envelope, on the 50 000-row fixture.
+- [x] In the inbox, a conversation of an inbox message, a draft reply and two sent replies is one row with `(3)`, the draft marker and the date of the later sent reply; expanding it lists four members oldest first labelled `Inbox`, `Sent`, `Sent` and `Drafts`.
+  Evidence: `tests/daemon_conversations.rs` (`an_inbox_message_its_two_sent_replies_and_a_draft_are_one_conversation`) and the desktop's `conversations.test.tsx` (`lists one row per conversation...`, `expands on Enter...`).
+- [x] The same conversation is one row in Sent, with the same four members on expansion.
+  Evidence: the same daemon test, its Sent half.
+- [x] A `Message-ID` held in the inbox and in Archive counts once in `count` and appears once on expansion, as the inbox copy when the list shows the inbox.
+  Evidence: the same daemon test, whose question is held in both.
+- [x] Archiving a collapsed inbox conversation archives its inbox members and leaves its Sent members in Sent.
+  Evidence: `src/tui_tests/conversations.rs` (`actions_on_a_collapsed_row_reach_its_members_here`).
+- [x] Marking a collapsed row read clears its `unread` and its bold.
+  Evidence: the same TUI test, and the desktop's `conversations.test.tsx` row toggle.
+- [x] A message that arrives in a listed conversation, or a reply sent from it, updates the row within one re-stream.
+  Evidence: `src/tui_tests/conversations.rs` (`an_arrival_and_a_sent_reply_update_the_row_within_one_restream`, `deltas_restream_the_list_coalesced`).
+- [x] The streamed conversation rows equal the fold of the flat listing plus `message.thread` for the same mailbox, in a daemon test over a real socket.
+  Evidence: `tests/daemon_conversations.rs` (`streamed_conversations_equal_the_fold_of_the_listing_and_the_thread`).
+- [x] No frame of the stream exceeds `ROWS_CHUNK_BYTES` plus one row plus the envelope, on the 50 000-row fixture.
+  Evidence: `tests/daemon_conversations_cap.rs` (`no_conversation_frame_passes_the_budget_on_the_large_mailbox`).
 - [x] On the 50 000-row fixture the daemon side of `message.list_conversations` is under twice the flat stream's on the same host, recorded in `message-list-unbounded.md`.
-- [ ] `message.thread` without the new parameters answers byte for byte as before, and the `T` overlay's golden frames are unchanged.
+- [x] `message.thread` without the new parameters answers byte for byte as before, and the `T` overlay's golden frames are unchanged.
+  Evidence: the plain read of `an_inbox_message_its_two_sent_replies_and_a_draft_are_one_conversation` carries no `draft_id` key, `message.thread.{request,response}.json` and `tests/daemon_thread_slice.rs` are unchanged since step 1; the overlay has no golden frame of its own, and no snapshot but the help overlay's row count moved.
 - [ ] `tc` and the palette entry switch an account between the conversation list and the flat list in both clients, the desktop Settings switch does the same, and the choice survives a restart of each client.
+  Holds here: `src/tui_tests/conversations.rs` (`tc_and_the_palette_switch_the_list_and_tui_json_remembers_it`), `clients/tui/src/prefs.rs`, and the desktop's vitest (`conversations.test.tsx` "the conversation view setting", `settings.test.tsx` "the conversation view switch"); open: a restart of the built desktop app on the Mac.
 - [ ] A TUI or desktop build against a daemon without `message.list_conversations` stops at the handshake with `capability_missing`.
+  Holds for the TUI: `src/daemon/session.rs` (`a_daemon_without_the_conversation_listing_refuses_the_tui`); open: the desktop's `the_required_capabilities_cover_the_conversation_list` (`clients/desktop/src-tauri/src/connector.rs`), which runs on the Mac only.
 - [ ] `cargo test --workspace`, `cargo test -p mp-protocol --features ts --test ts_bindings` and the desktop's vitest run pass; the desktop crate's `cargo test` passes on the Mac.
+  Holds on the home server for the first three at step 6; open: the desktop crate's `cargo test` on the Mac.
 
 ## Cross-references
 

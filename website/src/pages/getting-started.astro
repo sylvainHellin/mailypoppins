@@ -156,6 +156,7 @@ cargo install --path .`}
         <li><code>j</code> / <code>k</code> to move up and down the email list</li>
         <li><code>1</code>-<code>9</code> to jump to a mailbox by index</li>
         <li><code>Enter</code> to read the selected message in the body pane, where <code>j</code> / <code>k</code> scroll it</li>
+        <li><code>l</code> / <code>h</code> to expand and collapse the conversation under the cursor</li>
         <li><code>e</code> to open the selected row in your <code>$EDITOR</code>: a draft opens for editing, a received message opens as a read-only Markdown copy</li>
         <li><code>/</code> to filter, <code>\</code> to search (includes body text)</li>
         <li><code>?</code> for the full help overlay</li>
@@ -167,6 +168,17 @@ cargo install --path .`}
         the editor. It is there for searching, folding and copying a long message with the
         tools you already know. Edits go nowhere: the store is the source of truth, and
         nothing reads the copy back.
+      </p>
+      <p>
+        Each mailbox lists one row per conversation: the question in your inbox, your replies
+        in Sent and the draft of your next reply are one row, dated by its newest message and
+        marked <code>(3)</code> with the number of messages. The first <code>Enter</code> on a
+        conversation of several messages expands it in place, each member labelled with the
+        mailbox it lives in; the next one reads it. Archive, delete, flag and mark read on a
+        collapsed row act on its messages in the mailbox you are looking at, never on your
+        Sent copies. Press <code>tc</code> to list an account one row per message instead; the
+        TUI remembers the choice in <code>~/.config/mailypoppins/tui.json</code>, and the
+        desktop app has the same switch on the account's Settings card.
       </p>
       <p>
         The marker column on the left of the list carries one glyph per message: a dot

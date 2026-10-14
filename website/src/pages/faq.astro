@@ -75,12 +75,24 @@ import AccordionItem from '../components/AccordionItem.astro';
           </p>
         </AccordionItem>
 
+        <AccordionItem question="I want one row per message, not per conversation">
+          <p>
+            The list groups each mailbox by conversation by default. Press <code>tc</code> (or
+            run "Conversation view on / off for this account" from the command palette) to list
+            the account one row per message; press it again to group it once more. The TUI keeps
+            the choice per account in <code>~/.config/mailypoppins/tui.json</code> as
+            <code>{"{"}"flat_list_accounts": ["work"]{"}"}</code>, and the desktop app keeps its
+            own through the "Conversation view" switch on the account's Settings card. The
+            Drafts mailbox always lists one draft per row.
+          </p>
+        </AccordionItem>
+
         <AccordionItem question="I forgot a key binding">
           <p>
             Press <code>:</code> or <code>Ctrl+p</code> to open the command palette, type part of
             an action's name and press <code>Enter</code> to run it against the current context.
-            Keys are grouped in mnemonic families (<code>c</code> compose, <code>t</code> thread
-            and attachments, <code>f</code> find, <code>s</code> sync and settings, <code>g</code>
+            Keys are grouped in mnemonic families (<code>c</code> compose, <code>t</code> thread,
+            conversation view and attachments, <code>f</code> find, <code>s</code> sync and settings, <code>g</code>
             go-to), so pressing a leader alone pops up a which-key list of its continuations.
             <code>?</code> shows the full catalogue, and <code>mp dump-keys</code> prints the same
             table outside the TUI.

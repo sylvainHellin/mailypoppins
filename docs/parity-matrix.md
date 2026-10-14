@@ -18,7 +18,7 @@ Each entry then holds the remaining columns of the matrix:
 - Validation: the coverage that exists today.
 - Status: implementation and validation state.
 
-The matrix is a list rather than a table because eight columns over 131 rows is unreadable in an editor; the field names are the columns.
+The matrix is a list rather than a table because eight columns over 133 rows is unreadable in an editor; the field names are the columns.
 
 ### Classification vocabulary
 
@@ -363,6 +363,18 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Note: `open_thread_overlay` asked `message.thread` on the session the `App` holds since P5-U10d-I, where it opened the store, read the row and folded `read::thread_messages` over it; it was the last read in `clients/tui/src/app/` that no method answered.
   The method takes `message.get`'s address and answers `{account, thread_id, subject, messages}`, the rows oldest first and one per `Message-ID`; a thread row carries the `mailbox` its copy lives in, which a listing row does not, because a conversation crosses mailboxes and the overlay's `Enter` switches to the one it opens.
   A message with no relatives answers with itself alone, and the client keeps its "No related emails for this message in the store" line by branching on the length.
+
+### LST-14 List a mailbox one row per conversation
+
+- Classification: GUI parity
+- Source anchor: the TUI's conversation list (#0142): `list_mailbox` and the header and member rows in `clients/tui/src/queries.rs` and `clients/tui/src/ui/list.rs`, `l` / `h` (`ExpandConversation`, `CollapseConversation`) and `tc` (`ToggleConversationMode`) in `clients/tui/src/app/keymap.rs`, the per-account choice in `tui.json` (`clients/tui/src/prefs.rs`)
+- Daemon surface: `message.list_conversations` (streamed on `message.conversations`, the transport of `message.list_stream`), `message.thread` with `prefer_mailbox` and `include_drafts` for an expansion, the per-message mutations for an action on a row; both clients require `message.list_conversations` at the handshake
+- GUI location: clients/desktop: `ConversationRow` and `ConversationMemberRow` in the list pane, `Enter`, `l` and `h` from the generated `keymap.json`, `tc` and its palette entry, and a "Conversation view" switch on each account's Settings card, stored in `prefs.flatListAccounts` (#0142; shell.md, "Model" and "Settings")
+- Validation: `tests/daemon_conversations.rs` (`streamed_conversations_equal_the_fold_of_the_listing_and_the_thread`, `an_inbox_message_its_two_sent_replies_and_a_draft_are_one_conversation`), `tests/daemon_conversations_cap.rs` (`no_conversation_frame_passes_the_budget_on_the_large_mailbox`), `src/tui_tests/conversations.rs` (golden frames `golden_conversation_collapsed` and `golden_conversation_expanded`, `actions_on_a_collapsed_row_reach_its_members_here`, `deltas_restream_the_list_coalesced`, `tc_and_the_palette_switch_the_list_and_tui_json_remembers_it`), `clients/tui/src/prefs.rs` (the `tui.json` round trip and its malformed-file fallback), `clients/desktop/src/app/conversations.test.ts`, `clients/desktop/src/components/list/conversations.test.tsx` (the "conversation view setting" suite: `tc` and a restart), `clients/desktop/src/components/settings/settings.test.tsx` (`shows each account's choice and flips it, stored with the prefs`), `clients/desktop/src-tauri/src/commands.rs` (`conversation_mode_lists_and_expands_the_canned_thread`)
+- Status: routed (#0142 steps 2 and 3); TUI and GUI shipped (#0142 steps 4 to 6), on by default for every account the client's stored list does not name
+- Note: `LST-10` stays the `T` overlay of one conversation; this row is the listing that groups a whole mailbox, and the Drafts mailbox stays the flat `draft.list` in both clients.
+  The choice is presentation and stays in each client, `tui.json` beside config.toml for the TUI and localStorage for the desktop, so the two may disagree for one account as their themes may.
+  Graph rows and replies sent before PERSO-137 root their own conversations until #0142's step 7 threads them by the server's ids.
 
 ### LST-11 Legacy server fetch with inline filters
 
