@@ -2671,3 +2671,12 @@ Message changes reach clients only as a `counts`-scope `state.invalidate` of `ma
 ## `message.list_conversations` needs a row sink in process
 
 The method refuses an in-process call with no row sink; `TestDaemon` hands it a `RowsSink::channel()` and decodes the frames with `ConversationRowsChunk::from_frame_line` (PERSO-138).
+
+## Only `App::new` reads `tui.json`
+
+`App::new` loads `tui.json` and groups by default; `default_for_tests`, `shell` and `from_bootstrap` start flat with nowhere to write, so a TUI test stays flat unless it calls `set_conversation_mode(true)`, and pointing `list_modes.path` at a temporary config dir (`ConfigDirOverride`) exercises saving without touching the real one.
+`tc` re-reads the file before each save and changes only its account, so two TUIs keep each other's choices, and a file that failed to load is never written in that run (PERSO-138).
+
+## A desktop reducer test that loads a flat list needs `flatState()`
+
+`messages_loaded` drops a list whose shape does not match the account's mode, so a test built on `initialState()`, where accounts are grouped, that loads a flat list ends with empty data rather than an error; build it on `flatState()` from `clients/desktop/src/test/prefs.ts` (PERSO-138).
