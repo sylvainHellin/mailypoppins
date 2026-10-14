@@ -2680,3 +2680,7 @@ The method refuses an in-process call with no row sink; `TestDaemon` hands it a 
 ## A desktop reducer test that loads a flat list needs `flatState()`
 
 `messages_loaded` drops a list whose shape does not match the account's mode, so a test built on `initialState()`, where accounts are grouped, that loads a flat list ends with empty data rather than an error; build it on `flatState()` from `clients/desktop/src/test/prefs.ts` (PERSO-138).
+
+## A thread row carries no selector, so a client builds a member's own
+
+`message.thread` rows (`ThreadMessage`) have no `selector` field, unlike a `MessageListRow`, so an expanded conversation member that copied the listing's `selector` field got `None` and `y` said the message had none; the TUI spells it with `mp_core::selector::Selector` from the account, the member's mailbox and Message-ID (or `Selector::for_draft`), the same rule the daemon uses for a listing row (PERSO-138).
