@@ -682,6 +682,10 @@ impl App {
                 self.pending_prefix = None;
                 self.collapse_conversation();
             }
+            A::ToggleConversationMode => {
+                self.pending_prefix = None;
+                self.toggle_conversation_mode();
+            }
             A::Archive => {
                 self.pending_prefix = None;
                 if !self.selection.is_empty() {

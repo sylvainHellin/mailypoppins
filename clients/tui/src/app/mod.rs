@@ -238,13 +238,15 @@ pub struct App {
     /// a watermark, and an operation belongs to the client that started it.
     pub events: super::events::EventState,
 
-    /// The accounts whose received mailboxes list as conversations (#0142).
+    /// Which accounts' received mailboxes list as conversations (#0142), and
+    /// the `tui.json` that remembers the ones turned off with `tc`.
     ///
-    /// Empty unless something turns the mode on, so the flat list stays the
-    /// default: rollout step 6 adds the setting and the `tc` toggle that fill
-    /// it, and until then only a test does. The Drafts mailbox stays the flat
-    /// `draft.list` whatever this holds.
-    pub conversation_accounts: HashSet<String>,
+    /// [`App::new`] reads the file and groups every account it does not name;
+    /// every other constructor is a test's and starts flat with nowhere to
+    /// write, so a golden frame of the flat list stays flat and a test turns
+    /// the mode on with [`App::set_conversation_mode`]. The Drafts mailbox
+    /// stays the flat `draft.list` whatever this holds.
+    pub list_modes: crate::prefs::ListModes,
     /// The coalesced re-stream of a conversation list (#0142): at most one
     /// listing in flight and one owed, however many deltas arrive.
     pub restream: Restream,
@@ -300,6 +302,13 @@ impl App {
 
         let mut app = Self::shell(global_config, accounts);
 
+        // The conversation list's per-account choice (#0142), before the
+        // first mailbox load reads it. A file that cannot be read starts the
+        // TUI with every account grouped and says so in the status log.
+        let (list_modes, prefs_warning) =
+            crate::prefs::ListModes::load(crate::prefs::tui_prefs_path());
+        app.list_modes = list_modes;
+
         app.load_from_account(0);
         // The active mailbox is NOT loaded here (#0003 two-phase startup):
         // `load_emails` opens the store, and the first open runs the full
@@ -311,6 +320,9 @@ impl App {
         // fills in a beat later, which is the whole point.
 
         if let Some(warning) = theme_warning {
+            app.push_status(warning, StatusLevel::Warning);
+        }
+        if let Some(warning) = prefs_warning {
             app.push_status(warning, StatusLevel::Warning);
         }
 
@@ -405,7 +417,7 @@ impl App {
             global_config,
             session: None,
             events: super::events::EventState::default(),
-            conversation_accounts: HashSet::new(),
+            list_modes: crate::prefs::ListModes::default(),
             restream: Restream::default(),
         }
     }
@@ -490,7 +502,7 @@ impl App {
             global_config: mp_core::config::GlobalConfig::default(),
             session: None,
             events: super::events::EventState::default(),
-            conversation_accounts: HashSet::new(),
+            list_modes: crate::prefs::ListModes::default(),
             restream: Restream::default(),
         }
     }
@@ -1250,8 +1262,7 @@ impl App {
 
     /// Whether mailbox `idx` of the active account lists as conversations.
     pub fn mailbox_lists_conversations(&self, idx: usize) -> bool {
-        self.conversation_accounts
-            .contains(&self.account_config.name)
+        self.list_modes.grouped(&self.account_config.name)
             && self
                 .mailboxes
                 .get(idx)
@@ -1265,18 +1276,41 @@ impl App {
 
     /// Turn the conversation list on or off for the active account, dropping
     /// every list it has cached in the other mode and reloading the open one.
-    pub fn set_conversation_mode(&mut self, on: bool) {
+    pub fn set_conversation_mode(&mut self, on: bool) -> bool {
         let name = self.account_config.name.clone();
-        let changed = if on {
-            self.conversation_accounts.insert(name)
-        } else {
-            self.conversation_accounts.remove(&name)
-        };
+        let changed = self.list_modes.set(&name, on);
         if changed {
             self.selection.clear();
             self.invalidate_all_caches();
             self.reload_current_mailbox();
         }
+        changed
+    }
+
+    /// `tc`: flip the active account between the conversation list and the
+    /// flat list, remember it in `tui.json`, and say which it is now.
+    ///
+    /// A write that fails keeps the new mode for this run and warns, since
+    /// the list on screen is already the one the user asked for.
+    pub fn toggle_conversation_mode(&mut self) {
+        let name = self.account_config.name.clone();
+        let on = !self.list_modes.grouped(&name);
+        self.set_conversation_mode(on);
+        if let Err(e) = self.list_modes.persist() {
+            self.set_status_level(
+                format!("Conversation view not saved: {e:#}"),
+                StatusLevel::Warning,
+            );
+            return;
+        }
+        let state = if on { "on" } else { "off" };
+        let drafts = if self.find_mailbox_by_kind(MailboxKind::Drafts) == Some(self.active_mailbox)
+        {
+            " (Drafts stays flat)"
+        } else {
+            ""
+        };
+        self.set_status(format!("Conversation view {state} for {name}{drafts}"));
     }
 
     /// The threads of the open list drawn expanded, which a re-stream expands

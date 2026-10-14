@@ -292,6 +292,9 @@ pub enum KeyAction {
     /// `h`: fold the conversation under the cursor, from its header or any
     /// of its members (#0142).
     CollapseConversation,
+    /// Leader `t c`: switch the active account between the conversation list
+    /// and the flat list, remembered in `tui.json` (#0142).
+    ToggleConversationMode,
     /// Leader `t a`: prompt for a file path and append it to the cursor
     /// draft's `attachments:` frontmatter (#0098). Drafts-only.
     AttachFile,
@@ -1039,6 +1042,19 @@ pub static KEYMAP: &[KeyBinding] = &[
         "Show conversation (thread)",
         false,
     ),
+    // `tc` flips the account between the conversation list and the flat list
+    // and remembers it in `tui.json` (#0142); no guard, since an empty mailbox
+    // can be switched as well.
+    pg(
+        "tc",
+        Chord::Char('c'),
+        't',
+        KeyCtx::Message,
+        Guard::None,
+        KeyAction::ToggleConversationMode,
+        "Conversation view on / off for this account",
+        false,
+    ),
     pg(
         "to",
         Chord::Char('o'),
@@ -1240,27 +1256,25 @@ pub static KEYMAP: &[KeyBinding] = &[
         "Select all visible",
         false,
     ),
-    // `l` / `h` expand and fold a conversation row (#0142). Dispatch-only rows
-    // with no keys and no description, so neither the help overlay, the key
-    // dump nor the palette shows them while the conversation list is reachable
-    // from tests alone; rollout step 6, which adds the `tc` toggle, gives them
-    // their keys and descriptions and regenerates the published tables.
+    // `l` / `h` expand and fold a conversation row (#0142). Free in the list:
+    // the file picker overlay reads its own `h` / `l` before any KEYMAP row,
+    // and `sl` is a chord under the `s` leader. Both do nothing in a flat list.
     bg(
-        "",
+        "l",
         Chord::Char('l'),
         KeyCtx::List,
         Guard::NonEmptyList,
         KeyAction::ExpandConversation,
-        "",
+        "Expand the conversation (conversation view)",
         false,
     ),
     bg(
-        "",
+        "h",
         Chord::Char('h'),
         KeyCtx::List,
         Guard::NonEmptyList,
         KeyAction::CollapseConversation,
-        "",
+        "Collapse the conversation (conversation view)",
         false,
     ),
     // `ce` edit recipients, Drafts only (the compose family's list-scoped tail).

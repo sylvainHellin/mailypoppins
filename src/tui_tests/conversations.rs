@@ -983,3 +983,65 @@ fn a_selected_conversation_keeps_its_members_across_a_collapse() {
     assert_eq!(fx.archive_selection(), inbox);
     assert_eq!(fx.shape(), ["H2 Re: Angebot", "H1 Wochenbericht"]);
 }
+
+/// `tc` and its palette entry switch the account between the conversation list
+/// and the flat list, and `tui.json` remembers the choice across a restart
+/// (#0142, rollout step 6). The file lives in a config directory of the test's
+/// own, never the user's.
+#[test]
+fn tc_and_the_palette_switch_the_list_and_tui_json_remembers_it() {
+    use crate::tui::app::{palette_actions, KeyAction, Overlay};
+    use crate::tui::prefs::{tui_prefs_path, ListModes};
+
+    let mut fx = Fixture::new();
+    let home = tempfile::tempdir().expect("a home");
+    let config = crate::config::test_env::ConfigDirOverride::new(home.path());
+    config.set_config_dir(&home.path().join("config"));
+    let path = tui_prefs_path();
+    assert!(path.starts_with(home.path()), "{}", path.display());
+    fx.app.list_modes.path = Some(path.clone());
+
+    fx.char('t');
+    fx.char('c');
+    assert_eq!(run_load(&mut fx.app), Some(true), "the flat list loads");
+    assert!(fx.app.emails.iter().all(|e| e.conv.is_none()), "flat");
+    let stored: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("tui.json written"))
+            .expect("tui.json is JSON");
+    assert_eq!(stored, json!({ "flat_list_accounts": [ACCOUNT] }));
+    assert!(
+        fx.app
+            .status_message
+            .as_deref()
+            .is_some_and(|m| m.contains("Conversation view off")),
+        "{:?}",
+        fx.app.status_message
+    );
+
+    // A restart reads the same file: the account stays flat, and an account
+    // the file does not name is grouped.
+    let (restarted, warning) = ListModes::load(path.clone());
+    assert_eq!(warning, None);
+    assert!(!restarted.grouped(ACCOUNT));
+    assert!(restarted.grouped("another"));
+
+    // The palette carries the same row and runs the same toggle.
+    let label = palette_actions()
+        .into_iter()
+        .find(|(action, _)| *action == KeyAction::ToggleConversationMode)
+        .map(|(_, label)| label)
+        .expect("tc is in the palette");
+    fx.char(':');
+    for c in label.chars() {
+        fx.char(c);
+    }
+    assert!(matches!(fx.app.overlay, Overlay::Palette(_)));
+    fx.key(crossterm::event::KeyCode::Enter);
+    assert_eq!(run_load(&mut fx.app), Some(true), "the grouped list loads");
+    assert_eq!(fx.shape(), ["H4 Re: Frage zum Bericht", "H1 Wochenbericht"]);
+    let stored: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("tui.json written"))
+            .expect("tui.json is JSON");
+    assert_eq!(stored, json!({ "flat_list_accounts": [] }));
+    assert!(ListModes::load(path).0.grouped(ACCOUNT));
+}
