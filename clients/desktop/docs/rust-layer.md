@@ -82,7 +82,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `list_accounts` | none | `AccountInfo[]` |
 | `list_mailboxes` | `account` | `MailboxListing` |
 | `list_messages` | `account`, `mailbox` (slug), `conversations` (optional, default false) | `MessageList`; a received mailbox is `message.list_stream` collected whole on the session thread under the 15 s list budget, so a mailbox past the 16 MiB response cap lists, and the Drafts mailbox is `draft.list` (#0138); with `conversations` it is the `conversations` variant, `message.list_conversations` collected the same way, one row per conversation, Drafts still `draft.list` (#0142) |
-| `message_thread` | `account`, `row_id`, `mailbox` (slug) | `ThreadListing`: the conversation of the row as the expansion under its conversation row, `message.thread` with `prefer_mailbox` the listed mailbox and `include_drafts`, oldest first (#0142) |
+| `message_thread` | `account`, `row_id`, `mailbox` (slug) | `ThreadListing`: the conversation of the row as the expansion under its conversation row, `message.thread` with `prefer_mailbox` the listed mailbox and `include_drafts`, oldest first, which the list shows reversed; each member carries its `selector` and a draft member its `path` (#0142) |
 | `message_text` | `account`, `row_id` | `MessageText`: the stored plain text, `body: null` when the store holds none; `not_found` for an unknown row |
 | `message_html_meta` | `account`, `row_id` | `MessageMeta` |
 | `search_local` | `params: LocalSearchParams` | `LocalSearchHit[]` |

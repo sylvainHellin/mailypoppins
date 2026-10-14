@@ -1037,6 +1037,7 @@ fn the_thread_with_drafts_carries_a_draft_member() {
         "id",
         "mailbox",
         "message_id",
+        "selector",
     ];
     let name = "message.thread.drafts.response.json";
     let response = load(name);
@@ -1046,13 +1047,20 @@ fn the_thread_with_drafts_carries_a_draft_member() {
         assert_keys(member, MESSAGE, &format!("messages[{index}]"));
     }
     let mut with_draft = MESSAGE.to_vec();
-    with_draft.push("draft_id");
+    with_draft.extend(["draft_id", "path"]);
     assert_keys(draft, &with_draft, "the draft member");
     assert_eq!(draft["id"], json!(0));
     assert_eq!(draft["mailbox"], json!("drafts"));
     assert_eq!(draft["message_id"], json!(""));
+    assert_eq!(
+        draft["selector"],
+        json!(format!(
+            "mp://work/drafts/{}",
+            draft["draft_id"].as_str().unwrap_or_default()
+        ))
+    );
 
-    // The answer without the two parameters carries no draft_id key.
+    // The answer without the two parameters carries no draft_id or path key.
     let plain = load("message.thread.response.json");
     for member in plain["result"]["messages"].as_array().expect("messages") {
         assert_keys(member, MESSAGE, "a message.thread member");

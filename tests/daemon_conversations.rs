@@ -636,6 +636,14 @@ async fn an_inbox_message_its_two_sent_replies_and_a_draft_are_one_conversation(
     assert_eq!((member.id, member.message_id.as_str()), (0, ""));
     assert_eq!(member.from, "alpha@example.com");
     assert!(!member.current);
+    // Each member carries the selector `y` copies, and a draft its file.
+    assert_eq!(member.selector, format!("mp://{ACCOUNT}/drafts/{draft_id}"));
+    let path = member.path.as_deref().expect("the draft member's file");
+    assert!(std::path::Path::new(path).is_file(), "{path}");
+    assert_eq!(
+        thread.messages[0].selector,
+        format!("mp://{ACCOUNT}/inbox/{}", QUESTION.trim_matches(['<', '>']))
+    );
     let message_ids: Vec<String> = thread
         .messages
         .iter()

@@ -139,7 +139,7 @@ The frontmatter value is the source row's `messages.message_id` copied verbatim 
   `ThreadMessage` (`crates/mp-protocol/src/listing.rs:233`) gains `draft_id: Option<String>`; a draft member carries its draft `id` there, `id: 0`, `mailbox: "drafts"`, an empty `message_id`, the account's address as `from`, and its frontmatter `date` as `date_display`.
 - `thread` does not call `only_params`, so an older daemon would ignore both parameters without an error.
   That cannot reach a client: both ship in step 2 with `message.list_conversations`, which the clients require at the handshake.
-- The expanded list is newest first in the TUI, the order of the mailbox around it (the desktop still lists it oldest first, as `message.thread` answers), each member labelled with its mailbox (`Inbox`, `Sent`, `Archive`, `Drafts`, or an extra mailbox's label) whatever mailbox the list shows.
+- The expanded list is newest first, the order of the mailbox around it (each client reverses `message.thread`'s oldest-first answer), each member labelled with its mailbox (`Inbox`, `Sent`, `Archive`, `Drafts`, or an extra mailbox's label) whatever mailbox the list shows.
 
 ### Unread and actions on a conversation row
 
@@ -227,7 +227,7 @@ Until step 6 the clients default to the flat list, so `main` never ships a mode 
 
 ## Acceptance criteria
 
-- [x] In the inbox, a conversation of an inbox message, a draft reply and two sent replies is one row with `(3)`, the draft marker and the date of the later sent reply; expanding it lists four members, in the TUI newest first labelled `Drafts`, `Sent`, `Sent` and `Inbox`.
+- [x] In the inbox, a conversation of an inbox message, a draft reply and two sent replies is one row with `(3)`, the draft marker and the date of the later sent reply; expanding it lists four members newest first labelled `Drafts`, `Sent`, `Sent` and `Inbox`.
   Evidence: `tests/daemon_conversations.rs` (`an_inbox_message_its_two_sent_replies_and_a_draft_are_one_conversation`) and the desktop's `conversations.test.tsx` (`lists one row per conversation...`, `expands on Enter...`).
 - [x] The same conversation is one row in Sent, with the same four members on expansion.
   Evidence: the same daemon test, its Sent half.

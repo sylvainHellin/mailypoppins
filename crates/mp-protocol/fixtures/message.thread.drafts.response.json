@@ -16,7 +16,8 @@
         "from": "Ivana <ivana@example.com>",
         "id": 3141,
         "mailbox": "inbox",
-        "message_id": "<Bericht@example.com>"
+        "message_id": "<Bericht@example.com>",
+        "selector": "mp://work/inbox/Bericht@example.com"
       },
       {
         "current": false,
@@ -30,7 +31,8 @@
         "from": "alice@example.com",
         "id": 3142,
         "mailbox": "sent",
-        "message_id": "<Re-Bericht@example.com>"
+        "message_id": "<Re-Bericht@example.com>",
+        "selector": "mp://work/sent/Re-Bericht@example.com"
       },
       {
         "current": false,
@@ -45,7 +47,9 @@
         "from": "alice@example.com",
         "id": 0,
         "mailbox": "drafts",
-        "message_id": ""
+        "message_id": "",
+        "path": "/home/alice/.local/share/mailypoppins/work/drafts/2026-07-03-re-bericht.md",
+        "selector": "mp://work/drafts/c3f1a2b4d5e6f708"
       }
     ],
     "subject": "Bericht",

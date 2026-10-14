@@ -1134,8 +1134,10 @@ export type ConversationEntry =
 
 /**
  * The visible sequence of a conversation list, after the filter: each
- * header, followed by its members, oldest first, once its expansion read
- * them. A filter matches headers only; an expanded header keeps its members.
+ * header, followed by its members, newest first like the list around them
+ * (the expansion holds them oldest first, as `message.thread` answers), once
+ * its expansion read them. A filter matches headers only; an expanded header
+ * keeps its members.
  */
 export function conversationEntries(list: MessageList | null, expanded: Record<string, Expansion>, filter: string): ConversationEntry[] {
   return filteredConversations(list, filter).flatMap((row): ConversationEntry[] => {
@@ -1144,7 +1146,7 @@ export function conversationEntries(list: MessageList | null, expanded: Record<s
     const members = e.data?.messages ?? [];
     return [
       { kind: "header", row, expanded: true },
-      ...members.map((member): ConversationEntry => ({ kind: "member", thread_id: row.thread_id, member })),
+      ...[...members].reverse().map((member): ConversationEntry => ({ kind: "member", thread_id: row.thread_id, member })),
     ];
   });
 }
@@ -1262,4 +1264,11 @@ export function readerDraftKey(s: AppState): string | null {
 export function conversationDraft(s: AppState): string | null {
   const member = s.search ? null : s.selection.conversation?.member;
   return member?.startsWith("draft:") ? member.slice("draft:".length) : null;
+}
+
+/** The expanded member under the conversation cursor, null on a header or outside a conversation list. */
+export function conversationMember(s: AppState): ThreadMessage | null {
+  const c = s.search ? null : s.selection.conversation;
+  if (!c?.member) return null;
+  return s.expanded[c.thread_id]?.data?.messages.find((m) => memberKey(m) === c.member) ?? null;
 }

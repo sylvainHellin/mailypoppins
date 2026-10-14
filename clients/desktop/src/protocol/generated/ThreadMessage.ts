@@ -9,10 +9,10 @@ import type { MessageFlags } from "./MessageFlags";
  * crosses mailboxes: a listing names its mailbox once and every row of it is
  * in that mailbox, while a thread holds the Inbox copy and the archived
  * original side by side and the overlay switches mailbox when it opens one.
- * It carries what the overlay renders and nothing else, which is why there is
- * no `date_sort` here: the daemon orders the conversation oldest first, and a
- * client that re-sorted it would be inventing an order the overlay does not
- * have.
+ * It carries what the overlay and an expanded conversation row use, which is
+ * why there is no `date_sort` here: the daemon orders the conversation oldest
+ * first, and a client that shows it newest first reverses that order rather
+ * than inventing one of its own.
  */
 export type ThreadMessage = {
 /**
@@ -66,4 +66,19 @@ current: boolean,
  * `message_id`, the account's address as `from` and the frontmatter
  * `date` as `date_display`.
  */
-draft_id?: string | null, };
+draft_id?: string | null,
+/**
+ * The canonical `mp://` selector of this member, the one a listing row
+ * carries for the same copy: `mp://<account>/drafts/<id>` for a draft
+ * member (#0142).
+ *
+ * It is what `y` copies on an expanded member; spelled by the daemon so
+ * every client applies the one encoding rule. `""` from a daemon older
+ * than the field.
+ */
+selector: string,
+/**
+ * The file of a draft member, the path `y` copies on a draft in the
+ * desktop (#0142); absent for a message.
+ */
+path?: string | null, };

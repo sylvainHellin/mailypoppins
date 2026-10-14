@@ -2681,6 +2681,6 @@ The method refuses an in-process call with no row sink; `TestDaemon` hands it a 
 
 `messages_loaded` drops a list whose shape does not match the account's mode, so a test built on `initialState()`, where accounts are grouped, that loads a flat list ends with empty data rather than an error; build it on `flatState()` from `clients/desktop/src/test/prefs.ts` (PERSO-138).
 
-## A thread row carries no selector, so a client builds a member's own
+## An expanded conversation member takes its selector off the thread row
 
-`message.thread` rows (`ThreadMessage`) have no `selector` field, unlike a `MessageListRow`, so an expanded conversation member that copied the listing's `selector` field got `None` and `y` said the message had none; the TUI spells it with `mp_core::selector::Selector` from the account, the member's mailbox and Message-ID (or `Selector::for_draft`), the same rule the daemon uses for a listing row (PERSO-138).
+`message.thread` rows (`ThreadMessage`) had no `selector`, unlike a `MessageListRow`, so both clients built expanded members with an empty one and `y` on a member copied nothing; the daemon now spells `selector` (and a draft member's `path`) on every thread row, so no client re-implements the selector's percent-encoding (PERSO-138).

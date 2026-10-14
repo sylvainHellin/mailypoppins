@@ -351,10 +351,10 @@ pub struct ConversationListing {
 /// crosses mailboxes: a listing names its mailbox once and every row of it is
 /// in that mailbox, while a thread holds the Inbox copy and the archived
 /// original side by side and the overlay switches mailbox when it opens one.
-/// It carries what the overlay renders and nothing else, which is why there is
-/// no `date_sort` here: the daemon orders the conversation oldest first, and a
-/// client that re-sorted it would be inventing an order the overlay does not
-/// have.
+/// It carries what the overlay and an expanded conversation row use, which is
+/// why there is no `date_sort` here: the daemon orders the conversation oldest
+/// first, and a client that shows it newest first reverses that order rather
+/// than inventing one of its own.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ThreadMessage {
@@ -401,6 +401,19 @@ pub struct ThreadMessage {
     /// `date` as `date_display`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_id: Option<String>,
+    /// The canonical `mp://` selector of this member, the one a listing row
+    /// carries for the same copy: `mp://<account>/drafts/<id>` for a draft
+    /// member (#0142).
+    ///
+    /// It is what `y` copies on an expanded member; spelled by the daemon so
+    /// every client applies the one encoding rule. `""` from a daemon older
+    /// than the field.
+    #[serde(default)]
+    pub selector: String,
+    /// The file of a draft member, the path `y` copies on a draft in the
+    /// desktop (#0142); absent for a message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// The whole `message.thread` answer: one conversation, oldest first.
@@ -959,6 +972,8 @@ mod tests {
                 },
                 current: false,
                 draft_id: None,
+                selector: "mp://work/Team%2FReports/root@example.com".to_string(),
+                path: None,
             }],
         };
         let encoded = serde_json::to_value(&thread).expect("it serialises");

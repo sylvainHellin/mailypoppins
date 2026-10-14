@@ -80,7 +80,7 @@ const METHOD: &str = "message.thread";
 
 /// Every field of a thread row, which is what the fixture and
 /// `docs/daemon-protocol.md` document and what a client may read.
-const ROW_FIELDS: [&str; 7] = [
+const ROW_FIELDS: [&str; 8] = [
     "current",
     "date_display",
     "flags",
@@ -88,6 +88,7 @@ const ROW_FIELDS: [&str; 7] = [
     "id",
     "mailbox",
     "message_id",
+    "selector",
 ];
 
 /// Every field of the answer.
@@ -547,6 +548,11 @@ async fn the_row_carries_every_field_the_overlay_renders() {
     for (wire, row) in thread.messages.iter().zip(rows.iter()) {
         let flags = row.flags();
         assert_eq!(wire.mailbox, row.mailbox);
+        assert_eq!(
+            wire.selector,
+            mailypoppins::selector::Selector::for_message(fixture::ACCOUNT, row).to_string(),
+            "the selector a listing row of the same copy carries"
+        );
         assert_eq!(wire.from, row.from.clone().unwrap_or_default());
         assert_eq!(
             wire.date_display,

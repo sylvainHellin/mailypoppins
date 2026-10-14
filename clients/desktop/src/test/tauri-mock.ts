@@ -846,11 +846,11 @@ const threadOf = (r: FixtureRow) => (CANNED_MEMBERS.includes(r.message_id) ? CAN
 const addressOf = (from: string) => (/<([^>]+)>/.exec(from)?.[1] ?? from).trim().toLowerCase();
 
 /** The drafts that join a conversation: the canned one while it is listed and not sent. */
-function conversationDrafts(account: string): { id: string; date: string; thread_id: string }[] {
+function conversationDrafts(account: string): { id: string; date: string; thread_id: string; path: string }[] {
   if (account !== CANNED_DRAFT.account) return [];
   return (mock.drafts[account]?.drafts ?? [])
     .filter((d) => d.id === CANNED_DRAFT.id && d.status !== "sent")
-    .map((d) => ({ id: d.id, date: d.date ?? "", thread_id: CANNED_THREAD }));
+    .map((d) => ({ id: d.id, date: d.date ?? "", thread_id: CANNED_THREAD, path: d.path }));
 }
 
 /** Every row of the account, with its mailbox and its wire shape. */
@@ -921,6 +921,7 @@ export function threadListing(account: string, rowId: number, prefer: string): T
       date_display: row.date_display,
       flags: row.flags,
       current: row.message_id === addressed.row.message_id,
+      selector: row.selector,
     },
   }));
   for (const d of conversationDrafts(account).filter((x) => x.thread_id === tid)) {
@@ -933,6 +934,8 @@ export function threadListing(account: string, rowId: number, prefer: string): T
       flags: { seen: false, answered: false, forwarded: false, flagged: false },
       current: false,
       draft_id: d.id,
+      selector: `mp://${account}/drafts/${d.id}`,
+      path: d.path,
     };
     const at = messages.findIndex((x) => x.date > d.date);
     messages.splice(at < 0 ? messages.length : at, 0, { date: d.date, m });

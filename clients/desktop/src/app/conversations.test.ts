@@ -49,17 +49,17 @@ describe("the conversation list", () => {
     expect(s.selection.message?.row_id).toBe(list(s).rows[0].latest.id);
   });
 
-  it("expands to four members oldest first under the header, and collapses back to it", () => {
+  it("expands to four members newest first under the header, and collapses back to it", () => {
     let s = grouped();
     s = expanded(s);
     const entries = conversationEntries(s.messages.data, s.expanded, "");
     const at = entries.findIndex((e) => e.kind === "header" && e.row.thread_id === CANNED_THREAD);
     const members = entries.slice(at + 1, at + 5).map((e) => (e.kind === "member" ? [e.member.mailbox, e.member.draft_id ?? e.member.id] : null));
     expect(members).toEqual([
-      ["inbox", 1007],
-      ["sent", 1010],
-      ["sent", 1000],
       ["drafts", "offsite-note"],
+      ["sent", 1000],
+      ["sent", 1010],
+      ["inbox", 1007],
     ]);
     // The cursor on the draft member, then a collapse puts it on the header.
     s = run(s, { type: "select_conversation", thread_id: CANNED_THREAD, member: "draft:offsite-note" });

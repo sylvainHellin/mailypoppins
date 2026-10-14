@@ -442,7 +442,8 @@ A query nothing matches is an empty `hits` array, not an error.
     "from": "Ivana <ivana@example.com>",
     "date_display": "Thu, 2 Jul 2026 13:57:30 +0200",
     "flags": {"seen": true, "answered": true, "forwarded": false, "flagged": false},
-    "current": false
+    "current": false,
+    "selector": "mp://work/inbox/Bericht@example.com"
   }]
 }
 ```
@@ -451,10 +452,11 @@ The rows are `mp_protocol::listing::ThreadMessage` and the answer is `ThreadList
 The grouping is `store::read::thread_messages`: the set of rows ingest gave the same `thread_id`, which is the `Message-ID` of the root the `In-Reply-To` / `References` chain resolved to, decided once at ingest and read out of the indexed column rather than recomputed from headers.
 A message ingest assigned no thread to is its own thread, so `thread_id` is then its own `Message-ID`.
 
-The order is `date_sort ASC, id ASC`, the reverse of a listing: a conversation reads oldest to newest, the way a mail client threads one.
+The order is `date_sort ASC, id ASC`, the reverse of a listing: a conversation reads oldest to newest, the way the `T` overlay threads one; the conversation list's expansion shows it newest first in both clients, by reversing this order.
 One row per `Message-ID`, because the same message sits in the Inbox and in the Archive after a move and the conversation is a list of messages rather than of copies; the row that survives is the first one the order yields, which is the earliest copy ingest saw.
 
-**A thread row is not a listing row.** It carries `mailbox`, which a listing names once for every row it holds, because a conversation crosses mailboxes and a client opens a row in the one it is in; it carries no `date_sort`, no `uid`, no `selector` and no `to`/`cc`/`bcc`, because the daemon orders the conversation and the overlay renders a sender, a date, four flag markers and a mailbox.
+**A thread row is not a listing row.** It carries `mailbox`, which a listing names once for every row it holds, because a conversation crosses mailboxes and a client opens a row in the one it is in; it carries no `date_sort`, no `uid` and no `to`/`cc`/`bcc`, because the daemon orders the conversation and the overlay renders a sender, a date, four flag markers and a mailbox.
+It does carry `selector`, the canonical `mp://` name a listing row gives the same copy (`mp://<account>/drafts/<id>` for a draft member), which is what `y` copies on an expanded member, and a draft member carries its file as `path` (#0142).
 A client that wants the whole message asks `message.get` with the row's `id`, which is the same `messages.id` a listing row carries under the same name.
 
 `current` marks the message the conversation was opened from, and it is decided on the `Message-ID` rather than on the row id: the dedup above may have kept another copy of the addressed message, so the marked row can carry an `id` other than the one the call named.

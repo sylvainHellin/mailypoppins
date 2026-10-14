@@ -612,7 +612,7 @@ export function visibleItems(s: AppState): ListItem[] {
         kind: "member",
         thread_id: e.thread_id,
         key: memberKey(m),
-        ref: m.draft_id ? null : { row_id: m.id, message_id: m.message_id, selector: "" },
+        ref: m.draft_id ? null : { row_id: m.id, message_id: m.message_id, selector: m.selector },
         draft: m.draft_id ?? null,
       };
     });

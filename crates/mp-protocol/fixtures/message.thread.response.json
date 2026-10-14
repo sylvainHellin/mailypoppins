@@ -16,7 +16,8 @@
         "from": "Ivana <ivana@example.com>",
         "id": 3141,
         "mailbox": "inbox",
-        "message_id": "<Bericht@example.com>"
+        "message_id": "<Bericht@example.com>",
+        "selector": "mp://work/inbox/Bericht@example.com"
       },
       {
         "current": false,
@@ -30,7 +31,8 @@
         "from": "alice@example.com",
         "id": 3142,
         "mailbox": "sent",
-        "message_id": "<Re-Bericht@example.com>"
+        "message_id": "<Re-Bericht@example.com>",
+        "selector": "mp://work/sent/Re-Bericht@example.com"
       },
       {
         "current": true,
@@ -44,7 +46,8 @@
         "from": "Ivana <ivana@example.com>",
         "id": 3148,
         "mailbox": "inbox",
-        "message_id": "<Re-Re-Bericht@example.com>"
+        "message_id": "<Re-Re-Bericht@example.com>",
+        "selector": "mp://work/inbox/Re-Re-Bericht@example.com"
       }
     ],
     "subject": "Re: Bericht",

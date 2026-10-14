@@ -520,6 +520,7 @@ impl State {
                 id: d.id.clone(),
                 date: d.date.clone().unwrap_or_default(),
                 thread_id: conversations::CANNED_THREAD.to_string(),
+                path: d.path.clone(),
             })
             .collect()
     }

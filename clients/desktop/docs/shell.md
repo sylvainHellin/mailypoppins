@@ -1074,7 +1074,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `Tab`/`Shift+Tab`: cycle panes; `gm`: the sidebar; `gr`: the reader, a desktop key; `Space m`: Mail and its list; `Space c`, `Space a`: Contacts and Calendar (see Views); `ga`: next account.
 - `1`-`9`: the selected account's nth mailbox.
 - `gg`/`G`, `Home`/`End`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`: jumps in the list or the reader.
-- `:` or `Ctrl+p`: the command palette; `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector, or in Drafts the draft's file path (PERSO-100).
+- `:` or `Ctrl+p`: the command palette; `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector, or in Drafts and on a conversation's draft member the draft's file path (PERSO-100, #0142).
 - `Escape`: in a full-pane view, back to Mail; with the outbox shown and the focus outside the reader, back to the mailbox list; else clear the marks when any are set and the outbox is not shown; else back to the list from the reader; with a search shown, back to the mailbox list; else clear the selection; in the narrow layout, up one view.
 - `Enter` in the field: search the store, or the server for a query only it can answer; `Shift+Enter`: search the server; `ff`: the Server Search form (see Search).
 - `Cmd+[` or `Alt+Left`: back through the focus history.

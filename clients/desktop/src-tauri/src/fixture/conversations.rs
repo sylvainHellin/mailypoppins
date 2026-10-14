@@ -43,13 +43,14 @@ const DRAFTS: &str = "drafts";
 /// The most participants a row carries.
 const PARTICIPANTS: usize = 5;
 
-/// A draft that joins a conversation: its id, its frontmatter date and the
-/// `thread_id` of the message it answers.
+/// A draft that joins a conversation: its id, its frontmatter date, the
+/// `thread_id` of the message it answers and its file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftMember {
     pub id: String,
     pub date: String,
     pub thread_id: String,
+    pub path: String,
 }
 
 /// The conversation a fixture row belongs to.
@@ -213,6 +214,8 @@ pub fn thread(
                 date_display: row.date_display,
                 flags: row.flags,
                 draft_id: None,
+                selector: row.selector,
+                path: None,
             };
             (row.date_sort, member)
         })
@@ -227,6 +230,8 @@ pub fn thread(
             flags: MessageFlags::default(),
             current: false,
             draft_id: Some(draft.id.clone()),
+            selector: format!("mp://{account}/{DRAFTS}/{}", draft.id),
+            path: Some(draft.path.clone()),
         };
         let at = messages
             .iter()
@@ -307,6 +312,7 @@ mod tests {
             id: "offsite-note".to_string(),
             date: "2026-09-27T18:40:00".to_string(),
             thread_id: CANNED_THREAD.to_string(),
+            path: "/fixture/drafts/offsite-note.md".to_string(),
         }]
     }
 

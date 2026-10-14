@@ -1137,10 +1137,10 @@ pub(super) fn address(
 /// A row type of its own rather than [`to_json`]'s: a listing names its mailbox
 /// once and every row of it is in that mailbox, while a conversation holds the
 /// Inbox copy and the archived original side by side, so each row says which
-/// mailbox it is in. It carries nothing the overlay does not render - no `uid`,
-/// no `selector`, no recipients, and no `date_sort`, because the daemon orders
-/// the conversation and a client that re-sorted it would be inventing an order
-/// the overlay does not have.
+/// mailbox it is in. It carries what the overlay and an expanded conversation
+/// row use - the `selector` `y` copies, but no `uid`, no recipients, and no
+/// `date_sort`, because the daemon orders the conversation and a client that
+/// re-sorted it would be inventing an order of its own.
 ///
 /// `current` is decided on the `Message-ID` rather than on the row id, because
 /// the fold keeps the first copy its order yields: the surviving row for the
@@ -1200,6 +1200,8 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
                 },
                 current: member.message_id == row.message_id,
                 draft_id: None,
+                selector: Selector::for_message(&name, member).to_string(),
+                path: None,
             };
             (*stamped, message)
         })
@@ -1258,6 +1260,8 @@ fn join_drafts(
             date_display: draft.date.unwrap_or_default(),
             flags: mp_protocol::listing::MessageFlags::default(),
             current: false,
+            selector: Selector::for_draft(name, &draft.id).to_string(),
+            path: Some(draft.path),
             draft_id: Some(draft.id),
         };
         members.insert(at, (Some(draft.mtime), member));

@@ -63,6 +63,9 @@ pub struct DraftRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedDraft {
     pub id: String,
+    /// The draft file, which a conversation's draft member carries as its
+    /// `path`.
+    pub path: String,
     pub mtime: i64,
     pub date: Option<String>,
     /// The `Message-ID` it answers or forwards, whichever of the two the
@@ -481,7 +484,7 @@ fn linked_id(value: Option<&str>) -> Option<String> {
 /// ingest threads stands for it.
 pub fn linked(store: &Store, account: &str) -> Result<Vec<LinkedDraft>> {
     let mut stmt = store.conn().prepare(
-        "SELECT id, mtime, date, COALESCE(in_reply_to, forwarded_from)
+        "SELECT id, path, mtime, date, COALESCE(in_reply_to, forwarded_from)
          FROM drafts
          WHERE account = ?1 AND (in_reply_to IS NOT NULL OR forwarded_from IS NOT NULL)
            AND IFNULL(status, '') <> 'sent'
@@ -490,9 +493,10 @@ pub fn linked(store: &Store, account: &str) -> Result<Vec<LinkedDraft>> {
     let rows = stmt.query_map([account], |row| {
         Ok(LinkedDraft {
             id: row.get(0)?,
-            mtime: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-            date: row.get(2)?,
-            source: row.get(3)?,
+            path: row.get(1)?,
+            mtime: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            date: row.get(3)?,
+            source: row.get(4)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()

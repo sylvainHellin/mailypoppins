@@ -155,7 +155,7 @@ pub fn conversation_members(
         .messages
         .iter()
         .rev()
-        .map(|member| entry_from_member(member, account, thread_id, &thread.subject))
+        .map(|member| entry_from_member(member, thread_id, &thread.subject))
         .collect())
 }
 

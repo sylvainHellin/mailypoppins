@@ -20,6 +20,7 @@ import { saveReaderMode, toggleReaderMode } from "@/app/readerMode";
 import { checkForUpdates, installUpdate, restartIntoUpdate } from "@/app/updates";
 import { actionTargets, cursorKey, type Action } from "@/app/reducer";
 import {
+  conversationMember,
   conversationModeOn,
   conversationOf,
   draftItems,
@@ -139,6 +140,13 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       if (draftsShown(s) && s.selection.draft) {
         const draft = draftItems(s.messages.data).find((d) => d.id === s.selection.draft);
         if (draft) void copyText(draft.path, draft.path, dispatch);
+        return;
+      }
+      // A conversation's draft member copies its file too, off the expansion
+      // (ticket 0142); a message member has its own selector on the ref.
+      const member = conversationMember(s);
+      if (member?.draft_id) {
+        if (member.path) void copyText(member.path, member.path, dispatch);
         return;
       }
       const selector = s.selection.message?.selector;

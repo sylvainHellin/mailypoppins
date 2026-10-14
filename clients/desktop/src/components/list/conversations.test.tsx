@@ -4,7 +4,7 @@
 
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import App from "@/App";
 import { PREFS_KEY } from "@/app/prefs";
 import { initialState } from "@/app/state";
@@ -50,8 +50,9 @@ describe("the conversation list", () => {
     await user.click(offsite());
     await user.keyboard("{Enter}");
     await waitFor(() => expect(members()).toHaveLength(4));
-    expect(members().map((m) => m.getAttribute("aria-label")?.split(":")[0])).toEqual(["Inbox", "Sent", "Sent", "Drafts"]);
-    expect(members().map((m) => m.getAttribute("data-member"))).toEqual(["row:1007", "row:1010", "row:1000", "draft:offsite-note"]);
+    // Newest first, like the list around them.
+    expect(members().map((m) => m.getAttribute("aria-label")?.split(":")[0])).toEqual(["Drafts", "Sent", "Sent", "Inbox"]);
+    expect(members().map((m) => m.getAttribute("data-member"))).toEqual(["draft:offsite-note", "row:1000", "row:1010", "row:1007"]);
     expect(callsOf("message_thread")).toEqual([{ account: "work", row_id: 1007, mailbox: "inbox" }]);
     expect(cursorRow()).toBe(offsite());
     expect(offsite()).toHaveAttribute("aria-expanded", "true");
@@ -68,7 +69,7 @@ describe("the conversation list", () => {
     await user.click(offsite());
     await user.keyboard("l");
     await waitFor(() => expect(members()).toHaveLength(4));
-    await user.keyboard("jj");
+    await user.keyboard("jjj");
     expect(cursorRow()?.getAttribute("data-member")).toBe("row:1010");
     await waitFor(() => expect(callsOf("message_html_meta")).toContainEqual({ account: "work", row_id: 1010 }));
     // The sidebar keeps the inbox: the member opens by its row id where it lives.
@@ -87,8 +88,33 @@ describe("the conversation list", () => {
     await waitFor(() => expect(offsite()).not.toBeNull());
     await user.click(within(offsite()).getByRole("button", { name: "Expand conversation (l)" }));
     await waitFor(() => expect(members()).toHaveLength(4));
-    await user.click(members()[3]);
+    await user.click(members()[0]);
     await waitFor(() => expect(callsOf("draft_preview")).toContainEqual({ account: "work", id: "offsite-note" }));
+  });
+
+  it("y on a member copies its own selector, and on a draft member its file", async () => {
+    const { user } = renderGrouped();
+    await shellReady();
+    await waitFor(() => expect(offsite()).not.toBeNull());
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    try {
+      await user.click(offsite());
+      await user.keyboard("l");
+      await waitFor(() => expect(members()).toHaveLength(4));
+      await user.keyboard("j");
+      expect(cursorRow()?.getAttribute("data-member")).toBe("draft:offsite-note");
+      await user.keyboard("y");
+      expect(writeText).toHaveBeenLastCalledWith("/fixture/work/drafts/offsite-note.md");
+      await user.keyboard("jj");
+      expect(cursorRow()?.getAttribute("data-member")).toBe("row:1010");
+      await user.keyboard("y");
+      const sent = mock.rows.work.sent.find((r) => r.id === 1010);
+      expect(writeText).toHaveBeenLastCalledWith(`mp://work/sent/${sent?.message_id.replace(/^<|>$/g, "")}`);
+      expect(writeText).toHaveBeenCalledTimes(2);
+    } finally {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    }
   });
 
   it("archives a collapsed row's members in the inbox and nothing in Sent", async () => {
