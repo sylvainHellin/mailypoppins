@@ -170,15 +170,16 @@ cargo install --path .`}
         nothing reads the copy back.
       </p>
       <p>
-        Each mailbox lists one row per conversation: the question in your inbox, your replies
-        in Sent and the draft of your next reply are one row, dated by its newest message and
-        marked <code>(3)</code> with the number of messages. The first <code>Enter</code> on a
-        conversation of several messages expands it in place, each member labelled with the
-        mailbox it lives in; the next one reads it. Archive, delete, flag and mark read on a
+        Each mailbox but Drafts lists one row per conversation: the question in your inbox, your
+        replies in Sent and the draft of your next reply are one row. The row takes the date of
+        its newest message and shows the message count, such as <code>(3)</code>. The first
+        <code>Enter</code> on a conversation of several messages expands it in place, each member
+        labelled with the mailbox it lives in; the next one reads it. Archive, delete, flag and mark read on a
         collapsed row act on its messages in the mailbox you are looking at, never on your
-        Sent copies. Press <code>tc</code> to list an account one row per message instead; the
-        TUI remembers the choice in <code>~/.config/mailypoppins/tui.json</code>, and the
-        desktop app has the same switch on the account's Settings card.
+        Sent copies. Press <code>tc</code> to list an account one row per message instead. The
+        TUI remembers the choice in <code>~/.config/mailypoppins/tui.json</code>. In the desktop
+        app, <code>tc</code> works too, and so does the "Conversation view" switch on the
+        account's Settings card.
       </p>
       <p>
         The marker column on the left of the list carries one glyph per message: a dot
