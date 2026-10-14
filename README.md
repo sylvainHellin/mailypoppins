@@ -259,6 +259,8 @@ Running `mp` with no arguments opens a full-screen terminal interface (built on 
 
 Layout: sidebar (mailbox list) | email list | headers + body preview. Adapts to terminal width.
 
+Every mailbox but Drafts lists one row per conversation, with its messages from Inbox, Sent, Archive and Drafts one keypress away; `tc` switches an account to one row per message, and the TUI remembers the choice in `~/.config/mailypoppins/tui.json`.
+
 Keys are nvim-style mnemonic families: a leader letter opens a which-key popup listing its continuations, and the second key runs the action.
 `c` is compose, `t` is thread and attachments, `f` is find and filter, `s` is sync and settings, `g` is go-to, `Space` switches view.
 Forget a chord and `:` or `Ctrl+p` opens a command palette over every runnable action by name.
@@ -266,7 +268,8 @@ Forget a chord and `:` or `Ctrl+p` opens a command palette over every runnable a
 | Key | Action |
 |-----|--------|
 | `j`/`k`, arrows | Navigate |
-| `Enter` | Read the message in the body pane |
+| `Enter` | Read the message in the body pane (expands a folded conversation first) |
+| `l`/`h` | Expand / fold the conversation |
 | `e` | Open in `$EDITOR` (received mail is read-only) |
 | `cn` | New draft |
 | `cs` | Manage signatures |
@@ -276,6 +279,7 @@ Forget a chord and `:` or `Ctrl+p` opens a command palette over every runnable a
 | `a`/`d` | Archive / Delete (with confirmation) |
 | `ta`/`to`/`ts` | Attach file to draft / Open attachment / Save attachment |
 | `tt`/`tb` | Show conversation / Open HTML in browser |
+| `tc` | Conversation view on / off for this account |
 | `ff`/`fm` | Search all mail / Filter the current list |
 | `ss`/`sS` | Quick sync / Full sync |
 | `ga`/`gm` | Switch account / Go to the sidebar |
@@ -289,7 +293,7 @@ The help overlay (`?`) and `mp dump-keys` print the full catalogue, both generat
 A send from the TUI is held for `email.send_hold_secs` (default 20) before it reaches the transport: the status line counts down and `u` cancels it, leaving the approved draft in place.
 Set it to `0` to hand off immediately. `mp send` and the batch run are never held.
 
-The TUI calls library functions directly (no subprocess spawning). Background IMAP IDLE watches for new mail and triggers automatic fetches.
+The TUI is a client of the daemon over its Unix socket and spawns no subprocess; the daemon syncs new mail and pushes the changes to every open client.
 
 ## Example workflow
 
