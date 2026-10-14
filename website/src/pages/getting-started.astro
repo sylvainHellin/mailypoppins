@@ -173,8 +173,9 @@ cargo install --path .`}
         Each mailbox but Drafts lists one row per conversation: the question in your inbox, your
         replies in Sent and the draft of your next reply are one row. The row takes the date of
         its newest message and shows the message count, such as <code>(3)</code>. The first
-        <code>Enter</code> on a conversation of several messages expands it in place, each member
-        labelled with the mailbox it lives in; the next one reads it. Archive, delete, flag and mark read on a
+        <code>Enter</code> on a conversation of several messages expands it in place, newest
+        first, each member labelled with the mailbox it lives in; the next one reads it, and
+        <code>y</code> on a member copies its selector (in the desktop app, a draft's file path). Archive, delete, flag and mark read on a
         collapsed row act on its messages in the mailbox you are looking at, never on your
         Sent copies. Press <code>tc</code> to list an account one row per message instead. The
         TUI remembers the choice in <code>~/.config/mailypoppins/tui.json</code>. In the desktop

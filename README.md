@@ -259,7 +259,7 @@ Running `mp` with no arguments opens a full-screen terminal interface (built on 
 
 Layout: sidebar (mailbox list) | email list | headers + body preview. Adapts to terminal width.
 
-Every mailbox but Drafts lists one row per conversation, with its messages from Inbox, Sent, Archive and Drafts one keypress away; `tc` switches an account to one row per message, and the TUI remembers the choice in `~/.config/mailypoppins/tui.json`.
+Every mailbox but Drafts lists one row per conversation, with its messages from Inbox, Sent, Archive and Drafts one keypress away, newest first; `tc` switches an account to one row per message, and the TUI remembers the choice in `~/.config/mailypoppins/tui.json`.
 
 Keys are nvim-style mnemonic families: a leader letter opens a which-key popup listing its continuations, and the second key runs the action.
 `c` is compose, `t` is thread and attachments, `f` is find and filter, `s` is sync and settings, `g` is go-to, `Space` switches view.
