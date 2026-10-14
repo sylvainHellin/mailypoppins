@@ -197,4 +197,30 @@ describe("the conversation list", () => {
     s = run(s, { type: "mutation_apply", batch: 1, kind: "archive", targets: [{ account: "work", row_id: 1007 }] });
     expect(next.kind === "conversation" && s.selection.conversation?.thread_id === next.thread_id).toBe(true);
   });
+
+  it("drops the mark of a conversation that left the list, so the cursor row is acted on next", () => {
+    let s = grouped();
+    s = run(s, { type: "select_conversation", thread_id: CANNED_THREAD, member: null });
+    s = run(s, { type: "mark_toggle", key: threadKey("work", CANNED_THREAD) });
+    expect(actionTargets(s)).toEqual([{ account: "work", row_id: 1007 }]);
+    s = run(s, { type: "mutation_apply", batch: 1, kind: "archive", targets: [{ account: "work", row_id: 1007 }] });
+    // The batch's own unmark comes after the header has left the list.
+    s = run(s, { type: "mark_set", keys: ["work#1007"], on: false });
+    expect(s.marked.keys.size).toBe(0);
+    expect(s.marked.anchor).toBeNull();
+    expect(s.selection.conversation?.thread_id).not.toBe(CANNED_THREAD);
+    expect(actionTargets(s).length).toBeGreaterThan(0);
+  });
+
+  it("folds a row with a missing subject and date into a real row, as the Rust fixture does", () => {
+    resetMock();
+    const rows = conversationListing("home", "newsletters").rows;
+    expect(rows.length).toBe(fixtures.messages.home.newsletters.length);
+    for (const r of rows) {
+      expect(r.latest.id).not.toBe(0);
+      expect(r.member_ids.length).toBeGreaterThan(0);
+      expect(r.member_ids.every((id) => id !== 0)).toBe(true);
+    }
+    expect(rows.find((r) => r.latest.id === 1021)?.latest).toMatchObject({ subject: "", date_display: "" });
+  });
 });

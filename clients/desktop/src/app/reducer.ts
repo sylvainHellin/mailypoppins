@@ -1968,11 +1968,20 @@ function reduce(s: AppState, a: Action): AppState {
       if (!leaves(a.kind)) return next;
       const gone = new Set(a.targets.map(targetKey));
       // In a conversation list a row leaves when its last member here did,
-      // and a member when it did: whatever the list no longer shows.
+      // and a member when it did: whatever the list no longer shows. A
+      // vanished row's mark goes with it, since the batch's later `mark_set`
+      // unmarks only the headers still shown.
       if (!s.search && s.messages.data?.kind === "conversations") {
         const account = shownAccount(s);
         const after = new Set(visibleItems(next).map((it) => itemKey(account, it)));
-        for (const it of before) if (!after.has(itemKey(account, it))) gone.add(itemKey(account, it));
+        const vanished = new Set<string>();
+        for (const it of before) if (!after.has(itemKey(account, it))) vanished.add(itemKey(account, it));
+        for (const k of vanished) gone.add(k);
+        if ([...vanished].some((k) => next.marked.keys.has(k))) {
+          const keys = new Set([...next.marked.keys].filter((k) => !vanished.has(k)));
+          const anchor = next.marked.anchor !== null && vanished.has(next.marked.anchor) ? null : next.marked.anchor;
+          next = { ...next, marked: { keys, anchor } };
+        }
       }
       next = cursorAfterLeave(next, before, gone);
       // The mailbox list's own selection, kept under a search, lets go too.

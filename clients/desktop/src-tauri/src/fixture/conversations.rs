@@ -62,10 +62,12 @@ pub fn thread_id_of(row: &Value) -> String {
     }
 }
 
-/// A fixture row as the listing row it is: the fixture-only keys are ignored
-/// by the derive, and a row that does not decode is a default one.
+/// A fixture row as the listing row it is, normalised as `message.list`
+/// sends it ([`super::wire_row`]: an absent or `null` header is `""`). A row
+/// that still does not decode is a broken fixture, and says so.
 fn list_row(row: &Value) -> MessageListRow {
-    serde_json::from_value(row.clone()).unwrap_or_default()
+    serde_json::from_value(super::wire_row(row))
+        .unwrap_or_else(|e| panic!("fixture row {} is not a listing row: {e}", row["id"]))
 }
 
 /// Every row of the account outside Drafts, with its mailbox.
@@ -378,6 +380,40 @@ mod tests {
         let bare = thread("work", &boxes(), 1007, None, &[], "x").expect("thread");
         assert_eq!(bare.messages.len(), 3);
         assert!(thread("work", &boxes(), 99, None, &[], "x").is_none());
+    }
+
+    /// Every mailbox of the shipped fixtures folds into rows that name real
+    /// messages: a row with a `null` header (`home`'s newsletter 1021) is
+    /// normalised, not decoded into a default row of id 0.
+    #[test]
+    fn every_fixture_conversation_names_real_rows() {
+        let all: BTreeMap<String, BTreeMap<String, Vec<Value>>> =
+            serde_json::from_str(super::super::MESSAGES).expect("messages.json");
+        let mut listed = 0;
+        for (account, boxes) in &all {
+            for mailbox in boxes.keys().filter(|m| m.as_str() != DRAFTS) {
+                let listing = list(account, mailbox, boxes, &[]);
+                assert!(listing.total > 0, "{account}/{mailbox} lists nothing");
+                for c in &listing.conversations {
+                    let at = format!("{account}/{mailbox} {}", c.thread_id);
+                    assert_ne!(c.latest.id, 0, "{at}: latest.id");
+                    assert!(!c.member_ids.is_empty(), "{at}: no members");
+                    assert!(c.member_ids.iter().all(|&id| id != 0), "{at}: member_ids");
+                    let t = thread(account, boxes, c.latest.id, Some(mailbox), &[], "x")
+                        .expect("the latest row has a thread");
+                    assert!(t.messages.iter().all(|m| m.id != 0), "{at}: thread ids");
+                    listed += 1;
+                }
+            }
+        }
+        assert!(listed > 0);
+        let newsletters = list("home", "newsletters", &all["home"], &[]);
+        let row = newsletters
+            .conversations
+            .iter()
+            .find(|c| c.latest.id == 1021)
+            .expect("the newsletter with no subject is listed");
+        assert_eq!(row.latest.subject, "");
     }
 
     /// One `Message-ID` held twice counts once, and the expansion names the

@@ -5292,7 +5292,7 @@ mod tests {
             .flat_map(|m| m.values())
             .map(Vec::len)
             .sum();
-        assert_eq!(messages, 21);
+        assert_eq!(messages, 22);
         assert_eq!(s.html.len(), 3);
         let hostile = s
             .html
