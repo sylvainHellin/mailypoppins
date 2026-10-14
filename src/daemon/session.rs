@@ -682,6 +682,30 @@ mod tests {
             .expect("this build serves everything the TUI requires");
     }
 
+    /// A daemon that predates the conversation listing (#0142) refuses the
+    /// TUI's handshake with `capability_missing` naming that one method, which
+    /// is what stops the TUI at the connect instead of at its first grouped
+    /// mailbox.
+    #[test]
+    fn a_daemon_without_the_conversation_listing_refuses_the_tui() {
+        let request = InitializeParams::parse(&params(
+            1,
+            1,
+            crate::daemon::client::TUI_REQUIRED_CAPABILITIES,
+        ))
+        .expect("the TUI's handshake parses");
+        let older: Vec<String> = capabilities(&state())
+            .into_iter()
+            .filter(|name| name != mp_protocol::listing::METHOD_MESSAGE_LIST_CONVERSATIONS)
+            .collect();
+        assert!(older.iter().any(|name| name == "message.list_stream"));
+
+        let error = check_capabilities(&request, &older).expect_err("refused");
+        assert_eq!(error.code, ErrorCode::CapabilityMissing.code());
+        let data = error.data.expect("capability_missing carries data");
+        assert_eq!(data["missing"], json!(["message.list_conversations"]));
+    }
+
     #[test]
     fn params_without_an_identity_are_invalid_params() {
         let error = Session::new(1)

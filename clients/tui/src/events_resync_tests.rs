@@ -293,6 +293,7 @@ fn a_restart_resync_drops_the_old_daemons_hold_and_frees_u() {
         forwarded: false,
         flagged: false,
         is_invite: false,
+        conv: None,
     };
     app.emails = Arc::new(vec![entry]);
     app.visible = vec![0];

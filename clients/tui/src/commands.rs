@@ -133,9 +133,15 @@ pub fn route(action: &Action) -> ActionRoute {
             ActionRoute::ClientOnly("a copy into a directory only this process can name (ANO-15)")
         }
         Action::Fetch | Action::FetchAccount(_) => ActionRoute::Daemon(&["sync.quick"]),
-        // A received mailbox streams (#0138); the Drafts mailbox is the drafts
-        // directory's own listing.
-        Action::LoadMailbox { .. } => ActionRoute::Daemon(&["message.list_stream", "draft.list"]),
+        // A received mailbox streams (#0138), as conversations when the
+        // account lists them, whose expanded members are `message.thread`
+        // (#0142); the Drafts mailbox is the drafts directory's own listing.
+        Action::LoadMailbox { .. } => ActionRoute::Daemon(&[
+            "message.list_stream",
+            "message.list_conversations",
+            "message.thread",
+            "draft.list",
+        ]),
         Action::Sync => ActionRoute::Daemon(&["sync.full"]),
         // The local pass first, then the server leg (LST-08).
         Action::ServerSearch { .. } => {
@@ -202,9 +208,15 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
             true
         }
         Action::Archive => {
-            if let Some(msg) = app.selected_email_ref() {
+            // A conversation header reaches its members in the listed
+            // mailbox (#0142); any other row is itself.
+            let msgs = app
+                .selected_email()
+                .map(|e| e.action_refs())
+                .unwrap_or_default();
+            if !msgs.is_empty() {
                 // The status line already carries the outcome.
-                let _ = archive_msgs(app, commands, vec![msg], false);
+                let _ = archive_msgs(app, commands, msgs, false);
             }
             true
         }
@@ -224,8 +236,12 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
                 delete_skip_file(app, std::path::Path::new(&path));
             } else if let Some(id) = draft_id {
                 delete_draft(app, commands, &id);
-            } else if let Some(msg) = app.selected_email_ref() {
-                delete_msgs(app, commands, vec![msg], false);
+            } else if let Some(msgs) = app
+                .selected_email()
+                .map(|e| e.action_refs())
+                .filter(|msgs| !msgs.is_empty())
+            {
+                delete_msgs(app, commands, msgs, false);
             }
             true
         }
@@ -244,13 +260,14 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
         Action::ToggleRead => {
             if let Some(email) = app.selected_email() {
                 let new_read = !email.read;
-                if let Some(msg) = email.msg {
+                let msgs = email.action_refs();
+                if !msgs.is_empty() {
                     let label = if new_read {
                         "Marked as read"
                     } else {
                         "Marked as unread"
                     };
-                    if set_read_flag(app, commands, &[msg], new_read) {
+                    if set_read_flag(app, commands, &msgs, new_read) {
                         app.set_status(label.to_string());
                     }
                 }
@@ -283,9 +300,10 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
         Action::ToggleFlag => {
             if let Some(email) = app.selected_email() {
                 let new_flag = !email.flagged;
-                if let Some(msg) = email.msg {
+                let msgs = email.action_refs();
+                if !msgs.is_empty() {
                     let label = if new_flag { "Flagged" } else { "Unflagged" };
-                    if set_flag(app, commands, &[msg], new_flag) {
+                    if set_flag(app, commands, &msgs, new_flag) {
                         app.set_status(label.to_string());
                     }
                 }
@@ -1401,9 +1419,7 @@ fn set_read_flag(app: &mut App, commands: &dyn Queries, msgs: &[MessageRef], rea
     if flagged.is_empty() {
         return false;
     }
-    for msg in &flagged {
-        app.set_email_read(*msg, read);
-    }
+    app.set_rows_read(&flagged, read);
     true
 }
 
@@ -1420,9 +1436,7 @@ fn set_flag(app: &mut App, commands: &dyn Queries, msgs: &[MessageRef], flagged:
     if starred.is_empty() {
         return false;
     }
-    for msg in &starred {
-        app.set_email_flagged(*msg, flagged);
-    }
+    app.set_rows_flagged(&starred, flagged);
     true
 }
 
@@ -1443,7 +1457,9 @@ pub fn mark_open_read(app: &mut App, commands: &dyn Queries, msg: MessageRef) ->
     let Some(email) = app.emails.iter().find(|e| e.msg == Some(msg)) else {
         return false;
     };
-    if email.read {
+    // A conversation header stands for its `latest`, whose own read state
+    // is what an open of it changes (#0142).
+    if email.header().map_or(email.read, |h| h.latest_read) {
         return false;
     }
     set_read_flag(app, commands, &[msg], true)

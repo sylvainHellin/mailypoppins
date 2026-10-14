@@ -335,9 +335,11 @@ impl App {
                 super::bg::apply_server_hit(self, &event.payload);
                 Applied::Ignored
             }
-            // The counts scope is the sidebar's and not the list's: a hundred
-            // count changes for one mailbox may not each refetch the open list,
-            // which is why `MessageRowDelta::decode` returns `None` for it.
+            // The counts scope is the sidebar's and not the flat list's: a
+            // hundred count changes for one mailbox may not each refetch the
+            // open list, which is why `MessageRowDelta::decode` returns `None`
+            // for it. A conversation list is the exception, re-streamed
+            // coalesced (see `apply_counts`).
             KIND_INVALIDATE if event.payload["scope"]["query"] == json!("counts") => {
                 self.apply_counts(event)
             }
@@ -600,9 +602,14 @@ impl App {
             return Applied::Ignored;
         };
         self.invalidate_cache_idx(idx);
-        let reloaded = self.active_mailbox == idx;
+        let mut reloaded = self.active_mailbox == idx;
         if reloaded {
             self.reload_current_mailbox();
+        } else if self.conversation_mode() {
+            // A draft joins the conversation it answers (#0142): its marker
+            // and its member row move with it, so the list re-streams.
+            self.request_restream();
+            reloaded = true;
         }
         self.recount_all_mailboxes();
         if reloaded {
@@ -617,14 +624,27 @@ impl App {
     /// One `mailbox.list` for the account, not one per mailbox: the answer
     /// carries every count, and the events coalesce by resource so a tick that
     /// touched four mailboxes costs four cheap reads of one small answer.
+    ///
+    /// In conversation mode it also re-streams the open list, coalesced
+    /// (#0142). The daemon publishes no `message.row` for a message change:
+    /// an ingest, a flag pass or a mutation reaches a client as this counts
+    /// invalidate of the mailbox it touched, and a conversation listed in the
+    /// inbox moves when a reply lands in Sent, so any mailbox of the account
+    /// counts. The flat list keeps the rule `MessageRowDelta::decode` states,
+    /// since it folds the row events it does get.
     fn apply_counts(&mut self, event: &EventEnvelope) -> Applied {
         let account = event.payload["resource"]
             .as_str()
             .and_then(|resource| resource.strip_prefix("mailbox:"))
             .and_then(|rest| rest.split_once('/'))
             .map(|(account, _)| account.to_string());
-        if account.as_deref() == Some(self.account_config.name.as_str()) {
-            self.recount_all_mailboxes();
+        if account.as_deref() != Some(self.account_config.name.as_str()) {
+            return Applied::Counts;
+        }
+        self.recount_all_mailboxes();
+        if self.conversation_mode() {
+            self.request_restream();
+            return Applied::Rows;
         }
         Applied::Counts
     }

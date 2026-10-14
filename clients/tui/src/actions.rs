@@ -965,20 +965,34 @@ pub(super) fn handle_action(
             // still arrive here as one list.
             let mailbox = match app.mailboxes.get(mailbox_idx) {
                 Some(mb) => super::app::mailbox_key(mb),
-                None => return Ok(()),
+                // No load runs, so none lands to end the stream in flight.
+                None => {
+                    app.restream_landed(generation);
+                    return Ok(());
+                }
             };
             let account = app.account_config.name.clone();
             let account_index = app.active_account;
             let queries = app.session.as_ref().map(|session| session.handle());
+            // A conversation list (#0142) re-expands what the list on screen
+            // has open, so a re-stream does not fold the user's view.
+            let expanded = app
+                .mailbox_lists_conversations(mailbox_idx)
+                .then(|| app.expanded_threads());
             app.bg_count += 1;
             let tx = bg_tx.clone();
             std::thread::spawn(move || {
                 let entries = match queries {
-                    Some(queries) => super::queries::list_emails(&queries, &account, &mailbox)
-                        .unwrap_or_else(|e| {
-                            log::warn!("[queries] listing {account}/{mailbox}: {e:#}");
-                            Vec::new()
-                        }),
+                    Some(queries) => super::queries::list_mailbox(
+                        &queries,
+                        &account,
+                        &mailbox,
+                        expanded.as_deref(),
+                    )
+                    .unwrap_or_else(|e| {
+                        log::warn!("[queries] listing {account}/{mailbox}: {e:#}");
+                        Vec::new()
+                    }),
                     None => {
                         log::warn!("[queries] no daemon session: {account}/{mailbox} lists empty");
                         Vec::new()

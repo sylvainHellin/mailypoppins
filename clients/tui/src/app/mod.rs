@@ -237,6 +237,17 @@ pub struct App {
     /// two `App`s in one process (a test, a future second window) may not share
     /// a watermark, and an operation belongs to the client that started it.
     pub events: super::events::EventState,
+
+    /// The accounts whose received mailboxes list as conversations (#0142).
+    ///
+    /// Empty unless something turns the mode on, so the flat list stays the
+    /// default: rollout step 6 adds the setting and the `tc` toggle that fill
+    /// it, and until then only a test does. The Drafts mailbox stays the flat
+    /// `draft.list` whatever this holds.
+    pub conversation_accounts: HashSet<String>,
+    /// The coalesced re-stream of a conversation list (#0142): at most one
+    /// listing in flight and one owed, however many deltas arrive.
+    pub restream: Restream,
 }
 
 impl Default for App {
@@ -394,6 +405,8 @@ impl App {
             global_config,
             session: None,
             events: super::events::EventState::default(),
+            conversation_accounts: HashSet::new(),
+            restream: Restream::default(),
         }
     }
 
@@ -477,6 +490,8 @@ impl App {
             global_config: mp_core::config::GlobalConfig::default(),
             session: None,
             events: super::events::EventState::default(),
+            conversation_accounts: HashSet::new(),
+            restream: Restream::default(),
         }
     }
 
@@ -485,7 +500,9 @@ impl App {
     // ---------------------------------------------------------------
 
     pub(crate) fn save_to_account(&mut self) {
-        let cursor_ref = self.cursor_anchor();
+        // The store row under the cursor, a header's `latest` included: the
+        // account's list may be another mode's by the time it is shown again.
+        let cursor_ref = self.selected_email().and_then(|e| e.msg);
         if let Some(acct) = self.accounts.get_mut(self.active_account) {
             acct.sidebar_index = self.sidebar_index;
             acct.active_mailbox = self.active_mailbox;
@@ -986,7 +1003,11 @@ impl App {
         // The cursor identity to restore is the INCOMING account's own,
         // saved when it was last parked -- the outgoing account's path
         // can never appear in this account's list.
-        let anchor = self.accounts.get(idx).and_then(|acct| acct.cursor_ref);
+        let anchor = self
+            .accounts
+            .get(idx)
+            .and_then(|acct| acct.cursor_ref)
+            .map(CursorAnchor::Row);
         let am = self.active_mailbox;
         let target_opening = self.accounts.get(idx).is_some_and(|a| a.opening);
         if let Some(cached) = self.email_cache.get(am).and_then(|c| c.as_ref()) {
@@ -1163,10 +1184,10 @@ impl App {
         // true...true over a newest-first list, so `partition_point` is the
         // first row on or before it.
         let at_or_before = |i: usize| -> bool {
-            let Some(entry) = self.emails.get(self.visible[i]) else {
+            let Some(entry) = self.list_order_row(i) else {
                 return true;
             };
-            match jump_date::day_of_sort_key(&entry.date_sort) {
+            match jump_date::day_of_sort_key(entry.list_date_sort()) {
                 Some(day) => day <= target,
                 None => true,
             }
@@ -1209,6 +1230,225 @@ impl App {
             .and_then(|&i| self.emails.get(i))
     }
 
+    /// The row whose date places visible row `i` in the list's order: the row
+    /// itself, or the header of an expanded member, since a member sits under
+    /// its conversation whatever its own date (#0142).
+    fn list_order_row(&self, i: usize) -> Option<&EmailEntry> {
+        let mut at = i;
+        loop {
+            let entry = self.emails.get(*self.visible.get(at)?)?;
+            if entry.member_mailbox().is_none() || at == 0 {
+                return Some(entry);
+            }
+            at -= 1;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // The conversation list (#0142)
+    // ---------------------------------------------------------------
+
+    /// Whether mailbox `idx` of the active account lists as conversations.
+    pub fn mailbox_lists_conversations(&self, idx: usize) -> bool {
+        self.conversation_accounts
+            .contains(&self.account_config.name)
+            && self
+                .mailboxes
+                .get(idx)
+                .is_some_and(|mb| mb.kind != MailboxKind::Drafts)
+    }
+
+    /// Whether the open mailbox lists as conversations.
+    pub fn conversation_mode(&self) -> bool {
+        self.mailbox_lists_conversations(self.active_mailbox)
+    }
+
+    /// Turn the conversation list on or off for the active account, dropping
+    /// every list it has cached in the other mode and reloading the open one.
+    pub fn set_conversation_mode(&mut self, on: bool) {
+        let name = self.account_config.name.clone();
+        let changed = if on {
+            self.conversation_accounts.insert(name)
+        } else {
+            self.conversation_accounts.remove(&name)
+        };
+        if changed {
+            self.selection.clear();
+            self.invalidate_all_caches();
+            self.reload_current_mailbox();
+        }
+    }
+
+    /// The threads of the open list drawn expanded, which a re-stream expands
+    /// again.
+    pub fn expanded_threads(&self) -> Vec<String> {
+        self.emails
+            .iter()
+            .filter_map(|e| e.header().filter(|h| h.expanded))
+            .map(|h| h.thread_id.clone())
+            .collect()
+    }
+
+    /// Re-read the open conversation list, coalesced (#0142).
+    ///
+    /// A row delta cannot be folded into a conversation list: it carries no
+    /// `thread_id`, and a delta about Sent changes a conversation listed in
+    /// the inbox. So every change of the account owes a fresh listing: a row
+    /// delta, a `state.remove` of a message or a draft, a `draft.changed`, and
+    /// the counts invalidate of any of its mailboxes, which is how the daemon
+    /// announces a message change at all. The coalescing is what keeps a sync
+    /// burst of hundreds of them to two streams: one in flight, and one owed
+    /// that starts when it lands. Every other mailbox's cached list is dropped
+    /// too, since the same change moves conversations listed there.
+    pub(crate) fn request_restream(&mut self) {
+        if self.restream.in_flight.is_some() {
+            self.restream.owed = true;
+            return;
+        }
+        let drafts = self.find_mailbox_by_kind(MailboxKind::Drafts);
+        for (idx, slot) in self.email_cache.iter_mut().enumerate() {
+            if Some(idx) != drafts {
+                *slot = None;
+            }
+        }
+        self.reload_current_mailbox();
+    }
+
+    /// A mailbox load of `generation` arrived, applied or dropped: the stream
+    /// in flight is done, and the owed one starts if a delta came meanwhile.
+    pub(crate) fn restream_landed(&mut self, generation: u64) {
+        if self.restream.in_flight != Some(generation) {
+            return;
+        }
+        self.restream.in_flight = None;
+        if std::mem::take(&mut self.restream.owed) && self.conversation_mode() {
+            self.request_restream();
+        }
+    }
+
+    /// Draw the members of the conversation under the cursor, read through
+    /// `message.thread` with the listed mailbox preferred and its drafts
+    /// included, and keep the cursor on the header (#0142).
+    ///
+    /// A conversation with nothing to show beyond its header, or one already
+    /// expanded, is left as it is and answers `false`.
+    pub(crate) fn expand_conversation(&mut self) -> bool {
+        let Some(at) = self.cursor_header_index() else {
+            return false;
+        };
+        let (thread_id, latest) = {
+            let entry = &self.emails[at];
+            let Some(header) = entry.header() else {
+                return false;
+            };
+            if header.expanded || !header.expandable() {
+                return false;
+            }
+            let Some(latest) = entry.msg else {
+                return false;
+            };
+            (header.thread_id.clone(), latest)
+        };
+        let account = self.account_config.name.clone();
+        let mailbox = self.current_local_mailbox_key().unwrap_or_default();
+        let members = match self.queries() {
+            Some(queries) => super::queries::conversation_members(
+                queries, &account, &mailbox, &thread_id, latest,
+            ),
+            None => Err(anyhow::anyhow!("there is no daemon session to ask")),
+        };
+        let members = match members {
+            Ok(members) => members,
+            Err(e) => {
+                self.set_status(format!("Could not load the conversation: {e:#}"));
+                return false;
+            }
+        };
+        self.with_emails_mut(|entries| {
+            if let Some(ConvRole::Header(header)) = &mut entries[at].conv {
+                header.expanded = true;
+            }
+            entries.splice(at + 1..at + 1, members);
+        });
+        self.relist_on(CursorAnchor::Header(thread_id));
+        true
+    }
+
+    /// Fold the conversation under the cursor, from its header or any of its
+    /// members, and put the cursor on the header (#0142).
+    pub(crate) fn collapse_conversation(&mut self) -> bool {
+        let Some(at) = self.cursor_header_index() else {
+            return false;
+        };
+        let Some(thread_id) = self.emails[at]
+            .header()
+            .filter(|h| h.expanded)
+            .map(|h| h.thread_id.clone())
+        else {
+            return false;
+        };
+        self.with_emails_mut(|entries| {
+            if let Some(ConvRole::Header(header)) = &mut entries[at].conv {
+                header.expanded = false;
+            }
+            let end = entries[at + 1..]
+                .iter()
+                .position(|e| e.member_mailbox().is_none())
+                .map_or(entries.len(), |n| at + 1 + n);
+            entries.drain(at + 1..end);
+        });
+        // A selected member that left the screen leaves the selection, unless
+        // a header on screen still stands for it, as the folded one does for
+        // its members here and any other collapsed header for its own.
+        let live = live_keys(&self.emails);
+        self.selection.retain(|key| live.contains(key));
+        self.relist_on(CursorAnchor::Header(thread_id));
+        true
+    }
+
+    /// The index in `emails` of the header of the conversation under the
+    /// cursor, from the header itself or from any of its members.
+    fn cursor_header_index(&self) -> Option<usize> {
+        let mut at = *self.visible.get(self.list_index)?;
+        loop {
+            let entry = self.emails.get(at)?;
+            if entry.header().is_some() {
+                return Some(at);
+            }
+            entry.member_mailbox()?;
+            at = at.checked_sub(1)?;
+        }
+    }
+
+    /// Rebuild the view after the list changed shape and put the cursor back
+    /// on `anchor`.
+    fn relist_on(&mut self, anchor: CursorAnchor) {
+        let fallback = self.list_index;
+        self.rebuild_visible();
+        self.restore_cursor(Some(anchor), fallback);
+        self.headers_scroll = 0;
+        self.preview_scroll = 0;
+    }
+
+    /// The label the list prints for a member's mailbox: the sidebar's, so an
+    /// extra mailbox reads as the user named it.
+    pub fn mailbox_label(&self, mailbox: &str) -> String {
+        self.mailboxes
+            .iter()
+            .find(|mb| mailbox_key(mb) == mailbox)
+            .map(|mb| mb.label.clone())
+            .unwrap_or_else(|| mailbox.to_string())
+    }
+
+    /// Whether the cursor row is a draft the Drafts actions apply to: a row of
+    /// the Drafts mailbox, or a draft member of an expanded conversation.
+    pub fn cursor_is_draft_row(&self) -> bool {
+        self.active_kind() == MailboxKind::Drafts
+            || self
+                .selected_email()
+                .is_some_and(|e| e.draft_id.is_some() && e.member_mailbox().is_some())
+    }
+
     /// Queue the mark-read that an explicit open owes (#0110).
     ///
     /// The trigger is the user saying "I am reading this": `Enter` / `e`, and a
@@ -1238,7 +1478,10 @@ impl App {
         let Some(msg) = email.msg else {
             return;
         };
-        if email.read {
+        // Reading a header reads its `latest`, which may be read while the
+        // conversation is not.
+        let read = email.header().map_or(email.read, |h| h.latest_read);
+        if read {
             return;
         }
         self.push_action(Action::MarkAsRead(msg));
@@ -1260,23 +1503,23 @@ impl App {
     /// of an entry (`selection`, `set_email_read` key on it too), so we
     /// anchor on it and restore with `restore_cursor`. An entry with no
     /// store row cannot be anchored and falls back to the index.
-    pub(crate) fn cursor_anchor(&self) -> Option<MessageRef> {
-        self.selected_email().and_then(|e| e.msg)
+    pub(crate) fn cursor_anchor(&self) -> Option<CursorAnchor> {
+        self.selected_email().and_then(CursorAnchor::of)
     }
 
     /// Restore the cursor to `anchor` after `visible` was rebuilt. Falls
     /// back to the clamped `fallback` index when the anchored email is
     /// gone (archived, deleted, filtered out, moved to another mailbox).
-    pub(crate) fn restore_cursor(&mut self, anchor: Option<MessageRef>, fallback: usize) {
+    pub(crate) fn restore_cursor(&mut self, anchor: Option<CursorAnchor>, fallback: usize) {
         if self.visible.is_empty() {
             self.list_index = 0;
             return;
         }
-        if let Some(m) = anchor {
+        if let Some(anchor) = anchor {
             if let Some(pos) = self
                 .visible
                 .iter()
-                .position(|&i| self.emails.get(i).is_some_and(|e| e.msg == Some(m)))
+                .position(|&i| self.emails.get(i).is_some_and(|e| anchor.matches(e)))
             {
                 self.list_index = pos;
                 return;
@@ -1301,13 +1544,23 @@ impl App {
     /// Applied after the search filter rather than inside it, because the two
     /// are independent narrowings of the same list and every path that rebuilds
     /// `visible` has to end in the same intersection.
+    ///
+    /// In a conversation list the flag is the header's (any member here is
+    /// flagged), and an expanded member is shown exactly when its header is,
+    /// whichever narrowing ran: the members are the conversation's, not hits
+    /// of their own (#0142).
     pub(crate) fn apply_flagged_filter(&mut self) {
-        if !self.flagged_only {
-            return;
-        }
         let emails = Arc::clone(&self.emails);
-        self.visible
-            .retain(|&i| emails.get(i).is_some_and(|e| e.flagged));
+        if self.flagged_only {
+            self.visible.retain(|&i| {
+                emails
+                    .get(i)
+                    .is_some_and(|e| e.flagged || e.member_mailbox().is_some())
+            });
+        }
+        if emails.iter().any(|e| e.conv.is_some()) {
+            self.visible = members_follow_headers(&emails, &self.visible);
+        }
     }
 
     // ---------------------------------------------------------------
@@ -1526,21 +1779,67 @@ impl App {
     /// Optimistically set the read flag of one entry (by message ref) in
     /// both the in-memory list and the cache slot. No-op if the message is
     /// not in the active mailbox's list.
+    #[cfg(test)]
     pub(crate) fn set_email_read(&mut self, msg: MessageRef, read: bool) {
+        self.set_rows_read(&[msg], read);
+    }
+
+    /// Optimistically set the read flag of `msgs`, conversation rows included
+    /// (#0142): a member row takes it as a flat row does, and a header whose
+    /// members are all in `msgs` becomes the read or unread conversation
+    /// marking the row is, while one only some of whose members moved
+    /// follows its `latest`. The re-stream the mutation's deltas owe confirms
+    /// it either way.
+    pub(crate) fn set_rows_read(&mut self, msgs: &[MessageRef], read: bool) {
+        let set: HashSet<MessageRef> = msgs.iter().copied().collect();
         self.with_emails_mut(|entries| {
-            if let Some(e) = entries.iter_mut().find(|e| e.msg == Some(msg)) {
-                e.read = read;
+            for e in entries.iter_mut() {
+                let hit = e.msg.is_some_and(|m| set.contains(&m));
+                match &mut e.conv {
+                    Some(ConvRole::Header(header)) => {
+                        if !header.member_ids.is_empty()
+                            && header.member_ids.iter().all(|m| set.contains(m))
+                        {
+                            header.unread = if read { 0 } else { header.unread.max(1) };
+                            header.latest_read = read;
+                        } else if hit && header.latest_read != read {
+                            header.latest_read = read;
+                            header.unread = if read {
+                                header.unread.saturating_sub(1)
+                            } else {
+                                header.unread + 1
+                            };
+                        }
+                        e.read = header.unread == 0;
+                    }
+                    _ if hit => e.read = read,
+                    _ => {}
+                }
             }
         });
     }
 
-    /// Optimistically set the `\Flagged` star of one entry in both the
-    /// in-memory list and the cache slot (#0007). No-op if the message is not
-    /// in the active mailbox's list.
-    pub(crate) fn set_email_flagged(&mut self, msg: MessageRef, flagged: bool) {
+    /// Optimistically set the `\Flagged` star of `msgs` in both the in-memory
+    /// list and the cache slot (#0007). A header is flagged when any of its
+    /// members here is, so a star set on one sets it, and only a clear of
+    /// every member clears it (#0142).
+    pub(crate) fn set_rows_flagged(&mut self, msgs: &[MessageRef], flagged: bool) {
+        let set: HashSet<MessageRef> = msgs.iter().copied().collect();
         self.with_emails_mut(|entries| {
-            if let Some(e) = entries.iter_mut().find(|e| e.msg == Some(msg)) {
-                e.flagged = flagged;
+            for e in entries.iter_mut() {
+                let hit = e.msg.is_some_and(|m| set.contains(&m));
+                match &e.conv {
+                    Some(ConvRole::Header(header)) => {
+                        let all = !header.member_ids.is_empty()
+                            && header.member_ids.iter().all(|m| set.contains(m));
+                        let any = header.member_ids.iter().any(|m| set.contains(m)) || hit;
+                        if all || (flagged && any) {
+                            e.flagged = flagged;
+                        }
+                    }
+                    _ if hit => e.flagged = flagged,
+                    _ => {}
+                }
             }
         });
     }
@@ -1575,14 +1874,15 @@ impl App {
         if self.selection.is_empty() {
             return;
         }
-        let live: HashSet<EntryKey> = self.emails.iter().filter_map(|e| e.key()).collect();
+        let live = live_keys(&self.emails);
         self.selection.retain(|key| live.contains(key));
     }
 
     pub fn remove_selected_from_list(&mut self) -> Option<MessageRef> {
         let msg = self.selected_email()?.msg?;
         let fallback = self.list_index;
-        self.with_emails_mut(|entries| entries.retain(|e| e.msg != Some(msg)));
+        let gone = HashSet::from([msg]);
+        self.with_emails_mut(|entries| retain_surviving(entries, &gone));
         // A removed row's id must not survive in the selection: a delete frees
         // it, and a re-ingest of the same message mints a new one, so a held
         // reference would either miss or, worse, name a different message.
@@ -1596,9 +1896,7 @@ impl App {
         self.rebuild_visible();
         self.restore_cursor(None, fallback);
 
-        if let Some(count) = self.mailbox_counts.get_mut(self.active_mailbox) {
-            *count = self.emails.len();
-        }
+        self.sync_listed_count(self.active_mailbox);
 
         self.headers_scroll = 0;
         self.preview_scroll = 0;
@@ -1621,16 +1919,16 @@ impl App {
         // on it when it survives; otherwise fall back to the number of
         // surviving rows ABOVE the old cursor, so removing rows above it
         // does not drag the cursor down the list.
-        let anchor = self.cursor_anchor().filter(|m| !msgs.contains(m));
+        let anchor = self
+            .cursor_anchor()
+            .filter(|a| !matches!(a, CursorAnchor::Row(m) if msgs.contains(m)));
         let fallback = self
             .visible_emails()
             .take(self.list_index)
             .filter(|e| !e.msg.is_some_and(|m| msgs.contains(&m)))
             .count();
 
-        self.with_emails_mut(|entries| {
-            entries.retain(|e| !e.msg.is_some_and(|m| msgs.contains(&m)))
-        });
+        self.with_emails_mut(|entries| retain_surviving(entries, msgs));
         // See `remove_selected_from_list`: the ids are dead, so nothing may
         // keep holding them.
         self.selection
@@ -1640,14 +1938,27 @@ impl App {
         self.rebuild_visible();
         self.restore_cursor(anchor, fallback);
 
-        if let Some(count) = self.mailbox_counts.get_mut(self.active_mailbox) {
-            *count = self.emails.len();
-        }
+        self.sync_listed_count(self.active_mailbox);
 
         self.headers_scroll = 0;
         self.preview_scroll = 0;
 
         removed
+    }
+
+    /// Set mailbox `idx`'s sidebar count to the length of the list on screen,
+    /// when that list is one row per message.
+    ///
+    /// A conversation list is one row per conversation and the sidebar counts
+    /// messages (#0142), so its count is left to `mailbox.list`, which the
+    /// mutations and the count events already re-read.
+    pub(crate) fn sync_listed_count(&mut self, idx: usize) {
+        if self.emails.iter().any(|e| e.conv.is_some()) {
+            return;
+        }
+        if let Some(count) = self.mailbox_counts.get_mut(idx) {
+            *count = self.emails.len();
+        }
     }
 
     /// Surface a persistent error that requires explicit dismissal.
@@ -1873,6 +2184,11 @@ impl App {
     }
 
     pub(crate) fn switch_mailbox(&mut self, idx: usize) {
+        // A conversation list in flight for the mailbox being left owes it
+        // nothing: the next visit lists it afresh.
+        if self.active_mailbox != idx {
+            self.restream.owed = false;
+        }
         let changing = self.active_mailbox != idx;
         self.active_mailbox = idx;
         if changing {
@@ -1883,9 +2199,7 @@ impl App {
         if let Some(cached) = self.email_cache.get(idx).and_then(|c| c.as_ref()) {
             self.emails = Arc::clone(cached);
             self.rebuild_visible();
-            if let Some(count) = self.mailbox_counts.get_mut(idx) {
-                *count = self.emails.len();
-            }
+            self.sync_listed_count(idx);
         } else if let Some(mb) = self.mailboxes.get(idx) {
             // Cache miss: walk the directory off the UI thread (P1 step 2).
             // The entries arrive via `BgResult::MailboxLoaded`; the mailbox
@@ -1971,6 +2285,11 @@ impl App {
     /// clobber a newer result.
     fn request_mailbox_load(&mut self, idx: usize) {
         self.mailbox_load_generation = self.mailbox_load_generation.wrapping_add(1);
+        // Any conversation listing is the stream in flight a delta coalesces
+        // behind, whichever path asked for it (#0142).
+        self.restream.in_flight = self
+            .mailbox_lists_conversations(idx)
+            .then_some(self.mailbox_load_generation);
         self.push_action(Action::LoadMailbox {
             mailbox_idx: idx,
             generation: self.mailbox_load_generation,
@@ -1984,4 +2303,81 @@ impl App {
     fn invalidate_pending_mailbox_loads(&mut self) {
         self.mailbox_load_generation = self.mailbox_load_generation.wrapping_add(1);
     }
+}
+
+/// The selection keys a list still holds: each row's own key and, for a
+/// conversation header, the members it stands for in the listed mailbox,
+/// which a collapsed header carries only in its `member_ids` while its row is
+/// keyed by its latest alone (#0142).
+fn live_keys(entries: &[EmailEntry]) -> HashSet<EntryKey> {
+    entries
+        .iter()
+        .flat_map(|e| {
+            let members = e.header().map_or(&[][..], |h| h.member_ids.as_slice());
+            e.key()
+                .into_iter()
+                .chain(members.iter().copied().map(EntryKey::Msg))
+        })
+        .collect()
+}
+
+/// Drop the rows `gone` names from a list, conversation rows included
+/// (#0142).
+///
+/// A flat row and an expanded member go when their store row does. A header
+/// goes once every member it has in the listed mailbox is gone, which is when
+/// the conversation leaves the listing, and its expanded members go with it;
+/// otherwise it stays with the gone ids struck from its `member_ids`, since a
+/// header shares its row id with its newest member and an action on that
+/// member alone does not empty the conversation.
+fn retain_surviving(entries: &mut Vec<EmailEntry>, gone: &HashSet<MessageRef>) {
+    let mut header_gone = false;
+    entries.retain_mut(|e| {
+        let row_gone = e.msg.is_some_and(|m| gone.contains(&m));
+        match &mut e.conv {
+            Some(ConvRole::Header(header)) => {
+                header_gone = if header.member_ids.is_empty() {
+                    row_gone
+                } else {
+                    header.member_ids.iter().all(|m| gone.contains(m))
+                };
+                header.member_ids.retain(|m| !gone.contains(m));
+                !header_gone
+            }
+            Some(ConvRole::Member { .. }) => !header_gone && !row_gone,
+            None => !row_gone,
+        }
+    });
+}
+
+/// `visible` with every expanded member shown exactly when its header is.
+///
+/// The narrowings (the `/` filter, flagged-only) judge headers and flat rows;
+/// a member is part of its conversation rather than a hit of its own, so it
+/// follows the header it is drawn under (#0142).
+fn members_follow_headers(emails: &[EmailEntry], visible: &[usize]) -> Vec<usize> {
+    let shown: HashSet<usize> = visible.iter().copied().collect();
+    let mut out = Vec::with_capacity(visible.len());
+    let mut header_shown = false;
+    for (i, e) in emails.iter().enumerate() {
+        match &e.conv {
+            Some(ConvRole::Header(_)) => {
+                header_shown = shown.contains(&i);
+                if header_shown {
+                    out.push(i);
+                }
+            }
+            Some(ConvRole::Member { .. }) => {
+                if header_shown {
+                    out.push(i);
+                }
+            }
+            None => {
+                if shown.contains(&i) {
+                    out.push(i);
+                }
+            }
+        }
+    }
+    out
 }

@@ -305,14 +305,20 @@ pub fn tui_connector() -> mp_tui::session::Connector {
     }
 }
 
-/// The capabilities the TUI requires at its handshake (#0138).
+/// The capabilities the TUI requires at its handshake (#0138, #0142).
 ///
 /// Only the methods an older daemon may lack and the TUI cannot do without:
 /// `message.list_stream` is how it opens a received mailbox, and the fallback
 /// `message.list` with `limit: null` answers `frame_too_large` past about
-/// 34 000 rows. The one-shot commands go through [`client_session`], which
-/// requires nothing, so `mp list-messages` keeps working against that daemon.
-pub const TUI_REQUIRED_CAPABILITIES: &[&str] = &["message.list_stream"];
+/// 34 000 rows; `message.list_conversations` is how it opens one as
+/// conversations, which no other method answers, and requiring it here is
+/// also what lets the TUI send `message.thread`'s `prefer_mailbox` and
+/// `include_drafts`, which shipped with it and which an older daemon would
+/// ignore without an error. The one-shot commands go through
+/// [`client_session`], which requires nothing, so `mp list-messages` keeps
+/// working against that daemon.
+pub const TUI_REQUIRED_CAPABILITIES: &[&str] =
+    &["message.list_stream", "message.list_conversations"];
 
 /// Connect, starting a daemon on demand, or say why it could not be done.
 ///

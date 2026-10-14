@@ -503,6 +503,7 @@ mod store_backed_mutations {
             forwarded: false,
             flagged: false,
             is_invite: false,
+            conv: None,
         }
     }
 
@@ -786,6 +787,7 @@ mod store_backed_files {
             forwarded: false,
             flagged: false,
             is_invite: false,
+            conv: None,
         }]);
         app.rebuild_visible();
         app
@@ -901,6 +903,7 @@ mod store_backed_files {
             forwarded: false,
             flagged: false,
             is_invite: false,
+            conv: None,
         }
     }
 

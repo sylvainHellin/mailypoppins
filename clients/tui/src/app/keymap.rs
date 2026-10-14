@@ -287,6 +287,11 @@ pub enum KeyAction {
     ToggleSelect,
     SelectAllVisible,
     ClearSelection,
+    /// `l`: draw the members of the conversation under the cursor (#0142).
+    ExpandConversation,
+    /// `h`: fold the conversation under the cursor, from its header or any
+    /// of its members (#0142).
+    CollapseConversation,
     /// Leader `t a`: prompt for a file path and append it to the cursor
     /// draft's `attachments:` frontmatter (#0098). Drafts-only.
     AttachFile,
@@ -1233,6 +1238,29 @@ pub static KEYMAP: &[KeyBinding] = &[
         Guard::NonEmptyList,
         KeyAction::SelectAllVisible,
         "Select all visible",
+        false,
+    ),
+    // `l` / `h` expand and fold a conversation row (#0142). Dispatch-only rows
+    // with no keys and no description, so neither the help overlay, the key
+    // dump nor the palette shows them while the conversation list is reachable
+    // from tests alone; rollout step 6, which adds the `tc` toggle, gives them
+    // their keys and descriptions and regenerates the published tables.
+    bg(
+        "",
+        Chord::Char('l'),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::ExpandConversation,
+        "",
+        false,
+    ),
+    bg(
+        "",
+        Chord::Char('h'),
+        KeyCtx::List,
+        Guard::NonEmptyList,
+        KeyAction::CollapseConversation,
+        "",
         false,
     ),
     // `ce` edit recipients, Drafts only (the compose family's list-scoped tail).

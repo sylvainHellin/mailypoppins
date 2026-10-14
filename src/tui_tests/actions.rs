@@ -314,8 +314,14 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
     (
         "LoadMailbox",
         // Routed by P5-U4 already; here so the table is the whole enum. A
-        // received mailbox streams since #0138.
-        ActionRoute::Daemon(&["message.list_stream", "draft.list"]),
+        // received mailbox streams since #0138, as conversations with their
+        // expanded members when the account lists them (#0142).
+        ActionRoute::Daemon(&[
+            "message.list_stream",
+            "message.list_conversations",
+            "message.thread",
+            "draft.list",
+        ]),
         false,
     ),
     ("FetchAccount", ActionRoute::Daemon(&["sync.quick"]), false),

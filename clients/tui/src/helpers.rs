@@ -174,6 +174,7 @@ pub(super) fn fetched_to_email_entry(
         forwarded: fetched.flags.forwarded,
         flagged: fetched.flags.flagged,
         is_invite: fetched.event.is_some(),
+        conv: None,
     }
 }
 

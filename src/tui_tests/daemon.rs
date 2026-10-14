@@ -120,6 +120,18 @@ impl Queries for Recording {
             .push((method.to_string(), params.clone()));
         self.daemon.call(method, params)
     }
+
+    fn list_conversations(
+        &self,
+        account: &str,
+        mailbox: &str,
+    ) -> anyhow::Result<mp_protocol::listing::ConversationListing> {
+        self.log.lock().expect("the call log").push((
+            mp_protocol::listing::METHOD_MESSAGE_LIST_CONVERSATIONS.to_string(),
+            serde_json::json!({"account": account, "mailbox": mailbox}),
+        ));
+        self.daemon.list_conversations(account, mailbox)
+    }
 }
 
 impl TestDaemon {
@@ -155,6 +167,67 @@ impl Queries for TestDaemon {
             .block_on(self.state.dispatcher.dispatch(&ctx, request))
             .map_err(|e| anyhow::anyhow!("{method}: {e}"))?;
         Ok(outcome.result)
+    }
+
+    /// `message.list_conversations` against the real method, its chunks
+    /// collected off a row sink of this fixture's own (#0142).
+    ///
+    /// The method streams to the calling connection and refuses a caller with
+    /// none, so this hands it the sink a connection's writer would drain and
+    /// reads the `message.conversations` frames back in order until the
+    /// answer's `total` is in. The flat stream needs nothing of the kind,
+    /// since `message.list` answers it whole.
+    fn list_conversations(
+        &self,
+        account: &str,
+        mailbox: &str,
+    ) -> anyhow::Result<mp_protocol::listing::ConversationListing> {
+        use mp_protocol::listing::{
+            ConversationListing, ConversationRowsChunk, MessageListStreamStarted,
+            METHOD_MESSAGE_LIST_CONVERSATIONS,
+        };
+        let (sink, mut frames) = crate::daemon::dispatch::RowsSink::channel();
+        let ctx = ClientCtx {
+            connection_id: 1,
+            kind: ClientKind::Tui,
+            protocol: 1,
+            capabilities: Vec::new(),
+            rows: Some(sink),
+        };
+        let request = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: Some(RequestId::Num(1)),
+            method: METHOD_MESSAGE_LIST_CONVERSATIONS.to_string(),
+            params: serde_json::json!({"account": account, "mailbox": mailbox}),
+        };
+        let outcome = self
+            .runtime
+            .block_on(self.state.dispatcher.dispatch(&ctx, request))
+            .map_err(|e| anyhow::anyhow!("{METHOD_MESSAGE_LIST_CONVERSATIONS}: {e}"))?;
+        let started: MessageListStreamStarted = serde_json::from_value(outcome.result)?;
+        let mut conversations = Vec::new();
+        while (conversations.len() as u64) < started.total {
+            let frame = self
+                .runtime
+                .block_on(frames.recv())
+                .ok_or_else(|| anyhow::anyhow!("the stream ended short of its total"))?;
+            let line = std::str::from_utf8(&frame.bytes)?.trim_end();
+            let chunk = ConversationRowsChunk::from_frame_line(line)
+                .ok_or_else(|| anyhow::anyhow!("a frame that is no conversation chunk: {line}"))?;
+            anyhow::ensure!(
+                chunk.offset == conversations.len() as u64,
+                "a chunk at {} after {} rows",
+                chunk.offset,
+                conversations.len()
+            );
+            conversations.extend(chunk.rows);
+        }
+        Ok(ConversationListing {
+            account: started.account,
+            mailbox: started.mailbox,
+            total: started.total,
+            conversations,
+        })
     }
 }
 

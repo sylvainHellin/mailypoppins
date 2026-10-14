@@ -46,8 +46,8 @@ use mp_client::queries as wire;
 use mp_protocol::listing::{MessageListRow, ThreadListing};
 
 use crate::app::{
-    entry_from_draft, entry_from_row, entry_from_skip, mailbox_key, status_for_mailbox,
-    CalendarEvent, EmailEntry, MailboxInfo, MessageRef,
+    entry_from_conversation, entry_from_draft, entry_from_member, entry_from_row, entry_from_skip,
+    mailbox_key, status_for_mailbox, CalendarEvent, ConvRole, EmailEntry, MailboxInfo, MessageRef,
 };
 pub use mp_client::queries::{MessageRowDelta, Queries};
 use mp_core::selector::DRAFTS_MAILBOX;
@@ -72,6 +72,86 @@ pub fn list_emails(q: &dyn Queries, account: &str, mailbox: &str) -> Result<Vec<
     }
     let listing = q.list_stream(account, mailbox)?;
     Ok(entries_from_rows(account, mailbox, listing.messages))
+}
+
+/// The list a mailbox load delivers: [`list_conversation_entries`] when the
+/// mailbox lists as conversations, with the threads `expanded` re-expanded,
+/// and [`list_emails`] otherwise (#0142).
+pub fn list_mailbox(
+    q: &dyn Queries,
+    account: &str,
+    mailbox: &str,
+    conversations: Option<&[String]>,
+) -> Result<Vec<EmailEntry>> {
+    match conversations {
+        Some(expanded) => list_conversation_entries(q, account, mailbox, expanded),
+        None => list_emails(q, account, mailbox),
+    }
+}
+
+/// One received mailbox as conversations, newest first, each expanded
+/// conversation of `expanded` followed by its members (#0142).
+///
+/// [`Queries::list_conversations`] for the headers, then one
+/// [`conversation_members`] per expanded conversation still listed, so a
+/// re-stream keeps open what the user opened. A conversation whose expansion
+/// is refused is listed collapsed, with the reason in the log.
+pub fn list_conversation_entries(
+    q: &dyn Queries,
+    account: &str,
+    mailbox: &str,
+    expanded: &[String],
+) -> Result<Vec<EmailEntry>> {
+    let listing = q.list_conversations(account, mailbox)?;
+    let status = status_for_mailbox(mailbox);
+    let mut out = Vec::with_capacity(listing.conversations.len());
+    for row in listing.conversations {
+        let mut header = entry_from_conversation(row, &status);
+        let members = match (&mut header.conv, header.msg) {
+            (Some(ConvRole::Header(conv)), Some(latest))
+                if conv.expandable() && expanded.contains(&conv.thread_id) =>
+            {
+                match conversation_members(q, account, mailbox, &conv.thread_id, latest) {
+                    Ok(members) => {
+                        conv.expanded = true;
+                        members
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[queries] expanding {} of {account}/{mailbox}: {e:#}",
+                            conv.thread_id
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+            _ => Vec::new(),
+        };
+        out.push(header);
+        out.extend(members);
+    }
+    Ok(out)
+}
+
+/// The members of one conversation of `mailbox`, oldest first, as the rows an
+/// expanded header draws under it (#0142).
+///
+/// [`Queries::thread_expanded`] from the header's `latest`: each message held
+/// twice is its copy in the listed mailbox, and the drafts that answer a member
+/// join as draft members.
+pub fn conversation_members(
+    q: &dyn Queries,
+    account: &str,
+    mailbox: &str,
+    thread_id: &str,
+    latest: MessageRef,
+) -> Result<Vec<EmailEntry>> {
+    let thread = q.thread_expanded(account, latest.row_id(), mailbox)?;
+    Ok(thread
+        .messages
+        .iter()
+        .map(|member| entry_from_member(member, thread_id, &thread.subject))
+        .collect())
 }
 
 /// The rows of one message listing, as list rows.
