@@ -1290,20 +1290,23 @@ impl App {
     /// `tc`: flip the active account between the conversation list and the
     /// flat list, remember it in `tui.json`, and say which it is now.
     ///
-    /// A write that fails keeps the new mode for this run and warns, since
-    /// the list on screen is already the one the user asked for.
+    /// The save re-reads `tui.json` and changes only this account's entry, so
+    /// another TUI's choice survives. A write that fails, or a file that
+    /// failed to load and so is left alone, keeps the new mode for this run
+    /// and warns, since the list on screen is already the one the user asked
+    /// for.
     pub fn toggle_conversation_mode(&mut self) {
         let name = self.account_config.name.clone();
         let on = !self.list_modes.grouped(&name);
         self.set_conversation_mode(on);
-        if let Err(e) = self.list_modes.persist() {
+        let state = if on { "on" } else { "off" };
+        if let Err(e) = self.list_modes.persist(&name) {
             self.set_status_level(
-                format!("Conversation view not saved: {e:#}"),
+                format!("Conversation view {state} for {name}, not saved: {e:#}"),
                 StatusLevel::Warning,
             );
             return;
         }
-        let state = if on { "on" } else { "off" };
         let drafts = if self.find_mailbox_by_kind(MailboxKind::Drafts) == Some(self.active_mailbox)
         {
             " (Drafts stays flat)"

@@ -1046,6 +1046,36 @@ fn tc_and_the_palette_switch_the_list_and_tui_json_remembers_it() {
     assert!(ListModes::load(path).0.grouped(ACCOUNT));
 }
 
+/// A `tui.json` that failed to load at start-up is left as it is: `tc` still
+/// switches the list, and the status line says the choice was not saved.
+#[test]
+fn tc_leaves_a_malformed_tui_json_alone_and_says_so() {
+    use crate::tui::prefs::{ListModes, TUI_PREFS_FILE};
+
+    let mut fx = Fixture::new();
+    let dir = tempfile::tempdir().expect("a config dir");
+    let path = dir.path().join(TUI_PREFS_FILE);
+    let typo = r#"{"flat_list_accounts": ["work",]}"#;
+    std::fs::write(&path, typo).expect("write tui.json");
+    let (modes, warning) = ListModes::load(path.clone());
+    assert!(warning.is_some());
+    fx.app.list_modes = modes;
+
+    fx.char('t');
+    fx.char('c');
+    assert_eq!(run_load(&mut fx.app), Some(true), "the flat list loads");
+    assert!(fx.app.emails.iter().all(|e| e.conv.is_none()), "flat");
+    assert_eq!(std::fs::read_to_string(&path).expect("tui.json"), typo);
+    assert!(
+        fx.app
+            .status_message
+            .as_deref()
+            .is_some_and(|m| m.contains("not saved: tui.json is malformed")),
+        "{:?}",
+        fx.app.status_message
+    );
+}
+
 /// A message that arrives in a listed conversation, and a reply sent from it,
 /// update the row within one re-stream: the counts invalidate the daemon
 /// publishes for the mailbox it landed in starts one listing, and that listing
