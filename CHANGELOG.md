@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Added
 - **Conversation listing in the daemon and mp-client (PERSO-138, steps 1 to 3).** `message.list_conversations` streams a mailbox as one row per conversation in `message.conversations` chunks, `message.thread` gains `prefer_mailbox` and `include_drafts`, the drafts index keeps the message a draft answers or forwards, and `Session`/`QueryHandle` gain `list_conversations` with `Queries::thread_expanded`; no client shows it yet.
+- **TUI and desktop: conversation list mode (PERSO-138, steps 4 and 5).** A mailbox lists one row per conversation with its participants, message count and a draft marker; Enter, `l` and `h` expand it in place to its members across Inbox, Sent, Archive and Drafts, each labelled with its mailbox; actions on a collapsed row reach its messages in the listed mailbox only, and the list re-reads on any change in the account. Both clients now require `message.list_conversations` at the handshake. The mode is reachable from tests until step 6 adds the `tc` switch.
 - **`examples/draft_probe.rs` (PERSO-139, slice 0).** Appends a probe draft to an account's Drafts folder and dumps what Outlook and Apple Mail made of it, to pick the linking rule for two-way server drafts.
 - **`tb` on a draft opens it as it will be sent (PERSO-136).** The new `draft.html` daemon method renders the signature and the quoted reply through the same `send::draft_html_body` as `mp send`. In the TUI `tb` opens it in the browser; on the desktop `tb` does the same and `tt` on a draft switches its preview between the Markdown body and that HTML in the sandboxed reader frame, with the message reader mode unchanged.
 - **Desktop: `y` on a draft copies its file path (PERSO-100).**
@@ -20,6 +21,7 @@ All notable changes to this project are documented in this file.
 - **Desktop: `e` on a received message opens it read-only in `$EDITOR` as Markdown, as in the TUI (PERSO-92).** Enter focuses the reader.
 
 ### Fixed
+- **The conversation listing reads a mailbox of one-message conversations in one walk (PERSO-138).** A new additive `messages_thread_mailbox` index answers whether a row's conversation has other members with an index-only probe, so only shared conversations pay a member read: 1.68x the flat stream on 50 000 rows, was 2.4x.
 - **A sent reply carries `In-Reply-To` and `References` (PERSO-137).** The parent's References plus the parent, so recipients' clients thread it and mp files the Sent copy in the parent's conversation instead of a new one.
 - **The desktop log's startup line names the bundle version, and the unreachable TUI `Action::NewDraft` is gone (PERSO-135).**
 - **Reply and reply-all to a message you sent address its original recipients (PERSO-99).** They now go to its original To (and Cc for reply-all) instead of your own address.

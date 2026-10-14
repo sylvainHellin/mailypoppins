@@ -152,11 +152,10 @@ The frontmatter value is the source row's `messages.message_id` copied verbatim 
 ### Keeping the list current
 
 The flat list folds row deltas in place (`apply_row_delta`, `clients/tui/src/queries.rs:291`), and a conversation list cannot.
-A `message.row` delta carries a `MessageListRow`, which has no `thread_id`, and a delta about Sent changes a conversation listed in the inbox.
+A delta about Sent changes a conversation listed in the inbox, and the daemon publishes no `message.row` at all: a message change reaches clients only as a `counts`-scope `state.invalidate` of `mailbox:<account>/<mailbox>` (`Event::from_change`, `src/daemon/state/events.rs`).
 
-- In conversation mode a client re-streams the listing on any row delta of the account, in any mailbox, and on `draft.changed` and a `state.remove` of a `draft:` resource.
-  A row delta is what `MessageRowDelta::decode` (`crates/mp-client/src/queries.rs:410`) yields: `message.row`, `state.remove` of a `message:` resource, and a `state.invalidate` of `mailbox:<account>/<mailbox>` whose scope is not `counts`.
-  The `counts` scope of that invalidate (`src/daemon/state/events.rs:147`) stays the sidebar's and drives no re-stream, as `decode` already rules for the flat list.
+- In conversation mode a client re-streams the listing on a `counts` invalidate of any of the account's mailboxes, on any row delta `MessageRowDelta::decode` (`crates/mp-client/src/queries.rs`) yields, on `draft.changed` and on a `state.remove` of a `draft:` or `message:` resource.
+  The flat list keeps its rule, where the `counts` scope drives only the sidebar.
 - The re-stream is coalesced: at most one stream in flight and one owed, so a sync burst of hundreds of deltas costs two streams.
 - The user's own action updates the row at once, in the pending state both clients already draw, and the re-stream confirms it.
 - A targeted refresh of the touched conversations alone is a follow-up, listed under Out of scope.
@@ -236,7 +235,7 @@ Until step 6 the clients default to the flat list, so `main` never ships a mode 
 - [ ] A message that arrives in a listed conversation, or a reply sent from it, updates the row within one re-stream.
 - [ ] The streamed conversation rows equal the fold of the flat listing plus `message.thread` for the same mailbox, in a daemon test over a real socket.
 - [ ] No frame of the stream exceeds `ROWS_CHUNK_BYTES` plus one row plus the envelope, on the 50 000-row fixture.
-- [ ] On the 50 000-row fixture the daemon side of `message.list_conversations` is under twice the flat stream's on the same host, recorded in `message-list-unbounded.md`.
+- [x] On the 50 000-row fixture the daemon side of `message.list_conversations` is under twice the flat stream's on the same host, recorded in `message-list-unbounded.md`.
 - [ ] `message.thread` without the new parameters answers byte for byte as before, and the `T` overlay's golden frames are unchanged.
 - [ ] `tc` and the palette entry switch an account between the conversation list and the flat list in both clients, the desktop Settings switch does the same, and the choice survives a restart of each client.
 - [ ] A TUI or desktop build against a daemon without `message.list_conversations` stops at the handshake with `capability_missing`.

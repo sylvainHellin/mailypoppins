@@ -2655,6 +2655,19 @@ A TUI key handler reads its door off `app.session`, so the recording `Fixture` i
 
 SQLite reads it as a range over `messages_thread` and walks every threaded row of the account; pin the mailbox walk with `INDEXED BY messages_list`, which fails at prepare time rather than falling back if the index is ever missing (PERSO-138).
 
-## The grouped listing's cost is in the per-thread probes
+## The grouped listing's cost was in the per-thread member reads
 
-On 50 000 one-message conversations the `messages_thread` probes cost 60 ms of SQL against the flat walk's 19 ms, and the Rust fold is a small share; a covering `(account, thread_id, mailbox)` index or a summary table is the lever, not the fold (PERSO-138).
+On 50 000 one-message conversations reading every conversation's members through `messages_thread` cost 60 ms of SQL against the flat walk's 19 ms, and an extra index alone changed nothing because that query still fetched every member row.
+What paid off was skipping the member read for a conversation of one: the flat walk asks, through an index-only `EXISTS` on `messages_thread_mailbox (account, thread_id, mailbox)`, whether the row has another member, and only shared conversations go to the second statement; what is left of the cost is the encode, about 812 bytes a row with two dates formatted (PERSO-138).
+
+## Merging two statements' rows in Rust was slower than reading twice
+
+Holding the rows of one statement to merge them with a second statement's rows lost to reading them twice: the fold walked 50 000 rows decoded 100 ms earlier and out of the cache, 44 ms against a fold that streams as the rows arrive (PERSO-138).
+
+## The daemon publishes no `message.row`
+
+Message changes reach clients only as a `counts`-scope `state.invalidate` of `mailbox:<account>/<mailbox>`, plus `draft.changed`, `state.remove` and `sync.completed` (`Event::from_change`, `src/daemon/state/events.rs`); a client that cannot fold row deltas in place, as the conversation list cannot, re-reads on the counts invalidate of any of the account's mailboxes, coalesced to one read in flight and one owed (PERSO-138).
+
+## `message.list_conversations` needs a row sink in process
+
+The method refuses an in-process call with no row sink; `TestDaemon` hands it a `RowsSink::channel()` and decodes the frames with `ConversationRowsChunk::from_frame_line` (PERSO-138).
