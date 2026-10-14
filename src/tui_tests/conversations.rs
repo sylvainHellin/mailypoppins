@@ -1045,3 +1045,95 @@ fn tc_and_the_palette_switch_the_list_and_tui_json_remembers_it() {
     assert_eq!(stored, json!({ "flat_list_accounts": [] }));
     assert!(ListModes::load(path).0.grouped(ACCOUNT));
 }
+
+/// A message that arrives in a listed conversation, and a reply sent from it,
+/// update the row within one re-stream: the counts invalidate the daemon
+/// publishes for the mailbox it landed in starts one listing, and that listing
+/// is the row with the new member counted, dated and, for the arrival, unread.
+#[test]
+fn an_arrival_and_a_sent_reply_update_the_row_within_one_restream() {
+    let mut fx = Fixture::new();
+    let header = |app: &App| app.emails[0].header().cloned().expect("a header");
+    let before = header(&fx.app);
+    assert_eq!((before.count, before.unread), (4, 2));
+
+    let ingest = |mailbox: &str, uid: i64, email: FetchedEmail, parent: &str| {
+        let store = crate::store::Store::open(crate::config::store_path(ACCOUNT)).expect("a store");
+        let blobs = crate::store::BlobStore::for_account(ACCOUNT);
+        let raw = format!("In-Reply-To: {parent}\r\nReferences: {QUESTION} {parent}\r\n\r\n");
+        crate::ingest::ingest_message(
+            &store,
+            &blobs,
+            &crate::ingest::IngestInput {
+                account: ACCOUNT,
+                mailbox,
+                uid,
+                email: &email,
+                raw: Some(raw.as_bytes()),
+            },
+        )
+        .expect("ingest")
+        .row_id
+    };
+    let invalidate = |app: &mut App, revision: u64, mailbox: &str| {
+        app.apply_event(&event(
+            revision,
+            "state.invalidate",
+            json!({
+                "resource": format!("mailbox:{ACCOUNT}/{mailbox}"),
+                "scope": {"query": "counts"},
+            }),
+        ));
+    };
+
+    let arrival = ingest(
+        "inbox",
+        6,
+        message(
+            "<third-question@example.com>",
+            "Ivana Petrova <ivana@example.com>",
+            "Re: Frage zum Bericht",
+            "Sat, 6 Jan 2024 08:00:00 +0000",
+            false,
+        ),
+        SECOND_REPLY,
+    );
+    invalidate(&mut fx.app, WATERMARK + 1, "inbox");
+    assert_eq!(queued_loads(&fx.app), 1, "one re-stream");
+    assert_eq!(run_load(&mut fx.app), Some(true));
+    let arrived = header(&fx.app);
+    assert_eq!((arrived.count, arrived.unread), (5, 3));
+    assert!(
+        arrived.date_sort.starts_with("2024-01-06"),
+        "{}",
+        arrived.date_sort
+    );
+    assert_eq!(arrived.member_ids[0], MessageRef::new(arrival));
+
+    ingest(
+        "sent",
+        3,
+        message(
+            "<third-reply@example.com>",
+            "Alice Martin <alice@example.com>",
+            "Re: Frage zum Bericht",
+            "Sun, 7 Jan 2024 09:00:00 +0000",
+            true,
+        ),
+        "<third-question@example.com>",
+    );
+    invalidate(&mut fx.app, WATERMARK + 2, "sent");
+    assert_eq!(queued_loads(&fx.app), 1, "one re-stream");
+    assert_eq!(run_load(&mut fx.app), Some(true));
+    let replied = header(&fx.app);
+    assert_eq!((replied.count, replied.unread), (6, 3));
+    assert!(
+        replied.date_sort.starts_with("2024-01-07"),
+        "{}",
+        replied.date_sort
+    );
+    assert_eq!(
+        replied.member_ids, arrived.member_ids,
+        "a reply in Sent adds no inbox member"
+    );
+}
