@@ -456,9 +456,10 @@ fn golden_conversation_collapsed() {
 }
 
 /// `Enter` expands the collapsed conversation and keeps the cursor on it; its
-/// members are the four messages and the draft, oldest first, each labelled
-/// with its mailbox, the question as its inbox copy. The frame parks the
-/// cursor on the draft member, whose preview is the draft's own text.
+/// members are the draft and the four messages, newest first like the
+/// mailbox around them, each labelled with its mailbox, the question as its
+/// inbox copy. The frame parks the cursor on the draft member, whose preview
+/// is the draft's own text.
 #[test]
 fn golden_conversation_expanded() {
     let mut fx = Fixture::new();
@@ -482,11 +483,11 @@ fn golden_conversation_expanded() {
         fx.shape(),
         [
             "H4 Re: Frage zum Bericht",
-            "  inbox",
-            "  sent",
-            "  inbox",
-            "  sent",
             "  drafts",
+            "  sent",
+            "  inbox",
+            "  sent",
+            "  inbox",
             "H1 Wochenbericht",
         ]
     );
@@ -494,17 +495,15 @@ fn golden_conversation_expanded() {
     assert_eq!(
         members,
         [
-            Some(EntryKey::Msg(MessageRef::new(fx.ids.question))),
-            Some(EntryKey::Msg(MessageRef::new(fx.ids.first_reply))),
-            Some(EntryKey::Msg(MessageRef::new(fx.ids.follow_up))),
-            Some(EntryKey::Msg(MessageRef::new(fx.ids.second_reply))),
             Some(EntryKey::Draft(DRAFT_ID.to_string())),
+            Some(EntryKey::Msg(MessageRef::new(fx.ids.second_reply))),
+            Some(EntryKey::Msg(MessageRef::new(fx.ids.follow_up))),
+            Some(EntryKey::Msg(MessageRef::new(fx.ids.first_reply))),
+            Some(EntryKey::Msg(MessageRef::new(fx.ids.question))),
         ]
     );
 
-    for _ in 0..5 {
-        fx.char('j');
-    }
+    fx.char('j');
     assert_eq!(
         fx.app.selected_email().and_then(|e| e.draft_id.clone()),
         Some(DRAFT_ID.to_string())
@@ -594,8 +593,11 @@ fn a_member_from_another_mailbox_previews_without_switching_mailbox() {
     let mut fx = Fixture::new();
     let inbox = fx.app.active_mailbox;
     fx.char('l');
-    fx.char('j');
-    fx.char('j');
+    // Newest first: the draft, the second reply, the follow-up, then the
+    // first reply.
+    for _ in 0..4 {
+        fx.char('j');
+    }
     assert_eq!(
         fx.app.selected_email().and_then(|e| e.member_mailbox()),
         Some("sent")
@@ -658,6 +660,37 @@ fn actions_on_a_collapsed_row_reach_its_members_here() {
     );
 }
 
+/// Every expanded member carries its canonical selector, which is what `y`
+/// copies: a message's names its own mailbox and Message-ID, a draft's the
+/// drafts namespace, and the header keeps the one the listing sent.
+#[test]
+fn an_expanded_member_has_a_selector_to_copy() {
+    let mut fx = Fixture::new();
+    let header = fx.app.emails[0].selector.clone();
+    fx.char('l');
+    let selectors: Vec<Option<String>> = fx.app.emails[0..6]
+        .iter()
+        .map(|e| e.selector.clone())
+        .collect();
+    let message = |mailbox: &str, id: &str| {
+        Some(format!(
+            "mp://{ACCOUNT}/{mailbox}/{}",
+            id.trim_matches(['<', '>'])
+        ))
+    };
+    assert_eq!(
+        selectors,
+        [
+            header,
+            Some(format!("mp://{ACCOUNT}/drafts/{DRAFT_ID}")),
+            message("sent", SECOND_REPLY),
+            message("inbox", FOLLOW_UP),
+            message("sent", FIRST_REPLY),
+            message("inbox", QUESTION),
+        ]
+    );
+}
+
 /// On an expanded member an action applies to that member alone, whatever
 /// mailbox it lives in; a selection of conversation rows is the union of their
 /// members here.
@@ -665,8 +698,11 @@ fn actions_on_a_collapsed_row_reach_its_members_here() {
 fn an_action_on_a_member_reaches_that_member_alone() {
     let mut fx = Fixture::new();
     fx.char('l');
-    fx.char('j');
-    fx.char('j');
+    // Newest first: the draft, the second reply, the follow-up, then the
+    // first reply.
+    for _ in 0..4 {
+        fx.char('j');
+    }
     fx.forget();
     fx.dispatch(Action::ToggleFlag);
     assert_eq!(fx.rows_of("message.set_flag"), [fx.ids.first_reply]);

@@ -6,11 +6,11 @@ expression: wide
 00 |╭ Inbox ───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 01 |│   DATE       CONTACT         SUBJECT                                                                                 │
 02 |│  2024-01-04 Alice Mart… (4) 󰏫 Re: Frage zum Bericht                                                                 │
-03 |│  2024-01-01  └ Inbox        Re: Frage zum Bericht                                                                   │
-04 |│   2024-01-02  └ Sent         Re: Frage zum Bericht                                                                   │
+03 |│   2024-01-05  └ Drafts       Re: Frage zum Bericht                                                                   │
+04 |│   2024-01-04  └ Sent         Re: Frage zum Bericht                                                                   │
 05 |│  2024-01-03  └ Inbox        Re: Frage zum Bericht                                                                   │
-06 |│   2024-01-04  └ Sent         Re: Frage zum Bericht                                                                   │
-07 |│   2024-01-05  └ Drafts       Re: Frage zum Bericht                                                                   │
+06 |│   2024-01-02  └ Sent         Re: Frage zum Bericht                                                                   │
+07 |│  2024-01-01  └ Inbox        Re: Frage zum Bericht                                                                   │
 08 |│   2024-01-02 Bot             Wochenbericht                                                                           │
 09 |│                                                                                                                      │
 10 |│                                                                                                                      │
@@ -45,7 +45,7 @@ expression: wide
 39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
 02 |bold@1..119
-03 |bold@1..119
+03 |bg:surface+fg:selection+bold@1..119
 05 |bold@1..119
-07 |bg:surface+fg:selection+bold@1..119
+07 |bold@1..119
 38 |bold@1..12 bold@14..17 bold@28..29 bold@38..43 bold@55..60 bold@67..68 bold@77..78 bold@86..87 bold@97..98 bold@107..110

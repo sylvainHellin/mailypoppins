@@ -8,6 +8,7 @@ use mp_protocol::draft::{DraftEntry, DraftSkip};
 use mp_protocol::listing::{ConversationRow, MessageListRow, ThreadMessage};
 
 use mp_core::parse::FetchedEmail;
+use mp_core::selector::{message_key, Selector};
 use mp_core::types::MailboxRole;
 
 // ---------------------------------------------------------------------------
@@ -378,16 +379,35 @@ pub fn entry_from_conversation(row: ConversationRow, status: &str) -> EmailEntry
 /// and leaves the recipients empty; the body comes from `message.get` by its
 /// row id (or the draft file by its id) like any row's. A draft member is
 /// keyed by its draft id, which is what makes the Drafts actions reach it.
-pub fn entry_from_member(member: &ThreadMessage, thread_id: &str, subject: &str) -> EmailEntry {
+///
+/// A thread row carries no `selector` either, so the member spells its own
+/// from the account, its mailbox and its Message-ID (or its draft id), the
+/// same three parts the daemon puts in a listing row's, which is what `y`
+/// copies.
+pub fn entry_from_member(
+    member: &ThreadMessage,
+    account: &str,
+    thread_id: &str,
+    subject: &str,
+) -> EmailEntry {
     let (date_display, date_sort) = resolve_date(
         &Some(member.date_display.clone()).filter(|d| !d.is_empty()),
         &None,
         Path::new(""),
     );
     let draft = member.draft_id.clone();
+    let selector = match &draft {
+        Some(id) => Some(Selector::for_draft(account, id)),
+        None if !member.message_id.is_empty() => Some(Selector::new(
+            account,
+            member.mailbox.as_str(),
+            message_key(&member.message_id),
+        )),
+        None => None,
+    };
     EmailEntry {
         msg: draft.is_none().then(|| MessageRef::new(member.id)),
-        selector: None,
+        selector: selector.map(|s| s.to_string()),
         skip: None,
         from: extract_display_name(&member.from),
         to: String::new(),

@@ -13,11 +13,11 @@ expression: frame
 07 |╭ Inbox ─────────────────────────────────╮╭ Body ──────────────────────────────────────────────────────────────────────╮
 08 |│   DATE       SUBJECT                   ││Hallo Ivana,                                                                │
 09 |│  2024-01-04 (4) 󰏫 Re: Frage zum Beri… ││                                                                            │
-10 |│  2024-01-01  └ Inbox: Re: Frage zum … ││der Bericht folgt morgen.                                                   │
-11 |│   2024-01-02  └ Sent: Re: Frage zum B… ││                                                                            │
+10 |│   2024-01-05  └ Drafts: Re: Frage zum… ││der Bericht folgt morgen.                                                   │
+11 |│   2024-01-04  └ Sent: Re: Frage zum B… ││                                                                            │
 12 |│  2024-01-03  └ Inbox: Re: Frage zum … ││                                                                            │
-13 |│   2024-01-04  └ Sent: Re: Frage zum B… ││                                                                            │
-14 |│   2024-01-05  └ Drafts: Re: Frage zum… ││                                                                            │
+13 |│   2024-01-02  └ Sent: Re: Frage zum B… ││                                                                            │
+14 |│  2024-01-01  └ Inbox: Re: Frage zum … ││                                                                            │
 15 |│   2024-01-02 Wochenbericht             ││                                                                            │
 16 |│                                        ││                                                                            │
 17 |│                                        ││                                                                            │
@@ -49,8 +49,8 @@ expression: frame
 03 |bold@43..50
 04 |bold@43..50
 09 |bold@1..41
-10 |bold@1..41
+10 |bg:surface+fg:selection+bold@1..41
 12 |bold@1..41
-14 |bg:surface+fg:selection+bold@1..41
+14 |bold@1..41
 35 |bold@5..11
 38 |bold@1..7 bold@9..12 bold@23..24 bold@33..38 bold@50..55 bold@62..63 bold@72..73 bold@81..82 bold@92..93 bold@102..105

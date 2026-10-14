@@ -133,12 +133,16 @@ pub fn list_conversation_entries(
     Ok(out)
 }
 
-/// The members of one conversation of `mailbox`, oldest first, as the rows an
+/// The members of one conversation of `mailbox`, newest first, as the rows an
 /// expanded header draws under it (#0142).
 ///
 /// [`Queries::thread_expanded`] from the header's `latest`: each message held
 /// twice is its copy in the listed mailbox, and the drafts that answer a member
 /// join as draft members.
+///
+/// The daemon answers oldest first, as the thread overlay reads it; the list
+/// reverses it so a conversation reads in the order the mailbox around it
+/// does, newest on top.
 pub fn conversation_members(
     q: &dyn Queries,
     account: &str,
@@ -150,7 +154,8 @@ pub fn conversation_members(
     Ok(thread
         .messages
         .iter()
-        .map(|member| entry_from_member(member, thread_id, &thread.subject))
+        .rev()
+        .map(|member| entry_from_member(member, account, thread_id, &thread.subject))
         .collect())
 }
 
