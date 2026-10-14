@@ -373,9 +373,19 @@ pub const INVITE_INDEX: &str = "message_blobs_invite";
 /// index instead of scanning `messages` and sorting into a temp B-tree.
 pub const THREAD_INDEX: &str = "messages_thread";
 
+/// Name of the index that tells a conversation of one from a longer one.
+///
+/// [`super::read::list_conversations`] asks of every listed row whether its
+/// `thread_id` has another member outside the `drafts` mailbox. With
+/// `mailbox` in the index beside `(account, thread_id)` and the row id
+/// implicitly last, that is an index-only probe, so a mailbox of
+/// conversations of one is listed off its own rows without a second read of
+/// them (#0142).
+pub const THREAD_MAILBOX_INDEX: &str = "messages_thread_mailbox";
+
 /// Every index created after [`SCHEMA_VERSION`] was last bumped, as
 /// `(name, CREATE statement)`, each looked up and created on its own.
-fn additive_indexes() -> [(&'static str, String); 2] {
+fn additive_indexes() -> [(&'static str, String); 3] {
     [
         (
             INVITE_INDEX,
@@ -389,6 +399,13 @@ fn additive_indexes() -> [(&'static str, String); 2] {
             format!(
                 "CREATE INDEX IF NOT EXISTS {THREAD_INDEX} \
                  ON messages (account, thread_id, date_sort)"
+            ),
+        ),
+        (
+            THREAD_MAILBOX_INDEX,
+            format!(
+                "CREATE INDEX IF NOT EXISTS {THREAD_MAILBOX_INDEX} \
+                 ON messages (account, thread_id, mailbox)"
             ),
         ),
     ]

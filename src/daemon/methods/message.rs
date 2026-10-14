@@ -3107,9 +3107,10 @@ mod tests {
         });
         // `message.list_conversations` (#0142), the daemon's side on the same
         // terms: the two-statement read, the fold and the drafts join, then
-        // every conversation encoded into `message.conversations` frames.
-        let encode_conversations = |conversations: &[read::Conversation]| -> Vec<Vec<u8>> {
-            let rows = StreamRows::Conversations(conversations.to_vec());
+        // every conversation encoded into `message.conversations` frames. The
+        // read moves into the rows as the handler moves it, with no copy.
+        let encode_conversations = |conversations: Vec<read::Conversation>| -> Vec<Vec<u8>> {
+            let rows = StreamRows::Conversations(conversations);
             let mut chunks = ChunkEncoder::new(
                 rows.method(),
                 "op-bench",
@@ -3134,10 +3135,10 @@ mod tests {
         });
         let conversations_daemon = sample(|| {
             let conversations = read_conversations("alpha", &resolved, &path).expect("rows");
-            std::hint::black_box(encode_conversations(&conversations));
+            std::hint::black_box(encode_conversations(conversations));
         });
         let conversations = read_conversations("alpha", &resolved, &path).expect("rows");
-        let conversation_frames = encode_conversations(&conversations);
+        let conversation_frames = encode_conversations(conversations.clone());
         let largest_conversation = conversations
             .iter()
             .map(|c| {

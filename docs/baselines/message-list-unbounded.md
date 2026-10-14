@@ -123,6 +123,62 @@ A standalone timing of the two client paths, on 50 000 synthetic rows of 623 byt
 
 That run was on the baseline host, macOS 26.6.2 on the Apple M4 Pro, `rustc 1.98.1`, at a load average of 36 to 39 on 12 cores, so the absolute figures are loose and the ratio is the result.
 
+## The conversation listing
+
+`message_list_unbounded_bench` also times `message.list_conversations` (#0142), the daemon's side on the stream's terms: `read::list_conversations` with the drafts join, then every conversation encoded into `message.conversations` frames, without the socket writes.
+`MP_BENCH_MAILBOX` picks the listed mailbox, `Bulk` when it is unset.
+The ticket's target is under twice the flat stream's daemon side on the same host and fixture.
+
+| field | value |
+| --- | --- |
+| `singleton` | `mkfixture --rows 50000`: every `Bulk` row a conversation of one, the worst case |
+| `threaded` | `mkfixture --rows 50000 --threaded`: `Bulk` in 10 000 conversations of five, each with one reply in `sent` (18 minutes to build here) |
+| `before` | `8a255a1`, the two-statement read whose members query probed `messages_thread` for every conversation |
+| `after` | `8a255a1` plus `messages_thread_mailbox` and the read below (PERSO-138) |
+| `host` | the home server of "The stream", `rustc 1.96.0`, load average 1.4 to 5.9 |
+
+```sh
+cargo build --release --example mkfixture
+target/release/examples/mkfixture --out /var/tmp/mp-bench-50k-threaded --rows 50000 --threaded
+MP_BENCH_FIXTURE=/var/tmp/mp-bench-50k-threaded MP_BENCH_MAILBOX=sent cargo test --release --lib \
+  message_list_unbounded_bench -- --ignored --nocapture
+```
+
+The before and after test binaries ran alternately, case by case, in two passes, each on its own copy of the fixture, since the after binary adds the index to the store it opens.
+The conversation step used to copy the whole read (`to_vec`) before encoding it, which the handler does not do; both columns are taken without the copy, which had put the singleton before figure at 307.4 ms, 2.64x the stream.
+
+Milliseconds, `median min max`, pass 2; pass 1 agreed within 1% on every ratio.
+
+| case | step | before | after |
+| --- | --- | --- | --- |
+| singleton `Bulk`, 50 000 conversations | `message.list_stream`: read plus chunks | 111.7 110.3 114.0 | 119.0 117.2 128.5 |
+| | `read::list_conversations` with the drafts join | 188.5 187.3 193.6 | **127.4** 126.4 135.0 |
+| | `message.list_conversations`: read plus chunks | 265.4 263.7 284.4 | **200.5** 198.0 204.3 |
+| | ratio to the stream | 2.38x | **1.68x** |
+| threaded `Bulk`, 10 000 conversations | `message.list_stream`: read plus chunks | 115.3 114.7 117.2 | 116.0 114.5 116.6 |
+| | `read::list_conversations` with the drafts join | 148.4 147.3 150.2 | 185.3 183.8 186.6 |
+| | `message.list_conversations`: read plus chunks | 169.9 168.0 172.3 | 208.6 204.4 210.6 |
+| | ratio to the stream | 1.47x | 1.80x |
+| threaded `sent`, 10 050 conversations | `message.list_stream`: read plus chunks | 22.5 22.1 25.0 | 22.8 22.6 25.1 |
+| | `read::list_conversations` with the drafts join | 119.7 118.4 123.1 | 127.9 127.1 132.8 |
+| | `message.list_conversations`: read plus chunks | 139.6 138.0 142.3 | 149.2 148.7 151.4 |
+| | ratio to the stream | 6.21x | 6.55x |
+
+On the singleton fixture the daemon side is now 1.68x the stream, under the target.
+The old members query read every row twice, once in its inner walk for the `thread_id` and once through a `messages_thread` probe; the new read walks the mailbox once and asks `messages_thread_mailbox` whether the row has another member, an index-only probe, so the read fell by 61 ms.
+Of the 81 ms still over the stream, 38 are the read (the probe per row and the fold) and 43 the encode: a conversation row is 812 bytes against 488, 40.6 MB in 39 frames against 24.4 MB in 24, with two dates formatted per row.
+
+Threaded `Bulk` pays for the probe without the saving: every row has other members, so the walk with 50 000 probes costs about 37 ms more than the old inner walk, and the members are read as before.
+At 1.80x it is still under the target.
+`sent` stays far over the stream because each of its conversations pulls in five `Bulk` members: 10 050 listed rows become 60 000 rows read and folded, against the stream's 10 050.
+
+The index earns its place on the shared conversations.
+The walk plus the probes measured 47.5 ms on the singleton `Bulk` with `messages_thread_mailbox` against 48.2 with `messages_thread`, 48.1 against 57.7 on threaded `Bulk`, and 10.2 against 26.3 on `sent`, because `messages_thread` has to read the other row to check its mailbox.
+Building it took 95 ms on the 50 351-row `alpha` store, once, at the first open; both fixtures, built before the change, gained it that way through `ensure_additive_indexes`.
+
+A variant that kept the shared rows from the first statement and read only the other mailboxes' members in the second, every row read once, was slower: 194 ms of read against 185 on threaded `Bulk`, 163 against 128 on `sent`.
+Its fold took 44 ms over 10 000 conversations whose rows had been decoded 100 ms earlier and had left the cache.
+
 ## Not taken
 
 The end-to-end CLI figure (`mp list-messages --mailbox Bulk -n 30000` over a warm sandboxed daemon, the W2 harness at a larger `-n`) was taken before and after, but the host load made the same binary vary by 2x between rounds, so no figure from it is recorded.

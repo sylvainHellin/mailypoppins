@@ -591,6 +591,48 @@ mod tests {
         assert!(has_index(&store, schema::INVITE_INDEX));
     }
 
+    /// A store that predates the conversation listing's index gains it on
+    /// open, with its version and its rows untouched (#0142).
+    #[test]
+    fn an_existing_store_gains_the_thread_mailbox_index_on_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        let has_index = |store: &Store, name: &str| -> bool {
+            store
+                .conn()
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+                    [name],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        {
+            let store = Store::open(&path).unwrap();
+            assert!(
+                has_index(&store, schema::THREAD_MAILBOX_INDEX),
+                "a fresh store is created with it"
+            );
+            insert_message(&store, "alice", "inbox", 1, "<a@example.com>").unwrap();
+            store
+                .conn()
+                .execute_batch(&format!("DROP INDEX {}", schema::THREAD_MAILBOX_INDEX))
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(
+            has_index(&store, schema::THREAD_MAILBOX_INDEX),
+            "the reopen added it back"
+        );
+        assert!(has_index(&store, schema::THREAD_INDEX));
+        assert_eq!(store.schema_version().unwrap(), Some(SCHEMA_VERSION));
+        let rows: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "and the file was not rebuilt");
+    }
+
     #[test]
     fn truncated_file_is_dropped_and_rebuilt() {
         let dir = tempdir().unwrap();

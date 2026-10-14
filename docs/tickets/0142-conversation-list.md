@@ -92,21 +92,27 @@ The sidebar counts stay per message: the `counts` invalidate and `mailbox_read_c
 
 ### The store query
 
-A new `read::list_conversations(store, account, mailbox)` beside `list_mailbox_dated` (`src/store/read.rs:209`), in two statements on one snapshot.
+`read::list_conversations(store, account, mailbox)` beside `list_mailbox_dated` (`src/store/read.rs:209`), in two statements on one snapshot.
 
-1. The members of every conversation with a row in the mailbox:
-   `SELECT <the list_mailbox_sql columns>, messages.thread_id ... WHERE messages.account = ?1 AND messages.thread_id IN (SELECT thread_id FROM messages WHERE account = ?1 AND mailbox = ?2 AND thread_id IS NOT NULL) ORDER BY messages.thread_id, messages.date_sort, messages.id`.
-   The inner select walks `messages_list` (`src/store/schema.rs:242`) as the flat listing does, and the outer probes `messages_thread` (`(account, thread_id, date_sort)`) once per conversation in index order.
-   A query-plan test pins both to index walks with no temp B-tree, on the precedent of `the_listing_is_served_by_the_messages_list_index`.
-2. The mailbox's rows with a `NULL` `thread_id`, each a conversation of one keyed by its `Message-ID`, since nothing can join them; `message.thread` already treats such a row as its own conversation (`src/daemon/methods/message.rs:944`).
+1. The mailbox's rows, each with whether its conversation has another member:
+   `SELECT <the list_mailbox_sql columns>, EXISTS (SELECT 1 FROM messages AS other WHERE other.account = ?1 AND other.thread_id = messages.thread_id AND other.mailbox <> 'drafts' AND other.id <> messages.id) ... WHERE messages.account = ?1 AND messages.mailbox = ?2 ORDER BY messages.date_sort DESC, messages.id DESC`.
+   The walk is the flat listing's, over `messages_list` (`src/store/schema.rs:242`), and the probe is index-only on `messages_thread_mailbox` (`(account, thread_id, mailbox)`), an additive index a store gains on its next open.
+   A row with no other member is a conversation of one and is folded as it stands.
+   That includes a row with a `NULL` `thread_id`, keyed by its `Message-ID`, which `message.thread` already treats as its own conversation (`src/daemon/methods/message.rs:1177`).
+2. The members of the conversations step 1 found shared, their `thread_id`s bound as one JSON array:
+   `SELECT <the same columns> ... WHERE messages.account = ?1 AND messages.mailbox <> 'drafts' AND messages.thread_id IN (SELECT value FROM json_each(?2)) ORDER BY messages.thread_id, messages.date_sort, messages.id`.
+   It probes `messages_thread` (`(account, thread_id, date_sort)`) once per conversation in index order, so each conversation is folded as its rows arrive.
+   The listed rows of a shared conversation are read a second time here, because holding them from step 1 until their other members arrive made the fold walk rows out of the cache and cost more than the second read.
+
+A query-plan test pins both statements to index walks with no temp B-tree, on the precedent of `the_listing_is_served_by_the_messages_list_index`.
 
 The fold runs in Rust over the ordered rows, one conversation at a time.
-A `Message-ID` seen twice in one conversation counts once in `count`, the rule `thread_messages` applies (`src/store/read.rs:480`), and is unread when any of its copies in the listed mailbox lacks `\Seen`.
+A `Message-ID` seen twice in one conversation counts once in `count`, the rule `thread_messages` applies (`src/store/read.rs:847`), and is unread when any of its copies in the listed mailbox lacks `\Seen`.
 Keeping the dedup in Rust keeps one spelling of the rule for the list and the expansion; `COUNT(DISTINCT message_id)` in SQL would be a second one.
 
 No summary table and no materialised count in this ticket.
 Membership and flags change through ingest, the five mutation methods, the prune, eviction and reconcile, and a materialised count kept in step by every one of those writers would show a wrong unread number without any error the day one of them forgets.
-The read is a bounded multiple of the flat listing's: on the 50 000-row fixture every row is its own conversation, and step 1 reads 50 000 rows through 50 000 index probes against the flat listing's one index walk.
+The read is a bounded multiple of the flat listing's: on the 50 000-row fixture every row is its own conversation, so step 1 is the flat listing's walk plus 50 000 index-only probes and step 2 reads nothing.
 The flat stream's daemon side is 41 ms of read on the baseline host and 111 ms in all on the home server ([message-list-unbounded.md](../baselines/message-list-unbounded.md)); the target is under twice the flat stream's figure on the same host and fixture, and a table is reopened only if the bench misses it.
 `mkfixture` gains an option to give the `Bulk` mailbox threaded rows with replies in Sent, so the bench measures the fold on conversations of several members as well as the singleton worst case.
 
