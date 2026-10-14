@@ -132,27 +132,54 @@ The findings go here when the probe has run, one subsection per account, with th
 `EmailFrontmatter` (`crates/mp-core/src/types.rs:310`) carries today `id`, `to`, `cc`, `bcc`, `subject`, `status`, `from`, `reply_to`, `attachments`, `sent_at`, `sent_via`, `message_id`, `in_reply_to`, `forwarded_from`, `date`, `signature` and `event`; `parse_email_draft` (`crates/mp-core/src/draft.rs:1700`) deserialises it whole.
 `message_id` is the Message-ID of the sent message, written by `mark_draft_sent` (`crates/mp-core/src/draft.rs:1899`), and is not reused here.
 
-Slice 1 adds six optional keys, each `skip_serializing_if = "Option::is_none"` so a draft without them parses unchanged:
+Slice 1 adds two optional keys, each `skip_serializing_if = "Option::is_none"` so a draft without them parses unchanged:
 
 - `server_message_id`: the Message-ID every server copy of this draft carries, minted once by mp when the draft is first pushed and kept for its life.
   It differs from the Message-ID the send mints (`src/send.rs:2829-2832`), so the sent message and the draft are never confused by a Message-ID search.
-- `server_mailbox`: the server folder the copy lives in.
-- `server_uid` and `server_uidvalidity`: the UID of the current copy and the folder's UIDVALIDITY when it was recorded, because a UID means nothing without it.
-- `server_synced_at`: RFC 3339 time of the last push or pull that converged.
-- `server_synced_hash`: a hash of the file's content with the six `server_*` keys removed, taken at that convergence.
+- `conflict_of: <id>`: marks a conflict copy (below).
+
+The daemon writes `server_message_id` with `rewrite_frontmatter_scalars` (`crates/mp-core/src/draft.rs:1540`), the surgical writer `mark_draft_sent` uses, which leaves every other byte of the file as it was.
+That write happens once in the draft's life, at its first push.
+No later push touches the file; the server state a push changes lives in the store.
+
+#### The `draft_sync` table
+
+Every push replaces the server copy and changes its UID.
+The push runs a few seconds after the save that triggers it (the watcher's poll and settle, then `DRAIN_DEBOUNCE`).
+A UID kept in the file would therefore be rewritten during every editing session, and Neovim would prompt "file changed" whenever the user had typed between the save and the push.
+
+The volatile state lives in a store table, `draft_sync`, keyed by `(account, draft_id)`:
+
+- `mailbox`: the server folder the copy lives in.
+- `uid` and `uidvalidity`: the UID of the current copy and the folder's UIDVALIDITY when it was recorded, because a UID means nothing without it.
+- `synced_at`: Unix seconds of the last push or pull that converged.
+- `synced_hash`: a hash of the file's bytes at that convergence.
   A file whose hash differs has changed locally since; a file whose hash matches has not.
 
-A seventh key, `conflict_of: <id>`, marks a conflict copy (below).
+`draft_sync` is created with `CREATE TABLE IF NOT EXISTS` at open, beside `ensure_additive_indexes` and `ensure_additive_columns` (`src/store/schema.rs:404`, `:444`), with no `SCHEMA_VERSION` bump.
+It is separate from the derived `drafts` table, which `refresh_reporting` (`src/store/drafts.rs:149`) deletes and rewrites on every refresh.
+Retiring a draft deletes its row.
 
-The daemon writes these keys with `rewrite_frontmatter_scalars` (`crates/mp-core/src/draft.rs:1540`), the surgical writer `mark_draft_sent` uses, which leaves every other byte of the file as it was.
-The watcher sees that write as a change and reparses; the hash still matches and no push follows.
+The table holds only sync bookkeeping, which the server copy and the file determine between them.
+A store rebuild drops it with the rest of the file, since only open `outbox` rows are carried (`src/store/rebuild.rs:1-15`), and the reconcile re-derives each row:
+
+1. It finds the server copy by `server_message_id`, with `UID SEARCH HEADER Message-ID` in the Drafts folder.
+2. It renders the copy as a pull would and compares the result with the file.
+3. Equal means synced: the row is written from the copy's UID and the file's hash.
+4. Different means the side that changed is unknown: the draft takes the server's version and the local text goes to `<name>.conflict.md` with a fresh `id:`, the path a concurrent edit takes ("Conflict" below).
+5. No copy found means the draft is pushed again.
+   A draft sent or deleted elsewhere while the table was missing comes back as a duplicate, which costs a deletion and loses nothing the user typed.
+
+The same recovery covers a crash between an APPEND and the write of its row.
 
 #### When a push is owed
 
 - The draft watcher (`src/daemon/watch.rs`, the one-second poll with a 300 ms settle, `:52-55`) settles a changed file into `WatchEvent::DraftChanged`.
   `src/daemon/runtime/watcher.rs` is the IDLE watcher for received mail and takes no part in this.
 - The watcher opens no store and takes no engine lock (`src/daemon/watch.rs:606-610`), and that stays true.
-  Its loop, `spawn` (`src/daemon/watch.rs:616`), gains the `RuntimeTable` and hands each settled change of a draft whose hash differs from `server_synced_hash` to that account's runtime, which enqueues the push and calls `request_drain` (`src/daemon/runtime/account.rs:463`).
+  It reads the synced hashes from an in-memory copy of each account's `draft_sync` rows, which the account's runtime loads when it comes up and updates on every write of the table.
+  Its loop, `spawn` (`src/daemon/watch.rs:616`), gains the `RuntimeTable` and hands each settled change of a draft whose hash differs from its row's `synced_hash`, or that has no row, to that account's runtime, which enqueues the push and calls `request_drain` (`src/daemon/runtime/account.rs:463`).
+  An account whose runtime has not loaded its rows yet hands nothing over; the next reconcile finds what is owed.
 - The `draft.*` commands that write a file (`draft.create`, `draft.reply`, `draft.forward`, `draft.create_from_message`, `draft.attach`, `draft.detach`, `draft.approve`, `draft.demote`) need no hook of their own: the watcher notices their writes like any other, as it already does for `draft.approve` (`docs/daemon-protocol.md:748`).
 - A draft with `conflict_of:` set is never pushed.
 - An account whose switch is off pushes nothing (see "The per-account switch").
@@ -173,23 +200,26 @@ It also keeps the blob invariant trivially: there is no blob to write before the
 
 The drain of a `PushDraft`:
 
-1. Parse the file; a file that is gone or does not parse retires the row with nothing done.
-2. Build the server copy (below).
-3. APPEND it to `server_mailbox` with `(\Draft \Seen)`.
-   A first push mints `server_message_id` and resolves the folder.
-4. Recover the new UID with `UID SEARCH HEADER MESSAGE-ID`, as `ImapSentMailbox::append` does (`src/imap_client/sent.rs:108-118`), because `async-imap` 0.11 drops `APPENDUID` (`src/imap_client/sent.rs:9-20`).
+1. Parse the file.
+   A file that is gone or does not parse retires the queue row with nothing done, and so does a file whose hash equals its `draft_sync` row's `synced_hash`, which a pull or a burst of saves leaves behind.
+   A file with a `server_message_id` and no `draft_sync` row runs the recovery of "The `draft_sync` table" instead of a push.
+2. A first push mints `server_message_id`, writes it into the file, reads the file again and resolves the folder.
+3. Build the server copy (below).
+4. APPEND it to the folder with `(\Draft \Seen)`.
+5. Recover the new UID with `UID SEARCH HEADER MESSAGE-ID`, as `ImapSentMailbox::append` does (`src/imap_client/sent.rs:108-118`), because `async-imap` 0.11 drops `APPENDUID` (`src/imap_client/sent.rs:9-20`).
    Every copy shares the Message-ID, so the new copy is the highest UID the search returns.
-5. Delete the previous copy by UID: `UID STORE +FLAGS (\Deleted)` and `UID EXPUNGE` when the server offers `UIDPLUS`.
+6. Delete the previous copy by the UID its `draft_sync` row names: `UID STORE +FLAGS (\Deleted)` and `UID EXPUNGE` when the server offers `UIDPLUS`.
    Without `UIDPLUS` the old copy is only flagged `\Deleted`, since a plain `EXPUNGE` would also expunge whatever another client flagged in that folder; the reconcile ignores flagged copies.
    The existing `delete_email_on_server` (`src/imap_client/ops.rs:57`) finds its target by Message-ID, which here matches every copy, so it is not reused for this step.
-6. Write `server_uid`, `server_uidvalidity`, `server_synced_at` and `server_synced_hash` into the file.
+7. Upsert the draft's `draft_sync` row with the folder, the new UID, UIDVALIDITY, the time, and the hash of the bytes the drain read, then have the draft's row republished ("Protocol surface").
+   The file stays untouched, so an editor holding it open sees no change.
 
 APPEND comes before the delete, so a crash between them leaves two copies rather than none, and the reconcile removes the older one.
 A refusal follows the queue's backoff (`crate::outbox::backoff_secs`) and parks the row `failed` past its budget with `Rollback::None` (`src/pending_ops.rs:97`): the local file is the truth, so there is nothing local to undo.
 
-`pending_ops` is a cache table that a store rebuild drops (`docs/architecture.md:228`).
-A lost `PushDraft` is re-derived at the next reconcile, because the file's hash still differs from `server_synced_hash`.
-The server identity lives in the frontmatter for the same reason: the store may lose it, the file may not.
+`pending_ops` is a cache table that a store rebuild drops (`docs/architecture.md:228`), and so is `draft_sync`.
+A lost `PushDraft` is re-derived at the next reconcile, because the file's hash still differs from its row's `synced_hash`, and a lost row is re-derived as "The `draft_sync` table" describes.
+`server_message_id` is the one piece of sync state the reconcile could not re-derive from the server, so it lives in the frontmatter, which a rebuild leaves alone.
 
 #### Building the server copy
 
@@ -225,14 +255,15 @@ The Drafts folder is exempt from body eviction, because a pull needs the body.
 
 For each local draft with a `server_message_id`:
 
-- The linked server copy is unchanged (same UID, or the rule's equivalent) and the file's hash matches: nothing to do.
+- No `draft_sync` row: the recovery of "The `draft_sync` table".
+- The linked server copy is unchanged (the row's UID, or the rule's equivalent) and the file's hash matches the row: nothing to do.
 - The file's hash differs and the server copy is unchanged: a push is owed; enqueue `PushDraft` if none is queued.
 - The server copy changed and the file's hash matches: pull.
-- Both changed since `server_synced_at`: conflict.
+- Both changed since the row's `synced_at`: conflict.
 - No server copy links to it: the copy was sent or deleted elsewhere; retire the file.
 - Two or more copies link to it, which a crash between APPEND and delete or a concurrent push from the other machine leaves behind: the newest by UID is the copy; an older copy whose body equals a version mp pushed is deleted, and any other older copy is pulled as a conflict copy.
 
-For each server copy carrying a marker that names no local file and no file in `drafts/.retired/`: it is a draft the other machine's mp pushed, and it is written as a new local file under that `id:` with its server keys.
+For each server copy carrying a marker that names no local file and no file in `drafts/.retired/`: it is a draft the other machine's mp pushed, and it is written as a new local file under that `id:` with the copy's `server_message_id`, beside a `draft_sync` row for the copy.
 Without this rule the Mac and the home server would not converge in slice 1, since each would only ever see its own drafts.
 
 The latency is the scheduler's quick tick (`imap.sync_interval_secs`), because the IDLE watcher hears only INBOX (`src/daemon/runtime/watcher.rs:21-28`).
@@ -240,7 +271,8 @@ That is the latency Outlook and Apple Mail show between each other on IMAP as we
 
 #### Pull
 
-A pull rewrites the body and the headers of the local file from the server copy and keeps every frontmatter key the server cannot carry: `id`, `status`, `signature`, `forwarded_from`, `event`.
+A pull rewrites the body and the headers of the local file from the server copy and keeps every frontmatter key the server cannot carry: `id`, `status`, `signature`, `forwarded_from`, `event`, `server_message_id`.
+It writes the file first and then the draft's `draft_sync` row, with the copy's UID and the hash of the bytes it wrote, so the watcher's settle of that write owes no push.
 
 The body comes from the `text/html` part when there is one, through an HTML-to-Markdown step, and from `text/plain` otherwise.
 Neither existing converter fits:
@@ -249,20 +281,30 @@ Neither existing converter fits:
 - `html_to_markdown` (`crates/mp-core/src/parse.rs:485`) is a regex converter for signatures, documented as "deliberately narrow": anchors, `<br>`, paragraphs, bold, italic and images.
 
 The pull needs the subset `markdown_to_html` (`src/send.rs:156`, pulldown-cmark with strikethrough and tables) produces, plus whatever Outlook and Apple Mail add: headings, lists, block quotes, code, links, emphasis.
-`html2text` 0.14, already a dependency of `mp-core`, exposes the `TextDecorator` trait (`html2text::render::TextDecorator`) and `config::with_decorator`.
-A Markdown decorator in `crates/mp-core/src/parse.rs` built on them gives a Markdown-preserving reverse without a new crate.
-A dedicated crate (`htmd`, a Turndown port) would convert tables and nested lists better, and adopting it is a decision for Sylvain after the usual due diligence.
+
+The step is the `htmd` crate (0.5.5, Apache-2.0, a port of turndown.js), chosen on 2026-10-14 over a `TextDecorator` on `html2text`.
+`html2text`'s decorators produce wrapped plain text with footnote links, no escaping and ASCII-box tables, so valid Markdown would need a hand-written emitter on top of them.
+`htmd` emits CommonMark with GFM tables, escaping and nested block quotes, and takes per-tag handlers (`add_handler`) and `skip_tags`.
+It pulls `html5ever` 0.39 and `markup5ever_rcdom` 0.39, while `html2text` 0.14.4 in `Cargo.lock` uses `html5ever` 0.31, so `html5ever` compiles twice; that cost is accepted.
+`html2text` keeps rendering received HTML as plain text.
+
+The converter lives in `crates/mp-core/src/parse.rs` beside `html_to_plain`, configured with:
+
+- `skip_tags` for `script`, `style` and `head`, without which the text of a `<style>` block leaks into the body;
+- a handler for Word's fake lists, the `mso-list` paragraphs whose number sits inside `<![if !supportLists]>`, turning them into Markdown lists;
+- handlers for the quote wrappers, Apple Mail's `blockquote type="cite"` and Outlook's `div#divRplyFwdMsg` and `div#appendonsend`, which map back to the `QUOTE_MARKER` section;
+- a trim of trailing `&nbsp;`.
 
 Only the part above the quote boundary is replaced.
 The text below `QUOTE_MARKER` and the companion `.html` stay as they are, because Outlook and Apple Mail rewrite a quoted thread in ways mp would not round-trip.
-The boundary in the server HTML is mp's own quote `<div>` when the comment survived, and otherwise the first `divRplyFwdMsg` (Outlook) or `blockquote type="cite"` (Apple Mail); the probe's dumps confirm the markers.
+The boundary in the server HTML is mp's own quote `<div>` when the comment survived, and otherwise the first of the quote wrappers above; the probe's dumps confirm the selectors.
 
 A pull into an `approved` draft demotes it to `status: draft`: a send must never carry content the user did not approve.
 A pull into a draft with an open outbox row (`active_submission_for_draft`, `src/outbox.rs:773`) or an armed undo-send hold (`src/daemon/hold.rs`) waits until that settles.
 
 #### Conflict
 
-When both sides changed since the last convergence, the local text is kept as `<name>.conflict.md` beside the draft, and the draft itself takes the server's version.
+When both sides changed since the last convergence, the local text is kept as `<name>.conflict.md` beside the draft, and the draft itself takes the server's version and its `draft_sync` row, as after a pull.
 The conflict copy gets a fresh `id:` and `conflict_of: <original id>`.
 A fresh id is required: two files with the same `id:` shadow each other in the watcher's inventory with whichever settled last (`BACKLOG.md:38`).
 A conflict copy is never pushed; the user merges it and deletes it, or removes `conflict_of:` to keep it as a draft of its own, which is then pushed like any other.
@@ -288,7 +330,7 @@ Its server copy may be the only one left, so the reconcile pulls it into `.retir
 `send_draft` (`src/send.rs:2216`) commits the outbox row before SMTP, records the result, then settles the draft (`:2285-2295`).
 The server copy's delete joins the outbox's transition out of `pending_send`, without a fifth state:
 
-- `outbox::enqueue` (`src/outbox.rs:644`) records the draft's server identity on the row, in a new nullable `outbox.draft_copy` column holding `{mailbox, message_id, uid, uidvalidity}`.
+- `outbox::enqueue` (`src/outbox.rs:644`) records the draft's server identity on the row, in a new nullable `outbox.draft_copy` column holding `{mailbox, message_id, uid, uidvalidity}`, read from the draft's frontmatter and its `draft_sync` row.
   The rebuild carries open outbox rows across a store drop (`src/store/rebuild.rs:1-15`), and the column goes with them.
 - `record_submission` (`src/outbox.rs:819`) and `record_per_recipient` (`src/outbox.rs:912`), the two transitions out of `pending_send`, insert a `DeleteDraft` `pending_ops` row in the same transaction that moves the row to `sent_pending_append` or `done`, when the row names a draft copy and every recipient was delivered.
 - The condition is the one `settle_sent_draft` retires the file under (`src/draft.rs:182-187`), so a partly delivered draft keeps both its local file and its server copy.
@@ -309,7 +351,8 @@ The server folder is the account's `drafts` role from [#0141](0141-mailbox-auto-
 A server draft that links to no local file and carries no marker was started in Outlook, Apple Mail or the Proton web app.
 The reconcile imports it as a new file in the drafts directory:
 
-- a fresh `id:` and the server keys, with `server_message_id` taken from the draft's own Message-ID;
+- a fresh `id:`, and `server_message_id` taken from the draft's own Message-ID;
+- a `draft_sync` row for the copy;
 - `to`, `cc`, `bcc`, `subject`, `from`, `reply_to` from its headers, and `in_reply_to:` from its `In-Reply-To`;
 - `status: draft`;
 - the body through the pull's converter, and the attachments as files as above.
@@ -331,8 +374,8 @@ A merged view that lists server drafts beside local files was considered and dro
 The same contract over `src/graph.rs`, for when an account uses Graph:
 
 - push: `POST /me/messages` creates the copy in Drafts and `PATCH /me/messages/{id}` replaces its body and recipients, so a Graph draft keeps one id across edits;
-- identity: the immutable id (`Prefer: IdType="ImmutableId"`) as `server_uid`, the `internetMessageId` as `server_message_id`, and the marker as `internetMessageHeaders`, which Graph accepts only on create;
-- change detection: `changeKey` and `lastModifiedDateTime`;
+- identity: the immutable id (`Prefer: IdType="ImmutableId"`) in the draft's `draft_sync` row, in a nullable column slice 3 adds where IMAP uses `uid` and `uidvalidity`, the `internetMessageId` as `server_message_id`, and the marker as `internetMessageHeaders`, which Graph accepts only on create;
+- change detection: `changeKey`, kept in the same row, and `lastModifiedDateTime`;
 - delete: the existing `delete_message` (`src/graph.rs:2203`);
 - foreign drafts: the `isDraft` messages of `/me/mailFolders/drafts`.
 
@@ -341,18 +384,21 @@ No Graph account exists today, and nothing here can be verified live.
 ### Protocol surface
 
 No new method and no new event kind.
-Every change to a draft is a write to its file, which keeps the watcher the one publisher of `draft.changed` and `state.remove`:
+The watcher stays the one publisher of `draft.changed` and `state.remove`:
 
-- a pull, an import and the daemon's write of the `server_*` keys all reach clients as `draft.changed`;
+- a pull, an import and the first push's write of `server_message_id` are writes to the file, which reach clients as `draft.changed`;
+- a write of a `draft_sync` row touches no file, so the runtime that wrote it updates the in-memory copy of the table and asks the watcher to recommit that draft, which publishes `draft.changed` with the new `server` member;
 - a retire is a file leaving the top level, which the watcher publishes as the removal of `draft:<account>/<id>`.
+
+When an account's runtime loads its `draft_sync` rows, the watcher recommits every draft of that account; until then those drafts carry no `server` member.
 
 `DraftRow` (`crates/mp-protocol/src/state.rs:147`) and the `draft.list` row gain an optional `server` member, `{state, synced_at}`, defaulting to absent.
 The change is additive: the protocol stays `{min: 1, max: 1}` and an older client ignores the member.
-`state` is derived on each reparse:
+`state` is derived each time the watcher commits a draft, from the file and the in-memory copy of its `draft_sync` row:
 
 - `local` for a draft with no `server_message_id` or an account whose switch is off;
-- `pending` for a file whose hash differs from `server_synced_hash`;
-- `synced` when it matches;
+- `pending` for a file whose hash differs from its row's `synced_hash`, and for one with a `server_message_id` and no row;
+- `synced` when the hash matches;
 - `conflict` for a draft some `conflict_of:` names, and for the conflict copy itself.
 
 A push parked `failed` is not visible in the file.
@@ -362,18 +408,22 @@ No `state.invalidate` scope changes: drafts never travelled as invalidations, an
 ### Invariants kept
 
 - Drafts `.md` files are the truth and the `drafts` table is derived (`docs/architecture.md:11-12`); the server copy is a mirror of the file, and a server change reaches mp only by rewriting the file.
-- Nothing in the store is the only copy of anything the user typed (`docs/architecture.md:10`): the server identity lives in the frontmatter, and a lost queue row is re-derived from the file.
+- Nothing in the store is the only copy of anything the user typed (`docs/architecture.md:10`): `draft_sync` holds only sync bookkeeping, which the reconcile re-derives from the server copy and the file, `server_message_id` lives in the frontmatter, and a lost queue row is re-derived from the file.
+- A push leaves the file alone once its `server_message_id` is written, so an editor holding the file open is not interrupted by the mirror.
 - Blob files are written before the transaction that references them: `PushDraft` carries no blob, and the attachments a pull writes are plain files written before the frontmatter names them.
 - The per-account engine lock (`src/engine_lock.rs`) covers the drain and the reconcile; the watcher stays lock-free.
 - Exactly-once submission (`submission_started_at`, `docs/architecture.md:293`) is untouched: the server copy's delete is queued after the SMTP verdict and never gates it.
 - No two files share an `id:` (`BACKLOG.md:38`): conflict copies and imports mint fresh ids, and the marker import writes only an id the directory does not hold.
 
-### Decisions for Sylvain
+### Decisions
 
-- The frontmatter carries the volatile `server_uid`, so every push rewrites the file the editor may have open.
-  Neovim with `autoread` reloads an unmodified buffer silently; a buffer with unsaved edits gets the "file changed" prompt after each push.
-  The alternative keeps only `server_message_id` in the frontmatter and the UID and hash in the `drafts` table, at the cost of a store rebuild that loses which local edits are unpushed.
-- The HTML-to-Markdown step: a `TextDecorator` on the existing `html2text`, or the `htmd` crate.
+Settled on 2026-10-14:
+
+- The frontmatter carries only `server_message_id` and `conflict_of`, and the state a push changes lives in the `draft_sync` table, re-derived by the reconcile when a rebuild drops it ("The `draft_sync` table").
+- The pull converts HTML to Markdown with `htmd`, and `html2text` stays the plain-text renderer ("Pull").
+
+Open for Sylvain:
+
 - `approved` does not travel to the server or to the other machine: approval stays a local act on each machine.
 - `.retired/` is pruned after 30 days.
 
@@ -381,10 +431,10 @@ No `state.invalidate` scope changes: drafts never travelled as invalidations, an
 
 1. Probe: `examples/draft_probe.rs`, run against `tum` and `proton` from the Mac with Outlook and Apple Mail, and "Probe results" filled in.
    The linking rule and the Proton switch default are settled here, before any production code.
-2. Contract: the six `server_*` keys and `conflict_of` in `EmailFrontmatter`, the `server` member of `DraftRow` and its fixture, `docs/daemon-protocol.md`.
-3. Push: `build_server_draft` and the shared MIME assembly, `ServerOp::PushDraft` and `DeleteDraft`, the drain's APPEND, UID read-back and UID delete, the watcher hand-off in `src/daemon/watch.rs`, the switch in `config.toml`.
+2. Contract: `server_message_id` and `conflict_of` in `EmailFrontmatter`, the `draft_sync` table in `src/store/schema.rs`, the `server` member of `DraftRow` and its fixture, `docs/daemon-protocol.md`.
+3. Push: `build_server_draft` and the shared MIME assembly, `ServerOp::PushDraft` and `DeleteDraft`, the drain's APPEND, UID read-back, UID delete and `draft_sync` write, the in-memory copy of `draft_sync` and the watcher hand-off in `src/daemon/watch.rs`, the switch in `config.toml`.
 4. Send and discard: `outbox.draft_copy`, the `DeleteDraft` in both transitions out of `pending_send`, `draft.discard` and `settle_sent_draft` moving into `.retired/`.
-5. Reconcile and pull: `messages.draft_marker`, the eviction exemption, the reconcile pass, the HTML-to-Markdown step, conflict copies, the marker import from the other machine.
+5. Reconcile and pull: `messages.draft_marker`, the eviction exemption, the reconcile pass and its recovery of a lost `draft_sync` row, the HTML-to-Markdown step with the `htmd` dependency, conflict copies, the marker import from the other machine.
 6. Foreign drafts: the import, and the received list hiding the `drafts`-role folder in the TUI and the desktop.
 7. Graph, once an account uses it.
 
@@ -395,6 +445,8 @@ Each step lands on its own and leaves the tree green; until step 3 nothing reach
 - [ ] The probe has run on `tum` and `proton` with Outlook and Apple Mail, and "Probe results" records every item of the list above.
 - [ ] A draft created with `mp new` on the Mac appears in Outlook's and Apple Mail's Drafts within one quick tick, with its recipients, Bcc included, its subject, its body and its attachments.
 - [ ] An edit saved in Neovim replaces the server copy, and the Drafts folder holds one copy of the draft afterwards.
+- [ ] After its first push, a push leaves the draft file's bytes unchanged, so Neovim shows no "file changed" prompt.
+- [ ] Deleting the store file and restarting the daemon leaves every synced draft `synced`, with no second copy on the server and no conflict copy.
 - [ ] An edit made in Outlook reaches the local file at the next quick tick, with the quoted section below `QUOTE_MARKER` unchanged.
 - [ ] The same draft, created on the Mac, appears in the home server's `drafts/` and converges back after an edit there.
 - [ ] Editing a draft both in Neovim and in Outlook between two syncs leaves the server's version in the draft and the local text in `<name>.conflict.md` with a fresh `id:`.
@@ -416,7 +468,7 @@ Each step lands on its own and leaves the tree green; until step 3 nothing reach
 - [#0133](0133-debounced-drain-after-a-queued-mutation.md): the debounced drainer the push rides on.
 - `.agents/research/2026-07-12-architecture-rethink-decision-doc.md`, Option C, which first proposed syncing drafts through `pending_ops`.
 - Docs that change when this ships:
-  - `docs/architecture.md`: the invariant at `:11-12`, the `drafts` and `pending_ops` store bullets at `:227-228`, the Send section at `:279-307` and the retirement at `:299`;
+  - `docs/architecture.md`: the invariant at `:11-12`, the `drafts` and `pending_ops` store bullets at `:227-228` and a `draft_sync` bullet beside them, the Send section at `:279-307` and the retirement at `:299`;
   - `docs/daemon-protocol.md`: the `draft.*` family at `:661`, the draft row at `:212`, `draft.changed` at `:1060`, and the protocol changelog at `:1229`;
   - `docs/daemon-operations.md`: the draft watcher at `:310`;
   - `docs/parity-matrix.md`: LST-01 at `:262`, DFT-02 at `:609`, DFT-12 at `:712`, and a new DFT row for the mirror;
