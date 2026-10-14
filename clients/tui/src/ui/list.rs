@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use super::super::app::{App, EmailEntry, Focus};
 use super::super::theme;
-use super::util::{pane_border_style, truncate};
+use super::util::{display_width, pane_border_style, truncate};
 
 /// Nerd Font calendar glyph shown before a subject when the email carries an
 /// iMIP invite (`event:` frontmatter). Distinct from the attachment paperclip
@@ -33,6 +33,52 @@ const FLAG_GLYPH: &str = "\u{f024}";
 /// could not parse (#0080). The whole row is drawn in the theme's `error`
 /// colour; the glyph names it as the broken file it is at a glance.
 const SKIP_GLYPH: &str = "\u{f071}";
+
+/// The Drafts sidebar glyph, shown before the subject of a conversation a
+/// draft answers or forwards (#0142).
+const DRAFT_GLYPH: &str = "\u{f03eb}";
+
+/// What an expanded member's contact cell starts with: the indent and the
+/// branch that hang it under its header (#0142).
+const MEMBER_INDENT: &str = " \u{2514} ";
+
+/// The contact cell of one row.
+///
+/// A flat row, and a conversation of one message, shows the mailbox's contact
+/// as it always did. A conversation of several shows its participants and the
+/// `(n)` count, the count kept whole and the names truncated before it. An
+/// expanded member shows the mailbox its copy lives in, hung under its header
+/// (#0142).
+fn contact_text(app: &App, email: &EmailEntry, width: usize) -> String {
+    if let Some(mailbox) = email.member_mailbox() {
+        return truncate(
+            &format!("{MEMBER_INDENT}{}", app.mailbox_label(mailbox)),
+            width,
+        );
+    }
+    match email.header() {
+        Some(header) if header.count > 1 => {
+            let count = format!(" ({})", header.count);
+            let names = header.participants.join(", ");
+            let room = width.saturating_sub(display_width(&count));
+            format!("{}{count}", truncate(&names, room))
+        }
+        _ => truncate(email.display_contact(app.active_kind()), width),
+    }
+}
+
+/// The subject of a row in the narrow layout, which has no contact column: a
+/// member names its mailbox and a conversation its count before the subject
+/// (#0142).
+fn narrow_subject_prefix(app: &App, email: &EmailEntry) -> String {
+    if let Some(mailbox) = email.member_mailbox() {
+        return format!("{MEMBER_INDENT}{}: ", app.mailbox_label(mailbox));
+    }
+    match email.header() {
+        Some(header) if header.count > 1 => format!("({}) ", header.count),
+        _ => String::new(),
+    }
+}
 
 /// The one marker the status column shows for a message.
 ///
@@ -69,7 +115,17 @@ fn status_marker(email: &EmailEntry) -> Span<'static> {
 /// subject stay in the row's own style. When flagged, the glyph plus its space
 /// costs two columns, so the subject is truncated to what is left.
 fn subject_cell(email: &EmailEntry, width: usize) -> Cell<'static> {
-    let text = format!("{}{}", invite_and_attachment_prefix(email), email.subject);
+    subject_cell_after(email, "", width)
+}
+
+/// [`subject_cell`] with `lead` before the badges, which the narrow layout
+/// fills for a conversation row.
+fn subject_cell_after(email: &EmailEntry, lead: &str, width: usize) -> Cell<'static> {
+    let text = format!(
+        "{lead}{}{}",
+        invite_and_attachment_prefix(email),
+        email.subject
+    );
     match flag_span(email) {
         Some(flag) => {
             let body = truncate(&text, width.saturating_sub(2));
@@ -104,6 +160,10 @@ fn invite_and_attachment_prefix(email: &EmailEntry) -> String {
     }
     if email.has_attachments {
         prefix.push_str("\u{f0c6} ");
+    }
+    if email.header().is_some_and(|h| h.has_draft) {
+        prefix.push_str(DRAFT_GLYPH);
+        prefix.push(' ');
     }
     prefix
 }
@@ -284,7 +344,7 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
             .map(|(i, email)| {
                 let is_cursor = i == app.list_index;
                 let is_in_selection = has_selection && app.is_selected(email);
-                let contact = truncate(email.display_contact(app.active_kind()), contact_width);
+                let contact = contact_text(app, email, contact_width);
 
                 let style = list_row_style(email, is_cursor, is_in_selection);
 
@@ -299,7 +359,7 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
                 }
                 // Read/answered/forwarded indicator (#TKT-0051).
                 cells.push(Cell::from(status_marker(email)));
-                cells.push(Cell::from(email.date_display.clone()));
+                cells.push(Cell::from(email.list_date_display().to_string()));
                 cells.push(Cell::from(contact));
                 // Invite/attachment badges, subject, and the flag star (#0007).
                 cells.push(subject_cell(email, subject_width));
@@ -367,9 +427,10 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
                 }
                 // Read/answered/forwarded indicator (#TKT-0051).
                 cells.push(Cell::from(status_marker(email)));
-                cells.push(Cell::from(email.date_display.clone()));
+                cells.push(Cell::from(email.list_date_display().to_string()));
                 // Subject with badges and the flag star (#0007).
-                cells.push(subject_cell(email, subject_width));
+                let lead = narrow_subject_prefix(app, email);
+                cells.push(subject_cell_after(email, &lead, subject_width));
 
                 Row::new(cells).style(style)
             })
@@ -424,6 +485,7 @@ mod badge_tests {
             forwarded: false,
             flagged: false,
             is_invite,
+            conv: None,
         }
     }
 

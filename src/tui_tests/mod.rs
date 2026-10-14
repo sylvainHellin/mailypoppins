@@ -26,6 +26,7 @@
 mod actions;
 mod actions_store;
 mod commands;
+mod conversations;
 mod daemon;
 mod events;
 mod golden_frames_daemon;

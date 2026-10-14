@@ -6,9 +6,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::{
     Action, App, AttachmentPicker, AttachmentPickerMode, CommandPalette, ComposeField, ComposeMode,
     ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker, DirPickerMode,
-    EmailEntry, Focus, MailboxKind, MailboxPicker, Message, MessageRef, Overlay, RsvpChoice,
-    RsvpOverlay, SearchField, SearchOverlayFocus, SearchScope, SignaturesMode, SignaturesOverlay,
-    StatusLevel, ThreadEntry, ThreadOverlay,
+    EmailEntry, EntryKey, Focus, MailboxKind, MailboxPicker, Message, MessageRef, Overlay,
+    RsvpChoice, RsvpOverlay, SearchField, SearchOverlayFocus, SearchScope, SignaturesMode,
+    SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
 };
 
 impl App {
@@ -558,6 +558,13 @@ impl App {
             // fills the content area instead of taking the keyboard unseen.
             A::FocusBody => {
                 self.pending_prefix = None;
+                // `Enter` on a collapsed conversation with more than itself
+                // to show expands it and keeps the cursor on it; on an
+                // expanded header or a member it reads, as on any row
+                // (#0142).
+                if self.focus == Focus::List && self.expand_conversation() {
+                    return None;
+                }
                 if self.focus != Focus::Preview {
                     self.focus = Focus::Preview;
                     if self.terminal_width < 80 {
@@ -603,7 +610,7 @@ impl App {
                 // recipients). Only a Drafts row has an `attachments:` list to
                 // grow, so arming the prompt outside Drafts would be a lie.
                 self.pending_prefix = None;
-                if self.active_kind() == MailboxKind::Drafts {
+                if self.cursor_is_draft_row() {
                     if self
                         .selected_email()
                         .and_then(|e| e.draft_id.as_ref())
@@ -644,7 +651,7 @@ impl App {
                 // Only meaningful in Drafts; outside Drafts keep the old status
                 // hint (the guard is advisory, resolved everywhere).
                 self.pending_prefix = None;
-                if self.active_kind() == MailboxKind::Drafts {
+                if self.cursor_is_draft_row() {
                     // The draft is named by its `id:`, not by the path it
                     // happens to sit at: the wizard resolves it through the
                     // drafts index when it opens and again when it submits.
@@ -657,7 +664,23 @@ impl App {
             }
             A::SelectAllVisible => {
                 self.pending_prefix = None;
-                self.selection = self.visible_emails().filter_map(|e| e.key()).collect();
+                // A conversation header selects its members here and an
+                // expanded member is already among them or elsewhere, so the
+                // selection is the union of the headers' `member_ids`
+                // (#0142).
+                self.selection = self
+                    .visible_emails()
+                    .filter(|e| e.member_mailbox().is_none())
+                    .flat_map(selection_keys)
+                    .collect();
+            }
+            A::ExpandConversation => {
+                self.pending_prefix = None;
+                self.expand_conversation();
+            }
+            A::CollapseConversation => {
+                self.pending_prefix = None;
+                self.collapse_conversation();
             }
             A::Archive => {
                 self.pending_prefix = None;
@@ -670,7 +693,7 @@ impl App {
                     });
                 } else if let Some(email) = self.selected_email() {
                     self.overlay = Overlay::Confirm(ConfirmDialog {
-                        title: "Archive this email?".to_string(),
+                        title: confirm_title("Archive", email),
                         detail: format!("{} - {}", email.from, email.subject),
                         action: ConfirmAction::Archive,
                     });
@@ -687,7 +710,7 @@ impl App {
                     });
                 } else if let Some(email) = self.selected_email() {
                     self.overlay = Overlay::Confirm(ConfirmDialog {
-                        title: "Delete this email?".to_string(),
+                        title: confirm_title("Delete", email),
                         detail: format!("{} - {}", email.from, email.subject),
                         action: ConfirmAction::Delete,
                     });
@@ -848,12 +871,20 @@ impl App {
             A::ToggleSelect => {
                 self.pending_prefix = None;
                 // Drafts are selectable too (#0052): the set is keyed on
-                // `EntryKey`, so the Drafts mailbox has a batch again.
-                if let Some(key) = self.selected_email().and_then(|e| e.key()) {
-                    if self.selection.contains(&key) {
-                        self.selection.remove(&key);
+                // `EntryKey`, so the Drafts mailbox has a batch again. A
+                // conversation header toggles its members here as one
+                // (#0142).
+                let keys = self
+                    .selected_email()
+                    .map(selection_keys)
+                    .unwrap_or_default();
+                if !keys.is_empty() {
+                    if keys.iter().all(|key| self.selection.contains(key)) {
+                        for key in &keys {
+                            self.selection.remove(key);
+                        }
                     } else {
-                        self.selection.insert(key);
+                        self.selection.extend(keys);
                     }
                     if self.list_index < self.visible.len() - 1 {
                         self.list_index += 1;
@@ -2060,10 +2091,16 @@ impl App {
 
         let msgs: Vec<MessageRef> = if !self.selection.is_empty() {
             self.selection.iter().filter_map(|k| k.msg()).collect()
-        } else if let Some(m) = self.selected_email_ref() {
-            vec![m]
         } else {
-            return;
+            // A conversation header moves its members here (#0142).
+            match self
+                .selected_email()
+                .map(|e| e.action_refs())
+                .filter(|msgs| !msgs.is_empty())
+            {
+                Some(msgs) => msgs,
+                None => return,
+            }
         };
 
         let candidates: Vec<(usize, String)> = self
@@ -2855,14 +2892,45 @@ fn rsvp_refusal(event: Option<&mp_core::types::EventFrontmatter>) -> Option<Stri
 }
 
 fn email_matches(email: &EmailEntry, needle_lower: &str, kind: MailboxKind) -> bool {
+    // A conversation header matches on its participants as well as on its
+    // `latest`, which the fields below are (#0142).
+    if email.header().is_some_and(|h| {
+        h.participants
+            .iter()
+            .any(|p| p.to_lowercase().contains(needle_lower))
+    }) {
+        return true;
+    }
     email.subject.to_lowercase().contains(needle_lower)
         || email
             .display_contact(kind)
             .to_lowercase()
             .contains(needle_lower)
-        || email.date_display.to_lowercase().contains(needle_lower)
+        || email
+            .list_date_display()
+            .to_lowercase()
+            .contains(needle_lower)
         || email.from.to_lowercase().contains(needle_lower)
         || email.to.to_lowercase().contains(needle_lower)
+}
+
+/// What selecting `email` puts in the selection: its own key, or for a
+/// conversation header the keys of its members in the listed mailbox, which is
+/// what a batch over it reaches (#0142).
+fn selection_keys(email: &EmailEntry) -> Vec<EntryKey> {
+    if email.header().is_some() {
+        return email.action_refs().into_iter().map(EntryKey::Msg).collect();
+    }
+    email.key().into_iter().collect()
+}
+
+/// The confirm title of archiving or deleting the cursor row: a conversation
+/// of several messages here names how many the action reaches (#0142).
+fn confirm_title(verb: &str, email: &EmailEntry) -> String {
+    match email.header().map(|h| h.member_ids.len()) {
+        Some(n) if n > 1 => format!("{verb} the {n} emails of this conversation?"),
+        _ => format!("{verb} this email?"),
+    }
 }
 
 /// Build the visible-index view of `emails` for `query` from scratch.
@@ -3114,6 +3182,7 @@ mod tests {
             forwarded: false,
             flagged: false,
             is_invite: false,
+            conv: None,
         }
     }
 
@@ -3889,7 +3958,9 @@ mod tests {
             "the selection kept a reference to a row that no longer exists"
         );
         assert!(app.selection.contains(&EntryKey::Msg(survivor)));
-        assert!(app.cursor_anchor().is_none_or(|m| m != doomed));
+        assert!(app
+            .cursor_anchor()
+            .is_none_or(|a| a != crate::app::CursorAnchor::Row(doomed)));
     }
 
     /// Same guarantee for a batch: every removed reference leaves the

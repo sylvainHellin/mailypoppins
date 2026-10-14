@@ -245,6 +245,7 @@ pub fn email(
         forwarded: false,
         flagged: false,
         is_invite,
+        conv: None,
     }
 }
 
@@ -502,6 +503,7 @@ pub fn drafts_fixture() -> App {
         flagged: false,
         has_attachments: false,
         is_invite: false,
+        conv: None,
     };
     let draft = EmailEntry {
         msg: None,
@@ -523,6 +525,7 @@ pub fn drafts_fixture() -> App {
         flagged: false,
         has_attachments: false,
         is_invite: false,
+        conv: None,
     };
     app.emails = Arc::new(vec![skip, draft]);
     app.email_cache = vec![None, Some(Arc::clone(&app.emails)), None, None];

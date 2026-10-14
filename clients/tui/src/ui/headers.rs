@@ -171,6 +171,7 @@ mod tests {
             forwarded: false,
             flagged: false,
             is_invite: false,
+            conv: None,
         }
     }
 

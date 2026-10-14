@@ -329,6 +329,10 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
                 // apply. Do NOT populate the cache either -- the walk may
                 // predate an in-flight file move. The cache slot stays
                 // `None`, so the next visit triggers a fresh load.
+                //
+                // Dropped or not, the conversation listing in flight is
+                // done, and one a delta owed meanwhile starts now (#0142).
+                app.restream_landed(generation);
                 return;
             }
             // The cursor's identity must be read from the OLD list: a
@@ -358,15 +362,14 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             // (#0008); now that the fresh list is here, put the cursor on it,
             // overriding the anchor restore above.
             app.consume_pending_select();
-            if let Some(count) = app.mailbox_counts.get_mut(mailbox_idx) {
-                *count = app.emails.len();
-            }
+            app.sync_listed_count(mailbox_idx);
             // Clear the "Loading <mailbox>..." indication set by a
             // cache-miss mailbox switch (harmless no-op otherwise).
             if matches!(&app.status_message, Some(m) if m.starts_with("Loading ")) {
                 app.status_message = None;
                 app.status_ticks = 0;
             }
+            app.restream_landed(generation);
         }
 
         BgResult::ServerSearch { generation, result } => {
@@ -517,6 +520,16 @@ pub(super) fn land_sync(
 /// The cache slot moves with the list, because the two share the allocation and
 /// a slot that kept the pre-delta rows would undo the delta on the next visit.
 pub(super) fn apply_row_delta(app: &mut App, delta: &super::queries::MessageRowDelta) -> bool {
+    // A conversation list cannot fold a row delta (#0142): the row carries no
+    // `thread_id`, and a delta about Sent moves a conversation listed in the
+    // inbox. Any delta of the account re-streams the list, coalesced.
+    if app.conversation_mode() {
+        if delta.account() != app.account_config.name {
+            return true;
+        }
+        app.request_restream();
+        return false;
+    }
     let Some(mailbox) = app.current_local_mailbox_key() else {
         return true;
     };

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use chrono::NaiveDate;
 
 use mp_protocol::draft::{DraftEntry, DraftSkip};
-use mp_protocol::listing::MessageListRow;
+use mp_protocol::listing::{ConversationRow, MessageListRow, ThreadMessage};
 
 use mp_core::parse::FetchedEmail;
 use mp_core::types::MailboxRole;
@@ -196,6 +196,69 @@ pub struct EmailEntry {
     /// mailbox row's invite eagerly would put back exactly the per-row blob
     /// read the lazy body work removed.
     pub is_invite: bool,
+    /// Where the row sits in a conversation list (#0142), `None` for a row of
+    /// the flat list, of a search and of the Drafts mailbox.
+    ///
+    /// On the row rather than in a vector beside the list because every path
+    /// that reshapes the list (a filter, an optimistic removal, a cache slot)
+    /// moves rows whole, and a parallel vector would have to be kept aligned
+    /// by each of them.
+    pub conv: Option<ConvRole>,
+}
+
+/// What a row of a conversation list is (#0142): the header of one
+/// conversation, or one member of an expanded one.
+#[derive(Debug, Clone)]
+pub enum ConvRole {
+    /// One conversation, collapsed or expanded. The entry itself is the
+    /// conversation's `latest`, the row a collapsed conversation previews and
+    /// the one its fields (subject, from, cc) describe in the headers pane.
+    Header(ConvHeader),
+    /// One member of an expanded conversation, drawn under its header.
+    Member {
+        /// The conversation it belongs to.
+        thread_id: String,
+        /// The mailbox this copy lives in, as the store holds it; `drafts` for
+        /// a draft member.
+        mailbox: String,
+    },
+}
+
+/// What a conversation header carries beyond its `latest` row (#0142).
+#[derive(Debug, Clone, Default)]
+pub struct ConvHeader {
+    /// The `thread_id` the members share, which holds the row across a
+    /// re-stream (its `latest` may change under it).
+    pub thread_id: String,
+    /// The conversation's messages across every mailbox, drafts excluded.
+    pub count: u64,
+    /// The `Message-ID`s with an unseen copy in the listed mailbox.
+    pub unread: u64,
+    /// The members' senders as display names, newest first, at most five.
+    pub participants: Vec<String>,
+    /// The member rows in the listed mailbox, newest first: what an action on
+    /// the collapsed row reaches.
+    pub member_ids: Vec<MessageRef>,
+    /// Whether a draft answers or forwards a member.
+    pub has_draft: bool,
+    /// Whether `latest` itself is read, which is what an explicit open of
+    /// the header marks: the row's own `read` is the conversation's.
+    pub latest_read: bool,
+    /// The conversation's date, its newest member's across every mailbox, as
+    /// the list prints it.
+    pub date_display: String,
+    /// The sort key of that date, what jump-to-date and the order use.
+    pub date_sort: String,
+    /// Whether the members are drawn under the header.
+    pub expanded: bool,
+}
+
+impl ConvHeader {
+    /// Whether the header has members to show beyond itself: another message,
+    /// or a draft that answers it.
+    pub fn expandable(&self) -> bool {
+        self.count > 1 || self.has_draft
+    }
 }
 
 impl EmailEntry {
@@ -215,6 +278,206 @@ impl EmailEntry {
             (Some(msg), _) => Some(EntryKey::Msg(msg)),
             (None, Some(id)) => Some(EntryKey::Draft(id.to_string())),
             (None, None) => None,
+        }
+    }
+
+    /// The conversation this row heads, when it is a conversation header.
+    pub fn header(&self) -> Option<&ConvHeader> {
+        match &self.conv {
+            Some(ConvRole::Header(header)) => Some(header),
+            _ => None,
+        }
+    }
+
+    /// The conversation this row belongs to, header or member.
+    pub fn thread_id(&self) -> Option<&str> {
+        match &self.conv {
+            Some(ConvRole::Header(header)) => Some(&header.thread_id),
+            Some(ConvRole::Member { thread_id, .. }) => Some(thread_id),
+            None => None,
+        }
+    }
+
+    /// The mailbox of an expanded member, `None` for any other row.
+    pub fn member_mailbox(&self) -> Option<&str> {
+        match &self.conv {
+            Some(ConvRole::Member { mailbox, .. }) => Some(mailbox),
+            _ => None,
+        }
+    }
+
+    /// The date the list prints: a header's is its conversation's, every
+    /// other row's its own.
+    pub fn list_date_display(&self) -> &str {
+        match self.header() {
+            Some(header) => &header.date_display,
+            None => &self.date_display,
+        }
+    }
+
+    /// The sort key of [`Self::list_date_display`], what jump-to-date uses.
+    pub fn list_date_sort(&self) -> &str {
+        match self.header() {
+            Some(header) => &header.date_sort,
+            None => &self.date_sort,
+        }
+    }
+
+    /// The rows an action on this row reaches (#0142): every member in the
+    /// listed mailbox for a conversation header, the row itself otherwise.
+    pub fn action_refs(&self) -> Vec<MessageRef> {
+        match self.header() {
+            Some(header) if !header.member_ids.is_empty() => header.member_ids.clone(),
+            _ => self.msg.into_iter().collect(),
+        }
+    }
+}
+
+/// One conversation as its header row (#0142).
+///
+/// The entry is [`entry_from_row`] of `latest`, so the preview, the headers
+/// pane and every action that reads the row see the message a collapsed
+/// conversation stands for; what is the conversation's (the read state, the
+/// star, the paperclip) is set on top, and the rest rides in [`ConvHeader`]
+/// for the list to draw.
+pub fn entry_from_conversation(row: ConversationRow, status: &str) -> EmailEntry {
+    let latest_read = row.latest.flags.seen;
+    let (date_display, date_sort) = resolve_date(
+        &Some(row.date_display.clone()).filter(|d| !d.is_empty()),
+        &None,
+        Path::new(""),
+    );
+    let mut entry = entry_from_row(row.latest, status);
+    entry.read = row.unread == 0;
+    entry.flagged = row.flagged;
+    entry.has_attachments = row.has_attachments;
+    entry.conv = Some(ConvRole::Header(ConvHeader {
+        thread_id: row.thread_id,
+        count: row.count,
+        unread: row.unread,
+        participants: row
+            .participants
+            .iter()
+            .map(|from| extract_display_name(from))
+            .collect(),
+        member_ids: row.member_ids.into_iter().map(MessageRef::new).collect(),
+        has_draft: row.has_draft,
+        latest_read,
+        date_display,
+        date_sort,
+        expanded: false,
+    }));
+    entry
+}
+
+/// One member of an expanded conversation, out of the `message.thread` row
+/// that names it (#0142).
+///
+/// A thread row carries the sender, the date, the flags and the mailbox, and
+/// no subject or recipients, so the member takes the conversation's subject
+/// and leaves the recipients empty; the body comes from `message.get` by its
+/// row id (or the draft file by its id) like any row's. A draft member is
+/// keyed by its draft id, which is what makes the Drafts actions reach it.
+pub fn entry_from_member(member: &ThreadMessage, thread_id: &str, subject: &str) -> EmailEntry {
+    let (date_display, date_sort) = resolve_date(
+        &Some(member.date_display.clone()).filter(|d| !d.is_empty()),
+        &None,
+        Path::new(""),
+    );
+    let draft = member.draft_id.clone();
+    EmailEntry {
+        msg: draft.is_none().then(|| MessageRef::new(member.id)),
+        selector: None,
+        skip: None,
+        from: extract_display_name(&member.from),
+        to: String::new(),
+        cc: None,
+        reply_to: None,
+        bcc: None,
+        subject: if subject.is_empty() {
+            "(no subject)".to_string()
+        } else {
+            subject.to_string()
+        },
+        status: status_for_mailbox(&member.mailbox),
+        date_display,
+        date_sort,
+        has_attachments: false,
+        // A draft is not unread mail, as in the Drafts list.
+        read: draft.is_some() || member.flags.seen,
+        answered: member.flags.answered,
+        forwarded: member.flags.forwarded,
+        flagged: member.flags.flagged,
+        is_invite: false,
+        draft_id: draft,
+        conv: Some(ConvRole::Member {
+            thread_id: thread_id.to_string(),
+            mailbox: member.mailbox.clone(),
+        }),
+    }
+}
+
+/// The coalescing state of a conversation list's re-stream (#0142).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Restream {
+    /// The generation of the conversation listing in flight, if one is.
+    pub in_flight: Option<u64>,
+    /// Whether a delta arrived while it was, which owes one more listing
+    /// when it lands.
+    pub owed: bool,
+}
+
+/// What the cursor is anchored on across a list rebuild.
+///
+/// A flat row is its store row, as it always was; a conversation header is its
+/// thread, because a re-stream may give it another `latest`; an expanded
+/// member is its thread and its key, because the header and its newest member
+/// in the listed mailbox share one row id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CursorAnchor {
+    /// A row of a flat list.
+    Row(MessageRef),
+    /// A conversation header.
+    Header(String),
+    /// An expanded member.
+    Member(String, EntryKey),
+}
+
+impl CursorAnchor {
+    /// The anchor of `entry`, or `None` for a row with no name.
+    pub fn of(entry: &EmailEntry) -> Option<CursorAnchor> {
+        match &entry.conv {
+            Some(ConvRole::Header(header)) => Some(CursorAnchor::Header(header.thread_id.clone())),
+            Some(ConvRole::Member { thread_id, .. }) => {
+                Some(CursorAnchor::Member(thread_id.clone(), entry.key()?))
+            }
+            None => entry.msg.map(CursorAnchor::Row),
+        }
+    }
+
+    /// Whether `entry` is the row this anchors.
+    ///
+    /// A row anchor also finds a conversation row with the same store row, so
+    /// a cursor parked by a store row alone (an account switch, a jump) lands
+    /// on the header that previews it.
+    pub fn matches(&self, entry: &EmailEntry) -> bool {
+        match self {
+            CursorAnchor::Row(msg) => entry.msg == Some(*msg),
+            CursorAnchor::Header(thread) => entry.header().is_some_and(|h| &h.thread_id == thread),
+            CursorAnchor::Member(thread, key) => {
+                entry.member_mailbox().is_some()
+                    && entry.thread_id() == Some(thread.as_str())
+                    && entry.key().as_ref() == Some(key)
+            }
+        }
+    }
+
+    /// The store row this anchors, when it names one.
+    pub fn msg(&self) -> Option<MessageRef> {
+        match self {
+            CursorAnchor::Row(msg) => Some(*msg),
+            CursorAnchor::Member(_, key) => key.msg(),
+            CursorAnchor::Header(_) => None,
         }
     }
 }
@@ -290,6 +553,7 @@ pub fn entry_from_row(row: MessageListRow, status: &str) -> EmailEntry {
         flagged: row.flags.flagged,
         has_attachments: row.has_attachments,
         is_invite: row.is_invite,
+        conv: None,
     }
 }
 
@@ -332,6 +596,7 @@ pub fn entry_from_draft(row: DraftEntry) -> EmailEntry {
         flagged: false,
         has_attachments: false,
         is_invite: false,
+        conv: None,
     }
 }
 
@@ -371,6 +636,7 @@ pub fn entry_from_skip(skip: DraftSkip) -> EmailEntry {
         flagged: false,
         has_attachments: false,
         is_invite: false,
+        conv: None,
     }
 }
 
