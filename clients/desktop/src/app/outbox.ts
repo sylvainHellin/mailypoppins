@@ -196,6 +196,8 @@ export function closeOutbox(s: AppState): AppState {
  */
 export const SELECTION_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
   "open_message",
+  "expand_conversation",
+  "collapse_conversation",
   "copy_selector",
   "archive",
   "delete",

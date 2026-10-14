@@ -212,6 +212,7 @@ pub fn run() {
             commands::list_accounts,
             commands::list_mailboxes,
             commands::list_messages,
+            commands::message_thread,
             commands::message_text,
             commands::message_html_meta,
             commands::search_local,

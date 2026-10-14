@@ -27,6 +27,8 @@ import type {
   MessageListRow,
   OutboxListing,
   OutboxRow,
+  ThreadListing,
+  ThreadMessage,
 } from "@/protocol/types";
 import { FakeBridge } from "@/test/terminal-fake";
 import type {
@@ -827,6 +829,117 @@ export function mailboxListing(account: string): MailboxListing {
   };
 }
 
+// The conversations, as src-tauri/src/fixture/conversations.rs folds them
+// (ticket 0142): every message its own conversation, but the canned offsite thread.
+
+/** The `thread_id` of the fixture's one conversation of several messages. */
+export const CANNED_THREAD = "<team-offsite-in-october-1007@fixture.example>";
+const CANNED_MEMBERS = [
+  "<team-offsite-in-october-1007@fixture.example>",
+  "<draft-agenda-for-the-off-1010@fixture.example>",
+  "<re-team-offsite-in-octob-1000@fixture.example>",
+];
+/** The draft that answers the canned thread. */
+export const CANNED_DRAFT = { account: "work", id: "offsite-note" };
+
+const threadOf = (r: FixtureRow) => (CANNED_MEMBERS.includes(r.message_id) ? CANNED_THREAD : r.message_id);
+const addressOf = (from: string) => (/<([^>]+)>/.exec(from)?.[1] ?? from).trim().toLowerCase();
+
+/** The drafts that join a conversation: the canned one while it is listed and not sent. */
+function conversationDrafts(account: string): { id: string; date: string; thread_id: string }[] {
+  if (account !== CANNED_DRAFT.account) return [];
+  return (mock.drafts[account]?.drafts ?? [])
+    .filter((d) => d.id === CANNED_DRAFT.id && d.status !== "sent")
+    .map((d) => ({ id: d.id, date: d.date ?? "", thread_id: CANNED_THREAD }));
+}
+
+/** Every row of the account, with its mailbox and its wire shape. */
+function accountRows(account: string): { mailbox: string; row: MessageListRow }[] {
+  return Object.entries(mock.rows[account] ?? {}).flatMap(([mailbox, rows]) =>
+    mailbox === "drafts" ? [] : rows.map((r) => ({ mailbox, row: { ...strip(r), id: r.id + mock.rowShift } })),
+  );
+}
+
+/** `message.list_conversations`, collected. */
+export function conversationListing(account: string, mailbox: string): Extract<MessageList, { kind: "conversations" }> {
+  const byThread = new Map<string, { mailbox: string; row: MessageListRow }[]>();
+  for (const m of accountRows(account)) {
+    const tid = threadOf(m.row as FixtureRow);
+    byThread.set(tid, [...(byThread.get(tid) ?? []), m]);
+  }
+  const drafted = new Set(conversationDrafts(account).map((d) => d.thread_id));
+  const newest = (a: MessageListRow, b: MessageListRow) => (b.date_sort < a.date_sort ? -1 : b.date_sort > a.date_sort ? 1 : b.id - a.id);
+  const rows = [...byThread.entries()].flatMap(([thread_id, members]) => {
+    members.sort((a, b) => newest(a.row, b.row));
+    const here = members.filter((m) => m.mailbox === mailbox).map((m) => m.row);
+    if (here.length === 0) return [];
+    const seen = new Set<string>();
+    const participants = members.filter((m) => !seen.has(addressOf(m.row.from)) && !!seen.add(addressOf(m.row.from))).slice(0, 5).map((m) => m.row.from);
+    return [
+      {
+        count: new Set(members.map((m) => m.row.message_id)).size,
+        date_display: members[0].row.date_display,
+        date_sort: members[0].row.date_sort,
+        flagged: here.some((r) => r.flags.flagged),
+        has_attachments: members.some((m) => m.row.has_attachments),
+        has_draft: drafted.has(thread_id),
+        latest: here[0],
+        mailboxes: [...new Set(members.map((m) => m.mailbox))].sort(),
+        member_ids: here.map((r) => r.id),
+        participants,
+        thread_id,
+        unread: new Set(here.filter((r) => !r.flags.seen).map((r) => r.message_id)).size,
+      },
+    ];
+  });
+  rows.sort((a, b) => (b.date_sort < a.date_sort ? -1 : b.date_sort > a.date_sort ? 1 : b.latest.id - a.latest.id));
+  return { kind: "conversations", account, mailbox, total: rows.length, rows };
+}
+
+/** `message.thread` with `prefer_mailbox` and `include_drafts`. */
+export function threadListing(account: string, rowId: number, prefer: string): ThreadListing | null {
+  const all = accountRows(account);
+  const addressed = all.find((m) => m.row.id === rowId);
+  if (!addressed) return null;
+  const tid = threadOf(addressed.row as FixtureRow);
+  const members = all
+    .filter((m) => threadOf(m.row as FixtureRow) === tid)
+    .sort((a, b) => (a.row.date_sort < b.row.date_sort ? -1 : a.row.date_sort > b.row.date_sort ? 1 : a.row.id - b.row.id));
+  const kept: { mailbox: string; row: MessageListRow }[] = [];
+  for (const m of members) {
+    const at = kept.findIndex((k) => k.row.message_id === m.row.message_id);
+    if (at < 0) kept.push(m);
+    else if (m.mailbox === prefer && kept[at].mailbox !== prefer) kept[at] = m;
+  }
+  const messages: { date: string; m: ThreadMessage }[] = kept.map(({ mailbox, row }) => ({
+    date: row.date_sort,
+    m: {
+      id: row.id,
+      mailbox,
+      message_id: row.message_id,
+      from: row.from,
+      date_display: row.date_display,
+      flags: row.flags,
+      current: row.message_id === addressed.row.message_id,
+    },
+  }));
+  for (const d of conversationDrafts(account).filter((x) => x.thread_id === tid)) {
+    const m: ThreadMessage = {
+      id: 0,
+      mailbox: "drafts",
+      message_id: "",
+      from: "Me <me@example.com>",
+      date_display: d.date,
+      flags: { seen: false, answered: false, forwarded: false, flagged: false },
+      current: false,
+      draft_id: d.id,
+    };
+    const at = messages.findIndex((x) => x.date > d.date);
+    messages.splice(at < 0 ? messages.length : at, 0, { date: d.date, m });
+  }
+  return { account, thread_id: tid, subject: addressed.row.subject, messages: messages.map((x) => x.m) };
+}
+
 /** A refusal about one row, as the Rust layer maps the daemon's -32602. */
 function refusedRow(method: string, why: string): GuiError {
   return { kind: "not_found", message: `${method}: the daemon refused the call: ${why} (-32602)`, code: -32602 };
@@ -1128,8 +1241,14 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (mailbox === "drafts") {
         return { kind: "drafts", account, listing: clone(mock.drafts[account]) } satisfies MessageList;
       }
+      if (args.conversations === true) return conversationListing(account, mailbox) satisfies MessageList;
       const rows = (mock.rows[account]?.[mailbox] ?? []).map(strip).map((r) => ({ ...r, id: r.id + mock.rowShift }));
       return { kind: "messages", account, mailbox, total: rows.length, rows } satisfies MessageList;
+    }
+    case "message_thread": {
+      const thread = threadListing(account, Number(args.row_id), String(args.mailbox));
+      if (!thread) throw { kind: "not_found", message: `no message has row_id ${String(args.row_id)}`, code: -32602 };
+      return thread;
     }
     case "message_text": {
       const rowId = Number(args.row_id);

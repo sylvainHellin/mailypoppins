@@ -12,6 +12,7 @@ import type {
   DraftInvalid,
   HoldStatus,
   MessageListRow,
+  ThreadMessage,
   MutationsRolledBackPayload,
   OperationStatus,
   RecipientOutcome,
@@ -19,6 +20,9 @@ import type {
 } from "@/protocol/types";
 import type { MailboxListing, MessageList, MovedTo, SyncMode } from "@/lib/gui-types";
 import {
+  conversationOf,
+  expandedMember,
+  listedRow,
   listKey,
   markStale,
   readerKey,
@@ -164,7 +168,93 @@ function setFlagEverywhere(s: AppState, account: string, rowId: number, axis: Fl
   if (s.reader.meta && s.reader.key === readerKey(account, rowId)) {
     s = { ...s, reader: { ...s.reader, meta: { ...s.reader.meta, flags: readerFlags(s.reader.meta.flags, axis, on) } } };
   }
-  return s;
+  return setFlagInConversations(s, account, rowId, flag, on);
+}
+
+/**
+ * The same in a conversation list (ticket 0142): the `latest` that is this row,
+ * and the expanded members that are. The row's `unread` and `flagged`,
+ * which fold several messages, are `patchConversations`' to move.
+ */
+function setFlagInConversations(s: AppState, account: string, rowId: number, flag: "flagged" | "seen", on: boolean): AppState {
+  const list = s.messages.data;
+  if (list?.kind !== "conversations" || list.account !== account) return s;
+  if (list.rows.some((r) => r.latest.id === rowId)) {
+    const rows = list.rows.map((r) => (r.latest.id === rowId ? { ...r, latest: { ...r.latest, flags: { ...r.latest.flags, [flag]: on } } } : r));
+    s = { ...s, messages: { ...s.messages, data: { ...list, rows } } };
+  }
+  return mapExpanded(s, (m) => (!m.draft_id && m.id === rowId ? [{ ...m, flags: { ...m.flags, [flag]: on } }] : [m]));
+}
+
+/** Rewrite every loaded expansion's members, each into none, itself or another. */
+function mapExpanded(s: AppState, f: (m: ThreadMessage) => ThreadMessage[]): AppState {
+  let changed = false;
+  const expanded = Object.fromEntries(
+    Object.entries(s.expanded).map(([tid, e]) => {
+      if (!e.data) return [tid, e];
+      const messages = e.data.messages.flatMap(f);
+      if (messages.length === e.data.messages.length && messages.every((m, i) => m === e.data!.messages[i])) return [tid, e];
+      changed = true;
+      return [tid, { ...e, data: { ...e.data, messages } }];
+    }),
+  );
+  return changed ? { ...s, expanded } : s;
+}
+
+/**
+ * A row leaves a conversation list (ticket 0142): out of its row's `member_ids`,
+ * the row out of the list once none is left here, and out of every
+ * expansion that shows it.
+ */
+function leaveConversation(s: AppState, account: string, rowId: number): AppState {
+  const list = s.messages.data;
+  if (list?.kind === "conversations" && list.account === account && list.rows.some((r) => r.member_ids.includes(rowId))) {
+    let removed = 0;
+    const rows = list.rows.flatMap((r) => {
+      if (!r.member_ids.includes(rowId)) return [r];
+      const member_ids = r.member_ids.filter((id) => id !== rowId);
+      if (member_ids.length === 0) {
+        removed += 1;
+        return [];
+      }
+      return [{ ...r, member_ids }];
+    });
+    s = { ...s, messages: { ...s.messages, data: { ...list, rows, total: Math.max(0, list.total - removed) } } };
+  }
+  if (list?.kind !== "conversations" || list.account !== account) return s;
+  return mapExpanded(s, (m) => (!m.draft_id && m.id === rowId ? [] : [m]));
+}
+
+/**
+ * A read or flag change on rows of a conversation list moves the folded
+ * `unread` and `flagged` of their rows (ticket 0142). A change to every member here
+ * sets them outright; one to some of them moves `unread` by what each
+ * changed row was before, where the model knew it (`before`'s `latest` or
+ * expansion), and the re-read that follows confirms the rest.
+ */
+function patchConversations(next: AppState, before: AppState, kind: MutationKind, targets: Target[], value: boolean): AppState {
+  const list = next.messages.data;
+  if (list?.kind !== "conversations") return next;
+  const ids = new Set(targets.flatMap((t) => ("row_id" in t && t.account === list.account ? [t.row_id] : [])));
+  if (ids.size === 0) return next;
+  let changed = false;
+  const rows = list.rows.map((r) => {
+    const hit = r.member_ids.filter((id) => ids.has(id));
+    if (hit.length === 0) return r;
+    changed = true;
+    const all = hit.length === r.member_ids.length;
+    if (kind === "flag") return { ...r, flagged: value ? true : all ? false : r.flagged };
+    if (all) return { ...r, unread: value ? 0 : Math.max(r.unread, r.member_ids.length) };
+    let unread = r.unread;
+    for (const id of hit) {
+      const prior = listedRow(before.messages.data, list.account, id)?.flags ?? expandedMember(before, list.account, id)?.flags;
+      if (!prior) continue;
+      if (value && !prior.seen) unread -= 1;
+      if (!value && prior.seen) unread += 1;
+    }
+    return { ...r, unread: Math.max(0, unread) };
+  });
+  return changed ? { ...next, messages: { ...next.messages, data: { ...list, rows } } } : next;
 }
 
 export function pushNotice(
@@ -256,9 +346,23 @@ function applyRow(
   const listRow: MessageListRow | null = inList >= 0 && list?.kind === "messages" ? list.rows[inList] : null;
   const hitIdx = s.search ? s.search.hits.findIndex((h) => h.account === t.account && h.row_id === t.row_id) : -1;
   const hit = hitIdx >= 0 && s.search ? s.search.hits[hitIdx] : null;
-  const flags = listRow?.flags ?? hit?.flags ?? null;
+  // In a conversation list (ticket 0142) the row is a member of a listed row here,
+  // or an expanded member in any mailbox.
+  const conv = s.search ? null : conversationOf(list, t.account, t.row_id);
+  const member = s.search ? null : expandedMember(s, t.account, t.row_id);
+  const convFlags = conv && conv.latest.id === t.row_id ? conv.latest.flags : null;
+  const flags = listRow?.flags ?? hit?.flags ?? convFlags ?? member?.flags ?? null;
   const source =
-    listRow && list?.kind === "messages" ? list.mailbox : hit ? slugOf(s, t.account, hit.mailbox) : old?.source ?? null;
+    listRow && list?.kind === "messages"
+      ? list.mailbox
+      : conv && list?.kind === "conversations"
+        ? list.mailbox
+        : member
+          ? member.mailbox
+          : hit
+            ? slugOf(s, t.account, hit.mailbox)
+            : old?.source ?? null;
+  const shown = conv || member ? s.messages.key : null;
   const dest =
     kind === "archive" ? slugByRole(s, t.account, "archive") : destination === null ? null : slugOf(s, t.account, destination);
 
@@ -276,7 +380,8 @@ function applyRow(
   // Each axis keeps its own saved state and batch. A second change of the
   // same axis restores to before the first; the other axes stay as they are.
   const base: PendingChange = old ?? { target: t, source, subject: null, flag: null, read: null, leave: null, status: null };
-  let entry: PendingChange = { ...base, source, subject: base.subject ?? listRow?.subject ?? hit?.subject ?? null };
+  const subject = base.subject ?? listRow?.subject ?? hit?.subject ?? (convFlags ? conv!.latest.subject : null);
+  let entry: PendingChange = { ...base, source, subject, shown: shown ?? base.shown ?? null };
   if (leaves(kind)) {
     const prevRow = listRow && s.messages.key ? { key: s.messages.key, row: listRow, index: inList } : null;
     const prevHit = hit && s.search ? { hit, index: hitIdx, seq: s.search.seq } : null;
@@ -302,11 +407,12 @@ function applyRow(
     if (hit && next.search) {
       next = { ...next, search: { ...next.search, hits: next.search.hits.filter((_, i) => i !== hitIdx) } };
     }
+    if (shown) next = leaveConversation(next, t.account, t.row_id);
   } else if (value !== null) {
     next = setFlagEverywhere(next, t.account, t.row_id, flagAxis(kind), value);
   }
   next = adjustCounts(next, counts);
-  return bumpList(next, [listRow ? s.messages.key : null, source ? listKey(t.account, source) : null]);
+  return bumpList(next, [listRow ? s.messages.key : null, shown, source ? listKey(t.account, source) : null]);
 }
 
 function applyDraft(s: AppState, batch: number, t: { account: string; draft: string }): AppState {
@@ -393,6 +499,7 @@ export function applyMutation(
     if ("row_id" in t) next = applyRow(next, batch, kind, t, destination, value);
     else next = changesStatus(kind) ? applyDraftStatus(next, batch, kind, t) : applyDraft(next, batch, t);
   }
+  if ((kind === "read" || kind === "flag") && value !== null && !s.search) next = patchConversations(next, s, kind, targets, value);
   if (leaves(kind) && next.marked.keys.size > 0) {
     const gone = new Set(targets.map(targetKey));
     const keys = new Set([...next.marked.keys].filter((k) => !gone.has(k)));
@@ -416,7 +523,7 @@ function withoutAxis(e: PendingChange, axis: Axis): PendingChange | null {
 /** The list keys an entry touches: the list it left, and its source mailbox's. */
 function entryKeys(e: PendingChange): (string | null)[] {
   const shown = e.leave?.prevRow?.key ?? e.leave?.prevDraft?.key ?? null;
-  return [shown, e.source ? listKey(e.target.account, e.source) : null];
+  return [shown, e.shown ?? null, e.source ? listKey(e.target.account, e.source) : null];
 }
 
 /** A saved row and hit with one flag set, so a row still out of its list comes back with it. */
@@ -606,6 +713,7 @@ export function overlayPending(s: AppState, list: MessageList): MessageList {
   }
   const here = entries.filter((e) => "row_id" in e.target && e.source === list.mailbox);
   if (here.length === 0) return list;
+  if (list.kind === "conversations") return overlayConversations(list, here);
   const byId = new Map(here.map((e) => [(e.target as { row_id: number }).row_id, e]));
   let removed = 0;
   const rows = list.rows.flatMap((r) => {
@@ -621,6 +729,44 @@ export function overlayPending(s: AppState, list: MessageList): MessageList {
       if (v !== null && v !== undefined) flags = { ...flags, [flagName(axis)]: v };
     }
     return flags === r.flags ? [r] : [{ ...r, flags }];
+  });
+  return { ...list, rows, total: Math.max(0, list.total - removed) };
+}
+
+/**
+ * `overlayPending` for a conversation list (ticket 0142): a member on its way out
+ * leaves its row's `member_ids` (the row with its last one), the `latest`
+ * shows its pending flags, and a change pending on every member here sets
+ * the row's `unread` or `flagged`.
+ */
+function overlayConversations(list: Extract<MessageList, { kind: "conversations" }>, here: PendingChange[]): MessageList {
+  const byId = new Map(here.map((e) => [(e.target as { row_id: number }).row_id, e]));
+  let removed = 0;
+  const rows = list.rows.flatMap((r) => {
+    const mine = r.member_ids.flatMap((id) => byId.get(id) ?? []);
+    if (mine.length === 0) return [r];
+    const member_ids = r.member_ids.filter((id) => !byId.get(id)?.leave);
+    if (member_ids.length === 0) {
+      removed += 1;
+      return [];
+    }
+    let row = member_ids.length === r.member_ids.length ? r : { ...r, member_ids };
+    const latest = byId.get(r.latest.id);
+    let flags = row.latest.flags;
+    for (const axis of ["flag", "read"] as const) {
+      const v = latest?.[axis]?.value;
+      if (v !== null && v !== undefined) flags = { ...flags, [flagName(axis)]: v };
+    }
+    if (flags !== row.latest.flags) row = { ...row, latest: { ...row.latest, flags } };
+    const every = (axis: FlagAxis): boolean | null => {
+      const values = member_ids.map((id) => byId.get(id)?.[axis]?.value);
+      return values.every((v) => v === true) ? true : values.every((v) => v === false) ? false : null;
+    };
+    const read = every("read");
+    if (read !== null) row = { ...row, unread: read ? 0 : Math.max(row.unread, member_ids.length) };
+    const flag = every("flag");
+    if (flag !== null) row = { ...row, flagged: flag };
+    return [row];
   });
   return { ...list, rows, total: Math.max(0, list.total - removed) };
 }

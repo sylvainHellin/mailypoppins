@@ -18,10 +18,14 @@ import { hiddenNotice, viewPanes } from "@/app/views";
 import { saveTheme } from "@/app/theme";
 import { saveReaderMode, toggleReaderMode } from "@/app/readerMode";
 import { checkForUpdates, installUpdate, restartIntoUpdate } from "@/app/updates";
-import { actionTargets, type Action } from "@/app/reducer";
+import { actionTargets, cursorKey, type Action } from "@/app/reducer";
 import {
+  conversationOf,
   draftItems,
   draftsShown,
+  expandable,
+  expandedMember,
+  listedRow,
   liveHolds,
   LIST_WIDTH_MIN,
   LIST_WIDTH_STEP,
@@ -102,10 +106,21 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return dispatch({ type: "move_selection", to: 1, relative: true });
     case "prev_message":
       return dispatch({ type: "move_selection", to: -1, relative: true });
-    case "open_message":
+    case "open_message": {
+      // Enter on a collapsed conversation of several members expands it and
+      // stays on it; on an expanded one or on a member it reads (ticket 0142).
+      const header = collapsedHeader(s);
+      if (header) return dispatch({ type: "conversation_expand", thread_id: header });
       if (s.selection.message || s.selection.draft || s.selection.hit) dispatch({ type: "focus", pane: "reader" });
       openedRead(s, dispatch);
       return;
+    }
+    case "expand_conversation":
+    case "collapse_conversation": {
+      const c = s.search ? null : s.selection.conversation;
+      if (!c) return;
+      return dispatch({ type: id === "expand_conversation" ? "conversation_expand" : "conversation_collapse", thread_id: c.thread_id });
+    }
     case "select_mailbox":
       return dispatch({ type: "sidebar_enter" });
     case "copy_selector": {
@@ -199,15 +214,15 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     case "toggle_read":
       return runMutation(id, actionTargets(s), s, dispatch);
     case "mark_toggle": {
-      const t = actionCursor(s);
-      if (!t) return;
-      dispatch({ type: "mark_toggle", key: targetKey(t) });
+      const key = markKey(s);
+      if (!key) return;
+      dispatch({ type: "mark_toggle", key });
       // The TUI's `v` steps to the next row, so a run of `v` marks a run.
       return dispatch({ type: "move_selection", to: 1, relative: true });
     }
     case "mark_range": {
-      const t = actionCursor(s);
-      if (t) dispatch({ type: "mark_range", key: targetKey(t) });
+      const key = markKey(s);
+      if (key) dispatch({ type: "mark_range", key });
       return;
     }
     case "mark_all":
@@ -382,6 +397,25 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
 
 export type MutationActionId = "archive" | "delete" | "move" | "toggle_flag" | "toggle_read";
 
+/**
+ * The `thread_id` of the conversation header under the cursor when Enter
+ * expands it: collapsed, and of more than one member. Null anywhere else.
+ */
+function collapsedHeader(s: AppState): string | null {
+  const c = s.search ? null : s.selection.conversation;
+  const list = s.messages.data;
+  if (!c || c.member !== null || list?.kind !== "conversations" || s.expanded[c.thread_id]) return null;
+  const row = list.rows.find((r) => r.thread_id === c.thread_id);
+  return row && expandable(row) ? row.thread_id : null;
+}
+
+/** What `v` marks: the cursor row's key, a conversation header's being its thread's. */
+function markKey(s: AppState): string | null {
+  if (!s.search && s.messages.data?.kind === "conversations") return cursorKey(s);
+  const t = actionCursor(s);
+  return t ? targetKey(t) : null;
+}
+
 /** The row under the cursor as a target, without the marks. */
 function actionCursor(s: AppState): Target | null {
   const account = s.search?.account ?? s.selection.account;
@@ -426,10 +460,13 @@ function messageTargets(targets: Target[]): MessageTarget[] {
 /** A message's read and flag state, wherever the model shows it. */
 export function flagsOf(s: AppState, t: MessageTarget): { seen: boolean; flagged: boolean } | null {
   const list = s.messages.data;
-  if (list?.kind === "messages" && list.account === t.account) {
-    const row = list.rows.find((r) => r.id === t.row_id);
-    if (row) return { seen: row.flags.seen, flagged: row.flags.flagged };
-  }
+  const row = listedRow(list, t.account, t.row_id) ?? expandedMember(s, t.account, t.row_id);
+  if (row) return { seen: row.flags.seen, flagged: row.flags.flagged };
+  // A member of a conversation row the list shows only as a count (ticket 0142):
+  // all read when the row has no unread, and flagged as the row is, which
+  // makes the toggles on a collapsed row act on the row as a whole.
+  const conv = conversationOf(list, t.account, t.row_id);
+  if (conv) return { seen: conv.unread === 0, flagged: conv.flagged };
   const hit = s.search?.hits.find((h) => h.account === t.account && h.row_id === t.row_id);
   if (hit) return { seen: hit.flags.seen, flagged: hit.flags.flagged };
   if (s.reader.meta && s.reader.key === readerKey(t.account, t.row_id)) {
@@ -445,9 +482,7 @@ function describeTarget(s: AppState, t: Target): string {
     const d = list?.kind === "drafts" ? list.listing.drafts.find((x) => x.id === t.draft) : undefined;
     return `${d?.to || "(no recipient)"} - ${d?.subject || "(no subject)"}`;
   }
-  const row =
-    (list?.kind === "messages" && list.account === t.account ? list.rows.find((r) => r.id === t.row_id) : undefined) ??
-    s.search?.hits.find((h) => h.account === t.account && h.row_id === t.row_id);
+  const row = listedRow(list, t.account, t.row_id) ?? s.search?.hits.find((h) => h.account === t.account && h.row_id === t.row_id);
   if (row) return `${row.from || "(no sender)"} - ${row.subject || "(no subject)"}`;
   const meta = s.reader.key === readerKey(t.account, t.row_id) ? s.reader.meta : null;
   return `${meta?.from ?? "(no sender)"} - ${meta?.subject ?? "(no subject)"}`;

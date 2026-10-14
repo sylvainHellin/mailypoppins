@@ -41,7 +41,7 @@ pnpm tauri dev                          # against the daemon, started with `mp d
 MP_DESKTOP_FIXTURE=1 pnpm tauri dev     # on the bundled fixtures, no daemon
 ```
 
-Fixture mode serves `fixtures/*.json`: 2 accounts, 6 mailboxes, 21 messages, 2 drafts, 3 HTML bodies, 1 armed send hold, 6 agenda events and 28 contacts, row 1006 being a hostile message.
+Fixture mode serves `fixtures/*.json`: 2 accounts, 6 mailboxes, 22 messages, 2 drafts, 3 HTML bodies, 1 armed send hold, 6 agenda events and 28 contacts, row 1006 being a hostile message.
 It is the way to iterate on the screens without a mail server.
 The drafts are real files in a per-run directory, and the fixture never starts an editor or the system opener: it records the path instead.
 The `fixture_simulate` command, answered only in fixture mode, takes these:

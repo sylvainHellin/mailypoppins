@@ -24,6 +24,9 @@ export type ActionId =
   | "next_message"
   | "prev_message"
   | "open_message"
+  /** `l` and `h` on a conversation row or one of its members (ticket 0142). */
+  | "expand_conversation"
+  | "collapse_conversation"
   | "select_mailbox"
   | "copy_selector"
   | "clear_selection"

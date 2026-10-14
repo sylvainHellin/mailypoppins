@@ -15,6 +15,7 @@ import type {
   EventFrontmatter,
   HoldListing,
   OutboxListing,
+  ThreadListing,
 } from "@/protocol/types";
 import type {
   AccountDraft,
@@ -80,8 +81,19 @@ export const listAccounts = (): Promise<AccountInfo[]> => invoke<AccountInfo[]>(
 export const listMailboxes = (account: string): Promise<MailboxListing> =>
   invoke<MailboxListing>("list_mailboxes", { account });
 
-export const listMessages = (account: string, mailbox: string): Promise<MessageList> =>
-  invoke<MessageList>("list_messages", { account, mailbox });
+/**
+ * A mailbox's contents; with `conversations`, one row per conversation
+ * (`message.list_conversations`, ticket 0142), Drafts excepted.
+ */
+export const listMessages = (account: string, mailbox: string, conversations = false): Promise<MessageList> =>
+  invoke<MessageList>("list_messages", { account, mailbox, conversations });
+
+/**
+ * The members of the conversation of `row_id`, the expansion under its row:
+ * the copies in `mailbox` where there are two, and the drafts that answer it.
+ */
+export const messageThread = (account: string, row_id: number, mailbox: string): Promise<ThreadListing> =>
+  invoke<ThreadListing>("message_thread", { account, row_id, mailbox });
 
 export const messageText = (account: string, row_id: number): Promise<MessageText> =>
   invoke<MessageText>("message_text", { account, row_id });

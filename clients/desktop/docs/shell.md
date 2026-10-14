@@ -69,6 +69,13 @@ An event that arrives mid-fetch thus leaves the answer stale when it lands, and 
 Selection is held by stable identifiers: account name, mailbox slug, and for a message its `message_id` and `selector` next to the `row_id`.
 Opening another mailbox or account puts the cursor on the top row once its list lands, as the TUI does (PERSO-94): `retarget` flags the fresh list `pickTop`, and its first answer selects the first visible row or draft unless a selection exists by then; Escape before the answer, a refetch of the same list and a re-bootstrap move no cursor, and the launch's first list keeps nothing selected.
 A `rebootstrapped` keeps what still exists, falls back to the default account's inbox for what does not, and marks the message `verified: false`; the reloaded list confirms it by `message_id` (taking the new `row_id` after a daemon restart) or clears it.
+In conversation mode (#0142; `conversationMode` per account, flat until the setting lands) a mailbox lists one `ConversationRow` per conversation and Drafts stays flat.
+The pane draws the visible sequence of headers, each followed by its members once expanded (`expanded`, by `thread_id`, each a `Loadable` of `message_thread` read again on every reload of the list), every line of the list's one row height.
+The cursor is `selection.conversation`: a header by `thread_id`, with `message` its `latest`, or a member by `row:<id>` or `draft:<id>`; a reload follows the header by `thread_id` and an expansion's answer confirms a member by its key, then by `Message-ID`, else the header takes the cursor.
+`Enter` expands a collapsed header of more than one member and keeps the cursor on it, and reads anything else; `l` expands and `h` collapses from a header or any of its members (`expand_conversation`, `collapse_conversation`, keyed in `useKeymap.ts` until the KEYMAP rows arrive).
+An action on a header acts on its `member_ids`, the members in the listed mailbox only, and on a member on that member alone; marked headers are the union of their members.
+The list is read again on any change in the account (a `mailbox:`, `message:` or `draft:` resource, `draft.changed`), the counts scope included, since the daemon publishes no row deltas: one read in flight and one owed, so a burst costs two.
+An optimistic change shows on the row at once (`member_ids`, `unread`, `flagged`, `latest`) and a refusal reads the list again.
 An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`, and `list_accounts` moves it to the default account only while that flag holds; any selection the user makes clears it, so a click made before the answer, or between a failed fetch and its retry, is never reverted.
 
 | GuiEvent | Effect |

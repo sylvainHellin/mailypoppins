@@ -7,7 +7,7 @@ import * as cmd from "@/lib/commands";
 import { asGuiError, type GuiEvent } from "@/lib/gui-types";
 import { onMenu, subscribe } from "@/lib/events";
 import type { Action } from "@/app/reducer";
-import { accountNames, isStale, readerKey, type AppState } from "@/app/state";
+import { accountNames, isStale, listsConversations, readerKey, type AppState } from "@/app/state";
 import { refusalsWanted } from "@/app/rsvp";
 import { CONTACT_LIMIT } from "@/app/contacts";
 import { signaturesWanted } from "@/app/signatures";
@@ -190,18 +190,59 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
   const messages = state.messages;
   const listGenRef = useRef(state.listGen);
   listGenRef.current = state.listGen;
+  const grouped = listsConversations(state, account, mailbox);
   useEffect(() => {
     if (!hasBootstrap || !account || !mailbox || messages.key === null || !isStale(messages)) return;
     const key = messages.key;
     const gen = messages.gen;
     const lgen = listGenRef.current[key] ?? 0;
-    run(`messages:${key}@${gen}`, () =>
-      cmd
-        .listMessages(account, mailbox)
-        .then((list) => dispatch({ type: "messages_loaded", key, gen, lgen, list }))
-        .catch((e: unknown) => dispatch({ type: "messages_failed", key, gen, error: asGuiError(e) })),
+    if (!grouped) {
+      run(`messages:${key}@${gen}`, () =>
+        cmd
+          .listMessages(account, mailbox)
+          .then((list) => dispatch({ type: "messages_loaded", key, gen, lgen, list }))
+          .catch((e: unknown) => dispatch({ type: "messages_failed", key, gen, error: asGuiError(e) })),
+      );
+      return;
+    }
+    // A conversation list is read again on any change in the account
+    // (ticket 0142), so the reads are coalesced: one in flight, and one owed when
+    // the list went stale meanwhile, which this effect starts once the
+    // answer lands and the list is still stale. The tag is cleared before
+    // the answer is dispatched, so the re-run that answer causes can start it.
+    const tag = `conversations:${key}`;
+    if (inflight.current.has(tag)) return;
+    inflight.current.add(tag);
+    cmd.listMessages(account, mailbox, true).then(
+      (list) => {
+        inflight.current.delete(tag);
+        dispatch({ type: "messages_loaded", key, gen, lgen, list });
+      },
+      (e: unknown) => {
+        inflight.current.delete(tag);
+        dispatch({ type: "messages_failed", key, gen, error: asGuiError(e) });
+      },
     );
-  }, [hasBootstrap, account, mailbox, messages, dispatch]);
+  }, [hasBootstrap, account, mailbox, messages, grouped, dispatch]);
+
+  // The expansions under conversation rows (ticket 0142): each one stale is read
+  // through the `latest` its row last listed, in the listed mailbox.
+  const expanded = state.expanded;
+  const listKeyNow = messages.key;
+  useEffect(() => {
+    if (!hasBootstrap || !account || !mailbox || !grouped || listKeyNow === null) return;
+    for (const [thread_id, e] of Object.entries(expanded)) {
+      if (!isStale(e)) continue;
+      const gen = e.gen;
+      const key = listKeyNow;
+      run(`thread:${key}:${thread_id}@${gen}`, () =>
+        cmd
+          .messageThread(account, e.row_id, mailbox)
+          .then((thread) => dispatch({ type: "thread_loaded", key, thread_id, gen, thread }))
+          .catch((e: unknown) => dispatch({ type: "thread_failed", key, thread_id, gen, error: asGuiError(e) })),
+      );
+    }
+  }, [hasBootstrap, account, mailbox, grouped, listKeyNow, expanded, dispatch]);
 
   // The reader: the headers of a verified selection. The body is the
   // `mpmsg` document the reader's iframe loads by itself.
