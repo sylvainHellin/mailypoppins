@@ -965,7 +965,11 @@ pub(super) fn handle_action(
             // still arrive here as one list.
             let mailbox = match app.mailboxes.get(mailbox_idx) {
                 Some(mb) => super::app::mailbox_key(mb),
-                None => return Ok(()),
+                // No load runs, so none lands to end the stream in flight.
+                None => {
+                    app.restream_landed(generation);
+                    return Ok(());
+                }
             };
             let account = app.account_config.name.clone();
             let account_index = app.active_account;

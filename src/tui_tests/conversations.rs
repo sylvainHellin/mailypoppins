@@ -833,3 +833,153 @@ fn filters_and_jumps_run_over_conversation_rows() {
         Some(MessageRef::new(fx.ids.lone))
     );
 }
+
+// ---------------------------------------------------------------------------
+// A selected conversation
+// ---------------------------------------------------------------------------
+
+/// Seed a second conversation of two inbox messages, newer than the first.
+fn seed_second_conversation() {
+    let store = crate::store::Store::open(crate::config::store_path(ACCOUNT)).expect("a store");
+    let blobs = crate::store::BlobStore::for_account(ACCOUNT);
+    let root = "<offer@example.com>";
+    let ingest = |uid: i64, id: &str, subject: &str, date: &str, parent: Option<&str>| {
+        let raw = parent.map(|p| format!("In-Reply-To: {p}\r\nReferences: {p}\r\n\r\n"));
+        crate::ingest::ingest_message(
+            &store,
+            &blobs,
+            &crate::ingest::IngestInput {
+                account: ACCOUNT,
+                mailbox: "inbox",
+                uid,
+                email: &message(id, "Carl <carl@example.com>", subject, date, true),
+                raw: raw.as_deref().map(str::as_bytes),
+            },
+        )
+        .expect("ingest a fixture message")
+        .row_id
+    };
+    ingest(4, root, "Angebot", "Sat, 6 Jan 2024 08:00:00 +0000", None);
+    ingest(
+        5,
+        "<offer-follow-up@example.com>",
+        "Re: Angebot",
+        "Sun, 7 Jan 2024 08:00:00 +0000",
+        Some(root),
+    );
+}
+
+/// The row ids in the selection, sorted.
+fn selected_rows(app: &App) -> Vec<i64> {
+    let mut rows: Vec<i64> = app
+        .selection
+        .iter()
+        .filter_map(EntryKey::msg)
+        .map(MessageRef::row_id)
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
+impl Fixture {
+    /// Put the cursor on the header whose subject is `subject`.
+    fn cursor_on(&mut self, subject: &str) {
+        let at = self
+            .app
+            .visible_emails()
+            .position(|e| e.header().is_some() && e.subject == subject);
+        self.app.list_index =
+            at.unwrap_or_else(|| panic!("a header {subject:?} in {:?}", self.shape()));
+    }
+
+    /// Announce a message change in the inbox, as the daemon does, and land
+    /// the re-stream it owes.
+    fn restream(&mut self, revision: u64) {
+        self.app.apply_event(&event(
+            revision,
+            "state.invalidate",
+            json!({
+                "resource": format!("mailbox:{ACCOUNT}/inbox"),
+                "scope": {"query": "counts"},
+            }),
+        ));
+        assert_eq!(run_load(&mut self.app), Some(true), "the re-stream lands");
+    }
+
+    /// Press `a`, confirm, and run the batch the confirmation queues,
+    /// answering the rows it archived, sorted.
+    fn archive_selection(&mut self) -> Vec<i64> {
+        self.char('a');
+        self.char('y');
+        let at = self
+            .app
+            .pending_actions
+            .iter()
+            .position(|a| matches!(a, Action::BatchArchive(_)))
+            .expect("a batch archive queued");
+        let action = self.app.pending_actions.remove(at).expect("the batch");
+        self.forget();
+        self.dispatch(action);
+        let mut archived = self.rows_of("message.archive");
+        archived.sort_unstable();
+        archived
+    }
+}
+
+/// A selected collapsed conversation stands for its members here, and a
+/// re-stream, which lists it collapsed again with only its latest as a row
+/// key, keeps them all: the batch archive reaches every inbox member.
+#[test]
+fn a_selected_conversation_keeps_its_members_across_a_restream() {
+    let mut fx = Fixture::new();
+    let mut inbox = vec![fx.ids.question, fx.ids.follow_up];
+    inbox.sort_unstable();
+    fx.cursor_on("Re: Frage zum Bericht");
+    fx.char('v');
+    assert_eq!(selected_rows(&fx.app), inbox);
+
+    fx.restream(WATERMARK + 1);
+    assert_eq!(selected_rows(&fx.app), inbox, "the re-stream keeps them");
+
+    assert_eq!(fx.archive_selection(), inbox);
+    assert_eq!(fx.shape(), ["H1 Wochenbericht"]);
+}
+
+/// Folding another conversation keeps the members of a selected collapsed one,
+/// which no row on screen carries but its header.
+#[test]
+fn a_selected_conversation_keeps_its_members_across_a_collapse() {
+    let mut fx = Fixture::new();
+    seed_second_conversation();
+    fx.restream(WATERMARK + 1);
+    assert_eq!(
+        fx.shape(),
+        [
+            "H2 Re: Angebot",
+            "H4 Re: Frage zum Bericht",
+            "H1 Wochenbericht"
+        ]
+    );
+    let mut inbox = vec![fx.ids.question, fx.ids.follow_up];
+    inbox.sort_unstable();
+    fx.cursor_on("Re: Frage zum Bericht");
+    fx.char('v');
+    assert_eq!(selected_rows(&fx.app), inbox);
+
+    fx.cursor_on("Re: Angebot");
+    fx.char('l');
+    fx.char('j');
+    fx.char('h');
+    assert_eq!(
+        fx.shape(),
+        [
+            "H2 Re: Angebot",
+            "H4 Re: Frage zum Bericht",
+            "H1 Wochenbericht"
+        ]
+    );
+    assert_eq!(selected_rows(&fx.app), inbox, "the fold keeps them");
+
+    assert_eq!(fx.archive_selection(), inbox);
+    assert_eq!(fx.shape(), ["H2 Re: Angebot", "H1 Wochenbericht"]);
+}

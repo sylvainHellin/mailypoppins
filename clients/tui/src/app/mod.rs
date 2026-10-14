@@ -1397,10 +1397,11 @@ impl App {
                 .map_or(entries.len(), |n| at + 1 + n);
             entries.drain(at + 1..end);
         });
-        let members: HashSet<EntryKey> = self.emails.iter().filter_map(|e| e.key()).collect();
         // A selected member that left the screen leaves the selection, unless
-        // its row is still on screen as a header's `latest`.
-        self.selection.retain(|key| members.contains(key));
+        // a header on screen still stands for it, as the folded one does for
+        // its members here and any other collapsed header for its own.
+        let live = live_keys(&self.emails);
+        self.selection.retain(|key| live.contains(key));
         self.relist_on(CursorAnchor::Header(thread_id));
         true
     }
@@ -1873,7 +1874,7 @@ impl App {
         if self.selection.is_empty() {
             return;
         }
-        let live: HashSet<EntryKey> = self.emails.iter().filter_map(|e| e.key()).collect();
+        let live = live_keys(&self.emails);
         self.selection.retain(|key| live.contains(key));
     }
 
@@ -2302,6 +2303,22 @@ impl App {
     fn invalidate_pending_mailbox_loads(&mut self) {
         self.mailbox_load_generation = self.mailbox_load_generation.wrapping_add(1);
     }
+}
+
+/// The selection keys a list still holds: each row's own key and, for a
+/// conversation header, the members it stands for in the listed mailbox,
+/// which a collapsed header carries only in its `member_ids` while its row is
+/// keyed by its latest alone (#0142).
+fn live_keys(entries: &[EmailEntry]) -> HashSet<EntryKey> {
+    entries
+        .iter()
+        .flat_map(|e| {
+            let members = e.header().map_or(&[][..], |h| h.member_ids.as_slice());
+            e.key()
+                .into_iter()
+                .chain(members.iter().copied().map(EntryKey::Msg))
+        })
+        .collect()
 }
 
 /// Drop the rows `gone` names from a list, conversation rows included
