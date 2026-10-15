@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { actionTargets, reducer, visibleItems, type Action } from "@/app/reducer";
 import { overlayPending } from "@/app/pending";
 import { runAction } from "@/app/actions";
+import { editableDraft } from "@/app/compose";
 import { loadPrefs, PREFS_KEY, savePrefs } from "@/app/prefs";
 import { conversationEntries, DEFAULT_PREFS, initialState, isStale, listKey, listsConversations, threadKey, type AppState } from "@/app/state";
 import { paletteEntries } from "@/keymap/catalog";
@@ -47,6 +48,17 @@ describe("the conversation list", () => {
     s = run(s, { type: "move_selection", to: "first", relative: false });
     expect(s.selection.conversation).toEqual({ thread_id: list(s).rows[0].thread_id, member: null });
     expect(s.selection.message?.row_id).toBe(list(s).rows[0].latest.id);
+  });
+
+  it("e resolves a draft member by its id when the thread answer carries no path, as a daemon older than the field answers", () => {
+    let s = grouped();
+    s = run(s, { type: "conversation_expand", thread_id: CANNED_THREAD });
+    const e = s.expanded[CANNED_THREAD];
+    const thread = threadListing("work", e.row_id, "inbox")!;
+    const old = { ...thread, messages: thread.messages.map(({ path: _path, ...m }) => m) };
+    s = run(s, { type: "thread_loaded", key: INBOX, thread_id: CANNED_THREAD, gen: e.gen, thread: old });
+    s = run(s, { type: "select_conversation", thread_id: CANNED_THREAD, member: "draft:offsite-note" });
+    expect(editableDraft(s)).toEqual({ account: "work", id: "offsite-note", path: "", valid: true });
   });
 
   it("expands to four members newest first under the header, and collapses back to it", () => {

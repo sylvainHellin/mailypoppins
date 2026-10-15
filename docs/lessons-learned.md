@@ -2687,4 +2687,5 @@ The method refuses an in-process call with no row sink; `TestDaemon` hands it a 
 
 ## A desktop draft action gated on `draftsShown` misses a conversation's draft member
 
-An expanded conversation selects its draft member with `selection.draft` set while the list is the Inbox, so a gate on `draftsShown(s)` silently drops the key there and `e` fell through to the received-message path, which had no message to open; resolve the draft through `compose.editableDraft`, which reads the member's `draft_id` and `path` off the expansion.
+An expanded conversation selects its draft member with `selection.draft` set while the list is the Inbox, so a gate on `draftsShown(s)` silently drops the key there and `e` fell through to the received-message path, which had no message to open; resolve the draft through `compose.editableDraft`, which takes the id off the conversation cursor and the file from `draft_path`.
+Do not gate it on the expansion's `path`: a daemon older than that field (a 0.10 daemon left running under a 0.11 binary) omits it, and the first fix, which required it, did nothing on the Mac while every vitest passed.

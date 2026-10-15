@@ -10,6 +10,7 @@ import type { Action } from "@/app/reducer";
 import { actionTargets } from "@/app/reducer";
 import { createMutations } from "@/app/mutations";
 import {
+  conversationDraft,
   conversationMember,
   draftsShown,
   filteredDrafts,
@@ -342,17 +343,18 @@ function cursorDraft(s: AppState) {
 
 /**
  * The draft `e` edits: the Drafts row under the cursor, or a conversation's
- * draft member (ticket 0142), which the expansion names with its file. A
- * member is a linked draft, one that parsed when the index read it, so it
- * counts as valid.
+ * draft member (ticket 0142), named by the conversation cursor. A member is
+ * a linked draft, one that parsed when the index read it, so it counts as
+ * valid and its file is whatever `draft_path` answers: the expansion's
+ * `path` is absent from a daemon older than the field.
  */
 export function editableDraft(s: AppState): { account: string; id: string; path: string; valid: boolean } | null {
   const cur = cursorDraft(s);
   if (cur) return { account: cur.account, id: cur.row.id, path: cur.row.path, valid: cur.row.valid };
   const account = s.selection.account;
-  const member = conversationMember(s);
-  if (!account || !member?.draft_id || !member.path || member.draft_id !== s.selection.draft) return null;
-  return { account, id: member.draft_id, path: member.path, valid: true };
+  const id = conversationDraft(s);
+  if (!account || !id) return null;
+  return { account, id, path: conversationMember(s)?.path ?? "", valid: true };
 }
 
 /**
