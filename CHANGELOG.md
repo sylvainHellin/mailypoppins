@@ -21,6 +21,7 @@ All notable changes to this project are documented in this file.
 - **Desktop: `e` on a received message opens it read-only in `$EDITOR` as Markdown, as in the TUI (PERSO-92).** Enter focuses the reader.
 
 ### Fixed
+- **Desktop: `e` on a conversation's draft member opens the draft in the editor.** It did nothing in a grouped mailbox, and the draft only opened from Drafts; the TUI already edited it.
 - **TUI and desktop: an expanded conversation lists its members newest first, and `y` works on a member (PERSO-138).** The members read top-down like the mailbox around them. `y` on a message member copies its `mp://` selector, and on a draft member the TUI copies its selector and the desktop its file path, as in Drafts; before, the TUI said the member had no selector and the desktop copied nothing. `message.thread` rows now carry `selector`, and a draft member its `path`.
 - **The conversation listing reads a mailbox of one-message conversations in one walk (PERSO-138).** A new additive `messages_thread_mailbox` index answers whether a row's conversation has other members with an index-only probe, so only shared conversations pay a member read: 1.68x the flat stream on 50 000 rows, was 2.4x.
 - **A sent reply carries `In-Reply-To` and `References` (PERSO-137).** The parent's References plus the parent, so recipients' clients thread it and mp files the Sent copy in the parent's conversation instead of a new one.

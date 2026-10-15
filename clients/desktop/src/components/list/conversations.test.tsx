@@ -92,6 +92,32 @@ describe("the conversation list", () => {
     await waitFor(() => expect(callsOf("draft_preview")).toContainEqual({ account: "work", id: "offsite-note" }));
   });
 
+  it("e on the draft member opens the draft in the editor, as in Drafts", async () => {
+    const { user } = renderGrouped();
+    await shellReady();
+    await waitFor(() => expect(offsite()).not.toBeNull());
+    await user.click(offsite());
+    await user.keyboard("l");
+    await waitFor(() => expect(members()).toHaveLength(4));
+    await user.keyboard("j");
+    expect(cursorRow()?.getAttribute("data-member")).toBe("draft:offsite-note");
+    await user.keyboard("e");
+    await waitFor(() => expect(mock.editorOpens).toEqual(["/fixture/work/drafts/offsite-note.md"]));
+    expect(callsOf("draft_path")).toContainEqual({ account: "work", id: "offsite-note" });
+    expect(callsOf("message_markdown_path")).toEqual([]);
+  });
+
+  it("the reader's Edit on the draft member opens the draft in the editor", async () => {
+    const { user } = renderGrouped();
+    await shellReady();
+    await waitFor(() => expect(offsite()).not.toBeNull());
+    await user.click(within(offsite()).getByRole("button", { name: "Expand conversation (l)" }));
+    await waitFor(() => expect(members()).toHaveLength(4));
+    await user.click(members()[0]);
+    await user.click(await screen.findByRole("button", { name: /Edit in editor/ }));
+    await waitFor(() => expect(mock.editorOpens).toEqual(["/fixture/work/drafts/offsite-note.md"]));
+  });
+
   it("y on a member copies its own selector, and on a draft member its file", async () => {
     const { user } = renderGrouped();
     await shellReady();

@@ -297,8 +297,9 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     case "open_editor":
       // The TUI's `e`: a draft opens in the editor; a received message opens
       // read-only, its Markdown rendition in the editor (PERSO-92), where
-      // Enter focuses the reader.
-      if (draftsShown(s) && s.selection.draft) return void compose.editDraft(s, dispatch);
+      // Enter focuses the reader. A conversation's draft member edits as
+      // its Drafts row does (ticket 0142).
+      if ((draftsShown(s) && s.selection.draft) || compose.editableDraft(s)) return void compose.editDraft(s, dispatch);
       return void attachments.openMarkdown(s, dispatch);
     case "edit_recipients":
       return void compose.editRecipients(s, dispatch);

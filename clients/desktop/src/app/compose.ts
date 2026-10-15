@@ -10,6 +10,7 @@ import type { Action } from "@/app/reducer";
 import { actionTargets } from "@/app/reducer";
 import { createMutations } from "@/app/mutations";
 import {
+  conversationMember,
   draftsShown,
   filteredDrafts,
   isRunning,
@@ -340,26 +341,41 @@ function cursorDraft(s: AppState) {
 }
 
 /**
+ * The draft `e` edits: the Drafts row under the cursor, or a conversation's
+ * draft member (ticket 0142), which the expansion names with its file. A
+ * member is a linked draft, one that parsed when the index read it, so it
+ * counts as valid.
+ */
+export function editableDraft(s: AppState): { account: string; id: string; path: string; valid: boolean } | null {
+  const cur = cursorDraft(s);
+  if (cur) return { account: cur.account, id: cur.row.id, path: cur.row.path, valid: cur.row.valid };
+  const account = s.selection.account;
+  const member = conversationMember(s);
+  if (!account || !member?.draft_id || !member.path || member.draft_id !== s.selection.draft) return null;
+  return { account, id: member.draft_id, path: member.path, valid: true };
+}
+
+/**
  * `e` on a draft: `draft_path` resolves the file fresh, then the editor
  * opens it. A file that does not parse opens by the path the listing gave,
  * since fixing it is what the editor is for.
  */
 export async function editDraft(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
-  const cur = cursorDraft(s);
+  const cur = editableDraft(s);
   if (!cur) return;
-  const { account, row } = cur;
-  const busy = sendingRefusal(s, [{ account, draft: row.id }]);
+  const { account, id } = cur;
+  const busy = sendingRefusal(s, [{ account, draft: id }]);
   if (busy) return notice(dispatch, busy);
-  let path = row.path;
+  let path = cur.path;
   try {
-    path = (await cmd.draftPath(account, row.id)).path;
+    path = (await cmd.draftPath(account, id)).path;
   } catch (e: unknown) {
-    if (row.valid) {
-      failed(dispatch, account, `Could not find ${row.id}`, e);
+    if (cur.valid) {
+      failed(dispatch, account, `Could not find ${id}`, e);
       return;
     }
   }
-  await openInEditor(dispatch, account, row.id, path, s.compose);
+  await openInEditor(dispatch, account, id, path, s.compose);
 }
 
 /**

@@ -2684,3 +2684,7 @@ The method refuses an in-process call with no row sink; `TestDaemon` hands it a 
 ## An expanded conversation member takes its selector off the thread row
 
 `message.thread` rows (`ThreadMessage`) had no `selector`, unlike a `MessageListRow`, so both clients built expanded members with an empty one and `y` on a member copied nothing; the daemon now spells `selector` (and a draft member's `path`) on every thread row, so no client re-implements the selector's percent-encoding (PERSO-138).
+
+## A desktop draft action gated on `draftsShown` misses a conversation's draft member
+
+An expanded conversation selects its draft member with `selection.draft` set while the list is the Inbox, so a gate on `draftsShown(s)` silently drops the key there and `e` fell through to the received-message path, which had no message to open; resolve the draft through `compose.editableDraft`, which reads the member's `draft_id` and `path` off the expansion.
