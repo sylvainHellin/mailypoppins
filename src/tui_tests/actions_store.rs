@@ -92,6 +92,29 @@ mod store_backed_drafts {
                 .unwrap()
         }
 
+        /// Ingest one message from its raw RFC822 bytes, kept as the `raw`
+        /// blob the way the IMAP path keeps them.
+        pub(super) fn ingest_raw(&self, raw: &[u8]) -> MessageRow {
+            let email = crate::parse::parse_rfc822_to_fetched_email(raw).unwrap();
+            let store = self.store();
+            let blobs = BlobStore::for_account("alice");
+            let outcome = crate::ingest::ingest_message(
+                &store,
+                &blobs,
+                &crate::ingest::IngestInput {
+                    account: "alice",
+                    mailbox: "inbox",
+                    uid: 1,
+                    email: &email,
+                    raw: Some(raw),
+                },
+            )
+            .unwrap();
+            crate::store::read::find_by_id(&store, outcome.row_id)
+                .unwrap()
+                .unwrap()
+        }
+
         /// The source of a reply or a forward off that row, which is what both
         /// the list flow and `mp reply` build.
         pub(super) fn source(&self, row: &MessageRow, with_attachments: bool) -> SourceMessage {
@@ -297,6 +320,105 @@ mod store_backed_drafts {
         assert_eq!(std::fs::read(&expected).unwrap(), b"fake pdf");
 
         assert_eq!(fx.resolve(&selector).path, path);
+    }
+
+    /// An Outlook-shaped message: a multipart/related HTML body whose
+    /// signature logo is a `cid:`-referenced image part, inside a
+    /// multipart/mixed carrying a real PDF and an attached photo the HTML
+    /// does not point at.
+    fn signature_logo_message() -> String {
+        "From: Alice <alice@example.com>\r\nTo: me@example.com\r\n\
+Subject: Signed\r\nMessage-ID: <signed@example.com>\r\n\
+Date: Mon, 01 Jan 2024 12:00:00 +0000\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"MIX\"\r\n\r\n\
+--MIX\r\nContent-Type: multipart/related; boundary=\"REL\"\r\n\r\n\
+--REL\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+<p>See attached.</p><img src=\"cid:image001.png@01DA0000.00000000\">\r\n\
+--REL\r\nContent-Type: image/png; name=\"image001.png\"\r\n\
+Content-ID: <image001.png@01DA0000.00000000>\r\n\
+Content-Disposition: inline; filename=\"image001.png\"\r\n\
+Content-Transfer-Encoding: base64\r\n\r\nbG9nby1ieXRlcw==\r\n\
+--REL--\r\n\
+--MIX\r\nContent-Type: application/pdf; name=\"report.pdf\"\r\n\
+Content-Disposition: attachment; filename=\"report.pdf\"\r\n\
+Content-Transfer-Encoding: base64\r\n\r\nZmFrZSBwZGY=\r\n\
+--MIX\r\nContent-Type: image/png; name=\"photo.png\"\r\n\
+Content-Disposition: attachment; filename=\"photo.png\"\r\n\
+Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
+--MIX--\r\n"
+            .to_string()
+    }
+
+    fn attachment_names(source: &SourceMessage) -> Vec<String> {
+        source
+            .attachments
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// A forward lists only the real attachments: the signature logo the HTML
+    /// references by `cid:` stays behind, the PDF and the unreferenced photo
+    /// go along.
+    #[test]
+    fn forward_drops_the_cid_referenced_signature_logo() {
+        let fx = Fixture::new();
+        let row = fx.ingest_raw(signature_logo_message().as_bytes());
+        let store = fx.store();
+        let listed: Vec<String> = crate::store::read::attachments_for(&store, row.id)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert!(
+            listed.contains(&"image001.png".to_string()),
+            "ingest lists the logo as an attachment, which is what the forward has to undo: {listed:?}"
+        );
+
+        let source = fx.source(&row, true);
+        assert_eq!(
+            attachment_names(&source),
+            vec!["report.pdf".to_string(), "photo.png".to_string()]
+        );
+        assert_eq!(std::fs::read(&source.attachments[0]).unwrap(), b"fake pdf");
+        assert_eq!(
+            std::fs::read(&source.attachments[1]).unwrap(),
+            b"photo-bytes"
+        );
+
+        let (path, _) = create_draft_from_source(
+            "alice",
+            "me@example.com",
+            &source,
+            DraftFromSource::Forward,
+            None,
+            None,
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("report.pdf"), "{content}");
+        assert!(content.contains("photo.png"), "{content}");
+        assert!(!content.contains("image001.png"), "{content}");
+    }
+
+    /// With no raw message (a Graph row) there is no MIME structure to tell a
+    /// signature logo from an attached image, so the forward keeps every
+    /// attachment rather than guess, even when the HTML names a `cid:`.
+    #[test]
+    fn forward_without_a_raw_message_keeps_every_attachment() {
+        let fx = Fixture::new();
+        let raw = signature_logo_message();
+        let email = crate::parse::parse_rfc822_to_fetched_email(raw.as_bytes()).unwrap();
+        assert!(email
+            .html_body
+            .as_deref()
+            .is_some_and(|h| h.contains("cid:image001.png")));
+        let row = fx.ingest(&email);
+
+        let source = fx.source(&row, true);
+        let mut names = attachment_names(&source);
+        names.sort();
+        assert_eq!(names, vec!["image001.png", "photo.png", "report.pdf"]);
     }
 
     /// The forward wizard's recipients and subject win over the ones the

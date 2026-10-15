@@ -42,6 +42,9 @@ pub fn new_draft_skeleton(from: &str, date: &str, signature: Option<&str>) -> St
 /// and a draft's `attachments:` list needs paths, so they are materialised
 /// into the stable per-account mirror keyed by Message-ID (#0006) where the
 /// draft keeps resolving them after the source row is archived or evicted.
+/// The body's `cid:`-referenced inline images (signature logos) are not
+/// attachments of the forward and stay behind
+/// ([`crate::store::read::materialise_forward_attachments`]).
 pub fn source_from_row(
     store: &crate::store::Store,
     blobs: &crate::store::BlobStore,
@@ -54,7 +57,7 @@ pub fn source_from_row(
             &crate::config::account_dir(&account_name_of(store)),
             &row.message_id,
         );
-        crate::store::read::materialise_attachments(store, blobs, row.id, &dest)?
+        crate::store::read::materialise_forward_attachments(store, blobs, row.id, &dest)?
     } else {
         Vec::new()
     };

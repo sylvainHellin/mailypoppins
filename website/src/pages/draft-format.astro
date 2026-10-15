@@ -288,6 +288,9 @@ Email body here.`;
         account's store. Forwarding a message therefore materialises its attachments once, into a
         stable per-message directory under the account, and writes those paths into the draft, so
         the forward still resolves them after the original has been archived.
+        Images the original's HTML body shows inline through a <code>cid:</code> reference, such as
+        a signature's logos, are part of the body rather than attachments and are not carried; an
+        image the body does not reference is.
       </p>
       <Code code={attachmentStructure} lang="text" theme="catppuccin-mocha" />
       <Code code={attachmentFrontmatter} lang="yaml" theme="catppuccin-mocha" />

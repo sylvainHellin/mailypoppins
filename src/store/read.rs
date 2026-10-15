@@ -1070,7 +1070,8 @@ pub fn read_blob(blobs: &BlobStore, message_row: i64, hash: &str) -> Option<Vec<
 /// Attachments are blobs in the account's content-addressed store (#0037), so
 /// this is the one place that turns them back into files: `mp save`, `mp open`
 /// and the forward path that needs real paths in a draft's `attachments:`
-/// list all come through here.
+/// list (through [`materialise_forward_attachments`], which leaves the body's
+/// inline images out) all come through here.
 ///
 /// A missing blob is an error rather than a skipped file: a forward that
 /// silently dropped an attachment would be a worse answer than one that says
@@ -1090,7 +1091,62 @@ pub fn materialise_attachments(
     row_id: i64,
     dest: &Path,
 ) -> Result<Vec<PathBuf>> {
-    let attachments = attachments_for(store, row_id)?;
+    write_attachments(blobs, row_id, attachments_for(store, row_id)?, dest)
+}
+
+/// Materialise the attachments a forward carries: every attachment except the
+/// image parts the HTML body references by `cid:` URL.
+///
+/// Those parts are the body's inline graphics, typically an Outlook
+/// signature's `image001.png` / `image002.png`, and ingest lists them as
+/// attachments because they are MIME parts with a filename. A forward that
+/// copied them into `attachments:` sent the recipient a stack of logos beside
+/// the one real PDF. An image the HTML does not point at (an attached photo)
+/// stays.
+///
+/// The match is by content hash, not by filename: the referenced parts are
+/// decoded from the raw message and hashed the way the blob store hashes the
+/// attachment it stored, so a real attachment that happens to share a logo's
+/// name is not dropped. It is a multiset match, so a logo whose exact bytes
+/// are also attached a second time drops only one copy. With no raw message
+/// (a Graph row) or no HTML body there is nothing to decide by, and every
+/// attachment is kept, which is what a forward did before.
+pub fn materialise_forward_attachments(
+    store: &Store,
+    blobs: &BlobStore,
+    row_id: i64,
+    dest: &Path,
+) -> Result<Vec<PathBuf>> {
+    let mut attachments = attachments_for(store, row_id)?;
+    let mut inline: HashMap<String, usize> = HashMap::new();
+    if let (Some(raw), Some(html)) = (
+        load_raw(store, blobs, row_id),
+        load_html(store, blobs, row_id),
+    ) {
+        for content in crate::parse::cid_referenced_image_contents(&raw, &html) {
+            *inline
+                .entry(BlobHash::of(&content).as_str().to_string())
+                .or_default() += 1;
+        }
+    }
+    attachments.retain(|att| match inline.get_mut(&att.hash) {
+        Some(left) if *left > 0 => {
+            *left -= 1;
+            false
+        }
+        _ => true,
+    });
+    write_attachments(blobs, row_id, attachments, dest)
+}
+
+/// Write `attachments` of `row_id` into `dest`, the shared tail of
+/// [`materialise_attachments`] and [`materialise_forward_attachments`].
+fn write_attachments(
+    blobs: &BlobStore,
+    row_id: i64,
+    attachments: Vec<AttachmentRow>,
+    dest: &Path,
+) -> Result<Vec<PathBuf>> {
     crate::config::create_private_dir_all(dest)
         .with_context(|| format!("creating {}", dest.display()))?;
     let mut written = Vec::new();

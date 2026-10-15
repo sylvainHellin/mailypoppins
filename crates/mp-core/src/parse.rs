@@ -1387,21 +1387,73 @@ pub fn embed_inline_images(html: &str, images: &[InlineImage]) -> String {
 /// [`MAX_INLINE_IMAGE_BYTES`] are dropped, and so is a message that does not
 /// parse at all -- the preview then shows what it always showed.
 pub fn inline_images(raw: &[u8], html: &str) -> Vec<InlineImage> {
-    let Ok(parsed) = mailparse::parse_mail(raw) else {
-        return Vec::new();
-    };
-    let html_lower = html.to_ascii_lowercase();
     let mut out = Vec::new();
     let mut counter = 0usize;
-    collect_inline_images(&parsed, &html_lower, &mut counter, &mut out);
+    for_each_cid_image(raw, html, &mut |part, cid| {
+        let disposition = part.get_content_disposition();
+        let filename = disposition
+            .params
+            .get("filename")
+            .or_else(|| part.ctype.params.get("name"))
+            .cloned()
+            .unwrap_or_else(|| {
+                counter += 1;
+                format!("inline-{}.{}", counter, mime_ext_for(&part.ctype.mimetype))
+            });
+        if let Ok(content) = part.get_body_raw() {
+            if !content.is_empty() && content.len() <= MAX_INLINE_IMAGE_BYTES {
+                out.push(InlineImage {
+                    filename: sanitize_attachment_filename(&filename),
+                    content_id: cid,
+                    media_type: part.ctype.mimetype.to_ascii_lowercase(),
+                    content,
+                });
+            }
+        }
+    });
     out
 }
 
-fn collect_inline_images(
+/// The decoded bytes of every image part of `raw` that `html` references by
+/// `cid:` URL, with no size cap and no empty-part skip.
+///
+/// The forward's question rather than the preview's: which of the message's
+/// attachments are really the body's inline graphics (Outlook signature logos
+/// such as `image001.png`) and so do not belong in a forward's `attachments:`
+/// list. [`inline_images`] caps what it decodes because it embeds the bytes in
+/// a page; a referenced logo above that cap is still inline, so this walk
+/// keeps every referenced part. The bytes are what ingest stored as the
+/// attachment blob (both decode with `get_body_raw`), so a caller matches them
+/// by content hash rather than by filename. A message that does not parse
+/// yields nothing.
+pub fn cid_referenced_image_contents(raw: &[u8], html: &str) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for_each_cid_image(raw, html, &mut |part, _cid| {
+        if let Ok(content) = part.get_body_raw() {
+            out.push(content);
+        }
+    });
+    out
+}
+
+/// Call `visit` with every `image/*` part of `raw` whose `Content-ID` `html`
+/// references, in MIME order, along with its normalised Content-ID.
+fn for_each_cid_image(
+    raw: &[u8],
+    html: &str,
+    visit: &mut dyn FnMut(&mailparse::ParsedMail, String),
+) {
+    let Ok(parsed) = mailparse::parse_mail(raw) else {
+        return;
+    };
+    let html_lower = html.to_ascii_lowercase();
+    walk_cid_images(&parsed, &html_lower, visit);
+}
+
+fn walk_cid_images(
     part: &mailparse::ParsedMail,
     html_lower: &str,
-    counter: &mut usize,
-    out: &mut Vec<InlineImage>,
+    visit: &mut dyn FnMut(&mailparse::ParsedMail, String),
 ) {
     if part
         .ctype
@@ -1416,30 +1468,11 @@ fn collect_inline_images(
             .map(|h| normalize_cid(&h.get_value()))
             .unwrap_or_default();
         if html_references_cid(html_lower, &cid) {
-            let disposition = part.get_content_disposition();
-            let filename = disposition
-                .params
-                .get("filename")
-                .or_else(|| part.ctype.params.get("name"))
-                .cloned()
-                .unwrap_or_else(|| {
-                    *counter += 1;
-                    format!("inline-{}.{}", counter, mime_ext_for(&part.ctype.mimetype))
-                });
-            if let Ok(content) = part.get_body_raw() {
-                if !content.is_empty() && content.len() <= MAX_INLINE_IMAGE_BYTES {
-                    out.push(InlineImage {
-                        filename: sanitize_attachment_filename(&filename),
-                        content_id: cid,
-                        media_type: part.ctype.mimetype.to_ascii_lowercase(),
-                        content,
-                    });
-                }
-            }
+            visit(part, cid);
         }
     }
     for sub in &part.subparts {
-        collect_inline_images(sub, html_lower, counter, out);
+        walk_cid_images(sub, html_lower, visit);
     }
 }
 
@@ -2206,6 +2239,36 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
     #[test]
     fn unparseable_bytes_yield_no_inline_images() {
         assert!(inline_images(b"", "<img src=\"cid:x\">").is_empty());
+    }
+
+    #[test]
+    fn cid_referenced_image_contents_are_the_referenced_parts_decoded() {
+        let raw = related_message("<img src=\"cid:logo@x\">", "logo@x", "");
+        let found = cid_referenced_image_contents(raw.as_bytes(), "<img src=\"cid:logo@x\">");
+        assert_eq!(found.len(), 1);
+        assert_eq!(&found[0][1..4], b"PNG");
+        // An unreferenced image is an attachment, not an inline graphic.
+        assert!(cid_referenced_image_contents(raw.as_bytes(), "<p>hello</p>").is_empty());
+    }
+
+    #[test]
+    fn cid_referenced_image_contents_ignore_the_preview_size_cap() {
+        // The forward asks which parts are inline, not which are small enough
+        // to embed: an oversized referenced logo is still inline.
+        use base64::Engine as _;
+        let big = vec![0u8; MAX_INLINE_IMAGE_BYTES + 1];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&big);
+        let raw = format!(
+            "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"B\"\r\n\r\n\
+--B\r\nContent-Type: text/html\r\n\r\n<img src=\"cid:big@x\">\r\n\
+--B\r\nContent-Type: image/png\r\nContent-ID: <big@x>\r\n\
+Content-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n--B--\r\n"
+        );
+        let html = "<img src=\"cid:big@x\">";
+        assert!(inline_images(raw.as_bytes(), html).is_empty());
+        let found = cid_referenced_image_contents(raw.as_bytes(), html);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].len(), MAX_INLINE_IMAGE_BYTES + 1);
     }
 
     #[test]

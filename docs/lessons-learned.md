@@ -2689,3 +2689,7 @@ The method refuses an in-process call with no row sink; `TestDaemon` hands it a 
 
 An expanded conversation selects its draft member with `selection.draft` set while the list is the Inbox, so a gate on `draftsShown(s)` silently drops the key there and `e` fell through to the received-message path, which had no message to open; resolve the draft through `compose.editableDraft`, which takes the id off the conversation cursor and the file from `draft_path`.
 Do not gate it on the expansion's `path`: a daemon older than that field (a 0.10 daemon left running under a 0.11 binary) omits it, and the first fix, which required it, did nothing on the Mac while every vitest passed.
+
+## The store lists a body's inline images as attachments
+
+Ingest stores every MIME part with a filename as an `attachment` blob, `cid:`-referenced signature logos (`image001.png`) included, and `message_blobs` keeps no Content-ID, so a consumer that wants only real attachments has to ask the raw message: `materialise_forward_attachments` decodes the parts the HTML references (`parse::cid_referenced_image_contents`, deliberately uncapped, unlike `inline_images`) and drops attachments with the same blob hash. Match by content, never by filename, and keep everything when the row has no raw blob (Graph) or no HTML.
