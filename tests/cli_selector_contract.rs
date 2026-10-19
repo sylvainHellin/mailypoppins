@@ -506,8 +506,12 @@ fn a_missing_sent_selector_is_fetched_and_then_shown_and_saved() {
         "the row the fetch settled on: {shown}"
     );
     assert!(
-        stderr.contains("fetching it from the server"),
-        "the fetch is announced on stderr: {stderr}"
+        stderr.contains("the store holds it in inbox"),
+        "the notice names the mailbox the store holds the copy in: {stderr}"
+    );
+    assert!(
+        !stderr.contains("from the server"),
+        "no download happened, so none is announced: {stderr}"
     );
 
     // `mp save` resolves through the same fallback, and fails only because

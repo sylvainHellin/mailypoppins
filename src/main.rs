@@ -1675,7 +1675,10 @@ async fn routed_show(
 /// told which mailbox to search.
 ///
 /// The retry asks for the selector the fetch settled on, which names a copy
-/// the store already held in another mailbox when there was one.
+/// the store already held in another mailbox when there was one. The stderr
+/// notice waits for the fetch's answer so it can say which of the two
+/// happened: a download from the server, or a copy the store holds in another
+/// mailbox (`already_present`, found by Message-ID with no server session).
 ///
 /// [`selector::not_found`]: mailypoppins::selector::not_found
 async fn message_get_or_fetch(
@@ -1707,11 +1710,6 @@ async fn message_get_or_fetch(
         return Err(refusal(account, refused));
     };
 
-    eprintln!(
-        "{} {} is not in the local store; fetching it from the server",
-        "\u{2139}".blue(),
-        selector
-    );
     let mut session = operation_session().await;
     let fetched = run_admin_operation(
         &mut session,
@@ -1730,6 +1728,20 @@ async fn message_get_or_fetch(
             refused.message
         )
     })?;
+    if fetched["already_present"].as_bool() == Some(true) {
+        eprintln!(
+            "{} {} is not in the local store under that mailbox; the store holds it in {}",
+            "\u{2139}".blue(),
+            selector,
+            wire_str(&fetched["mailbox"])
+        );
+    } else {
+        eprintln!(
+            "{} {} was not in the local store; fetched it from the server",
+            "\u{2139}".blue(),
+            selector
+        );
+    }
     daemon_try_call(
         connection,
         "message.get",
