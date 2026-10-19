@@ -583,12 +583,12 @@ export function runMutation(
       }
       if (msgs.length === 0) return;
       const account = msgs[0].account;
-      const source = s.search ? null : s.selection.mailbox;
-      if (moveDestinations(s, account, source).length === 0) {
+      const sources = moveSources(s, msgs);
+      if (moveDestinations(s, account, sources).length === 0) {
         dispatch({ type: "notice", text: "No other mailboxes to move to" });
         return;
       }
-      return dispatch({ type: "open_dialog", dialog: { kind: "move", targets: msgs, account, source } });
+      return dispatch({ type: "open_dialog", dialog: { kind: "move", targets: msgs, account, sources } });
     }
     case "toggle_flag":
     case "toggle_read": {
@@ -649,13 +649,25 @@ export function runDialog(
   dispatch({ type: "mark_set", keys: dialog.targets.map(targetKey), on: false });
 }
 
-/** The mailboxes a move can go to: the account's, less Drafts and the one the rows are in. */
-export function moveDestinations(s: AppState, account: string, source: string | null): { slug: string; label: string }[] {
+/**
+ * The mailboxes the rows of a move live in: an expanded conversation member's
+ * own, wherever the list is (ticket 0142), and the listed mailbox for any
+ * other row; none over a search, whose hits the picker never narrowed for.
+ */
+export function moveSources(s: AppState, msgs: MessageTarget[]): string[] {
+  if (s.search) return [];
+  const listed = s.selection.mailbox;
+  const mailboxes = msgs.map((t) => expandedMember(s, t.account, t.row_id)?.mailbox ?? listed);
+  return [...new Set(mailboxes.filter((m): m is string => m !== null))];
+}
+
+/** The mailboxes a move can go to: the account's, less Drafts and the ones the rows are in. */
+export function moveDestinations(s: AppState, account: string, sources: string[]): { slug: string; label: string }[] {
   const rows =
     s.mailboxes[account]?.data?.mailboxes.map((m) => ({ slug: m.slug, label: m.label, role: m.role })) ??
     s.bootstrap?.snapshot.mailboxes[account]?.map((m) => ({ slug: m.slug, label: m.label, role: m.role })) ??
     [];
-  return rows.filter((m) => m.role !== "drafts" && m.slug !== source).map(({ slug, label }) => ({ slug, label }));
+  return rows.filter((m) => m.role !== "drafts" && !sources.includes(m.slug)).map(({ slug, label }) => ({ slug, label }));
 }
 
 /**

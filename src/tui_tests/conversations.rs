@@ -804,6 +804,58 @@ fn an_action_on_a_member_reaches_that_member_alone() {
     assert_eq!(selected, want, "the union of the rows' members here");
 }
 
+/// The move picker on an expanded member leaves out the mailbox the member
+/// lives in rather than the listed one: from the first reply in Sent it
+/// offers the inbox and not Sent, and from the header it offers Sent and not
+/// the inbox (PERSO-146).
+#[test]
+fn the_move_picker_leaves_out_the_mailbox_a_member_lives_in() {
+    let mut fx = Fixture::new();
+    // The fixture's account names no server folders; a move needs them.
+    for mailbox in fx.app.mailboxes.iter_mut() {
+        if mailbox.id != "drafts" {
+            mailbox.server_name = Some(mailbox.label.clone());
+        }
+    }
+    let picked = |app: &App| -> Vec<String> {
+        let crate::tui::app::Overlay::Mailbox(picker) = &app.overlay else {
+            panic!("the move picker is open");
+        };
+        picker
+            .candidates
+            .iter()
+            .map(|(i, _)| mailbox_key(&app.mailboxes[*i]))
+            .collect()
+    };
+    fx.char('M');
+    let from_header = picked(&fx.app);
+    assert!(
+        !from_header.contains(&"inbox".to_string()),
+        "{from_header:?}"
+    );
+    assert!(from_header.contains(&"sent".to_string()), "{from_header:?}");
+    fx.key(crossterm::event::KeyCode::Esc);
+
+    fx.char('l');
+    for _ in 0..4 {
+        fx.char('j');
+    }
+    assert_eq!(
+        fx.app.selected_email_ref(),
+        Some(MessageRef::new(fx.ids.first_reply))
+    );
+    fx.char('M');
+    let from_member = picked(&fx.app);
+    assert!(
+        from_member.contains(&"inbox".to_string()),
+        "{from_member:?}"
+    );
+    assert!(
+        !from_member.contains(&"sent".to_string()),
+        "{from_member:?}"
+    );
+}
+
 /// Any change of the account re-streams the list, in any mailbox: the
 /// `counts` invalidate the daemon announces a message change with, a row
 /// delta, the removal of a message or a draft, `draft.changed`. A burst costs

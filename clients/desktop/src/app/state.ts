@@ -472,7 +472,8 @@ export type MutationDialog =
   | { kind: "send"; targets: [{ account: string; draft: string }]; subject: string | null; title: string; detail: string }
   /** `cX`: every approved draft of `account`; `targets` are those the Drafts list shows. */
   | { kind: "send_approved"; account: string; targets: { account: string; draft: string }[]; title: string; detail: string }
-  | { kind: "move"; targets: MessageTarget[]; account: string; source: string | null }
+  /** `sources` are the mailboxes the targets live in, which the picker leaves out; none over a search. */
+  | { kind: "move"; targets: MessageTarget[]; account: string; sources: string[] }
   /**
    * An outbox row's retry or discard: both ask first, and `warning` says
    * what the row may already have done (SND-07).

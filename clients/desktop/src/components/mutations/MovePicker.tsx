@@ -20,12 +20,12 @@ export type MovePickerProps = {
 };
 
 /**
- * The TUI's `M` picker: the account's mailboxes less Drafts and the one the
+ * The TUI's `M` picker: the account's mailboxes less Drafts and the ones the
  * rows are in, filtered as the name is typed; Enter moves, Escape cancels.
  */
 export function MovePicker({ state, dialog, onOpenChange, onPick }: MovePickerProps) {
   const destinations = useMemo(
-    () => (dialog ? moveDestinations(state, dialog.account, dialog.source) : []),
+    () => (dialog ? moveDestinations(state, dialog.account, dialog.sources) : []),
     [state, dialog],
   );
   const n = dialog?.targets.length ?? 0;

@@ -82,6 +82,23 @@ describe("the conversation list", () => {
     await waitFor(() => expect(members()).toHaveLength(4));
   });
 
+  it("M on a member in Sent offers the inbox and leaves Sent out, wherever the list is", async () => {
+    const { user } = renderGrouped();
+    await shellReady();
+    await waitFor(() => expect(offsite()).not.toBeNull());
+    await user.click(offsite());
+    await user.keyboard("l");
+    await waitFor(() => expect(members()).toHaveLength(4));
+    await user.keyboard("jjj");
+    expect(cursorRow()?.getAttribute("data-member")).toBe("row:1010");
+    await user.keyboard("M");
+    const picker = await screen.findByRole("dialog", { name: "Move the message to" });
+    const slugs = () => [...picker.querySelectorAll("[data-testid='move-destination']")].map((e) => e.getAttribute("data-slug"));
+    expect(slugs()).toEqual(["inbox", "archive"]);
+    await user.keyboard("inbox{Enter}");
+    await waitFor(() => expect(callsOf("message_move")).toEqual([{ account: "work", row_ids: [1010], destination: "inbox" }]));
+  });
+
   it("selecting the draft member previews the draft", async () => {
     const { user } = renderGrouped();
     await shellReady();

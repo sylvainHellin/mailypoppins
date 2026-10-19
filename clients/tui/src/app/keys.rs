@@ -2079,7 +2079,9 @@ impl App {
 
     /// Open the quick-move picker for the current selection (or the
     /// cursor email). Candidates are all server-backed mailboxes other
-    /// than the active one, so "move to the same mailbox" cannot happen.
+    /// than the ones the rows live in, so "move to the same mailbox"
+    /// cannot happen: the active one, and an expanded conversation
+    /// member's own wherever the list is (#0142).
     fn open_mailbox_picker(&mut self) {
         // The source mailbox must have a server-side folder; Drafts
         // (local-only) can't be quick-moved -- drafts leave via send.
@@ -2107,11 +2109,12 @@ impl App {
             }
         };
 
+        let sources = self.move_sources(&msgs);
         let candidates: Vec<(usize, String)> = self
             .mailboxes
             .iter()
             .enumerate()
-            .filter(|(i, m)| *i != self.active_mailbox && m.server_name.is_some())
+            .filter(|(_, m)| !sources.contains(&super::mailbox_key(m)) && m.server_name.is_some())
             .map(|(i, m)| (i, m.label.clone()))
             .collect();
         if candidates.is_empty() {
@@ -2127,6 +2130,25 @@ impl App {
             selected: 0,
             msgs,
         });
+    }
+
+    /// The mailboxes `msgs` live in: an expanded member's own, the active
+    /// mailbox for every other row, a collapsed header's members included
+    /// (#0142).
+    fn move_sources(&self, msgs: &[MessageRef]) -> HashSet<String> {
+        let active = self
+            .mailboxes
+            .get(self.active_mailbox)
+            .map(super::mailbox_key);
+        msgs.iter()
+            .filter_map(|msg| {
+                self.emails
+                    .iter()
+                    .filter(|e| e.msg == Some(*msg))
+                    .find_map(|e| e.member_mailbox().map(str::to_string))
+                    .or_else(|| active.clone())
+            })
+            .collect()
     }
 
     fn handle_mailbox_picker_key(&mut self, key: KeyEvent) -> Option<Message> {

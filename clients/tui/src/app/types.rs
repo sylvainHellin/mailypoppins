@@ -2206,8 +2206,9 @@ pub struct MailboxPicker {
     /// Type-to-filter query.
     pub query: String,
     /// Candidate destinations: `(mailbox index into App::mailboxes,
-    /// label)`. Excludes the active mailbox and any mailbox without a
-    /// server-side folder.
+    /// label)`. Excludes the mailboxes the rows live in (the active one,
+    /// and an expanded conversation member's own) and any mailbox without
+    /// a server-side folder.
     pub candidates: Vec<(usize, String)>,
     /// Indices into `candidates` matching the current query.
     pub filtered: Vec<usize>,
