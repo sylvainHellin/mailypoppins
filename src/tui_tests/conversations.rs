@@ -804,6 +804,54 @@ fn an_action_on_a_member_reaches_that_member_alone() {
     assert_eq!(selected, want, "the union of the rows' members here");
 }
 
+/// A draft member takes its recipients, its sender and its status from its
+/// file: the headers pane prints its To and the frontmatter's From, and the
+/// Send confirmation of an approved draft does not offer to approve it
+/// (PERSO-146).
+#[test]
+fn a_draft_member_carries_its_files_headers_and_status() {
+    let mut fx = Fixture::new();
+    fx.char('l');
+    fx.char('j');
+    let draft = fx.app.selected_email().expect("the draft member").clone();
+    assert_eq!(draft.draft_id.as_deref(), Some(DRAFT_ID));
+    assert_eq!(draft.to, "ivana@example.com");
+    assert_eq!(draft.from, "alice@example.com");
+    assert_eq!(draft.status, "draft");
+    fx.char('x');
+    let crate::tui::app::Overlay::Confirm(confirm) = &fx.app.overlay else {
+        panic!("the send confirmation is open");
+    };
+    assert_eq!(confirm.title, "Draft is not approved. Approve and send?");
+    assert_eq!(
+        confirm.detail,
+        "To: ivana@example.com - Re: Frage zum Bericht"
+    );
+    fx.key(crossterm::event::KeyCode::Esc);
+
+    // Approved, and sent from an alias, behind the TUI's back.
+    let path = crate::config::drafts_dir(ACCOUNT).join("2024-01-05-re-frage.md");
+    let text = std::fs::read_to_string(&path).expect("the draft");
+    let text = text.replace("status: draft", "status: approved").replace(
+        "from: alice@example.com",
+        "from: \"Alice (Team) <team@example.com>\"",
+    );
+    std::fs::write(&path, text).expect("rewrite the draft");
+    crate::store::drafts::refresh_account(ACCOUNT).expect("index the draft");
+    fx.app.reload_current_mailbox();
+    assert_eq!(run_load(&mut fx.app), Some(true));
+
+    let draft = fx.app.selected_email().expect("the draft member").clone();
+    assert_eq!(draft.draft_id.as_deref(), Some(DRAFT_ID));
+    assert_eq!(draft.status, "approved");
+    assert_eq!(draft.from, "Alice (Team)");
+    fx.char('x');
+    let crate::tui::app::Overlay::Confirm(confirm) = &fx.app.overlay else {
+        panic!("the send confirmation is open");
+    };
+    assert_eq!(confirm.title, "Send this email?");
+}
+
 /// A conversation list's load sets the sidebar count to the messages of the
 /// listed mailbox, not to its conversations or its expanded rows: three in
 /// the inbox (the question, the follow-up and the lone message), with the

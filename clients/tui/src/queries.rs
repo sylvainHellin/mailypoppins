@@ -47,7 +47,8 @@ use mp_protocol::listing::{MessageListRow, ThreadListing};
 
 use crate::app::{
     entry_from_conversation, entry_from_draft, entry_from_member, entry_from_row, entry_from_skip,
-    mailbox_key, status_for_mailbox, CalendarEvent, ConvRole, EmailEntry, MailboxInfo, MessageRef,
+    fill_draft_member, mailbox_key, status_for_mailbox, CalendarEvent, ConvRole, EmailEntry,
+    MailboxInfo, MessageRef,
 };
 pub use mp_client::queries::{MessageRowDelta, Queries};
 use mp_core::selector::DRAFTS_MAILBOX;
@@ -142,7 +143,8 @@ pub fn list_conversation_entries(
 ///
 /// The daemon answers oldest first, as the thread overlay reads it; the list
 /// reverses it so a conversation reads in the order the mailbox around it
-/// does, newest on top.
+/// does, newest on top. A draft member takes its recipients, its sender and
+/// its status from its file ([`draft_member_headers`]).
 pub fn conversation_members(
     q: &dyn Queries,
     account: &str,
@@ -155,8 +157,52 @@ pub fn conversation_members(
         .messages
         .iter()
         .rev()
-        .map(|member| entry_from_member(member, thread_id, &thread.subject))
+        .map(|member| {
+            let mut entry = entry_from_member(member, thread_id, &thread.subject);
+            if let Some(id) = member.draft_id.as_deref() {
+                if let Some(frontmatter) =
+                    draft_member_headers(q, account, id, member.path.as_deref())
+                {
+                    fill_draft_member(&mut entry, &frontmatter);
+                }
+            }
+            entry
+        })
         .collect())
+}
+
+/// The frontmatter of a conversation's draft member, read from the file the
+/// thread row names, as [`draft_body`] reads its body (PERSO-146).
+///
+/// A daemon older than the row's `path` is asked through `draft.path`. A
+/// file that is gone or does not parse leaves the member as the thread row
+/// drew it, with the reason in the log.
+fn draft_member_headers(
+    q: &dyn Queries,
+    account: &str,
+    id: &str,
+    path: Option<&str>,
+) -> Option<mp_core::types::EmailFrontmatter> {
+    let path = match path.filter(|p| !p.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => match wire::draft_path(q, account, id) {
+            Ok(location) => PathBuf::from(location.path),
+            Err(e) => {
+                log::warn!("[queries] the draft member {id} of {account} is not indexed: {e:#}");
+                return None;
+            }
+        },
+    };
+    match mp_core::draft::parse_email_draft(&path) {
+        Ok(draft) => Some(draft.frontmatter),
+        Err(e) => {
+            log::warn!(
+                "[queries] reading the draft member {}: {e:#}",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 /// The rows of one message listing, as list rows.

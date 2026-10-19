@@ -4,8 +4,8 @@ expression: frame
 ---
 == text 120x40 (trailing spaces trimmed) ==
 00 |╭ Mail ──────────────────────────────────╮╭ Headers ───────────────────────────────────────────────────────────────────╮
-01 |│> 󰅲 Inbox  3                            ││ From:                                                                      │
-02 |│  󰏫 Drafts  0                           ││ To:                                                                        │
+01 |│> 󰅲 Inbox  3                            ││ From: alice@example.com                                                    │
+02 |│  󰏫 Drafts  0                           ││ To: ivana@example.com                                                      │
 03 |│  󰑫 Sent  0                             ││ Subj: Re: Frage zum Bericht                                                │
 04 |│  󰄼 Archive  0                          ││ Date: 2024-01-05  [draft]                                                  │
 05 |│                                        ││                                                                            │

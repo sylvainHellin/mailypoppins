@@ -420,6 +420,29 @@ pub fn entry_from_member(member: &ThreadMessage, thread_id: &str, subject: &str)
     }
 }
 
+/// A draft member's own headers and status, out of its file's frontmatter
+/// (PERSO-146).
+///
+/// A thread row carries no recipients and no status, and names a draft's
+/// sender as the account's address, so [`entry_from_member`] alone leaves the
+/// headers pane without a To and the Send confirmation calling an approved
+/// draft unapproved. The fields are the ones [`entry_from_draft`] gives the
+/// same draft in the Drafts list, plus the frontmatter `from` when it names
+/// another sender than the account's.
+pub fn fill_draft_member(entry: &mut EmailEntry, frontmatter: &mp_core::types::EmailFrontmatter) {
+    if let Some(from) = frontmatter.from.as_deref().filter(|f| !f.trim().is_empty()) {
+        entry.from = extract_display_name(from);
+    }
+    entry.to = extract_display_name(frontmatter.to.as_deref().unwrap_or_default());
+    entry.cc = frontmatter.cc.clone();
+    entry.bcc = frontmatter.bcc.clone();
+    entry.reply_to = frontmatter.reply_to.clone();
+    if !frontmatter.subject.trim().is_empty() {
+        entry.subject = frontmatter.subject.clone();
+    }
+    entry.status = frontmatter.status.to_string();
+}
+
 /// The coalescing state of a conversation list's re-stream (#0142).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Restream {
