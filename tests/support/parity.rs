@@ -107,6 +107,7 @@
 #![allow(dead_code)]
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -203,9 +204,9 @@ pub fn oracle_command(root: &Path) -> Command {
 
 /// A running `mp daemon run` and the client that talks to the same root.
 ///
-/// `start` returns only once the socket accepts a connection, so a test never
-/// races the daemon's bind. The daemon dies with the fixture, whether the test
-/// called [`DaemonFixture::stop`] or panicked before it could.
+/// `start` returns only once the daemon has answered a `daemon.status`, so a
+/// test never races the daemon's startup. The daemon dies with the fixture,
+/// whether the test called [`DaemonFixture::stop`] or panicked before it could.
 pub struct DaemonFixture {
     root: PathBuf,
     child: Option<Child>,
@@ -321,16 +322,25 @@ impl DaemonFixture {
         }
     }
 
+    /// Wait for a `daemon.status` round trip, which is what `mp daemon start`
+    /// calls ready.
+    ///
+    /// A connect alone is not readiness: the daemon binds its socket, and the
+    /// kernel queues connections from that instant, *before* it writes
+    /// `daemon.pid` and `daemon.json` and before it serves. A stall in that
+    /// window let `daemon_shutdown.rs` find the runtime files missing
+    /// (PERSO-142). The daemon answers only from its serve loop, which starts
+    /// after the files are written, so an answer means all of startup is done.
     fn wait_ready(&self) {
         let socket = socket_path(&self.root);
         let start = Instant::now();
         loop {
-            if UnixStream::connect(&socket).is_ok() {
+            if status_round_trip(&socket, start + DEADLINE) {
                 return;
             }
             assert!(
                 start.elapsed() < DEADLINE,
-                "the daemon socket {} never accepted a connection within {DEADLINE:?}",
+                "the daemon on {} never answered daemon.status within {DEADLINE:?}",
                 socket.display()
             );
             std::thread::sleep(TICK);
@@ -343,6 +353,33 @@ impl DaemonFixture {
             let _ = child.wait();
         }
     }
+}
+
+/// Ask the daemon at `socket` for `daemon.status` and answer whether it
+/// replied before `deadline`.
+///
+/// `daemon.status` is lifecycle surface, answered without a handshake. Any
+/// failure - nothing listening, a connection closed during startup, a reply
+/// that is not this request's result - is `false`, and the caller polls again.
+fn status_round_trip(socket: &Path, deadline: Instant) -> bool {
+    let Ok(mut stream) = UnixStream::connect(socket) else {
+        return false;
+    };
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+        return false;
+    }
+    let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"daemon.status\",\"params\":{}}\n";
+    if stream.write_all(request).is_err() {
+        return false;
+    }
+    let mut line = String::new();
+    if BufReader::new(&stream).read_line(&mut line).is_err() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&line)
+        .map(|reply| reply["id"] == 1 && reply.get("result").is_some())
+        .unwrap_or(false)
 }
 
 impl Drop for DaemonFixture {
