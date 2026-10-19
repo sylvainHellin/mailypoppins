@@ -2710,3 +2710,11 @@ A test that runs `mp` under `script -qec` to get a terminal stdout sees stderr i
 ## vitest in a git worktree can use the main checkout's packages through linked entries
 
 Give the worktree a real `node_modules` folder whose entries are links into the main checkout's, not one link to the whole folder, so vite's cache stays in the worktree.
+
+## A thread row carries no recipients or status
+
+`message.thread` rows have no To, Cc or draft status, so a client that shows them for an expanded member fills a message member from the `message.get` its preview already sends, and a draft member from its draft file; `message.thread`'s plain answer stays unchanged (PERSO-146).
+
+## A desktop draft-member preview re-reads when the conversation list lands
+
+The draft member's preview has to re-read whenever the conversation list lands (`messages.loadedGen`), or an approve never reaches its toolbar, which keeps the old status (PERSO-146).

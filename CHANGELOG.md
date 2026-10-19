@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop: approve, back to draft, edit recipients and send work on a conversation's draft member (PERSO-146).** `cA`, `cD`, `ce` and `x` reach the draft member of an expanded conversation as they do in Drafts and in the TUI.
+- **TUI: an expanded conversation member shows its To and Cc in the headers pane, and a draft member its own From, To and status (PERSO-146).**
 - **Tests: golden frames for the `tt` conversation overlay over a collapsed and an expanded conversation (PERSO-148).**
 - **Conversation listing in the daemon and mp-client (PERSO-138, steps 1 to 3).** `message.list_conversations` streams a mailbox as one row per conversation in `message.conversations` chunks, `message.thread` gains `prefer_mailbox` and `include_drafts`, the drafts index keeps the message a draft answers or forwards, and `Session`/`QueryHandle` gain `list_conversations` with `Queries::thread_expanded`; no client shows it yet.
 - **TUI and desktop: conversation view, on by default (PERSO-138).** Every mailbox but Drafts lists one row per conversation with its participants, message count and a draft marker; Enter, `l` and `h` expand it in place to its members across Inbox, Sent, Archive and Drafts, each labelled with its mailbox; actions on a collapsed row reach its messages in the listed mailbox only, and the list re-reads on any change in the account. `tc` and its palette entry switch an account back to one row per message, as does the desktop's "Conversation view" switch on the account's Settings card; the TUI remembers the choice in `~/.config/mailypoppins/tui.json`, the desktop in its local prefs. Both clients now require `message.list_conversations` at the handshake.
@@ -22,6 +24,8 @@ All notable changes to this project are documented in this file.
 - **Desktop: `e` on a received message opens it read-only in `$EDITOR` as Markdown, as in the TUI (PERSO-92).** Enter focuses the reader.
 
 ### Fixed
+- **TUI and desktop: the move picker on an expanded conversation member leaves out the mailbox that member lives in (PERSO-146).**
+- **TUI: the sidebar count stays right after a conversation list loads (PERSO-146).** It counts the listed mailbox's messages, the members of its conversation rows.
 - **`mp show`, `mp save` and `mp open` fetch a message the store lacks from the server when the selector names its mailbox (PERSO-155).** The sent-mail selectors `mp search` prints for messages no sync stored resolve now, where they failed with "no match"; when the store holds the message in another mailbox, the command reads that copy and says so on stderr.
 - **Tests: every daemon suite waits for a `daemon.status` answer through one shared `tests/support/readiness.rs` instead of a bare connect (PERSO-142).** This ends the `daemon_shutdown` runtime-file flake and a race in `daemon_lifecycle` where a SIGTERM arrived before the daemon installed its signal handler.
 - **A forward lists only the original's real attachments, not its signature logos.** `mp forward`, the TUI's `w`, the desktop app and `draft.forward` dropped nothing before, so an Outlook mail forwarded with `image001.png` and `image002.png` beside its PDF. An image part the HTML body references by `cid:` is now left out, matched by content against the stored attachment so a real file sharing a logo's name stays; an image the HTML does not reference stays too, and a row with no raw message (Graph) or no HTML keeps every attachment as before.
