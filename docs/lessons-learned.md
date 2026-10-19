@@ -2693,3 +2693,20 @@ Do not gate it on the expansion's `path`: a daemon older than that field (a 0.10
 ## The store lists a body's inline images as attachments
 
 Ingest stores every MIME part with a filename as an `attachment` blob, `cid:`-referenced signature logos (`image001.png`) included, and `message_blobs` keeps no Content-ID, so a consumer that wants only real attachments has to ask the raw message: `materialise_forward_attachments` decodes the parts the HTML references (`parse::cid_referenced_image_contents`, deliberately uncapped, unlike `inline_images`) and drops attachments with the same blob hash. Match by content, never by filename, and keep everything when the row has no raw blob (Graph) or no HTML.
+
+## A socket that accepts a connection is not a daemon that is ready
+
+The kernel queues connections from `bind`/`listen` on, before the daemon writes `daemon.pid` and `daemon.json`, serves a request, or installs its SIGTERM handler, and a SIGTERM in that window kills it with exit -1.
+Tests wait for a `daemon.status` round trip through `tests/support/readiness.rs`, as `mp daemon start` does; to reproduce a suspected startup race, put a temporary sleep in the gap instead of rerunning under load (PERSO-142).
+
+## A deliberate output change rewrites the old binary's output in the parity harness
+
+To change a command's output on purpose, rewrite the old binary's output in `tests/support/parity.rs` (see `piped_since_0144`, which follows `pin_font_size`) instead of dropping comparison rows (PERSO-145).
+
+## `script -qec` gives a test a terminal but merges stderr into stdout
+
+A test that runs `mp` under `script -qec` to get a terminal stdout sees stderr in the same stream, so compare only the trailing lines (PERSO-145).
+
+## vitest in a git worktree can use the main checkout's packages through linked entries
+
+Give the worktree a real `node_modules` folder whose entries are links into the main checkout's, not one link to the whole folder, so vite's cache stays in the worktree.

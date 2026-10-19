@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Tests: golden frames for the `tt` conversation overlay over a collapsed and an expanded conversation (PERSO-148).**
 - **Conversation listing in the daemon and mp-client (PERSO-138, steps 1 to 3).** `message.list_conversations` streams a mailbox as one row per conversation in `message.conversations` chunks, `message.thread` gains `prefer_mailbox` and `include_drafts`, the drafts index keeps the message a draft answers or forwards, and `Session`/`QueryHandle` gain `list_conversations` with `Queries::thread_expanded`; no client shows it yet.
 - **TUI and desktop: conversation view, on by default (PERSO-138).** Every mailbox but Drafts lists one row per conversation with its participants, message count and a draft marker; Enter, `l` and `h` expand it in place to its members across Inbox, Sent, Archive and Drafts, each labelled with its mailbox; actions on a collapsed row reach its messages in the listed mailbox only, and the list re-reads on any change in the account. `tc` and its palette entry switch an account back to one row per message, as does the desktop's "Conversation view" switch on the account's Settings card; the TUI remembers the choice in `~/.config/mailypoppins/tui.json`, the desktop in its local prefs. Both clients now require `message.list_conversations` at the handshake.
 - **`examples/draft_probe.rs` (PERSO-139, slice 0).** Appends a probe draft to an account's Drafts folder and dumps what Outlook and Apple Mail made of it, to pick the linking rule for two-way server drafts.
@@ -21,6 +22,8 @@ All notable changes to this project are documented in this file.
 - **Desktop: `e` on a received message opens it read-only in `$EDITOR` as Markdown, as in the TUI (PERSO-92).** Enter focuses the reader.
 
 ### Fixed
+- **`mp show`, `mp save` and `mp open` fetch a message the store lacks from the server when the selector names its mailbox (PERSO-155).** The sent-mail selectors `mp search` prints for messages no sync stored resolve now, where they failed with "no match"; when the store holds the message in another mailbox, the command reads that copy and says so on stderr.
+- **Tests: every daemon suite waits for a `daemon.status` answer through one shared `tests/support/readiness.rs` instead of a bare connect (PERSO-142).** This ends the `daemon_shutdown` runtime-file flake and a race in `daemon_lifecycle` where a SIGTERM arrived before the daemon installed its signal handler.
 - **A forward lists only the original's real attachments, not its signature logos.** `mp forward`, the TUI's `w`, the desktop app and `draft.forward` dropped nothing before, so an Outlook mail forwarded with `image001.png` and `image002.png` beside its PDF. An image part the HTML body references by `cid:` is now left out, matched by content against the stored attachment so a real file sharing a logo's name stays; an image the HTML does not reference stays too, and a row with no raw message (Graph) or no HTML keeps every attachment as before.
 - **Desktop: `e` on a conversation's draft member opens the draft in the editor.** It did nothing in a grouped mailbox, and the draft only opened from Drafts; the TUI already edited it.
 - **TUI and desktop: an expanded conversation lists its members newest first, and `y` works on a member (PERSO-138).** The members read top-down like the mailbox around them. `y` on a message member copies its `mp://` selector, and on a draft member the TUI copies its selector and the desktop its file path, as in Drafts; before, the TUI said the member had no selector and the desktop copied nothing. `message.thread` rows now carry `selector`, and a draft member its `path`.
@@ -45,6 +48,8 @@ All notable changes to this project are documented in this file.
 - **Log records from concurrent `mp` processes no longer interleave mid-line.** Each record reaches the dated log file in one append.
 
 ### Changed
+- **`new`, `edit`, `reply`, `forward`, `mark-approved`, `mark-draft`, `archive` and `save` print only the selector or path when stdout is not a terminal (#0144, PERSO-145).** `sel=$(mp new x)` now captures a selector a later command can take.
+- **Desktop: the palette hides Reader: HTML and Reader: text while a draft is shown (PERSO-143).** A draft's preview ignores the saved reader mode, so the two commands did nothing there.
 - **Desktop: the focused pane's frame is square where it meets the neighbouring pane (PERSO-95).**
 - **TUI: on a list row `Enter` moves focus into the body pane and marks the message read, as in the desktop client (PERSO-92).** In a terminal under 80 columns it also zooms the body pane. `e` opens the message in `$EDITOR`: a draft for editing, received mail as its read-only Markdown copy.
 - **Reply and forward drafts mark the boundary above the quoted original with `<!-- mp:quote -->` instead of `{{SIGNATURE}}` (PERSO-114).** Drafts that still carry `{{SIGNATURE}}` keep working, and the TUI preview labels the boundary as the quoted message.
