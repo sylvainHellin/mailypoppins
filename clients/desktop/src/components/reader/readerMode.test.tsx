@@ -194,6 +194,32 @@ describe("tt on a draft (PERSO-136)", () => {
     expect(within(reader()).queryByLabelText(/^Message text: /)).toBeNull();
     expect(mock.settings.has("reader_mode")).toBe(false);
   });
+
+  it("the palette leaves Reader: HTML and Reader: text out while a draft is shown, and a message lists them again (PERSO-143)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await openDraft(user);
+    const paletteLabels = async () => {
+      await user.keyboard(":");
+      const dialog = await screen.findByRole("dialog", { name: "Command palette" });
+      const labels = [...dialog.querySelectorAll("[data-testid='palette-item']")].map((el) => el.getAttribute("data-label") ?? "");
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull());
+      return labels;
+    };
+
+    let labels = await paletteLabels();
+    expect(labels).toContain("Toggle reader text mode");
+    expect(labels).not.toContain("Reader: HTML");
+    expect(labels).not.toContain("Reader: text");
+
+    await user.keyboard("1");
+    await within(reader()).findByRole("toolbar", { name: "Message actions" });
+    labels = await paletteLabels();
+    expect(labels).toContain("Reader: HTML");
+    expect(labels).toContain("Reader: text");
+    expect(mock.settings.has("reader_mode")).toBe(false);
+  });
 });
 
 describe("the text pane", () => {

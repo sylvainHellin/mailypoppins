@@ -19,6 +19,7 @@ function groups(entries: PaletteEntry[]): [string, PaletteEntry[]][] {
 }
 
 const NO_EXTRA: PaletteEntry[] = [];
+const NO_HIDDEN: ReadonlySet<ActionId> = new Set();
 
 export type CommandPaletteProps = {
   open: boolean;
@@ -26,14 +27,19 @@ export type CommandPaletteProps = {
   onRun: (id: ActionId) => void;
   /** Rows that come and go with the model, such as the update's (`updatePaletteEntries`), after the fixed ones. */
   extra?: PaletteEntry[];
+  /** Actions whose rows the model leaves out for now, such as the reader mode's on a draft (`hiddenPaletteRows`). */
+  hidden?: ReadonlySet<ActionId>;
 };
 
 /**
  * Every KEYMAP action, with its keys; what M1 cannot run yet is listed,
  * disabled, with the milestone that brings it.
  */
-export function CommandPalette({ open, onOpenChange, onRun, extra = NO_EXTRA }: CommandPaletteProps) {
-  const all = useMemo(() => groups([...paletteEntries(), ...GUI_ENTRIES, ...extra]), [extra]);
+export function CommandPalette({ open, onOpenChange, onRun, extra = NO_EXTRA, hidden = NO_HIDDEN }: CommandPaletteProps) {
+  const all = useMemo(
+    () => groups([...paletteEntries(), ...GUI_ENTRIES, ...extra].filter((e) => e.id === null || !hidden.has(e.id))),
+    [extra, hidden],
+  );
   return (
     <CommandDialog
       open={open}

@@ -346,6 +346,8 @@ export const GUI_ENTRIES: PaletteEntry[] = [
   { section: "READER", label: "Show intercepted links", keys: [], id: "show_intercepted", badge: null },
   // The reader mode (src/app/readerMode.ts), stored in desktop.json: `tt`
   // toggles it, as the TUI's thread key, which the desktop does not have yet.
+  // The palette leaves "Reader: HTML" and "Reader: text" out while a draft is
+  // shown, whose preview ignores the stored mode (`hiddenPaletteRows`, PERSO-143).
   { section: "READER", label: "Toggle reader text mode", keys: ["tt"], id: "toggle_reader_mode", badge: null },
   { section: "READER", label: "Reader: HTML", keys: [], id: "reader_html", badge: null },
   { section: "READER", label: "Reader: text", keys: [], id: "reader_text", badge: null },

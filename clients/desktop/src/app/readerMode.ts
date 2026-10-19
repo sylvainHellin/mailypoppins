@@ -6,7 +6,8 @@
 
 import { useEffect, type Dispatch } from "react";
 import type { Action } from "@/app/reducer";
-import type { AppState } from "@/app/state";
+import { readerDraftKey, type AppState } from "@/app/state";
+import type { ActionId } from "@/keymap/catalog";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
 
@@ -59,6 +60,19 @@ export async function saveReaderMode(dispatch: Dispatch<Action>, mode: ReaderMod
 /** `tt`: the other mode. */
 export function toggleReaderMode(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
   return saveReaderMode(dispatch, s.readerMode === "html" ? "text" : "html");
+}
+
+const NO_HIDDEN_ROWS: ReadonlySet<ActionId> = new Set();
+const READER_MODE_ROWS: ReadonlySet<ActionId> = new Set<ActionId>(["reader_html", "reader_text"]);
+
+/**
+ * The palette rows to leave out: "Reader: HTML" and "Reader: text" while the
+ * reader shows a draft, whose preview `tt` toggles per draft and which ignores
+ * the stored mode, so the rows would store it with nothing to see (PERSO-143).
+ * One constant set per answer, so the palette's memo holds across renders.
+ */
+export function hiddenPaletteRows(s: AppState): ReadonlySet<ActionId> {
+  return readerDraftKey(s) ? READER_MODE_ROWS : NO_HIDDEN_ROWS;
 }
 
 // ---------------------------------------------------------------------------

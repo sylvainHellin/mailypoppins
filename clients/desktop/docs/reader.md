@@ -59,7 +59,7 @@ A read that fails says "The text did not load: <why>".
 
 `tt` from the list or the reader toggles the mode, and from the sidebar does nothing; on a draft it switches the draft's preview instead and leaves the mode alone (see Drafts and server-only hits).
 The toolbar's "Reader mode" group holds HTML and Text, the current one pressed, and Settings has the same pair under "Reader".
-The palette's READER rows are "Toggle reader text mode" (`tt`), "Reader: HTML" and "Reader: text"; the last two set the mode, which a message follows and a draft does not.
+The palette's READER rows are "Toggle reader text mode" (`tt`), "Reader: HTML" and "Reader: text"; the last two set the mode, which a message follows and a draft does not, so the palette leaves them out while the reader shows a draft (PERSO-143).
 The mode is the `reader_mode` key of `desktop.json` ([rust-layer.md](rust-layer.md), "Desktop settings"), read once at startup into `state.readerMode`, which is html until the read answers.
 A change shows at once and is then stored; a refused write keeps the mode for this window and says "The reader mode was not saved: <why>".
 `tb` still opens the HTML in the browser from text mode.
