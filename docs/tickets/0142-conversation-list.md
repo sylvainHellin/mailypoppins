@@ -254,6 +254,17 @@ Until step 6 the clients default to the flat list, so `main` never ships a mode 
 - [ ] `cargo test --workspace`, `cargo test -p mp-protocol --features ts --test ts_bindings` and the desktop's vitest run pass; the desktop crate's `cargo test` passes on the Mac.
   Holds on the home server for the first three at step 6; open: the desktop crate's `cargo test` on the Mac.
 
+## Follow-ups after shipping (PERSO-146)
+
+The gaps the step 4 to 6 workers and reviewers left open, each small and none blocking daily use.
+
+- Done: the move picker leaves out the mailbox an expanded member lives in rather than the listed one, in both clients (`moveSources` in `clients/desktop/src/app/actions.ts`, `move_sources` in `clients/tui/src/app/keys.rs`).
+- Done: the desktop offers `ce`, `cA`, `cD` and `x` on a draft member, and its reader shows the draft toolbar less Attach file, as the TUI already did; the fields come from a `draft_preview` of the member.
+- Done: a TUI draft member takes To, Cc, Bcc, Reply-To, subject, status and a frontmatter `from` from its file (`fill_draft_member`), so the Send confirmation of an approved draft no longer offers to approve it.
+- Done: a TUI message member's headers pane prints To and Cc, read off the `message.get` its preview already sends (`MessagePreview` in `mp-client`).
+- Done: a TUI conversation list's load sets the sidebar count to the sum of its headers' `member_ids`, the listed mailbox's messages.
+- Open, needs a decision: the list filter of both clients matches a conversation by its participants and `latest` only, as this ticket specified, so a conversation whose matching member is neither listed nor among the five participants stays hidden.
+
 ## Cross-references
 
 - [#0008](0008-threading-conversation-view.md) (done): the persisted `thread_id`, `thread_messages` and the `T` overlay this ticket reads from.
