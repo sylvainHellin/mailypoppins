@@ -70,6 +70,9 @@
 //! `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` to the child
 //! through `Command::env`, so they are safe to run in parallel.
 
+#[path = "support/readiness.rs"]
+mod readiness;
+
 use std::fs;
 use std::io::Read;
 use std::os::unix::net::UnixStream;
@@ -208,13 +211,10 @@ impl Sandbox {
         UnixStream::connect(self.socket()).is_ok()
     }
 
-    /// Block until the socket accepts a connection, or fail the test.
-    fn wait_socket_live(&self) {
-        assert!(
-            wait_until(|| self.socket_is_live()),
-            "the daemon socket {} never accepted a connection within {DEADLINE:?}",
-            self.socket().display()
-        );
+    /// Block until the daemon answers `daemon.status`, or fail the test; a
+    /// connect alone returns before startup is done ([`readiness`]).
+    fn wait_ready(&self) {
+        readiness::wait_until_answering(&self.socket(), DEADLINE, TICK);
     }
 
     /// Block until the socket path is gone, or fail the test.
@@ -430,7 +430,7 @@ fn assert_same_path(reported: &Value, expected: &Path, label: &str) {
 fn run_binds_the_socket_and_answers_status() {
     let sandbox = Sandbox::new();
     let daemon = sandbox.spawn_run();
-    sandbox.wait_socket_live();
+    sandbox.wait_ready();
 
     // Plain `status` is the exit-code surface: 0 while a daemon runs.
     let plain = sandbox
@@ -515,7 +515,7 @@ fn run_without_a_config_file_serves_zero_accounts() {
     );
 
     let _daemon = sandbox.spawn_run();
-    sandbox.wait_socket_live();
+    sandbox.wait_ready();
 
     let (exit, status) = sandbox.status_json();
     assert_eq!(exit, 0, "a config-less daemon is a running daemon");
@@ -548,7 +548,7 @@ fn run_performs_the_legacy_config_dir_migration() {
     fs::write(legacy.join("marker.txt"), "moved, not rewritten\n").expect("marker");
 
     let mut daemon = sandbox.spawn_run_with(sandbox.cmd_home_config());
-    sandbox.wait_socket_live();
+    sandbox.wait_ready();
 
     assert!(
         !legacy.exists(),
@@ -623,7 +623,7 @@ fn two_concurrent_starts_yield_one_pid_file_and_one_instance_id() {
     assert_eq!(first_code, 0, "first start exits 0; stderr: {first_err}");
     assert_eq!(second_code, 0, "second start exits 0; stderr: {second_err}");
 
-    sandbox.wait_socket_live();
+    sandbox.wait_ready();
 
     // Exactly one pid file, naming a live process.
     let pid = sandbox.recorded_pid();
@@ -729,8 +729,8 @@ fn stop_removes_only_its_own_socket() {
 
     let mut daemon = mine.spawn_run();
     let _other_daemon = other.spawn_run();
-    mine.wait_socket_live();
-    other.wait_socket_live();
+    mine.wait_ready();
+    other.wait_ready();
 
     let stop = mine
         .cmd()
@@ -806,7 +806,7 @@ fn restart_yields_a_new_instance_id() {
         "start exits 0; stderr: {}",
         String::from_utf8_lossy(&start.stderr)
     );
-    sandbox.wait_socket_live();
+    sandbox.wait_ready();
 
     let before_instance = sandbox.recorded_instance_id();
     let before_pid = sandbox.recorded_pid();
@@ -822,7 +822,7 @@ fn restart_yields_a_new_instance_id() {
         "restart exits 0; stderr: {}",
         String::from_utf8_lossy(&restart.stderr)
     );
-    sandbox.wait_socket_live();
+    sandbox.wait_ready();
 
     let (exit, status) = sandbox.status_json();
     assert_eq!(exit, 0, "a restarted daemon is running");
@@ -892,7 +892,7 @@ fn restart_yields_a_new_instance_id() {
         "restart --grace-secs 0 exits 0; stderr: {}",
         String::from_utf8_lossy(&graced.stderr)
     );
-    sandbox.wait_socket_live();
+    sandbox.wait_ready();
     let graced_pid = sandbox.recorded_pid();
     assert_ne!(graced_pid, after_pid, "and replaces the process");
     assert_eq!(
@@ -913,7 +913,7 @@ fn restart_yields_a_new_instance_id() {
 fn sigterm_to_a_foreground_daemon_exits_0_and_unlinks_the_socket() {
     let sandbox = Sandbox::new();
     let mut daemon = sandbox.spawn_run();
-    sandbox.wait_socket_live();
+    sandbox.wait_ready();
 
     signal(daemon.pid(), libc::SIGTERM);
 

@@ -23,6 +23,8 @@
 //! [`admin_fixture`] is the send fixture plus two invitations and a reply, a
 //! file-era mailstore, an id-less draft, a secrets file, a token cache and a
 //! prebuilt contact index, for the admin slice (plan unit P4-U13).
+//! [`readiness`] waits for a spawned daemon to answer `daemon.status`; daemon
+//! suites that do not declare `mod support;` include that one file by path.
 
 #![allow(dead_code)]
 
@@ -31,5 +33,6 @@ pub mod draft_fixture;
 pub mod mutation_fixture;
 pub mod parity;
 pub mod read_fixture;
+pub mod readiness;
 pub mod send_fixture;
 pub mod sync_fixture;

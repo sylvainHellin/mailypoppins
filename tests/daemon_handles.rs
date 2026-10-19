@@ -250,17 +250,19 @@
 //!   recommendation the plan does not fix; it is pinned here so the T and I
 //!   units agree.
 
+#[path = "support/readiness.rs"]
+mod readiness;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::future::Future;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokio::net::UnixStream;
 
 use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
 use mp_protocol::RpcError;
@@ -1361,23 +1363,14 @@ impl Sandbox {
             .spawn()
             .expect("spawn mp daemon run");
         let proc = Proc(Some(child));
-        self.wait_socket_live().await;
+        self.wait_ready().await;
         proc
     }
 
-    async fn wait_socket_live(&self) {
-        let start = Instant::now();
-        loop {
-            if UnixStream::connect(self.socket()).await.is_ok() {
-                return;
-            }
-            assert!(
-                start.elapsed() < DEADLINE,
-                "the daemon socket {} never accepted a connection within {DEADLINE:?}",
-                self.socket().display()
-            );
-            tokio::time::sleep(TICK).await;
-        }
+    /// Block until the daemon answers `daemon.status`, or fail the test; a
+    /// connect alone returns before startup is done ([`readiness`]).
+    async fn wait_ready(&self) {
+        readiness::wait_until_answering(&self.socket(), DEADLINE, TICK);
     }
 }
 

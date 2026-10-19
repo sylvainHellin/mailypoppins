@@ -205,6 +205,11 @@
 //! shared `tests/common/` module: each daemon test file needs a different half
 //! of it, and a shared module would have to be built into every explicit
 //! `[[test]]` target.
+//! The readiness wait is the exception: every daemon suite needs all of it,
+//! so it is the one small file `tests/support/readiness.rs`, included by path.
+
+#[path = "support/readiness.rs"]
+mod readiness;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -213,11 +218,10 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokio::net::UnixStream;
 
 use mp_protocol::{
     EventEnvelope, Notification, JSONRPC_VERSION, METHOD_STATE_EVENT, METHOD_STATE_RESYNC_REQUIRED,
@@ -1482,24 +1486,14 @@ server = "INBOX"
             .spawn()
             .expect("spawn mp daemon run");
         let proc = Proc(Some(child));
-        self.wait_socket_live().await;
+        self.wait_ready().await;
         proc
     }
 
-    /// Block until the socket accepts a connection, or fail the test.
-    async fn wait_socket_live(&self) {
-        let start = Instant::now();
-        loop {
-            if UnixStream::connect(self.socket()).await.is_ok() {
-                return;
-            }
-            assert!(
-                start.elapsed() < DEADLINE,
-                "the daemon socket {} never accepted a connection within {DEADLINE:?}",
-                self.socket().display()
-            );
-            tokio::time::sleep(TICK).await;
-        }
+    /// Block until the daemon answers `daemon.status`, or fail the test; a
+    /// connect alone returns before startup is done ([`readiness`]).
+    async fn wait_ready(&self) {
+        readiness::wait_until_answering(&self.socket(), DEADLINE, TICK);
     }
 
     /// `instance_id` out of `daemon.json`, which the bootstrap must echo.

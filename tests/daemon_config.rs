@@ -282,6 +282,9 @@
 //! and the four test-only hooks are explicitly cleared so an inherited variable
 //! cannot change an outcome.
 
+#[path = "support/readiness.rs"]
+mod readiness;
+
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -290,7 +293,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokio::net::UnixStream;
 
 use mp_protocol::events::{ConfigChanged, ConfigInvalid, KIND_CONFIG_CHANGED, KIND_CONFIG_INVALID};
 use mp_protocol::{ErrorCode, EventEnvelope, RpcError, METHOD_STATE_EVENT};
@@ -825,23 +827,14 @@ impl Sandbox {
             .spawn()
             .expect("spawn mp daemon run");
         let proc = Proc(Some(child));
-        self.wait_socket_live().await;
+        self.wait_ready().await;
         proc
     }
 
-    async fn wait_socket_live(&self) {
-        let start = Instant::now();
-        loop {
-            if UnixStream::connect(self.socket()).await.is_ok() {
-                return;
-            }
-            assert!(
-                start.elapsed() < DEADLINE,
-                "the daemon socket {} never accepted a connection within {DEADLINE:?}",
-                self.socket().display()
-            );
-            tokio::time::sleep(TICK).await;
-        }
+    /// Block until the daemon answers `daemon.status`, or fail the test; a
+    /// connect alone returns before startup is done ([`readiness`]).
+    async fn wait_ready(&self) {
+        readiness::wait_until_answering(&self.socket(), DEADLINE, TICK);
     }
 
     /// Ask the running daemon to shut down, so its log file is complete before

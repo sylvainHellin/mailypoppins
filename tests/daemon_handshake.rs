@@ -86,6 +86,11 @@
 //! halves of it (this one is async throughout and never runs `mp daemon
 //! status`), and a shared module would have to be built into both explicit
 //! `[[test]]` targets.
+//! The readiness wait is the exception: every daemon suite needs all of it,
+//! so it is the one small file `tests/support/readiness.rs`, included by path.
+
+#[path = "support/readiness.rs"]
+mod readiness;
 
 use std::fs;
 use std::future::Future;
@@ -210,24 +215,14 @@ impl Sandbox {
             .spawn()
             .expect("spawn mp daemon run");
         let proc = Proc(Some(child));
-        self.wait_socket_live().await;
+        self.wait_ready().await;
         proc
     }
 
-    /// Block until the socket accepts a connection, or fail the test.
-    async fn wait_socket_live(&self) {
-        let start = Instant::now();
-        loop {
-            if UnixStream::connect(self.socket()).await.is_ok() {
-                return;
-            }
-            assert!(
-                start.elapsed() < DEADLINE,
-                "the daemon socket {} never accepted a connection within {DEADLINE:?}",
-                self.socket().display()
-            );
-            tokio::time::sleep(TICK).await;
-        }
+    /// Block until the daemon answers `daemon.status`, or fail the test; a
+    /// connect alone returns before startup is done ([`readiness`]).
+    async fn wait_ready(&self) {
+        readiness::wait_until_answering(&self.socket(), DEADLINE, TICK);
     }
 
     /// `instance_id` out of `daemon.json`, which the handshake must echo.

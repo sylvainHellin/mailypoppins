@@ -187,6 +187,9 @@
 //! rather than letting `config::account_dir` read the environment
 //! (`tests/engine_lock_ingest.rs` takes the same route, for the same reason).
 
+#[path = "support/readiness.rs"]
+mod readiness;
+
 use std::fs;
 use std::future::Future;
 use std::ops::Deref;
@@ -1016,8 +1019,8 @@ server = "INBOX"
         cmd
     }
 
-    /// Spawn `mp daemon run`, killed on drop, and wait until its socket
-    /// accepts a connection.
+    /// Spawn `mp daemon run`, killed on drop, and wait until it answers
+    /// `daemon.status` ([`readiness`]).
     fn start_daemon(&self) -> Proc {
         let child = self
             .cmd()
@@ -1028,15 +1031,7 @@ server = "INBOX"
             .spawn()
             .expect("spawn mp daemon run");
         let proc = Proc(Some(child));
-        let start = Instant::now();
-        while std::os::unix::net::UnixStream::connect(self.socket()).is_err() {
-            assert!(
-                start.elapsed() < DEADLINE,
-                "the daemon socket {} never accepted a connection within {DEADLINE:?}",
-                self.socket().display()
-            );
-            std::thread::sleep(TICK);
-        }
+        readiness::wait_until_answering(&self.socket(), DEADLINE, TICK);
         proc
     }
 
