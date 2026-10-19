@@ -275,6 +275,98 @@ fn renaming_a_draft_keeps_its_selector_working() {
 }
 
 // ---------------------------------------------------------------------------
+// #0144: a pipe gets the bare selector
+// ---------------------------------------------------------------------------
+
+/// What `$(...)` makes of a command's stdout: the trailing newlines go.
+fn captured(stdout: &str) -> &str {
+    stdout.trim_end_matches('\n')
+}
+
+/// `sel=$(mp new x) && mp path "$sel"`, the scenario #0144 was filed on: a
+/// pipe receives the selector alone, with no check mark in front of it, and
+/// the next command takes it as it is.
+#[test]
+fn a_piped_mp_new_prints_the_bare_selector_mp_path_accepts() {
+    let fx = Fixture::new();
+    let printed = fx.ok(&["new", "piped"]);
+    let sel = captured(&printed);
+    assert!(
+        sel.starts_with(selector::SCHEME) && !sel.contains(char::is_whitespace),
+        "a pipe gets one bare selector: {printed:?}"
+    );
+    let path = PathBuf::from(fx.ok(&["path", sel]).trim());
+    assert!(path.is_file(), "{} must exist", path.display());
+
+    // `mp mark-approved` hands the same selector back, both when it approves
+    // and when there is nothing left to approve.
+    assert_eq!(captured(&fx.ok(&["mark-approved", sel])), sel);
+    assert_eq!(captured(&fx.ok(&["mark-approved", sel])), sel);
+}
+
+/// `mp reply` and `mp forward` print the source and the new draft on a
+/// terminal; a pipe receives only the new draft's selector.
+#[test]
+fn a_piped_mp_reply_prints_only_the_new_drafts_selector() {
+    let fx = Fixture::new();
+    fx.ingest("inbox", 1, "question@example.com", "A question");
+
+    for command in ["reply", "forward"] {
+        let printed = fx.ok(&[command, "question@example.com"]);
+        let sel = captured(&printed);
+        assert!(
+            sel.starts_with(&format!("{}{ACCOUNT}/drafts/", selector::SCHEME))
+                && !sel.contains(char::is_whitespace),
+            "mp {command} piped prints the draft's selector alone: {printed:?}"
+        );
+        let path = PathBuf::from(fx.ok(&["path", sel]).trim());
+        assert!(path.is_file(), "{} must exist", path.display());
+    }
+}
+
+/// On a terminal the output is the decorated one it always was. `script`
+/// gives the command a pseudo-terminal; the util-linux spelling is Linux's.
+/// The terminal also shows stderr (the missing-secret warning), so only the
+/// trailing stdout lines are compared.
+#[cfg(target_os = "linux")]
+#[test]
+fn on_a_terminal_mp_new_and_mp_reply_keep_the_check_mark() {
+    let fx = Fixture::new();
+    fx.ingest("inbox", 1, "question@example.com", "A question");
+    let in_a_terminal = |args: &str| -> String {
+        let out = Command::new("script")
+            .args(["-qec", &format!("'{MP}' {args}"), "/dev/null"])
+            .env("HOME", fx.home())
+            .env("MAILYPOPPINS_CONFIG_DIR", fx.config())
+            .env("MAILYPOPPINS_DATA_DIR", fx.data())
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("script must run");
+        assert!(out.status.success(), "mp {args} in a terminal failed");
+        String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+    };
+
+    let printed = in_a_terminal("new on-a-terminal");
+    let created = selectors_in(&printed);
+    assert_eq!(created.len(), 1, "{printed:?}");
+    assert!(
+        printed.ends_with(&format!("\n\u{2713} {}\n", created[0])),
+        "{printed:?}"
+    );
+
+    let printed = in_a_terminal("reply question@example.com");
+    let lines: Vec<&str> = printed.lines().rev().take(2).collect();
+    assert_eq!(
+        lines[1],
+        format!(
+            "\u{2713} reply to mp://{ACCOUNT}/inbox/{}",
+            selector::encode("question@example.com")
+        )
+    );
+    assert!(lines[0].starts_with(&format!("mp://{ACCOUNT}/drafts/")));
+}
+
+// ---------------------------------------------------------------------------
 // TKT-0045: freshness
 // ---------------------------------------------------------------------------
 

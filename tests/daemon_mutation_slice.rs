@@ -228,8 +228,8 @@ use mailypoppins::store::read;
 use support::draft_fixture::Stash;
 use support::mutation_fixture as fixture;
 use support::parity::{
-    assert_byte_identical, mp_command, mp_no_daemon, oracle_command, socket_path, DaemonFixture,
-    EXIT_UNAVAILABLE, REQUIRE_ENV,
+    assert_byte_identical, mp_command, mp_no_daemon, oracle_command, piped_since_0144, socket_path,
+    DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
 
 /// Upper bound on any single wait: a connection, a handshake, one call.
@@ -359,11 +359,14 @@ impl Slice {
 
     /// The pre-daemon binary, standing in `cwd`.
     fn oracle_in(&self, cwd: &Path, args: &[&str]) -> Output {
-        oracle_command(self.root())
-            .current_dir(cwd)
-            .args(args)
-            .output()
-            .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" ")))
+        piped_since_0144(
+            args,
+            oracle_command(self.root())
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
+        )
     }
 
     /// Run a command that hands files to the opener, with the recording `open`
@@ -1355,7 +1358,8 @@ fn mp_delete_sent_sweeps_identically() {
 
 /// The default destination is the directory the client is standing in, and the
 /// line printed is the spelling the user gave, not the absolute form that
-/// crossed the socket.
+/// crossed the socket. A pipe gets the bare paths (#0144); a terminal puts a
+/// check mark in front of each.
 #[test]
 fn mp_save_writes_the_clients_directory_and_prints_the_users_spelling() {
     let slice = Slice::start();
@@ -1364,7 +1368,7 @@ fn mp_save_writes_the_clients_directory_and_prints_the_users_spelling() {
     assert_eq!(routed.status.code(), Some(0));
     assert_eq!(
         stdout(&routed),
-        "\u{2713} ./notes.pdf\n\u{2713} ./agenda.txt\n",
+        "./notes.pdf\n./agenda.txt\n",
         "the default destination prints as the user's `.`"
     );
     for (name, bytes) in fixture::ATTACHMENT_FILES {
@@ -1383,10 +1387,7 @@ fn mp_save_into_a_relative_output_directory() {
     let slice = Slice::start();
 
     let (routed, cwd) = slice.both_saving(&["save", "-o", "out", fixture::WITH_ATTACHMENTS]);
-    assert_eq!(
-        stdout(&routed),
-        "\u{2713} out/notes.pdf\n\u{2713} out/agenda.txt\n"
-    );
+    assert_eq!(stdout(&routed), "out/notes.pdf\nout/agenda.txt\n");
     assert!(
         cwd.path().join("out").join("notes.pdf").is_file(),
         "the directory was created under the client's cwd"
@@ -1412,7 +1413,7 @@ fn mp_save_into_an_absolute_output_directory() {
     );
     assert_eq!(
         stdout(&routed),
-        format!("\u{2713} {arg}/notes.pdf\n\u{2713} {arg}/agenda.txt\n")
+        format!("{arg}/notes.pdf\n{arg}/agenda.txt\n")
     );
 }
 
@@ -1424,10 +1425,7 @@ fn mp_save_disambiguates_two_parts_that_share_a_name() {
     let slice = Slice::start();
 
     let (routed, cwd) = slice.both_saving(&["save", fixture::TWO_PARTS]);
-    assert_eq!(
-        stdout(&routed),
-        "\u{2713} ./report.pdf\n\u{2713} ./report_1.pdf\n"
-    );
+    assert_eq!(stdout(&routed), "./report.pdf\n./report_1.pdf\n");
     for (name, bytes) in fixture::TWO_PARTS_FILES {
         assert_eq!(
             fs::read(cwd.path().join(name)).expect("the saved file is there"),

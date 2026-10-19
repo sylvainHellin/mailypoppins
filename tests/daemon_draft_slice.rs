@@ -2369,11 +2369,13 @@ fn the_draft_lifecycle_contract_holds_on_both_routes() {
         );
     });
 
-    // test_mark_as_approved_already_approved: an information line, exit 0.
+    // test_mark_as_approved_already_approved: exit 0, and a pipe gets the
+    // bare selector where a terminal gets the `ℹ … is already approved`
+    // line (#0144).
     slice.for_each_binary(&["mark-approved", fixture::APPROVED], |run| {
         assert!(run.out.status.success(), "{}: {}", run.route, run.stderr());
         assert!(
-            run.stdout().contains("already approved"),
+            run.stdout().starts_with("mp://alpha/drafts/") && run.stdout().lines().count() == 1,
             "{}: {}",
             run.route,
             run.stdout()
@@ -2415,7 +2417,7 @@ fn the_draft_lifecycle_contract_holds_on_both_routes() {
     slice.for_each_binary(&["mark-draft", fixture::VALID], |run| {
         assert!(run.out.status.success(), "{}: {}", run.route, run.stderr());
         assert!(
-            run.stdout().contains("already a draft"),
+            run.stdout().starts_with("mp://alpha/drafts/") && run.stdout().lines().count() == 1,
             "{}: {}",
             run.route,
             run.stdout()
@@ -2472,9 +2474,11 @@ fn the_reply_and_forward_contract_holds_on_both_routes() {
             "{}: a reply starts as a draft: {document}",
             run.route
         );
+        // A pipe gets the new draft's selector alone (#0144); the terminal's
+        // `✓ reply to <source>` line is pinned in `cli_selector_contract`.
         assert!(
-            run.stdout().contains("reply to"),
-            "{}: the source is named first: {}",
+            run.stdout().starts_with("mp://alpha/drafts/") && run.stdout().lines().count() == 1,
+            "{}: a pipe gets the draft's selector alone: {}",
             run.route,
             run.stdout()
         );
@@ -2506,8 +2510,8 @@ fn the_reply_and_forward_contract_holds_on_both_routes() {
             );
         }
         assert!(
-            run.stdout().contains("forward of"),
-            "{}: {}",
+            run.stdout().starts_with("mp://alpha/drafts/") && run.stdout().lines().count() == 1,
+            "{}: a pipe gets the draft's selector alone (#0144): {}",
             run.route,
             run.stdout()
         );

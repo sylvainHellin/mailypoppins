@@ -569,10 +569,66 @@ pub fn pin_font_size(root: &Path) {
 /// Run the pre-daemon binary against `tmp` and collect its output.
 pub fn oracle(args: &[&str], tmp: &Path) -> Output {
     fs::create_dir_all(tmp).unwrap_or_else(|e| panic!("create {}: {e}", tmp.display()));
-    oracle_command(tmp)
-        .args(args)
-        .output()
-        .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" ")))
+    piped_since_0144(
+        args,
+        oracle_command(tmp)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
+    )
+}
+
+/// The oracle's stdout as today's binary prints it into a pipe.
+///
+/// Since #0144 a command that hands back a selector or a path prints the
+/// bare value when stdout is not a terminal, and a test's stdout is always a
+/// pipe: `✓ <selector>` became `<selector>`, `mp reply` and `mp forward` lost
+/// the `✓ reply to <source>` line, `mp archive` prints only the selector it
+/// moved the message to, and `mp save` only the paths it wrote. This rewrites
+/// the pre-daemon output into that form, which takes the deliberate change out
+/// of every parity row the way [`pin_font_size`] does for #0127. A failed run
+/// is left alone: the change touches only what a success prints.
+pub fn piped_since_0144(args: &[&str], mut out: Output) -> Output {
+    const CHANGED: &[&str] = &[
+        "new",
+        "edit",
+        "reply",
+        "forward",
+        "mark-approved",
+        "mark-draft",
+        "archive",
+        "save",
+    ];
+    let Some(command) = args.iter().find(|arg| CHANGED.contains(arg)) else {
+        return out;
+    };
+    if !out.status.success() {
+        return out;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let bare = |line: &str| -> Option<String> {
+        match *command {
+            // `✓ <selector>`, `✓ approved <selector>`, `ℹ <selector> is
+            // already approved`: the selector is the one `mp://` word.
+            "new" | "edit" | "mark-approved" | "mark-draft" => line
+                .split_whitespace()
+                .find(|word| word.starts_with("mp://"))
+                .map(str::to_string),
+            // The `✓ reply to <source>` line goes; the draft's line stays.
+            "reply" | "forward" => (!line.starts_with('\u{2713}')).then(|| line.to_string()),
+            // `✓ archived <source>` goes; `  now <selector>` keeps its value.
+            "archive" => line.trim_start().strip_prefix("now ").map(str::to_string),
+            // `✓ <path>`.
+            _ => Some(line.strip_prefix("\u{2713} ").unwrap_or(line).to_string()),
+        }
+    };
+    out.stdout = stdout
+        .lines()
+        .filter_map(bare)
+        .map(|line| line + "\n")
+        .collect::<String>()
+        .into_bytes();
+    out
 }
 
 /// The oracle binary, resolved once per process and built if it is missing.

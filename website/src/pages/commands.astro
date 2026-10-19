@@ -221,6 +221,15 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
         lists something prints the fully qualified form, which pastes straight into the next
         command, and <code>mp path &lt;selector&gt;</code> is the one way back to a filesystem path.
       </p>
+      <p>
+        On a terminal, <code>mp new</code>, <code>mp edit</code>, <code>mp reply</code>,
+        <code>mp forward</code>, <code>mp mark-approved</code> and <code>mp mark-draft</code> print
+        <code>&#10003; &lt;selector&gt;</code>, <code>mp archive</code> prints the selector it moved
+        the message to under <code>&#10003; archived</code>, and <code>mp save</code> prints
+        <code>&#10003; &lt;path&gt;</code> per file. When stdout is a pipe or a file, each prints
+        only the bare selector or path, one per line, so
+        <code>sel=$(mp new note) &amp;&amp; mp path "$sel"</code> works as written.
+      </p>
     </section>
 
     <section>

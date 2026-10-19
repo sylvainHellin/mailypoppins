@@ -11,7 +11,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use colored::*;
 use log::{error, info, warn};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -873,6 +873,29 @@ async fn cmd_outbox(
 fn print_lines(lines: &[String]) {
     for line in lines {
         println!("{}", paint(line));
+    }
+}
+
+/// What a command that hands back a selector or a path prints: `decorated`
+/// (`✓ <selector>`, possibly over several lines) on a terminal, and only the
+/// bare `value` when stdout is a pipe or a file (#0144).
+///
+/// The bare form is what makes `sel=$(mp new x) && mp path "$sel"` work: a
+/// captured check mark is not part of any selector, and `mp path` refused the
+/// whole string as one with an empty segment.
+fn hand_back(decorated: &str, value: &str) {
+    println!(
+        "{}",
+        handed_back(std::io::stdout().is_terminal(), decorated, value)
+    );
+}
+
+/// The text [`hand_back`] prints, with the terminal check made by the caller.
+fn handed_back<'a>(terminal: bool, decorated: &'a str, value: &'a str) -> &'a str {
+    if terminal {
+        decorated
+    } else {
+        value
     }
 }
 
@@ -1806,7 +1829,10 @@ async fn routed_mark(account: &str, selector: &str, approve: bool) -> Result<()>
         false => ("draft.demote", "draft", "is already a draft", "demoted"),
     };
     if location.status == target {
-        println!("{} {} {already}", "\u{2139}".blue(), location.selector);
+        hand_back(
+            &format!("{} {} {already}", "\u{2139}".blue(), location.selector),
+            &location.selector,
+        );
         return Ok(());
     }
     daemon_try_call(
@@ -1816,7 +1842,10 @@ async fn routed_mark(account: &str, selector: &str, approve: bool) -> Result<()>
     )
     .await
     .map_err(|e| refusal(account, e))?;
-    println!("{} {done} {}", "\u{2713}".green(), location.selector);
+    hand_back(
+        &format!("{} {done} {}", "\u{2713}".green(), location.selector),
+        &location.selector,
+    );
     Ok(())
 }
 
@@ -3834,7 +3863,10 @@ async fn main() -> Result<()> {
                 ),
             )
             .await?;
-            println!("{} {}", "\u{2713}".green(), created.selector);
+            hand_back(
+                &format!("{} {}", "\u{2713}".green(), created.selector),
+                &created.selector,
+            );
         }
 
         Some(Commands::Path { selector }) => {
@@ -3866,7 +3898,10 @@ async fn main() -> Result<()> {
             if !status.success() {
                 return Err(anyhow!("{editor} exited with {status}"));
             }
-            println!("{} {}", "\u{2713}".green(), location.selector);
+            hand_back(
+                &format!("{} {}", "\u{2713}".green(), location.selector),
+                &location.selector,
+            );
         }
 
         Some(Commands::Reply {
@@ -3884,12 +3919,15 @@ async fn main() -> Result<()> {
                 draft_signature,
             )
             .await?;
-            println!(
-                "{} reply to {}",
-                "\u{2713}".green(),
-                created.source.map(|s| s.selector).unwrap_or_default()
+            hand_back(
+                &format!(
+                    "{} reply to {}\n{}",
+                    "\u{2713}".green(),
+                    created.source.map(|s| s.selector).unwrap_or_default(),
+                    created.selector
+                ),
+                &created.selector,
             );
-            println!("{}", created.selector);
         }
 
         Some(Commands::Forward { selector, mailbox }) => {
@@ -3903,12 +3941,15 @@ async fn main() -> Result<()> {
                 draft_signature,
             )
             .await?;
-            println!(
-                "{} forward of {}",
-                "\u{2713}".green(),
-                created.source.map(|s| s.selector).unwrap_or_default()
+            hand_back(
+                &format!(
+                    "{} forward of {}\n{}",
+                    "\u{2713}".green(),
+                    created.source.map(|s| s.selector).unwrap_or_default(),
+                    created.selector
+                ),
+                &created.selector,
             );
-            println!("{}", created.selector);
         }
 
         // The invitation, the reply it builds and the submission are the
@@ -4014,15 +4055,15 @@ async fn main() -> Result<()> {
                 mailbox.as_deref(),
             )
             .await?;
-            println!(
-                "{} archived {}",
-                "\u{2713}".green(),
-                wire_str(&moved["selector"])
-            );
-            println!(
-                "  {} {}",
-                "now".dimmed(),
-                wire_str(&moved["moved_to"]["selector"])
+            hand_back(
+                &format!(
+                    "{} archived {}\n  {} {}",
+                    "\u{2713}".green(),
+                    wire_str(&moved["selector"]),
+                    "now".dimmed(),
+                    wire_str(&moved["moved_to"]["selector"])
+                ),
+                wire_str(&moved["moved_to"]["selector"]),
             );
         }
 
@@ -4157,7 +4198,8 @@ async fn main() -> Result<()> {
                 written.push(name);
             }
             for name in &written {
-                println!("{} {}", "\u{2713}".green(), spelled.join(name).display());
+                let path = spelled.join(name).display().to_string();
+                hand_back(&format!("{} {path}", "\u{2713}".green()), &path);
             }
         }
 
@@ -4632,7 +4674,19 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_drafts_selector;
+    use super::{handed_back, is_drafts_selector};
+
+    /// A terminal keeps the decorated lines and a pipe gets the bare value
+    /// alone, however many lines the decoration spans (#0144).
+    #[test]
+    fn a_pipe_gets_the_bare_value_and_a_terminal_the_decorated_lines() {
+        let decorated = "\u{2713} reply to mp://tum/inbox/a\nmp://tum/drafts/b";
+        assert_eq!(handed_back(true, decorated, "mp://tum/drafts/b"), decorated);
+        assert_eq!(
+            handed_back(false, decorated, "mp://tum/drafts/b"),
+            "mp://tum/drafts/b"
+        );
+    }
 
     /// `mp delete` dispatches on the selector shape, not a second command
     /// (#0073): the reserved `drafts` mailbox segment, or `--mailbox drafts`

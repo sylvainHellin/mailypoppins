@@ -181,6 +181,7 @@ mp delete --sent                # Clear every sent draft of the account
 ```
 
 A draft selector is `mp://<account>/drafts/<id>`, `drafts/<id>` or `<id>`; a received one is `mp://<account>/<mailbox>/<message-id>`, and `--mailbox <name>` picks the mailbox a short one resolves in.
+On a terminal `mp new`, `edit`, `reply`, `forward` and `mark-approved` print `✓ <selector>`; into a pipe they print the bare selector (and `mp save` the bare paths), so `sel=$(mp new note) && mp path "$sel"` works.
 
 ### IMAP
 
