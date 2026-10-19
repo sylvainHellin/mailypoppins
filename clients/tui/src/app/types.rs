@@ -709,6 +709,18 @@ pub struct PreviewBody {
     /// text every frame; a plain compare here keeps the stamp (and so the
     /// wrapped lines) stable across those frames.
     epoch: u64,
+    /// The recipients the body's `message.get` answered, kept for an expanded
+    /// conversation member, whose thread row carries none (PERSO-146); `None`
+    /// for every other row and whenever the key moves.
+    recipients: Option<MemberRecipients>,
+}
+
+/// The recipients of an expanded conversation member, as the headers pane
+/// prints them (PERSO-146): `to` as [`entry_from_row`] spells a listed row's.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MemberRecipients {
+    pub to: String,
+    pub cc: Option<String>,
 }
 
 impl PreviewBody {
@@ -735,8 +747,27 @@ impl PreviewBody {
         if self.key != key || self.text != text {
             self.epoch = self.epoch.wrapping_add(1);
         }
+        if self.key != key {
+            self.recipients = None;
+        }
         self.key = key;
         self.text = text;
+    }
+
+    /// [`Self::fill`], with the recipients of a conversation member.
+    pub(crate) fn fill_member(
+        &mut self,
+        key: Option<BodyKey>,
+        text: String,
+        recipients: Option<MemberRecipients>,
+    ) {
+        self.fill(key, text);
+        self.recipients = recipients;
+    }
+
+    /// The member recipients the memo holds for `key`, if it holds any.
+    pub(crate) fn recipients(&self, key: &Option<BodyKey>) -> Option<&MemberRecipients> {
+        self.recipients.as_ref().filter(|_| &self.key == key)
     }
 }
 

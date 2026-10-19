@@ -332,9 +332,30 @@ pub fn totals_by_slug(rows: &[MailboxRow]) -> HashMap<&str, u64> {
 /// listed row needs no second identity for it. `None` when the row has no
 /// stored body.
 pub fn message_body(q: &dyn Queries, account: &str, row_id: i64) -> Result<Option<String>> {
+    Ok(message_preview(q, account, row_id)?.body)
+}
+
+/// What a preview of one row reads off its `message.get` record: the body,
+/// and the recipients a `message.thread` row does not carry, which a
+/// conversation member's headers need (PERSO-146).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessagePreview {
+    pub body: Option<String>,
+    pub to: Option<String>,
+    pub cc: Option<String>,
+}
+
+/// One row's body and recipients through the one `message.get` that
+/// [`message_body`] sends.
+pub fn message_preview(q: &dyn Queries, account: &str, row_id: i64) -> Result<MessagePreview> {
     let params = json!({"account": account, "row_id": row_id, "body": true});
     let answer = q.call("message.get", params)?;
-    Ok(answer["body"].as_str().map(str::to_string))
+    let text = |key: &str| answer[key].as_str().map(str::to_string);
+    Ok(MessagePreview {
+        body: text("body"),
+        to: text("to"),
+        cc: text("cc"),
+    })
 }
 
 /// The browser rendition of one row, inline, through `message.html`: the same

@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::super::app::{App, EmailEntry, Focus};
+use super::super::app::{App, EmailEntry, Focus, MemberRecipients};
 use super::super::theme;
 use super::util::{display_width, pane_border_style};
 
@@ -50,7 +50,11 @@ pub(super) fn render_headers(app: &mut App, frame: &mut Frame, area: Rect) {
     // Own the header strings up front so the metadata lines (which borrow them)
     // no longer hold a borrow of `app`, leaving `app.headers_scroll` free to
     // clamp below.
-    let Some(fields) = app.selected_email().map(HeaderFields::from_entry) else {
+    let recipients = app.member_recipients().cloned();
+    let Some(fields) = app
+        .selected_email()
+        .map(|email| HeaderFields::from_entry(email).with_member_recipients(email, recipients))
+    else {
         app.headers_scroll = 0;
         frame.render_widget(block, area);
         frame.render_widget(
@@ -128,6 +132,24 @@ impl HeaderFields {
                 .has_attachments
                 .then(|| format!("{ATTACHMENT_GLYPH} yes")),
         }
+    }
+
+    /// An expanded conversation member's recipients, which its thread row
+    /// does not carry, from the preview's read of it (PERSO-146); a draft
+    /// member has its own from its file, and any other row its listing's.
+    fn with_member_recipients(
+        mut self,
+        email: &EmailEntry,
+        recipients: Option<MemberRecipients>,
+    ) -> Self {
+        if email.member_mailbox().is_none() || email.draft_id.is_some() || !self.to.is_empty() {
+            return self;
+        }
+        if let Some(recipients) = recipients {
+            self.to = recipients.to;
+            self.cc = self.cc.or(recipients.cc);
+        }
+        self
     }
 }
 

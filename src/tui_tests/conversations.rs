@@ -804,6 +804,31 @@ fn an_action_on_a_member_reaches_that_member_alone() {
     assert_eq!(selected, want, "the union of the rows' members here");
 }
 
+/// An expanded message member's headers pane prints its To, which its thread
+/// row does not carry, from the one `message.get` its preview sends
+/// (PERSO-146).
+#[test]
+fn a_message_members_headers_print_its_to() {
+    let mut fx = Fixture::new();
+    fx.char('l');
+    for _ in 0..4 {
+        fx.char('j');
+    }
+    assert_eq!(
+        fx.app.selected_email_ref(),
+        Some(MessageRef::new(fx.ids.first_reply))
+    );
+    assert_eq!(fx.app.selected_email().map(|e| e.to.as_str()), Some(""));
+    fx.forget();
+    let frame = frame_snapshot(&mut fx.app, WIDTH, HEIGHT);
+    assert!(frame.contains("To: Alice Martin"), "the To line:\n{frame}");
+    assert_eq!(
+        fx.rows_of("message.get"),
+        [fx.ids.first_reply],
+        "one read for the body and the recipients"
+    );
+}
+
 /// A draft member takes its recipients, its sender and its status from its
 /// file: the headers pane prints its To and the frontmatter's From, and the
 /// Send confirmation of an approved draft does not offer to approve it

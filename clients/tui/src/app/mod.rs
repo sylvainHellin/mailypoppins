@@ -1648,6 +1648,28 @@ impl App {
         if self.preview_body.holds(&key) {
             return;
         }
+        // An expanded conversation member's thread row carries no recipients,
+        // so its body read keeps the ones its `message.get` answers for the
+        // headers pane (PERSO-146).
+        let member = self
+            .selected_email()
+            .is_some_and(|e| e.member_mailbox().is_some() && e.msg.is_some());
+        if let (true, Some((_, EntryKey::Msg(msg), _))) = (member, &key) {
+            let msg = *msg;
+            let _span = preview_query_span(format!(
+                "{}/{msg}",
+                self.current_local_mailbox_key()
+                    .unwrap_or_else(|| self.active_server_mailbox()),
+            ));
+            let preview = self.message_preview(msg).unwrap_or_default();
+            let recipients = MemberRecipients {
+                to: extract_display_name(preview.to.as_deref().unwrap_or_default()),
+                cc: preview.cc,
+            };
+            self.preview_body
+                .fill_member(key, preview.body.unwrap_or_default(), Some(recipients));
+            return;
+        }
         let text = match &key {
             // Everything below the memo check is the preview query itself: one
             // store open plus one blob (or one draft file) read. The span sits
@@ -1737,6 +1759,26 @@ impl App {
             log::warn!("[queries] previewing {msg} of {account}: {e:#}");
             None
         })
+    }
+
+    /// Read one row's body and recipients for the preview memo of a
+    /// conversation member, through the one `message.get` a body read sends.
+    pub(crate) fn message_preview(
+        &self,
+        msg: MessageRef,
+    ) -> Option<mp_client::queries::MessagePreview> {
+        let account = self.account_config.name.clone();
+        let queries = self.queries()?;
+        super::queries::message_preview(queries, &account, msg).unwrap_or_else(|e| {
+            log::warn!("[queries] previewing {msg} of {account}: {e:#}");
+            None
+        })
+    }
+
+    /// The recipients of the selected conversation member, when the preview
+    /// memo read them for the current selection (PERSO-146).
+    pub(crate) fn member_recipients(&self) -> Option<&MemberRecipients> {
+        self.preview_body.recipients(&self.preview_body_key())
     }
 
     /// The daemon session as a query source, or `None` for an `App` that has

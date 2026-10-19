@@ -329,6 +329,25 @@ pub fn message_body(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<O
     )
 }
 
+/// The stored body of one row and its recipients, for the preview memo of a
+/// conversation member, whose thread row carries none (PERSO-146).
+///
+/// The same `message.get` [`message_body`] sends, read further, with the same
+/// degrade: a refusal is an empty preview, no recipients and a line in the
+/// log.
+pub fn message_preview(
+    q: &dyn Queries,
+    account: &str,
+    msg: MessageRef,
+) -> Result<Option<wire::MessagePreview>> {
+    Ok(wire::message_preview(q, account, msg.row_id())
+        .map(Some)
+        .unwrap_or_else(|e| {
+            log::warn!("[queries] {msg} of {account} has no body to preview: {e:#}");
+            None
+        }))
+}
+
 /// The body of one draft, through `draft.path` plus a client-side parse.
 ///
 /// The daemon answers where the file is, not what is in it: a draft is a local

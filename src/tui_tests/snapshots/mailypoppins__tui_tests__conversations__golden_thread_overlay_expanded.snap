@@ -5,7 +5,7 @@ expression: frame
 == text 120x40 (trailing spaces trimmed) ==
 00 |╭ Mail ──────────────────────────────────╮╭ Headers ───────────────────────────────────────────────────────────────────╮
 01 |│> 󰅲 Inbox  3                            ││ From: Alice Martin                                                         │
-02 |│  󰏫 Drafts  0                           ││ To:                                                                        │
+02 |│  󰏫 Drafts  0                           ││ To: Alice Martin                                                           │
 03 |│  󰑫 Sent  0                             ││ Subj: Re: Frage zum Bericht                                                │
 04 |│  󰄼 Archive  0                          ││ Date: 2024-01-04  [sent]                                                   │
 05 |│                                        ││                                                                            │
