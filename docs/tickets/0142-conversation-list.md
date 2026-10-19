@@ -263,7 +263,7 @@ The gaps the step 4 to 6 workers and reviewers left open, each small and none bl
 - Done: a TUI draft member takes To, Cc, Bcc, Reply-To, subject, status and a frontmatter `from` from its file (`fill_draft_member`), so the Send confirmation of an approved draft no longer offers to approve it.
 - Done: a TUI message member's headers pane prints To and Cc, read off the `message.get` its preview already sends (`MessagePreview` in `mp-client`).
 - Done: a TUI conversation list's load sets the sidebar count to the sum of its headers' `member_ids`, the listed mailbox's messages.
-- Open, needs a decision: the list filter of both clients matches a conversation by its participants and `latest` only, as this ticket specified, so a conversation whose matching member is neither listed nor among the five participants stays hidden.
+- Kept as specified (Sylvain, 2026-10-19): the list filter of both clients matches a conversation by its participants and `latest` only, so a conversation whose matching member is neither listed nor among the five participants stays hidden; matching expanded members would make results depend on what is open, and matching every member needs a protocol change.
 
 ## Cross-references
 
