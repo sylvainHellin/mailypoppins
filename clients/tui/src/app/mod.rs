@@ -1983,18 +1983,28 @@ impl App {
         removed
     }
 
-    /// Set mailbox `idx`'s sidebar count to the length of the list on screen,
-    /// when that list is one row per message.
+    /// Set mailbox `idx`'s sidebar count to the messages of the list on
+    /// screen.
     ///
-    /// A conversation list is one row per conversation and the sidebar counts
-    /// messages (#0142), so its count is left to `mailbox.list`, which the
-    /// mutations and the count events already re-read.
+    /// A flat list is one row per message. A conversation list is one row per
+    /// conversation and the sidebar counts messages (#0142), so its count is
+    /// the headers' `member_ids`, which are every row of the conversation in
+    /// the listed mailbox: their sum is the flat list's length, and the
+    /// expanded members, which may live elsewhere, are not counted again
+    /// (PERSO-146).
     pub(crate) fn sync_listed_count(&mut self, idx: usize) {
-        if self.emails.iter().any(|e| e.conv.is_some()) {
-            return;
-        }
+        let grouped = self.emails.iter().any(|e| e.conv.is_some());
+        let listed = if grouped {
+            self.emails
+                .iter()
+                .filter_map(EmailEntry::header)
+                .map(|h| h.member_ids.len().max(1))
+                .sum()
+        } else {
+            self.emails.len()
+        };
         if let Some(count) = self.mailbox_counts.get_mut(idx) {
-            *count = self.emails.len();
+            *count = listed;
         }
     }
 

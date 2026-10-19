@@ -804,6 +804,35 @@ fn an_action_on_a_member_reaches_that_member_alone() {
     assert_eq!(selected, want, "the union of the rows' members here");
 }
 
+/// A conversation list's load sets the sidebar count to the messages of the
+/// listed mailbox, not to its conversations or its expanded rows: three in
+/// the inbox (the question, the follow-up and the lone message), with the
+/// conversation collapsed or expanded, and one after the conversation's two
+/// inbox members are archived (PERSO-146).
+#[test]
+fn the_sidebar_count_follows_a_conversation_list_load() {
+    let mut fx = Fixture::new();
+    let inbox = fx.app.active_mailbox;
+    assert_eq!(fx.app.mailbox_counts[inbox], 3, "the first load");
+
+    fx.char('l');
+    assert_eq!(fx.app.emails.len(), 7);
+    fx.app.mailbox_counts[inbox] = 0;
+    fx.app.reload_current_mailbox();
+    assert_eq!(run_load(&mut fx.app), Some(true));
+    assert_eq!(
+        fx.app.mailbox_counts[inbox], 3,
+        "the expanded members are not counted"
+    );
+
+    fx.app.list_index = 0;
+    fx.dispatch(Action::Archive);
+    assert_eq!(
+        fx.app.mailbox_counts[inbox], 1,
+        "the archive takes the conversation's two inbox members"
+    );
+}
+
 /// The move picker on an expanded member leaves out the mailbox the member
 /// lives in rather than the listed one: from the first reply in Sent it
 /// offers the inbox and not Sent, and from the header it offers Sent and not
