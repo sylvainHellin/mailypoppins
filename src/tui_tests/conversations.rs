@@ -18,9 +18,10 @@
 //! ```
 //!
 //! Two golden frames (the conversation collapsed, and expanded with the cursor
-//! on its draft member) are minted here; the frames of the `T` overlay and of
-//! the flat list are the hand-built suite's and are untouched by this mode,
-//! which is off unless a test turns it on.
+//! on its draft member) are minted here, with two of the `tt` conversation
+//! overlay opened over each (PERSO-148); the frames of the flat list are the
+//! hand-built suite's and are untouched by this mode, which is off unless a
+//! test turns it on.
 
 use insta::assert_snapshot;
 use serde_json::{json, Value};
@@ -521,6 +522,83 @@ fn golden_conversation_expanded() {
     fx.app.zoomed = true;
     let wide = frame_snapshot(&mut fx.app, WIDTH, HEIGHT);
     assert_snapshot!("golden_conversation_expanded_wide", wide);
+}
+
+/// The conversation overlay's rows as `(row id, mailbox, current)`, oldest
+/// first, and its cursor.
+fn thread_overlay(app: &App) -> (Vec<(i64, String, bool)>, usize) {
+    let crate::tui::app::Overlay::Thread(overlay) = &app.overlay else {
+        panic!("the conversation overlay is open");
+    };
+    let rows = overlay
+        .messages
+        .iter()
+        .map(|m| (m.msg.row_id(), m.mailbox.clone(), m.current))
+        .collect();
+    (rows, overlay.selected)
+}
+
+/// `tt` on a collapsed conversation row opens the conversation overlay on the
+/// message the row previews, its newest inbox member: the four messages
+/// oldest first across both mailboxes, the draft not among them, the caret
+/// and the cursor on the follow-up.
+#[test]
+fn golden_thread_overlay_collapsed() {
+    let mut fx = Fixture::new();
+    fx.char('t');
+    fx.char('t');
+    let (rows, selected) = thread_overlay(&fx.app);
+    assert_eq!(
+        rows,
+        [
+            (fx.ids.question, "inbox".to_string(), false),
+            (fx.ids.first_reply, "sent".to_string(), false),
+            (fx.ids.follow_up, "inbox".to_string(), true),
+            (fx.ids.second_reply, "sent".to_string(), false),
+        ]
+    );
+    assert_eq!(selected, 2, "the cursor starts on the current message");
+
+    let frame = frame_snapshot(&mut fx.app, WIDTH, HEIGHT);
+    assert!(
+        frame.contains("Conversation (4): Re: Frage zum Bericht"),
+        "the title:\n{frame}"
+    );
+    assert_snapshot!(frame);
+}
+
+/// `tt` on an expanded member opens the overlay on that member: from the
+/// second reply in Sent, the caret and the cursor sit on the last row while
+/// the conversation behind the overlay stays expanded.
+#[test]
+fn golden_thread_overlay_expanded() {
+    let mut fx = Fixture::new();
+    fx.char('l');
+    // Newest first: the draft, then the second reply.
+    fx.char('j');
+    fx.char('j');
+    assert_eq!(
+        fx.app.selected_email_ref(),
+        Some(MessageRef::new(fx.ids.second_reply))
+    );
+    fx.char('t');
+    fx.char('t');
+    let (rows, selected) = thread_overlay(&fx.app);
+    let current: Vec<i64> = rows
+        .iter()
+        .filter(|(_, _, current)| *current)
+        .map(|(id, _, _)| *id)
+        .collect();
+    assert_eq!(current, [fx.ids.second_reply]);
+    assert_eq!(rows.len(), 4, "the draft is not a member of the overlay");
+    assert_eq!(selected, 3);
+
+    let frame = frame_snapshot(&mut fx.app, WIDTH, HEIGHT);
+    assert!(
+        frame.contains("Conversation (4): Re: Frage zum Bericht"),
+        "the title:\n{frame}"
+    );
+    assert_snapshot!(frame);
 }
 
 /// A conversation of one message renders exactly as the flat row does.
