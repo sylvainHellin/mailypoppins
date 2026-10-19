@@ -43,12 +43,12 @@ const imapCommands = [
   { command: 'mp delete <selector> [--mailbox <name>]', description: 'Delete a received email (server + local), or a local draft with a drafts selector' },
   { command: 'mp search <query> [--json]', description: 'Search emails on the server with one grammar (fields, has:attachment, dates, OR groups); --local searches the store offline; --json prints the hits as JSON on stdout' },
   { command: 'mp open <selector> [--mailbox <name>]', description: 'Open attachment in default app' },
-  { command: 'mp save <selector> [--output <dir>] [--mailbox <name>]', description: 'Save attachment(s) to directory' },
+  { command: 'mp save <selector> [--output <dir>] [--mailbox <name>]', description: 'Save attachment(s) to directory, fetching the message from the server first when the store lacks it and the selector names its mailbox' },
 ];
 
 const storeCommands = [
   { command: 'mp list-messages [--mailbox <name>] [-n N] [--json]', description: 'List received messages from the local store (offline; --json prints them as JSON on stdout)' },
-  { command: 'mp show <selector> [--mailbox <name>] [--json]', description: 'Print one received message -- headers, attachments and body -- from the local store (offline)' },
+  { command: 'mp show <selector> [--mailbox <name>] [--json]', description: 'Print one received message -- headers, attachments and body -- from the local store, fetching it from the server first when the store lacks it and the selector names its mailbox' },
   { command: 'mp search --local <query> [--mailbox <name>] [-n N] [--full] [--json]', description: 'Ranked full-text search over the local store (offline, every synced mailbox at once)' },
 ];
 
@@ -245,9 +245,10 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
     <section>
       <h2 id="store-commands">Local Store Commands</h2>
       <p>
-        Two offline reads over what <code>mp sync</code> already brought down. Neither opens a
+        Offline reads over what <code>mp sync</code> already brought down. They open no
         connection: they answer from the per-account store, so they work on a plane and cost
-        nothing.
+        nothing. The one exception is <code>mp show</code> of a message the store does not hold,
+        below.
       </p>
       <CommandTable commands={storeCommands} />
       <CommandTable commands={storeOptions} />
@@ -262,8 +263,11 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
         <code>mp show</code> takes the same selector grammar as every other message command, so
         the bare Message-ID is enough when it is unambiguous, and an
         <code>mp://&lt;account&gt;/...</code> selector reads that account's store rather than the
-        default one. A body the store no longer holds (evicted, or never ingested) prints as a
-        note under the headers instead of failing. <code>--json</code> is the parseable form:
+        default one. A selector that names its mailbox but no message the store holds, such as a
+        sent message <code>mp search</code> found on the server that no sync stored, is
+        fetched from the server into the store first, with a note on stderr; <code>mp save</code>
+        and <code>mp open</code> do the same. A body the store no longer holds (evicted, or never
+        ingested) prints as a note under the headers instead of failing. <code>--json</code> is the parseable form:
         one object with the envelope, the attachment list and the body as a JSON string.
       </p>
       <p>

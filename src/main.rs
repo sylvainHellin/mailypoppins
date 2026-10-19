@@ -343,7 +343,7 @@ enum Commands {
         #[arg(long)]
         mailbox: Option<String>,
     },
-    /// Print one received message from the local store (offline)
+    /// Print one received message from the local store, fetched first if missing
     Show {
         /// Received selector: mp://<account>/<mailbox>/<message-id>,
         /// <mailbox>/<message-id> or <message-id>
@@ -1651,19 +1651,115 @@ fn store_row(
 /// store the client no longer has; which *account* it names stays a client-side
 /// decision, since `Selector::parse` needs no store.
 async fn routed_show(
-    account: &str,
+    account: &AccountConfig,
     selector: &str,
     mailbox: Option<&str>,
 ) -> Result<mailypoppins::read_cmd::ShownMessage> {
-    let mut params = serde_json::json!({"account": account, "selector": selector});
-    if let Some(mailbox) = mailbox {
-        params["mailbox"] = serde_json::json!(mailbox);
-    }
     let mut connection = daemon_connection().await;
-    let result = daemon_try_call(&mut connection, "message.get", params)
-        .await
-        .map_err(|e| refusal(account, e))?;
+    let result = message_get_or_fetch(&mut connection, account, selector, mailbox, true).await?;
     serde_json::from_value(result).context("reading the daemon's message.get answer")
+}
+
+/// `message.get`, and when the store holds no row for a selector that names
+/// its mailbox, `message.fetch` from the server and `message.get` once more
+/// (PERSO-155).
+///
+/// `mp search` without `--local` lists what the server holds, so the
+/// selectors it prints include messages no sync stored (the reported case was
+/// a sent message eleven months old), and `mp show` and `mp save` refused
+/// exactly those with "no match". A miss is recognised by the daemon's own
+/// sentence for it, minted by the same [`selector::not_found`] the resolver
+/// raises, so any other refusal (an ambiguity, a malformed selector) is
+/// reported unchanged and fetches nothing. A selector with no mailbox, or one
+/// the account does not have, fetches nothing either: the server has to be
+/// told which mailbox to search.
+///
+/// The retry asks for the selector the fetch settled on, which names a copy
+/// the store already held in another mailbox when there was one.
+///
+/// [`selector::not_found`]: mailypoppins::selector::not_found
+async fn message_get_or_fetch(
+    connection: &mut mp_client::Connection,
+    account_config: &AccountConfig,
+    selector: &str,
+    mailbox: Option<&str>,
+    body: bool,
+) -> Result<serde_json::Value> {
+    let account = account_config.name.as_str();
+    let params = |selector: &str, mailbox: Option<&str>| {
+        let mut params = serde_json::json!({"account": account, "selector": selector});
+        if let Some(mailbox) = mailbox {
+            params["mailbox"] = serde_json::json!(mailbox);
+        }
+        if !body {
+            params["body"] = serde_json::json!(false);
+        }
+        params
+    };
+    let refused = match daemon_try_call(connection, "message.get", params(selector, mailbox)).await
+    {
+        Ok(result) => return Ok(result),
+        Err(refused) => refused,
+    };
+    let Some((mailbox_key, message_id)) =
+        missing_from_store(account_config, selector, mailbox, &refused)
+    else {
+        return Err(refusal(account, refused));
+    };
+
+    eprintln!(
+        "{} {} is not in the local store; fetching it from the server",
+        "\u{2139}".blue(),
+        selector
+    );
+    let mut session = operation_session().await;
+    let fetched = run_admin_operation(
+        &mut session,
+        "message.fetch",
+        serde_json::json!({
+            "account": account,
+            "mailbox": mailbox_key,
+            "message_id": message_id,
+        }),
+        account,
+    )
+    .await
+    .map_err(|e| {
+        anyhow!(
+            "{}, and fetching it from the server failed: {e:#}",
+            refused.message
+        )
+    })?;
+    daemon_try_call(
+        connection,
+        "message.get",
+        params(wire_str(&fetched["selector"]), None),
+    )
+    .await
+    .map_err(|e| refusal(account, e))
+}
+
+/// The mailbox and the `Message-ID` to fetch when `refused` is the store's
+/// "no match" for a received `selector` that names its mailbox, else `None`.
+///
+/// The `Message-ID` goes back in angle brackets, the form a server and a sync
+/// both carry: Graph keys the row's synthetic uid off that exact string, so the
+/// bare selector key would land a row the next sync duplicates.
+fn missing_from_store(
+    account: &AccountConfig,
+    selector: &str,
+    mailbox: Option<&str>,
+    refused: &mp_protocol::RpcError,
+) -> Option<(String, String)> {
+    let query =
+        mailypoppins::selector::parse_in(selector, Namespace::Received, &account.name, mailbox)
+            .ok()?;
+    if refused.message != mailypoppins::selector::not_found(&query).to_string() {
+        return None;
+    }
+    let mailbox_key = resolve_mailbox_key(account, query.mailbox.as_deref()?).ok()?;
+    let key = mailypoppins::selector::message_key(&query.key);
+    Some((mailbox_key, format!("<{key}>")))
 }
 
 /// `mp dump-mailbox --json`: every selected account's envelope records, in the
@@ -1960,15 +2056,12 @@ async fn routed_sweep(account: &str) -> Result<()> {
 /// to ask for.
 async fn routed_attachment_target(
     connection: &mut mp_client::Connection,
-    account: &str,
+    account: &AccountConfig,
     selector: &str,
     mailbox: Option<&str>,
 ) -> Result<mailypoppins::read_cmd::ShownMessage> {
-    let mut params = serde_json::json!({"account": account, "selector": selector, "body": false});
-    if let Some(mailbox) = mailbox {
-        params["mailbox"] = serde_json::json!(mailbox);
-    }
-    typed_call(connection, account, "message.get", params).await
+    let result = message_get_or_fetch(connection, account, selector, mailbox, false).await?;
+    serde_json::from_value(result).context("reading the daemon's message.get answer")
 }
 
 /// One materialised attachment: the file the daemon wrote, and the name it was
@@ -4119,7 +4212,7 @@ async fn main() -> Result<()> {
             let mut connection = daemon_connection().await;
             let message = routed_attachment_target(
                 &mut connection,
-                &account_config.name,
+                &account_config,
                 &selector,
                 mailbox.as_deref(),
             )
@@ -4162,7 +4255,7 @@ async fn main() -> Result<()> {
             let mut connection = daemon_connection().await;
             let message = routed_attachment_target(
                 &mut connection,
-                &account_config.name,
+                &account_config,
                 &selector,
                 mailbox.as_deref(),
             )
@@ -4214,7 +4307,7 @@ async fn main() -> Result<()> {
             json,
         }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let message = routed_show(&account_config.name, &selector, mailbox.as_deref()).await?;
+            let message = routed_show(&account_config, &selector, mailbox.as_deref()).await?;
             if json {
                 println!("{}", mailypoppins::read_cmd::to_json(&message)?);
             } else {

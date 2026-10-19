@@ -28,7 +28,7 @@ Commands:
   delete          Delete a received email (server + local) or a local draft
   open            Open a received email's attachment in the default application
   save            Save a received email's attachment(s) to a directory
-  show            Print one received message from the local store (offline)
+  show            Print one received message from the local store, fetched first if missing
   list-messages   List received messages from the local store (offline)
   search          Search emails on the IMAP server, or locally with --local
   config          Manage configuration
@@ -409,7 +409,7 @@ Options:
   -h, --help                   Print help
 
 $ mp show --help
-Print one received message from the local store (offline)
+Print one received message from the local store, fetched first if missing
 
 Usage: mp show [OPTIONS] <SELECTOR>
 

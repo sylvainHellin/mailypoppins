@@ -195,7 +195,7 @@ mp delete <selector>            # Delete a received email (server + local)
 mp search <query> [--json]      # Search emails on the server (--local: the store)
 mp open <selector>              # Open an attachment in the default app
 mp save <selector> [--output]   # Save attachment(s) to a directory
-mp show <selector> [--json]     # Print one received message from the local store
+mp show <selector> [--json]     # Print one received message from the local store (fetched first if missing)
 ```
 
 ### Fetch options

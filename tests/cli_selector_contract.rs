@@ -475,6 +475,82 @@ fn an_unknown_key_names_the_namespace_it_searched() {
 }
 
 // ---------------------------------------------------------------------------
+// PERSO-155: a selector the store has no row for is fetched
+// ---------------------------------------------------------------------------
+
+/// `mp search` prints selectors for what the server holds, `mp://tum/sent/<id>`
+/// for a sent message no sync stored among them, and `mp show` and `mp save`
+/// used to refuse those with "no match". A miss on a selector that names its
+/// mailbox now asks the daemon's `message.fetch` for the message and reads it
+/// again from the row the fetch settled on.
+///
+/// No test server exists, so the fetch that succeeds here is the one that
+/// needs none: the store holds the message, but in the Inbox, and the fetch
+/// answers with that row (`already_present`). The resolution, the fetch and
+/// the second read are the same calls a real download makes.
+#[test]
+fn a_missing_sent_selector_is_fetched_and_then_shown_and_saved() {
+    let fx = Fixture::new();
+    let key = "sent-to-self@example.com";
+    fx.ingest("inbox", 1, key, "Sent to myself");
+    let sent = format!("mp://{ACCOUNT}/sent/{}", selector::encode(key));
+    let inbox = format!("mp://{ACCOUNT}/inbox/{}", selector::encode(key));
+
+    let out = fx.run(&["show", &sent]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "mp show {sent} failed: {stderr}");
+    let shown = String::from_utf8_lossy(&out.stdout);
+    assert!(shown.contains("Sent to myself"), "{shown}");
+    assert!(
+        shown.contains(&inbox),
+        "the row the fetch settled on: {shown}"
+    );
+    assert!(
+        stderr.contains("fetching it from the server"),
+        "the fetch is announced on stderr: {stderr}"
+    );
+
+    // `mp save` resolves through the same fallback, and fails only because
+    // the message carries no attachment, naming the row it settled on.
+    let stderr = fx.err(&["save", &sent]);
+    assert!(stderr.contains("has no attachments"), "{stderr}");
+    assert!(stderr.contains(&inbox), "{stderr}");
+}
+
+/// A message the server cannot hand over either (here: no credentials, no
+/// server) fails with both halves of the story, and a selector that names no
+/// mailbox, or one the account lacks, fetches nothing: the miss stays the
+/// plain "no match" it was.
+#[test]
+fn a_failed_fetch_names_the_miss_and_a_bare_key_fetches_nothing() {
+    let fx = Fixture::new();
+    fx.ingest("inbox", 1, "known@example.com", "Known");
+    let sent = format!("mp://{ACCOUNT}/sent/unknown@example.com");
+
+    for command in ["show", "save"] {
+        let stderr = fx.err(&[command, &sent]);
+        assert!(
+            stderr.contains(&format!(
+                "no match for unknown@example.com in the received mail index of {ACCOUNT}/sent, \
+                 and fetching it from the server failed"
+            )),
+            "mp {command}: {stderr}"
+        );
+
+        // A bare key, and a mailbox the account does not have: nothing to
+        // tell the server, so the miss is reported as it always was.
+        for unaddressable in ["unknown@example.com", "nope/unknown@example.com"] {
+            let stderr = fx.err(&[command, unaddressable]);
+            assert!(stderr.contains("received mail"), "mp {command}: {stderr}");
+            assert!(
+                !stderr.contains("fetching it from the server"),
+                "mp {command} {unaddressable}: no mailbox to fetch from: {stderr}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cross-account selectors (#0073 follow-up)
 // ---------------------------------------------------------------------------
 
