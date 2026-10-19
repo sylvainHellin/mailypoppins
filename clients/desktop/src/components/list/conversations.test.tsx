@@ -135,6 +135,48 @@ describe("the conversation list", () => {
     await waitFor(() => expect(mock.editorOpens).toEqual(["/fixture/work/drafts/offsite-note.md"]));
   });
 
+  it("cA approves the draft member, its reader then offers Back to draft, and cD demotes it", async () => {
+    const { user } = renderGrouped();
+    await shellReady();
+    await waitFor(() => expect(offsite()).not.toBeNull());
+    await user.click(offsite());
+    await user.keyboard("l");
+    await waitFor(() => expect(members()).toHaveLength(4));
+    await user.keyboard("j");
+    expect(cursorRow()?.getAttribute("data-member")).toBe("draft:offsite-note");
+    const reader = screen.getByRole("complementary", { name: "Reader" });
+    await within(reader).findByRole("button", { name: /Approve/ });
+    expect(within(reader).queryByRole("button", { name: /Attach file/ })).toBeNull();
+    await user.keyboard("cA");
+    await waitFor(() => expect(callsOf("draft_approve")).toEqual([{ account: "work", ids: ["offsite-note"] }]));
+    await within(reader).findByRole("button", { name: /Back to draft/ });
+    await user.keyboard("cD");
+    await waitFor(() => expect(callsOf("draft_demote")).toEqual([{ account: "work", ids: ["offsite-note"] }]));
+    await within(reader).findByRole("button", { name: /Approve/ });
+  });
+
+  it("x on the draft member confirms with the draft's own status and recipients, and ce edits them", async () => {
+    const { user } = renderGrouped();
+    const d = mock.drafts.work.drafts.find((x) => x.id === "offsite-note")!;
+    Object.assign(d, { status: "approved", to: "Marta Silva <marta@fixture.example>", subject: "Re: Team offsite in October" });
+    await shellReady();
+    await waitFor(() => expect(offsite()).not.toBeNull());
+    await user.click(offsite());
+    await user.keyboard("l");
+    await waitFor(() => expect(members()).toHaveLength(4));
+    await user.keyboard("j");
+    expect(cursorRow()?.getAttribute("data-member")).toBe("draft:offsite-note");
+    await user.keyboard("x");
+    const confirm = await screen.findByRole("dialog", { name: "Send this email?" });
+    expect(confirm).toHaveTextContent("To: Marta Silva <marta@fixture.example> - Re: Team offsite in October");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Send this email?" })).toBeNull());
+
+    await user.keyboard("ce");
+    const dialog = await screen.findByRole("dialog", { name: "Edit recipients" });
+    expect(within(dialog).getByDisplayValue("Marta Silva <marta@fixture.example>")).toBeInTheDocument();
+  });
+
   it("y on a member copies its own selector, and on a draft member its file", async () => {
     const { user } = renderGrouped();
     await shellReady();

@@ -56,9 +56,21 @@ export function StatusPill({ status, hidden }: { status: string; hidden?: boolea
 /**
  * The selected draft, in place of a message body. `standalone` is the exit
  * summary of a draft the Drafts list may not show: its actions are Edit,
- * on the draft itself, and Close, which brings the selection back.
+ * on the draft itself, and Close, which brings the selection back. `member`
+ * is a conversation's draft member (PERSO-146): the Drafts actions less
+ * Attach file, which stays in Drafts.
  */
-export function DraftPreview({ account, draft, standalone = false }: { account: string; draft: DraftItem; standalone?: boolean }) {
+export function DraftPreview({
+  account,
+  draft,
+  standalone = false,
+  member = false,
+}: {
+  account: string;
+  draft: DraftItem;
+  standalone?: boolean;
+  member?: boolean;
+}) {
   const s = useAppState();
   const dispatch = useDispatch();
   const [loaded, setLoaded] = useState<Loaded | null>(null);
@@ -126,10 +138,12 @@ export function DraftPreview({ account, draft, standalone = false }: { account: 
               <Users aria-hidden="true" />
               Edit recipients
             </Button>
-            <Button size="sm" variant="ghost" title="Attach file (ta)" onClick={() => runAction("attach_file", s, dispatch)}>
-              <Paperclip aria-hidden="true" />
-              Attach file
-            </Button>
+            {member ? null : (
+              <Button size="sm" variant="ghost" title="Attach file (ta)" onClick={() => runAction("attach_file", s, dispatch)}>
+                <Paperclip aria-hidden="true" />
+                Attach file
+              </Button>
+            )}
             {status === "approved" ? (
               <Button size="sm" variant="ghost" title="Back to draft (cD)" onClick={() => setShownStatus(s, dispatch, account, draft.id, false)}>
                 <Undo2 aria-hidden="true" />
@@ -256,14 +270,17 @@ export function DraftPreview({ account, draft, standalone = false }: { account: 
  * The draft an embedded editor just left with exit 0: its row when the
  * Drafts list shows it, else a row built from a fresh `draft_preview`. A
  * draft that is gone closes the summary, so the reader shows the selection,
- * the message it showed before.
+ * the message it showed before. `member` is a conversation's draft member
+ * (PERSO-146), shown with its draft actions and read again with each list
+ * the conversation re-read lands, which is how an approve reaches it.
  */
-export function ComposeSummary({ account, draftId }: { account: string; draftId: string }) {
+export function ComposeSummary({ account, draftId, member = false }: { account: string; draftId: string; member?: boolean }) {
   const s = useAppState();
   const dispatch = useDispatch();
   const listed = draftsShown(s) && s.selection.account === account ? filteredDrafts(s.messages.data, "").find((d) => d.id === draftId) : undefined;
   const [read, setRead] = useState<DraftItem | null>(null);
   const known = listed !== undefined;
+  const landed = member ? s.messages.loadedGen : 0;
 
   useEffect(() => {
     if (known) return;
@@ -292,7 +309,7 @@ export function ComposeSummary({ account, draftId }: { account: string; draftId:
     return () => {
       live = false;
     };
-  }, [account, draftId, known, dispatch]);
+  }, [account, draftId, known, landed, dispatch]);
 
   const draft = listed ?? read;
   if (!draft) {
@@ -303,5 +320,5 @@ export function ComposeSummary({ account, draftId }: { account: string; draftId:
       </div>
     );
   }
-  return <DraftPreview account={account} draft={draft} standalone />;
+  return <DraftPreview account={account} draft={draft} standalone={!member} member={member} />;
 }

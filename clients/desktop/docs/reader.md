@@ -150,6 +150,7 @@ Remove calls `draft_attachment_remove`, which takes the entry out of the file an
 The three, and the frame while it is shown, are read again whenever the listing's row or the list itself changes, which is what a save in the editor or an attach does through `draft.changed`.
 Its toolbar, "Draft actions", has Edit in editor (`e`), Edit recipients (`ce`), Attach file (`ta`), and Approve (`cA`) or Back to draft (`cD`).
 Approve and Back to draft act on the draft the preview shows and ask nothing, even with drafts marked; a draft being sent is refused with a notice, as by the keys.
+A conversation's draft member (#0142) shows the same preview, built from a `draft_preview` read again whenever the conversation list lands, with the same toolbar less Attach file, which stays in Drafts (PERSO-146).
 
 Attach file, `ta` in Drafts, opens the "Attach file" dialog, whose File field takes an absolute path or one starting with `~`, stored in the draft as typed.
 Its "Browse…" opens the system's file picker the same way as the Save dialog's, and a file picked fills the field, under the home directory as `~/…`, so a draft keeps a path that resolves on another machine's home too; Attach or Enter then attaches it.

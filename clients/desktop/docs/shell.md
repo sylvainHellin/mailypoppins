@@ -276,15 +276,15 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `ca` | Reply all | list, reader | `draft_reply` (`all: true`) or `draft_from_message` (`reply_all`), then the editor |
 | `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `signature_list`, then `draft_forward` with `headers` and the signature, or `draft_from_message` (`forward`), then the editor |
 | `e` | Edit the draft in the editor; on a received message, open its Markdown rendition read-only by the same route, the TUI's `e` (PERSO-92); Enter focuses the reader | list, reader | `draft_path`, then the editor; `message_markdown_path`, then the embedded editor, or `message_markdown_open` |
-| `ce` | Edit recipients, Drafts only | list, reader | `draft_set_recipients`, the dialog filled from the listed row |
-| `cA` | Approve, Drafts only | list, reader | `draft_approve` |
-| `cD` | Back to draft, Drafts only | list, reader | `draft_demote` |
-| `x` | Send the cursor draft, approving it first | any pane | `send_draft` (`hold: true`) |
+| `ce` | Edit recipients, in Drafts or on a conversation's draft member | list, reader | `draft_set_recipients`, the dialog filled from the listed row, or from `draft_preview` for a draft member |
+| `cA` | Approve, in Drafts or on a conversation's draft member | list, reader | `draft_approve` |
+| `cD` | Back to draft, in Drafts or on a conversation's draft member | list, reader | `draft_demote` |
+| `x` | Send the cursor draft, approving it first; a conversation's draft member confirms once `draft_preview` read its status and recipients | any pane | `send_draft` (`hold: true`) |
 | `cX` | Send all approved drafts, Drafts only | list, reader | `send_approved` (`hold: true`) |
 | `ta` | Attach a file to the draft, Drafts only: the path dialog, with Browse for the system's file picker | list, reader | `draft_attach` |
 
 The keys are the TUI's (`clients/tui/src/app/keymap.rs`), and like its MESSAGE and List keys they do nothing from the sidebar.
-`ce`, `cA`, `cD` and `cX` outside the Drafts list say that they are only available in Drafts, in the TUI's words.
+`ce`, `cA`, `cD` and `cX` outside the Drafts list say that they are only available in Drafts, in the TUI's words, except that `ce`, `cA` and `cD` reach a conversation's draft member as the TUI's do (PERSO-146).
 A reply or a forward acts on the cursor row, or on the server-only hit under the cursor, which has no row: `draft_from_message` then builds the draft from the hit's headers and bodies, with no attachments.
 On a draft, reply and forward say that a draft has nothing to quote.
 

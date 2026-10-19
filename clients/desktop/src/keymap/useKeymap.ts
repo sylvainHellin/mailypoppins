@@ -10,7 +10,7 @@
 import { useEffect, useRef, type Dispatch } from "react";
 import { flushSync } from "react-dom";
 import type { Action } from "@/app/reducer";
-import { draftsShown, liveHolds, screenFor, type AppState } from "@/app/state";
+import { conversationDraft, draftsShown, liveHolds, screenFor, type AppState } from "@/app/state";
 import { hiddenNotice } from "@/app/views";
 import { FILTER_INPUT_ID, HALF_PAGE, PAGE, READER_SCROLL_ID, runAction } from "@/app/actions";
 import { CONTACTS_SEARCH_ID } from "@/app/contacts";
@@ -135,6 +135,9 @@ const CONVERSATION_KEYS: ReadonlyMap<string, ActionId> = new Map(
 /** The `c` and `t` row keys whose action answers outside Drafts with a notice only. */
 const DRAFTS_ONLY: ReadonlySet<ActionId> = new Set(["edit_recipients", "approve", "demote", "send_all", "attach_file"]);
 
+/** The Drafts-only keys that also reach a conversation's draft member (PERSO-146). */
+const DRAFT_MEMBER_TOO: ReadonlySet<ActionId> = new Set(["edit_recipients", "approve", "demote"]);
+
 /**
  * What a prefix combo (`gg`, `Space m`) does in this state: the action the
  * keymap runs, `"notice"` for a combo it does not bind (the KEYMAP row's
@@ -161,7 +164,7 @@ export function prefixRuns(s: AppState, combo: string): ActionId | null {
   const id = resolvePrefix(s, combo);
   if (id === null || id === "notice") return null;
   if (hiddenNotice(s, id)) return null;
-  if (DRAFTS_ONLY.has(id) && !draftsShown(s)) return null;
+  if (DRAFTS_ONLY.has(id) && !draftsShown(s) && !(DRAFT_MEMBER_TOO.has(id) && conversationDraft(s))) return null;
   return id;
 }
 

@@ -6,7 +6,9 @@
 import type { Dispatch } from "react";
 import type { Action } from "@/app/reducer";
 import { createMutations } from "@/app/mutations";
-import { draftsShown, filteredDrafts, sendingRefusal, type AppState, type MutationDialog } from "@/app/state";
+import { conversationDraft, draftsShown, filteredDrafts, sendingRefusal, type AppState, type MutationDialog } from "@/app/state";
+import * as cmd from "@/lib/commands";
+import { asGuiError } from "@/lib/gui-types";
 
 function notice(dispatch: Dispatch<Action>, text: string): void {
   dispatch({ type: "notice", text });
@@ -20,12 +22,28 @@ function mailboxLabel(s: AppState): string {
   return listed ?? s.bootstrap?.snapshot.mailboxes[account]?.find((m) => m.slug === mailbox)?.label ?? mailbox;
 }
 
+/** The fields of a draft the send confirmation names. */
+type SendRow = { id: string; status: string; to: string | null; subject: string | null };
+
+/** The TUI's confirmation: a `draft` status warns that confirming approves it too. */
+function sendDialog(account: string, row: SendRow): MutationDialog {
+  return {
+    kind: "send",
+    targets: [{ account, draft: row.id }],
+    subject: row.subject,
+    title: row.status === "draft" ? "Draft is not approved. Approve and send?" : "Send this email?",
+    detail: `To: ${row.to ?? ""} - ${row.subject ?? ""}`,
+  };
+}
+
 /**
  * `x`: the draft under the cursor of the Drafts list, one draft whatever
- * is marked, as the TUI's `selected_email`. The confirmation is the TUI's:
- * a `draft` status warns that confirming approves it too.
+ * is marked, as the TUI's `selected_email`, or a conversation's draft member
+ * (PERSO-146), whose status and recipients a `draft_preview` reads first.
  */
 export function sendCursor(s: AppState, dispatch: Dispatch<Action>): void {
+  const member = draftsShown(s) ? null : conversationDraft(s);
+  if (member && s.selection.account) return void sendMember(s, dispatch, s.selection.account, member);
   if (!draftsShown(s) || !s.selection.draft || !s.selection.account) {
     if (s.selection.message || s.selection.hit) notice(dispatch, "Send needs a draft; received mail has nothing to send");
     return;
@@ -33,17 +51,21 @@ export function sendCursor(s: AppState, dispatch: Dispatch<Action>): void {
   const account = s.selection.account;
   const row = filteredDrafts(s.messages.data, "").find((d) => d.id === s.selection.draft);
   if (!row) return;
-  const target = { account, draft: row.id };
-  const busy = sendingRefusal(s, [target]);
+  const busy = sendingRefusal(s, [{ account, draft: row.id }]);
   if (busy) return notice(dispatch, busy);
-  const dialog: MutationDialog = {
-    kind: "send",
-    targets: [target],
-    subject: row.subject,
-    title: row.status === "draft" ? "Draft is not approved. Approve and send?" : "Send this email?",
-    detail: `To: ${row.to ?? ""} - ${row.subject ?? ""}`,
-  };
-  dispatch({ type: "open_dialog", dialog });
+  dispatch({ type: "open_dialog", dialog: sendDialog(account, row) });
+}
+
+/** `x` on a conversation's draft member: the confirmation, once `draft_preview` read the draft. */
+async function sendMember(s: AppState, dispatch: Dispatch<Action>, account: string, id: string): Promise<void> {
+  const busy = sendingRefusal(s, [{ account, draft: id }]);
+  if (busy) return notice(dispatch, busy);
+  try {
+    const p = await cmd.draftPreview(account, id);
+    dispatch({ type: "open_dialog", dialog: sendDialog(account, { id, status: p.status, to: p.to, subject: p.subject }) });
+  } catch (e: unknown) {
+    notice(dispatch, `Could not read ${id}: ${asGuiError(e).message}`);
+  }
 }
 
 /**

@@ -342,6 +342,17 @@ function cursorDraft(s: AppState) {
 }
 
 /**
+ * A conversation's draft member under the cursor (ticket 0142), named by its
+ * id: what `ce`, `cA`, `cD` and `x` reach outside Drafts, as the TUI's do
+ * (PERSO-146). Null in Drafts, where the listed row is the cursor.
+ */
+export function memberDraft(s: AppState): { account: string; id: string } | null {
+  const account = s.selection.account;
+  const id = draftsShown(s) ? null : conversationDraft(s);
+  return account && id ? { account, id } : null;
+}
+
+/**
  * The draft `e` edits: the Drafts row under the cursor, or a conversation's
  * draft member (ticket 0142), named by the conversation cursor. A member is
  * a linked draft, one that parsed when the index read it, so it counts as
@@ -381,11 +392,14 @@ export async function editDraft(s: AppState, dispatch: Dispatch<Action>): Promis
 }
 
 /**
- * `ce`, Drafts only: the recipients dialog, filled from the draft's listed
- * row, which carries To, Cc, Bcc and the subject; a draft that does not
- * parse cannot be edited this way.
+ * `ce`: the recipients dialog, filled from the draft's listed row, which
+ * carries To, Cc, Bcc and the subject; a draft that does not parse cannot be
+ * edited this way. A conversation's draft member has no listed row, so its
+ * fields come from a `draft_preview` of it (PERSO-146).
  */
 export function editRecipients(s: AppState, dispatch: Dispatch<Action>): void {
+  const member = memberDraft(s);
+  if (member) return void editMemberRecipients(s, dispatch, member);
   if (!draftsShown(s)) {
     notice(dispatch, "Edit recipients (c e) is only available in Drafts");
     return;
@@ -405,13 +419,30 @@ export function editRecipients(s: AppState, dispatch: Dispatch<Action>): void {
   });
 }
 
+/** `ce` on a conversation's draft member: the dialog, once `draft_preview` read its fields. */
+async function editMemberRecipients(s: AppState, dispatch: Dispatch<Action>, member: { account: string; id: string }): Promise<void> {
+  const { account, id } = member;
+  const busy = sendingRefusal(s, [{ account, draft: id }]);
+  if (busy) return notice(dispatch, busy);
+  try {
+    const p = await cmd.draftPreview(account, id);
+    dispatch({
+      type: "open_compose",
+      dialog: { kind: "recipients", account, draftId: id, to: p.to ?? "", cc: p.cc ?? "", bcc: p.bcc ?? "", subject: p.subject ?? "" },
+    });
+  } catch (e: unknown) {
+    dispatch({ type: "activity", kind: "compose_failed", account, text: `Cannot edit ${id}: ${asGuiError(e).message}` });
+  }
+}
+
 /**
- * `cA` and `cD`, Drafts only, over the marked drafts or the cursor one.
- * Over marks they ask first, with the TUI's words; one draft changes at once.
+ * `cA` and `cD`, over the marked drafts or the cursor one: in Drafts, or on
+ * a conversation's draft member (PERSO-146). Over marks they ask first, with
+ * the TUI's words; one draft changes at once.
  */
 export function setStatus(s: AppState, dispatch: Dispatch<Action>, approve: boolean): void {
   const what = approve ? "Approve (c A)" : "Unapprove (c D)";
-  if (!draftsShown(s)) {
+  if (!draftsShown(s) && !memberDraft(s)) {
     notice(dispatch, `${what} is only available in Drafts`);
     return;
   }

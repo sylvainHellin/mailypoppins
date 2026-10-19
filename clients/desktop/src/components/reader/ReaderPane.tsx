@@ -130,7 +130,7 @@ export function ReaderPane() {
             <DraftPreview key={`${account}/${draft}`} account={account} draft={draftRow} />
           ) : conversationDraft(s) === draft ? (
             // A conversation's draft member (ticket 0142): no Drafts listing to read it from.
-            <ComposeSummary key={`${account}/${draft}`} account={account} draftId={draft} />
+            <ComposeSummary key={`${account}/${draft}`} account={account} draftId={draft} member />
           ) : null
         ) : serverHit ? (
           <ServerHitSummary hit={serverHit} />
