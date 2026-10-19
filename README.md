@@ -275,7 +275,7 @@ Forget a chord and `:` or `Ctrl+p` opens a command palette over every runnable a
 | `cn` | New draft |
 | `cs` | Manage signatures |
 | `cr`/`ca`/`cf` | Reply / Reply all / Forward |
-| `cA`/`cD` | Approve draft / back to draft (Drafts only) |
+| `cA`/`cD` | Approve draft / back to draft (in Drafts or a conversation) |
 | `x`/`cX` | Approve and send / Send all approved |
 | `a`/`d` | Archive / Delete (with confirmation) |
 | `ta`/`to`/`ts` | Attach file to draft / Open attachment / Save attachment |

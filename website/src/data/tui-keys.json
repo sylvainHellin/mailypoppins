@@ -74,10 +74,10 @@
       { "key": "Ctrl+a", "action": "Select all visible" },
       { "key": "l", "action": "Expand the conversation (conversation view)" },
       { "key": "h", "action": "Collapse the conversation (conversation view)" },
-      { "key": "ce", "action": "Edit recipients (Drafts only)" },
+      { "key": "ce", "action": "Edit recipients (in Drafts or a conversation)" },
       { "key": "ta", "action": "Attach file to draft (Drafts only)" },
-      { "key": "cA", "action": "Approve draft (Drafts only)" },
-      { "key": "cD", "action": "Unapprove, back to draft (Drafts only)" },
+      { "key": "cA", "action": "Approve draft (in Drafts or a conversation)" },
+      { "key": "cD", "action": "Unapprove, back to draft (in Drafts or a conversation)" },
       { "key": "cX", "action": "Send all approved drafts (Drafts only)" },
       { "key": "fF", "action": "Show flagged only (toggle)" }
     ]

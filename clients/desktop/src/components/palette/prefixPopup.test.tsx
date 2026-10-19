@@ -52,9 +52,9 @@ describe("the prefix popup", () => {
     await user.keyboard("c");
     expect(rows()).toEqual([
       ...COMPOSE,
-      ["ce", "Edit recipients (Drafts only)"],
-      ["cA", "Approve draft (Drafts only)"],
-      ["cD", "Unapprove, back to draft (Drafts only)"],
+      ["ce", "Edit recipients (in Drafts or a conversation)"],
+      ["cA", "Approve draft (in Drafts or a conversation)"],
+      ["cD", "Unapprove, back to draft (in Drafts or a conversation)"],
       ["cX", "Send all approved drafts (Drafts only)"],
     ]);
     await user.keyboard("{Escape}");

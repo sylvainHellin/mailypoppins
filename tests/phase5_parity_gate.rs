@@ -593,6 +593,12 @@ const RETIRED_BINDINGS: &[(&str, &str, &str)] = &[
         "Enter / e",
         "Open in editor (mail read-only)",
     ),
+    // PERSO-146: `ce`, `cA` and `cD` also reach a draft member of an
+    // expanded conversation, so their "(Drafts only)" labels say so; the
+    // keys survive under the new labels.
+    ("EMAIL LIST", "ce", "Edit recipients (Drafts only)"),
+    ("EMAIL LIST", "cA", "Approve draft (Drafts only)"),
+    ("EMAIL LIST", "cD", "Unapprove, back to draft (Drafts only)"),
 ];
 
 fn is_retired(title: &serde_json::Value, binding: &serde_json::Value) -> bool {

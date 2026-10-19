@@ -221,7 +221,7 @@ describe("the command palette", () => {
     await screen.findByRole("listbox", { name: "Drafts messages" });
     await user.keyboard(":");
     dialog = await screen.findByRole("dialog", { name: "Command palette" });
-    await user.click(within(dialog).getByText("Approve draft (Drafts only)"));
+    await user.click(within(dialog).getByText("Approve draft (in Drafts or a conversation)"));
     await waitFor(() =>
       expect(mock.calls.filter((c) => c.cmd === "draft_approve").map((c) => c.args)).toEqual([
         // The reply above is the newest draft, at the top.

@@ -247,7 +247,7 @@
       },
       {
         "key": "ce",
-        "action": "Edit recipients (Drafts only)"
+        "action": "Edit recipients (in Drafts or a conversation)"
       },
       {
         "key": "ta",
@@ -255,11 +255,11 @@
       },
       {
         "key": "cA",
-        "action": "Approve draft (Drafts only)"
+        "action": "Approve draft (in Drafts or a conversation)"
       },
       {
         "key": "cD",
-        "action": "Unapprove, back to draft (Drafts only)"
+        "action": "Unapprove, back to draft (in Drafts or a conversation)"
       },
       {
         "key": "cX",

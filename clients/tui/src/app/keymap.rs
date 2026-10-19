@@ -1277,7 +1277,8 @@ pub static KEYMAP: &[KeyBinding] = &[
         "Collapse the conversation (conversation view)",
         false,
     ),
-    // `ce` edit recipients, Drafts only (the compose family's list-scoped tail).
+    // `ce` edit recipients, in Drafts or on a conversation's draft member
+    // (the compose family's list-scoped tail; PERSO-146).
     pg(
         "ce",
         Chord::Char('e'),
@@ -1285,7 +1286,7 @@ pub static KEYMAP: &[KeyBinding] = &[
         KeyCtx::List,
         Guard::DraftsOnly,
         KeyAction::EditRecipients,
-        "Edit recipients (Drafts only)",
+        "Edit recipients (in Drafts or a conversation)",
         false,
     ),
     // `ta` attach-file, Drafts only (the thread/attachment family's list tail,
@@ -1305,8 +1306,9 @@ pub static KEYMAP: &[KeyBinding] = &[
     // clear of the lowercase compose surface (`cn`/`cr`/`ca`/`cf`/`ce`) and
     // still echo the letters they had before the redesign. All three are
     // List + DraftsOnly: they act on the cursor draft (or, when a selection is
-    // live, on the batch, via the confirm dialog in `keys.rs`), so they are
-    // meaningless without the Drafts list focused.
+    // live, on the batch, via the confirm dialog in `keys.rs`). `cA` and `cD`
+    // also reach a draft member of an expanded conversation (PERSO-146);
+    // `cX` stays Drafts only.
     pg(
         "cA",
         Chord::Char('A'),
@@ -1314,7 +1316,7 @@ pub static KEYMAP: &[KeyBinding] = &[
         KeyCtx::List,
         Guard::DraftsOnly,
         KeyAction::Approve,
-        "Approve draft (Drafts only)",
+        "Approve draft (in Drafts or a conversation)",
         false,
     ),
     pg(
@@ -1324,7 +1326,7 @@ pub static KEYMAP: &[KeyBinding] = &[
         KeyCtx::List,
         Guard::DraftsOnly,
         KeyAction::MarkDraft,
-        "Unapprove, back to draft (Drafts only)",
+        "Unapprove, back to draft (in Drafts or a conversation)",
         false,
     ),
     pg(
