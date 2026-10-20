@@ -24,6 +24,7 @@ All notable changes to this project are documented in this file.
 - **Desktop: `e` on a received message opens it read-only in `$EDITOR` as Markdown, as in the TUI (PERSO-92).** Enter focuses the reader.
 
 ### Fixed
+- **Desktop: the Open attachment picker highlights its cursor row, and long file names no longer push the rows past the dialog.** The row `j`/`k` reaches is painted like the palette's selected item, where only the browser's focus ring showed, and on the last row alone; a long name ends in an ellipsis with its size still in view, in the Save dialog's list too.
 - **TUI and desktop: the move picker on an expanded conversation member leaves out the mailbox that member lives in (PERSO-146).**
 - **TUI: the sidebar count stays right after a conversation list loads (PERSO-146).** It counts the listed mailbox's messages, the members of its conversation rows.
 - **`mp show`, `mp save` and `mp open` fetch a message the store lacks from the server when the selector names its mailbox (PERSO-155).** The sent-mail selectors `mp search` prints for messages no sync stored resolve now, where they failed with "no match"; when the store holds the message in another mailbox, the command reads that copy and says so on stderr.

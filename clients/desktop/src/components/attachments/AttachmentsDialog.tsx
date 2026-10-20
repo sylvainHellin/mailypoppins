@@ -74,13 +74,20 @@ function BrowseButton({
 
 function Size({ item }: { item: AttachmentItem }) {
   if (item.missing) return <span className="text-destructive">missing</span>;
-  return item.size === null ? null : <span className="text-muted-foreground tabular-nums">{formatSize(item.size)}</span>;
+  return item.size === null ? null : (
+    <span className="shrink-0 text-muted-foreground tabular-nums group-data-selected/button:text-selection-foreground">
+      {formatSize(item.size)}
+    </span>
+  );
 }
 
 /**
  * The `to` picker: one button per attachment; the dialog closes on an open.
- * j/k and the arrows move the focus between the parts, skipping a missing
- * one; Enter opens the focused one, q closes.
+ * j/k and the arrows move the cursor and the focus between the parts,
+ * skipping a missing one; Enter opens the cursor's part, q closes.
+ * The cursor row carries `data-selected`, painted like the palette's
+ * selected item, since `:focus-visible` alone matches only when the webview's
+ * heuristic says so and left most rows unmarked.
  */
 function OpenList({
   owner,
@@ -98,6 +105,10 @@ function OpenList({
   const dispatch = useDispatch();
   const listRef = useRef<HTMLUListElement>(null);
   const first = items.find((i) => !i.missing)?.part;
+  const [cursor, setCursor] = useState(first);
+  useEffect(() => {
+    if (active) setCursor(first);
+  }, [active, first]);
 
   // On the window, so the keys work before the popup has taken focus, and in
   // the capture phase, since the popup stops the arrow keys on their way up.
@@ -116,16 +127,18 @@ function OpenList({
       e.preventDefault();
       const buttons = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
       if (buttons.length === 0) return;
-      const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const focused = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const at = focused !== -1 ? focused : buttons.findIndex((b) => b.dataset.attachment === String(cursor));
       const next = at === -1 ? 0 : Math.max(0, Math.min(buttons.length - 1, at + (down ? 1 : -1)));
+      setCursor(Number(buttons[next].dataset.attachment));
       buttons[next].focus();
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [active, onDone]);
+  }, [active, onDone, cursor]);
 
   return (
-    <ul ref={listRef} aria-label="Attachments" className="flex flex-col gap-1">
+    <ul ref={listRef} aria-label="Attachments" className="flex min-w-0 flex-col gap-1">
       {items.map((item) => (
         <li key={item.part}>
           <Button
@@ -133,9 +146,12 @@ function OpenList({
             variant="ghost"
             ref={item.part === first ? firstRef : undefined}
             data-attachment={item.part}
+            data-selected={item.part === cursor ? "" : undefined}
+            aria-current={item.part === cursor ? "true" : undefined}
             disabled={item.missing}
-            className="w-full justify-start gap-2"
+            className="w-full justify-start gap-2 focus-visible:border-transparent focus-visible:ring-0 data-selected:bg-selection data-selected:text-selection-foreground data-selected:hover:bg-selection data-selected:hover:text-selection-foreground dark:data-selected:hover:bg-selection data-selected:*:[svg]:text-selection-foreground"
             aria-label={`Open ${item.name}${item.missing ? " (missing)" : ""}`}
+            onFocus={() => setCursor(item.part)}
             onClick={() => {
               onDone();
               void openItem(owner, item, dispatch);
@@ -180,7 +196,7 @@ function SaveForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "save
       }}
     >
       {dialog.items.length > 1 ? (
-        <fieldset className="flex flex-col gap-1">
+        <fieldset className="flex min-w-0 flex-col gap-1">
           <legend className="mb-1 text-sm text-muted-foreground">Attachments</legend>
           {dialog.items.map((item) => (
             <label key={item.part} className="flex items-center gap-2 text-sm">

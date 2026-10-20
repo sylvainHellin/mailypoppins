@@ -280,6 +280,35 @@ describe("the reader's attachments", () => {
     );
   });
 
+  it("marks the cursor row of the to picker on every row, the first one included, and moves the mark with j and k", async () => {
+    const { user } = renderApp(1400, () => {
+      mock.rows.work.inbox[0].attachments = [
+        { name: "ledger-q3.pdf", size: 184223 },
+        { name: "notes.txt", size: 812 },
+        { name: "scan.png", size: 4096 },
+      ];
+    });
+    await shellReady();
+    await user.keyboard("j");
+    await within(reader()).findByRole("list", { name: "Attachments" });
+    await user.keyboard("to");
+    const picker = await screen.findByRole("dialog", { name: "Open attachment" });
+    const rows = ["ledger-q3.pdf", "notes.txt", "scan.png"].map((n) => within(picker).getByRole("button", { name: `Open ${n}` }));
+    const marked = () => rows.map((r) => r.hasAttribute("data-selected"));
+    await waitFor(() => expect(rows[0]).toHaveFocus());
+    expect(marked()).toEqual([true, false, false]);
+    expect(rows[0]).toHaveAttribute("aria-current", "true");
+    expect(rows[0].className).toContain("data-selected:bg-selection");
+    await user.keyboard("j");
+    expect(marked()).toEqual([false, true, false]);
+    expect(rows[1]).toHaveFocus();
+    await user.keyboard("j");
+    expect(marked()).toEqual([false, false, true]);
+    await user.keyboard("k");
+    expect(marked()).toEqual([false, true, false]);
+    expect(rows[2]).not.toHaveAttribute("aria-current");
+  });
+
   it("says No attachments for a message without any", async () => {
     const { user } = renderApp();
     await shellReady();
