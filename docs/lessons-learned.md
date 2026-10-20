@@ -2718,3 +2718,8 @@ Give the worktree a real `node_modules` folder whose entries are links into the 
 ## A desktop draft-member preview re-reads when the conversation list lands
 
 The draft member's preview has to re-read whenever the conversation list lands (`messages.loadedGen`), or an approve never reaches its toolbar, which keeps the old status (PERSO-146).
+
+## A desktop picker holds its cursor in state, not in DOM focus
+
+A row marked only by keyboard focus is visible only when WKWebView's `:focus-visible` heuristic draws a ring, which on the Mac it did for the last row alone; a picker keeps its cursor in state and styles it through `data-selected`, like the command palette.
+A nowrap row inside the `DialogContent` grid widened the column past the dialog's edge until the grid children got `min-w-0` (383d48c).
