@@ -1244,15 +1244,24 @@ export function draftsShown(s: AppState): boolean {
 }
 
 /**
+ * The draft of the exit summary the reader pane shows in place of the
+ * selection, once its embedded editor ended with 0 (docs/shell.md,
+ * "Compose"): `composeShown` with its session forgotten. Null otherwise.
+ */
+export function summaryDraft(s: AppState): { account: string; draft: string } | null {
+  const shown = s.composeShown;
+  return shown && !s.compose[shown] ? draftOfKey(shown) : null;
+}
+
+/**
  * The `targetKey` of the draft the reader pane shows, by `ReaderPane`'s own
  * test: an embedded editor's exit summary, else a selected draft; null while
  * an embedded editor fills the pane, or when the pane shows anything else.
  */
 export function readerDraftKey(s: AppState): string | null {
   const shown = s.composeShown;
-  const editor = shown ? s.compose[shown] : undefined;
-  if (editor?.kind === "embedded") return null;
-  const summary = shown && !editor ? draftOfKey(shown) : null;
+  if (shown && s.compose[shown]?.kind === "embedded") return null;
+  const summary = summaryDraft(s);
   if (summary) return targetKey(summary);
   const { account, draft } = s.selection;
   if (!draft || !account) return null;

@@ -6,7 +6,7 @@
 import type { Dispatch } from "react";
 import type { Action } from "@/app/reducer";
 import { createMutations } from "@/app/mutations";
-import { conversationDraft, draftsShown, filteredDrafts, sendingRefusal, type AppState, type MutationDialog } from "@/app/state";
+import { conversationDraft, draftsShown, filteredDrafts, sendingRefusal, summaryDraft, type AppState, type MutationDialog } from "@/app/state";
 import * as cmd from "@/lib/commands";
 import { asGuiError } from "@/lib/gui-types";
 
@@ -37,13 +37,18 @@ function sendDialog(account: string, row: SendRow): MutationDialog {
 }
 
 /**
- * `x`: the draft under the cursor of the Drafts list, one draft whatever
- * is marked, as the TUI's `selected_email`, or a conversation's draft member
- * (PERSO-146), whose status and recipients a `draft_preview` reads first.
+ * `x`: the draft the reader's exit summary shows, which stands in for the
+ * selection until a navigation brings it back; else the draft under the
+ * cursor of the Drafts list, one draft whatever is marked, as the TUI's
+ * `selected_email`, or a conversation's draft member (PERSO-146). The
+ * summary and the member have no listed row, so a `draft_preview` reads
+ * their status and recipients first.
  */
 export function sendCursor(s: AppState, dispatch: Dispatch<Action>): void {
+  const summary = summaryDraft(s);
+  if (summary) return void sendById(s, dispatch, summary.account, summary.draft);
   const member = draftsShown(s) ? null : conversationDraft(s);
-  if (member && s.selection.account) return void sendMember(s, dispatch, s.selection.account, member);
+  if (member && s.selection.account) return void sendById(s, dispatch, s.selection.account, member);
   if (!draftsShown(s) || !s.selection.draft || !s.selection.account) {
     if (s.selection.message || s.selection.hit) notice(dispatch, "Send needs a draft; received mail has nothing to send");
     return;
@@ -56,8 +61,8 @@ export function sendCursor(s: AppState, dispatch: Dispatch<Action>): void {
   dispatch({ type: "open_dialog", dialog: sendDialog(account, row) });
 }
 
-/** `x` on a conversation's draft member: the confirmation, once `draft_preview` read the draft. */
-async function sendMember(s: AppState, dispatch: Dispatch<Action>, account: string, id: string): Promise<void> {
+/** `x` on a draft with no listed row: the confirmation, once `draft_preview` read the draft. */
+async function sendById(s: AppState, dispatch: Dispatch<Action>, account: string, id: string): Promise<void> {
   const busy = sendingRefusal(s, [{ account, draft: id }]);
   if (busy) return notice(dispatch, busy);
   try {

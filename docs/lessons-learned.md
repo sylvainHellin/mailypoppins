@@ -2723,3 +2723,7 @@ The draft member's preview has to re-read whenever the conversation list lands (
 
 A row marked only by keyboard focus is visible only when WKWebView's `:focus-visible` heuristic draws a ring, which on the Mac it did for the last row alone; a picker keeps its cursor in state and styles it through `data-selected`, like the command palette.
 A nowrap row inside the `DialogContent` grid widened the column past the dialog's edge until the grid children got `min-w-0` (383d48c).
+
+## A desktop draft key has to reach the editor's exit summary, not only the selection
+
+After `r` or `cn` in the embedded editor, the reader shows the new draft's summary (`composeShown` with no session) while the list cursor stays on the received message, so a draft key that reads only the selection acts on the wrong row; `x` takes `summaryDraft(s)` first.

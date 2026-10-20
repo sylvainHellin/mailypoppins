@@ -279,7 +279,7 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `ce` | Edit recipients, in Drafts or on a conversation's draft member | list, reader | `draft_set_recipients`, the dialog filled from the listed row, or from `draft_preview` for a draft member |
 | `cA` | Approve, in Drafts or on a conversation's draft member | list, reader | `draft_approve` |
 | `cD` | Back to draft, in Drafts or on a conversation's draft member | list, reader | `draft_demote` |
-| `x` | Send the cursor draft, approving it first; a conversation's draft member confirms once `draft_preview` read its status and recipients | any pane | `send_draft` (`hold: true`) |
+| `x` | Send the draft the editor's exit summary shows, else the cursor draft, approving it first; the summary's draft and a conversation's draft member confirm once `draft_preview` read their status and recipients | any pane | `send_draft` (`hold: true`) |
 | `cX` | Send all approved drafts, Drafts only | list, reader | `send_approved` (`hold: true`) |
 | `ta` | Attach a file to the draft, Drafts only: the path dialog, with Browse for the system's file picker | list, reader | `draft_attach` |
 
@@ -372,7 +372,7 @@ The pane frees the PTY after the exit frame with `terminal_kill`, which the Rust
 So a session the model forgets, by "Close the editor", a discard or Done, takes its process with it; a `state.remove` never forgets a running one.
 What follows depends on how the editor ended:
 
-- Code 0 (`:wq`, `:q`) ends the session, and the reader area shows the draft's summary: `DraftPreview` over a fresh `draft_preview`, with Edit and Close, until a navigation or Close brings the selection back. When the selection is the draft already, the reader shows its usual preview. A draft that is gone (`draft_preview` refused) shows the selection, the message the reader showed before.
+- Code 0 (`:wq`, `:q`) ends the session, and the reader area shows the draft's summary: `DraftPreview` over a fresh `draft_preview`, with Edit and Close, until a navigation or Close brings the selection back; `x` sends that draft meanwhile, whatever the cursor is on (`summaryDraft`). When the selection is the draft already, the reader shows its usual preview. A draft that is gone (`draft_preview` refused) shows the selection, the message the reader showed before.
 - Code 0 also gives the focus back to the list, on the row it was on, so `j` and `k` move in the Drafts list at once (PERSO-124); the TUI's `e` returns to its list the same way. An editor that ends in the background moves no focus.
 - A nonzero code or a signal keeps the session and the pane, whose last output stays readable, and the banner shows the status with Reopen, which spawns again on the same path; the focus stays on the reader.
 - A spawn `terminal_spawn` refused turns the session to `failed` with a failure notice, and the reader shows the selection again.

@@ -174,6 +174,21 @@ describe("the exit", () => {
     expect(await within(reader()).findByRole("article", { name: message! })).toBeInTheDocument();
   });
 
+  it("x on the summary of a reply sends the reply, not the message the cursor is on", async () => {
+    const { user } = renderApp(1400, nvim);
+    await shellReady();
+    await replyEmbedded(user);
+    act(() => mock.terminal.exit(1, { code: 0, signal: null }));
+    await within(reader()).findByRole("article", { name: /^Draft: / });
+    await user.keyboard("x");
+    const confirm = await screen.findByRole("dialog", { name: "Draft is not approved. Approve and send?" });
+    expect(confirm).toHaveTextContent(/To: .* - Re: /);
+    expect(screen.queryByText("Send needs a draft; received mail has nothing to send")).toBeNull();
+    await user.keyboard("y");
+    await waitFor(() => expect(cmds("send_draft")).toHaveLength(1));
+    expect(mock.calls.find((c) => c.cmd === "send_draft")?.args).toMatchObject({ account: "work", id: "fixture-draft-1" });
+  });
+
   it("0 from a draft edited in the Drafts list gives the focus back to the list, on the draft's row (PERSO-124)", async () => {
     const { user } = renderApp(1400, nvim);
     await shellReady();

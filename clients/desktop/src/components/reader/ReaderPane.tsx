@@ -13,7 +13,7 @@ import * as compose from "@/app/compose";
 import { fetchHit, openHtml } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
 import { usePaneFocused } from "@/hooks/use-pane-focused";
-import { conversationDraft, draftOfKey, filteredDrafts, isStale, readerKey, type SearchHit } from "@/app/state";
+import { conversationDraft, filteredDrafts, isStale, readerKey, summaryDraft, type SearchHit } from "@/app/state";
 
 /**
  * A server-only search hit: the store holds no row, so there is no body to
@@ -91,7 +91,7 @@ export function ReaderPane() {
   // its draft's summary once it exited with 0 (docs/shell.md, "Compose").
   const shown = s.composeShown;
   const editor = shown ? s.compose[shown] : undefined;
-  const summary = shown && !editor ? draftOfKey(shown) : null;
+  const summary = summaryDraft(s);
 
   if (editor?.kind === "embedded") {
     return (
