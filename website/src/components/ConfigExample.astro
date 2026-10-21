@@ -1,5 +1,6 @@
 ---
 import { Code } from 'astro:components';
+import { codeTheme } from '../styles/code-theme';
 
 interface Props {
   code: string;
@@ -14,7 +15,7 @@ const { code, title, description } = Astro.props;
   {title && <h3>{title}</h3>}
   {description && <p class="config-desc">{description}</p>}
   <div class="config-code">
-    <Code code={code} lang="toml" theme="catppuccin-mocha" />
+    <Code code={code} lang="toml" theme={codeTheme} />
   </div>
 </div>
 
@@ -24,13 +25,13 @@ const { code, title, description } = Astro.props;
   }
 
   .config-desc {
-    color: var(--color-subtext1);
+    color: var(--color-text-soft);
     margin-bottom: var(--space-4);
   }
 
   .config-code {
-    background: var(--color-crust);
-    border: 1px solid var(--color-surface0);
+    background: var(--color-code-bg);
+    border: 1px solid var(--color-code-border);
     border-radius: 8px;
     padding: var(--space-4);
     overflow-x: auto;

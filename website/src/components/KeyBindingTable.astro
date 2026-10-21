@@ -31,7 +31,7 @@ const { bindings } = Astro.props;
     overflow-x: auto;
     margin-bottom: var(--space-6);
     border-radius: 8px;
-    border: 1px solid var(--color-surface0);
+    border: 1px solid var(--color-surface);
   }
 
   .keybinding-table {
@@ -41,13 +41,13 @@ const { bindings } = Astro.props;
   }
 
   .keybinding-table thead tr {
-    background: var(--color-surface0);
+    background: var(--color-surface);
   }
 
   .keybinding-table th {
     text-align: left;
     padding: var(--space-3) var(--space-4);
-    color: var(--color-subtext1);
+    color: var(--color-text-soft);
     font-size: 0.75rem;
     font-weight: 600;
     text-transform: uppercase;
@@ -56,12 +56,12 @@ const { bindings } = Astro.props;
 
   .keybinding-table td {
     padding: var(--space-3) var(--space-4);
-    color: var(--color-subtext1);
-    border-top: 1px solid var(--color-surface0);
+    color: var(--color-text-soft);
+    border-top: 1px solid var(--color-surface);
   }
 
   .keybinding-table tbody tr:nth-child(even) {
-    background: color-mix(in srgb, var(--color-surface0) 30%, transparent);
+    background: color-mix(in srgb, var(--color-surface) 30%, transparent);
   }
 
   .keybinding-table td kbd {
@@ -69,8 +69,8 @@ const { bindings } = Astro.props;
     font-family: var(--font-mono);
     font-size: 0.8em;
     color: var(--color-text);
-    background: var(--color-surface0);
-    border: 1px solid var(--color-surface1);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
     border-bottom-width: 2px;
     padding: 0.1em 0.45em;
     border-radius: 4px;

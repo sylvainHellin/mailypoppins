@@ -2,10 +2,12 @@
 import Layout from '../layouts/Layout.astro';
 import Nav from '../components/Nav.astro';
 import Footer from '../components/Footer.astro';
+import DocsTabs from '../components/DocsTabs.astro';
 import CommandTable from '../components/CommandTable.astro';
 import CodeBlock from '../components/CodeBlock.astro';
 import KeyBindingTable from '../components/KeyBindingTable.astro';
 import { Code } from 'astro:components';
+import { codeTheme } from '../styles/code-theme';
 // TUI key bindings are GENERATED from the single KEYMAP source of truth in
 // clients/tui/src/app/keymap.rs. Do not hand-edit; run scripts/regen-website-keys.sh
 // after changing KEYMAP so the site cannot drift from the TUI/help overlay.
@@ -179,9 +181,10 @@ const searchFlags = [
 const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 ---
 
-<Layout title="Commands -- mailypoppins" description="Complete reference for mailypoppins CLI commands and TUI key bindings.">
+<Layout title="Commands · mailypoppins" description="Complete reference for mailypoppins CLI commands and TUI key bindings.">
   <Nav />
   <main id="main-content" class="content page">
+    <DocsTabs />
     <header class="page-header">
       <h1>Commands</h1>
       <p class="subtitle">Complete reference for CLI commands and TUI key bindings.</p>
@@ -323,7 +326,7 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 mp completions zsh > "\${fpath[1]}/_mp"
 
 # bash: load it in ~/.bashrc
-eval "$(mp completions bash)"`} lang="sh" />
+eval "$(mp completions bash)"`} lang="sh" theme={codeTheme} />
     </section>
 
     <section>
@@ -541,7 +544,7 @@ mp send --invite --to me@example.com --subject "Kita closed" --start 2026-12-24 
 
   .subtitle {
     font-size: 1.125rem;
-    color: var(--color-subtext0);
+    color: var(--color-text-muted);
   }
 
   section {

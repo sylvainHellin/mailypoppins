@@ -1,0 +1,75 @@
+---
+// The two reasons to use mailypoppins over an established client.
+---
+
+<section class="why" aria-labelledby="why-heading">
+  <div class="content-wide">
+    <h2 id="why-heading" class="visually-hidden">Why mailypoppins</h2>
+    <div class="why-grid">
+      <article class="why-card">
+        <h3>Your editor, your keys</h3>
+        <ul>
+          <li>Every draft is a Markdown file that opens in Vim, Neovim or whatever <code>$EDITOR</code> you use.</li>
+          <li>The terminal client and the Mac app share one set of Vim keys: <code>j</code>/<code>k</code>, <code>gg</code>, <code>/</code>, visual mode and a <code>Space</code> leader.</li>
+          <li>The Mac app runs a real Neovim for each draft, inside its window.</li>
+          <li>Mail syncs from any IMAP provider or Microsoft 365 into a local store you can search offline.</li>
+        </ul>
+      </article>
+      <article class="why-card">
+        <h3>Built to work with your agent</h3>
+        <ul>
+          <li>Your AI agent runs the same <code>mp</code> commands you do, so it can search your mail for a contact or the history of a thread.</li>
+          <li>Ask it to proofread a draft, review it or write a first reply: it edits the same files you open.</li>
+          <li>It can tell you what you missed and what still waits for an answer.</li>
+          <li>A draft is sent only once it is marked approved, and that step stays yours.</li>
+          <li>The same <code>mp</code> runs on a Linux server, so an agent on your home server can work on your mail too.</li>
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
+
+<style>
+  .why {
+    padding: var(--space-8) 0 var(--space-16);
+  }
+
+  .why-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-6);
+  }
+
+  .why-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-top: 3px solid var(--color-frame);
+    border-radius: 10px;
+    padding: var(--space-6) var(--space-8);
+  }
+
+  .why-card h3 {
+    margin: 0 0 var(--space-4);
+    font-size: 1.25rem;
+  }
+
+  .why-card ul {
+    margin: 0;
+    padding-left: var(--space-5);
+    color: var(--color-text-soft);
+  }
+
+  .why-card li + li {
+    margin-top: var(--space-2);
+  }
+
+  @media (max-width: 768px) {
+    .why-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .why-card {
+      padding: var(--space-5);
+    }
+  }
+</style>

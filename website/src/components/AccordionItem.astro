@@ -19,7 +19,7 @@ const { question } = Astro.props;
 
 <style>
   .accordion-item {
-    border-bottom: 1px solid var(--color-surface0);
+    border-bottom: 1px solid var(--color-surface);
   }
 
   .accordion-question {
@@ -48,7 +48,7 @@ const { question } = Astro.props;
   .chevron {
     flex-shrink: 0;
     transition: transform 0.2s ease;
-    color: var(--color-overlay0);
+    color: var(--color-text-faint);
   }
 
   details[open] .chevron {
@@ -57,7 +57,7 @@ const { question } = Astro.props;
 
   .accordion-answer {
     padding-bottom: var(--space-6);
-    color: var(--color-subtext1);
+    color: var(--color-text-soft);
     line-height: 1.65;
   }
 
@@ -72,9 +72,9 @@ const { question } = Astro.props;
   .accordion-answer :global(code) {
     font-family: var(--font-mono);
     font-size: 0.875em;
-    background: var(--color-bg-code);
+    background: var(--color-code-bg);
     padding: 0.15em 0.35em;
     border-radius: 4px;
-    color: var(--color-peach);
+    color: var(--color-accent-text);
   }
 </style>

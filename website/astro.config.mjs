@@ -9,9 +9,4 @@ export default defineConfig({
   build: {
     assets: '_assets',
   },
-  markdown: {
-    shikiConfig: {
-      theme: 'catppuccin-mocha',
-    },
-  },
 });

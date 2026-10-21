@@ -52,13 +52,13 @@
     border: none;
     border-radius: 6px;
     background: transparent;
-    color: var(--color-overlay0);
+    color: var(--color-code-label);
     cursor: pointer;
     transition: background 0.15s ease, color 0.15s ease;
   }
 
   .copy-btn:hover {
-    background: var(--color-surface0);
-    color: var(--color-text);
+    background: var(--color-code-header);
+    color: #F4F1E8;
   }
 </style>

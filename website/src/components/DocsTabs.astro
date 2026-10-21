@@ -1,0 +1,43 @@
+---
+import { docsTabs, isActive } from '../data/nav';
+
+const currentPath = Astro.url.pathname;
+---
+
+<nav class="docs-tabs" aria-label="Reference">
+  {docsTabs.map((tab) => (
+    <a
+      href={tab.href}
+      class:list={['docs-tab', { active: isActive(tab, currentPath) }]}
+      aria-current={isActive(tab, currentPath) ? 'page' : undefined}
+    >
+      {tab.label}
+    </a>
+  ))}
+</nav>
+
+<style>
+  .docs-tabs {
+    display: flex;
+    gap: var(--space-1);
+    border-bottom: 1px solid var(--color-border);
+    margin-bottom: var(--space-8);
+  }
+
+  .docs-tab {
+    padding: var(--space-2) var(--space-3);
+    margin-bottom: -1px;
+    font-size: 0.9375rem;
+    color: var(--color-text-muted);
+    border-bottom: 2px solid transparent;
+  }
+
+  .docs-tab:hover {
+    color: var(--color-text);
+  }
+
+  .docs-tab.active {
+    color: var(--color-text);
+    border-bottom-color: var(--color-frame);
+  }
+</style>

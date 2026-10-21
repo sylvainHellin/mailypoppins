@@ -11,7 +11,7 @@ cargo build --release`;
 const installCode = `cargo install --path .`;
 ---
 
-<Layout title="Open Source -- mailypoppins">
+<Layout title="Open Source · mailypoppins">
   <Nav />
   <main id="main-content" class="content page">
     <header class="page-header">
@@ -92,7 +92,7 @@ const installCode = `cargo install --path .`;
 
   .subtitle {
     font-size: 1.125rem;
-    color: var(--color-subtext0);
+    color: var(--color-text-muted);
   }
 
   .repo-section {
@@ -104,7 +104,7 @@ const installCode = `cargo install --path .`;
     flex-direction: column;
     align-items: center;
     text-align: center;
-    background: var(--color-bg-card);
+    background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: 12px;
     padding: var(--space-10) var(--space-8);
@@ -124,37 +124,17 @@ const installCode = `cargo install --path .`;
   }
 
   .repo-description {
-    color: var(--color-subtext0);
+    color: var(--color-text-muted);
     margin-bottom: var(--space-4);
   }
 
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    padding: var(--space-3) var(--space-6);
-    font-size: 1rem;
-    font-weight: 600;
-    border-radius: 8px;
-    transition: background 0.15s ease, color 0.15s ease;
-    text-decoration: none;
-  }
-
-  .btn-primary {
-    background: var(--color-mauve);
-    color: var(--color-crust);
-  }
-
-  .btn-primary:hover {
-    background: color-mix(in srgb, var(--color-mauve) 85%, white);
-    color: var(--color-crust);
-  }
 
   section {
     margin-bottom: var(--space-8);
   }
 
   .contribute-list {
-    color: var(--color-subtext1);
+    color: var(--color-text-soft);
     padding-left: var(--space-6);
     margin-bottom: var(--space-6);
   }

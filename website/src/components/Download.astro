@@ -1,0 +1,97 @@
+---
+import CodeBlock from './CodeBlock.astro';
+
+// GitHub serves the newest release's assets under /releases/latest/download/,
+// so these links follow every release without an edit here.
+const latest = 'https://github.com/sylvainHellin/mailypoppins/releases/latest/download';
+---
+
+<section id="download" class="download" aria-labelledby="download-heading">
+  <div class="content-wide">
+    <h2 id="download-heading">Download</h2>
+    <div class="download-grid">
+      <article class="download-card">
+        <h3>Mac app</h3>
+        <p>For Apple silicon. It brings its own <code>mp</code> and updates itself.</p>
+        <a class="btn btn-primary" href={`${latest}/mailypoppins-desktop-aarch64-apple-darwin.dmg`}>Download .dmg</a>
+        <p class="note">Not signed yet: allow it once under System Settings, Privacy &amp; Security. <a href="/getting-started/#mac-app">Details</a></p>
+      </article>
+      <article class="download-card">
+        <h3>Terminal and command line</h3>
+        <p>macOS and Linux, through Homebrew:</p>
+        <CodeBlock lang="bash" code={`brew tap sylvainHellin/mailypoppins\nbrew install mailypoppins`} />
+        <p class="note">
+          Or a binary for
+          <a href={`${latest}/mailypoppins-aarch64-apple-darwin.tar.gz`}>macOS arm64</a>,
+          <a href={`${latest}/mailypoppins-x86_64-unknown-linux-gnu.tar.gz`}>Linux x86_64</a> or
+          <a href={`${latest}/mailypoppins-x86_64-unknown-linux-musl.tar.gz`}>Linux x86_64 static</a>.
+        </p>
+      </article>
+    </div>
+    <p class="next">Then set up an account in the <a href="/getting-started/">guide</a>.</p>
+  </div>
+</section>
+
+<style>
+  .download {
+    padding: var(--space-16) 0 var(--space-20);
+  }
+
+  .download h2 {
+    text-align: center;
+    margin: 0 0 var(--space-8);
+  }
+
+  .download-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-6);
+  }
+
+  .download-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    padding: var(--space-6) var(--space-8);
+  }
+
+  .download-card h3 {
+    margin: 0;
+    font-size: 1.25rem;
+  }
+
+  .download-card p {
+    margin: 0;
+    color: var(--color-text-soft);
+  }
+
+  .download-card :global(.code-block) {
+    width: 100%;
+    margin: 0;
+  }
+
+  .note {
+    font-size: 0.875rem;
+    color: var(--color-text-muted) !important;
+  }
+
+  .next {
+    text-align: center;
+    margin: var(--space-8) 0 0;
+    color: var(--color-text-muted);
+  }
+
+  @media (max-width: 768px) {
+    .download-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .download-card {
+      padding: var(--space-5);
+    }
+  }
+</style>

@@ -2,9 +2,11 @@
 import Layout from '../layouts/Layout.astro';
 import Nav from '../components/Nav.astro';
 import Footer from '../components/Footer.astro';
+import DocsTabs from '../components/DocsTabs.astro';
 import CommandTable from '../components/CommandTable.astro';
 import WorkflowDiagram from '../components/WorkflowDiagram.astro';
 import { Code } from 'astro:components';
+import { codeTheme } from '../styles/code-theme';
 
 const frontmatterFields = [
   { command: 'to', description: 'Recipient address(es). Required. Comma-separated for multiple.' },
@@ -107,9 +109,10 @@ message_id: "<unique-id@example.com>"
 Email body here.`;
 ---
 
-<Layout title="Draft Format -- mailypoppins" description="Markdown email drafts with YAML frontmatter -- fields, status workflow, attachments, and signatures.">
+<Layout title="Draft Format · mailypoppins" description="Markdown email drafts with YAML frontmatter -- fields, status workflow, attachments, and signatures.">
   <Nav />
   <main id="main-content" class="content page">
+    <DocsTabs />
     <header class="page-header">
       <h1>Draft Format</h1>
       <p class="subtitle">Markdown email drafts with YAML frontmatter.</p>
@@ -122,7 +125,7 @@ Email body here.`;
         metadata (recipients, subject, status), and the body below the second <code>---</code>
         is the email content written in Markdown, which gets converted to HTML when sent.
       </p>
-      <Code code={basicDraft} lang="markdown" theme="catppuccin-mocha" />
+      <Code code={basicDraft} lang="markdown" theme={codeTheme} />
     </section>
 
     <section>
@@ -149,7 +152,7 @@ Email body here.`;
         <code>sent_via</code> (tool version), and <code>message_id</code> (the RFC 822 Message-ID,
         used for sync deduplication).
       </p>
-      <Code code={sentExample} lang="markdown" theme="catppuccin-mocha" />
+      <Code code={sentExample} lang="markdown" theme={codeTheme} />
       <p>
         A send that reached every recipient and was recorded in the outbox then deletes
         the draft file: the copy that matters lives on the server, where the outbox appends
@@ -224,7 +227,7 @@ Email body here.`;
         Drafts written by older versions carry <code>{"{{SIGNATURE}}"}</code> in the same
         place; it is read as the same boundary, so those drafts still send correctly.
       </p>
-      <Code code={replyExample} lang="markdown" theme="catppuccin-mocha" />
+      <Code code={replyExample} lang="markdown" theme={codeTheme} />
     </section>
 
     <section>
@@ -237,7 +240,7 @@ Email body here.`;
         is recorded in <code>forwarded_from</code> and is marked as forwarded once the draft
         goes out.
       </p>
-      <Code code={forwardExample} lang="markdown" theme="catppuccin-mocha" />
+      <Code code={forwardExample} lang="markdown" theme={codeTheme} />
     </section>
 
     <section>
@@ -253,7 +256,7 @@ Email body here.`;
         body for a new message, in the reply area above the quoted content for a reply or
         forward. An account with no default signature adds nothing.
       </p>
-      <Code code={signatureExample} lang="markdown" theme="catppuccin-mocha" />
+      <Code code={signatureExample} lang="markdown" theme={codeTheme} />
       <p>
         Use <code>-s &lt;name&gt;</code> to select a specific signature, or
         <code>--no-signature</code> to skip it entirely.
@@ -292,8 +295,8 @@ Email body here.`;
         a signature's logos, are part of the body rather than attachments and are not carried; an
         image the body does not reference is.
       </p>
-      <Code code={attachmentStructure} lang="text" theme="catppuccin-mocha" />
-      <Code code={attachmentFrontmatter} lang="yaml" theme="catppuccin-mocha" />
+      <Code code={attachmentStructure} lang="text" theme={codeTheme} />
+      <Code code={attachmentFrontmatter} lang="yaml" theme={codeTheme} />
       <p>
         To read an attachment of a received message rather than forward it: in the TUI press
         <code>to</code> to open one in the default app (it is written to a private temp directory
@@ -317,7 +320,7 @@ Email body here.`;
 
   .subtitle {
     font-size: 1.125rem;
-    color: var(--color-subtext0);
+    color: var(--color-text-muted);
   }
 
   section {

@@ -3,26 +3,15 @@ import MobileMenu from './MobileMenu.svelte';
 
 const currentPath = Astro.url.pathname;
 
-const navLinks = [
-  { href: '/', label: 'Home' },
-  { href: '/getting-started/', label: 'Getting Started' },
-  { href: '/commands/', label: 'Commands' },
-  { href: '/draft-format/', label: 'Draft Format' },
-  { href: '/config/', label: 'Config' },
-  { href: '/faq/', label: 'FAQ' },
-];
-
-function isActive(href: string): boolean {
-  if (href === '/') return currentPath === '/';
-  return currentPath.startsWith(href);
-}
+import { navLinks, isActive } from '../data/nav';
 ---
 
 <nav class="nav">
   <div class="nav-inner content-wide">
     <a href="/" class="nav-logo" aria-label="mailypoppins home">
-      <svg width="30" height="30" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <g fill="none" stroke="currentColor" stroke-width="40" stroke-linecap="round" stroke-linejoin="round">
+      <svg width="28" height="28" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <rect width="1024" height="1024" rx="224" fill="#0C1B33"/>
+        <g fill="none" stroke="#F4F1E8" stroke-width="44" stroke-linecap="round" stroke-linejoin="round">
           <path d="M212 480 C 212 300 350 190 512 190 C 674 190 812 300 812 480 a 75 56 0 0 0 -150 0 a 75 56 0 0 0 -150 0 a 75 56 0 0 0 -150 0 a 75 56 0 0 0 -150 0 Z"/>
           <path d="M512 190 V 150"/>
           <path d="M512 480 V 560"/>
@@ -30,15 +19,16 @@ function isActive(href: string): boolean {
           <rect x="232" y="560" width="560" height="320" rx="24"/>
           <path d="M232 584 L512 760 L792 584"/>
         </g>
-        <circle cx="512" cy="130" r="30" fill="#FF6700"/>
+        <circle cx="512" cy="130" r="34" fill="#FF6700"/>
       </svg>
+      <span class="nav-wordmark">mailypoppins</span>
     </a>
 
     <div class="nav-links">
       {navLinks.map((link) => (
         <a
           href={link.href}
-          class:list={['nav-link', { active: isActive(link.href) }]}
+          class:list={['nav-link', { active: isActive(link, currentPath) }]}
         >
           {link.label}
         </a>
@@ -47,7 +37,7 @@ function isActive(href: string): boolean {
 
     <div class="nav-right">
       <a
-        href="https://github.com/sylvainhellin/mailypoppins"
+        href="https://github.com/sylvainHellin/mailypoppins"
         class="nav-github"
         aria-label="GitHub repository"
         target="_blank"
@@ -71,7 +61,7 @@ function isActive(href: string): boolean {
     top: 0;
     z-index: 100;
     height: var(--nav-height);
-    background: color-mix(in srgb, var(--color-bg-nav) 85%, transparent);
+    background: color-mix(in srgb, var(--color-bg) 85%, transparent);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--color-border-subtle);
@@ -87,13 +77,30 @@ function isActive(href: string): boolean {
   .nav-logo {
     display: flex;
     align-items: center;
+    gap: var(--space-2);
     flex-shrink: 0;
     color: var(--color-text);
     transition: opacity 0.15s ease;
   }
 
+  .nav-logo svg {
+    border-radius: 7px;
+    box-shadow: 0 0 0 1px var(--color-border-subtle);
+  }
+
+  .nav-wordmark {
+    font-weight: 600;
+    font-size: 1.0625rem;
+    letter-spacing: -0.025em;
+    margin-right: var(--space-4);
+  }
+
   .nav-logo:hover {
-    opacity: 0.8;
+    color: var(--color-text);
+  }
+
+  .nav-logo:hover {
+    opacity: 0.85;
   }
 
   .nav-links {
@@ -106,19 +113,19 @@ function isActive(href: string): boolean {
   .nav-link {
     padding: var(--space-2) var(--space-3);
     font-size: 0.875rem;
-    color: var(--color-subtext0);
+    color: var(--color-text-muted);
     border-radius: 6px;
     transition: color 0.15s ease, background 0.15s ease;
   }
 
   .nav-link:hover {
     color: var(--color-text);
-    background: var(--color-surface0);
+    background: var(--color-surface-hover);
   }
 
   .nav-link.active {
-    color: var(--color-mauve);
-    background: color-mix(in srgb, var(--color-mauve) 10%, transparent);
+    color: var(--color-text);
+    background: var(--color-surface-hover);
   }
 
   .nav-right {
@@ -131,7 +138,7 @@ function isActive(href: string): boolean {
   .nav-github {
     display: flex;
     align-items: center;
-    color: var(--color-subtext0);
+    color: var(--color-text-muted);
     transition: color 0.15s ease;
   }
 

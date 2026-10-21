@@ -1,5 +1,6 @@
 ---
 import { Code } from 'astro:components';
+import { codeTheme } from '../styles/code-theme';
 import CopyButton from './CopyButton.svelte';
 
 interface Props {
@@ -21,14 +22,14 @@ const label = filename || lang;
   )}
   <div class="code-body">
     <CopyButton client:load text={code} />
-    <Code code={code} lang={lang} theme="catppuccin-mocha" />
+    <Code code={code} lang={lang} theme={codeTheme} />
   </div>
 </div>
 
 <style>
   .code-block {
-    background: var(--color-crust);
-    border: 1px solid var(--color-surface0);
+    background: var(--color-code-bg);
+    border: 1px solid var(--color-code-border);
     border-radius: 8px;
     overflow: hidden;
     margin-bottom: var(--space-6);
@@ -38,14 +39,14 @@ const label = filename || lang;
     display: flex;
     align-items: center;
     padding: var(--space-2) var(--space-4);
-    background: var(--color-surface0);
-    border-bottom: 1px solid var(--color-surface0);
+    background: var(--color-code-header);
+    border-bottom: 1px solid var(--color-code-border);
   }
 
   .code-label {
     font-family: var(--font-mono);
     font-size: 0.75rem;
-    color: var(--color-overlay0);
+    color: var(--color-code-label);
   }
 
   .code-body {

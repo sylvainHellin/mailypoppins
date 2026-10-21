@@ -6,7 +6,7 @@ import CodeBlock from '../components/CodeBlock.astro';
 import { Code } from 'astro:components';
 ---
 
-<Layout title="Getting Started -- mailypoppins" description="Install mailypoppins and send your first email in under 5 minutes.">
+<Layout title="Getting Started · mailypoppins" description="Install mailypoppins and send your first email in under 5 minutes.">
   <Nav />
   <main id="main-content" class="content page">
     <header class="page-header">
@@ -16,7 +16,7 @@ import { Code } from 'astro:components';
 
     <!-- Installation -->
     <section>
-      <h2>Installation</h2>
+      <h2 id="installation">Installation</h2>
 
       <h3>Homebrew (macOS and Linux)</h3>
       <p>
@@ -37,7 +37,7 @@ brew install mailypoppins`}
         <code>mp</code> binary somewhere on your <code>PATH</code>.
       </p>
 
-      <h3>Mac app</h3>
+      <h3 id="mac-app">Mac app</h3>
       <p>
         <em>From 0.11.0.</em> Download
         <code>mailypoppins-desktop-aarch64-apple-darwin.dmg</code> (Apple
@@ -273,7 +273,7 @@ Let me know if I missed anything.`}
 
   .subtitle {
     font-size: 1.125rem;
-    color: var(--color-subtext0);
+    color: var(--color-text-muted);
   }
 
   section {
@@ -283,7 +283,7 @@ Let me know if I missed anything.`}
   .steps {
     list-style: decimal;
     padding-left: var(--space-6);
-    color: var(--color-subtext1);
+    color: var(--color-text-soft);
     margin-bottom: var(--space-6);
   }
 
@@ -295,7 +295,7 @@ Let me know if I missed anything.`}
   .key-list {
     list-style: disc;
     padding-left: var(--space-6);
-    color: var(--color-subtext1);
+    color: var(--color-text-soft);
     margin-bottom: var(--space-6);
   }
 
@@ -311,16 +311,16 @@ Let me know if I missed anything.`}
 
   .next-links li {
     margin-bottom: var(--space-3);
-    color: var(--color-subtext1);
+    color: var(--color-text-soft);
     line-height: 1.6;
   }
 
   .next-links a {
-    color: var(--color-mauve);
+    color: var(--color-link);
     font-weight: 500;
   }
 
   .next-links a:hover {
-    color: var(--color-peach);
+    color: var(--color-accent-text);
   }
 </style>

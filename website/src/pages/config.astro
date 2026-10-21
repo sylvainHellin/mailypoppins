@@ -2,13 +2,16 @@
 import Layout from '../layouts/Layout.astro';
 import Nav from '../components/Nav.astro';
 import Footer from '../components/Footer.astro';
+import DocsTabs from '../components/DocsTabs.astro';
 import ConfigExample from '../components/ConfigExample.astro';
 import { Code } from 'astro:components';
+import { codeTheme } from '../styles/code-theme';
 ---
 
-<Layout title="Configuration -- mailypoppins" description="Complete configuration reference for mailypoppins email CLI.">
+<Layout title="Configuration · mailypoppins" description="Complete configuration reference for mailypoppins email CLI.">
   <Nav />
   <main id="main-content" class="content page">
+    <DocsTabs />
     <header class="page-header">
       <h1>Configuration</h1>
       <p class="subtitle">Complete reference for <code>~/.config/mailypoppins/config.toml</code></p>
@@ -386,7 +389,7 @@ server = "Sent Items"`} />
       </p>
       <p>Set or update passwords with:</p>
       <div class="code-inline">
-        <Code code="mp config set-password" lang="bash" theme="catppuccin-mocha" />
+        <Code code="mp config set-password" lang="bash" theme={codeTheme} />
       </div>
       <ConfigExample title="Password auth config" code={`[[accounts]]
 name = "personal"
@@ -409,7 +412,7 @@ username = "me@example.com"`} />
       </p>
       <p>Run the device code flow to authenticate:</p>
       <div class="code-inline">
-        <Code code="mp config oauth2-login --account work" lang="bash" theme="catppuccin-mocha" />
+        <Code code="mp config oauth2-login --account work" lang="bash" theme={codeTheme} />
       </div>
       <ConfigExample title="OAuth2 (IMAP/SMTP) config" code={`[[accounts]]
 name = "work"
@@ -443,7 +446,7 @@ username = "name@company.com"`} />
         SMTP and IMAP sections are not needed.
       </p>
       <div class="code-inline">
-        <Code code="mp config oauth2-login --account exchange" lang="bash" theme="catppuccin-mocha" />
+        <Code code="mp config oauth2-login --account exchange" lang="bash" theme={codeTheme} />
       </div>
       <ConfigExample title="Graph API config" code={`[[accounts]]
 name = "exchange"
@@ -529,7 +532,7 @@ server = "sentitems"          # Not "Sent Items"`} />
       </ul>
       <p>To set or update a password:</p>
       <div class="code-inline">
-        <Code code="mp config set-password" lang="bash" theme="catppuccin-mocha" />
+        <Code code="mp config set-password" lang="bash" theme={codeTheme} />
       </div>
       <p>
         The command prompts you to select which password to update (SMTP or IMAP) and
@@ -552,7 +555,7 @@ server = "sentitems"          # Not "Sent Items"`} />
 
   .subtitle {
     font-size: 1.125rem;
-    color: var(--color-subtext0);
+    color: var(--color-text-muted);
   }
 
   section {
@@ -562,7 +565,7 @@ server = "sentitems"          # Not "Sent Items"`} />
   .setup-steps {
     list-style: decimal;
     padding-left: var(--space-6);
-    color: var(--color-subtext1);
+    color: var(--color-text-soft);
     margin-bottom: var(--space-6);
   }
 
@@ -584,7 +587,7 @@ server = "sentitems"          # Not "Sent Items"`} />
   .keyring-list {
     list-style: disc;
     padding-left: var(--space-6);
-    color: var(--color-subtext1);
+    color: var(--color-text-soft);
     margin-bottom: var(--space-4);
   }
 
@@ -593,8 +596,8 @@ server = "sentitems"          # Not "Sent Items"`} />
   }
 
   .code-inline {
-    background: var(--color-crust);
-    border: 1px solid var(--color-surface0);
+    background: var(--color-code-bg);
+    border: 1px solid var(--color-code-border);
     border-radius: 8px;
     padding: var(--space-3) var(--space-4);
     overflow-x: auto;

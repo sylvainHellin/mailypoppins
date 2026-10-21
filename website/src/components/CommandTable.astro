@@ -31,7 +31,7 @@ const { commands } = Astro.props;
     overflow-x: auto;
     margin-bottom: var(--space-6);
     border-radius: 8px;
-    border: 1px solid var(--color-surface0);
+    border: 1px solid var(--color-surface);
   }
 
   .command-table {
@@ -41,13 +41,13 @@ const { commands } = Astro.props;
   }
 
   .command-table thead tr {
-    background: var(--color-surface0);
+    background: var(--color-surface);
   }
 
   .command-table th {
     text-align: left;
     padding: var(--space-3) var(--space-4);
-    color: var(--color-subtext1);
+    color: var(--color-text-soft);
     font-size: 0.75rem;
     font-weight: 600;
     text-transform: uppercase;
@@ -56,19 +56,19 @@ const { commands } = Astro.props;
 
   .command-table td {
     padding: var(--space-3) var(--space-4);
-    color: var(--color-subtext1);
-    border-top: 1px solid var(--color-surface0);
+    color: var(--color-text-soft);
+    border-top: 1px solid var(--color-surface);
   }
 
   .command-table tbody tr:nth-child(even) {
-    background: color-mix(in srgb, var(--color-surface0) 30%, transparent);
+    background: color-mix(in srgb, var(--color-surface) 30%, transparent);
   }
 
   .command-table td code {
     font-family: var(--font-mono);
     font-size: 0.85em;
-    color: var(--color-mauve);
-    background: var(--color-bg-code);
+    color: var(--color-link);
+    background: var(--color-code-bg);
     padding: 0.15em 0.35em;
     border-radius: 4px;
     white-space: nowrap;

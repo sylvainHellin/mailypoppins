@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { navLinks, isActive } from '../data/nav';
+
   interface Props {
     currentPath: string;
   }
@@ -7,19 +9,6 @@
 
   let open = $state(false);
 
-  const navLinks = [
-    { href: '/', label: 'Home' },
-    { href: '/getting-started/', label: 'Getting Started' },
-    { href: '/commands/', label: 'Commands' },
-    { href: '/draft-format/', label: 'Draft Format' },
-    { href: '/config/', label: 'Config' },
-    { href: '/faq/', label: 'FAQ' },
-  ];
-
-  function isActive(href: string): boolean {
-    if (href === '/') return currentPath === '/';
-    return currentPath.startsWith(href);
-  }
 
   function toggle() {
     open = !open;
@@ -58,7 +47,7 @@
         <a
           href={link.href}
           class="menu-link"
-          class:active={isActive(link.href)}
+          class:active={isActive(link, currentPath)}
           onclick={close}
         >
           {link.label}
@@ -77,7 +66,7 @@
     height: 36px;
     background: none;
     border: none;
-    color: var(--color-subtext0);
+    color: var(--color-text-muted);
     cursor: pointer;
     border-radius: 6px;
     transition: color 0.15s ease, background 0.15s ease;
@@ -85,13 +74,13 @@
 
   .hamburger:hover {
     color: var(--color-text);
-    background: var(--color-surface0);
+    background: var(--color-surface-hover);
   }
 
   .overlay {
     position: fixed;
     inset: var(--nav-height) 0 0 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: rgba(12, 27, 51, 0.5);
     z-index: 90;
   }
 
@@ -100,7 +89,7 @@
     top: var(--nav-height);
     left: 0;
     right: 0;
-    background: var(--color-bg-nav);
+    background: var(--color-bg-raised);
     border-bottom: 1px solid var(--color-border-subtle);
     padding: var(--space-4);
     z-index: 95;
@@ -128,7 +117,7 @@
     display: block;
     padding: var(--space-3) var(--space-4);
     font-size: 1rem;
-    color: var(--color-subtext0);
+    color: var(--color-text-muted);
     border-radius: 6px;
     text-decoration: none;
     transition: color 0.15s ease, background 0.15s ease;
@@ -136,11 +125,11 @@
 
   .menu-link:hover {
     color: var(--color-text);
-    background: var(--color-surface0);
+    background: var(--color-surface-hover);
   }
 
   .menu-link.active {
-    color: var(--color-mauve);
-    background: color-mix(in srgb, var(--color-mauve) 10%, transparent);
+    color: var(--color-text);
+    background: var(--color-surface-hover);
   }
 </style>

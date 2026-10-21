@@ -19,40 +19,48 @@
 }
 
 /* ============================================================
-   Catppuccin Mocha palette
+   Palette: Basenord Palette D, as in the desktop app
+   (clients/desktop/src/index.css). Light is Palette D itself, dark its
+   Prussian inverse; the site follows the system setting. Prussian #0C1B33,
+   Cream #F4F1E8, Ocean #2E86AB, Pumpkin #FF6700 (calls to action only).
+   Code blocks stay on Prussian in both themes (code-theme.ts).
    ============================================================ */
 
 :root {
-  --color-base: #1e1e2e;
-  --color-mantle: #181825;
-  --color-crust: #11111b;
-  --color-surface0: #313244;
-  --color-surface1: #45475a;
-  --color-surface2: #585b70;
-  --color-overlay0: #6c7086;
-  --color-overlay1: #7f849c;
-  --color-text: #cdd6f4;
-  --color-subtext1: #bac2de;
-  --color-subtext0: #a6adc8;
-  --color-mauve: #cba6f7;
-  --color-peach: #fab387;
-  --color-green: #a6e3a1;
-  --color-blue: #89b4fa;
-  --color-yellow: #f9e2af;
-  --color-red: #f38ba8;
-  --color-teal: #94e2d5;
+  color-scheme: light;
 
-  /* Semantic aliases */
-  --color-accent: var(--color-mauve);
-  --color-accent-hover: var(--color-peach);
-  --color-link: var(--color-mauve);
-  --color-link-hover: var(--color-peach);
-  --color-bg: var(--color-base);
-  --color-bg-nav: var(--color-mantle);
-  --color-bg-code: var(--color-crust);
-  --color-bg-card: var(--color-surface0);
-  --color-border: var(--color-surface1);
-  --color-border-subtle: var(--color-surface0);
+  --color-bg: #F4F1E8;
+  --color-bg-raised: #FBFAF6;
+  --color-surface: #FFFFFF;
+  --color-surface-hover: #ECE8DD;
+  --color-border: #D3D6DC;
+  --color-border-subtle: #E4DFD0;
+  --color-border-strong: #7D889B;
+
+  --color-text: #0C1B33;
+  --color-text-soft: #24324A;
+  --color-text-muted: #46546C;
+  --color-text-faint: #5E6A80;
+
+  --color-link: #1A6385;
+  --color-link-hover: #A04000;
+  --color-frame: #2E86AB;
+  --color-ring: #1F6F93;
+  --color-selection: #CFE3EE;
+
+  --color-cta: #FF6700;
+  --color-cta-hover: #FF7F26;
+  --color-cta-text: #0C1B33;
+
+  --color-accent-text: #A04000;
+  --color-inline-code-bg: #ECE8DD;
+
+  --color-code-bg: #0C1B33;
+  --color-code-header: #142A4A;
+  --color-code-border: #0C1B33;
+  --color-code-label: #B4BFCE;
+
+  --shadow-shot: 0 12px 40px rgba(12, 27, 51, 0.18);
 
   /* Spacing scale */
   --space-1: 0.25rem;
@@ -76,6 +84,44 @@
   --nav-height: 3.5rem;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --color-bg: #0C1B33;
+    --color-bg-raised: #0F213D;
+    --color-surface: #142A4A;
+    --color-surface-hover: #1A3457;
+    --color-border: #25406A;
+    --color-border-subtle: #1E3558;
+    --color-border-strong: #5075A8;
+
+    --color-text: #F4F1E8;
+    --color-text-soft: #E2DFD5;
+    --color-text-muted: #B4BFCE;
+    --color-text-faint: #8F9CB2;
+
+    --color-link: #6DB6DA;
+    --color-link-hover: #FF8A3D;
+    --color-frame: #2E86AB;
+    --color-ring: #4BA3CC;
+    --color-selection: #174A68;
+
+    --color-accent-text: #FF8A3D;
+    --color-inline-code-bg: #142A4A;
+
+    --color-code-bg: #081426;
+    --color-code-header: #0F213D;
+    --color-code-border: #25406A;
+
+    --shadow-shot: 0 12px 40px rgba(0, 0, 0, 0.45);
+  }
+}
+
+::selection {
+  background: var(--color-selection);
+}
+
 /* ============================================================
    Reset
    ============================================================ */
@@ -92,7 +138,6 @@
 html {
   scroll-behavior: smooth;
   -webkit-text-size-adjust: 100%;
-  color-scheme: dark;
 }
 
 body {
@@ -123,17 +168,16 @@ h1, h2, h3 {
   line-height: 1.2;
   color: var(--color-text);
   font-weight: 600;
+  letter-spacing: -0.025em;
 }
 
 h1 {
   font-size: 2.5rem;
-  letter-spacing: -0.02em;
   margin-bottom: var(--space-6);
 }
 
 h2 {
   font-size: 1.75rem;
-  letter-spacing: -0.01em;
   margin-top: var(--space-12);
   margin-bottom: var(--space-4);
 }
@@ -146,7 +190,7 @@ h3 {
 
 p {
   margin-bottom: var(--space-4);
-  color: var(--color-subtext1);
+  color: var(--color-text-soft);
 }
 
 a {
@@ -162,18 +206,19 @@ a:hover {
 code {
   font-family: var(--font-mono);
   font-size: 0.875em;
-  background: var(--color-bg-code);
+  background: var(--color-inline-code-bg);
   padding: 0.15em 0.35em;
   border-radius: 4px;
-  color: var(--color-peach);
+  color: var(--color-accent-text);
 }
 
 pre {
   font-family: var(--font-mono);
   font-size: 0.875rem;
   line-height: 1.6;
-  background: var(--color-bg-code);
-  border: 1px solid var(--color-border-subtle);
+  background: var(--color-code-bg);
+  color: #F4F1E8;
+  border: 1px solid var(--color-code-border);
   border-radius: 8px;
   padding: var(--space-4);
   overflow-x: auto;
@@ -208,7 +253,7 @@ pre code {
    ============================================================ */
 
 :focus-visible {
-  outline: 2px solid var(--color-mauve);
+  outline: 2px solid var(--color-ring);
   outline-offset: 2px;
 }
 
@@ -226,36 +271,61 @@ pre code {
 }
 
 /* ============================================================
-   Scrollbar (dark theme)
+   Scrollbar
    ============================================================ */
 
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: var(--color-mantle);
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--color-surface1);
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--color-surface2);
-}
-
-/* Firefox */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--color-surface1) var(--color-mantle);
+  scrollbar-color: var(--color-border) transparent;
 }
 
 /* ============================================================
-   Responsive breakpoints
+   Buttons
    ============================================================ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-5);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  border-radius: 8px;
+  border: 1.5px solid transparent;
+  text-decoration: none;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-primary {
+  background: var(--color-cta);
+  color: var(--color-cta-text);
+}
+
+.btn-primary:hover {
+  background: var(--color-cta-hover);
+  color: var(--color-cta-text);
+}
+
+.btn-secondary {
+  background: transparent;
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+}
+
+.btn-secondary:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 
 /* ============================================================
    Skip link (a11y)
@@ -267,8 +337,8 @@ pre code {
   left: var(--space-4);
   z-index: 200;
   padding: var(--space-2) var(--space-4);
-  background: var(--color-mauve);
-  color: var(--color-crust);
+  background: var(--color-cta);
+  color: var(--color-cta-text);
   border-radius: 0 0 4px 4px;
   font-weight: 600;
   text-decoration: none;
