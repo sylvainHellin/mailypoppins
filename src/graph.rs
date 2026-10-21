@@ -2478,16 +2478,11 @@ impl GraphClient {
         &self,
         internet_message_id: &str,
     ) -> Result<Option<String>> {
-        // The $filter on internetMessageId needs the angle brackets escaped
-        let clean_id = internet_message_id.trim_matches(|c| c == '<' || c == '>');
-        let url = format!(
-            "{}/me/messages?$filter=internetMessageId eq '<{}>'&$select=id",
-            GRAPH_BASE, clean_id
-        );
+        let url = message_lookup_url(internet_message_id)?;
 
         let resp = self
             .client
-            .get(&url)
+            .get(url)
             .bearer_auth(self.bearer())
             .send()
             .await
@@ -2717,6 +2712,25 @@ fn search_url(
         .collect::<Vec<_>>()
         .join("&");
     let mut url = reqwest::Url::parse(base).with_context(|| format!("parsing {base}"))?;
+    url.set_query(Some(&query));
+    Ok(url)
+}
+
+/// The URL looking a message up by its `Message-ID` across every folder.
+///
+/// The id goes into an OData string literal, so a single quote in it is
+/// doubled, and the whole `$filter` value is percent-encoded: a raw `+` would
+/// read as a space, a `&` would end the parameter and a `#` the query, and the
+/// lookup would quietly find nothing.
+fn message_lookup_url(internet_message_id: &str) -> Result<reqwest::Url> {
+    let clean_id = internet_message_id.trim_matches(|c| c == '<' || c == '>');
+    let filter = format!("internetMessageId eq '<{}>'", clean_id.replace('\'', "''"));
+    let query = format!(
+        "$filter={}&$select=id",
+        percent_encoding::utf8_percent_encode(&filter, QUERY_VALUE_ENCODE_SET)
+    );
+    let base = format!("{GRAPH_BASE}/me/messages");
+    let mut url = reqwest::Url::parse(&base).with_context(|| format!("parsing {base}"))?;
     url.set_query(Some(&query));
     Ok(url)
 }
@@ -3564,6 +3578,34 @@ mod tests {
             pairs["$search"]
         );
         assert_eq!(pairs["$top"], "10");
+    }
+
+    /// A Message-ID carrying URL and OData metacharacters reaches Graph as
+    /// exactly the literal it is: quotes doubled, nothing read as a separator.
+    #[test]
+    fn the_message_lookup_url_escapes_the_id() {
+        let url = message_lookup_url("<a+b&c#d'e%f=g?h@x.com>").unwrap();
+        let raw = url.as_str();
+        assert!(url.fragment().is_none(), "{raw}");
+        assert!(raw.contains("%2B"), "{raw}");
+        assert!(raw.contains("%26"), "{raw}");
+        assert!(raw.contains("%23"), "{raw}");
+        let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (
+                    "$filter".to_string(),
+                    "internetMessageId eq '<a+b&c#d''e%f=g?h@x.com>'".to_string()
+                ),
+                ("$select".to_string(), "id".to_string()),
+            ]
+        );
+        assert_eq!(url.path(), "/v1.0/me/messages");
+        // A bare id gets its brackets back.
+        let bare = message_lookup_url("plain@x.com").unwrap();
+        let pairs: Vec<(String, String)> = bare.query_pairs().into_owned().collect();
+        assert_eq!(pairs[0].1, "internetMessageId eq '<plain@x.com>'");
     }
 
     #[test]
