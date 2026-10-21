@@ -1,6 +1,6 @@
 ---
 id: 0146
-title: Graph search fails with InefficientFilter when a query mixes free text, an address and a date
+title: Graph server search fails or returns unfiltered results (InefficientFilter, the $search fallback, in:sent)
 type: bug
 priority: next
 status: open
@@ -41,6 +41,28 @@ A fourth mismatch with IMAP behaviour: `from:ovh` renders as `eq 'ovh'`, an exac
 - `from:<partial>` matches on Graph as it does on IMAP.
 - Unit tests on `to_graph` and `search_url` pin the parameter combinations: no `$orderby` beside `$search`, `receivedDateTime` first in a filter sorted by it.
 - A live check on a Graph account for each of: free text only, address only, date only, address plus date, free text plus address plus date.
+- `mp -A evoqs search 'subject:"<word>"'` returns only messages whose subject contains the word.
+- `mp -A evoqs search 'message-id:<id>'` returns the one message.
+- `mp -A evoqs search 'in:sent <word>'` searches Sent Items.
+
+## Further findings from the PERSO-144 live test (2026-10-21)
+
+The live test on the EVOQS account (`.agents/research/2026-10-21-perso-144-live-test.md`, items 3 to 5) and a second session the same day widened the scope: no Graph server search works reliably, whatever the query.
+
+- Defect 1 hits every query with a `$search` half, not only mixed ones: each search in the test logged `Graph $search failed (HTTP 400), falling back to $filter only`, so `$search` has not succeeded once on this account.
+- Defect 3 is worse than a wider result set when every term of a query lands in `$search` (`subject:`, `body:`, `filename:`, free text): the fallback then has no `$filter` at all and lists the folder's newest `limit` messages.
+  `mp -A evoqs search 'subject:"PERSO-144"'` returned 20 rows, most of them unrelated (for example "Rechnung für die Bestellung #1478103"), and no error.
+  Every subject, body and free-text search on a Graph account is therefore wrong today.
+- Defect 2 hits every filter-only query, not only mixed ones.
+  In another session the same day, every server search on the evoqs account failed with HTTP 400 `InefficientFilter`, a bare `mp -A evoqs search 'from:amazon'` included.
+  `from:amazon` renders as `from/emailAddress/address eq 'amazon'`, and `search_url` sends `$orderby=receivedDateTime desc` beside it, so the filter does not start with `receivedDateTime` and Graph refuses it.
+- `message-id:` alone fails with `InefficientFilter`.
+  `to_graph` renders it as the whole `$filter` (`internetMessageId eq '<...>'`) and `search_url` adds `$orderby=receivedDateTime desc`, which is defect 2 on a single clause.
+  `message_lookup_url` in `src/graph.rs` sends the same filter without `$orderby`, which Graph accepts.
+- A fifth defect: `in:sent` fails with Graph `ErrorInvalidIdMalformed`, while `in:"Sent Items"` works.
+  The CLI's server leg passes the `in:` value to `GraphClient::search_messages` unresolved (`src/main.rs`, `mailbox_name` around line 4383).
+  `folder_path` then finds `sent` neither in `well_known_folder` (`src/graph.rs`, line 549, which knows `sentitems` and `sent items` but none of mp's role names) nor among the top-level folders, and sends it as a folder id.
+  The daemon's `message.search_server` resolves names against the configured mailboxes (`pick_target`), so the fix is to resolve a role name to the account's configured server folder in the CLI leg as well, or to teach `well_known_folder` the role names `sent`, `trash` and `junk`.
 
 ## Context
 
