@@ -236,19 +236,31 @@ struct GraphMessageList {
     value: Vec<GraphMessage>,
 }
 
+/// One entry of a message's `/attachments` collection.
+///
+/// The collection mixes `fileAttachment`, `itemAttachment` (an attached
+/// message or event) and `referenceAttachment` (a cloud link); only the first
+/// carries `contentBytes`. Every field is optional so an item or reference
+/// attachment, whose properties differ and may come back `null`, can never
+/// fail the parse of the whole list.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GraphAttachment {
+    #[serde(rename = "@odata.type", default)]
+    odata_type: Option<String>,
+    #[serde(default)]
     #[allow(dead_code)]
     id: Option<String>,
+    #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
     #[allow(dead_code)]
     content_type: Option<String>,
     #[serde(default)]
     content_bytes: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
-    is_inline: bool,
+    is_inline: Option<bool>,
     #[serde(default)]
     content_id: Option<String>,
 }
@@ -734,10 +746,7 @@ impl GraphClient {
 
     /// Fetch attachments for a specific message.
     async fn fetch_attachments(&self, message_id: &str) -> Result<Vec<AttachmentData>> {
-        let url = format!(
-            "{}/me/messages/{}/attachments?$select=id,name,contentType,contentBytes,isInline,contentId",
-            GRAPH_BASE, message_id
-        );
+        let url = attachments_url(message_id);
 
         let resp = self
             .client
@@ -762,35 +771,67 @@ impl GraphClient {
             .await
             .context("Failed to parse attachment list")?;
 
-        let mut result = Vec::new();
-        for att in att_list.value {
-            // Server-provided name is untrusted: strip path separators so it cannot
-            // escape the attachments directory (the IMAP path does the same).
-            let filename =
-                sanitize_attachment_filename(&att.name.unwrap_or_else(|| "attachment".to_string()));
-            let content = if let Some(b64) = att.content_bytes {
-                use base64::Engine;
-                base64::engine::general_purpose::STANDARD
-                    .decode(&b64)
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+        Ok(attachments_from_list(att_list))
+    }
+}
 
-            // Skip zero-byte attachments (placeholder entries)
-            if content.is_empty() {
-                continue;
-            }
+/// The URL listing a message's attachments.
+///
+/// It carries no `$select`: `contentBytes` exists only on the derived
+/// `fileAttachment` type, and Graph rejects the whole request with HTTP 400
+/// ("Could not find a property named 'contentBytes' on type
+/// 'microsoft.graph.attachment'") when a `$select` on the base collection
+/// names it. Without one, each entry comes back with every property of its
+/// own type, so file attachments carry their bytes.
+fn attachments_url(message_id: &str) -> String {
+    format!("{}/me/messages/{}/attachments", GRAPH_BASE, message_id)
+}
 
-            result.push(AttachmentData {
-                filename,
-                content,
-                content_id: att.content_id,
-            });
+/// Turn a parsed `/attachments` page into the attachments the store keeps.
+///
+/// Only `fileAttachment` entries carry content; an item attachment (an
+/// attached message or event) or a reference attachment (a cloud link) is
+/// skipped rather than failing the message, as is a zero-byte placeholder.
+fn attachments_from_list(att_list: GraphAttachmentList) -> Vec<AttachmentData> {
+    let mut result = Vec::new();
+    for att in att_list.value {
+        let is_file = att
+            .odata_type
+            .as_deref()
+            .is_none_or(|t| t.eq_ignore_ascii_case("#microsoft.graph.fileAttachment"));
+        if !is_file {
+            debug!(
+                "Skipping Graph {} '{}': only file attachments carry content",
+                att.odata_type.as_deref().unwrap_or_default(),
+                att.name.as_deref().unwrap_or_default(),
+            );
+            continue;
+        }
+        // Server-provided name is untrusted: strip path separators so it cannot
+        // escape the attachments directory (the IMAP path does the same).
+        let filename =
+            sanitize_attachment_filename(&att.name.unwrap_or_else(|| "attachment".to_string()));
+        let content = if let Some(b64) = att.content_bytes {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(&b64)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Skip zero-byte attachments (placeholder entries)
+        if content.is_empty() {
+            continue;
         }
 
-        Ok(result)
+        result.push(AttachmentData {
+            filename,
+            content,
+            content_id: att.content_id,
+        });
     }
+    result
 }
 
 fn graph_message_to_fetched_email(msg: &GraphMessage) -> FetchedEmail {
@@ -2956,6 +2997,69 @@ mod tests {
             assert!(url.contains("$select=id,internetMessageId,isRead,receivedDateTime"));
             assert!(url.contains("$top=200"));
         }
+    }
+
+    /// Graph answers HTTP 400 to `$select=...contentBytes` on the base
+    /// attachment collection, which left every Graph message without its
+    /// attachments; the list request must not narrow the properties at all.
+    #[test]
+    fn the_attachment_list_url_selects_nothing() {
+        let url = attachments_url("AAMk=");
+        assert_eq!(url, format!("{GRAPH_BASE}/me/messages/AAMk=/attachments"));
+        assert!(!url.contains("$select"), "got {url}");
+        assert!(!url.contains("contentBytes"), "got {url}");
+    }
+
+    /// A live `/attachments` page mixes file, item and reference attachments,
+    /// with `null` where a type lacks a property: the file comes through, the
+    /// others are skipped, and none of them fails the parse.
+    #[test]
+    fn item_and_reference_attachments_do_not_break_the_file_ones() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.4");
+        let page = serde_json::json!({
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#...",
+            "value": [
+                {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "id": "A1",
+                    "name": "../report.pdf",
+                    "contentType": "application/pdf",
+                    "size": 8,
+                    "isInline": false,
+                    "contentId": null,
+                    "contentLocation": null,
+                    "contentBytes": b64,
+                },
+                {
+                    "@odata.type": "#microsoft.graph.itemAttachment",
+                    "id": "A2",
+                    "name": "Forwarded message",
+                    "contentType": null,
+                    "size": 4096,
+                    "isInline": null,
+                },
+                {
+                    "@odata.type": "#microsoft.graph.referenceAttachment",
+                    "id": "A3",
+                    "name": "Plan.docx",
+                    "contentType": null,
+                    "isInline": false,
+                },
+                {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "id": "A4",
+                    "name": "empty.txt",
+                    "contentBytes": "",
+                },
+            ],
+        });
+        let list: GraphAttachmentList = serde_json::from_value(page).expect("page parses");
+        let attachments = attachments_from_list(list);
+        assert_eq!(attachments.len(), 1, "got {attachments:?}");
+        assert_eq!(attachments[0].content, b"%PDF-1.4");
+        assert!(!attachments[0].filename.contains('/'));
+        assert!(attachments[0].filename.ends_with("report.pdf"));
     }
 
     #[test]
