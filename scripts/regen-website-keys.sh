@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate the website TUI key-binding data from the single KEYMAP source of
 # truth (src/tui/app/keymap.rs). The website page renders this file, so key
-# bindings on mailypoppins.dev cannot drift from the TUI/help overlay.
+# bindings on mailypoppins.com cannot drift from the TUI/help overlay.
 #
 # Run after changing KEYMAP, then rebuild the site (cd website && pnpm build).
 set -euo pipefail

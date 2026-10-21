@@ -3,7 +3,7 @@
 
 [Unit]
 Description=mailypoppins daemon
-Documentation=https://mailypoppins.dev
+Documentation=https://mailypoppins.com
 
 [Service]
 Type=simple

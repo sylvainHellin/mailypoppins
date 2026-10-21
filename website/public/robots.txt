@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://mailypoppins.dev/sitemap-index.xml
+Sitemap: https://mailypoppins.com/sitemap-index.xml

@@ -2727,3 +2727,8 @@ A nowrap row inside the `DialogContent` grid widened the column past the dialog'
 ## A desktop draft key has to reach the editor's exit summary, not only the selection
 
 After `r` or `cn` in the embedded editor, the reader shows the new draft's summary (`composeShown` with no session) while the list cursor stays on the received message, so a draft key that reads only the selection acts on the wrong row; `x` takes `summaryDraft(s)` first.
+
+## `sftp -b` refuses password auth unless BatchMode is turned back off
+
+`sftp -b <file>` sets `BatchMode=yes`, which disables password and keyboard-interactive authentication, so a password-only host (the OVH free hosting behind mailypoppins.com has SFTP but no SSH keys) fails with `Permission denied (publickey,password)` and `No more authentication methods to try`.
+Pass `-o BatchMode=no` and feed the password through `SSH_ASKPASS` with `SSH_ASKPASS_REQUIRE=force`; `scripts/deploy-website.sh` does this with a temporary askpass script that reads Proton Pass.
