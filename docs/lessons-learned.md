@@ -483,7 +483,7 @@ Before hoisting a construction out of a loop, list what the constructor did besi
 
 The Graph prune computes `store − server` over `internetMessageId` and deletes the difference, which is correct for every row the server put there.
 A Graph send does not produce one: `sendMail` takes JSON with no `Message-ID`, Exchange stamps its own, and the outbox has already filed the local copy under a uid derived from *our* id, so that row is in the difference on every pass from the moment it is written (#0065).
-Since PERSO-144 this holds only for the JSON fallback over 3.5 MB of base64; a MIME send carries mailypoppins' own `Message-ID`, so the Sent copy should key on the same uid as the local row (to be confirmed live).
+Since PERSO-144 this holds only for the JSON fallback over 3.5 MB of base64; a MIME send carries mailypoppins' own `Message-ID`, which Exchange keeps, so the Sent copy keys on the same uid as the local row (confirmed by the live test of 2026-10-21: one `sent` row per `Message-ID`).
 Deleting it releases the raw MIME, which on a Graph account is the only copy that will ever exist.
 The IMAP path was immune by accident rather than by design: its prune was clamped to the fetch window's numeric range, and a `graph_uid` hash sits far above any real UID. Since #0072 the clamp is deliberate, `UIDNEXT - 1`, and IMAP runs the same age guard.
 Two shapes of row are exposed this way, the locally synthesised one and the one whose server copy has not been filed yet, and both are recent; the guard is therefore an age window on the row rather than an exemption for the `sent` role, which would have made the duplicate permanent ([src/ingest.rs](../src/ingest.rs), `prunable_uids`).
@@ -1702,8 +1702,8 @@ Nothing in the parity table sees it (every fixture draft carries a `from:`), and
 
 `main` answers `Commands::Daemon` and exits at the top of the function, ahead of `init_secrets_backend`, which is right for every daemon command and wrong the moment a method needs a credential: `Backend::resolve` inside the daemon would have failed with `secrets backend not initialized -- call secrets::init() first` instead of the `Secret '…' not found. Run \`mp config set-password\`.` sentence the pre-daemon binary produces, and the parity row is that exact sentence.
 
-`message.archive` and `message.delete` therefore call `secrets::init(snapshot.config.secrets_backend)` themselves, immediately before `Backend::resolve`, which is the rule `config.set_password` already followed: on first use rather than at startup, because a first run has no configuration to select a backend from and the opener is idempotent.
-Startup was the other candidate and is worse: a daemon that starts with no `config.toml` and later reloads one naming `secrets_backend = "keyring"` would have locked in the encrypted file, since the first kind wins.
+`message.archive` and `message.delete` therefore call `secrets::init(snapshot.config.secrets_backend)` themselves, immediately before `Backend::resolve`, as `config.set_password` does; the opener is idempotent.
+Since PERSO-170 the daemon also opens the backend at startup, but only once a configuration loaded (next entry): a daemon that starts with no `config.toml` and later reloads one naming `secrets_backend = "keyring"` would otherwise have locked in the encrypted file, since the first kind wins.
 
 ## A `Store` is not `Sync`, so a daemon method may not hold one across an `await`
 
@@ -2768,3 +2768,13 @@ Putting it back on the built bytes keeps the `Message-ID`, which `keep_bcc()` pl
 
 The tenant appears in the device-code, token and refresh URLs and nowhere else, so `common` works for a multi-tenant public client from the first sign-in through every refresh.
 Only the setup wizards hold the default; the daemon still requires a non-empty client ID and tenant (PERSO-164).
+
+## The daemon's own tasks read credentials with no client call in front of them
+
+Opening the secrets backend on first use covered the methods, and the account runtimes were left out: the IMAP watcher's first round and every scheduled tick call `ImapConfig::load`, which failed with `secrets backend not initialized` until a client call happened to open the backend.
+The scheduled tick's error went only into its `sync.completed`, which nobody waits on, so on 2026-10-21 no IMAP account synced for five hours while the log showed nothing but the scheduler ticking every 15 minutes.
+The Graph account kept syncing, since its token cache is encrypted with the machine key directly and never goes through the backend.
+The daemon now opens the backend in `run` once the configuration loads, and again in `reconcile` for a daemon that started without one; `tick_and_publish` logs a failed background tick ([src/daemon/config.rs](../src/daemon/config.rs), `open_secrets_backend`; [src/daemon/runtime/publish.rs](../src/daemon/runtime/publish.rs)).
+Opening at startup exposed a second flaw: the encrypted-file backend read `secrets.enc` once, so a password that `mp config init` or `mp config add-account` stored from their own process stayed invisible to the daemon until a restart.
+It now re-reads the file whenever its inode, length or modification time changed, before every read and write ([crates/mp-core/src/secrets.rs](../crates/mp-core/src/secrets.rs), `refresh_locked`).
+A background task that needs process-wide state must not rely on a request path having set it up first (PERSO-170).
