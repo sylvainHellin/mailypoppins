@@ -1002,26 +1002,66 @@ async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<SyncResult>
 /// batch download, and a pass the throttle runs out of budget defers its prune
 /// to the next tick.
 ///
-/// The body-fetch deadline (#0113) is an IMAP budget and does not apply: a
-/// Graph target fetches and ingests in one step, and the stop is honoured at
-/// each mailbox boundary. The orchestrator opens its own writer connection,
-/// unguarded, like the IMAP engine above: this runtime already holds the
-/// account's engine lock.
+/// The body-fetch deadline (#0113) is not a budget the Graph pass can spend
+/// the way IMAP does, since a Graph target fetches and ingests in one step and
+/// the stop is honoured only at each mailbox boundary. It sizes the pass's
+/// ceiling instead ([`graph_tick_ceiling`]): a pass that outlives it is cut
+/// off and reported as the tick's error, so a request that never returns
+/// cannot hold the run slot and starve every later tick. Cutting it off is
+/// safe at any await point, because every store write in the pass (an ingest,
+/// a flag update, a repair, a cursor, a prune) is a synchronous transaction
+/// between two awaits; the next tick picks up from what the store holds.
+///
+/// The orchestrator opens its own writer connection, unguarded, like the IMAP
+/// engine above: this runtime already holds the account's engine lock.
 async fn sync_once_graph(
     cfg: &AccountConfig,
     ctx: &TickContext,
     targets: &[crate::sync::SyncTarget],
 ) -> Result<SyncResult> {
     let graph = crate::config::GraphConfig::load(cfg)?;
-    crate::graph::sync_mailboxes_graph(
-        &graph,
-        &cfg.name,
-        targets,
-        tick_limit(ctx.kind),
-        false,
-        ctx.stop.as_ref(),
+    within_ceiling(
+        graph_tick_ceiling(ctx.body_deadline),
+        crate::graph::sync_mailboxes_graph(
+            &graph,
+            &cfg.name,
+            targets,
+            tick_limit(ctx.kind),
+            false,
+            ctx.stop.as_ref(),
+        ),
     )
     .await
+}
+
+/// How many body-fetch deadlines a Graph tick may last: ten minutes at the
+/// default thirty seconds, room for a full relist of a large mailbox, while a
+/// pass stuck on a dead connection still frees the run slot.
+const GRAPH_TICK_CEILING_FACTOR: u32 = 20;
+
+/// The longest a Graph tick may run, `None` when the body-fetch deadline is
+/// configured unbounded (`0`). The HTTP client's own idle timeout still bounds
+/// each request then.
+fn graph_tick_ceiling(body_deadline: Option<Duration>) -> Option<Duration> {
+    body_deadline.map(|deadline| deadline * GRAPH_TICK_CEILING_FACTOR)
+}
+
+/// Run `pass`, giving up on it once `ceiling` has passed.
+async fn within_ceiling<F>(ceiling: Option<Duration>, pass: F) -> Result<SyncResult>
+where
+    F: std::future::Future<Output = Result<SyncResult>>,
+{
+    let Some(ceiling) = ceiling else {
+        return pass.await;
+    };
+    match tokio::time::timeout(ceiling, pass).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(
+            "the Graph sync pass ran past its {}s ceiling and was cut off; \
+             the next tick resumes from what it stored",
+            ceiling.as_secs()
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -1091,6 +1131,89 @@ mod tests {
             );
             assert!(!text.contains("no Graph backend"), "{text}");
         }
+    }
+
+    /// A Graph pass that never returns (a request on a dead connection) is
+    /// cut off at its ceiling, twenty body-fetch deadlines, and reported as
+    /// an error; a pass that finishes in time is returned untouched, and an
+    /// unbounded deadline imposes no ceiling.
+    #[tokio::test]
+    async fn a_graph_pass_that_hangs_is_cut_off_at_its_ceiling() {
+        assert_eq!(
+            graph_tick_ceiling(Some(Duration::from_secs(30))),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(graph_tick_ceiling(None), None);
+
+        let started = tokio::time::Instant::now();
+        let err = within_ceiling(
+            Some(Duration::from_millis(50)),
+            std::future::pending::<Result<SyncResult>>(),
+        )
+        .await
+        .expect_err("a hung pass is cut off");
+        assert!(format!("{err:#}").contains("cut off"), "{err:#}");
+        assert!(started.elapsed() >= Duration::from_millis(50));
+
+        let done = within_ceiling(Some(Duration::from_secs(600)), async {
+            Ok(SyncResult {
+                saved: 3,
+                ..Default::default()
+            })
+        })
+        .await
+        .expect("a pass in time is returned");
+        assert_eq!(done.saved, 3);
+
+        let unbounded = within_ceiling(None, async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(SyncResult::default())
+        })
+        .await;
+        assert!(unbounded.is_ok(), "no ceiling, no cut-off");
+    }
+
+    /// A tick whose body hit the ceiling frees the run slot: the next tick
+    /// runs its body rather than joining a pass that never ends.
+    #[tokio::test]
+    async fn a_tick_cut_off_at_its_ceiling_lets_the_next_tick_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entered = Arc::new(AtomicU64::new(0));
+        let mut hooks = quiet_hooks();
+        hooks.body = {
+            let entered = Arc::clone(&entered);
+            Arc::new(move |_ctx: TickContext| {
+                entered.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    within_ceiling(
+                        Some(Duration::from_millis(50)),
+                        std::future::pending::<Result<SyncResult>>(),
+                    )
+                    .await
+                    .map(|_| ())
+                }
+                .boxed()
+            })
+        };
+        let runtime = AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 1), 1, hooks)
+            .expect("a free lock");
+
+        for expected in 1..=2 {
+            let outcome = runtime.tick(TickKind::Quick).await;
+            assert!(!outcome.joined, "tick {expected} ran its own body");
+            assert!(
+                outcome
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("cut off"),
+                "{:?}",
+                outcome.error
+            );
+            assert_eq!(outcome.phases.len(), 5, "the tail still ran");
+            assert_eq!(entered.load(Ordering::SeqCst), expected);
+        }
+        assert_eq!(runtime.readiness(), Readiness::Ready);
     }
 
     /// Both transports tick over every configured mailbox, with the quick

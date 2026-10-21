@@ -98,6 +98,27 @@ const ID_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
 // GraphClient
 // ---------------------------------------------------------------------------
 
+/// How long a Graph request may take to open its connection.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a Graph response may go without a single byte arriving.
+///
+/// An idle bound rather than a whole-request one, so a large attachment list
+/// on a slow link keeps downloading as long as it moves, while a connection
+/// that died under it (a laptop that slept mid-request) errors out instead of
+/// holding the account's tick forever. Graph's own gateway gives up on a
+/// request after about 100 seconds, so a live server never trips this.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The HTTP client every Graph call goes through, with the two bounds above.
+fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+        .build()
+        .context("building the Graph HTTP client")
+}
+
 /// A Graph API client holding a reqwest client and a valid access token.
 pub struct GraphClient {
     client: reqwest::Client,
@@ -121,7 +142,7 @@ impl GraphClient {
             crate::oauth2::GRAPH_SCOPES,
         )?;
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: http_client()?,
             access_token,
             username: config.username.clone(),
             top_folders: std::sync::Mutex::new(None),
@@ -138,7 +159,7 @@ impl GraphClient {
         )
         .await?;
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: http_client()?,
             access_token,
             username: config.username.clone(),
             top_folders: std::sync::Mutex::new(None),
@@ -3640,6 +3661,13 @@ mod tests {
 
         let flagged = msg("text", "hi", true);
         assert!(lists_attachments(&flagged));
+    }
+
+    /// The bounded client builds with this build's TLS stack.
+    #[test]
+    fn the_graph_http_client_builds_with_its_timeouts() {
+        http_client().expect("the Graph client builds");
+        assert!(READ_TIMEOUT > CONNECT_TIMEOUT);
     }
 
     #[test]
