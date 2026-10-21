@@ -483,6 +483,7 @@ Before hoisting a construction out of a loop, list what the constructor did besi
 
 The Graph prune computes `store − server` over `internetMessageId` and deletes the difference, which is correct for every row the server put there.
 A Graph send does not produce one: `sendMail` takes JSON with no `Message-ID`, Exchange stamps its own, and the outbox has already filed the local copy under a uid derived from *our* id, so that row is in the difference on every pass from the moment it is written (#0065).
+Since PERSO-144 this holds only for the JSON fallback over 3.5 MB of base64; a MIME send carries mailypoppins' own `Message-ID`, so the Sent copy should key on the same uid as the local row (to be confirmed live).
 Deleting it releases the raw MIME, which on a Graph account is the only copy that will ever exist.
 The IMAP path was immune by accident rather than by design: its prune was clamped to the fetch window's numeric range, and a `graph_uid` hash sits far above any real UID. Since #0072 the clamp is deliberate, `UIDNEXT - 1`, and IMAP runs the same age guard.
 Two shapes of row are exposed this way, the locally synthesised one and the one whose server copy has not been filed yet, and both are recent; the guard is therefore an age window on the row rather than an exemption for the `sent` role, which would have made the duplicate permanent ([src/ingest.rs](../src/ingest.rs), `prunable_uids`).
@@ -2756,3 +2757,14 @@ Once the store knows a message, later passes skip it, so attachments that failed
 ## Graph reports `hasAttachments` false for inline-only mail
 
 A message whose only attachments are `cid:` images has `hasAttachments: false`, so check the HTML body for `cid:` before skipping the attachment list (88342da1).
+
+## lettre drops `Bcc:` from the built message unless `keep_bcc()` is set
+
+That suits SMTP, where the envelope carries the Bcc recipients.
+A transport that reads the recipients off the headers (Graph MIME `sendMail`, the Gmail API) needs the header put back.
+Putting it back on the built bytes keeps the `Message-ID`, which `keep_bcc()` plus a rebuild would change ([src/send.rs](../src/send.rs), `graph_mime`, PERSO-144).
+
+## The OAuth2 tenant only goes into the Microsoft sign-in URLs
+
+The tenant appears in the device-code, token and refresh URLs and nowhere else, so `common` works for a multi-tenant public client from the first sign-in through every refresh.
+Only the setup wizards hold the default; the daemon still requires a non-empty client ID and tenant (PERSO-164).
