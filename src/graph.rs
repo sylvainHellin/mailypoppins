@@ -104,6 +104,10 @@ pub struct GraphClient {
     access_token: String,
     #[allow(dead_code)]
     username: String,
+    /// The mailbox's top-level folders, listed once per client the first time
+    /// a configured name is neither a well-known folder nor an id (see
+    /// [`GraphClient::folder_path`]).
+    top_folders: std::sync::Mutex<Option<Vec<GraphMailFolder>>>,
 }
 
 impl GraphClient {
@@ -120,6 +124,7 @@ impl GraphClient {
             client: reqwest::Client::new(),
             access_token,
             username: config.username.clone(),
+            top_folders: std::sync::Mutex::new(None),
         })
     }
 
@@ -136,6 +141,7 @@ impl GraphClient {
             client: reqwest::Client::new(),
             access_token,
             username: config.username.clone(),
+            top_folders: std::sync::Mutex::new(None),
         })
     }
 
@@ -181,6 +187,8 @@ pub struct GraphMailFolder {
 #[derive(Debug, Deserialize)]
 struct GraphMailFolderList {
     value: Vec<GraphMailFolder>,
+    #[serde(rename = "@odata.nextLink", default)]
+    next_link: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -508,17 +516,50 @@ fn iso_to_rfc2822(iso: &str) -> String {
     }
 }
 
-/// Resolve a well-known folder name (e.g. "inbox", "sentitems") to the Graph API
-/// well-known folder ID path segment. Graph accepts both well-known names and
-/// folder IDs in the URL, so this is mostly for documentation clarity.
-fn resolve_folder_path(folder: &str) -> String {
-    let lower = folder.to_lowercase();
-    match lower.as_str() {
-        "inbox" | "archive" | "sentitems" | "drafts" | "deleteditems" | "junkemail" => {
-            lower.clone()
-        }
-        _ => folder.to_string(),
-    }
+/// The Graph well-known folder name a configured folder stands for, if any.
+///
+/// A `/me/mailFolders/{x}` URL takes a well-known name or a folder id, never a
+/// display name: "Sent Items" in the URL is read as a malformed id (HTTP 400
+/// `ErrorInvalidIdMalformed`), so Sent Items and Junk Email never synced.
+/// Both the well-known names and Exchange's English default display names map
+/// here, matched case-insensitively. A localized display name ("Gesendete
+/// Elemente") is not listed: [`GraphClient::folder_path`] resolves it through
+/// the folder list.
+fn well_known_folder(folder: &str) -> Option<&'static str> {
+    let lower = folder.trim().to_lowercase();
+    Some(match lower.as_str() {
+        "inbox" => "inbox",
+        "archive" => "archive",
+        "sentitems" | "sent items" => "sentitems",
+        "drafts" => "drafts",
+        "deleteditems" | "deleted items" => "deleteditems",
+        "junkemail" | "junk email" | "junk e-mail" => "junkemail",
+        "outbox" => "outbox",
+        _ => return None,
+    })
+}
+
+/// Whether a configured folder already is a Graph folder id.
+///
+/// Mail folder ids are base64 strings of well over a hundred characters with
+/// no spaces; no display name a person types looks like one.
+fn looks_like_folder_id(folder: &str) -> bool {
+    folder.len() >= 64 && !folder.contains(char::is_whitespace)
+}
+
+/// The id of the folder whose display name is `name`, matched
+/// case-insensitively against one level of the folder tree.
+fn folder_id_by_display_name<'a>(folders: &'a [GraphMailFolder], name: &str) -> Option<&'a str> {
+    let name = name.trim();
+    folders
+        .iter()
+        .find(|f| f.display_name == name)
+        .or_else(|| {
+            folders
+                .iter()
+                .find(|f| f.display_name.to_lowercase() == name.to_lowercase())
+        })
+        .map(|f| f.id.as_str())
 }
 
 // ---------------------------------------------------------------------------
@@ -528,24 +569,101 @@ fn resolve_folder_path(folder: &str) -> String {
 impl GraphClient {
     /// List all mail folders in the user's mailbox.
     pub async fn list_folders(&self) -> Result<Vec<GraphMailFolder>> {
-        let url = format!("{}/me/mailFolders?$top=50", GRAPH_BASE);
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(self.bearer())
-            .send()
+        self.list_folder_level(&format!("{}/me/mailFolders?$top=100", GRAPH_BASE))
             .await
-            .context("Failed to list mail folders")?;
+    }
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("List folders failed (HTTP {}): {}", status, body));
+    /// Every folder on one level of the tree, following `@odata.nextLink`.
+    async fn list_folder_level(&self, first_url: &str) -> Result<Vec<GraphMailFolder>> {
+        let mut url = first_url.to_string();
+        let mut all = Vec::new();
+        for _ in 0..MAX_ENUMERATION_PAGES {
+            let resp = self
+                .client
+                .get(&url)
+                .bearer_auth(self.bearer())
+                .send()
+                .await
+                .context("Failed to list mail folders")?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(anyhow!("List folders failed (HTTP {}): {}", status, body));
+            }
+
+            let page: GraphMailFolderList =
+                resp.json().await.context("Failed to parse folder list")?;
+            all.extend(page.value);
+            match page.next_link {
+                Some(next) => url = next,
+                None => break,
+            }
         }
+        Ok(all)
+    }
 
-        let folders: GraphMailFolderList =
-            resp.json().await.context("Failed to parse folder list")?;
-        Ok(folders.value)
+    /// The URL path segment that names `folder` in `/me/mailFolders/{x}`.
+    ///
+    /// A well-known folder (by its Graph name or its English display name)
+    /// maps to the well-known name and an id passes through, both without a
+    /// request. Anything else is a display name, localized or custom, and is
+    /// looked up: first among the top-level folders (listed once per client),
+    /// then, for a `Parent/Child` path, one level at a time with the first
+    /// segment resolved the same way. A name the lookup cannot place passes
+    /// through unchanged, so the request reports Graph's own error.
+    async fn folder_path(&self, folder: &str) -> Result<String> {
+        if let Some(known) = well_known_folder(folder) {
+            return Ok(known.to_string());
+        }
+        if looks_like_folder_id(folder) {
+            return Ok(folder.to_string());
+        }
+        if let Some(id) = self.top_level_folder_id(folder).await? {
+            return Ok(id);
+        }
+        if let Some((head, rest)) = folder.split_once('/') {
+            let mut parent = match well_known_folder(head) {
+                Some(known) => Some(known.to_string()),
+                None => self.top_level_folder_id(head).await?,
+            };
+            for segment in rest.split('/') {
+                let Some(parent_id) = parent else { break };
+                let children = self
+                    .list_folder_level(&format!(
+                        "{}/me/mailFolders/{}/childFolders?$top=100",
+                        GRAPH_BASE, parent_id
+                    ))
+                    .await?;
+                parent = folder_id_by_display_name(&children, segment).map(str::to_string);
+            }
+            if let Some(id) = parent {
+                return Ok(id);
+            }
+        }
+        debug!("Graph folder '{folder}' matches no display name; using it as an id");
+        Ok(folder.to_string())
+    }
+
+    /// The id of the top-level folder displayed as `name`, from a folder list
+    /// fetched once per client.
+    async fn top_level_folder_id(&self, name: &str) -> Result<Option<String>> {
+        let cached = self
+            .top_folders
+            .lock()
+            .map_err(|_| anyhow!("folder cache poisoned"))?
+            .as_ref()
+            .map(|folders| folder_id_by_display_name(folders, name).map(str::to_string));
+        if let Some(found) = cached {
+            return Ok(found);
+        }
+        let folders = self.list_folders().await?;
+        let found = folder_id_by_display_name(&folders, name).map(str::to_string);
+        *self
+            .top_folders
+            .lock()
+            .map_err(|_| anyhow!("folder cache poisoned"))? = Some(folders);
+        Ok(found)
     }
 }
 
@@ -556,7 +674,7 @@ impl GraphClient {
 impl GraphClient {
     /// Fetch messages from a folder, converting to FetchedEmail.
     pub async fn fetch_messages(&self, folder: &str, limit: usize) -> Result<Vec<FetchedEmail>> {
-        let folder_path = resolve_folder_path(folder);
+        let folder_path = self.folder_path(folder).await?;
         let url = format!(
             "{}/me/mailFolders/{}/messages?\
              $top={}&\
@@ -960,7 +1078,7 @@ impl GraphClient {
     /// enumerates at all would be the worse failure, and that is what this
     /// avoids (#0065 follow-up).
     pub async fn enumerate_folder(&self, folder: &str) -> Result<FolderEnumeration> {
-        let folder_path = resolve_folder_path(folder);
+        let folder_path = self.folder_path(folder).await?;
         let mut result = HashMap::new();
         let mut complete = false;
         let mut pages = 0usize;
@@ -1330,7 +1448,7 @@ impl GraphClient {
         let url = format!(
             "{}/me/mailFolders/{}?$select=id",
             GRAPH_BASE,
-            resolve_folder_path(folder)
+            self.folder_path(folder).await?
         );
         let resp = self
             .client
@@ -1365,7 +1483,14 @@ impl GraphClient {
     /// A tenant that rejects `$deltatoken=latest` gets `None` and keeps the
     /// pre-#0042 behaviour for good; no token is ever guessed.
     async fn mint_delta_token(&self, folder: &str) -> Option<String> {
-        let url = delta_url(&resolve_folder_path(folder), true);
+        let folder_path = match self.folder_path(folder).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Could not mint a delta token for '{folder}': {e}");
+                return None;
+            }
+        };
+        let url = delta_url(&folder_path, true);
         let resp = match self
             .client
             .get(&url)
@@ -2217,7 +2342,7 @@ impl GraphClient {
 
     /// Move a message to a different folder.
     pub async fn move_message(&self, message_id: &str, destination_folder: &str) -> Result<()> {
-        let dest = resolve_folder_path(destination_folder);
+        let dest = self.folder_path(destination_folder).await?;
         let url = format!("{}/me/messages/{}/move", GRAPH_BASE, message_id);
 
         let resp = self
@@ -2437,7 +2562,7 @@ impl GraphClient {
             crate::search::to_graph(query).map_err(|e| anyhow!("{e}"))?;
 
         let base = if let Some(f) = folder {
-            let fp = resolve_folder_path(f);
+            let fp = self.folder_path(f).await?;
             format!("{}/me/mailFolders/{}/messages", GRAPH_BASE, fp)
         } else {
             format!("{}/me/messages", GRAPH_BASE)
@@ -2506,7 +2631,7 @@ impl GraphClient {
         let (_, filter_param) = crate::search::to_graph(query).map_err(|e| anyhow!("{e}"))?;
 
         let base = if let Some(f) = folder {
-            let fp = resolve_folder_path(f);
+            let fp = self.folder_path(f).await?;
             format!("{}/me/mailFolders/{}/messages", GRAPH_BASE, fp)
         } else {
             format!("{}/me/messages", GRAPH_BASE)
@@ -3116,16 +3241,67 @@ mod tests {
         assert_eq!(format_recipient(&r), "john@example.com");
     }
 
+    /// "Sent Items" in a `/me/mailFolders/{x}` URL is a malformed id to
+    /// Graph; the well-known names and Exchange's English display names must
+    /// both reach the URL as the well-known name.
     #[test]
-    fn test_resolve_folder_path_wellknown() {
-        assert_eq!(resolve_folder_path("Inbox"), "inbox");
-        assert_eq!(resolve_folder_path("SentItems"), "sentitems");
-        assert_eq!(resolve_folder_path("Archive"), "archive");
+    fn standard_folders_resolve_to_their_well_known_names() {
+        for (configured, expected) in [
+            ("Inbox", "inbox"),
+            ("inbox", "inbox"),
+            ("Archive", "archive"),
+            ("SentItems", "sentitems"),
+            ("Sent Items", "sentitems"),
+            ("sentitems", "sentitems"),
+            ("Drafts", "drafts"),
+            ("Deleted Items", "deleteditems"),
+            ("deleteditems", "deleteditems"),
+            ("Junk Email", "junkemail"),
+            ("Junk E-mail", "junkemail"),
+            ("junkemail", "junkemail"),
+        ] {
+            assert_eq!(
+                well_known_folder(configured),
+                Some(expected),
+                "{configured}"
+            );
+        }
+        assert_eq!(well_known_folder("MyFolder"), None);
+        assert_eq!(well_known_folder("Gesendete Elemente"), None);
+    }
+
+    /// A localized mailbox names its standard folders in its own language; the
+    /// display name resolves to the folder id through the folder list.
+    #[test]
+    fn a_localized_display_name_resolves_through_the_folder_list() {
+        let list: GraphMailFolderList = serde_json::from_value(serde_json::json!({
+            "value": [
+                {"id": "AAMkInbox", "displayName": "Posteingang", "totalItemCount": 3},
+                {"id": "AAMkSent", "displayName": "Gesendete Elemente"},
+                {"id": "AAMkJunk", "displayName": "Junk-E-Mail"},
+            ],
+            "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/mailFolders?$skip=3",
+        }))
+        .expect("folder page parses");
+        assert!(list.next_link.is_some());
+        let folders = list.value;
+        assert_eq!(
+            folder_id_by_display_name(&folders, "Gesendete Elemente"),
+            Some("AAMkSent")
+        );
+        assert_eq!(
+            folder_id_by_display_name(&folders, "junk-e-mail"),
+            Some("AAMkJunk")
+        );
+        assert_eq!(folder_id_by_display_name(&folders, "Projekte"), None);
     }
 
     #[test]
-    fn test_resolve_folder_path_custom() {
-        assert_eq!(resolve_folder_path("MyFolder"), "MyFolder");
+    fn only_an_id_shaped_name_skips_the_lookup() {
+        let id = "AAMkADc0ZGFmYmIzLTE3NjAtNDQzMS04NTczLTk4MzU0NTJhM2JkZgAuAAAAAACtv1F197oaSaeGBAwG1kbSAQDOhGPffOUcTJWagX2l-iGKAAAAAAEJAAA=";
+        assert!(looks_like_folder_id(id));
+        assert!(!looks_like_folder_id("Gesendete Elemente"));
+        assert!(!looks_like_folder_id("MyFolder"));
     }
 
     // The Graph rendering now goes through the shared grammar (#0086a):
