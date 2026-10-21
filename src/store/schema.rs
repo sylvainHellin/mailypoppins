@@ -349,6 +349,7 @@ pub fn create(conn: &Connection) -> Result<()> {
         .with_context(|| format!("creating store schema v{SCHEMA_VERSION}"))?;
     ensure_additive_indexes(conn)?;
     ensure_additive_columns(conn)?;
+    ensure_additive_tables(conn)?;
     set_meta(conn, META_SCHEMA_VERSION, &SCHEMA_VERSION.to_string())?;
     set_meta(conn, META_APP_VERSION, env!("CARGO_PKG_VERSION"))?;
     // Nothing to sweep in a file that starts empty, and stamping it here is
@@ -469,6 +470,57 @@ pub fn ensure_additive_columns(conn: &Connection) -> Result<()> {
             if !column_present(conn, table, column)? {
                 return Err(e).with_context(|| format!("adding {table}.{column}"));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Name of the table that remembers, per message row, what the Graph
+/// attachment repair has learnt about it.
+///
+/// A row here is either settled (`retry_at` NULL: the server answered and the
+/// message has no attachment whose content can be stored, such as only an
+/// attached Outlook item or a cloud link) or waiting out a backoff after a
+/// failed fetch (`retry_at` the unix time of the next attempt). No row means
+/// the repair has never looked at the message. Scoped by the `messages`
+/// foreign key like `message_blobs`, so a pruned message takes its state
+/// with it, and losing the table in a rebuild only costs one more look.
+pub const ATTACHMENT_REPAIRS_TABLE: &str = "attachment_repairs";
+
+/// Every table created after [`SCHEMA_VERSION`] was last bumped, as
+/// `(name, CREATE statement)`.
+///
+/// Kept out of [`REQUIRED_TABLES`] on purpose: a store opened by a build that
+/// predates a table is still a valid store, it simply gains the table here.
+fn additive_tables() -> [(&'static str, String); 1] {
+    [(
+        ATTACHMENT_REPAIRS_TABLE,
+        format!(
+            "CREATE TABLE IF NOT EXISTS {ATTACHMENT_REPAIRS_TABLE} (
+                message_row INTEGER PRIMARY KEY REFERENCES messages (id) ON DELETE CASCADE,
+                attempts    INTEGER NOT NULL DEFAULT 0,
+                retry_at    INTEGER,
+                last_error  TEXT
+            )"
+        ),
+    )]
+}
+
+/// Create the tables added after [`SCHEMA_VERSION`] was last bumped, on the
+/// terms of [`ensure_additive_indexes`]: additive, idempotent, and looked up
+/// before it is written, so an open of a store that has them writes nothing.
+pub fn ensure_additive_tables(conn: &Connection) -> Result<()> {
+    for (name, sql) in additive_tables() {
+        let present: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("looking up the {name} table"))?;
+        if !present {
+            conn.execute_batch(&sql)
+                .with_context(|| format!("creating the {name} table"))?;
         }
     }
     Ok(())

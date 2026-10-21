@@ -353,6 +353,14 @@ fn open_validated(path: &Path) -> Result<Connection> {
             path.display()
         );
     }
+    // Not fatal either: without the table the Graph attachment repair logs
+    // and skips its pass, and the next open tries again.
+    if let Err(e) = schema::ensure_additive_tables(&conn) {
+        warn!(
+            "[store] could not add an additive table to {}: {e:#}",
+            path.display()
+        );
+    }
 
     // One-shot, and not a reason to reject the file: a store that cannot be
     // written to here is still perfectly readable, and the sweep is a fix for

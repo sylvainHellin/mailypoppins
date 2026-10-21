@@ -1026,19 +1026,52 @@ fn graph_message_to_fetched_email(msg: &GraphMessage) -> FetchedEmail {
 /// same `parse.rs`/`calendar.rs` machinery. Best-effort: parse failures still
 /// leave the raw sidecar bytes so the email save writes the `.ics`.
 fn populate_calendar_from_attachments(email: &mut FetchedEmail) {
-    // Lift only the FIRST `.ics` attachment that is an actual iMIP invite (its
-    // payload parses as a VCALENDAR carrying a METHOD property). Every other
-    // `.ics` (e.g. a plain calendar export the user shared) stays a regular
-    // attachment with its original filename -- matching the IMAP path.
-    let invite_idx = email.attachments.iter().position(|att| {
-        crate::calendar::is_ics_filename(&att.filename)
-            && crate::calendar::is_imip_invite(&att.content)
-    });
-    if let Some(idx) = invite_idx {
-        let ics = email.attachments.remove(idx).content;
+    if let Some(ics) = lift_invite(&mut email.attachments) {
         email.event =
             crate::calendar::parse_ics(&ics).map(|ev| crate::calendar::event_frontmatter(&ev));
         email.calendar_ics = Some(ics);
+    }
+}
+
+/// Take the iMIP invite out of `attachments`, if there is one.
+///
+/// Lifts only the FIRST `.ics` attachment that is an actual iMIP invite (its
+/// payload parses as a VCALENDAR carrying a METHOD property). Every other
+/// `.ics` (e.g. a plain calendar export the user shared) stays a regular
+/// attachment with its original filename -- matching the IMAP path.
+fn lift_invite(attachments: &mut Vec<AttachmentData>) -> Option<Vec<u8>> {
+    let idx = attachments.iter().position(|att| {
+        crate::calendar::is_ics_filename(&att.filename)
+            && crate::calendar::is_imip_invite(&att.content)
+    })?;
+    Some(attachments.remove(idx).content)
+}
+
+/// What one attachment repair learnt about a message.
+#[derive(Debug)]
+enum RepairVerdict {
+    /// The server listed attachment content: the sidecar invite, if any, and
+    /// the remaining attachments, ready for the store.
+    Attach {
+        calendar_ics: Option<Vec<u8>>,
+        attachments: Vec<AttachmentData>,
+    },
+    /// The server answered and has nothing the store can keep: only attached
+    /// Outlook items, cloud links or empty placeholders. Asking again would
+    /// get the same answer, so the message is settled.
+    NothingToStore,
+}
+
+/// Turn a successfully fetched attachment list into what the repair writes.
+fn repair_verdict(mut attachments: Vec<AttachmentData>) -> RepairVerdict {
+    let calendar_ics = lift_invite(&mut attachments);
+    if calendar_ics.is_none() && attachments.is_empty() {
+        RepairVerdict::NothingToStore
+    } else {
+        RepairVerdict::Attach {
+            calendar_ics,
+            attachments,
+        }
     }
 }
 
@@ -1768,6 +1801,130 @@ fn vanished_graph_uids(
 // Phase 4: sync_mailboxes_graph
 // ---------------------------------------------------------------------------
 
+/// What one attachment repair pass over a mailbox did, for its log line.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RepairTally {
+    repaired: usize,
+    settled: usize,
+    failed: usize,
+}
+
+impl GraphClient {
+    /// Fetch the attachments the first ingest of a message could not.
+    ///
+    /// A message whose attachment fetch failed is ingested anyway, with its
+    /// body and without its attachments, and from then on the store knows it,
+    /// so no later pass downloads it again. This is the pass that closes the
+    /// gap: it takes at most [`crate::ingest::ATTACHMENT_REPAIRS_PER_PASS`]
+    /// messages of the mailbox that Graph marked `hasAttachments` and the store
+    /// holds no attachment for, newest first, and asks the server again.
+    ///
+    /// Three outcomes, each recorded so the candidate set converges: the
+    /// attachments are written and the message leaves the set; the server has
+    /// nothing storable (only attached items or links) and the message is
+    /// settled for good; or the fetch fails and the message waits out a
+    /// doubling backoff capped at a day, never given up on, because the
+    /// failure may be a bug a later build fixes.
+    ///
+    /// `server` is whatever listing this pass holds for the folder, a full
+    /// enumeration or a delta change set; a message it does not name is looked
+    /// up by its `Message-ID`.
+    async fn repair_missing_attachments(
+        &self,
+        store: &crate::store::Store,
+        blobs: &crate::store::BlobStore,
+        account: &str,
+        mailbox: &str,
+        server: &HashMap<String, FolderEntry>,
+        now: i64,
+    ) -> RepairTally {
+        let mut tally = RepairTally::default();
+        let candidates = match crate::ingest::attachment_repair_candidates(
+            store,
+            account,
+            mailbox,
+            now,
+            crate::ingest::ATTACHMENT_REPAIRS_PER_PASS,
+        ) {
+            Ok(candidates) => candidates,
+            Err(e) => {
+                warn!("Could not list the messages of '{mailbox}' owed their attachments: {e:#}");
+                return tally;
+            }
+        };
+        for candidate in candidates {
+            let outcome = match self.repair_verdict_for(&candidate, server).await {
+                Ok(RepairVerdict::Attach {
+                    calendar_ics,
+                    attachments,
+                }) => crate::ingest::attach_missing_attachments(
+                    store,
+                    blobs,
+                    candidate.row_id,
+                    calendar_ics.as_deref(),
+                    &attachments,
+                )
+                .map(|_| true),
+                Ok(RepairVerdict::NothingToStore) => {
+                    crate::ingest::settle_attachment_repair(store, candidate.row_id).map(|_| false)
+                }
+                Err(e) => Err(e),
+            };
+            match outcome {
+                Ok(true) => tally.repaired += 1,
+                Ok(false) => tally.settled += 1,
+                Err(e) => {
+                    tally.failed += 1;
+                    let error = format!("{e:#}");
+                    match crate::ingest::note_attachment_repair_failure(
+                        store,
+                        candidate.row_id,
+                        &error,
+                        now,
+                    ) {
+                        Ok(attempts) => warn!(
+                            "Attachment repair of {} in '{mailbox}' failed (attempt {attempts}, \
+                             retried in {}s): {error}",
+                            candidate.message_id,
+                            crate::ingest::attachment_repair_backoff_secs(attempts),
+                        ),
+                        Err(record) => warn!(
+                            "Attachment repair of {} in '{mailbox}' failed ({error}) and could \
+                             not be recorded: {record:#}",
+                            candidate.message_id
+                        ),
+                    }
+                }
+            }
+        }
+        if tally != RepairTally::default() {
+            info!(
+                "Graph attachment repair in '{mailbox}': {} repaired, {} with nothing to store, \
+                 {} failed",
+                tally.repaired, tally.settled, tally.failed
+            );
+        }
+        tally
+    }
+
+    /// Ask the server what attachments one repair candidate has.
+    async fn repair_verdict_for(
+        &self,
+        candidate: &crate::ingest::AttachmentRepairCandidate,
+        server: &HashMap<String, FolderEntry>,
+    ) -> Result<RepairVerdict> {
+        let graph_id = match server.get(&candidate.message_id) {
+            Some(entry) => entry.graph_id.clone(),
+            None => self
+                .find_message_by_internet_id(&candidate.message_id)
+                .await?
+                .ok_or_else(|| anyhow!("the server lists no message with this Message-ID"))?,
+        };
+        let attachments = self.fetch_attachments(&graph_id).await?;
+        Ok(repair_verdict(attachments))
+    }
+}
+
 /// Sync orchestrator for Graph accounts, store-only. Mirrors the IMAP
 /// `sync_mailboxes`, with two documented differences forced by the API:
 ///
@@ -2068,6 +2225,20 @@ pub async fn sync_mailboxes_graph(
                 .map(|(mid, entry)| (crate::ingest::graph_uid(mid), entry.is_read)),
         );
         span.mark(&format!("flags:{}", target.role));
+
+        // Messages stored without the attachments their first fetch failed
+        // to bring, a bounded handful per pass.
+        client
+            .repair_missing_attachments(
+                &store,
+                &blobs,
+                account_name,
+                mailbox,
+                &server,
+                crate::outbox::unix_now(),
+            )
+            .await;
+        span.mark(&format!("attachment_repair:{}", target.role));
 
         // The other half of the same diff: what the store holds here and the
         // server does not. Held back until every target has been ingested (see
@@ -2732,6 +2903,64 @@ mod tests {
 
     const INVITE_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:graph-invite-1\r\nSUMMARY:Sync\r\nDTSTART:20260720T120000Z\r\nDTEND:20260720T130000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
     const EXPORT_ICS: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:graph-export-1\r\nSUMMARY:Dentist\r\nDTSTART:20260801T090000Z\r\nDTEND:20260801T093000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    /// The attachment repair settles a message whose list holds nothing the
+    /// store can keep, and attaches everything else, the invite lifted into
+    /// its sidecar as a first ingest would.
+    #[test]
+    fn the_repair_settles_only_a_message_with_nothing_storable() {
+        let page = serde_json::json!({
+            "value": [
+                {
+                    "@odata.type": "#microsoft.graph.itemAttachment",
+                    "id": "A1",
+                    "name": "Forwarded message",
+                },
+                {
+                    "@odata.type": "#microsoft.graph.referenceAttachment",
+                    "id": "A2",
+                    "name": "Plan.docx",
+                },
+                {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "id": "A3",
+                    "name": "empty.txt",
+                    "contentBytes": "",
+                },
+            ],
+        });
+        let list: GraphAttachmentList = serde_json::from_value(page).expect("page parses");
+        assert!(matches!(
+            repair_verdict(attachments_from_list(list)),
+            RepairVerdict::NothingToStore
+        ));
+        assert!(matches!(
+            repair_verdict(Vec::new()),
+            RepairVerdict::NothingToStore
+        ));
+
+        match repair_verdict(vec![att("invite.ics", INVITE_ICS)]) {
+            RepairVerdict::Attach {
+                calendar_ics,
+                attachments,
+            } => {
+                assert_eq!(calendar_ics.as_deref(), Some(INVITE_ICS.as_bytes()));
+                assert!(attachments.is_empty());
+            }
+            other => panic!("an invite is storable: {other:?}"),
+        }
+        match repair_verdict(vec![att("report.pdf", "%PDF")]) {
+            RepairVerdict::Attach {
+                calendar_ics,
+                attachments,
+            } => {
+                assert!(calendar_ics.is_none());
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].filename, "report.pdf");
+            }
+            other => panic!("a file is storable: {other:?}"),
+        }
+    }
 
     #[test]
     fn graph_lifts_invite_and_keeps_shared_ics() {

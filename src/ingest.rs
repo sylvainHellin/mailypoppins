@@ -227,30 +227,11 @@ pub fn ingest_message_with_policy(
         }
         (None, None) => {}
     }
-    let mut ordinal = 0i64;
-    if let Some(ics) = email.calendar_ics.as_deref() {
-        // The iMIP payload is an attachment blob like any other, under the
-        // sidecar name the rest of the codebase already knows it by, so the
-        // read path can find an invite without re-walking the MIME tree.
-        refs.push(BlobRef {
-            kind: KIND_ATTACHMENT,
-            ordinal,
-            hash: blobs.write(ics)?,
-            filename: Some(crate::parse::CALENDAR_SIDECAR_NAME.to_string()),
-            size: ics.len() as u64,
-        });
-        ordinal += 1;
-    }
-    for att in &email.attachments {
-        refs.push(BlobRef {
-            kind: KIND_ATTACHMENT,
-            ordinal,
-            hash: blobs.write(&att.content)?,
-            filename: Some(att.filename.clone()),
-            size: att.content.len() as u64,
-        });
-        ordinal += 1;
-    }
+    refs.extend(attachment_refs(
+        blobs,
+        email.calendar_ics.as_deref(),
+        &email.attachments,
+    )?);
     span.mark("blobs_written");
 
     let (in_reply_to, references) = input.raw.map(threading_headers).unwrap_or((None, None));
@@ -273,6 +254,43 @@ pub fn ingest_message_with_policy(
     span.mark("committed");
 
     Ok(outcome)
+}
+
+/// Write the attachment blob files of one message and return their references,
+/// ordinals from 0: the iMIP sidecar first, then every attachment in order.
+/// Shared by [`ingest_message`] and [`attach_missing_attachments`], so a
+/// repaired message carries exactly the references a first ingest would have.
+fn attachment_refs(
+    blobs: &BlobStore,
+    calendar_ics: Option<&[u8]>,
+    attachments: &[crate::parse::AttachmentData],
+) -> Result<Vec<BlobRef>> {
+    let mut refs = Vec::new();
+    let mut ordinal = 0i64;
+    if let Some(ics) = calendar_ics {
+        // The iMIP payload is an attachment blob like any other, under the
+        // sidecar name the rest of the codebase already knows it by, so the
+        // read path can find an invite without re-walking the MIME tree.
+        refs.push(BlobRef {
+            kind: KIND_ATTACHMENT,
+            ordinal,
+            hash: blobs.write(ics)?,
+            filename: Some(crate::parse::CALENDAR_SIDECAR_NAME.to_string()),
+            size: ics.len() as u64,
+        });
+        ordinal += 1;
+    }
+    for att in attachments {
+        refs.push(BlobRef {
+            kind: KIND_ATTACHMENT,
+            ordinal,
+            hash: blobs.write(&att.content)?,
+            filename: Some(att.filename.clone()),
+            size: att.content.len() as u64,
+        });
+        ordinal += 1;
+    }
+    Ok(refs)
 }
 
 /// The database half of [`ingest_message`], so the transaction boundary stays
@@ -1327,6 +1345,195 @@ pub fn ingest_failure_attempts(store: &Store, account: &str, mailbox: &str, uid:
         .unwrap_or(0)
 }
 
+/// How many messages one Graph pass repairs per mailbox at most.
+///
+/// Each costs one or two requests and a download of every attachment it
+/// carries, so the bound keeps a tick cheap however large the backlog; a
+/// backlog drains over the following passes, newest first.
+pub const ATTACHMENT_REPAIRS_PER_PASS: usize = 10;
+
+/// The first wait after a failed attachment repair, doubled per further
+/// failure up to [`ATTACHMENT_REPAIR_MAX_BACKOFF_SECS`].
+pub const ATTACHMENT_REPAIR_BASE_BACKOFF_SECS: i64 = 3600;
+
+/// The longest wait between two repair attempts of one message: a message
+/// whose fetch keeps failing costs one request a day, and is never given up
+/// on, because the failure that left it without attachments may well be a bug
+/// a later build fixes (the 400 every Graph attachment fetch returned until
+/// the attachment list stopped narrowing with `$select`).
+pub const ATTACHMENT_REPAIR_MAX_BACKOFF_SECS: i64 = 86_400;
+
+/// A message the Graph attachment repair should look at: the server said it
+/// has attachments, the store holds none for it, and the repair has neither
+/// settled it nor is waiting out a backoff on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentRepairCandidate {
+    pub row_id: i64,
+    pub uid: i64,
+    pub message_id: String,
+}
+
+/// The messages of `(account, mailbox)` that are owed their attachments,
+/// newest first, at most `limit` of them.
+///
+/// `has_attachments` is Graph's `hasAttachments` as the first ingest recorded
+/// it, and an `attachment` blob reference is what that ingest wrote when the
+/// fetch worked, so the gap between the two is exactly the messages whose
+/// attachment fetch failed. A row parked on a negative UID is skipped: it is
+/// waiting for its own message to come back and is rewritten when it does.
+pub fn attachment_repair_candidates(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    now: i64,
+    limit: usize,
+) -> Result<Vec<AttachmentRepairCandidate>> {
+    let mut stmt = store.conn().prepare(
+        "SELECT m.id, m.uid, m.message_id FROM messages m
+         WHERE m.account = ?1 AND m.mailbox = ?2 AND m.has_attachments = 1 AND m.uid > 0
+           AND NOT EXISTS (SELECT 1 FROM message_blobs b
+                           WHERE b.message_row = m.id AND b.kind = 'attachment')
+           AND NOT EXISTS (SELECT 1 FROM attachment_repairs r
+                           WHERE r.message_row = m.id
+                             AND (r.retry_at IS NULL OR r.retry_at > ?3))
+         ORDER BY m.date_sort DESC, m.id DESC
+         LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![account, mailbox, now, limit as i64],
+        |row| {
+            Ok(AttachmentRepairCandidate {
+                row_id: row.get(0)?,
+                uid: row.get(1)?,
+                message_id: row.get(2)?,
+            })
+        },
+    )?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("reading the attachment repair candidates")
+}
+
+/// Give `row_id` the attachments a first ingest could not fetch, returning how
+/// many references were written.
+///
+/// Only the attachment references are added: the row's envelope, flags, body
+/// and thread stay as they are, so a local flag change the server has not seen
+/// yet is not overwritten by a repair. A row that already holds an attachment
+/// reference (a concurrent re-ingest got there first) is left alone and
+/// answers `0`. Writes the blob files first and the references in one
+/// transaction, acquiring each blob, the same order [`ingest_message`] keeps.
+/// A successful repair also drops the row's repair state.
+pub fn attach_missing_attachments(
+    store: &Store,
+    blobs: &BlobStore,
+    row_id: i64,
+    calendar_ics: Option<&[u8]>,
+    attachments: &[crate::parse::AttachmentData],
+) -> Result<usize> {
+    let refs = attachment_refs(blobs, calendar_ics, attachments)?;
+    if refs.is_empty() {
+        return Ok(0);
+    }
+    let tx = store
+        .conn()
+        .unchecked_transaction()
+        .context("opening the attachment repair transaction")?;
+    let already: bool = tx
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM message_blobs
+                            WHERE message_row = ?1 AND kind = 'attachment')",
+            [row_id],
+            |row| row.get(0),
+        )
+        .context("checking the row's attachment references")?;
+    if already {
+        return Ok(0);
+    }
+    for r in &refs {
+        blobs.acquire(&tx, &r.hash, r.size)?;
+        tx.execute(
+            "INSERT INTO message_blobs (message_row, kind, ordinal, hash, filename, size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                row_id,
+                r.kind,
+                r.ordinal,
+                r.hash.as_str(),
+                r.filename,
+                r.size as i64
+            ],
+        )
+        .context("recording a repaired attachment reference")?;
+    }
+    let added: i64 = refs.iter().map(|r| r.size as i64).sum();
+    tx.execute(
+        "UPDATE messages SET has_attachments = 1, size = IFNULL(size, 0) + ?2 WHERE id = ?1",
+        rusqlite::params![row_id, added],
+    )
+    .context("updating the repaired row")?;
+    tx.execute(
+        "DELETE FROM attachment_repairs WHERE message_row = ?1",
+        [row_id],
+    )
+    .context("clearing the repair state")?;
+    tx.commit()
+        .context("committing the attachment repair transaction")?;
+    Ok(refs.len())
+}
+
+/// Record that the server answered for `row_id` and has no attachment content
+/// to give (only attached Outlook items or cloud links), so the repair never
+/// asks again.
+pub fn settle_attachment_repair(store: &Store, row_id: i64) -> Result<()> {
+    store
+        .conn()
+        .execute(
+            "INSERT INTO attachment_repairs (message_row, attempts, retry_at, last_error)
+             VALUES (?1, 0, NULL, NULL)
+             ON CONFLICT (message_row) DO UPDATE SET retry_at = NULL, last_error = NULL",
+            [row_id],
+        )
+        .context("settling the attachment repair")?;
+    Ok(())
+}
+
+/// The wait after the `attempts`-th failed repair of one message.
+pub fn attachment_repair_backoff_secs(attempts: i64) -> i64 {
+    let doublings = attempts.saturating_sub(1).clamp(0, 30) as u32;
+    ATTACHMENT_REPAIR_BASE_BACKOFF_SECS
+        .saturating_mul(1i64 << doublings)
+        .min(ATTACHMENT_REPAIR_MAX_BACKOFF_SECS)
+}
+
+/// Count one failed repair of `row_id` and push its next attempt out by
+/// [`attachment_repair_backoff_secs`], returning the attempt count.
+pub fn note_attachment_repair_failure(
+    store: &Store,
+    row_id: i64,
+    error: &str,
+    now: i64,
+) -> Result<i64> {
+    let conn = store.conn();
+    let attempts: i64 = conn
+        .query_row(
+            "INSERT INTO attachment_repairs (message_row, attempts, retry_at, last_error)
+             VALUES (?1, 1, NULL, ?2)
+             ON CONFLICT (message_row) DO UPDATE SET
+                attempts = attachment_repairs.attempts + 1,
+                last_error = excluded.last_error
+             RETURNING attempts",
+            rusqlite::params![row_id, error],
+            |row| row.get(0),
+        )
+        .context("counting the failed attachment repair")?;
+    conn.execute(
+        "UPDATE attachment_repairs SET retry_at = ?2 WHERE message_row = ?1",
+        rusqlite::params![row_id, now + attachment_repair_backoff_secs(attempts)],
+    )
+    .context("scheduling the next attachment repair")?;
+    Ok(attempts)
+}
+
 /// Of `vanished`, the UIDs whose rows are old enough for the prune to delete.
 ///
 /// This is the answer to a row the server has never listed under the identity
@@ -1665,6 +1872,286 @@ mod tests {
         assert!(!too_fresh_to_prune(now + 10 * 365 * 86_400, now));
         // An unparseable `Date:` stores 0, which is prunable like any old row.
         assert!(!too_fresh_to_prune(0, now));
+    }
+
+    mod attachment_repair {
+        use super::*;
+        use crate::parse::AttachmentData;
+        use tempfile::TempDir;
+
+        struct Fixture {
+            _dir: TempDir,
+            store: Store,
+            blobs: BlobStore,
+        }
+
+        fn fixture() -> Fixture {
+            let dir = TempDir::new().unwrap();
+            let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+            let blobs = BlobStore::new(dir.path().join("blobs"));
+            Fixture {
+                _dir: dir,
+                store,
+                blobs,
+            }
+        }
+
+        fn att(filename: &str, content: &[u8]) -> AttachmentData {
+            AttachmentData {
+                filename: filename.into(),
+                content: content.to_vec(),
+                content_id: None,
+            }
+        }
+
+        /// Ingest one Graph-shaped message the way the sync does: `has` is the
+        /// server's `hasAttachments`, `attachments` what the fetch brought.
+        fn ingest(
+            fx: &Fixture,
+            mailbox: &str,
+            subject: &str,
+            date: &str,
+            has: bool,
+            attachments: Vec<AttachmentData>,
+        ) -> (i64, i64) {
+            let mut e = email(subject);
+            e.date = date.into();
+            e.message_id = Some(format!("<{subject}@example.com>"));
+            e.has_attachments = has;
+            e.attachments = attachments;
+            let uid = graph_uid(&resolve_message_id(&e, None));
+            let row = ingest_message(
+                &fx.store,
+                &fx.blobs,
+                &IngestInput {
+                    account: "acct",
+                    mailbox,
+                    uid,
+                    email: &e,
+                    raw: None,
+                },
+            )
+            .unwrap()
+            .row_id;
+            (row, uid)
+        }
+
+        fn candidate_rows(fx: &Fixture, mailbox: &str, now: i64, limit: usize) -> Vec<i64> {
+            attachment_repair_candidates(&fx.store, "acct", mailbox, now, limit)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.row_id)
+                .collect()
+        }
+
+        const OLD: &str = "Mon, 01 Jan 2024 12:00:00 +0000";
+        const NEW: &str = "Tue, 02 Jan 2024 12:00:00 +0000";
+
+        /// Only a message the server marked as having attachments and the
+        /// store holds none for is owed a repair, newest first, within the
+        /// mailbox asked about and the bound.
+        #[test]
+        fn only_messages_missing_their_attachments_are_candidates() {
+            let fx = fixture();
+            let (old_gap, _) = ingest(&fx, "inbox", "old-gap", OLD, true, vec![]);
+            let (new_gap, _) = ingest(&fx, "inbox", "new-gap", NEW, true, vec![]);
+            ingest(&fx, "inbox", "plain", NEW, false, vec![]);
+            ingest(
+                &fx,
+                "inbox",
+                "whole",
+                NEW,
+                true,
+                vec![att("a.pdf", b"%PDF")],
+            );
+            ingest(&fx, "archive", "elsewhere", NEW, true, vec![]);
+
+            assert_eq!(candidate_rows(&fx, "inbox", 0, 10), vec![new_gap, old_gap]);
+            assert_eq!(candidate_rows(&fx, "inbox", 0, 1), vec![new_gap]);
+        }
+
+        /// The repair writes only attachment references, in ingest's order
+        /// (sidecar first), takes a blob reference for each, and leaves the
+        /// message out of every later pass.
+        #[test]
+        fn a_repair_attaches_the_blobs_and_ends_the_candidacy() {
+            let fx = fixture();
+            let (row, _) = ingest(&fx, "inbox", "gap", OLD, true, vec![]);
+            let size_before: i64 = fx
+                .store
+                .conn()
+                .query_row("SELECT size FROM messages WHERE id = ?1", [row], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            note_attachment_repair_failure(&fx.store, row, "HTTP 503", 0).unwrap();
+
+            let written = attach_missing_attachments(
+                &fx.store,
+                &fx.blobs,
+                row,
+                Some(b"BEGIN:VCALENDAR"),
+                &[att("a.pdf", b"%PDF"), att("b.txt", b"hello")],
+            )
+            .unwrap();
+            assert_eq!(written, 3);
+
+            let refs: Vec<(i64, String)> = fx
+                .store
+                .conn()
+                .prepare(
+                    "SELECT ordinal, filename FROM message_blobs
+                     WHERE message_row = ?1 AND kind = 'attachment' ORDER BY ordinal",
+                )
+                .unwrap()
+                .query_map([row], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(
+                refs,
+                vec![
+                    (0, crate::parse::CALENDAR_SIDECAR_NAME.to_string()),
+                    (1, "a.pdf".to_string()),
+                    (2, "b.txt".to_string())
+                ]
+            );
+            // The reader sees the two files; the sidecar is the invite.
+            assert_eq!(
+                crate::store::read::attachments_for(&fx.store, row)
+                    .unwrap()
+                    .len(),
+                2
+            );
+            let hash = fx.blobs.write(b"%PDF").unwrap();
+            assert_eq!(
+                crate::store::blobs::refcount(fx.store.conn(), &hash).unwrap(),
+                1
+            );
+            let size_after: i64 = fx
+                .store
+                .conn()
+                .query_row("SELECT size FROM messages WHERE id = ?1", [row], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(size_after, size_before + 15 + 4 + 5);
+            let state: i64 = fx
+                .store
+                .conn()
+                .query_row("SELECT COUNT(*) FROM attachment_repairs", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(state, 0, "a repaired message keeps no repair state");
+            assert!(candidate_rows(&fx, "inbox", i64::MAX, 10).is_empty());
+
+            // A second repair of the same row writes nothing twice.
+            let again =
+                attach_missing_attachments(&fx.store, &fx.blobs, row, None, &[att("c", b"x")])
+                    .unwrap();
+            assert_eq!(again, 0);
+            assert_eq!(
+                crate::store::read::attachments_for(&fx.store, row)
+                    .unwrap()
+                    .len(),
+                2
+            );
+        }
+
+        /// A message whose attachments the server cannot hand over is asked
+        /// about once and never again.
+        #[test]
+        fn a_settled_message_is_never_a_candidate_again() {
+            let fx = fixture();
+            let (row, _) = ingest(&fx, "inbox", "item-only", OLD, true, vec![]);
+            settle_attachment_repair(&fx.store, row).unwrap();
+            assert!(candidate_rows(&fx, "inbox", i64::MAX, 10).is_empty());
+        }
+
+        /// A failed repair waits out a doubling backoff, capped at a day, and
+        /// comes back once it is due: never every tick, never given up on.
+        #[test]
+        fn a_failed_repair_backs_off_and_comes_back() {
+            let fx = fixture();
+            let (row, _) = ingest(&fx, "inbox", "flaky", OLD, true, vec![]);
+            let now = 1_800_000_000;
+
+            assert_eq!(
+                note_attachment_repair_failure(&fx.store, row, "e", now).unwrap(),
+                1
+            );
+            assert!(candidate_rows(&fx, "inbox", now + 60, 10).is_empty());
+            assert_eq!(
+                candidate_rows(&fx, "inbox", now + ATTACHMENT_REPAIR_BASE_BACKOFF_SECS, 10),
+                vec![row]
+            );
+
+            assert_eq!(
+                note_attachment_repair_failure(&fx.store, row, "e", now).unwrap(),
+                2
+            );
+            assert!(
+                candidate_rows(&fx, "inbox", now + ATTACHMENT_REPAIR_BASE_BACKOFF_SECS, 10)
+                    .is_empty()
+            );
+            assert_eq!(
+                candidate_rows(
+                    &fx,
+                    "inbox",
+                    now + 2 * ATTACHMENT_REPAIR_BASE_BACKOFF_SECS,
+                    10
+                ),
+                vec![row]
+            );
+
+            assert_eq!(attachment_repair_backoff_secs(1), 3600);
+            assert_eq!(attachment_repair_backoff_secs(3), 4 * 3600);
+            assert_eq!(
+                attachment_repair_backoff_secs(6),
+                ATTACHMENT_REPAIR_MAX_BACKOFF_SECS
+            );
+            assert_eq!(
+                attachment_repair_backoff_secs(i64::MAX),
+                ATTACHMENT_REPAIR_MAX_BACKOFF_SECS
+            );
+        }
+
+        /// The repair state is scoped by the message row, so a prune takes it
+        /// along rather than leaving it to a later row on the same id.
+        #[test]
+        fn a_pruned_message_takes_its_repair_state_along() {
+            let fx = fixture();
+            let (row, uid) = ingest(&fx, "inbox", "gone", OLD, true, vec![]);
+            settle_attachment_repair(&fx.store, row).unwrap();
+            assert_eq!(
+                prune_vanished(&fx.store, &fx.blobs, "acct", "inbox", &[uid]),
+                1
+            );
+            let state: i64 = fx
+                .store
+                .conn()
+                .query_row("SELECT COUNT(*) FROM attachment_repairs", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(state, 0);
+        }
+
+        /// A store written by a build that predates the table gains it on its
+        /// next open, with no rebuild.
+        #[test]
+        fn an_older_store_gains_the_repair_table_on_open() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("store.sqlite3");
+            {
+                let store = Store::open(&path).unwrap();
+                store
+                    .conn()
+                    .execute_batch("DROP TABLE attachment_repairs")
+                    .unwrap();
+            }
+            let store = Store::open(&path).unwrap();
+            assert!(attachment_repair_candidates(&store, "acct", "inbox", 0, 10)
+                .unwrap()
+                .is_empty());
+        }
     }
 
     #[test]
