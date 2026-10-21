@@ -919,17 +919,40 @@ pub fn cmd_config_add_account(
 // Graph API wizard flows
 // ---------------------------------------------------------------------------
 
-/// Graph API flow for `config init` (creates a new config file).
-fn graph_init_flow(path: &std::path::Path) -> Result<()> {
+/// The banner both Graph flows open with.
+fn print_graph_intro() {
     println!(
         "{} Microsoft 365 (Graph API) -- no IMAP/SMTP needed.",
         "\u{2139}".blue()
     );
     println!(
-        "  Requires an Azure Entra ID app with Mail.Read, Mail.ReadWrite, Mail.Send permissions."
+        "  Signs in through the shared mailypoppins app; no app registration of your own needed."
     );
     println!("  See docs/exchange-setup.md for details.");
     println!();
+}
+
+/// The Graph flows' app prompts: Enter at both keeps the shared mailypoppins
+/// app and the `common` tenant; a client ID is typed only for an
+/// organisation's own app registration. Answers (client_id, tenant_id).
+fn prompt_graph_app() -> Result<(String, String)> {
+    println!("{}", "OAuth2 Configuration".bold());
+    println!("  Press Enter at both prompts to sign in with any work, school or personal Microsoft account.");
+    let client_id = crate::oauth2::client_id_or_default(&prompt_input(
+        "Client ID [press Enter for the mailypoppins app]",
+        "",
+    )?);
+    let tenant_id = crate::oauth2::tenant_or_default(&prompt_input(
+        "Tenant ID or domain",
+        crate::oauth2::DEFAULT_TENANT,
+    )?);
+    println!();
+    Ok((client_id, tenant_id))
+}
+
+/// Graph API flow for `config init` (creates a new config file).
+fn graph_init_flow(path: &std::path::Path) -> Result<()> {
+    print_graph_intro();
 
     // -- Account name
     let account_name = prompt_input(
@@ -943,10 +966,7 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
     println!();
 
     // -- OAuth2 settings
-    println!("{}", "OAuth2 Configuration".bold());
-    let oauth2_client_id = prompt_input("Azure App client_id", "")?;
-    let oauth2_tenant_id = prompt_input("Azure tenant_id", "")?;
-    println!();
+    let (oauth2_client_id, oauth2_tenant_id) = prompt_graph_app()?;
 
     // -- Device code flow
     println!(
@@ -1117,15 +1137,7 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
 
 /// Graph API flow for `config add-account` (appends to existing config).
 fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Result<()> {
-    println!(
-        "{} Microsoft 365 (Graph API) -- no IMAP/SMTP needed.",
-        "\u{2139}".blue()
-    );
-    println!(
-        "  Requires an Azure Entra ID app with Mail.Read, Mail.ReadWrite, Mail.Send permissions."
-    );
-    println!("  See docs/exchange-setup.md for details.");
-    println!();
+    print_graph_intro();
 
     // -- Account name (unique)
     let account_name = loop {
@@ -1147,10 +1159,7 @@ fn graph_add_account_flow(path: &std::path::Path, existing_names: &[&str]) -> Re
     println!();
 
     // -- OAuth2 settings
-    println!("{}", "OAuth2 Configuration".bold());
-    let oauth2_client_id = prompt_input("Azure App client_id", "")?;
-    let oauth2_tenant_id = prompt_input("Azure tenant_id", "")?;
-    println!();
+    let (oauth2_client_id, oauth2_tenant_id) = prompt_graph_app()?;
 
     // -- Device code flow
     println!(

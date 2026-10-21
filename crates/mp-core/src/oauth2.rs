@@ -31,6 +31,41 @@ fn token_url(tenant_id: &str) -> String {
     )
 }
 
+/// Application (client) ID of the shared mailypoppins app registration: a
+/// multi-tenant public client in the `mailypoppins.onmicrosoft.com` tenant that
+/// accepts any Entra tenant plus personal Microsoft accounts. The Graph setup
+/// wizards (CLI and desktop) use it unless the user brings their own app; the
+/// desktop wizard mirrors it as `MAILYPOPPINS_CLIENT_ID` in
+/// `clients/desktop/src/app/wizard.ts`.
+pub const MAILYPOPPINS_CLIENT_ID: &str = "439d7ebd-7898-4df2-b2d6-88bb61e2597b";
+
+/// The tenant a Graph account signs in through when the user names none:
+/// `common` lets a multi-tenant app take both work or school and personal
+/// Microsoft accounts, at the authorize, device-code and token endpoints alike.
+pub const DEFAULT_TENANT: &str = "common";
+
+/// The client ID a setup wizard writes for `input`: the user's own app
+/// registration when they typed one, else the shared mailypoppins app.
+pub fn client_id_or_default(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        MAILYPOPPINS_CLIENT_ID.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The tenant a setup wizard writes for `input`: the tenant ID or domain the
+/// user typed, else [`DEFAULT_TENANT`].
+pub fn tenant_or_default(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        DEFAULT_TENANT.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Scopes required for IMAP + SMTP access via OAuth2.
 pub const IMAP_SMTP_SCOPES: &str = "https://outlook.office365.com/IMAP.AccessAsUser.All \
                                     https://outlook.office365.com/SMTP.Send \
@@ -509,6 +544,47 @@ mod tests {
         assert_eq!(
             url,
             "https://login.microsoftonline.com/my-tenant-id/oauth2/v2.0/devicecode"
+        );
+    }
+
+    #[test]
+    fn empty_client_id_is_the_mailypoppins_app() {
+        assert_eq!(client_id_or_default(""), MAILYPOPPINS_CLIENT_ID);
+        assert_eq!(client_id_or_default("  \n"), MAILYPOPPINS_CLIENT_ID);
+        assert_eq!(
+            MAILYPOPPINS_CLIENT_ID,
+            "439d7ebd-7898-4df2-b2d6-88bb61e2597b"
+        );
+    }
+
+    #[test]
+    fn typed_client_id_is_kept() {
+        assert_eq!(
+            client_id_or_default(" 00000000-1111-2222-3333-444444444444 "),
+            "00000000-1111-2222-3333-444444444444"
+        );
+    }
+
+    #[test]
+    fn empty_tenant_is_common_and_a_typed_one_is_kept() {
+        assert_eq!(tenant_or_default(""), "common");
+        assert_eq!(tenant_or_default(" "), DEFAULT_TENANT);
+        assert_eq!(tenant_or_default("contoso.com"), "contoso.com");
+        assert_eq!(
+            tenant_or_default("365f441f-42ba-4b36-851f-8b124c7becbb"),
+            "365f441f-42ba-4b36-851f-8b124c7becbb"
+        );
+    }
+
+    #[test]
+    fn common_tenant_reaches_the_common_endpoints() {
+        assert_eq!(
+            device_code_url(DEFAULT_TENANT),
+            "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
+        );
+        assert_eq!(
+            token_url(DEFAULT_TENANT),
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token"
         );
     }
 

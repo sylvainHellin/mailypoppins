@@ -410,6 +410,47 @@ fn wizard_answers_needing_toml_escapes_round_trip() {
     );
 }
 
+/// PERSO-164: Enter at the Graph wizard's client ID and tenant prompts writes
+/// the shared mailypoppins app and the `common` tenant, and the account loads
+/// as a Graph account with them; a typed client ID and tenant are written as
+/// they are, so an account with its own app registration keeps working.
+#[test]
+fn graph_wizard_defaults_to_the_mailypoppins_app_and_common() {
+    for (client_in, tenant_in, client_out, tenant_out) in [
+        (
+            "",
+            "",
+            crate::oauth2::MAILYPOPPINS_CLIENT_ID,
+            crate::oauth2::DEFAULT_TENANT,
+        ),
+        (
+            "00000000-1111-2222-3333-444444444444",
+            "contoso.onmicrosoft.com",
+            "00000000-1111-2222-3333-444444444444",
+            "contoso.onmicrosoft.com",
+        ),
+    ] {
+        let client_id = crate::oauth2::client_id_or_default(client_in);
+        let tenant_id = crate::oauth2::tenant_or_default(tenant_in);
+        let block = super::init::build_graph_account_toml(
+            "work",
+            "me@example.com",
+            &client_id,
+            &tenant_id,
+            "Inbox",
+            "Archive",
+            "Sent Items",
+            &[],
+        );
+        super::init::ensure_config_parses(&block).expect("the graph block parses");
+        let config: crate::config::GlobalConfig =
+            toml::from_str(&block).expect("graph block parses");
+        let graph = crate::config::GraphConfig::load(&config.accounts[0]).expect("graph config");
+        assert_eq!(graph.client_id, client_out);
+        assert_eq!(graph.tenant_id, tenant_out);
+    }
+}
+
 /// The backstop before every write: text the loader would reject is refused
 /// with an error that says nothing was written.
 #[test]
