@@ -325,6 +325,11 @@ async fn run(foreground_logs: bool) -> Result<()> {
             }
         }
     };
+    // Before any account runtime starts: the watchers and the scheduled ticks
+    // read passwords with no client call to open the backend for them
+    // (PERSO-170).
+    super::config::open_secrets_backend(&state, &loaded).await;
+
     // The daemon owns the configuration from here: `config.*` reads and swaps
     // this store, and nothing else re-reads the file.
     // Account runtimes are on (P5-U8): a daemon that started none would be a

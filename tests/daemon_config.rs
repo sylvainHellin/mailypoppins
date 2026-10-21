@@ -2164,6 +2164,98 @@ async fn a_reload_that_flips_the_secrets_backend_is_refused_until_a_restart() {
     );
 }
 
+/// The daemon opens its secrets backend at startup, from the configuration it
+/// loaded (PERSO-170): with no client call at all, a reload naming another
+/// backend is already refused.
+#[tokio::test]
+async fn a_freshly_started_daemon_has_opened_the_configured_secrets_backend() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let _daemon = sandbox.start_daemon().await;
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+
+    let original = sandbox.read_config();
+    sandbox.write_config(&format!("secrets_backend = \"keyring\"\n{original}"));
+    let error = call_err(&mut conn, "config.reload", json!({})).await;
+    assert_eq!(error.code, ErrorCode::ConfigInvalid.code(), "{error:?}");
+    assert_eq!(
+        error.data.as_ref().expect("a payload")["message"],
+        json!(
+            "secrets_backend changed from encrypted-file to keyring; restart the daemon to apply"
+        ),
+        "the backend was open before any client asked for a credential"
+    );
+}
+
+/// A daemon that started with no `config.toml` opens no backend, so the first
+/// configuration it loads chooses one: opening the default at startup would
+/// have locked a `secrets_backend = "keyring"` out until a restart. Opening the
+/// keyring backend reads nothing from the keychain.
+#[tokio::test]
+async fn a_first_run_daemon_lets_the_first_loaded_configuration_choose_the_backend() {
+    let sandbox = Sandbox::empty();
+    let _daemon = sandbox.start_daemon().await;
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+
+    let accounts = account_toml("alpha", DEFAULT_BODY_FETCH_DEADLINE_SECS);
+    sandbox.write_config(&format!("secrets_backend = \"keyring\"\n{accounts}"));
+    call_ok(&mut conn, "config.reload", json!({})).await;
+
+    sandbox.write_config(&accounts);
+    let error = call_err(&mut conn, "config.reload", json!({})).await;
+    assert_eq!(
+        error.data.as_ref().expect("a payload")["message"],
+        json!(
+            "secrets_backend changed from keyring to encrypted-file; restart the daemon to apply"
+        ),
+        "the first configuration that loaded chose the backend: {error:?}"
+    );
+}
+
+/// The account runtimes' own credential reads work after a restart with no
+/// client call (PERSO-170): the IMAP watcher's first round reaches the secrets
+/// backend and fails on the missing password, not on an unopened backend.
+#[tokio::test]
+async fn a_watcher_reads_its_password_without_a_client_opening_the_backend() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    sandbox.write_config(
+        "[[accounts]]\n\
+         name = \"alpha\"\n\
+         default_from = \"alpha@example.com\"\n\
+         \n\
+         [accounts.imap]\n\
+         host = \"127.0.0.1\"\n\
+         port = 1\n\
+         \n\
+         [accounts.mailboxes.inbox]\n\
+         server = \"INBOX\"\n",
+    );
+    let _daemon = sandbox.start_daemon().await;
+
+    let started = Instant::now();
+    let failure = loop {
+        let logs = sandbox.log_text();
+        if let Some(line) = logs
+            .lines()
+            .find(|line| line.contains("[watcher] watching alpha failed"))
+        {
+            break line.to_string();
+        }
+        assert!(
+            started.elapsed() < DEADLINE,
+            "the watcher never reported its first round:\n{logs}"
+        );
+        tokio::time::sleep(TICK).await;
+    };
+    assert!(
+        !failure.contains("secrets backend not initialized"),
+        "the watcher ran before the backend was opened: {failure}"
+    );
+    assert!(
+        failure.contains("not found. Run `mp config set-password`"),
+        "the watcher's failure is the missing password: {failure}"
+    );
+}
+
 #[tokio::test]
 async fn a_secret_never_reaches_a_log_line_an_error_payload_or_the_effective_config() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);

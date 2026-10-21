@@ -1791,9 +1791,9 @@ async fn mutate(
     let source_server = crate::config::find_server_name_for_role(account, &row.mailbox);
 
     let backend = if settle_owed {
-        // The secrets backend is opened on first use rather than at startup,
-        // the same rule `config.set_password` follows: a first run has no
-        // configuration to select one from, and the opener is idempotent.
+        // Startup opened the secrets backend if a configuration had loaded;
+        // a first run had none to select one from, so it opens here, as
+        // `config.set_password` does. The opener is idempotent.
         if let Err(e) = crate::secrets::init(snapshot.config.secrets_backend) {
             return Err(credentials(&name, &anyhow::anyhow!("{e}")));
         }

@@ -193,7 +193,7 @@ Its successful sends are routed-side assertions rather than parity rows, because
 
 `mp sync` is the one routed command that follows an operation rather than a call. It bootstraps first, because `operation.progress` and `operation.finished` reach bootstrapped connections only, and it renders every line it prints from those payloads through `mp_client::format`: the drain reports from the progress events, the summary from the `sync.completed` payload the result carries. There is no client-side budget on the wait, exactly as there was no budget on the in-process pass.
 
-The daemon opens the secrets backend on first use, which from P4-U8 includes `message.archive` and `message.delete` and from P4-U10 the whole sync slice: they load the account's IMAP or Graph credentials, and an account with none refuses with the `mp config set-password` sentence *before* the store is touched, so the row stays where it was.
+The daemon opens the secrets backend at startup once a configuration loaded, and on first use when it started with none; the methods that read a credential are, from P4-U8, `message.archive` and `message.delete` and from P4-U10 the whole sync slice: they load the account's IMAP or Graph credentials, and an account with none refuses with the `mp config set-password` sentence *before* the store is touched, so the row stays where it was.
 
 ## Exit codes
 

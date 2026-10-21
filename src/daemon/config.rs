@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use serde_json::{json, Value};
 
 use crate::config::{
@@ -272,6 +272,35 @@ fn check_secrets_backend(
     }
 }
 
+/// Open the secrets backend a loaded configuration names, before any account
+/// runtime reads a password (PERSO-170).
+///
+/// Every other `mp` process opens it in `main`'s client preamble, which the
+/// daemon skips, and the runtimes read credentials with no client call in
+/// front of them: the IMAP watcher's first round and every scheduled tick go
+/// through `ImapConfig::load`, which failed with `secrets backend not
+/// initialized` until some method happened to open the backend.
+///
+/// Only a configuration that loaded selects one. A daemon with no
+/// `config.toml`, or one that does not load, opens nothing, so the first
+/// configuration it does load still chooses: the backend is a first-kind-wins
+/// singleton, and opening the default here would lock a later
+/// `secrets_backend = "keyring"` out until a restart. Once one is open this is
+/// a no-op, and a failure is logged rather than fatal, since the methods that
+/// need a credential retry the open and report its error themselves.
+pub async fn open_secrets_backend(state: &ConfigState, config: &GlobalConfig) {
+    if *state != ConfigState::Ok || crate::secrets::active_backend().is_some() {
+        return;
+    }
+    let kind = config.secrets_backend;
+    let name = backend_name(kind);
+    match tokio::task::spawn_blocking(move || crate::secrets::init(kind)).await {
+        Ok(Ok(())) => info!("[daemon] opened the {name} secrets backend"),
+        Ok(Err(e)) => error!("[daemon] could not open the {name} secrets backend: {e}"),
+        Err(e) => error!("[daemon] the task opening the {name} secrets backend {e}"),
+    }
+}
+
 fn backend_name(kind: SecretsBackendKind) -> &'static str {
     match kind {
         SecretsBackendKind::EncryptedFile => "encrypted-file",
@@ -509,6 +538,9 @@ pub async fn reconcile(
     // Before any runtime reports: a change naming an account the state does
     // not have is dropped, so gamma must exist in the state before its
     // readiness is committed, and alpha must be gone before the swap is over.
+    // The secrets backend opens before any runtime starts, for a daemon that
+    // started with no configuration to select one from.
+    open_secrets_backend(&state, &config).await;
     store.install(state, config);
     canonical.reseed(seeds_from_config(&store.accounts()));
     // The watched roots are one per configured account, so a swap that added

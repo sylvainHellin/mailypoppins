@@ -29,16 +29,40 @@ use super::account::{AccountRuntime, TickKind, TickOutcome};
 /// that once, but it does publish counts: whatever the runner has not
 /// published yet by the time the joiner reads the store is the same set, and
 /// one the runner did publish compares equal and is skipped.
+///
+/// A tick that failed is logged here (PERSO-170): nobody waits on a scheduled
+/// or a watcher tick, so its error would otherwise reach no one but the
+/// `sync.completed` it carries.
 pub async fn tick_and_publish(
     runtime: &AccountRuntime,
     canonical: &Arc<CanonicalState>,
     kind: TickKind,
 ) -> TickOutcome {
     let outcome = commit_tick(runtime, canonical, kind).await;
+    if let Some(line) = failure_line(runtime.account(), &outcome) {
+        warn!("{line}");
+    }
     if !outcome.blocked {
         publish_changed_counts(canonical, runtime.account()).await;
     }
     outcome
+}
+
+/// The warning a failed tick leaves in the log, naming the account and the
+/// error; `None` for a tick that did not fail, was refused, or joined one
+/// already running, whose runner reports the error once.
+fn failure_line(account: &str, outcome: &TickOutcome) -> Option<String> {
+    if outcome.blocked || outcome.joined {
+        return None;
+    }
+    let kind = match outcome.kind {
+        TickKind::Quick => "quick",
+        TickKind::Full => "full",
+    };
+    outcome
+        .error
+        .as_ref()
+        .map(|error| format!("[daemon] a background {kind} tick of {account} failed: {error}"))
 }
 
 /// Commit one [`Change::MailboxCounts`] per mailbox whose store counts differ
@@ -107,6 +131,45 @@ mod tests {
                     .collect(),
             }],
         )
+    }
+
+    fn outcome(error: Option<&str>) -> TickOutcome {
+        TickOutcome {
+            kind: TickKind::Quick,
+            phases: Vec::new(),
+            joined: false,
+            blocked: false,
+            body_deadline: None,
+            status: String::new(),
+            error: error.map(str::to_string),
+            sync: None,
+        }
+    }
+
+    /// A failed tick's warning names the account and carries the error
+    /// verbatim, the line a silent scheduled tick never left (PERSO-170).
+    #[test]
+    fn a_failed_tick_is_logged_with_its_account_and_error() {
+        let error = "secrets backend not initialized -- call secrets::init() first";
+        assert_eq!(
+            failure_line("tum", &outcome(Some(error))).as_deref(),
+            Some(
+                "[daemon] a background quick tick of tum failed: \
+                 secrets backend not initialized -- call secrets::init() first"
+            )
+        );
+        assert_eq!(failure_line("tum", &outcome(None)), None, "a clean tick");
+
+        let mut joined = outcome(Some(error));
+        joined.joined = true;
+        assert_eq!(failure_line("tum", &joined), None, "the runner logs it");
+        let mut blocked = outcome(Some(error));
+        blocked.blocked = true;
+        assert_eq!(
+            failure_line("tum", &blocked),
+            None,
+            "a refused tick ran nothing"
+        );
     }
 
     /// Only a mailbox whose counts differ from the state's is committed, so a

@@ -249,9 +249,10 @@ fn server_error(account: &str, error: &anyhow::Error) -> RpcError {
     }
 }
 
-/// The secrets backend, opened on first use rather than at startup: the same
-/// rule `config.set_password` and the mutation slice follow, because a first run
-/// has no configuration to select one from and the opener is idempotent.
+/// The secrets backend, which the daemon opens at startup once a configuration
+/// loaded ([`crate::daemon::config::open_secrets_backend`]); opened again here
+/// for a daemon that had none to select one from, or whose open failed, as
+/// `config.set_password` and the mutation slice do. The opener is idempotent.
 fn open_secrets(account: &str, kind: crate::secrets::SecretsBackendKind) -> Result<(), RpcError> {
     crate::secrets::init(kind).map_err(|e| server_error(account, &anyhow::anyhow!("{e}")))
 }

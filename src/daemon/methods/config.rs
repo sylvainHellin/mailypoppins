@@ -327,8 +327,8 @@ async fn set_password(family: &ConfigFamily, params: &Value) -> Result<Outcome, 
         let key = key.clone();
         let value = params.value().to_string();
         tokio::task::spawn_blocking(move || {
-            // The daemon opens the backend on first use rather than at startup:
-            // a first run has no configuration to select one from, and the
+            // Startup opened the backend if a configuration had loaded; a
+            // first run had none to select one from, so it opens here. The
             // opener is idempotent.
             crate::secrets::init(backend).map_err(|e| e.to_string())?;
             crate::config::set_secret(&key, &value).map_err(|e| format!("{e:#}"))

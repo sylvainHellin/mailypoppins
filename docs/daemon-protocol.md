@@ -511,7 +511,7 @@ The refusals are that resolution's own sentences, ambiguity included, so a route
 An account whose credentials cannot be loaded refuses with the secret store's own sentence and leaves the row exactly where it was, rather than archiving it locally and queueing a move behind a password nobody has entered.
 That refusal is `-32603` with `{account}`: the account is configured and its store is readable, so `-32005` and `-32006` would contradict what `account.list` says about the same account, and the caller's parameters were right, so it is not `-32602`.
 Protocol 1 has no credentials code, and adding one would take a changelog entry without moving a user-visible byte.
-The secrets backend is opened on first use rather than at startup, the same rule `config.set_password` follows.
+The daemon opens the secrets backend at startup once a configuration loaded; a daemon that started with none opens it on first use, as `config.set_password` does.
 
 `moved_to.selector` names the Message-ID as the store holds it, which is the "now" line `mp archive` prints.
 

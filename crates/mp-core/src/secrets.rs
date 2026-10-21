@@ -292,6 +292,65 @@ pub struct EncryptedFileBackend {
 struct EncryptedFileState {
     key: DerivedKey,
     file: SecretsFile,
+    /// What the file on disk looked like when `file` was read or written, so
+    /// a write by another process is noticed (see [`FileStamp`]).
+    stamp: Option<FileStamp>,
+}
+
+/// The identity of one version of the secrets file: its inode, length and
+/// modification time, `None` when there is no file.
+///
+/// A long-lived process (the daemon, which opens the backend at startup since
+/// PERSO-170) would otherwise keep serving the copy it read first while
+/// `mp config init` or `mp config add-account` write new passwords from their
+/// own process. Every write is an atomic rename, so a new version has a new
+/// inode even when its length and timestamp happen to match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    inode: u64,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn file_stamp(path: &std::path::Path) -> Option<FileStamp> {
+    let meta = fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some(FileStamp {
+        inode,
+        len: meta.len(),
+        modified: meta.modified().ok(),
+    })
+}
+
+/// Read and decrypt the secrets file at `path`, or an empty store when there
+/// is none.
+fn read_secrets_file(
+    path: &std::path::Path,
+    key: &DerivedKey,
+) -> std::result::Result<SecretsFile, SecretsError> {
+    if !path.exists() {
+        return Ok(SecretsFile::default());
+    }
+    let bytes = fs::read(path)
+        .with_context(|| format!("Failed to read secrets file: {}", path.display()))
+        .map_err(SecretsError::Other)?;
+    let plaintext = decrypt_with_key(key, &bytes)
+        .map_err(|e| SecretsError::Undecryptable(path.to_path_buf(), e.to_string()))?;
+    let plaintext_str = std::str::from_utf8(&plaintext).map_err(|e| {
+        SecretsError::Undecryptable(
+            path.to_path_buf(),
+            format!("decrypted plaintext is not valid UTF-8: {}", e),
+        )
+    })?;
+    toml::from_str(plaintext_str).map_err(|e| {
+        SecretsError::Undecryptable(
+            path.to_path_buf(),
+            format!("decrypted plaintext is not valid TOML: {}", e),
+        )
+    })
 }
 
 impl EncryptedFileBackend {
@@ -315,35 +374,29 @@ impl EncryptedFileBackend {
     }
 
     fn open_with_key(path: PathBuf, key: DerivedKey) -> std::result::Result<Self, SecretsError> {
-        let file = if path.exists() {
-            let bytes = fs::read(&path)
-                .with_context(|| format!("Failed to read secrets file: {}", path.display()))
-                .map_err(SecretsError::Other)?;
-            let plaintext = decrypt_with_key(&key, &bytes)
-                .map_err(|e| SecretsError::Undecryptable(path.clone(), e.to_string()))?;
-            let plaintext_str = std::str::from_utf8(&plaintext).map_err(|e| {
-                SecretsError::Undecryptable(
-                    path.clone(),
-                    format!("decrypted plaintext is not valid UTF-8: {}", e),
-                )
-            })?;
-            let parsed: SecretsFile = toml::from_str(plaintext_str).map_err(|e| {
-                SecretsError::Undecryptable(
-                    path.clone(),
-                    format!("decrypted plaintext is not valid TOML: {}", e),
-                )
-            })?;
-            parsed
-        } else {
-            SecretsFile::default()
-        };
+        // Stamped before the read: a write landing in between leaves a stamp
+        // that no longer matches, so the next access reads it.
+        let stamp = file_stamp(&path);
+        let file = read_secrets_file(&path, &key)?;
         Ok(Self {
             path,
-            inner: std::sync::RwLock::new(EncryptedFileState { key, file }),
+            inner: std::sync::RwLock::new(EncryptedFileState { key, file, stamp }),
         })
     }
 
-    fn save_locked(&self, state: &EncryptedFileState) -> Result<()> {
+    /// Re-read the file when another process replaced or removed it since
+    /// this one last read or wrote it.
+    fn refresh_locked(&self, state: &mut EncryptedFileState) -> Result<()> {
+        let stamp = file_stamp(&self.path);
+        if stamp == state.stamp {
+            return Ok(());
+        }
+        state.file = read_secrets_file(&self.path, &state.key).map_err(|e| anyhow!("{e}"))?;
+        state.stamp = stamp;
+        Ok(())
+    }
+
+    fn save_locked(&self, state: &mut EncryptedFileState) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create secrets dir: {}", parent.display()))?;
@@ -353,6 +406,7 @@ impl EncryptedFileBackend {
         let blob = encrypt_with_key(&state.key, plaintext.as_bytes())?;
         // Atomic write, created with 0600 from the start (no umask window).
         write_secret_file_atomic(&self.path, &blob)?;
+        state.stamp = file_stamp(&self.path);
         // Drop our copy of the TOML plaintext.
         let mut s = plaintext.into_bytes();
         s.zeroize();
@@ -362,10 +416,11 @@ impl EncryptedFileBackend {
 
 impl SecretsBackend for EncryptedFileBackend {
     fn get(&self, key: &str) -> Result<String> {
-        let state = self
+        let mut state = self
             .inner
-            .read()
+            .write()
             .map_err(|_| anyhow!("secrets lock poisoned"))?;
+        self.refresh_locked(&mut state)?;
         state
             .file
             .entries
@@ -379,11 +434,14 @@ impl SecretsBackend for EncryptedFileBackend {
             .inner
             .write()
             .map_err(|_| anyhow!("secrets lock poisoned"))?;
+        // Refreshed first, so a password another process stored meanwhile is
+        // kept rather than overwritten by this process's older copy.
+        self.refresh_locked(&mut state)?;
         state
             .file
             .entries
             .insert(key.to_string(), value.to_string());
-        self.save_locked(&state)
+        self.save_locked(&mut state)
     }
 
     fn delete(&self, key: &str) -> Result<()> {
@@ -391,8 +449,9 @@ impl SecretsBackend for EncryptedFileBackend {
             .inner
             .write()
             .map_err(|_| anyhow!("secrets lock poisoned"))?;
+        self.refresh_locked(&mut state)?;
         state.file.entries.remove(key);
-        self.save_locked(&state)
+        self.save_locked(&mut state)
     }
 }
 
@@ -592,6 +651,35 @@ mod tests {
         let backend2 = EncryptedFileBackend::open_with_ikm_for_test(path.clone(), ikm).unwrap();
         assert_eq!(backend2.get("smtp-password-foo").unwrap(), "hunter2");
         assert_eq!(backend2.get("imap-password-foo").unwrap(), "hunter3");
+    }
+
+    /// A long-lived backend sees what another process wrote after it opened,
+    /// keeps that write when it stores its own, and forgets a removed file
+    /// (PERSO-170: the daemon opens its backend at startup).
+    #[test]
+    fn a_write_by_another_opener_is_seen_and_kept() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("secrets.enc");
+        let ikm = b"unit-test-ikm-reload";
+
+        let daemon = EncryptedFileBackend::open_with_ikm_for_test(path.clone(), ikm).unwrap();
+        assert!(daemon.get("imap-password-alpha").is_err(), "no file yet");
+
+        let wizard = EncryptedFileBackend::open_with_ikm_for_test(path.clone(), ikm).unwrap();
+        wizard.set("imap-password-alpha", "hunter2").unwrap();
+        assert_eq!(daemon.get("imap-password-alpha").unwrap(), "hunter2");
+
+        wizard.set("imap-password-beta", "hunter3").unwrap();
+        daemon.set("smtp-password-alpha", "hunter4").unwrap();
+        let reopened = EncryptedFileBackend::open_with_ikm_for_test(path.clone(), ikm).unwrap();
+        assert_eq!(reopened.get("imap-password-beta").unwrap(), "hunter3");
+        assert_eq!(reopened.get("smtp-password-alpha").unwrap(), "hunter4");
+
+        fs::remove_file(&path).unwrap();
+        assert!(
+            daemon.get("imap-password-alpha").is_err(),
+            "a reset store is empty"
+        );
     }
 
     #[test]
