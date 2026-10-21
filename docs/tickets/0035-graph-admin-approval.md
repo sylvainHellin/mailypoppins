@@ -15,7 +15,9 @@ The TUM M365 tenant requires **IT-admin approval** for Graph API access, which i
 
 ## Scope (operational, not code)
 
-For the EVOQS tenant: an app registration with public client flows enabled and the delegated Graph permissions `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `offline_access`, `User.Read` and `Calendars.ReadWrite`, admin consent granted by Sylvain.
+One multi-tenant app registration (any Entra tenant plus personal accounts) in the dedicated `mailypoppins.onmicrosoft.com` tenant, with public client flows enabled and the delegated Graph permissions `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `offline_access`, `User.Read` and `Calendars.ReadWrite`.
+The EVOQS tenant consents to it as an outside app, with Sylvain as its admin.
+Other organisations need a verified publisher (EVOQS GmbH via Partner Center, publisher domain `mailypoppins.com`) before their users can consent without an admin.
 Publisher verification is not needed for a single-tenant app consented by its own admin.
 
 For the TUM tenant, still blocked:
@@ -27,7 +29,9 @@ For the TUM tenant, still blocked:
 
 ## Status
 
-EVOQS: in progress, app registration and consent being done by Sylvain (2026-10-21).
+App registered 2026-10-21: client ID `439d7ebd-7898-4df2-b2d6-88bb61e2597b`, tenant `365f441f-42ba-4b36-851f-8b124c7becbb` (mailypoppins).
+EVOQS: consent pending, granted by Sylvain at the first device-code sign-in.
+Publisher verification: not started.
 TUM: admin approval unobtainable; revisit if the tenant policy changes.
 
 ## Blocks
