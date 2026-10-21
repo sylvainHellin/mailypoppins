@@ -8,8 +8,10 @@
 #   1. repo: refuse a tree with tracked changes, `git pull --rebase --autostash`.
 #   2. cli:  `cargo install --path . --locked`, the one `mp` that is the CLI and
 #            the TUI, into ~/.cargo/bin (or $CARGO_INSTALL_ROOT / $CARGO_HOME).
-#   3. gui:  `pnpm install` when the lockfile moved, `pnpm bundle` with that same
-#            `mp` as the sidecar, quit the running app, swap the new bundle into
+#   3. gui:  `pnpm install` when the lockfile moved, `pnpm bundle -- --bundles app`
+#            with that same `mp` as the sidecar (no DMG: the install needs only
+#            the .app, and the DMG step's Finder AppleScript can stall, as it
+#            did on a locked screen on 2026-10-21), quit the running app, swap the new bundle into
 #            /Applications/mailypoppins.app.
 #   4. daemon: restart it once on the new binary, then relaunch the app if it
 #            was running.
@@ -322,7 +324,7 @@ if [ "$GUI" -eq 1 ]; then
   PREVIOUS_APP="$(newest_app)"
   PREVIOUS_MTIME=0
   [ -z "$PREVIOUS_APP" ] || PREVIOUS_MTIME="$(mtime "$PREVIOUS_APP/Contents/Info.plist")"
-  run env MP_SIDECAR_BIN="$MP" pnpm --dir "$DESKTOP" bundle
+  run env MP_SIDECAR_BIN="$MP" pnpm --dir "$DESKTOP" bundle -- --bundles app
   NEW_APP="$(newest_app)"
   if [ "$DRY_RUN" -eq 1 ]; then
     NEW_APP="${NEW_APP:-<target dir>/<target>/release/bundle/macos/$APP_NAME}"
