@@ -1540,13 +1540,15 @@ pub fn note_attachment_repair_failure(
 /// the store gave it. The shape came from Graph, and IMAP runs it too since
 /// #0072 widened its diff to the whole mailbox: the placeholder a Sent copy is
 /// filed under is no longer kept safe by a window clamp alone. A Graph send
-/// transmits no `Message-ID`
-/// (Graph's `sendMail` takes JSON and Exchange stamps its own
+/// over [`crate::graph::MIME_SEND_MAX_BASE64_BYTES`] falls back to the JSON
+/// `sendMail`, which transmits no `Message-ID` (Exchange stamps its own
 /// `internetMessageId`), so [`crate::outbox::ingest_sent_copy`] files the local
 /// copy under [`graph_uid`] of *our* id, which no Sent enumeration will ever
 /// return. Every pass therefore sees it as vanished, and pruning it releases
-/// the raw MIME blob -- the only copy, because Graph never returns RFC822, so
-/// "show source" for that message dies with it (#0065).
+/// the raw MIME blob: the only copy, because Graph never returns RFC822, so
+/// "show source" for that message dies with it (#0065). Since PERSO-144 the
+/// MIME route, every other Graph send, carries our `Message-ID`, so the synced
+/// Sent copy keys on the same [`graph_uid`] and lands on the local row.
 ///
 /// The guard, rather than exempting the `sent` role: the local row is a
 /// duplicate of the server's copy once Exchange files it, and the prune is what
