@@ -597,6 +597,23 @@ pub async fn start_account(
         canonical.apply(blocked_by_failure(runtimes, &cfg.name, reason));
         return;
     }
+    // The daemon's first sync has created the store and holds the engine
+    // lock, so a runtime started now would come up blocked on it and nothing
+    // would ever restart it. The pending start is recorded instead, and the
+    // first sync starts the runtime once it is done ([`start_after_first_sync`]).
+    if runtimes.first_sync_running(&cfg.name) {
+        let reason = format!(
+            "{} is running its first sync; its runtime starts when that finishes",
+            cfg.name
+        );
+        info!("[daemon] {reason}");
+        runtimes.insert_failure(&cfg.name, reason.clone());
+        canonical.apply(Change::AccountBlocked {
+            account: cfg.name.clone(),
+            reason,
+        });
+        return;
+    }
     let account = cfg.name.clone();
     let cfg_for_watch = cfg.clone();
     let started =
@@ -736,6 +753,10 @@ pub fn spawn_first_sync_if_new(
         return;
     };
     if cfg.is_local_only() || crate::config::store_path(account).exists() {
+        return;
+    }
+    // Cleared by the first sync itself, whichever way it ends.
+    if !runtimes.begin_first_sync(account) {
         return;
     }
     tokio::spawn(super::methods::sync::first_sync(
@@ -934,6 +955,77 @@ mod tests {
         assert!(runtimes
             .blocked_reason("zz-startup-kept")
             .is_some_and(|reason| reason.contains("no local store")));
+    }
+
+    /// A swap that restarts an account while its first sync runs: the first
+    /// sync has created the store and holds the engine lock, so the start
+    /// records the pending state rather than bringing up a runtime blocked on
+    /// that lock for good, and the first sync is then the one caller that may
+    /// start it. Driven through `reconcile`, the path a `config.set` takes.
+    #[tokio::test]
+    async fn a_swap_during_the_first_sync_leaves_the_start_to_the_first_sync() {
+        let account = "zz-first-sync-race";
+        let data = tempfile::tempdir().expect("tempdir");
+        // Thread-local, so every step below stays on this test's thread and
+        // no runtime is built (`AccountRuntime::start` runs off-thread).
+        let _data = crate::config::test_env::DataDirOverride::set(data.path());
+        let store_file = crate::config::store_path(account);
+        std::fs::create_dir_all(store_file.parent().expect("a parent")).expect("account dir");
+        std::fs::write(&store_file, b"").expect("the store the first sync created");
+
+        let canonical = Arc::new(CanonicalState::new(
+            super::super::state::InstanceId::new("test"),
+            Vec::new(),
+        ));
+        let runtimes = Arc::new(RuntimeTable::default());
+        let watch = Arc::new(super::super::watch::DraftWatch::new(
+            super::super::watch::WatchRoots::new(),
+            super::super::watch::WatchConfig::default(),
+        ));
+        let document = |interval: u64| {
+            parse(&format!(
+                "[[accounts]]\nname = \"{account}\"\n\n[accounts.imap]\nsync_interval_secs = {interval}\n"
+            ))
+        };
+        let store = ConfigStore::new(
+            PathBuf::from("/c/config.toml"),
+            ConfigState::Ok,
+            document(300),
+            true,
+        );
+        // Where `spawn_first_sync_if_new` leaves the account: the failed start
+        // of an account with no store, and the first sync marked in flight.
+        runtimes.insert_failure(account, "no local store yet".to_string());
+        assert!(runtimes.begin_first_sync(account));
+        assert!(
+            !runtimes.begin_first_sync(account),
+            "a second first sync is not spawned beside the first"
+        );
+
+        let plan = reconcile(
+            &store,
+            &runtimes,
+            &canonical,
+            &watch,
+            ConfigState::Ok,
+            document(600),
+        )
+        .await;
+        assert_eq!(plan.updated, vec![account.to_string()]);
+        assert!(
+            runtimes.get(account).is_none(),
+            "no runtime beside the first sync"
+        );
+        assert!(runtimes
+            .blocked_reason(account)
+            .is_some_and(|reason| reason.contains("running its first sync")));
+
+        // The first sync ends: its mark goes, and it is the one caller that
+        // finds the pending start to replace.
+        runtimes.end_first_sync(account);
+        assert!(!runtimes.first_sync_running(account));
+        assert!(runtimes.take_failure(account));
+        assert!(!runtimes.take_failure(account));
     }
 
     /// Startup starts share the swap lock, so one in flight does not hold up

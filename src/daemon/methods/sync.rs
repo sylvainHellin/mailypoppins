@@ -381,6 +381,10 @@ pub async fn first_sync(
     canonical: Arc<CanonicalState>,
     account: String,
 ) {
+    let mark = FirstSyncMark {
+        runtimes: Arc::clone(&runtimes),
+        account: account.clone(),
+    };
     let snapshot = config.snapshot();
     let Some(cfg) = snapshot
         .accounts
@@ -407,6 +411,10 @@ pub async fn first_sync(
         body(&request, &targets, Stop::new(|_| false)).await
     }
     .await;
+    // The pass has released the engine lock, so from here a swap may start
+    // the runtime itself; whichever of the two gets there first wins, and
+    // `take_failure` keeps it to one.
+    drop(mark);
     match result {
         Ok(Some(pass)) => {
             crate::contacts::hooks::bump_after_sync(&request.account, &pass.fresh_observations);
@@ -433,6 +441,20 @@ pub async fn first_sync(
                 ));
             }
         }
+    }
+}
+
+/// The in-flight mark of a first sync ([`RuntimeTable::begin_first_sync`]),
+/// cleared when dropped, so a first sync that returns early or panics does
+/// not leave its account unstartable.
+struct FirstSyncMark {
+    runtimes: Arc<RuntimeTable>,
+    account: String,
+}
+
+impl Drop for FirstSyncMark {
+    fn drop(&mut self) {
+        self.runtimes.end_first_sync(&self.account);
     }
 }
 

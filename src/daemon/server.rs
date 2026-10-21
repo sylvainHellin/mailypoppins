@@ -22,7 +22,7 @@
 //! refusal placed behind it would let a client negotiate its way into a daemon
 //! that is leaving.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -103,6 +103,17 @@ enum AfterFlush {
 #[derive(Debug, Default)]
 pub struct RuntimeTable {
     entries: Mutex<BTreeMap<String, RuntimeEntry>>,
+    /// The accounts whose daemon-run first sync is in flight
+    /// ([`first_sync`](super::methods::sync::first_sync)).
+    ///
+    /// That pass creates the store early and holds the engine lock while it
+    /// runs, so a swap that started the account meanwhile would see the store,
+    /// come up blocked on the first sync's lock, and stay blocked: the first
+    /// sync only restarts an account whose start failed. While an account is
+    /// named here, [`start_account`](super::config::start_account) records the
+    /// pending start instead, and the first sync starts the runtime with the
+    /// configuration as it is when it finishes.
+    first_syncs: Mutex<BTreeSet<String>>,
 }
 
 /// How an account's runtime is doing, as the diagnostics read it.
@@ -208,12 +219,23 @@ impl RuntimeTable {
         }
     }
 
-    /// Take `account` out of the table, so dropping what comes back releases
-    /// its engine lock and closes its store (P3b-U8).
-    ///
-    /// The drop is the caller's, on `spawn_blocking`: it closes SQLite, and a
-    /// reload promises the lock is free by the time it answers. A start that
-    /// only ever failed has nothing to hand back and is simply forgotten.
+    /// Mark `account`'s first sync as in flight; `false` when one already is,
+    /// so the caller does not run a second.
+    pub fn begin_first_sync(&self, account: &str) -> bool {
+        lock(&self.first_syncs).insert(account.to_string())
+    }
+
+    /// Clear the mark [`RuntimeTable::begin_first_sync`] set. Called once the
+    /// pass has released the engine lock and before the runtime is started.
+    pub fn end_first_sync(&self, account: &str) {
+        lock(&self.first_syncs).remove(account);
+    }
+
+    /// Whether `account`'s first sync is in flight.
+    pub fn first_sync_running(&self, account: &str) -> bool {
+        lock(&self.first_syncs).contains(account)
+    }
+
     /// Forget a start that failed outright, so the account can be started
     /// again; `true` only for the one caller that found and removed it.
     ///
@@ -230,6 +252,12 @@ impl RuntimeTable {
         }
     }
 
+    /// Take `account` out of the table, so dropping what comes back releases
+    /// its engine lock and closes its store (P3b-U8).
+    ///
+    /// The drop is the caller's, on `spawn_blocking`: it closes SQLite, and a
+    /// reload promises the lock is free by the time it answers. A start that
+    /// only ever failed has nothing to hand back and is simply forgotten.
     pub fn remove(&self, account: &str) -> Option<Arc<AccountRuntime>> {
         match lock(&self.entries).remove(account)? {
             RuntimeEntry::Live(runtime) => Some(runtime),
