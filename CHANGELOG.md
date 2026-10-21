@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **TUI themes `mailypoppins` and `mailypoppins-light`, the Mac app's palettes.** `theme = "mailypoppins"` gives the TUI the app's Prussian ground, Cream text, Ocean focus and Pumpkin cursor; `mailypoppins-light` is the Cream variant. The default stays `catppuccin-mocha`.
 - **A newly added account syncs on its own and turns ready without a daemon restart.** When an account with a server and no local store comes into the daemon (at start or through a configuration change), the daemon runs its first quick sync in the background and then starts the account's runtime; a failed first sync leaves it `blocked` with the error and the `mp sync -A <account>` that retries it. A `mp sync` that creates an account's store also starts its runtime at once, where it used to wait for the next daemon start.
 - **Graph accounts no longer print `Could not load SMTP config` on every command.** A Graph account sends through Graph and has no SMTP transport, so the CLI skips that load and its warning.
 - **Graph accounts sync on their own (#0134).** The runtime tick has a Graph body, so a Graph account is scheduled like an IMAP one, its inbox watcher's ticks run a sync, and a plain `mp sync` goes through the runtime.

@@ -1067,7 +1067,7 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
     // -- Build config TOML
     let mut toml_content = String::new();
     toml_content.push_str(
-        "# TUI theme: catppuccin-mocha (default), catppuccin-latte, tokyo-night, terminal\n",
+        "# TUI theme: catppuccin-mocha (default), catppuccin-latte, mailypoppins, mailypoppins-light, tokyo-night, terminal\n",
     );
     toml_content.push_str("theme = \"catppuccin-mocha\"\n\n");
     toml_content
@@ -1348,7 +1348,7 @@ pub(crate) fn build_init_toml(
 ) -> String {
     let mut out = String::new();
     out.push_str(
-        "# TUI theme: catppuccin-mocha (default), catppuccin-latte, tokyo-night, terminal\n",
+        "# TUI theme: catppuccin-mocha (default), catppuccin-latte, mailypoppins, mailypoppins-light, tokyo-night, terminal\n",
     );
     out.push_str("theme = \"catppuccin-mocha\"\n\n");
     out.push_str("# Desktop notifications for new mail while the TUI runs (default: false)\n");

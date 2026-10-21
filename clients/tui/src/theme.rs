@@ -19,6 +19,8 @@ pub const DEFAULT_THEME_NAME: &str = "catppuccin-mocha";
 pub const THEME_NAMES: &[&str] = &[
     "catppuccin-mocha",
     "catppuccin-latte",
+    "mailypoppins",
+    "mailypoppins-light",
     "tokyo-night",
     "terminal",
 ];
@@ -138,6 +140,63 @@ impl Theme {
         }
     }
 
+    /// The Mac app's dark palette (clients/desktop/src/index.css, Basenord
+    /// Palette D inverted): Prussian ground, Cream text, Ocean for focus and
+    /// links, Pumpkin for the cursor, and the app's terminal colours for the
+    /// rest, so the TUI, the app and its `mailypoppins` Neovim colorscheme
+    /// read as one product.
+    pub const fn mailypoppins() -> Self {
+        Self {
+            bg: Color::Rgb(12, 27, 51),       // #0C1B33 Prussian, the app's canvas
+            surface: Color::Rgb(23, 74, 104), // #174A68 the app's selection
+            text: Color::Rgb(244, 241, 232),  // #F4F1E8 Cream
+            text_muted: Color::Rgb(180, 191, 206), // #B4BFCE muted-foreground
+            text_faint: Color::Rgb(125, 139, 163), // #7D8BA3 disabled-foreground
+            border: Color::Rgb(125, 139, 163), // #7D8BA3
+            border_focused: Color::Rgb(75, 163, 204), // #4BA3CC ring, Ocean lightened
+            panel_bg: Color::Rgb(20, 42, 74), // #142A4A card, raised above bg
+            selection: Color::Rgb(255, 138, 61), // #FF8A3D Pumpkin, readable as text
+            unread: Color::Rgb(75, 163, 204), // #4BA3CC
+            unread_count: Color::Rgb(255, 138, 61), // #FF8A3D
+            accent: Color::Rgb(109, 182, 218), // #6DB6DA link
+            accent_alt: Color::Rgb(92, 200, 200), // #5CC8C8 terminal cyan
+            heading: Color::Rgb(215, 162, 232), // #D7A2E8 terminal magenta
+            emphasis: Color::Rgb(242, 193, 78), // #F2C14E terminal yellow
+            code: Color::Rgb(255, 138, 61),   // #FF8A3D
+            success: Color::Rgb(143, 209, 158), // #8FD19E terminal green
+            warning: Color::Rgb(255, 103, 0), // #FF6700 warning, Pumpkin
+            error: Color::Rgb(255, 122, 133), // #FF7A85 destructive
+            info: Color::Rgb(75, 163, 204),   // #4BA3CC
+        }
+    }
+
+    /// The Mac app's light palette (Basenord Palette D): Cream ground,
+    /// Prussian text, the same roles as [`Theme::mailypoppins`].
+    pub const fn mailypoppins_light() -> Self {
+        Self {
+            bg: Color::Rgb(244, 241, 232),       // #F4F1E8 Cream, the app's canvas
+            surface: Color::Rgb(207, 227, 238),  // #CFE3EE the app's selection
+            text: Color::Rgb(12, 27, 51),        // #0C1B33 Prussian
+            text_muted: Color::Rgb(70, 84, 108), // #46546C muted-foreground
+            text_faint: Color::Rgb(119, 131, 154), // #77839A disabled-foreground
+            border: Color::Rgb(119, 131, 154),   // #77839A
+            border_focused: Color::Rgb(31, 111, 147), // #1F6F93 ring
+            panel_bg: Color::Rgb(236, 232, 221), // #ECE8DD muted, set off from bg
+            selection: Color::Rgb(179, 71, 0),   // #B34700 Pumpkin darkened
+            unread: Color::Rgb(31, 111, 147),    // #1F6F93
+            unread_count: Color::Rgb(179, 71, 0), // #B34700
+            accent: Color::Rgb(26, 99, 133),     // #1A6385 link
+            accent_alt: Color::Rgb(30, 122, 122), // #1E7A7A terminal cyan
+            heading: Color::Rgb(138, 63, 160),   // #8A3FA0 terminal magenta
+            emphasis: Color::Rgb(138, 97, 0),    // #8A6100 terminal yellow
+            code: Color::Rgb(160, 64, 0),        // #A04000
+            success: Color::Rgb(47, 122, 62),    // #2F7A3E terminal green
+            warning: Color::Rgb(179, 71, 0),     // #B34700 warning
+            error: Color::Rgb(180, 35, 46),      // #B4232E destructive
+            info: Color::Rgb(31, 111, 147),      // #1F6F93
+        }
+    }
+
     /// Tokyo Night.
     pub const fn tokyo_night() -> Self {
         Self {
@@ -221,6 +280,8 @@ impl Theme {
             // Empty = unset (e.g. GlobalConfig::default()) -> default theme.
             "" | "default" | "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin_mocha()),
             "latte" | "catppuccin-latte" => Some(Self::catppuccin_latte()),
+            "mailypoppins" | "mailypoppins-dark" => Some(Self::mailypoppins()),
+            "mailypoppins-light" => Some(Self::mailypoppins_light()),
             "tokyo-night" | "tokyonight" => Some(Self::tokyo_night()),
             "terminal" | "transparent" | "ansi" => Some(Self::terminal()),
             _ => None,
@@ -295,6 +356,23 @@ mod tests {
         );
         assert_eq!(Theme::by_name("default"), Some(Theme::catppuccin_mocha()));
         assert_eq!(Theme::by_name(""), Some(Theme::catppuccin_mocha()));
+    }
+
+    #[test]
+    fn mailypoppins_themes_resolve_and_follow_the_app() {
+        assert_eq!(Theme::by_name("mailypoppins"), Some(Theme::mailypoppins()));
+        assert_eq!(
+            Theme::by_name("Mailypoppins-Dark"),
+            Some(Theme::mailypoppins())
+        );
+        assert_eq!(
+            Theme::by_name("mailypoppins-light"),
+            Some(Theme::mailypoppins_light())
+        );
+        // The grounds are the app's canvases: Prussian dark, Cream light.
+        assert_eq!(Theme::mailypoppins().bg, Color::Rgb(12, 27, 51));
+        assert_eq!(Theme::mailypoppins_light().bg, Color::Rgb(244, 241, 232));
+        assert_eq!(Theme::mailypoppins().text, Theme::mailypoppins_light().bg);
     }
 
     #[test]
