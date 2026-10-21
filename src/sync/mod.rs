@@ -140,6 +140,13 @@ pub struct SyncResult {
     /// every tick. The log line carries the detail; this is what the status
     /// line and `mp sync` report so it cannot pass for a clean sync.
     pub non_converging: Vec<String>,
+    /// Server names of the mailboxes whose download `limit` cut short after
+    /// a window that landed whole, so the next pass takes the next window
+    /// (PERSO-172). Graph only: it downloads by id, so a quick pass drains a
+    /// backlog one window at a time, while an IMAP quick window is positional
+    /// and skips the backlog under it by design. The account runtime runs its
+    /// next tick at once while this is not empty.
+    pub backlogged: Vec<String>,
     /// Address observations from newly-ingested messages, ready to be merged
     /// into the contacts index by the caller. Empty on `dry_run`.
     pub fresh_observations: Vec<FreshObservation>,

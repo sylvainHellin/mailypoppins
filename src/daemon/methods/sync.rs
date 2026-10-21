@@ -423,6 +423,20 @@ pub async fn first_sync(
             log::info!("[daemon] {account} finished its first sync");
             super::super::config::start_after_first_sync(&config, &runtimes, &canonical, &account)
                 .await;
+            // A quick first sync of a large Graph mailbox takes only its newest
+            // window; the runtime drains the rest a tick at a time, starting
+            // now rather than an interval after it started (PERSO-172).
+            // Whoever started the runtime, this pass or a swap, it is in the
+            // table by now.
+            if !pass.backlogged.is_empty() {
+                if let Some(runtime) = runtimes.get(&account) {
+                    log::info!(
+                        "[daemon] {account}'s first sync left older mail in {}; draining it now",
+                        pass.backlogged.join(", ")
+                    );
+                    runtime.note_backlog();
+                }
+            }
         }
         // Another process holds the engine lock and is syncing it: its pass
         // creates the store, and a `mp sync` routed here starts the runtime.

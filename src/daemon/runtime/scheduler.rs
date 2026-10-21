@@ -27,6 +27,20 @@
 //! scheduler also remembers when it last fired and never fires sooner than an
 //! interval after that.
 //!
+//! # A backlog is drained at once
+//!
+//! A tick that left a Graph folder capped by its window, with more new mail
+//! behind it, says so ([`AccountRuntime::backlog_owed`], PERSO-172), and the
+//! next tick then comes [`BACKLOG_FOLLOW_UP`] after it instead of an interval.
+//! A Graph quick tick downloads by id, so each one takes the next window and a
+//! new account's mailbox fills in minutes; at one window per interval it took
+//! hours, and offline search missed the mail meanwhile. Every tick stays a
+//! bounded quick tick under the Graph ceiling, and the run slot is free
+//! between them, so a manual sync, a send or a drain is never queued behind
+//! the whole backlog. A tick that failed, or whose batch fell short (a
+//! throttle), owes nothing and falls back to the interval, which is the
+//! back-off.
+//!
 //! # What gets a scheduler
 //!
 //! A ready runtime with a server (IMAP or Graph) and a non-zero interval. A
@@ -58,6 +72,11 @@ use crate::daemon::state::CanonicalState;
 use super::account::{AccountRuntime, Readiness, TickKind};
 use super::publish::tick_and_publish;
 
+/// How soon after a tick that left a backlog the next one runs (see the module
+/// docs): long enough for a client's own request to take the run slot first,
+/// short against the seconds a Graph window takes to download.
+pub const BACKLOG_FOLLOW_UP: Duration = Duration::from_secs(5);
+
 /// Start the scheduler for `runtime`, if it has anything to schedule.
 ///
 /// The handle is the test's; the daemon lets the task run until the runtime
@@ -78,6 +97,7 @@ pub fn spawn(
         runtime.retired(),
         runtime.completed_ticks(),
         interval,
+        BACKLOG_FOLLOW_UP,
         Arc::new(move |runtime: Arc<AccountRuntime>| {
             let canonical = Arc::clone(&canonical);
             Box::pin(async move {
@@ -116,12 +136,23 @@ async fn stopped(retired: &mut watch::Receiver<bool>) {
     let _ = retired.wait_for(|retired| *retired).await;
 }
 
+/// The wait before the next scheduled tick: the interval, or the backlog
+/// follow-up when the last tick left one (never longer than the interval).
+fn gap(interval: Duration, follow_up: Duration, backlog_owed: bool) -> Duration {
+    if backlog_owed {
+        follow_up.min(interval)
+    } else {
+        interval
+    }
+}
+
 /// One account's scheduler, until the runtime it was spawned for retires.
 async fn run(
     runtime: Weak<AccountRuntime>,
     mut retired: watch::Receiver<bool>,
     mut ticks: watch::Receiver<Instant>,
     interval: Duration,
+    follow_up: Duration,
     fire: Fire,
 ) {
     let account = runtime
@@ -133,7 +164,16 @@ async fn run(
     let mut fired: Option<Instant> = None;
     loop {
         let last = *ticks.borrow_and_update();
-        let due = fired.map_or(last, |fired| fired.max(last)) + interval;
+        let owed = runtime
+            .upgrade()
+            .is_some_and(|runtime| runtime.backlog_owed());
+        if owed {
+            info!(
+                "[scheduler] {account} still has new mail to download; ticking again in {}s",
+                gap(interval, follow_up, owed).as_secs()
+            );
+        }
+        let due = fired.map_or(last, |fired| fired.max(last)) + gap(interval, follow_up, owed);
         tokio::select! {
             // Checked first, so a retired runtime never fires a deadline that
             // expired at the same moment.
@@ -205,12 +245,23 @@ mod tests {
     /// The scheduler over `runtime`, firing a real quick tick and counting the
     /// times it fired.
     fn scheduler(runtime: &Arc<AccountRuntime>, fired: &Arc<AtomicUsize>) -> JoinHandle<()> {
+        scheduler_with(runtime, fired, INTERVAL, INTERVAL / 6)
+    }
+
+    /// [`scheduler`] with its interval and backlog follow-up chosen.
+    fn scheduler_with(
+        runtime: &Arc<AccountRuntime>,
+        fired: &Arc<AtomicUsize>,
+        interval: Duration,
+        follow_up: Duration,
+    ) -> JoinHandle<()> {
         let fired = Arc::clone(fired);
         tokio::spawn(run(
             Arc::downgrade(runtime),
             runtime.retired(),
             runtime.completed_ticks(),
-            INTERVAL,
+            interval,
+            follow_up,
             Arc::new(move |runtime: Arc<AccountRuntime>| {
                 fired.fetch_add(1, Ordering::SeqCst);
                 async move {
@@ -276,6 +327,47 @@ mod tests {
         assert_eq!(fired.load(Ordering::SeqCst), 0, "the manual tick reset it");
         tokio::time::sleep_until(manual + INTERVAL * 3 / 2).await;
         assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    /// PERSO-172: a backlog brings the next tick forward to the follow-up,
+    /// and a tick that owes nothing more puts the schedule back on the
+    /// interval.
+    #[tokio::test]
+    async fn a_backlog_brings_the_next_tick_forward_until_it_is_drained() {
+        let dir = tempfile::tempdir().unwrap();
+        let bodies = Arc::new(AtomicUsize::new(0));
+        let runtime = started(dir.path(), &bodies);
+        let fired = Arc::new(AtomicUsize::new(0));
+        let interval = Duration::from_secs(3);
+        let follow_up = Duration::from_millis(50);
+        let _task = scheduler_with(&runtime, &fired, interval, follow_up);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "nothing owed yet");
+
+        // The first sync's backlog, noted on the runtime it started.
+        runtime.note_backlog();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "the backlog ticked at the follow-up, not the interval"
+        );
+        assert_eq!(bodies.load(Ordering::SeqCst), 1);
+        // That tick's body reported no backlog, so the next one waits.
+        assert!(!runtime.backlog_owed());
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "back on the interval");
+    }
+
+    /// The follow-up never stretches a shorter interval.
+    #[test]
+    fn the_gap_is_the_interval_unless_a_backlog_is_owed() {
+        let (interval, follow_up) = (Duration::from_secs(900), BACKLOG_FOLLOW_UP);
+        assert_eq!(gap(interval, follow_up, false), interval);
+        assert_eq!(gap(interval, follow_up, true), follow_up);
+        let short = Duration::from_secs(2);
+        assert_eq!(gap(short, follow_up, true), short);
     }
 
     /// A drain is not a tick: it does not move the deadline.

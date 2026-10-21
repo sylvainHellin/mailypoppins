@@ -365,6 +365,10 @@ pub struct FolderFetch {
     /// leftovers are queued for a later pass. See [`sync_mailboxes_graph`] for
     /// why that suspends the prune.
     pub download_incomplete: bool,
+    /// True when `limit` alone left new messages behind, after a download that
+    /// brought everything it asked for: the next pass's window takes the next
+    /// ones, so the folder is worth another pass soon ([`backlog_owed`]).
+    pub backlog: bool,
 }
 
 /// What one `/$batch` download run returned, and whether it returned all of it.
@@ -1261,18 +1265,21 @@ impl GraphClient {
                 skipped,
                 enumeration,
                 download_incomplete: capped,
+                backlog: false,
             });
         }
 
         let graph_ids: Vec<&str> = new.iter().map(|entry| entry.graph_id.as_str()).collect();
         let batch = self.fetch_messages_by_ids(&graph_ids).await?;
         let download_incomplete = capped || batch.fell_short();
+        let backlog = backlog_owed(found, graph_ids.len(), batch.fell_short());
 
         Ok(FolderFetch {
             new_emails: batch.emails,
             skipped,
             enumeration,
             download_incomplete,
+            backlog,
         })
     }
 }
@@ -1698,6 +1705,7 @@ impl GraphClient {
                 changed: delta.changed,
                 delta_link: delta.delta_link,
                 download_incomplete: capped,
+                backlog: false,
             }));
         }
         let graph_ids: Vec<&str> = new.iter().map(|entry| entry.graph_id.as_str()).collect();
@@ -1709,11 +1717,13 @@ impl GraphClient {
             }
         };
         let download_incomplete = capped || batch.fell_short();
+        let backlog = backlog_owed(found, graph_ids.len(), batch.fell_short());
         Ok(Some(DeltaFetch {
             new_emails: batch.emails,
             changed: delta.changed,
             delta_link: delta.delta_link,
             download_incomplete,
+            backlog,
         }))
     }
 }
@@ -1732,6 +1742,28 @@ struct DeltaFetch {
     /// everything.
     delta_link: String,
     download_incomplete: bool,
+    /// [`FolderFetch::backlog`], for the change set.
+    backlog: bool,
+}
+
+/// Whether a folder's pass left a backlog that another quick pass can drain at
+/// once (PERSO-172).
+///
+/// A capped pass downloads the newest `limit` messages the store lacks *by id*,
+/// so the next pass lists the leftovers as new again and takes the next window:
+/// a backlog drains one window per pass with no full sync. At one quick tick per
+/// `sync_interval_secs` that took hours for a new account of a few thousand
+/// messages, so the runtime asks for the next tick right away while this holds
+/// (see `scheduler::BACKLOG_FOLLOW_UP`).
+///
+/// Only the cap counts. A batch that fell short is a throttle or a failure,
+/// which an immediate retry would only make worse, and a pass that asked for
+/// nothing (`-n 0`) made no progress a retry would repeat; both wait for the
+/// regular interval. A stored delta token cannot hide the backlog: a capped
+/// pass never mints one ([`may_record_delta_token`]), so the next pass
+/// enumerates again or replays the same change set from the older token.
+fn backlog_owed(found: usize, asked: usize, fell_short: bool) -> bool {
+    found > asked && asked > 0 && !fell_short
 }
 
 /// Whether a pass has earned the right to store its delta resume point.
@@ -2129,7 +2161,7 @@ pub async fn sync_mailboxes_graph(
         // What the pass saw, in the two shapes it can come in. `server` is a
         // whole folder listing and may be diffed against the store; `changed`
         // is a change set and may not.
-        let (new_emails, server, complete, download_incomplete, token, used_delta) =
+        let (new_emails, server, complete, download_incomplete, backlog, token, used_delta) =
             match delta_fetch {
                 Some(d) => (
                     d.new_emails,
@@ -2141,6 +2173,7 @@ pub async fn sync_mailboxes_graph(
                     // is missing. It contributes no prunes of its own.
                     true,
                     d.download_incomplete,
+                    d.backlog,
                     Some(d.delta_link),
                     true,
                 ),
@@ -2172,6 +2205,7 @@ pub async fn sync_mailboxes_graph(
                         skipped,
                         enumeration,
                         download_incomplete,
+                        backlog,
                     } = fetch;
                     result.skipped += skipped;
                     (
@@ -2179,6 +2213,7 @@ pub async fn sync_mailboxes_graph(
                         enumeration.entries,
                         enumeration.complete,
                         download_incomplete,
+                        backlog,
                         minted,
                         false,
                     )
@@ -2263,6 +2298,17 @@ pub async fn sync_mailboxes_graph(
             }
         }
         coverage.push((complete, download_incomplete || ingest_failed));
+        // A window that landed whole leaves the next one for the next pass,
+        // which the runtime runs at once rather than an interval from now. A
+        // message the store refused is the same doubt as a short batch: the
+        // regular interval retries it, an immediate tick would only repeat it.
+        if backlog && !ingest_failed {
+            info!(
+                "Graph sync of {} left older new messages for the next pass",
+                target.role
+            );
+            result.backlogged.push(target.server_name.clone());
+        }
         span.mark(&format!("ingest:{}", target.role));
 
         // Read status for messages the store already holds, one transaction
@@ -3306,6 +3352,71 @@ mod tests {
         );
         let (all, found) = select_for_download(&server, &HashSet::new(), usize::MAX);
         assert_eq!((all.len(), found), (3, 3), "a full sync never truncates");
+    }
+
+    /// PERSO-172: a new account's quick passes drain the folder one window
+    /// each, every pass but the last says a backlog is owed (what the runtime
+    /// ticks again at once on), and none of the short ones mints the delta
+    /// token that would let the next pass skip the listing.
+    #[test]
+    fn a_backlog_drains_one_window_per_pass_and_owes_a_pass_until_the_last() {
+        const QUICK: usize = crate::daemon::runtime::account::QUICK_TICK_LIMIT;
+        let rows: Vec<(String, String, String)> = (0..250)
+            .map(|i| {
+                (
+                    format!("<m{i:03}@x>"),
+                    format!("G{i:03}"),
+                    format!("2026-08-06T{:02}:{:02}:00Z", i / 60, i % 60),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str, Option<&str>)> = rows
+            .iter()
+            .map(|(mid, id, date)| (mid.as_str(), id.as_str(), Some(date.as_str())))
+            .collect();
+        let server = folder(&borrowed);
+
+        let mut known = HashSet::new();
+        let mut token: Option<String> = None;
+        let mut owed = Vec::new();
+        loop {
+            // What the next pass decides before it lists anything: no token
+            // was minted by a short pass, so it enumerates again.
+            assert_eq!(
+                delta_verdict(QUICK, token.as_deref(), true),
+                DeltaVerdict::NoToken
+            );
+            let (new, found) = select_for_download(&server, &known, QUICK);
+            if found == 0 {
+                break;
+            }
+            let capped = found > new.len();
+            owed.push(backlog_owed(found, new.len(), false));
+            if may_record_delta_token(true, capped, false) {
+                token = Some(format!("{GRAPH_BASE}/me/mailFolders('A')/messages/delta?t"));
+            }
+            for entry in new {
+                known.insert(format!("<m{}@x>", &entry.graph_id[1..]));
+            }
+            if token.is_some() {
+                break;
+            }
+        }
+        assert_eq!(known.len(), 250, "every message landed without a full sync");
+        assert_eq!(owed, vec![true, true, false], "100, 100, then the last 50");
+        assert!(token.is_some(), "the pass that finished mints the token");
+    }
+
+    /// Only the cap owes an immediate pass: a short batch (a throttle, a
+    /// failed sub-response) and a pass that asked for nothing wait for the
+    /// regular interval, and a pass that took everything owes nothing.
+    #[test]
+    fn only_a_window_that_landed_whole_owes_an_immediate_pass() {
+        assert!(backlog_owed(250, 100, false));
+        assert!(!backlog_owed(250, 100, true), "a throttled batch backs off");
+        assert!(!backlog_owed(250, 0, false), "`-n 0` makes no progress");
+        assert!(!backlog_owed(100, 100, false), "nothing left behind");
+        assert!(!backlog_owed(0, 0, false));
     }
 
     /// The gate itself. A quick sync that could not download its whole backlog

@@ -327,6 +327,12 @@ pub struct AccountRuntime {
     /// (#0134). Set by the runner of every tick that ran a body, whatever
     /// asked for it; a joiner, a refused tick and a drain leave it alone.
     ticked: watch::Sender<tokio::time::Instant>,
+    /// Whether the last tick that ran a body left a Graph folder with a
+    /// backlog the next quick tick can drain ([`SyncResult::backlogged`]),
+    /// which the scheduler reads to run that tick at once (PERSO-172). Set
+    /// before `ticked` moves, so the scheduler woken by it reads this tick's
+    /// answer.
+    backlog: AtomicBool,
     /// Bumped by [`AccountRuntime::request_drain`], read by the drainer. A
     /// counter rather than a unit so a receiver created after the first
     /// request can still tell it was made.
@@ -424,6 +430,7 @@ impl AccountRuntime {
             running: Mutex::new(None),
             turn: tokio::sync::Mutex::new(()),
             ticked: watch::channel(tokio::time::Instant::now()).0,
+            backlog: AtomicBool::new(false),
             drain_requests: watch::channel(0).0,
             report: TickReport::default(),
         })
@@ -450,6 +457,26 @@ impl AccountRuntime {
     /// closes when the runtime is dropped: what the scheduler waits on (#0134).
     pub fn completed_ticks(&self) -> watch::Receiver<tokio::time::Instant> {
         self.ticked.subscribe()
+    }
+
+    /// Whether the last tick left a backlog the next quick tick drains, so
+    /// the scheduler runs that tick at once instead of an interval later
+    /// (PERSO-172).
+    pub fn backlog_owed(&self) -> bool {
+        self.backlog.load(Ordering::SeqCst)
+    }
+
+    /// Record that a pass this runtime did not run, the daemon's first sync of
+    /// a new account, finished with a backlog, and wake the scheduler so it
+    /// starts draining it now rather than an interval after the runtime
+    /// started.
+    ///
+    /// That pass ran a body for this account, so it moves
+    /// [`AccountRuntime::completed_ticks`] exactly as a tick of the runtime's
+    /// own would.
+    pub fn note_backlog(&self) {
+        self.backlog.store(true, Ordering::SeqCst);
+        self.ticked.send_replace(tokio::time::Instant::now());
     }
 
     /// Ask for a drain of the outbox and the mutation queue soon (#0133).
@@ -748,6 +775,13 @@ impl AccountRuntime {
         let entered = lock(&phases).clone();
         let error = result.err().map(|e| format!("{e:#}"));
         let (sync_result, failed_mutations) = self.report.take();
+        // A failed body owes nothing: whatever failed (the network, the
+        // ceiling, a refused token) is what an immediate retry would hit again,
+        // so the regular interval paces it.
+        self.backlog.store(
+            error.is_none() && !sync_result.backlogged.is_empty(),
+            Ordering::SeqCst,
+        );
         TickOutcome {
             kind,
             phases: entered,
@@ -1300,6 +1334,64 @@ mod tests {
         assert_eq!(outcome.error.as_deref(), Some("login refused"));
         assert_eq!(outcome.phases.len(), 5);
         assert_eq!(outcome.body_deadline, None, "0 seconds is unbounded");
+    }
+
+    /// PERSO-172: a tick whose pass left a backlog says so until a tick drains
+    /// it, a failed body owes nothing whatever it reported, and the first
+    /// sync's backlog is noted from outside and moves the tick record.
+    #[tokio::test]
+    async fn a_tick_that_left_a_backlog_owes_the_next_one_until_it_is_drained() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = TickReport::default();
+        // What each tick's pass reports: a backlog or none, and whether the
+        // body then failed.
+        let script = Arc::new(Mutex::new(vec![
+            (true, false),
+            (true, false),
+            (false, false),
+            (true, true),
+        ]));
+        let mut hooks = quiet_hooks();
+        hooks.body = {
+            let report = report.clone();
+            let script = Arc::clone(&script);
+            Arc::new(move |_ctx: TickContext| {
+                let (backlog, fails) = lock(&script).remove(0);
+                *lock(&report.sync) = Some(SyncResult {
+                    backlogged: if backlog {
+                        vec!["Inbox".to_string()]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                });
+                async move {
+                    if fails {
+                        Err(anyhow::anyhow!("throttled"))
+                    } else {
+                        Ok(())
+                    }
+                }
+                .boxed()
+            })
+        };
+        let runtime = AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 0), 1, hooks)
+            .expect("a free lock")
+            .with_report(report);
+
+        assert!(!runtime.backlog_owed(), "a fresh runtime owes nothing");
+        for owed in [true, true, false, false] {
+            runtime.tick(TickKind::Quick).await;
+            assert_eq!(runtime.backlog_owed(), owed);
+        }
+
+        let before = *runtime.completed_ticks().borrow();
+        runtime.note_backlog();
+        assert!(runtime.backlog_owed());
+        assert!(
+            *runtime.completed_ticks().borrow() > before,
+            "the first sync ran a body, so the scheduler is woken by it"
+        );
     }
 
     /// A runtime whose lock is held elsewhere refuses the tick and still reads.
