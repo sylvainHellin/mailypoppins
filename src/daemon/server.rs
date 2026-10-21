@@ -1225,12 +1225,22 @@ mod tests {
     #[test]
     fn take_failure_lets_exactly_one_caller_restart_a_failed_start() {
         let table = RuntimeTable::default();
-        assert!(!table.take_failure("alpha"), "nothing to take from an empty table");
+        assert!(
+            !table.take_failure("alpha"),
+            "nothing to take from an empty table"
+        );
         table.insert_failure("alpha", "no local store yet".to_string());
         assert_eq!(table.state_of("alpha"), Some("blocked"));
         assert!(table.take_failure("alpha"), "the first caller takes it");
-        assert!(!table.take_failure("alpha"), "a second caller finds nothing");
-        assert_eq!(table.state_of("alpha"), None, "the account reads as opening again");
+        assert!(
+            !table.take_failure("alpha"),
+            "a second caller finds nothing"
+        );
+        assert_eq!(
+            table.state_of("alpha"),
+            None,
+            "the account reads as opening again"
+        );
     }
 
     #[test]
