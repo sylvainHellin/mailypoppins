@@ -4,12 +4,25 @@ This guide walks through setting up the email CLI with a Microsoft 365 (Exchange
 
 ## Graph accounts: use the mailypoppins app
 
-A Graph account (`mp config add-account`, option 4) needs no app registration of its own.
+A Graph account (`mp config init` or `mp config add-account`, option 4, or the desktop app's "Microsoft 365 (Graph API)" preset) needs no app registration of its own.
 mailypoppins has one shared multi-tenant registration (any Entra tenant plus personal Microsoft accounts) in its own `mailypoppins.onmicrosoft.com` tenant:
 
-- client ID `439d7ebd-7898-4df2-b2d6-88bb61e2597b`, entered at the wizard's client_id prompt;
-- tenant ID: the user's own organisation, not the mailypoppins tenant;
+- client ID `439d7ebd-7898-4df2-b2d6-88bb61e2597b`, built in as `MAILYPOPPINS_CLIENT_ID` in `crates/mp-core/src/oauth2.rs`;
 - delegated Graph permissions `User.Read`, `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `offline_access`, `Calendars.ReadWrite`.
+
+The wizard asks for a client ID only for an organisation's own app registration:
+
+```
+OAuth2 Configuration
+  Press Enter at both prompts to sign in with any work, school or personal Microsoft account.
+Client ID [press Enter for the mailypoppins app]:
+Tenant ID or domain [common]:
+```
+
+Enter at the client ID prompt writes the mailypoppins app's client ID to the account's `[accounts.oauth2]` section.
+Enter at the tenant prompt writes `common`, which takes work or school and personal Microsoft accounts alike; a tenant ID or domain limits the sign-in to that organisation.
+The device-code, token and refresh endpoints all take the tenant as it is written, so `common` and an explicit tenant both keep working after the first sign-in.
+An existing account with its own client ID and tenant ID is read unchanged.
 
 Until the publisher is verified ([#0035](tickets/0035-graph-admin-approval.md)), only an organisation's admin can consent, by ticking "Consent on behalf of your organization" at the first device-code sign-in.
 The steps below are for IMAP and SMTP over OAuth2, or for an organisation that wants its own registration.
@@ -71,7 +84,7 @@ Run:
 ```
 mp config init
 ```
-Select "3. Microsoft 365 / Exchange Online (OAuth2)" and follow the prompts. You will be asked for the client_id and tenant_id, then the device code flow will start.
+Select "3. Microsoft 365 / Exchange Online (OAuth2 IMAP/SMTP)" and follow the prompts. You will be asked for the client_id and tenant_id, then the device code flow will start.
 
 ### Option B: Manual Configuration
 

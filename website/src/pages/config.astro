@@ -438,9 +438,19 @@ username = "name@company.com"`} />
       <h3 id="auth-graph">3. Graph API</h3>
       <p>
         For tenants that block IMAP and SMTP entirely. Uses the Microsoft Graph REST API
-        for all mail operations. Requires an Azure app registration with
-        <code>Mail.Read</code>, <code>Mail.ReadWrite</code>, and <code>Mail.Send</code>
-        delegated permissions (plus <code>offline_access</code> for refresh tokens).
+        for all mail operations. No app registration of your own is needed: the client ID
+        of the shared mailypoppins app is built in, and the setup wizard
+        (<code>mp config init</code> or <code>mp config add-account</code>, option 4) uses it
+        when you press Enter at the client ID prompt. The tenant defaults to
+        <code>common</code>, which takes any work, school or personal Microsoft account;
+        you can still enter your tenant ID or domain instead.
+      </p>
+      <p>
+        The first sign-in asks for consent to the app's delegated permissions
+        (<code>Mail.Read</code>, <code>Mail.ReadWrite</code>, <code>Mail.Send</code>,
+        <code>offline_access</code>). Some organisations require an administrator to approve
+        it first. An organisation that prefers its own app registration enters its client ID
+        at the prompt instead (see <a href="#azure-app">Azure App Registration</a> below).
       </p>
       <p>
         Graph accounts use well-known folder names (<code>inbox</code>,
@@ -456,8 +466,8 @@ default_from = "name@company.com"
 auth_method = "graph"
 
 [accounts.oauth2]
-client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-tenant_id = "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
+client_id = "439d7ebd-7898-4df2-b2d6-88bb61e2597b"  # the mailypoppins app
+tenant_id = "common"          # or your tenant ID or domain
 
 [accounts.mailboxes.inbox]
 server = "inbox"              # Graph well-known folder name
@@ -471,10 +481,12 @@ server = "sentitems"          # Not "Sent Items"`} />
 
     <!-- Azure App Registration -->
     <section>
-      <h2>Azure App Registration</h2>
+      <h2 id="azure-app">Azure App Registration</h2>
       <p>
-        Both OAuth2 and Graph authentication require registering an application in
-        Azure Entra ID (formerly Azure Active Directory). Here is a condensed setup.
+        OAuth2 (IMAP/SMTP) authentication requires registering an application in
+        Azure Entra ID (formerly Azure Active Directory). Graph accounts need one only when
+        your organisation wants its own app instead of the mailypoppins app. Here is a
+        condensed setup.
       </p>
 
       <ol class="setup-steps">
