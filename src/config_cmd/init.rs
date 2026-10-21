@@ -922,7 +922,7 @@ pub fn cmd_config_add_account(
 /// The banner both Graph flows open with.
 fn print_graph_intro() {
     println!(
-        "{} Microsoft 365 (Graph API) -- no IMAP/SMTP needed.",
+        "{} Microsoft 365 (Graph API): no IMAP/SMTP needed.",
         "\u{2139}".blue()
     );
     println!(
