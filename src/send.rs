@@ -969,6 +969,145 @@ mod tests {
         );
     }
 
+    /// The message a Graph MIME send submits, decoded back from the request
+    /// body [`graph_route`] produced.
+    fn graph_request_mime(built: &BuiltMessage) -> Vec<u8> {
+        use base64::Engine;
+        match graph_route(built).expect("the route is decided") {
+            GraphRoute::Mime(body) => base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .expect("the request body is standard base64"),
+            GraphRoute::Json => panic!("a small message goes as MIME"),
+        }
+    }
+
+    /// A Graph reply goes as the same MIME the SMTP path builds: threading
+    /// headers, our `Message-ID`, the account's From, the plain/html
+    /// alternative, and the Bcc recipients as a header, since Graph has no
+    /// envelope to carry them (PERSO-144).
+    #[test]
+    fn a_graph_reply_is_sent_as_mime_with_threading_and_bcc() {
+        use mailparse::MailHeaderMap;
+        let mut reply = draft_with(None, "/drafts/r.md");
+        reply.frontmatter.subject = "Re: Plan".to_string();
+        reply.frontmatter.in_reply_to = Some("<parent@example.com>".to_string());
+        reply.frontmatter.cc = Some("carol@example.com".to_string());
+        reply.frontmatter.bcc = Some("Dan Hidden <dan@example.com>, eve@example.com".to_string());
+        reply.body_markdown = "Sounds **good**.".to_string();
+        let built = build_with_ancestry(&reply, Some("<root@example.com>"));
+
+        let mime = graph_request_mime(&built);
+        let parsed = mailparse::parse_mail(&mime).expect("the Graph MIME parses");
+        let header = |name: &str| parsed.headers.get_first_value(name);
+        assert_eq!(header("Message-ID"), Some(built.message_id.clone()));
+        assert_eq!(
+            header("In-Reply-To").as_deref(),
+            Some("<parent@example.com>")
+        );
+        assert_eq!(
+            header("References").as_deref(),
+            Some("<root@example.com> <parent@example.com>")
+        );
+        assert_eq!(header("From").as_deref(), Some("me@example.com"));
+        assert_eq!(header("To").as_deref(), Some("bob@example.com"));
+        assert_eq!(header("Cc").as_deref(), Some("carol@example.com"));
+        assert_eq!(header("Subject").as_deref(), Some("Re: Plan"));
+        let bcc = mailparse::addrparse_header(
+            parsed
+                .headers
+                .get_first_header("Bcc")
+                .expect("the Graph MIME names the Bcc recipients"),
+        )
+        .expect("the Bcc header parses");
+        assert_eq!(
+            bcc.to_string(),
+            "\"Dan Hidden\" <dan@example.com>, eve@example.com"
+        );
+        assert_eq!(
+            parsed.headers.get_all_values("Bcc").len(),
+            1,
+            "one Bcc header"
+        );
+
+        assert_eq!(parsed.ctype.mimetype, "multipart/alternative");
+        let types: Vec<&str> = parsed
+            .subparts
+            .iter()
+            .map(|p| p.ctype.mimetype.as_str())
+            .collect();
+        assert_eq!(types, ["text/plain", "text/html"]);
+        let html = parsed.subparts[1].get_body().unwrap();
+        assert!(html.contains("<strong>good</strong>"), "{html}");
+    }
+
+    /// The Bcc header is added for Graph alone: the built bytes, which go to
+    /// SMTP, the outbox and the local sent copy, still carry none, and the
+    /// Graph MIME is those bytes with the one header in front (PERSO-144).
+    #[test]
+    fn the_bcc_header_is_added_for_graph_only() {
+        use mailparse::MailHeaderMap;
+        let mut draft = draft_with(None, "/drafts/b.md");
+        draft.frontmatter.bcc = Some("dan@example.com".to_string());
+        let built = build_with_ancestry(&draft, None);
+
+        let (smtp_headers, _) = mailparse::parse_headers(&built.raw).unwrap();
+        assert!(
+            smtp_headers.get_first_value("Bcc").is_none(),
+            "lettre keeps Bcc off the SMTP bytes"
+        );
+        assert!(built
+            .recipients
+            .contains(&("dan@example.com".to_string(), RecipientRole::Bcc)));
+
+        let mime = graph_mime(&built).unwrap();
+        assert_eq!(
+            &mime[..mime.len() - built.raw.len()],
+            b"Bcc: dan@example.com\r\n"
+        );
+        assert_eq!(&mime[mime.len() - built.raw.len()..], &built.raw[..]);
+
+        // No Bcc recipient, no header: the Graph MIME is the built bytes.
+        let plain = build_with_ancestry(&draft_with(None, "/drafts/p.md"), None);
+        assert_eq!(graph_mime(&plain).unwrap(), plain.raw);
+    }
+
+    /// Attachments travel inside the Graph MIME exactly as the SMTP builder
+    /// lays them out (PERSO-144).
+    #[test]
+    fn a_graph_mime_send_carries_the_attachments() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"attached text").unwrap();
+        let mut draft = draft_with(None, tmp.path().join("d.md").to_str().unwrap());
+        draft.frontmatter.attachments = Some(vec!["notes.txt".to_string()]);
+        let built = build_with_ancestry(&draft, None);
+
+        let mime = graph_request_mime(&built);
+        let parsed = mailparse::parse_mail(&mime).unwrap();
+        assert_eq!(parsed.ctype.mimetype, "multipart/mixed");
+        assert_eq!(parsed.subparts[0].ctype.mimetype, "multipart/alternative");
+        let attachment = &parsed.subparts[1];
+        assert_eq!(
+            attachment.get_content_disposition().params.get("filename"),
+            Some(&"notes.txt".to_string())
+        );
+        assert_eq!(attachment.get_body().unwrap().trim_end(), "attached text");
+    }
+
+    /// A message whose base64 MIME would exceed Graph's sendMail limit falls
+    /// back to the JSON payload instead of failing with a 413 (PERSO-144).
+    #[test]
+    fn a_message_over_the_mime_limit_falls_back_to_json() {
+        let mut big = draft_with(None, "/drafts/big.md");
+        big.frontmatter.in_reply_to = Some("<parent@example.com>".to_string());
+        big.body_markdown = "word ".repeat(600_000);
+        let built = build_with_ancestry(&big, None);
+        assert!(
+            crate::graph::mime_send_body(&graph_mime(&built).unwrap()).len()
+                > crate::graph::MIME_SEND_MAX_BASE64_BYTES
+        );
+        assert_eq!(graph_route(&built).unwrap(), GraphRoute::Json);
+    }
+
     /// The local half of the post-send hook flags *every* copy of the source,
     /// because one message is one row per mailbox and the archived copy is as
     /// likely to be the one on screen (#TKT-0051).
@@ -2418,39 +2557,46 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
     )?;
 
     let report = match ctx.graph.as_ref() {
-        Some(graph_config) => {
-            let to = parse_graph_recipients(draft.frontmatter.to.as_deref());
-            let cc = parse_graph_recipients(draft.frontmatter.cc.as_deref());
-            let bcc = parse_graph_recipients(draft.frontmatter.bcc.as_deref());
-            let to_refs: Vec<(&str, &str)> =
-                to.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
-            let cc_refs: Vec<(&str, &str)> =
-                cc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
-            let bcc_refs: Vec<(&str, &str)> =
-                bcc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
-
-            // The Graph API takes a rendered body rather than bytes: the same
-            // HTML part the SMTP bytes carry, quoted reply included.
-            let html_body = draft_html_body(draft, &ctx.email_settings, ctx.signature.as_deref());
-            let att_data = draft_attachments(draft)?;
-            let client = crate::graph::GraphClient::new_async(graph_config).await?;
+        Some(graph_config) => match graph_route(&built)? {
             // Graph files its own copy in Sent Items, so the outbox row never
             // carries a target mailbox; what it buys here is exactly-once
             // durability of the submission.
-            send_durably_via(
-                &built,
-                &ctx.account,
-                client.send_mail(
-                    &to_refs,
-                    &cc_refs,
-                    &bcc_refs,
-                    &draft.frontmatter.subject,
-                    &html_body,
-                    &att_data,
-                ),
-            )
-            .await?
-        }
+            GraphRoute::Mime(body) => {
+                let client = crate::graph::GraphClient::new_async(graph_config).await?;
+                send_durably_via(&built, &ctx.account, client.send_mime(body)).await?
+            }
+            GraphRoute::Json => {
+                let to = parse_graph_recipients(draft.frontmatter.to.as_deref());
+                let cc = parse_graph_recipients(draft.frontmatter.cc.as_deref());
+                let bcc = parse_graph_recipients(draft.frontmatter.bcc.as_deref());
+                let to_refs: Vec<(&str, &str)> =
+                    to.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+                let cc_refs: Vec<(&str, &str)> =
+                    cc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+                let bcc_refs: Vec<(&str, &str)> =
+                    bcc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+
+                // The JSON fallback takes a rendered body rather than bytes: the
+                // same HTML part the SMTP bytes carry, quoted reply included.
+                let html_body =
+                    draft_html_body(draft, &ctx.email_settings, ctx.signature.as_deref());
+                let att_data = draft_attachments(draft)?;
+                let client = crate::graph::GraphClient::new_async(graph_config).await?;
+                send_durably_via(
+                    &built,
+                    &ctx.account,
+                    client.send_mail(
+                        &to_refs,
+                        &cc_refs,
+                        &bcc_refs,
+                        &draft.frontmatter.subject,
+                        &html_body,
+                        &att_data,
+                    ),
+                )
+                .await?
+            }
+        },
         None => {
             let smtp = ctx
                 .smtp
@@ -3222,6 +3368,64 @@ pub fn build_draft_message(
         from: normalized_from,
         draft_key: Some(draft_key(draft)),
     })
+}
+
+/// The bytes a Graph MIME send submits: the built message with its Bcc
+/// recipients restored as a `Bcc:` header (PERSO-144).
+///
+/// lettre drops `Bcc:` from the formatted bytes because SMTP carries those
+/// recipients in the envelope; Graph's MIME sendMail has no envelope and
+/// reads every recipient off the headers, and Exchange strips `Bcc:` on
+/// delivery. Everything else, `Message-ID` and the threading headers
+/// included, is `built.raw` unchanged, so the outbox row, the local sent copy
+/// and an SMTP send keep the bytes they always had.
+pub fn graph_mime(built: &BuiltMessage) -> Result<Vec<u8>> {
+    let mut bcc = lettre::message::Mailboxes::new();
+    for (addr, role) in &built.recipients {
+        if *role == RecipientRole::Bcc {
+            let mbox: Mailbox = normalize_address_for_smtp(addr)
+                .parse()
+                .context("Invalid 'bcc' email address")?;
+            bcc.push(mbox);
+        }
+    }
+    if bcc.iter().next().is_none() {
+        return Ok(built.raw.clone());
+    }
+    let mut headers = lettre::message::header::Headers::new();
+    headers.set(lettre::message::header::Bcc::from(bcc));
+    let mut raw = headers.to_string().into_bytes();
+    raw.extend_from_slice(&built.raw);
+    Ok(raw)
+}
+
+/// How [`send_draft`] submits a message over Graph.
+#[derive(Debug, PartialEq, Eq)]
+enum GraphRoute {
+    /// `/me/sendMail` with the base64 MIME body: threading headers and our
+    /// `Message-ID` survive.
+    Mime(String),
+    /// The JSON message resource, for a message over
+    /// [`crate::graph::MIME_SEND_MAX_BASE64_BYTES`]; Exchange threads it on
+    /// nothing.
+    Json,
+}
+
+/// The route a built message takes over Graph (PERSO-144).
+fn graph_route(built: &BuiltMessage) -> Result<GraphRoute> {
+    let body = crate::graph::mime_send_body(&graph_mime(built)?);
+    if crate::graph::fits_mime_send(body.len()) {
+        Ok(GraphRoute::Mime(body))
+    } else {
+        warn!(
+            "[send] {} is {} bytes of base64 MIME, over Graph's sendMail limit of {}; \
+             sending it as JSON, which carries no In-Reply-To or References",
+            built.message_id,
+            body.len(),
+            crate::graph::MIME_SEND_MAX_BASE64_BYTES,
+        );
+        Ok(GraphRoute::Json)
+    }
 }
 
 /// Submit an already-built message over SMTP, one envelope per recipient.

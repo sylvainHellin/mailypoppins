@@ -2397,9 +2397,36 @@ pub async fn sync_mailboxes_graph(
 // Phase 5: Send via Graph
 // ---------------------------------------------------------------------------
 
+/// The largest base64 MIME body sent through `/me/sendMail` (PERSO-144).
+///
+/// Graph caps a sendMail request at about 4 MB (a 413 or "maximum request
+/// length supported is 4MB" above it); 3.5 MB of base64, about 2.6 MB of raw
+/// MIME, leaves headroom for the request line and headers and for the cap
+/// being counted in MiB or MB. A message above it goes as the JSON payload,
+/// which has no threading headers.
+pub const MIME_SEND_MAX_BASE64_BYTES: usize = 3_500_000;
+
+/// The request body `/me/sendMail` takes for a MIME send: the whole
+/// message, standard base64, unwrapped.
+pub fn mime_send_body(mime: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(mime)
+}
+
+/// Whether a base64 MIME body of `base64_len` bytes is small enough for a
+/// MIME sendMail; see [`MIME_SEND_MAX_BASE64_BYTES`].
+pub fn fits_mime_send(base64_len: usize) -> bool {
+    base64_len <= MIME_SEND_MAX_BASE64_BYTES
+}
+
 impl GraphClient {
-    /// Send an email via Graph API's /me/sendMail endpoint.
+    /// Send an email via Graph API's /me/sendMail endpoint, as the JSON
+    /// message resource.
     /// Graph automatically places the message in Sent Items.
+    ///
+    /// Exchange stamps its own `Message-ID` and the JSON form takes no
+    /// `In-Reply-To` or `References`, so this is only the fallback for a
+    /// message too large for [`GraphClient::send_mime`].
     pub async fn send_mail(
         &self,
         to: &[(&str, &str)], // (name, address) pairs
@@ -2485,18 +2512,36 @@ impl GraphClient {
             "saveToSentItems": "true"
         });
 
+        self.submit_send_mail(self.client.post(&url).json(&payload))
+            .await
+    }
+
+    /// Send a whole RFC 5322 message through `/me/sendMail` (PERSO-144).
+    ///
+    /// `mime_base64` is [`mime_send_body`] of the bytes: Graph takes the
+    /// message base64-encoded as a `text/plain` body, parses recipients
+    /// (`Bcc:` included) from its headers and keeps its `Message-ID`,
+    /// `In-Reply-To` and `References`, which the JSON form cannot carry.
+    /// Saved to Sent Items, the endpoint's default.
+    pub async fn send_mime(&self, mime_base64: String) -> Result<()> {
+        let url = format!("{}/me/sendMail", GRAPH_BASE);
+        self.submit_send_mail(
+            self.client
+                .post(&url)
+                .header(reqwest::header::CONTENT_TYPE, "text/plain")
+                .body(mime_base64),
+        )
+        .await
+    }
+
+    /// Issue one `/me/sendMail` request, JSON or MIME, and read its outcome
+    /// with the outbox's durability semantics.
+    async fn submit_send_mail(&self, request: reqwest::RequestBuilder) -> Result<()> {
         // A connect or builder failure never reached the API, so nothing was
         // sent; anything else (a timeout, a dropped response) leaves it
         // unknown, and the outbox must not re-send on its own. See
         // [`crate::outbox::AmbiguousSubmission`].
-        let resp = match self
-            .client
-            .post(&url)
-            .bearer_auth(self.bearer())
-            .json(&payload)
-            .send()
-            .await
-        {
+        let resp = match request.bearer_auth(self.bearer()).send().await {
             Ok(resp) => resp,
             Err(e) if e.is_connect() || e.is_builder() => {
                 return Err(anyhow!(e).context("Failed to send mail via Graph API"))
@@ -2937,6 +2982,32 @@ fn retain_exact_message_id_graph(emails: &mut Vec<FetchedEmail>, message_id: Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A MIME send is allowed up to the threshold inclusive and refused one
+    /// byte past it, where the caller falls back to JSON (PERSO-144).
+    #[test]
+    fn the_mime_send_threshold_is_inclusive_and_under_four_megabytes() {
+        assert!(fits_mime_send(0));
+        assert!(fits_mime_send(MIME_SEND_MAX_BASE64_BYTES));
+        assert!(!fits_mime_send(MIME_SEND_MAX_BASE64_BYTES + 1));
+        assert!(!fits_mime_send(4 * 1024 * 1024));
+        const { assert!(MIME_SEND_MAX_BASE64_BYTES < 4_000_000) };
+    }
+
+    /// The sendMail MIME body is the message in standard, unwrapped base64.
+    #[test]
+    fn the_mime_send_body_is_unwrapped_standard_base64() {
+        use base64::Engine;
+        let mime = "From: a@x\r\nSubject: hi\r\n\r\n".repeat(20);
+        let body = mime_send_body(mime.as_bytes());
+        assert!(!body.contains('\n') && !body.contains('\r'));
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&body)
+                .unwrap(),
+            mime.as_bytes()
+        );
+    }
 
     fn att(filename: &str, content: &str) -> crate::parse::AttachmentData {
         crate::parse::AttachmentData {

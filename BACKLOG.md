@@ -170,12 +170,13 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 ## Graph backend (unparked 2026-10-21)
 
 > Unparked with the EVOQS Exchange account as its first live account (decision log, 2026-10-21); the items below are picked up together, and the first-contact checks in the Verification section of [#0065](docs/tickets/0065-graph-prune-batch-hardening.md) run before the first real sync.
-> PERSO-144 (reply headers on Graph sends) comes early, since EVOQS is business mail.
+> PERSO-144 (reply headers on Graph sends) is built and waits for a live send on EVOQS: Graph sends go as MIME through `sendMail` (decision log, 2026-10-21).
 
 - [#0035 Graph API admin approval + Azure app verification](docs/tickets/0035-graph-admin-approval.md) -- chore _(in progress for EVOQS; TUM stays blocked)_
 - [#0036 Graph sync backend (calendar + server-side RSVP)](docs/tickets/0036-graph-sync-backend.md) -- feature _(blocked by #0035)_
 - [#0082 Verify the Graph delta against a live tenant](docs/tickets/0082-graph-delta-live-verification.md) -- perf _(the split-out half of #0042, which shipped the `/messages/delta` path and its fallbacks but had no Graph account to smoke them against)_
 - [#0063 Send durability gaps, Graph half](docs/tickets/0063-send-durability-gaps.md) -- bug _(the SMTP halves shipped; scope item 3, resumable Graph `pending_send` rows, waits with the backend)_
+- Graph sends over the `sendMail` size limit lose threading -- bug _(a message whose base64 MIME exceeds `MIME_SEND_MAX_BASE64_BYTES`, 3.5 MB, falls back to the JSON payload, which carries no In-Reply-To, References or our Message-ID; `createReply`, or a MIME draft plus upload sessions for the attachments, would keep them; PERSO-144 follow-up)_
 - Graph inline images render broken -- bug _(the renderer inlines `cid:` images only from the raw message, which Graph rows do not have, and the store keeps no content-id per attachment, so the fix needs a schema change; inline-only messages stored before 88342da1 are not repaired; see #0145)_
 
 The parity half of [#0059](docs/tickets/0059-syncbackend-trait.md) is parked with it: the trait and the engine shipped, but `graph.rs` still runs its own loop rather than being a second `SyncBackend`.

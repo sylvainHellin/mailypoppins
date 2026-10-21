@@ -30,3 +30,10 @@ Why: an app registration cannot move between tenants, so a dedicated tenant keep
 Rejected: registering the app inside the EVOQS tenant (fastest, but tied to EVOQS for good); every user registering their own app (no verification work, but the whole portal procedure for each user).
 Source: chat.
 Status: accepted
+
+## 2026-10-21 - Graph sends go as MIME through sendMail so replies carry In-Reply-To, References and our Message-ID
+
+Why: one request with the bytes the SMTP path already builds threads a reply for every recipient and keeps the Message-ID the outbox and the local sent copy are keyed on; a message whose base64 MIME exceeds 3.5 MB (Graph caps the request near 4 MB) falls back to the JSON payload without threading, logged as a warning.
+Rejected: createReply, PATCH and send (no control over the Message-ID, four round trips, a draft left in Drafts on failure, and it may mark the parent read); internetMessageHeaders on the JSON payload (Graph accepts only x- headers there).
+Source: .agents/research/2026-10-21-graph-reply-threading.md, chat of 2026-10-21 (PERSO-144).
+Status: accepted
