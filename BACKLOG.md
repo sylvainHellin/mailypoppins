@@ -176,5 +176,6 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 - [#0036 Graph sync backend (calendar + server-side RSVP)](docs/tickets/0036-graph-sync-backend.md) -- feature _(blocked by #0035)_
 - [#0082 Verify the Graph delta against a live tenant](docs/tickets/0082-graph-delta-live-verification.md) -- perf _(the split-out half of #0042, which shipped the `/messages/delta` path and its fallbacks but had no Graph account to smoke them against)_
 - [#0063 Send durability gaps, Graph half](docs/tickets/0063-send-durability-gaps.md) -- bug _(the SMTP halves shipped; scope item 3, resumable Graph `pending_send` rows, waits with the backend)_
+- Graph inline images render broken -- bug _(the renderer inlines `cid:` images only from the raw message, which Graph rows do not have, and the store keeps no content-id per attachment, so the fix needs a schema change; inline-only messages stored before 88342da1 are not repaired; see #0145)_
 
 The parity half of [#0059](docs/tickets/0059-syncbackend-trait.md) is parked with it: the trait and the engine shipped, but `graph.rs` still runs its own loop rather than being a second `SyncBackend`.

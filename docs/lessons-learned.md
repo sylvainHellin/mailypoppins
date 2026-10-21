@@ -2732,3 +2732,27 @@ After `r` or `cn` in the embedded editor, the reader shows the new draft's summa
 
 `sftp -b <file>` sets `BatchMode=yes`, which disables password and keyboard-interactive authentication, so a password-only host (the OVH free hosting behind mailypoppins.com has SFTP but no SSH keys) fails with `Permission denied (publickey,password)` and `No more authentication methods to try`.
 Pass `-o BatchMode=no` and feed the password through `SSH_ASKPASS` with `SSH_ASKPASS_REQUIRE=force`; `scripts/deploy-website.sh` does this with a temporary askpass script that reads Proton Pass.
+
+## Graph refuses a `$select` of a derived type's property on a base collection
+
+`/attachments` is a collection of the base `microsoft.graph.attachment`, so `$select=contentBytes` fails with HTTP 400 "Could not find a property named 'contentBytes'" because only `fileAttachment` has it; leave `$select` off `/attachments` (3ac15378).
+
+## `/me/mailFolders/{x}` takes a well-known name or an id, never a display name
+
+A display name such as `Sent Items` in the URL fails with `ErrorInvalidIdMalformed`; resolve it to a well-known name (`sentitems`, `junkemail`) or look the folder up and use its id (60dcdbec).
+
+## A dry run must never open the store for writing
+
+`Store::open` creates the file, and the daemon reads an existing store file as "already synced", so a `mp sync --dry-run` on a new account left an empty store that cancelled its first sync; a dry run of an account with no store reads an in-memory one (b90773f6).
+
+## A runtime for a new account kind sends every tick source through `sync_once`
+
+Manual sync, the watcher and client startup all tick the runtime, so turning one on for Graph sent every trigger into the tick body; check that the tick body supports the account kind before turning its runtime on (4725dbb9).
+
+## A message ingested after a failed attachment fetch is never re-downloaded
+
+Once the store knows a message, later passes skip it, so attachments that failed at ingest stayed missing for good; anything fetched partially needs its own repair path, as Graph attachments got in 0b3a4a91.
+
+## Graph reports `hasAttachments` false for inline-only mail
+
+A message whose only attachments are `cid:` images has `hasAttachments: false`, so check the HTML body for `cid:` before skipping the attachment list (88342da1).
