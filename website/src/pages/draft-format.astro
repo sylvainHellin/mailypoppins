@@ -14,7 +14,7 @@ const frontmatterFields = [
   { command: 'bcc', description: 'Blind carbon copy address(es). Optional.' },
   { command: 'subject', description: 'Email subject line. Required.' },
   { command: 'status', description: 'Workflow state: draft, approved, or sent. Required.' },
-  { command: 'from', description: 'Sender address. Optional -- overrides default_from from config.' },
+  { command: 'from', description: 'Sender address. Optional; overrides default_from from config.' },
   { command: 'reply_to', description: 'Reply-to address. Optional.' },
   { command: 'attachments', description: 'List of file paths to attach; a folder path attaches every file inside it. Optional.' },
   { command: 'in_reply_to', description: 'Message-ID of the message this draft answers. Written by mp reply; on send, the source is marked answered.' },
@@ -109,7 +109,7 @@ message_id: "<unique-id@example.com>"
 Email body here.`;
 ---
 
-<Layout title="Draft Format · mailypoppins" description="Markdown email drafts with YAML frontmatter -- fields, status workflow, attachments, and signatures.">
+<Layout title="Draft Format · mailypoppins" description="Markdown email drafts with YAML frontmatter: fields, status workflow, attachments, and signatures.">
   <Nav />
   <main id="main-content" class="content page">
     <DocsTabs />
@@ -136,7 +136,7 @@ Email body here.`;
     <section>
       <h2 id="status-workflow">Status Workflow</h2>
       <p>
-        Drafts follow a strict workflow. Only approved emails can be sent -- the <code>send</code>
+        Drafts follow a strict workflow. Only approved emails can be sent: the <code>send</code>
         command rejects drafts that have not been approved first. These three are the whole
         vocabulary of <code>status:</code>; where a message sits (inbox, archive, sent) is a
         mailbox, not a status.
@@ -168,7 +168,7 @@ Email body here.`;
       </p>
       <p>
         The raw RFC 822 message is also appended to the server-side Sent folder
-        via IMAP APPEND with the <code>\Seen</code> flag. This is best-effort -- a failed
+        via IMAP APPEND with the <code>\Seen</code> flag. This is best effort: a failed
         APPEND is logged but does not fail the send.
       </p>
     </section>

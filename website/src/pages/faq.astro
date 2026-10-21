@@ -144,7 +144,7 @@ import AccordionItem from '../components/AccordionItem.astro';
       <div class="accordion-group">
         <AccordionItem question="How does sync work?">
           <p>
-            <code>mp sync</code> is additive by default -- it only downloads new emails,
+            <code>mp sync</code> is additive by default: it only downloads new emails,
             deduplicating by Message-ID. It uses a two-pass approach: first fetches headers (~50
             bytes per message) to check what is new, then downloads full messages only for emails
             not already stored locally.
