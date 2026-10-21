@@ -167,12 +167,12 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 - [#0014 Linux packaging (.deb, .rpm, AUR, musl)](docs/tickets/0014-linux-packaging.md) -- chore
 - [#0015 Cross-platform smoke tests](docs/tickets/0015-cross-platform-smoke-tests.md) -- chore
 
-## Parked (Graph)
+## Graph backend (unparked 2026-10-21)
 
-> Graph backend parked (decision 2026-08-06): nothing depends on it today, and the priority is features and stability on the IMAP/SMTP path.
-> It wakes deliberately, not opportunistically: the first live target is the EVOQS Exchange account, the items below are picked up together, and the pre-live-contact checklist (end of [0065-followup-report](.agents/workflow/0065-followup-report.md), also the Verification section of [#0065](docs/tickets/0065-graph-prune-batch-hardening.md)) is run before that first contact.
+> Unparked with the EVOQS Exchange account as its first live account (decision log, 2026-10-21); the items below are picked up together, and the first-contact checks in the Verification section of [#0065](docs/tickets/0065-graph-prune-batch-hardening.md) run before the first real sync.
+> PERSO-144 (reply headers on Graph sends) comes early, since EVOQS is business mail.
 
-- [#0035 Graph API admin approval + Azure app verification](docs/tickets/0035-graph-admin-approval.md) -- chore _(blocked; written against the TUM tenant, re-scope for EVOQS on wake)_
+- [#0035 Graph API admin approval + Azure app verification](docs/tickets/0035-graph-admin-approval.md) -- chore _(in progress for EVOQS; TUM stays blocked)_
 - [#0036 Graph sync backend (calendar + server-side RSVP)](docs/tickets/0036-graph-sync-backend.md) -- feature _(blocked by #0035)_
 - [#0082 Verify the Graph delta against a live tenant](docs/tickets/0082-graph-delta-live-verification.md) -- perf _(the split-out half of #0042, which shipped the `/messages/delta` path and its fallbacks but had no Graph account to smoke them against)_
 - [#0063 Send durability gaps, Graph half](docs/tickets/0063-send-durability-gaps.md) -- bug _(the SMTP halves shipped; scope item 3, resumable Graph `pending_send` rows, waits with the backend)_
