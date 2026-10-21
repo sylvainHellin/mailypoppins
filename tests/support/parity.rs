@@ -569,13 +569,47 @@ pub fn pin_font_size(root: &Path) {
 /// Run the pre-daemon binary against `tmp` and collect its output.
 pub fn oracle(args: &[&str], tmp: &Path) -> Output {
     fs::create_dir_all(tmp).unwrap_or_else(|e| panic!("create {}: {e}", tmp.display()));
-    piped_since_0144(
+    graph_without_smtp_warning(piped_since_0144(
         args,
         oracle_command(tmp)
             .args(args)
             .output()
             .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
-    )
+    ))
+}
+
+/// The oracle's stderr without the SMTP warning it printed for a Graph account.
+///
+/// The pre-daemon binary loaded an SMTP transport for every account and warned
+/// `Could not load SMTP config: Graph accounts use Microsoft Graph API, not
+/// SMTP` (plus `Some commands may not work ...` in the preamble) on every
+/// command against a Graph account. Today's binary skips the load for Graph,
+/// which has no SMTP transport by design, so this takes that deliberate change
+/// out of a parity row the way [`pin_font_size`] does for #0127.
+pub fn graph_without_smtp_warning(mut out: Output) -> Output {
+    const WARNING: &str =
+        "Could not load SMTP config: Graph accounts use Microsoft Graph API, not SMTP";
+    const FOLLOW_UP: &str = "  Some commands may not work without proper configuration.";
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !stderr.contains(WARNING) {
+        return out;
+    }
+    let mut kept = Vec::new();
+    let mut lines = stderr.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.contains(WARNING) {
+            if lines
+                .peek()
+                .is_some_and(|next| next.trim_end() == FOLLOW_UP)
+            {
+                lines.next();
+            }
+            continue;
+        }
+        kept.push(line);
+    }
+    out.stderr = kept.concat().into_bytes();
+    out
 }
 
 /// The oracle's stdout as today's binary prints it into a pipe.

@@ -214,6 +214,22 @@ impl RuntimeTable {
     /// The drop is the caller's, on `spawn_blocking`: it closes SQLite, and a
     /// reload promises the lock is free by the time it answers. A start that
     /// only ever failed has nothing to hand back and is simply forgotten.
+    /// Forget a start that failed outright, so the account can be started
+    /// again; `true` only for the one caller that found and removed it.
+    ///
+    /// The atomic half of [`start_after_first_sync`](super::config::start_after_first_sync):
+    /// the daemon's own first sync and a `mp sync` the user ran can both finish
+    /// with a fresh store, and only one of them may start the runtime.
+    pub fn take_failure(&self, account: &str) -> bool {
+        let mut entries = lock(&self.entries);
+        if matches!(entries.get(account), Some(RuntimeEntry::Failed(_))) {
+            entries.remove(account);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn remove(&self, account: &str) -> Option<Arc<AccountRuntime>> {
         match lock(&self.entries).remove(account)? {
             RuntimeEntry::Live(runtime) => Some(runtime),
@@ -1206,6 +1222,17 @@ mod tests {
     /// the order they were evaluated. Sequential rather than raced: the
     /// runtime table cannot be made to flip mid-evaluation from a test, so this
     /// pins the order the serialised refresh guarantees, not the race itself.
+    #[test]
+    fn take_failure_lets_exactly_one_caller_restart_a_failed_start() {
+        let table = RuntimeTable::default();
+        assert!(!table.take_failure("alpha"), "nothing to take from an empty table");
+        table.insert_failure("alpha", "no local store yet".to_string());
+        assert_eq!(table.state_of("alpha"), Some("blocked"));
+        assert!(table.take_failure("alpha"), "the first caller takes it");
+        assert!(!table.take_failure("alpha"), "a second caller finds nothing");
+        assert_eq!(table.state_of("alpha"), None, "the account reads as opening again");
+    }
+
     #[test]
     fn refreshes_publish_an_account_check_in_evaluation_order() {
         let state = state_with_one_account("alpha");

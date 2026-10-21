@@ -214,7 +214,8 @@ impl Method for SyncPass {
             );
             let runtimes = Arc::clone(&self.runtimes);
             let canonical = Arc::clone(&self.canonical);
-            tokio::spawn(run_pass(request, handle, runtimes, canonical));
+            let config = Arc::clone(&self.config);
+            tokio::spawn(run_pass(request, handle, runtimes, canonical, config));
             Ok(Outcome::query(json!({"operation_id": id.as_str()})))
         })
     }
@@ -342,10 +343,97 @@ async fn run_pass(
     handle: OperationHandle,
     runtimes: Arc<RuntimeTable>,
     canonical: Arc<CanonicalState>,
+    config: Arc<ConfigStore>,
 ) {
     let method = request.method;
-    run_pass_to_end(request, handle, runtimes, canonical).await;
+    let account = request.account.name.clone();
+    let dry_run = request.dry_run;
+    run_pass_to_end(
+        request,
+        handle,
+        Arc::clone(&runtimes),
+        Arc::clone(&canonical),
+    )
+    .await;
+    // A guarded pass may have created the store of an account that had none,
+    // and that account's runtime then comes up now rather than at the next
+    // daemon start. A no-op for every account that already has one.
+    if !dry_run && runtimes.get(&account).is_none() {
+        super::super::config::start_after_first_sync(&config, &runtimes, &canonical, &account)
+            .await;
+    }
     commit_hold_marker(method, "returned");
+}
+
+/// The first sync of an account that has never been synced, run by the daemon
+/// itself after the account was added ([`spawn_first_sync_if_new`]).
+///
+/// The pass a `mp sync` with no flags would run, through the same guarded
+/// body, with nothing to drain (a new account has no queued mutations). It
+/// commits its outcome like any pass and then starts the runtime, so the
+/// account turns `ready` on its own. A failure leaves it `blocked` with a
+/// reason that says what failed and how to retry.
+///
+/// [`spawn_first_sync_if_new`]: super::super::config::spawn_first_sync_if_new
+pub async fn first_sync(
+    config: Arc<ConfigStore>,
+    runtimes: Arc<RuntimeTable>,
+    canonical: Arc<CanonicalState>,
+    account: String,
+) {
+    let snapshot = config.snapshot();
+    let Some(cfg) = snapshot
+        .accounts
+        .iter()
+        .find(|a| a.name == account)
+        .cloned()
+    else {
+        return;
+    };
+    let request = PassRequest {
+        method: "sync.quick",
+        account: cfg,
+        kind: TickKind::Quick,
+        mailbox: None,
+        dry_run: false,
+        limit: QUICK_TICK_LIMIT,
+        secrets: snapshot.config.secrets_backend,
+    };
+    log::info!("[daemon] {account} has no local store yet; running its first sync");
+    let result = async {
+        let targets =
+            resolve_targets(&request.account, None).map_err(|e| anyhow::anyhow!(e.message))?;
+        super::open_secrets(&account, request.secrets).map_err(|e| anyhow::anyhow!(e.message))?;
+        body(&request, &targets, Stop::new(|_| false)).await
+    }
+    .await;
+    match result {
+        Ok(Some(pass)) => {
+            crate::contacts::hooks::bump_after_sync(&request.account, &pass.fresh_observations);
+            let outcome = from_sync_result(&account, &pass, 0, None);
+            canonical.apply(super::super::state::Change::SyncCompleted(outcome));
+            log::info!("[daemon] {account} finished its first sync");
+            super::super::config::start_after_first_sync(&config, &runtimes, &canonical, &account)
+                .await;
+        }
+        // Another process holds the engine lock and is syncing it: its pass
+        // creates the store, and a `mp sync` routed here starts the runtime.
+        Ok(None) => log::info!("[daemon] {account}'s first sync is another engine's"),
+        Err(e) => {
+            let reason = format!(
+                "the first sync of {account} failed: {e:#}; fix the account and run `mp sync -A {account}`"
+            );
+            // Still no runtime, so the table still holds the failed start this
+            // replaces; a swap that removed the account meanwhile wins.
+            if runtimes.get(&account).is_none()
+                && config.accounts().iter().any(|a| a.name == account)
+            {
+                canonical.apply(super::super::config::blocked_by_failure(
+                    &runtimes, &account, reason,
+                ));
+            }
+        }
+    }
 }
 
 /// One pass, from the head drain to the committed outcome.

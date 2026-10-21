@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **A newly added account syncs on its own and turns ready without a daemon restart.** When an account with a server and no local store comes into the daemon (at start or through a configuration change), the daemon runs its first quick sync in the background and then starts the account's runtime; a failed first sync leaves it `blocked` with the error and the `mp sync -A <account>` that retries it. A `mp sync` that creates an account's store also starts its runtime at once, where it used to wait for the next daemon start.
+- **Graph accounts no longer print `Could not load SMTP config` on every command.** A Graph account sends through Graph and has no SMTP transport, so the CLI skips that load and its warning.
 - **Desktop: approve, back to draft, edit recipients and send work on a conversation's draft member (PERSO-146).** `cA`, `cD`, `ce` and `x` reach the draft member of an expanded conversation as they do in Drafts and in the TUI.
 - **TUI: an expanded conversation member shows its To and Cc in the headers pane, and a draft member its own From, To and status (PERSO-146).**
 - **Tests: golden frames for the `tt` conversation overlay over a collapsed and an expanded conversation (PERSO-148).**

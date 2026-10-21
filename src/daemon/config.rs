@@ -584,9 +584,10 @@ pub async fn start_account(
     // into an empty list on every read method, for an account the user has not
     // set up yet, which is a refusal the pre-daemon binary gives and the parity
     // gate compares against (P5-U8). It comes up blocked instead, with the
-    // sentence that says what to do; the first `mp sync` creates the store
-    // through the guarded path, and the runtime comes up with the next daemon
-    // start (`BACKLOG.md`).
+    // sentence that says what to do. The daemon's own first sync
+    // ([`spawn_first_sync_if_new`]) or a `mp sync` then creates the store
+    // through the guarded path, and [`start_after_first_sync`] brings the
+    // runtime up without a restart.
     if !crate::config::store_path(&cfg.name).exists() {
         let reason = format!(
             "{} has no local store yet; run `mp sync` to create one",
@@ -689,9 +690,65 @@ pub async fn start_configured(
     true
 }
 
+/// Start the runtime of an account whose first sync just created its store.
+///
+/// Under a shared hold on the swap lock for [`start_configured`]'s reasons: a
+/// swap that removed or changed the account meanwhile wins. Only the caller
+/// that takes the failed start out of the table goes on, so the daemon's own
+/// first sync and a concurrent `mp sync` cannot start the account twice; a
+/// second start would come up blocked on the first one's engine lock and
+/// replace it. `true` when this call started it.
+pub async fn start_after_first_sync(
+    store: &ConfigStore,
+    runtimes: &Arc<RuntimeTable>,
+    canonical: &Arc<CanonicalState>,
+    account: &str,
+) -> bool {
+    let _guard = store.share_swap().await;
+    let Some(cfg) = store.accounts().iter().find(|a| a.name == account).cloned() else {
+        return false;
+    };
+    if !crate::config::store_path(account).exists() || !runtimes.take_failure(account) {
+        return false;
+    }
+    info!("[daemon] {account} has a local store now; starting its runtime");
+    start_account(runtimes, canonical, cfg, store.account_runtimes).await;
+    true
+}
+
+/// Run the first sync of `account` in the background when it has never been
+/// synced: account runtimes on, a server configured, no runtime and no store.
+///
+/// What every mail client does after an account is added, and the reason a
+/// new account no longer waits in `blocked` for a `mp sync` and a daemon
+/// restart. Called by the two places an account comes into the table: the
+/// daemon's start and a configuration swap.
+pub fn spawn_first_sync_if_new(
+    store: &Arc<ConfigStore>,
+    runtimes: &Arc<RuntimeTable>,
+    canonical: &Arc<CanonicalState>,
+    account: &str,
+) {
+    if !store.account_runtimes || runtimes.get(account).is_some() {
+        return;
+    }
+    let Some(cfg) = store.accounts().iter().find(|a| a.name == account).cloned() else {
+        return;
+    };
+    if cfg.is_local_only() || crate::config::store_path(account).exists() {
+        return;
+    }
+    tokio::spawn(super::methods::sync::first_sync(
+        Arc::clone(store),
+        Arc::clone(runtimes),
+        Arc::clone(canonical),
+        account.to_string(),
+    ));
+}
+
 /// Record a start that never produced a runtime and build the change that says
 /// so.
-fn blocked_by_failure(runtimes: &RuntimeTable, account: &str, reason: String) -> Change {
+pub(crate) fn blocked_by_failure(runtimes: &RuntimeTable, account: &str, reason: String) -> Change {
     warn!("[daemon] could not start the runtime for {account}: {reason}");
     runtimes.insert_failure(account, reason.clone());
     Change::AccountBlocked {

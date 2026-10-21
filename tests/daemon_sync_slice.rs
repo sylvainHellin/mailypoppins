@@ -381,10 +381,12 @@ impl Slice {
 
     /// The pre-daemon binary over the same root: the definition of parity.
     fn oracle(&self, args: &[&str]) -> Output {
-        oracle_command(self.root())
-            .args(args)
-            .output()
-            .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" ")))
+        support::parity::graph_without_smtp_warning(
+            oracle_command(self.root())
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
+        )
     }
 
     /// Assert the two binaries agree byte for byte, and hand the routed output

@@ -313,8 +313,9 @@ use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
 
 use support::admin_fixture as fixture;
 use support::parity::{
-    assert_byte_identical, daemon_is_listening, mp_command, mp_no_daemon, oracle_command,
-    pin_font_size, socket_path, DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
+    assert_byte_identical, daemon_is_listening, graph_without_smtp_warning, mp_command,
+    mp_no_daemon, oracle_command, pin_font_size, socket_path, DaemonFixture, EXIT_UNAVAILABLE,
+    REQUIRE_ENV,
 };
 use support::send_fixture::{all_rows, await_commit_marker, commit_hold_dir};
 
@@ -499,10 +500,12 @@ impl Slice {
 
     /// The pre-daemon binary over the same root: the definition of parity.
     fn oracle(&self, args: &[&str]) -> Output {
-        oracle_command(self.root())
-            .args(args)
-            .output()
-            .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" ")))
+        graph_without_smtp_warning(
+            oracle_command(self.root())
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
+        )
     }
 
     /// Assert the two binaries agree byte for byte, and hand the routed output

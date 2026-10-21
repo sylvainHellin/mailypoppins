@@ -1161,8 +1161,12 @@ async fn routed_send_approved(
     // The pre-daemon loop loaded a transport per account and said so when it
     // could not. The line is the user's; the load behind it goes with the rest
     // of the client's transport handling in P4-U15.
-    if let Err(e) = SmtpConfig::load(account_config) {
-        eprintln!("{} Could not load SMTP config: {}", "\u{26a0}".yellow(), e);
+    // A Graph account has no SMTP transport by design, so there is nothing to
+    // warn about.
+    if account_config.auth_method != AuthMethod::Graph {
+        if let Err(e) = SmtpConfig::load(account_config) {
+            eprintln!("{} Could not load SMTP config: {}", "\u{26a0}".yellow(), e);
+        }
     }
     let mut connection = daemon_connection().await;
     let listing: mp_protocol::draft::DraftListing = typed_call(
@@ -3793,19 +3797,25 @@ async fn main() -> Result<()> {
     // `calendar.rsvp`, and deleted with the rest of the direct engine paths by
     // P4-U15. The call itself stays: the two warning lines it prints when there
     // are no credentials are part of what every command has always printed.
-    let _smtp_config = SmtpConfig::load(&account_config).unwrap_or_else(|e| {
-        eprintln!("{} Could not load SMTP config: {}", "⚠".yellow(), e);
-        eprintln!("  Some commands may not work without proper configuration.");
-        SmtpConfig {
-            host: "localhost".to_string(),
-            port: 465,
-            username: String::new(),
-            password: String::new(),
-            default_from: "user@example.com".to_string(),
-            accept_invalid_certs: false,
-            auth_method: mailypoppins::config::AuthMethod::Password,
-        }
-    });
+    // A Graph account sends through Graph and has no SMTP transport by design,
+    // so it skips the load and its warning.
+    let _smtp_config = if account_config.auth_method == AuthMethod::Graph {
+        None
+    } else {
+        Some(SmtpConfig::load(&account_config).unwrap_or_else(|e| {
+            eprintln!("{} Could not load SMTP config: {}", "⚠".yellow(), e);
+            eprintln!("  Some commands may not work without proper configuration.");
+            SmtpConfig {
+                host: "localhost".to_string(),
+                port: 465,
+                username: String::new(),
+                password: String::new(),
+                default_from: "user@example.com".to_string(),
+                accept_invalid_certs: false,
+                auth_method: mailypoppins::config::AuthMethod::Password,
+            }
+        }))
+    };
 
     // Signature for direct sends and invites, which have no editable draft to
     // carry it in the body (#0099). Draft sends (`mp send`) take None: their

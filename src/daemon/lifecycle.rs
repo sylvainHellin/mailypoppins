@@ -523,6 +523,12 @@ fn spawn_account_runtimes(state: Arc<DaemonState>) {
             if !start_configured(&state.config, &state.runtimes, &state.canonical, &account).await {
                 return;
             }
+            super::config::spawn_first_sync_if_new(
+                &state.config,
+                &state.runtimes,
+                &state.canonical,
+                &account,
+            );
             // The runtime that just reported is half of `account:<name>`'s
             // verdict and all of `store_open`'s, so this is where a check flips
             // and where the event that announces it belongs.

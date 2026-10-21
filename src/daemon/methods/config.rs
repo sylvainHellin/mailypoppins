@@ -592,6 +592,16 @@ async fn swap(family: &ConfigFamily, source: Source) -> Result<(Reconcile, u64),
         config,
     )
     .await;
+    // An added account, or a changed one whose earlier first sync failed (the
+    // credentials were wrong, say), gets its first sync now.
+    for account in plan.added.iter().chain(&plan.updated) {
+        crate::daemon::config::spawn_first_sync_if_new(
+            &family.store,
+            &family.runtimes,
+            &family.canonical,
+            account,
+        );
+    }
     let revision = family.store.snapshot().revision;
     info!(
         "[daemon] configuration revision {revision}: +{:?} ~{:?} -{:?}",
