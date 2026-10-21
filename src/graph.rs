@@ -1766,6 +1766,102 @@ fn backlog_owed(found: usize, asked: usize, fell_short: bool) -> bool {
     found > asked && asked > 0 && !fell_short
 }
 
+/// What one folder's ingest loop left behind, for the decisions taken after it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WindowIngest {
+    /// Messages of the window the store now holds, newly inserted or not.
+    written: usize,
+    /// A message the store refused and still owes a retry
+    /// ([`crate::ingest::note_ingest_failure`] answered true): the pass did
+    /// not write everything it downloaded.
+    owed_failure: bool,
+}
+
+/// Whether the folder is worth another quick pass at once (PERSO-172), given
+/// that its fetch left a backlog ([`backlog_owed`]) and what the window wrote.
+///
+/// A message the store refused and still owes a retry is the same doubt as a
+/// short batch: the regular interval retries it, an immediate tick would only
+/// repeat it.
+///
+/// A window that wrote nothing owes nothing either. A message given up on
+/// after [`crate::ingest::MAX_INGEST_ATTEMPTS`] counts against nothing, yet it
+/// never enters `known_message_ids`, so every pass lists it as new and puts it
+/// in the window again, newest first. A window made only of such messages
+/// would otherwise owe a follow-up for ever: the same bodies downloaded every
+/// few seconds, none of them ever stored. Progress is the test because it is
+/// what a follow-up buys; a window with one given-up message among written
+/// ones still moves the drain on.
+fn owes_follow_up(backlog: bool, window: &WindowIngest) -> bool {
+    backlog && !window.owed_failure && window.written > 0
+}
+
+/// Write one folder's downloaded window into the store, counting into
+/// `result` what it inserted.
+fn ingest_window(
+    store: &crate::store::Store,
+    blobs: &crate::store::BlobStore,
+    account_name: &str,
+    target: &SyncTarget,
+    new_emails: &[FetchedEmail],
+    result: &mut SyncResult,
+) -> WindowIngest {
+    let mut window = WindowIngest::default();
+    for email in new_emails {
+        let message_id = crate::ingest::resolve_message_id(email, None);
+        let uid = crate::ingest::graph_uid(&message_id);
+        match crate::ingest::ingest_message(
+            store,
+            blobs,
+            &crate::ingest::IngestInput {
+                account: account_name,
+                mailbox: target.role.as_str(),
+                uid,
+                email,
+                raw: None,
+            },
+        ) {
+            Ok(outcome) => {
+                window.written += 1;
+                crate::ingest::clear_ingest_failure(store, account_name, target.role.as_str(), uid);
+                if outcome.inserted {
+                    result.saved += 1;
+                    if target.role.is_inbox() {
+                        result
+                            .new_inbox_mail
+                            .push(crate::notify::NewMailMeta::new(&email.from, &email.subject));
+                    }
+                }
+                if outcome.uid_rebound {
+                    result.uid_rebound += 1;
+                }
+                result.fresh_observations.push(FreshObservation {
+                    role: target.role.clone(),
+                    from: email.from.clone(),
+                    to: email.to.clone(),
+                    cc: email.cc.clone(),
+                    date: email.date.clone(),
+                });
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to ingest {} from {}: {:#}",
+                    message_id, target.role, e
+                );
+                window.owed_failure |= crate::ingest::note_ingest_failure(
+                    store,
+                    account_name,
+                    target.role.as_str(),
+                    &target.server_name,
+                    uid,
+                    &format!("{e:#} (message {message_id})"),
+                );
+            }
+        }
+    }
+    window
+}
+
 /// Whether a pass has earned the right to store its delta resume point.
 ///
 /// The token means "at this point the store held every message the folder
@@ -2240,69 +2336,19 @@ pub async fn sync_mailboxes_graph(
         // failures never accumulate towards it. The arrival mark has no Graph
         // half -- the pull is by id, with no positional window (see the cursor
         // below) -- so the give-up only releases the prune gate.
-        let mut ingest_failed = false;
-        for email in &new_emails {
-            let message_id = crate::ingest::resolve_message_id(email, None);
-            let uid = crate::ingest::graph_uid(&message_id);
-            match crate::ingest::ingest_message(
-                &store,
-                &blobs,
-                &crate::ingest::IngestInput {
-                    account: account_name,
-                    mailbox: target.role.as_str(),
-                    uid,
-                    email,
-                    raw: None,
-                },
-            ) {
-                Ok(outcome) => {
-                    crate::ingest::clear_ingest_failure(
-                        &store,
-                        account_name,
-                        target.role.as_str(),
-                        uid,
-                    );
-                    if outcome.inserted {
-                        result.saved += 1;
-                        if target.role.is_inbox() {
-                            result
-                                .new_inbox_mail
-                                .push(crate::notify::NewMailMeta::new(&email.from, &email.subject));
-                        }
-                    }
-                    if outcome.uid_rebound {
-                        result.uid_rebound += 1;
-                    }
-                    result.fresh_observations.push(FreshObservation {
-                        role: target.role.clone(),
-                        from: email.from.clone(),
-                        to: email.to.clone(),
-                        cc: email.cc.clone(),
-                        date: email.date.clone(),
-                    });
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to ingest {} from {}: {:#}",
-                        message_id, target.role, e
-                    );
-                    ingest_failed |= crate::ingest::note_ingest_failure(
-                        &store,
-                        account_name,
-                        target.role.as_str(),
-                        &target.server_name,
-                        uid,
-                        &format!("{e:#} (message {message_id})"),
-                    );
-                }
-            }
-        }
+        let window = ingest_window(
+            &store,
+            &blobs,
+            account_name,
+            target,
+            &new_emails,
+            &mut result,
+        );
+        let ingest_failed = window.owed_failure;
         coverage.push((complete, download_incomplete || ingest_failed));
-        // A window that landed whole leaves the next one for the next pass,
-        // which the runtime runs at once rather than an interval from now. A
-        // message the store refused is the same doubt as a short batch: the
-        // regular interval retries it, an immediate tick would only repeat it.
-        if backlog && !ingest_failed {
+        // A window that moved the drain on leaves the next one for the next
+        // pass, which the runtime runs at once rather than an interval from now.
+        if owes_follow_up(backlog, &window) {
             info!(
                 "Graph sync of {} left older new messages for the next pass",
                 target.role
@@ -3417,6 +3463,77 @@ mod tests {
         assert!(!backlog_owed(250, 0, false), "`-n 0` makes no progress");
         assert!(!backlog_owed(100, 100, false), "nothing left behind");
         assert!(!backlog_owed(0, 0, false));
+    }
+
+    fn sync_target(role: MailboxRole, server_name: &str) -> SyncTarget {
+        SyncTarget {
+            role,
+            server_name: server_name.into(),
+        }
+    }
+
+    /// A message as the Graph download hands it over, dated by its
+    /// `receivedDateTime`.
+    fn received(mid: &str, iso: &str) -> FetchedEmail {
+        let mut email = email_with(Vec::new());
+        email.has_attachments = false;
+        email.message_id = Some(mid.into());
+        email.subject = mid.into();
+        email.body_text = format!("body of {mid}");
+        email.date = iso_to_rfc2822(iso);
+        email
+    }
+
+    /// PERSO-172 review: a message given up on after three attempts never
+    /// enters the store, so every pass lists it as new and downloads it again.
+    /// A window made only of those must not owe the immediate pass that would
+    /// re-download the same bodies every few seconds for ever.
+    #[test]
+    fn a_window_of_given_up_messages_owes_no_follow_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        // A blob root that is a file: every body write fails, deterministically.
+        let not_a_dir = tmp.path().join("blobs");
+        std::fs::write(&not_a_dir, b"").unwrap();
+        let blobs = crate::store::BlobStore::new(&not_a_dir);
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        let emails: Vec<FetchedEmail> = (0..3)
+            .map(|i| received(&format!("<poison{i}@x>"), "2026-08-06T10:00:00Z"))
+            .collect();
+
+        for pass in 1..=4 {
+            let mut result = SyncResult::default();
+            let window = ingest_window(&store, &blobs, "acct", &inbox, &emails, &mut result);
+            assert_eq!(window.written, 0, "pass {pass} stored nothing");
+            assert_eq!(
+                window.owed_failure,
+                pass < 3,
+                "pass {pass}: owed until the third failure gives up"
+            );
+            assert!(
+                !owes_follow_up(true, &window),
+                "pass {pass} made no progress, so the backlog waits for the interval"
+            );
+            assert_eq!(result.saved, 0);
+        }
+    }
+
+    /// Progress is what a follow-up buys: a given-up message among written ones
+    /// still moves the drain on, an owed retry still waits for the interval.
+    #[test]
+    fn a_follow_up_is_owed_only_by_a_window_that_moved_the_drain_on() {
+        let progressed = WindowIngest {
+            written: 99,
+            owed_failure: false,
+        };
+        assert!(owes_follow_up(true, &progressed));
+        assert!(!owes_follow_up(false, &progressed), "no backlog, no hurry");
+        let retrying = WindowIngest {
+            written: 99,
+            owed_failure: true,
+        };
+        assert!(!owes_follow_up(true, &retrying));
+        assert!(!owes_follow_up(true, &WindowIngest::default()));
     }
 
     /// The gate itself. A quick sync that could not download its whole backlog
