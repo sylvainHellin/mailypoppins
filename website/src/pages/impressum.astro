@@ -1,0 +1,99 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+---
+
+<Layout title="Impressum -- mailypoppins" description="Legal notice for mailypoppins.">
+  <Nav />
+  <main id="main-content" class="content page legal">
+    <header class="page-header">
+      <h1>Impressum</h1>
+      <p class="subtitle">Angaben gemäß § 5 DDG</p>
+    </header>
+
+    <section>
+      <p>
+        EVOQS GmbH<br />
+        Angerlohstr. 48a<br />
+        80997 München<br />
+        Deutschland
+      </p>
+      <p>Vertreten durch den Geschäftsführer Sylvain Hellin.</p>
+    </section>
+
+    <section>
+      <h2>Kontakt</h2>
+      <p>E-Mail: <a href="mailto:s.hellin@evoqs.com">s.hellin@evoqs.com</a></p>
+    </section>
+
+    <section>
+      <h2>Registereintrag</h2>
+      <p>
+        Registergericht: Amtsgericht München<br />
+        Registernummer: HRB 238367
+      </p>
+    </section>
+
+    <section>
+      <h2>Umsatzsteuer-ID</h2>
+      <p>Umsatzsteuer-Identifikationsnummer gemäß § 27a UStG: DE316806220</p>
+    </section>
+
+    <section>
+      <h2>Verantwortlich für den Inhalt</h2>
+      <p>Sylvain Hellin, Anschrift wie oben.</p>
+    </section>
+
+    <section>
+      <h2>Verbraucherstreitbeilegung</h2>
+      <p>
+        Die EVOQS GmbH ist nicht bereit und nicht verpflichtet, an Streitbeilegungsverfahren vor einer
+        Verbraucherschlichtungsstelle teilzunehmen.
+      </p>
+    </section>
+
+    <section>
+      <h2>Legal notice</h2>
+      <p>
+        This website and the mailypoppins software are published by EVOQS GmbH, Munich, Germany.
+        The details above are the legal notice German law requires.
+        How the website and the software handle personal data is described in the
+        <a href="/privacy/">privacy policy</a>.
+      </p>
+    </section>
+  </main>
+  <Footer />
+</Layout>
+
+<style>
+  .page {
+    padding-top: var(--space-16);
+    padding-bottom: var(--space-16);
+  }
+
+  .page-header {
+    margin-bottom: var(--space-12);
+  }
+
+  .subtitle {
+    font-size: 1.125rem;
+    color: var(--color-subtext0);
+  }
+
+  section {
+    margin-bottom: var(--space-8);
+  }
+
+  .legal p {
+    color: var(--color-subtext1);
+  }
+
+  .legal a {
+    color: var(--color-link);
+  }
+
+  .legal a:hover {
+    color: var(--color-link-hover);
+  }
+</style>

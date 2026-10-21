@@ -1,0 +1,142 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+---
+
+<Layout title="Privacy policy -- mailypoppins" description="How the mailypoppins website and software handle personal data.">
+  <Nav />
+  <main id="main-content" class="content page legal">
+    <header class="page-header">
+      <h1>Privacy policy</h1>
+      <p class="subtitle">Last updated 21 October 2026</p>
+    </header>
+
+    <section>
+      <h2 id="controller">Controller</h2>
+      <p>
+        EVOQS GmbH, Angerlohstr. 48a, 80997 München, Germany, is the controller for this website
+        within the meaning of the General Data Protection Regulation (GDPR).
+        Questions about this policy go to <a href="mailto:s.hellin@evoqs.com">s.hellin@evoqs.com</a>.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="software">The mailypoppins software</h2>
+      <p>
+        mailypoppins runs entirely on your own computer.
+        It connects directly from your computer to the mail provider you configure, such as Microsoft 365,
+        Proton Mail Bridge or any IMAP and SMTP server.
+        EVOQS GmbH operates no server in that path and receives none of your mail, contacts, calendar data,
+        passwords or access tokens.
+      </p>
+      <p>
+        Your messages, drafts and settings are stored as files and a local database on your computer.
+        Passwords and access tokens are stored encrypted on your computer or in your operating system's keychain.
+        Deleting the mailypoppins data and configuration folders removes all of it.
+      </p>
+      <p>
+        mailypoppins sends no telemetry, analytics or crash reports.
+        HTML messages are displayed with remote content blocked, so opening a message does not tell its sender that you read it.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="microsoft">Signing in with a Microsoft account</h2>
+      <p>
+        When you add a Microsoft 365 or Outlook.com account, mailypoppins signs you in through Microsoft's
+        own sign-in page, using an application registration published by EVOQS GmbH.
+        On that page you grant mailypoppins permission to read, change and send your mail on your behalf
+        (Microsoft Graph permissions <code>Mail.Read</code>, <code>Mail.ReadWrite</code>, <code>Mail.Send</code>,
+        <code>Calendars.ReadWrite</code>, <code>User.Read</code> and <code>offline_access</code>).
+        The access tokens Microsoft issues are delivered to and kept on your computer only.
+      </p>
+      <p>
+        Microsoft processes your sign-in under your own agreement with Microsoft or your organisation's.
+        Its privacy statement is at
+        <a href="https://privacy.microsoft.com/privacystatement" target="_blank" rel="noopener noreferrer">privacy.microsoft.com</a>.
+        You can withdraw the permissions at any time at
+        <a href="https://myapps.microsoft.com" target="_blank" rel="noopener noreferrer">myapps.microsoft.com</a>
+        or, for a personal account, at
+        <a href="https://account.live.com/consent/Manage" target="_blank" rel="noopener noreferrer">account.live.com/consent/Manage</a>.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="updates">Update checks</h2>
+      <p>
+        The desktop app checks GitHub for a newer release at most once a day, and whenever you ask it to.
+        That request reaches GitHub, Inc. with your IP address, as any download from GitHub does.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="website">This website</h2>
+      <p>
+        This website is a static site hosted on GitHub Pages by GitHub, Inc., 88 Colin P. Kelly Jr. Street,
+        San Francisco, CA 94107, USA.
+        When you visit it, GitHub processes your IP address and the request details to deliver the pages
+        and to protect the service, and may keep them in server logs.
+        The legal basis is our legitimate interest in presenting the software (Art. 6(1)(f) GDPR).
+        GitHub is certified under the EU-US Data Privacy Framework, which covers the transfer to the United States.
+        GitHub's privacy statement is at
+        <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement" target="_blank" rel="noopener noreferrer">docs.github.com</a>.
+      </p>
+      <p>
+        The website sets no cookies, runs no analytics or tracking, and loads its fonts from its own domain.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="email">Contacting us</h2>
+      <p>
+        If you email us, we use your address and message only to answer you, and delete them when the matter is settled
+        unless commercial or tax law requires us to keep them (Art. 6(1)(b) and (f) GDPR).
+      </p>
+    </section>
+
+    <section>
+      <h2 id="rights">Your rights</h2>
+      <p>
+        You have the right to access, rectify and erase your personal data, to restrict or object to its processing,
+        and to data portability (Art. 15 to 21 GDPR).
+        To exercise them, write to the address above.
+        You may also complain to a supervisory authority; ours is the Bayerisches Landesamt für Datenschutzaufsicht,
+        Promenade 18, 91522 Ansbach, Germany.
+      </p>
+    </section>
+  </main>
+  <Footer />
+</Layout>
+
+<style>
+  .page {
+    padding-top: var(--space-16);
+    padding-bottom: var(--space-16);
+  }
+
+  .page-header {
+    margin-bottom: var(--space-12);
+  }
+
+  .subtitle {
+    font-size: 1.125rem;
+    color: var(--color-subtext0);
+  }
+
+  section {
+    margin-bottom: var(--space-8);
+  }
+
+  .legal p {
+    color: var(--color-subtext1);
+  }
+
+  .legal a {
+    color: var(--color-link);
+  }
+
+  .legal a:hover {
+    color: var(--color-link-hover);
+  }
+</style>
