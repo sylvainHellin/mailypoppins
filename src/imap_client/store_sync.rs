@@ -175,7 +175,7 @@ pub async fn sync_mailboxes(
     };
     let mut span = TimingSpan::with_context(span_label, format!("{} targets", targets.len()));
 
-    let store = Store::open_account(account_name)?;
+    let store = Store::open_for_pass(account_name, dry_run)?;
     let blobs = BlobStore::for_account(account_name);
     let mut backend = ImapBackend::new(imap_config)
         .with_body_budget(body_budget)

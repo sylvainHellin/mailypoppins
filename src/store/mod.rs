@@ -161,6 +161,39 @@ impl Store {
         Self::open(crate::config::store_path(account_name))
     }
 
+    /// The store a sync pass reads and writes: the account's own, except for
+    /// a dry run of an account that has none yet, which gets an empty
+    /// in-memory store instead.
+    ///
+    /// A dry run writes nothing, and that includes the store file itself:
+    /// [`Store::open_account`] would create it, and an existing store file is
+    /// what tells the daemon an account has been synced, so a `mp sync
+    /// --dry-run` on a new account used to cancel its first sync and leave it
+    /// without mail. Against an empty store every message reads as new, which
+    /// is exactly what the dry run of a first sync should report.
+    pub fn open_for_pass(account_name: &str, dry_run: bool) -> Result<Self> {
+        if dry_run && !crate::config::store_path(account_name).exists() {
+            return Self::open_in_memory();
+        }
+        Self::open_account(account_name)
+    }
+
+    /// An empty, schema-complete store that lives only as long as the value.
+    ///
+    /// Without WAL, which an in-memory database cannot use; nothing else
+    /// connects to it, so there is no concurrent reader to serve.
+    fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory().context("opening an in-memory store")?;
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .context("setting foreign_keys = ON")?;
+        register_functions(&conn)?;
+        schema::create(&conn)?;
+        Ok(Self {
+            conn,
+            path: PathBuf::from(":memory:"),
+        })
+    }
+
     /// The underlying connection. Callers run their own SQL; the store owns
     /// only the file lifecycle and the schema.
     pub fn conn(&self) -> &Connection {
@@ -440,6 +473,37 @@ mod tests {
             "INSERT INTO messages (account, mailbox, uid, message_id) VALUES (?1, ?2, ?3, ?4)",
             (account, mailbox, uid, message_id),
         )
+    }
+
+    /// A dry run of an account with no store leaves no store behind: the
+    /// daemon reads an existing store file as "this account has synced" and
+    /// would skip the account's first sync for good.
+    #[test]
+    fn a_dry_run_pass_never_creates_the_store_file() {
+        let tmp = tempdir().unwrap();
+        let _data = crate::config::test_env::DataDirOverride::set(tmp.path());
+        let path = crate::config::store_path("alpha");
+
+        let scratch = Store::open_for_pass("alpha", true).unwrap();
+        assert_eq!(scratch.schema_version().unwrap(), Some(SCHEMA_VERSION));
+        insert_message(&scratch, "alpha", "inbox", 1, "<a@x>").unwrap();
+        drop(scratch);
+        assert!(!path.exists(), "a dry run created {}", path.display());
+
+        let real = Store::open_for_pass("alpha", false).unwrap();
+        assert_eq!(real.path(), path.as_path());
+        insert_message(&real, "alpha", "inbox", 1, "<a@x>").unwrap();
+        drop(real);
+        assert!(path.exists());
+
+        // Once the store exists, a dry run reads it rather than a blank one.
+        let reread = Store::open_for_pass("alpha", true).unwrap();
+        assert_eq!(reread.path(), path.as_path());
+        let rows: i64 = reread
+            .conn()
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 
     /// Every directory a store and its blobs create under the data dir is

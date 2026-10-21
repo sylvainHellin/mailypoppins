@@ -1826,7 +1826,7 @@ pub async fn sync_mailboxes_graph(
     let mut span = TimingSpan::with_context(span_label, format!("{} targets", targets.len()));
 
     let client = GraphClient::new_async(config).await?;
-    let store = crate::store::Store::open_account(account_name)?;
+    let store = crate::store::Store::open_for_pass(account_name, dry_run)?;
     let blobs = crate::store::BlobStore::for_account(account_name);
     let mut result = SyncResult::default();
     span.mark("client_open");
