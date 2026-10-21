@@ -7,7 +7,7 @@ A bug report that names no client may be about the desktop app as much as the TU
 
 - Rust crate at the root (`src/`, `Cargo.toml`, `tests/`), workspace members under `crates/`. All build / test commands run from the root.
 - `spikes/` and `clients/desktop/` are excluded from the workspace (the spike carries its own `Cargo.lock`).
-- Marketing + docs site under [website/](website/) (Astro + Svelte, pnpm). Deployed to <https://mailypoppins.dev> by [scripts/deploy-website.sh](scripts/deploy-website.sh) (rsync to OVH). Colocated so CLI changes and the docs that describe them ship in one commit.
+- Marketing + docs site under [website/](website/) (Astro + Svelte, pnpm). Meant for <https://mailypoppins.dev> via [scripts/deploy-website.sh](scripts/deploy-website.sh) (rsync to OVH), but never published: the domain is not registered yet (checked 2026-10-21) and the site has no Impressum or privacy page. Colocated so CLI changes and the docs that describe them ship in one commit.
 - `.gitignore` files are kept local-only by convention (the root `.gitignore` self-ignores). Edit them as needed but do not `git add -f` them.
 
 ## Build and test
