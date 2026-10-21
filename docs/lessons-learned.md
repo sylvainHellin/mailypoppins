@@ -2778,3 +2778,9 @@ The daemon now opens the backend in `run` once the configuration loads, and agai
 Opening at startup exposed a second flaw: the encrypted-file backend read `secrets.enc` once, so a password that `mp config init` or `mp config add-account` stored from their own process stayed invisible to the daemon until a restart.
 It now re-reads the file whenever its inode, length or modification time changed, before every read and write ([crates/mp-core/src/secrets.rs](../crates/mp-core/src/secrets.rs), `refresh_locked`).
 A background task that needs process-wide state must not rely on a request path having set it up first (PERSO-170).
+
+## A Graph backlog drains by id, and any "more is waiting" signal must require progress (PERSO-172, 2026-10-21)
+
+A Graph quick sync downloads the newest missing messages by id, so a backlog drains one window per pass, and a capped pass never mints a delta token, so the delta cannot hide the backlog.
+When a new account shows only the newest few hundred messages, count the ingests per tick in the log before blaming the delta path: the drain was slow (one window per 900 s interval), not stuck.
+A message given up on after `MAX_INGEST_ATTEMPTS` never enters `known_message_ids`, so Graph lists it as new on every pass; the fast follow-up therefore requires that the pass stored at least one message, or a window of given-up messages re-downloads forever.
