@@ -3,6 +3,7 @@ name = "mp-tui"
 version = "0.1.0"
 edition = "2021"
 description = "The mailypoppins terminal client: a daemon client that links no engine"
+license = "MIT"
 authors = ["Sylvain Hellin"]
 
 [lib]

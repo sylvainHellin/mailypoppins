@@ -3,6 +3,7 @@ name = "mp-protocol"
 version = "0.1.0"
 edition = "2021"
 description = "Wire types and framing for the mailypoppins daemon protocol"
+license = "MIT"
 authors = ["Sylvain Hellin"]
 
 [lib]

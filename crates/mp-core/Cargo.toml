@@ -3,6 +3,7 @@ name = "mp-core"
 version = "0.1.0"
 edition = "2021"
 description = "Engine-free shared modules of mailypoppins: configuration, secrets, parsing, types"
+license = "MIT"
 authors = ["Sylvain Hellin"]
 
 [lib]
