@@ -1798,12 +1798,21 @@ fn owes_follow_up(backlog: bool, window: &WindowIngest) -> bool {
 
 /// Write one folder's downloaded window into the store, counting into
 /// `result` what it inserted.
+///
+/// An inserted inbox message is announced as new mail (the desktop
+/// notification of #0009) only when it is newer than every row the account
+/// held before the pass ([`crate::ingest::arrived_after`] over `newest_held`).
+/// The Graph pull is by id, newest first, so a backlog drain and a first sync
+/// insert hundreds of messages that are old to their owner; a message that
+/// arrives during the drain is the newest of its window and is still
+/// announced.
 fn ingest_window(
     store: &crate::store::Store,
     blobs: &crate::store::BlobStore,
     account_name: &str,
     target: &SyncTarget,
     new_emails: &[FetchedEmail],
+    newest_held: Option<i64>,
     result: &mut SyncResult,
 ) -> WindowIngest {
     let mut window = WindowIngest::default();
@@ -1826,7 +1835,9 @@ fn ingest_window(
                 crate::ingest::clear_ingest_failure(store, account_name, target.role.as_str(), uid);
                 if outcome.inserted {
                     result.saved += 1;
-                    if target.role.is_inbox() {
+                    if target.role.is_inbox()
+                        && crate::ingest::arrived_after(newest_held, &email.date)
+                    {
                         result
                             .new_inbox_mail
                             .push(crate::notify::NewMailMeta::new(&email.from, &email.subject));
@@ -2173,6 +2184,10 @@ pub async fn sync_mailboxes_graph(
     // `(enumeration complete, download truncated)` per target, which decides
     // whether the prunes above may be applied at all: see `pass_may_prune`.
     let mut coverage: Vec<(bool, bool)> = Vec::with_capacity(targets.len());
+    // What "new" means for the notification: newer than anything the store
+    // held before this pass, read once so a target synced earlier in the pass
+    // does not raise the bar for the inbox (see `ingest_window`).
+    let newest_held = crate::ingest::newest_held_date(&store, account_name);
 
     for (index, target) in targets.iter().enumerate() {
         if stops_at(stop, StopPoint::Mailbox(index)) {
@@ -2342,6 +2357,7 @@ pub async fn sync_mailboxes_graph(
             account_name,
             target,
             &new_emails,
+            newest_held,
             &mut result,
         );
         let ingest_failed = window.owed_failure;
@@ -3503,7 +3519,7 @@ mod tests {
 
         for pass in 1..=4 {
             let mut result = SyncResult::default();
-            let window = ingest_window(&store, &blobs, "acct", &inbox, &emails, &mut result);
+            let window = ingest_window(&store, &blobs, "acct", &inbox, &emails, None, &mut result);
             assert_eq!(window.written, 0, "pass {pass} stored nothing");
             assert_eq!(
                 window.owed_failure,
@@ -3534,6 +3550,121 @@ mod tests {
         };
         assert!(!owes_follow_up(true, &retrying));
         assert!(!owes_follow_up(true, &WindowIngest::default()));
+    }
+
+    /// PERSO-172 review: a drain inserts a hundred old messages per pass, and
+    /// every inserted inbox row used to be announced, so the desktop said "100
+    /// new emails" every few seconds. Only a message newer than everything the
+    /// account held before the pass is announced; a first sync announces
+    /// nothing.
+    #[test]
+    fn only_mail_newer_than_the_store_is_announced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        let announced = |result: &SyncResult| -> Vec<String> {
+            result
+                .new_inbox_mail
+                .iter()
+                .map(|m| m.subject.clone())
+                .collect()
+        };
+
+        // The first sync of an empty store: the newest window, all of it old
+        // to its owner.
+        assert_eq!(crate::ingest::newest_held_date(&store, "acct"), None);
+        let first = vec![
+            received("<m3@x>", "2026-08-06T12:00:00Z"),
+            received("<m2@x>", "2026-08-06T11:00:00Z"),
+        ];
+        let mut result = SyncResult::default();
+        ingest_window(&store, &blobs, "acct", &inbox, &first, None, &mut result);
+        assert_eq!(result.saved, 2);
+        assert!(
+            announced(&result).is_empty(),
+            "a first sync announces nothing"
+        );
+
+        // A drain pass: the next older window, plus one message that arrived
+        // meanwhile and so leads the window.
+        let newest_held = crate::ingest::newest_held_date(&store, "acct");
+        assert!(newest_held.is_some());
+        let drain = vec![
+            received("<fresh@x>", "2026-08-06T12:00:01Z"),
+            received("<m1@x>", "2026-08-06T10:00:00Z"),
+            received("<m0@x>", "2026-08-06T09:00:00Z"),
+        ];
+        let mut result = SyncResult::default();
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &drain,
+            newest_held,
+            &mut result,
+        );
+        assert_eq!(result.saved, 3, "the old ones are still stored");
+        assert_eq!(announced(&result), vec!["<fresh@x>".to_string()]);
+
+        // Only the inbox announces, whatever the date.
+        let archive = sync_target(MailboxRole::Archive, "Archive");
+        let newest_held = crate::ingest::newest_held_date(&store, "acct");
+        let mut result = SyncResult::default();
+        let later = vec![received("<filed@x>", "2026-08-07T08:00:00Z")];
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &archive,
+            &later,
+            newest_held,
+            &mut result,
+        );
+        assert_eq!(result.saved, 1);
+        assert!(announced(&result).is_empty());
+    }
+
+    /// The floor is the account's, not the inbox's: an inbox kept at zero
+    /// holds no rows, and a per-folder floor would silence every arrival.
+    #[test]
+    fn an_empty_inbox_still_announces_what_arrives_in_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
+        let mut result = SyncResult::default();
+        let archived = vec![received("<old@x>", "2026-08-06T10:00:00Z")];
+        let archive = sync_target(MailboxRole::Archive, "Archive");
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &archive,
+            &archived,
+            None,
+            &mut result,
+        );
+
+        let newest_held = crate::ingest::newest_held_date(&store, "acct");
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        let arrival = vec![received("<new@x>", "2026-08-06T10:05:00Z")];
+        let mut result = SyncResult::default();
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &arrival,
+            newest_held,
+            &mut result,
+        );
+        assert_eq!(result.new_inbox_mail.len(), 1);
+        assert_eq!(
+            crate::ingest::newest_held_date(&store, "other"),
+            None,
+            "another account's rows are not this one's floor"
+        );
     }
 
     /// The gate itself. A quick sync that could not download its whole backlog

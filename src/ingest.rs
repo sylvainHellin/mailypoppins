@@ -710,6 +710,41 @@ fn date_sort_for(date: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// The newest `date_sort` among every row the store holds for `account`, in
+/// any mailbox, or `None` for an account with no rows yet (PERSO-172).
+///
+/// The floor [`arrived_after`] measures an inserted message against, so a sync
+/// that downloads old mail (a Graph backlog drain, a first sync) does not
+/// announce it as new. Account-wide rather than per mailbox, because an inbox
+/// kept at zero holds no rows and would otherwise silence every arrival into
+/// it. A store that cannot answer reads as `None`, the quiet side: a missed
+/// notification is the cheaper mistake next to a hundred old messages
+/// announced as new.
+pub fn newest_held_date(store: &Store, account: &str) -> Option<i64> {
+    store
+        .conn()
+        .query_row(
+            "SELECT MAX(date_sort) FROM messages WHERE account = ?1",
+            [account],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .unwrap_or_else(|e| {
+            warn!("Could not read the newest stored date of '{account}': {e}");
+            None
+        })
+}
+
+/// Whether a message dated `date` (a `Date:` header, RFC 2822) arrived after
+/// everything the store held when the pass began, `newest_held` being
+/// [`newest_held_date`] read then.
+///
+/// An empty store has nothing to be newer than, so it answers false: the first
+/// sync of an account fills it with mail that is old to its owner. An undated
+/// message sorts at `0` and is never newer either.
+pub fn arrived_after(newest_held: Option<i64>, date: &str) -> bool {
+    newest_held.is_some_and(|floor| date_sort_for(date) > floor)
+}
+
 /// List-preview text: the first [`SNIPPET_CHARS`] characters of the body with
 /// runs of whitespace collapsed.
 fn snippet_for(body: &str) -> String {
