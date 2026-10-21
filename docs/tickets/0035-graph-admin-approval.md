@@ -30,7 +30,7 @@ For the TUM tenant, still blocked:
 ## Status
 
 App registered 2026-10-21: client ID `439d7ebd-7898-4df2-b2d6-88bb61e2597b`, tenant `365f441f-42ba-4b36-851f-8b124c7becbb` (mailypoppins).
-EVOQS: consent pending, granted by Sylvain at the first device-code sign-in.
+EVOQS: consented for the whole organisation by Sylvain at the first device-code sign-in (2026-10-21); the `evoqs` Graph account syncs. For the onboarding test, delete the app from EVOQS's Enterprise applications after verification and consent again as a new organisation would.
 Publisher verification: started; `mailypoppins.com` is a verified custom domain in the mailypoppins tenant (2026-10-21). Next: native tenant admin, Partner Center enrolment of EVOQS GmbH with `info@mailypoppins.com`, app branding, then Verify.
 TUM: admin approval unobtainable; revisit if the tenant policy changes.
 

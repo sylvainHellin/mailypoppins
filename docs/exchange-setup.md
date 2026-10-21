@@ -2,6 +2,18 @@
 
 This guide walks through setting up the email CLI with a Microsoft 365 (Exchange Online) account using OAuth2 authentication.
 
+## Graph accounts: use the mailypoppins app
+
+A Graph account (`mp config add-account`, option 4) needs no app registration of its own.
+mailypoppins has one shared multi-tenant registration (any Entra tenant plus personal Microsoft accounts) in its own `mailypoppins.onmicrosoft.com` tenant:
+
+- client ID `439d7ebd-7898-4df2-b2d6-88bb61e2597b`, entered at the wizard's client_id prompt;
+- tenant ID: the user's own organisation, not the mailypoppins tenant;
+- delegated Graph permissions `User.Read`, `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `offline_access`, `Calendars.ReadWrite`.
+
+Until the publisher is verified ([#0035](tickets/0035-graph-admin-approval.md)), only an organisation's admin can consent, by ticking "Consent on behalf of your organization" at the first device-code sign-in.
+The steps below are for IMAP and SMTP over OAuth2, or for an organisation that wants its own registration.
+
 ## Prerequisites
 
 - A Microsoft 365 account (e.g., user@example.com)
