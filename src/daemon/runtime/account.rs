@@ -1004,13 +1004,20 @@ async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<SyncResult>
 ///
 /// The body-fetch deadline (#0113) is not a budget the Graph pass can spend
 /// the way IMAP does, since a Graph target fetches and ingests in one step and
-/// the stop is honoured only at each mailbox boundary. It sizes the pass's
-/// ceiling instead ([`graph_tick_ceiling`]): a pass that outlives it is cut
-/// off and reported as the tick's error, so a request that never returns
-/// cannot hold the run slot and starve every later tick. Cutting it off is
-/// safe at any await point, because every store write in the pass (an ingest,
-/// a flag update, a repair, a cursor, a prune) is a synchronous transaction
-/// between two awaits; the next tick picks up from what the store holds.
+/// the stop is honoured only at each mailbox boundary. It sizes a quick
+/// pass's ceiling instead ([`graph_tick_ceiling`]): a quick pass that
+/// outlives it is cut off and reported as the tick's error, so a request that
+/// never returns cannot hold the run slot and starve every later tick.
+/// Cutting it off is safe at any await point, because every store write in
+/// the pass (an ingest, a flag update, a repair, a cursor, a prune) is a
+/// synchronous transaction between two awaits; the next tick picks up from
+/// what the store holds.
+///
+/// A full tick has no ceiling. It downloads every new message of a folder
+/// before ingesting any of them, so a cut-off full pass would discard the
+/// whole download and the next full sync would restart from scratch and be
+/// cut off again. The Graph client's connect and idle-read timeouts already
+/// bound each request, which is what frees the slot on a dead connection.
 ///
 /// The orchestrator opens its own writer connection, unguarded, like the IMAP
 /// engine above: this runtime already holds the account's engine lock.
@@ -1021,7 +1028,7 @@ async fn sync_once_graph(
 ) -> Result<SyncResult> {
     let graph = crate::config::GraphConfig::load(cfg)?;
     within_ceiling(
-        graph_tick_ceiling(ctx.body_deadline),
+        graph_tick_ceiling(ctx.kind, ctx.body_deadline),
         crate::graph::sync_mailboxes_graph(
             &graph,
             &cfg.name,
@@ -1034,16 +1041,21 @@ async fn sync_once_graph(
     .await
 }
 
-/// How many body-fetch deadlines a Graph tick may last: ten minutes at the
-/// default thirty seconds, room for a full relist of a large mailbox, while a
-/// pass stuck on a dead connection still frees the run slot.
+/// How many body-fetch deadlines a quick Graph tick may last: ten minutes at
+/// the default thirty seconds, far more than its [`QUICK_TICK_LIMIT`] messages
+/// per mailbox need, while a pass stuck on a dead connection still frees the
+/// run slot.
 const GRAPH_TICK_CEILING_FACTOR: u32 = 20;
 
-/// The longest a Graph tick may run, `None` when the body-fetch deadline is
-/// configured unbounded (`0`). The HTTP client's own idle timeout still bounds
-/// each request then.
-fn graph_tick_ceiling(body_deadline: Option<Duration>) -> Option<Duration> {
-    body_deadline.map(|deadline| deadline * GRAPH_TICK_CEILING_FACTOR)
+/// The longest a Graph tick may run: `None` for a full tick, which must be
+/// allowed to finish however large the mailbox, and when the body-fetch
+/// deadline is configured unbounded (`0`). The HTTP client's own connect and
+/// idle-read timeouts still bound each request then.
+fn graph_tick_ceiling(kind: TickKind, body_deadline: Option<Duration>) -> Option<Duration> {
+    match kind {
+        TickKind::Quick => body_deadline.map(|deadline| deadline * GRAPH_TICK_CEILING_FACTOR),
+        TickKind::Full => None,
+    }
 }
 
 /// Run `pass`, giving up on it once `ceiling` has passed.
@@ -1133,17 +1145,17 @@ mod tests {
         }
     }
 
-    /// A Graph pass that never returns (a request on a dead connection) is
-    /// cut off at its ceiling, twenty body-fetch deadlines, and reported as
-    /// an error; a pass that finishes in time is returned untouched, and an
-    /// unbounded deadline imposes no ceiling.
+    /// A quick Graph pass that never returns (a request on a dead
+    /// connection) is cut off at its ceiling, twenty body-fetch deadlines,
+    /// and reported as an error; a pass that finishes in time is returned
+    /// untouched, and an unbounded deadline imposes no ceiling.
     #[tokio::test]
     async fn a_graph_pass_that_hangs_is_cut_off_at_its_ceiling() {
         assert_eq!(
-            graph_tick_ceiling(Some(Duration::from_secs(30))),
+            graph_tick_ceiling(TickKind::Quick, Some(Duration::from_secs(30))),
             Some(Duration::from_secs(600))
         );
-        assert_eq!(graph_tick_ceiling(None), None);
+        assert_eq!(graph_tick_ceiling(TickKind::Quick, None), None);
 
         let started = tokio::time::Instant::now();
         let err = within_ceiling(
@@ -1171,6 +1183,27 @@ mod tests {
         })
         .await;
         assert!(unbounded.is_ok(), "no ceiling, no cut-off");
+    }
+
+    /// A full Graph tick has no ceiling: a pass that outlasts twenty
+    /// body-fetch deadlines still runs to completion, because cutting it off
+    /// would discard every message it downloaded before ingesting.
+    #[tokio::test]
+    async fn a_full_graph_pass_is_not_cut_off() {
+        let deadline = Some(Duration::from_millis(1));
+        assert_eq!(graph_tick_ceiling(TickKind::Full, deadline), None);
+        assert_eq!(graph_tick_ceiling(TickKind::Full, None), None);
+
+        let done = within_ceiling(graph_tick_ceiling(TickKind::Full, deadline), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(SyncResult {
+                saved: 7,
+                ..Default::default()
+            })
+        })
+        .await
+        .expect("a full pass runs to completion");
+        assert_eq!(done.saved, 7);
     }
 
     /// A tick whose body hit the ceiling frees the run slot: the next tick
