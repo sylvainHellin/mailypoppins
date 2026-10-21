@@ -852,7 +852,7 @@ impl GraphClient {
     /// and leave the email otherwise intact.
     async fn hydrate(&self, msg: &GraphMessage) -> FetchedEmail {
         let mut email = graph_message_to_fetched_email(msg);
-        if msg.has_attachments {
+        if lists_attachments(msg) {
             match self.fetch_attachments(&msg.id).await {
                 Ok(attachments) => email.attachments = attachments,
                 Err(e) => warn!("Failed to fetch attachments for {}: {}", msg.id, e),
@@ -952,6 +952,32 @@ fn attachments_from_list(att_list: GraphAttachmentList) -> Vec<AttachmentData> {
     result
 }
 
+/// Whether the message's `/attachments` list is worth fetching.
+///
+/// Graph's `hasAttachments` is false for a message whose only attachments are
+/// inline (the images an HTML body shows by `cid:` URL), so the flag alone
+/// leaves such a mail with broken images. An HTML body that references `cid:`
+/// is taken as a claim that the list holds something too.
+fn lists_attachments(msg: &GraphMessage) -> bool {
+    msg.has_attachments || references_inline_parts(msg)
+}
+
+/// Whether the message's HTML body references an inline part by `cid:` URL.
+fn references_inline_parts(msg: &GraphMessage) -> bool {
+    let Some(body) = msg.body.as_ref() else {
+        return false;
+    };
+    let is_html = body
+        .content_type
+        .as_deref()
+        .is_some_and(|ct| ct.eq_ignore_ascii_case("html"));
+    is_html
+        && body
+            .content
+            .as_deref()
+            .is_some_and(|c| c.to_ascii_lowercase().contains("cid:"))
+}
+
 fn graph_message_to_fetched_email(msg: &GraphMessage) -> FetchedEmail {
     let from = msg.from.as_ref().map(format_recipient).unwrap_or_default();
 
@@ -1004,7 +1030,11 @@ fn graph_message_to_fetched_email(msg: &GraphMessage) -> FetchedEmail {
         date,
         body_text,
         html_body,
-        has_attachments: msg.has_attachments,
+        // Raised for an inline-only message too, so a row whose inline parts
+        // the first fetch could not bring stays an attachment repair
+        // candidate; one the repair finds nothing storable for is settled
+        // once, never retried.
+        has_attachments: lists_attachments(msg),
         message_id,
         attachments: Vec::new(), // filled by caller if has_attachments
         // Graph answers `isRead` and nothing else: the other two bits of the
@@ -2792,7 +2822,7 @@ impl GraphClient {
         let mut emails = Vec::with_capacity(msg_list.value.len());
         for msg in &msg_list.value {
             let mut email = graph_message_to_fetched_email(msg);
-            if msg.has_attachments {
+            if lists_attachments(msg) {
                 if let Ok(att) = self.fetch_attachments(&msg.id).await {
                     email.attachments = att;
                 }
@@ -2850,7 +2880,7 @@ impl GraphClient {
         let mut emails = Vec::with_capacity(msg_list.value.len());
         for msg in &msg_list.value {
             let mut email = graph_message_to_fetched_email(msg);
-            if msg.has_attachments {
+            if lists_attachments(msg) {
                 if let Ok(att) = self.fetch_attachments(&msg.id).await {
                     email.attachments = att;
                 }
@@ -3582,6 +3612,36 @@ mod tests {
 
     /// A Message-ID carrying URL and OData metacharacters reaches Graph as
     /// exactly the literal it is: quotes doubled, nothing read as a separator.
+    /// Graph says `hasAttachments: false` for a mail whose only attachments
+    /// are inline images; its HTML body's `cid:` references are what get the
+    /// list fetched and the stored flag raised, so a failed fetch is repaired.
+    #[test]
+    fn an_inline_only_message_still_lists_its_attachments() {
+        let msg = |content_type: &str, content: &str, has: bool| -> GraphMessage {
+            serde_json::from_value(serde_json::json!({
+                "id": "AAMk",
+                "internetMessageId": "<m@x>",
+                "body": {"contentType": content_type, "content": content},
+                "hasAttachments": has,
+            }))
+            .unwrap()
+        };
+        let inline = msg("html", r#"<p><img src="CID:image001.png@01DA"></p>"#, false);
+        assert!(lists_attachments(&inline));
+        assert!(graph_message_to_fetched_email(&inline).has_attachments);
+
+        let plain_html = msg("html", "<p>no images</p>", false);
+        assert!(!lists_attachments(&plain_html));
+        assert!(!graph_message_to_fetched_email(&plain_html).has_attachments);
+
+        // A text body that merely mentions the scheme is not a reference.
+        let text = msg("text", "see cid:foo", false);
+        assert!(!lists_attachments(&text));
+
+        let flagged = msg("text", "hi", true);
+        assert!(lists_attachments(&flagged));
+    }
+
     #[test]
     fn the_message_lookup_url_escapes_the_id() {
         let url = message_lookup_url("<a+b&c#d'e%f=g?h@x.com>").unwrap();
