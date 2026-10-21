@@ -371,13 +371,14 @@ This is a watch and not a scheduler - it reacts to a server saying something cha
 
 ### The scheduler
 
-A ready runtime with an IMAP server also runs a scheduler (`src/daemon/runtime/scheduler.rs`, #0134), spawned beside the watcher and the drainer and bound to the runtime the same way.
+A ready runtime with an IMAP or Graph server also runs a scheduler (`src/daemon/runtime/scheduler.rs`, #0134), spawned beside the watcher and the drainer and bound to the runtime the same way.
 It runs one quick tick once the account has gone `[accounts.imap] sync_interval_secs` without one: 900 seconds by default, `0` turns it off, and a value under 60 is raised to 60.
 The interval is measured from the end of the last tick of any origin (a manual `mp sync`, a TUI sync key, a client's startup fetch, a watcher round, the scheduler itself), which the runtime records as each tick that ran a body finishes, so another tick pushes the scheduled one back; a drain is not a tick and moves nothing.
 The first scheduled tick is an interval after the runtime starts.
 It is what catches everything the watcher cannot hear: a change in any mailbox other than INBOX, a queued op or an outbox Sent copy waiting out its backoff, a body fetch the deadline cut short, an IDLE connection the server dropped silently, and an account with no client open at all.
 The scheduled tick goes through the same `tick_and_publish` as the watcher's, so it publishes `sync.completed` and the counts that moved exactly as a watcher tick does; it joins a tick already running, and it waits for a drain in flight through the runtime's turn.
-A blocked runtime, a local-only account and an interval of `0` get no scheduler, and neither does a Graph account, because the daemon tick has no Graph backend yet (`sync_once` refuses one) and a scheduled tick would report a failed sync every interval.
+A blocked runtime, a local-only account and an interval of `0` get no scheduler.
+A Graph account is scheduled like an IMAP one and reads the same `[accounts.imap] sync_interval_secs` (the default when it has no `[accounts.imap]` table); its tick runs the Graph orchestrator over every configured mailbox, so `mp sync -A <graph account>` without `--mailbox` goes through the runtime too.
 Changing `sync_interval_secs` changes the effective account, so `config.reload` restarts that account's runtime and the scheduler comes back with the new interval.
 Accounts are not staggered: each runtime's clock starts when it comes up and ticks run on independent runtimes, so two accounts ticking in the same second contend for nothing.
 

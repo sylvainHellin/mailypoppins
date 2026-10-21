@@ -29,11 +29,11 @@
 //!
 //! # What gets a scheduler
 //!
-//! A ready runtime with an IMAP server and a non-zero interval. A local-only
-//! account has no server; a blocked runtime holds no engine lock, and the
-//! engine that does is scheduling its own; a Graph account's daemon tick has no
-//! Graph backend yet (`sync_once` refuses it), so a scheduled one would report
-//! a failed sync every interval.
+//! A ready runtime with a server (IMAP or Graph) and a non-zero interval. A
+//! local-only account has no server; a blocked runtime holds no engine lock,
+//! and the engine that does is scheduling its own. A Graph account reads the
+//! same `imap.sync_interval_secs`: the setting names the tick, not the
+//! transport.
 //!
 //! # Lifetime
 //!
@@ -52,7 +52,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::config::{AccountConfig, AuthMethod};
+use crate::config::AccountConfig;
 use crate::daemon::state::CanonicalState;
 
 use super::account::{AccountRuntime, Readiness, TickKind};
@@ -98,8 +98,6 @@ fn schedulable(runtime: &AccountRuntime, cfg: &AccountConfig) -> Option<Duration
         "has no server"
     } else if runtime.readiness() != Readiness::Ready {
         "is blocked"
-    } else if cfg.auth_method == AuthMethod::Graph {
-        "is a Graph account, which the daemon tick cannot sync yet"
     } else if cfg.imap.sync_interval().is_none() {
         "has sync_interval_secs = 0"
     } else {
@@ -167,6 +165,7 @@ mod tests {
     use futures::future::FutureExt;
 
     use super::super::account::{DrainHook, TickHooks};
+    use crate::config::AuthMethod;
     use crate::engine_lock::EngineLock;
 
     /// A short interval, so the tests run in real time without a paused clock:
@@ -292,8 +291,9 @@ mod tests {
         assert!(*runtime.completed_ticks().borrow() > before, "a tick does");
     }
 
-    /// `sync_interval_secs = 0` schedules nothing, and so does a local-only or
-    /// a Graph account.
+    /// `sync_interval_secs = 0` schedules nothing, and so does a local-only
+    /// account; a Graph account is scheduled like an IMAP one, and its `0`
+    /// turns it off the same way.
     #[tokio::test]
     async fn a_zero_interval_schedules_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -315,9 +315,20 @@ mod tests {
         assert!(local.is_local_only());
         assert!(spawn(&runtime, canonical(), &local).is_none());
 
-        let mut graph = config();
-        graph.auth_method = AuthMethod::Graph;
-        assert!(spawn(&runtime, canonical(), &graph).is_none());
+        let graph = AccountConfig {
+            name: "alpha".to_string(),
+            auth_method: AuthMethod::Graph,
+            ..Default::default()
+        };
+        assert_eq!(
+            schedulable(&runtime, &graph),
+            graph.imap.sync_interval(),
+            "a Graph account with no [accounts.imap] gets the default interval"
+        );
+        assert!(schedulable(&runtime, &graph).is_some());
+        let mut graph_off = graph;
+        graph_off.imap.sync_interval_secs = 0;
+        assert!(spawn(&runtime, canonical(), &graph_off).is_none());
     }
 
     /// A retired runtime fires nothing, even with its deadline long past, and

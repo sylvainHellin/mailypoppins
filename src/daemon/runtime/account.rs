@@ -869,10 +869,11 @@ fn mutations_hook(cfg: Arc<AccountConfig>, report: TickReport) -> DrainHook {
     })
 }
 
-/// The sync itself, against the account's real IMAP server.
+/// The sync itself, against the account's real IMAP server or Graph mailbox.
 ///
 /// The backend is built inside the hook rather than at start: it needs
-/// [`crate::config::ImapConfig::load`], which reads the keyring, and an account
+/// [`crate::config::ImapConfig::load`], which reads the keyring, or the Graph
+/// token cache, and an account
 /// whose credentials are missing must still be a runtime that serves reads and
 /// drains queues. A failed load is the body's `Err`, which the tail drain runs
 /// after and the outcome carries.
@@ -929,27 +930,38 @@ where
         .with_context(|| format!("{label} ended without reporting an outcome"))
 }
 
+/// How many new messages per mailbox a tick of `kind` downloads, on either
+/// transport.
+fn tick_limit(kind: TickKind) -> usize {
+    match kind {
+        TickKind::Quick => QUICK_TICK_LIMIT,
+        TickKind::Full => usize::MAX,
+    }
+}
+
+/// The mailboxes a tick covers: every configured one, in config order.
+fn tick_targets(cfg: &AccountConfig) -> Vec<crate::sync::SyncTarget> {
+    crate::config::all_configured_mailboxes(cfg)
+        .iter()
+        .map(|(role, mapping)| crate::sync::SyncTarget {
+            role: role.clone(),
+            server_name: mapping.server.clone(),
+        })
+        .collect()
+}
+
 /// One sync pass over every configured mailbox of `cfg`.
 async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<SyncResult> {
     use crate::config::ImapConfig;
     use crate::store::{BlobStore, Store};
     use crate::sync::engine::{run_sync, SyncRun};
-    use crate::sync::SyncTarget;
 
-    anyhow::ensure!(
-        cfg.auth_method != crate::config::AuthMethod::Graph,
-        "the daemon tick has no Graph backend yet; '{}' syncs through `mp sync`",
-        cfg.name
-    );
+    let targets = tick_targets(cfg);
+    if cfg.auth_method == crate::config::AuthMethod::Graph {
+        return sync_once_graph(cfg, ctx, &targets).await;
+    }
 
     let imap_config = ImapConfig::load(cfg)?;
-    let targets: Vec<SyncTarget> = crate::config::all_configured_mailboxes(cfg)
-        .iter()
-        .map(|(role, mapping)| SyncTarget {
-            role: role.clone(),
-            server_name: mapping.server.clone(),
-        })
-        .collect();
 
     // The writer connection, and it is not one of the pool's: a sync
     // transaction must never occupy a read slot
@@ -970,10 +982,7 @@ async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<SyncResult>
             blobs: &blobs,
             account: &cfg.name,
             targets: &targets,
-            limit: match ctx.kind {
-                TickKind::Quick => QUICK_TICK_LIMIT,
-                TickKind::Full => usize::MAX,
-            },
+            limit: tick_limit(ctx.kind),
             dry_run: false,
             stop: ctx.stop.as_ref(),
         },
@@ -981,6 +990,38 @@ async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<SyncResult>
     )
     .await?;
     Ok(result)
+}
+
+/// The Graph body of a tick: the same orchestrator `mp sync --mailbox` runs
+/// (`graph::sync_mailboxes_graph`), over every configured mailbox.
+///
+/// A quick tick is bounded at [`QUICK_TICK_LIMIT`] new messages per mailbox,
+/// which is also what lets it walk `/messages/delta` from the stored token
+/// (#0042); a full tick relists every folder and re-mints the token. Throttling
+/// is the orchestrator's: a 429 or 503 sub-response's `Retry-After` paces the
+/// batch download, and a pass the throttle runs out of budget defers its prune
+/// to the next tick.
+///
+/// The body-fetch deadline (#0113) is an IMAP budget and does not apply: a
+/// Graph target fetches and ingests in one step, and the stop is honoured at
+/// each mailbox boundary. The orchestrator opens its own writer connection,
+/// unguarded, like the IMAP engine above: this runtime already holds the
+/// account's engine lock.
+async fn sync_once_graph(
+    cfg: &AccountConfig,
+    ctx: &TickContext,
+    targets: &[crate::sync::SyncTarget],
+) -> Result<SyncResult> {
+    let graph = crate::config::GraphConfig::load(cfg)?;
+    crate::graph::sync_mailboxes_graph(
+        &graph,
+        &cfg.name,
+        targets,
+        tick_limit(ctx.kind),
+        false,
+        ctx.stop.as_ref(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1007,6 +1048,60 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    fn tick_context(kind: TickKind) -> TickContext {
+        TickContext {
+            account: "evoqs".to_string(),
+            kind,
+            phase: Phase::Body,
+            body_deadline: Some(Duration::from_secs(30)),
+            stop: None,
+        }
+    }
+
+    fn graph_config() -> AccountConfig {
+        let mut cfg = AccountConfig {
+            name: "evoqs".to_string(),
+            auth_method: crate::config::AuthMethod::Graph,
+            ..Default::default()
+        };
+        let mapping = |server: &str| crate::config::MailboxMapping {
+            server: server.to_string(),
+        };
+        cfg.mailboxes.inbox = Some(mapping("Inbox"));
+        cfg.mailboxes.sent = Some(mapping("Sent Items"));
+        cfg.mailboxes.extra = Some(vec![mapping("Junk Email")]);
+        cfg
+    }
+
+    /// A Graph account's tick body takes the Graph backend rather than
+    /// refusing (the gap #0134 left): with no `[accounts.oauth2]` it fails on
+    /// the Graph configuration, before any IMAP load and before any network.
+    #[tokio::test]
+    async fn a_graph_tick_body_runs_the_graph_backend() {
+        for kind in [TickKind::Quick, TickKind::Full] {
+            let err = sync_once(&graph_config(), &tick_context(kind))
+                .await
+                .expect_err("no oauth2 settings, so the Graph config cannot load");
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("Graph auth_method requires [accounts.oauth2]"),
+                "{text}"
+            );
+            assert!(!text.contains("no Graph backend"), "{text}");
+        }
+    }
+
+    /// Both transports tick over every configured mailbox, with the quick
+    /// bound on a quick tick and none on a full one.
+    #[test]
+    fn a_tick_covers_every_configured_mailbox_with_its_kinds_bound() {
+        let targets = tick_targets(&graph_config());
+        let servers: Vec<&str> = targets.iter().map(|t| t.server_name.as_str()).collect();
+        assert_eq!(servers, vec!["Inbox", "Sent Items", "Junk Email"]);
+        assert_eq!(tick_limit(TickKind::Quick), QUICK_TICK_LIMIT);
+        assert_eq!(tick_limit(TickKind::Full), usize::MAX);
     }
 
     /// The five slots, in the only order #0114 allows, and the status text is
