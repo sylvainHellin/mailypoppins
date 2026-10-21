@@ -78,7 +78,7 @@ export const PRESETS: Record<Preset, PresetInfo> = {
   },
   graph: {
     label: "Microsoft 365 (Graph API)",
-    hint: "Needs an Azure Entra ID app registration; no IMAP or SMTP server, you sign in with a device code.",
+    hint: "Signs in through the shared mailypoppins app with a device code; no IMAP or SMTP server, no app registration of your own.",
     auth: "graph",
     name: "exchange",
     smtpHost: "",
@@ -93,6 +93,29 @@ export const PRESETS: Record<Preset, PresetInfo> = {
 };
 
 export const PRESET_ORDER: Preset[] = ["imap", "proton", "microsoft365", "graph"];
+
+/**
+ * The shared mailypoppins app registration a Graph account signs in through
+ * when the client ID is left empty; mirrors `MAILYPOPPINS_CLIENT_ID` in
+ * crates/mp-core/src/oauth2.rs.
+ */
+export const MAILYPOPPINS_CLIENT_ID = "439d7ebd-7898-4df2-b2d6-88bb61e2597b";
+
+/**
+ * The tenant a Graph account signs in through when it is left empty: any
+ * work, school or personal Microsoft account (`DEFAULT_TENANT` in
+ * crates/mp-core/src/oauth2.rs).
+ */
+export const DEFAULT_TENANT = "common";
+
+/**
+ * Whether the preset may leave the client and tenant IDs empty for the
+ * mailypoppins app and `common`: Graph only, since the shared app carries
+ * Graph permissions and no IMAP or SMTP ones.
+ */
+export function hasDefaultApp(preset: Preset): boolean {
+  return PRESETS[preset].auth === "graph";
+}
 
 export type WizardForm = {
   preset: Preset;
@@ -219,7 +242,7 @@ export function stepErrors(step: WizardStep, form: WizardForm, taken: readonly s
       if (blank(form.smtp_username)) out.smtp_username = USERNAME_EMPTY;
       if (!port(form.imap_port)) out.imap_port = PORT_BAD;
     }
-    if (signsIn(form.preset)) {
+    if (signsIn(form.preset) && !hasDefaultApp(form.preset)) {
       if (blank(form.client_id)) out.client_id = CLIENT_EMPTY;
       if (blank(form.tenant_id)) out.tenant_id = TENANT_EMPTY;
     }
@@ -242,7 +265,9 @@ export function stepOf(field: WizardField): WizardStep {
  * daemon's `account_block` reads: a password account leaves `auth_method`
  * to the daemon's default, an empty IMAP host or username falls back to the
  * SMTP one there, and a Graph account has no server at all. The From
- * address defaults to the SMTP username, as the CLI's prompt does.
+ * address defaults to the SMTP username, as the CLI's prompt does; a Graph
+ * account's empty client and tenant IDs become the mailypoppins app and
+ * `common`, as the CLI's prompts do.
  */
 export function accountDraft(form: WizardForm): AccountDraft {
   const t = (v: string) => v.trim();
@@ -252,7 +277,11 @@ export function accountDraft(form: WizardForm): AccountDraft {
   if (from) draft.default_from = from;
   if (p.auth !== "password") {
     draft.auth_method = p.auth;
-    draft.oauth2 = { client_id: t(form.client_id), tenant_id: t(form.tenant_id) };
+    const fallback = (v: string, d: string) => (hasDefaultApp(form.preset) && t(v) === "" ? d : t(v));
+    draft.oauth2 = {
+      client_id: fallback(form.client_id, MAILYPOPPINS_CLIENT_ID),
+      tenant_id: fallback(form.tenant_id, DEFAULT_TENANT),
+    };
   }
   if (usesServers(form.preset)) {
     const certs = p.invalidCerts ? { accept_invalid_certs: true } : {};

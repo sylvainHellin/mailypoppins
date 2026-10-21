@@ -233,6 +233,25 @@ describe("the account wizard", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Sign in exchange" })).toBeNull());
     expect(probe.state.signIn).toBeNull();
   });
+
+  it("a Graph account left without a client and tenant signs in through the mailypoppins app and common", async () => {
+    const { user, dialog } = await openWizard();
+    await user.click(within(dialog).getByRole("radio", { name: /Graph API/ }));
+    await next(user, dialog);
+    await fill(user, dialog, "Email address", "me@contoso.com");
+    await next(user, dialog);
+    expect(within(dialog).getByLabelText("Client ID")).toHaveValue("");
+    expect(within(dialog).getByLabelText("Client ID")).toHaveAccessibleDescription(/shared mailypoppins app/);
+    expect(within(dialog).getByLabelText("Tenant ID")).toHaveAccessibleDescription(/Empty uses common/);
+    await next(user, dialog);
+    await next(user, dialog);
+    expect(within(dialog).getByText("the mailypoppins app, tenant common")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Add account" }));
+    await waitFor(() => expect(callsOf("config_add_account")).toHaveLength(1));
+    const account = callsOf("config_add_account")[0]?.account as { auth_method: string; oauth2: unknown };
+    expect(account.auth_method).toBe("graph");
+    expect(account.oauth2).toEqual({ client_id: "439d7ebd-7898-4df2-b2d6-88bb61e2597b", tenant_id: "common" });
+  });
 });
 
 describe("the device-code dialog", () => {

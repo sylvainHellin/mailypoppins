@@ -13,11 +13,14 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { accountNames, type AccountWizard as AccountWizardModel } from "@/app/state";
 import { useAppState, useDispatch } from "@/app/store";
 import {
+  DEFAULT_TENANT,
+  MAILYPOPPINS_CLIENT_ID,
   PRESET_ORDER,
   PRESETS,
   STEP_TITLES,
   STEPS,
   accountDraft,
+  hasDefaultApp,
   presetForm,
   signsIn,
   stepErrors,
@@ -231,7 +234,18 @@ export function AccountWizardForm({ preset, init, taken, onCancel, firstRef }: A
             {text("imap_username", "IMAP username", { hint: "Empty uses the SMTP username." })}
           </>
         ) : null}
-        {signsIn(form.preset) ? (
+        {signsIn(form.preset) && hasDefaultApp(form.preset) ? (
+          <>
+            {text("client_id", "Client ID", {
+              hint: "Empty uses the shared mailypoppins app; enter a client ID only for your organisation's own app registration.",
+              placeholder: "mailypoppins app",
+            })}
+            {text("tenant_id", "Tenant ID", {
+              hint: `Empty uses ${DEFAULT_TENANT}, for any work, school or personal Microsoft account; or enter your directory (tenant) ID or domain.`,
+              placeholder: DEFAULT_TENANT,
+            })}
+          </>
+        ) : signsIn(form.preset) ? (
           <>
             {text("client_id", "Client ID", { hint: "The Azure Entra ID app registration's application (client) ID." })}
             {text("tenant_id", "Tenant ID", { hint: "Your directory (tenant) ID or domain." })}
@@ -272,7 +286,10 @@ export function AccountWizardForm({ preset, init, taken, onCancel, firstRef }: A
     if (draft?.imap) {
       rows.push(["IMAP", `${draft.imap.host ?? draft.smtp?.host}:${draft.imap.port} as ${draft.imap.username ?? draft.smtp?.username}`]);
     }
-    if (draft?.oauth2) rows.push(["App registration", `client ${draft.oauth2.client_id}, tenant ${draft.oauth2.tenant_id}`]);
+    if (draft?.oauth2) {
+      const client = draft.oauth2.client_id === MAILYPOPPINS_CLIENT_ID ? "the mailypoppins app" : `client ${draft.oauth2.client_id}`;
+      rows.push(["App registration", `${client}, tenant ${draft.oauth2.tenant_id}`]);
+    }
     if (draft?.mailboxes) {
       const m = draft.mailboxes;
       rows.push(["Mailboxes", [m.inbox, m.archive, m.sent, ...(m.extra ?? [])].join(", ")]);

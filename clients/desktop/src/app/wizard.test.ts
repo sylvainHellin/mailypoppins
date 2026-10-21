@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   accountDraft,
   CLIENT_EMPTY,
+  DEFAULT_TENANT,
   FROM_EMPTY,
+  MAILYPOPPINS_CLIENT_ID,
   HOST_EMPTY,
   NAME_EMPTY,
   NAME_SHAPE,
@@ -79,11 +81,10 @@ describe("the account wizard's checks", () => {
     expect(stepErrors("servers", { ...filled("graph"), smtp_host: "" }, []).smtp_host).toBeUndefined();
   });
 
-  it("Microsoft 365 needs the client ID and the tenant ID, and Graph the email address", () => {
-    for (const preset of ["microsoft365", "graph"] as const) {
-      const errors = stepErrors("servers", { ...filled(preset), client_id: "", tenant_id: " " }, []);
-      expect(errors).toMatchObject({ client_id: CLIENT_EMPTY, tenant_id: TENANT_EMPTY });
-    }
+  it("Microsoft 365 OAuth2 needs the client ID and the tenant ID, and Graph the email address", () => {
+    const errors = stepErrors("servers", { ...filled("microsoft365"), client_id: "", tenant_id: " " }, []);
+    expect(errors).toMatchObject({ client_id: CLIENT_EMPTY, tenant_id: TENANT_EMPTY });
+    expect(stepErrors("servers", { ...filled("graph"), client_id: "", tenant_id: " " }, [])).toEqual({});
     expect(stepErrors("servers", { ...filled("imap"), client_id: "" }, []).client_id).toBeUndefined();
     expect(stepErrors("identity", { ...filled("graph"), default_from: "" }, []).default_from).toBe(FROM_EMPTY);
     expect(stepErrors("identity", { ...filled("imap"), default_from: "" }, []).default_from).toBeUndefined();
@@ -119,6 +120,7 @@ describe("the account wizard's draft", () => {
 
     const graph = accountDraft(filled("graph"));
     expect(graph.auth_method).toBe("graph");
+    expect(graph.oauth2).toEqual({ client_id: "client", tenant_id: "tenant" });
     expect(graph.smtp).toBeUndefined();
     expect(graph.imap).toBeUndefined();
     expect(graph.mailboxes).toEqual({ inbox: "Inbox", archive: "Archive", sent: "Sent Items", extra: [] });
@@ -126,6 +128,17 @@ describe("the account wizard's draft", () => {
     const imap = accountDraft({ ...filled("imap"), default_from: "", extra: " Lists \n\nProjects\n" });
     expect(imap.default_from).toBe("me@example.com");
     expect(imap.mailboxes).toEqual({ inbox: "INBOX", archive: "Archive", sent: "Sent", extra: ["Lists", "Projects"] });
+  });
+
+  it("an empty Graph client and tenant become the mailypoppins app and common, as in the CLI", () => {
+    const graph = accountDraft({ ...filled("graph"), client_id: " ", tenant_id: "" });
+    expect(graph.oauth2).toEqual({ client_id: MAILYPOPPINS_CLIENT_ID, tenant_id: DEFAULT_TENANT });
+    expect(MAILYPOPPINS_CLIENT_ID).toBe("439d7ebd-7898-4df2-b2d6-88bb61e2597b");
+    expect(DEFAULT_TENANT).toBe("common");
+    expect(accountDraft({ ...filled("graph"), client_id: "", tenant_id: "contoso.com" }).oauth2).toEqual({
+      client_id: MAILYPOPPINS_CLIENT_ID,
+      tenant_id: "contoso.com",
+    });
   });
 
   it("a preset switch keeps who the user is and takes the provider's servers", () => {

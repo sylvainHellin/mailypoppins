@@ -975,7 +975,8 @@ Next checks the step, and Enter in a field is Next.
 A refused step marks each field `aria-invalid`, ties its sentence to it with `aria-describedby`, and focuses the first one.
 The name must be non-empty, letters, digits, `.`, `-` and `_` starting with a letter or a digit, and not already configured.
 The SMTP host, the SMTP username and valid ports are required for the three IMAP presets; an empty IMAP host or username falls back to the SMTP one.
-The client ID and the tenant ID are required for both Microsoft 365 presets.
+The client ID and the tenant ID are required for the OAuth2 preset.
+The Graph preset may leave both empty, as the CLI wizard does: the client ID then becomes the shared mailypoppins app (`MAILYPOPPINS_CLIENT_ID`) and the tenant `common`, and the review shows "the mailypoppins app, tenant common".
 The review runs every check again and jumps to the step of the first failure.
 There is no connection test and no server mailbox pick, since both need a configured account; a wrong host shows as the first sync's failure in the sidebar.
 
