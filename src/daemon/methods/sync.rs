@@ -731,7 +731,7 @@ async fn body(
 ) -> anyhow::Result<Option<SyncResult>> {
     let account = Arc::new(request.account.clone());
     let targets = targets.to_vec();
-    let (kind, limit, dry_run) = (request.kind, request.limit, request.dry_run);
+    let (limit, dry_run) = (pass_limit(request.kind, request.limit), request.dry_run);
     off_thread("the sync body", move || async move {
         if account.auth_method == AuthMethod::Graph {
             let graph = crate::config::GraphConfig::load(&account)?;
@@ -749,10 +749,6 @@ async fn body(
             .map(Some);
         }
         let imap = ImapConfig::load(&account)?;
-        let limit = match kind {
-            TickKind::Quick => limit,
-            TickKind::Full => usize::MAX,
-        };
         crate::imap_client::sync_mailboxes(
             &imap,
             &account.name,
@@ -766,6 +762,21 @@ async fn body(
     })
     .await
     .and_then(|inner| inner)
+}
+
+/// How many new messages per mailbox a pass of `kind` downloads, on either
+/// transport: a quick pass's own bound, and none on a full one, whatever bound
+/// the request carried.
+///
+/// The Graph branch used to pass `limit` through and ignore the kind, so a
+/// `sync.full` with a `limit` was a capped pass on Graph and an unbounded one
+/// on IMAP (PERSO-172); a capped pass also takes the delta path where a full
+/// one relists the folder ([`crate::graph`]'s `delta_verdict`).
+fn pass_limit(kind: TickKind, limit: usize) -> usize {
+    match kind {
+        TickKind::Quick => limit,
+        TickKind::Full => usize::MAX,
+    }
 }
 
 /// The mailboxes one pass covers: the ones `--mailbox` named, or every
@@ -926,5 +937,19 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), count);
         assert!(Phase::TailOutbox.is_tail() && !Phase::HeadOutbox.is_tail());
+    }
+
+    /// PERSO-172: one kind-to-bound mapping for both transports, so a
+    /// `sync.full` carrying a `limit` is unbounded on Graph as it always was
+    /// on IMAP, and a quick pass keeps the bound it asked for.
+    #[test]
+    fn a_full_pass_is_unbounded_and_a_quick_one_keeps_its_bound() {
+        assert_eq!(pass_limit(TickKind::Full, 5), usize::MAX);
+        assert_eq!(pass_limit(TickKind::Full, usize::MAX), usize::MAX);
+        assert_eq!(
+            pass_limit(TickKind::Quick, QUICK_TICK_LIMIT),
+            QUICK_TICK_LIMIT
+        );
+        assert_eq!(pass_limit(TickKind::Quick, 2500), 2500);
     }
 }
