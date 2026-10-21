@@ -28,6 +28,7 @@ All notable changes to this project are documented in this file.
 - **Desktop: `e` on a received message opens it read-only in `$EDITOR` as Markdown, as in the TUI (PERSO-92).** Enter focuses the reader.
 
 ### Fixed
+- **A reply sent from a Microsoft 365 account threads for every recipient (PERSO-144).** Graph sends go as MIME through `sendMail`, so the message carries `In-Reply-To`, `References` and mailypoppins' own `Message-ID`. A message over 3.5 MB of base64 falls back to the old JSON send, unthreaded, with a warning.
 - **Graph attachments download.** The attachment list asked for `contentBytes` through `$select`, which Graph refuses on the base attachment type with HTTP 400; it now lists without `$select`, downloads file attachments and skips item and reference attachments.
 - **Graph: Sent Items, Junk Email and localized or custom folders sync.** A configured folder resolves to a well-known name (`sentitems`, `junkemail`), then to a folder id, then by display name; the display name used to go into the URL and failed with `ErrorInvalidIdMalformed`.
 - **Graph messages stored without their attachments get them on later passes.** A pass repairs up to ten such messages per mailbox, settles a message whose attachments are all item attachments, and retries a failed fetch with backoff. A message whose HTML references `cid:` images has its attachment list fetched too, since Graph reports `hasAttachments` false for inline-only mail.
@@ -64,6 +65,7 @@ All notable changes to this project are documented in this file.
 - **Log records from concurrent `mp` processes no longer interleave mid-line.** Each record reaches the dated log file in one append.
 
 ### Changed
+- **Graph accounts need no app registration (PERSO-164).** `mp config init`, `mp config add-account` (option 4) and the desktop wizard's Graph preset use the built-in mailypoppins app when the client ID is left empty, and the tenant defaults to `common`, which takes work, school and personal Microsoft accounts.
 - **`new`, `edit`, `reply`, `forward`, `mark-approved`, `mark-draft`, `archive` and `save` print only the selector or path when stdout is not a terminal (#0144, PERSO-145).** `sel=$(mp new x)` now captures a selector a later command can take.
 - **Desktop: the palette hides Reader: HTML and Reader: text while a draft is shown (PERSO-143).** A draft's preview ignores the saved reader mode, so the two commands did nothing there.
 - **Desktop: the focused pane's frame is square where it meets the neighbouring pane (PERSO-95).**
