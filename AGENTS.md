@@ -19,7 +19,8 @@ cargo insta review                         # approve markdown_to_html snapshot d
 ```
 
 Skipping `cargo install --path .` after a code change is the single most common footgun.
-On the Mac, `scripts/install-local.sh` is the install step to give Sylvain: it pulls, installs `mp`, bundles and swaps in the desktop app, restarts the daemon once and relaunches the app.
+On the Mac, `scripts/install-local.sh` is the install step for agents and Sylvain alike: the desktop app relaunches its own bundled `mp` as the daemon, so after `cargo install` alone a restarted daemon still runs the old code.
+The script pulls, installs `mp`, bundles and swaps in the desktop app, restarts the daemon once and relaunches the app; it refuses a dirty tree, so commit first.
 
 Test scratch goes to `/var/tmp`, set once in [.cargo/config.toml](.cargo/config.toml) so no run needs a flag: `/tmp` is a small RAM-backed tmpfs and ~2200 tests each building a tempdir sqlite store exhaust it, which surfaces as `Disk quota exceeded` / `SQLITE_IOERR` rather than as a real failure.
 Agent scratch belongs there too, as `/var/tmp/mp-<purpose>-<id>` for worktrees; `/var/tmp` is aged out after 30 days while `~/.cache` accumulates forever.
