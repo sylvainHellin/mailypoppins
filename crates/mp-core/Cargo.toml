@@ -33,6 +33,9 @@ colored = "2.1"
 dirs = "5"
 hkdf = "0.12"
 html2text = { version = "0.14", features = ["css"] }
+# HTML to Markdown for a draft pulled from the server Drafts folder (#0143);
+# html2text stays the plain-text renderer of received mail.
+htmd = "0.5"
 icalendar = "0.17"
 keyring = { version = "3", features = ["apple-native", "linux-native"] }
 log = "0.4"

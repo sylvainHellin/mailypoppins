@@ -21,6 +21,7 @@
 
 pub mod folder;
 pub mod push;
+pub mod reconcile;
 
 use std::path::PathBuf;
 
@@ -178,6 +179,30 @@ pub fn find_local(account: &str, id: &str) -> Option<LocalDraft> {
     local_drafts(account)
         .into_iter()
         .find(|draft| draft.id == id)
+}
+
+/// Reconcile `account`'s drafts with its server Drafts folder over IMAP, the
+/// pass the daemon runs after every sync (#0143). Nothing on an account that
+/// does not mirror; the configuration's credentials are what the sync used.
+pub async fn reconcile_account(
+    account: &AccountConfig,
+) -> anyhow::Result<reconcile::ReconcileReport> {
+    if !mirror_enabled(account) {
+        return Ok(reconcile::ReconcileReport::default());
+    }
+    let imap = crate::config::ImapConfig::load(account)?;
+    let store = Store::open(crate::config::store_path(&account.name))?;
+    let email = crate::config::load_global_config()
+        .map(|config| config.email)
+        .unwrap_or_default();
+    let mirror = push::Mirror {
+        store: &store,
+        account,
+        email: &email,
+        now: crate::outbox::unix_now(),
+    };
+    let mut folder = folder::ImapDraftsFolder::new(imap);
+    reconcile::reconcile(&mirror, &mut folder).await
 }
 
 #[cfg(test)]

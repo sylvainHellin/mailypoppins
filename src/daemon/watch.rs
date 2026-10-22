@@ -245,22 +245,35 @@ impl MirrorState {
     }
 }
 
-/// The conflict copy the reconcile writes beside `path` (#0143), whose
-/// existence is what marks the draft at `path` as in conflict.
-pub fn conflict_copy_of(path: &Path) -> Option<PathBuf> {
-    let stem = path.file_stem()?.to_string_lossy();
-    if stem.ends_with(".conflict") {
-        return None;
+/// Whether a conflict copy the reconcile wrote stands beside the draft at
+/// `path` (#0143): `<stem>.conflict.md`, or `<stem>.conflict-<n>.md` for a
+/// later one, which is what marks the draft as in conflict.
+pub fn has_conflict_copy(path: &Path) -> bool {
+    let (Some(stem), Some(dir)) = (path.file_stem(), path.parent()) else {
+        return false;
+    };
+    let stem = stem.to_string_lossy();
+    if stem.contains(".conflict") {
+        return false;
     }
-    Some(path.with_file_name(format!("{stem}.conflict.md")))
+    let prefix = format!("{stem}.conflict");
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.ends_with(".md")
+                && name
+                    .strip_prefix(&prefix)
+                    .is_some_and(|rest| rest == ".md" || rest.starts_with('-'))
+        })
+    })
 }
 
 /// The draft a conflict copy at `path` stands beside, `None` for a file that
 /// is not one.
 fn original_of_conflict(path: &Path) -> Option<PathBuf> {
     let stem = path.file_stem()?.to_string_lossy();
-    let base = stem.strip_suffix(".conflict")?;
-    Some(path.with_file_name(format!("{base}.md")))
+    let (base, rest) = stem.split_once(".conflict")?;
+    (rest.is_empty() || rest.starts_with('-')).then(|| path.with_file_name(format!("{base}.md")))
 }
 
 /// One thing a poll settled.
@@ -565,7 +578,7 @@ impl DraftWatcher {
             id,
             &crate::draft_mirror::file_hash(&bytes),
             &draft.frontmatter,
-            conflict_copy_of(path).is_some_and(|copy| copy.exists()),
+            has_conflict_copy(path),
         ))
     }
 
@@ -655,7 +668,7 @@ fn describe(root: &Root, path: &Path, mirror: Option<&MirrorState>) -> WatchEven
                         &announced,
                         &hash,
                         &draft.frontmatter,
-                        conflict_copy_of(path).is_some_and(|copy| copy.exists()),
+                        has_conflict_copy(path),
                     )
                 }),
                 owes_push: mirror

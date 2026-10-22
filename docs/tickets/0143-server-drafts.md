@@ -278,8 +278,7 @@ Slice 1 splits its MIME assembly (`:2866-2947`: the HTML from `markdown_to_html`
 - writes `In-Reply-To` and `References` from `in_reply_to:`, which Outlook and Apple Mail need to show a reply draft as a reply;
 - keeps the signature sentinels and `QUOTE_MARKER` as HTML comments in the HTML part, for a pull of an unedited copy; the probe shows them surviving mp's own APPEND on both servers and disappearing on every foreign edit, where the pull falls back to the quote wrappers ("Pull").
 
-The send path emits no `In-Reply-To` today either: outside its tests, `src/send.rs` reads `in_reply_to:` only to flag the source after a send (`source_to_flag`, `:2309-2313`).
-That is a gap of its own and listed under "Out of scope".
+The send path writes the same two headers since PERSO-137 (`build_draft_message`).
 
 #### Attachments
 
@@ -485,6 +484,11 @@ Open for Sylvain:
 4. Send and discard: `outbox.draft_copy`, the `DeleteDraft` in both transitions out of `pending_send`, `draft.discard` and `settle_sent_draft` moving into `.retired/`.
    Done, with one deviation: the draft copy rides the outbox row's envelope as a `draft-copy:` line rather than a new `outbox.draft_copy` column, because the envelope is already the row's extensible record and is carried across a store rebuild whole. `retire_draft_of_row` (the resume path) and the `--sent` sweep retire into `.retired/` too, and every drain point prunes `.retired/` after 30 days counted from the retirement.
 5. Reconcile and pull: `messages.draft_marker`, the eviction exemption, the reconcile pass and its recovery of a lost `draft_sync` row, the HTML-to-Markdown step with the `htmd` dependency, conflict copies, the marker import from the other machine.
+   Done (`src/draft_mirror/reconcile.rs`, run by the account runtime after every sync body, IMAP accounts only), with three deviations from the design above:
+   - The Drafts folder is read directly by the reconcile, one `SELECT` and every header, a body only for a copy it pulls or imports, and is not ingested into the store; so there is no `messages.draft_marker` column and no eviction exemption, the folder keeps the catalogue's `ignore` policy, and no received list, search or conversation can show a server draft beside its file.
+   - A copy mp writes carries the draft file whole, base64, in an `<!-- mp:source v1 ... -->` comment at the end of its HTML part (`parse::draft_source_comment`). HTML comments survive mp's own APPEND on both servers and no foreign edit (the probe), so a copy that still carries one is exactly a file mp pushed: the recovery of a lost row compares that source with the file instead of rendering the copy, and mp on the other machine reads a draft back byte for byte. A copy without one was edited elsewhere and goes through `parse::draft_html_to_markdown` (`htmd` 0.5.6).
+   - The pull waits for an open outbox row but not for an armed undo-send hold, which lives in the daemon: a pull into an approved draft demotes it, so a hold that fires afterwards is refused as not approved rather than sending what nobody approved.
+   A push that finds copies and no row of its folder runs the reconcile instead of pushing, so a rebuilt store never replaces a copy edited elsewhere. Two copies under one draft where the row's is the older is another machine pushing over this one: the newer wins and the local text becomes a conflict copy unless the two are the same file. Word's fake list bullets are turned into `- ` items after the conversion rather than by an `htmd` handler.
 6. Foreign drafts: the import, and the received list hiding the `drafts`-role folder in the TUI and the desktop.
 7. Graph, once an account uses it.
 
@@ -527,7 +531,6 @@ Each step lands on its own and leaves the tree green; until step 3 nothing reach
 
 ## Out of scope
 
-- `In-Reply-To` and `References` on the sent message: `build_draft_message` writes neither today, so mp's sent replies do not thread by header in other clients; PERSO-137 adds them, as a prerequisite of #0142.
 - Two clients sending the same draft at once, mp and Outlook: neither can see the other's submission, and the server copy's delete does not prevent it.
 - Mirroring signatures, approval state or the `event:` block of an invite draft.
 - A three-way merge of conflicting edits; the conflict copy is the whole answer.

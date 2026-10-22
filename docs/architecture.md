@@ -315,6 +315,15 @@ Replay is exactly-once for the local half because the drain runs only the server
 The CLI (`mp archive`, `mp delete`) enqueues through the same `apply_*` and then runs the op synchronously with `pending_ops::run_and_settle`, keeping its blocking UX: a success retires the row, a refusal rolls the local half back and returns the error verbatim, so a not-found stays byte-identical to the pre-queue message.
 The synchronous settle deliberately does *not* converge a not-found, because a CLI invocation runs the op once in the process that enqueued it and so is never a crash replay.
 
+### Drafts on the server
+
+Every draft of an IMAP account is mirrored to the account's server Drafts folder ([#0143](tickets/0143-server-drafts.md)); the file stays the truth.
+A save the draft watcher settles owes a push when its bytes differ from the `draft_sync` row's hash, and the watcher, which opens no store, asks the account's runtime for a drain; the drain queues `ServerOp::PushDraft` (`draft_mirror::push::enqueue_owed`) and runs it like a queued archive: APPEND the rendering, read the new UID back by `Message-ID`, delete the copy the row named, write the row.
+The file is written once in a draft's life, at the first push, to record `server_message_id`; every later push leaves its bytes alone.
+A copy carries the draft file whole in an HTML comment, so mp on another machine reads it back byte for byte, while a copy edited in Outlook, Apple Mail or the Proton app has lost the comment and is converted from its HTML with `htmd`.
+After every sync body the runtime runs the reconcile (`draft_mirror::reconcile`) under its turn: it reads the Drafts folder directly, never ingesting it, and pulls a copy that changed, writes a conflict copy when both sides changed, retires a draft whose copy is gone, recovers a row a rebuilt store lost, deletes the copies of retired drafts and imports a draft the other machine pushed.
+The watcher derives each draft's `server` member from the mirror state the runtime hands it after every drain and reconcile.
+
 ### Send
 
 `send::send_draft(&EmailDraft, &SendContext) -> SentDraft` is the one orchestration behind `mp send`, `mp send-approved` and both TUI send keys: it builds the bytes, commits the outbox row, submits over SMTP or Graph depending on which the context names, and retires the draft file.
@@ -446,7 +455,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `src/send.rs` | `markdown_to_html`, message building, `send_draft` + `SendContext`, per-recipient submission, `DurableSend`, `resume_outbox` |
 | `src/send/graph_submit.rs` | The Graph submission: the plan (one MIME `sendMail`, or a draft with attachments added separately), the staged send behind the `GraphSendApi` seam, and the resume that settles a Graph `pending_send` row against the mailbox |
 | `src/outbox.rs` | The durable send state machine and its blob refcounting |
-| `src/draft_mirror/` | The server drafts mirror (#0143): the policy (`mirror_enabled`, `approval_travels`, `file_hash`, the Drafts folder from the catalogue), `folder.rs` (the `DraftsFolder` seam, its IMAP implementation over the pool and the test fake), `push.rs` (the queued push and delete, and `enqueue_owed`, which every drain point runs) |
+| `src/draft_mirror/` | The server drafts mirror (#0143): the policy (`mirror_enabled`, `approval_travels`, `file_hash`, the Drafts folder from the catalogue, the 30-day prune of `drafts/.retired/`), `folder.rs` (the `DraftsFolder` seam, its IMAP implementation over the pool and the test fake), `push.rs` (the queued push and delete, and `enqueue_owed`, which every drain point runs), `reconcile.rs` (the pass after every sync: pull, conflict copy, retire, the recovery of a lost row, the import of a draft mp pushed elsewhere) |
 | `src/ops.rs` | `ServerOp` (the remote half of a mutation) and its IMAP/Graph execution seam `run_op`, at library layer so the durable queue and the CLI can drive it without depending on `tui/` |
 | `src/pending_ops.rs` | The durable mutation queue (#0039): atomic local-write-plus-enqueue, the drain with backoff and per-kind rollback, crash-replay, `resume_account` (sync-tick drain) and `run_and_settle` (the CLI's synchronous single-op path) |
 | `src/engine_lock.rs` | One engine per account across processes (#0061): a non-blocking `flock` on `<account_dir>/store.lock`, released on exit or crash; taken by the `pending_ops` drain, by the outbox drain (#0116) and by the IMAP sync ingest (#0122) |

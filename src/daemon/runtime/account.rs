@@ -1016,7 +1016,7 @@ fn mutations_hook(cfg: Arc<AccountConfig>, report: TickReport, watch: DraftWatch
 /// whose credentials are missing must still be a runtime that serves reads and
 /// drains queues. A failed load is the body's `Err`, which the tail drain runs
 /// after and the outcome carries.
-fn body_hook(cfg: Arc<AccountConfig>, report: TickReport, _watch: DraftWatchCell) -> BodyHook {
+fn body_hook(cfg: Arc<AccountConfig>, report: TickReport, watch: DraftWatchCell) -> BodyHook {
     // Whether this runtime has listed the server's folders yet: the first tick
     // lists, and so does every full one (#0141).
     let listed = Arc::new(AtomicBool::new(false));
@@ -1024,9 +1024,24 @@ fn body_hook(cfg: Arc<AccountConfig>, report: TickReport, _watch: DraftWatchCell
         let cfg = Arc::clone(&cfg);
         let report = report.clone();
         let listed = Arc::clone(&listed);
+        let watch = Arc::clone(&watch);
         async move {
             let result = off_thread("the sync body", move || async move {
-                sync_once(&cfg, &ctx, &listed).await
+                let synced = sync_once(&cfg, &ctx, &listed).await;
+                // The drafts mirror's reconcile (#0143), after the sync and
+                // whatever it did: the Drafts folder is read on its own, so a
+                // failed sync of the mail folders does not hold it back, and
+                // a failed reconcile is logged rather than failing the tick.
+                if cfg.auth_method != crate::config::AuthMethod::Graph {
+                    if let Err(e) = crate::draft_mirror::reconcile_account(&cfg).await {
+                        warn!(
+                            "[drafts] reconciling the drafts of {} failed: {e:#}",
+                            cfg.name
+                        );
+                    }
+                    publish_mirror_state(&cfg, &watch);
+                }
+                synced
             })
             .await
             .and_then(|inner| inner)?;

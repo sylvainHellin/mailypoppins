@@ -4249,13 +4249,24 @@ pub enum MissingAttachment {
 ///
 /// The one assembly [`build_draft_message`] and [`build_server_draft`] share,
 /// so a draft in Outlook's Drafts looks like the message it would send.
+///
+/// `source` is the draft file's own bytes, which a server copy carries in a
+/// comment at the end of its HTML part (#0143,
+/// [`crate::parse::draft_source_comment`]) so mp on another machine reads the
+/// draft back whole; a sent message carries none.
 pub fn draft_mime_body(
     draft: &EmailDraft,
     email_config: &EmailSettings,
     signature: Option<&str>,
     missing: MissingAttachment,
+    source: Option<&[u8]>,
 ) -> Result<MultiPart> {
-    let body_html = draft_html_body(draft, email_config, signature);
+    let mut body_html = draft_html_body(draft, email_config, signature);
+    if let Some(source) = source {
+        body_html.push('\n');
+        body_html.push_str(&crate::parse::draft_source_comment(source));
+        body_html.push('\n');
+    }
     let alternative = MultiPart::alternative()
         .singlepart(
             SinglePart::builder()
@@ -4392,7 +4403,14 @@ pub fn build_server_draft(
     {
         builder = builder.reply_to(mailbox);
     }
-    let body = draft_mime_body(draft, email_config, None, MissingAttachment::Skip)?;
+    let source = std::fs::read(&draft.path).ok();
+    let body = draft_mime_body(
+        draft,
+        email_config,
+        None,
+        MissingAttachment::Skip,
+        source.as_deref(),
+    )?;
     let message = builder
         .multipart(body)
         .context("Failed to build the draft's server copy")?;
@@ -4563,6 +4581,7 @@ pub fn build_draft_message(
                 email_config,
                 signature,
                 MissingAttachment::Refuse,
+                None,
             )?)
             .context("Failed to build email message")?
     };

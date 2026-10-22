@@ -390,6 +390,89 @@ pub fn set_draft_server_message_id(path: &Path, message_id: &str) -> Result<()> 
     )
 }
 
+/// Turn the draft file at `path` into a conflict copy (#0143): a fresh `id:`,
+/// `conflict_of:` naming the draft it was split from, and no
+/// `server_message_id:`, since its text is not the server copy's and a conflict
+/// copy is never pushed. Every other byte stays.
+pub fn mark_conflict_copy(path: &Path, id: &str, conflict_of: &str) -> Result<()> {
+    rewrite_frontmatter_scalars_at(
+        path,
+        &[
+            ("id", FieldWrite::Set(yaml_dq_escape(id))),
+            ("conflict_of", FieldWrite::Set(yaml_dq_escape(conflict_of))),
+            ("server_message_id", FieldWrite::ClearIfPresent),
+        ],
+    )
+}
+
+/// Record the `Message-ID` a draft answers in its `in_reply_to:`
+/// frontmatter, in place (#0143's import of a reply started in another
+/// client).
+pub fn set_draft_in_reply_to(path: &Path, message_id: &str) -> Result<()> {
+    rewrite_frontmatter_scalars_at(
+        path,
+        &[("in_reply_to", FieldWrite::Set(yaml_dq_escape(message_id)))],
+    )
+}
+
+/// Replace the body of the draft file at `path`, keeping its frontmatter
+/// byte for byte (#0143's pull).
+pub fn replace_draft_body(path: &Path, body: &str) -> Result<()> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read file: {}", path.display()))?;
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let after_open = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))
+        .ok_or_else(|| anyhow!("No frontmatter found (file does not start with '---')"))?;
+    let mut header_end = None;
+    let mut cursor = 0usize;
+    while cursor < after_open.len() {
+        let rest = &after_open[cursor..];
+        let (line, advance) = match rest.find('\n') {
+            Some(nl) => (&rest[..nl], nl + 1),
+            None => (rest, rest.len()),
+        };
+        if line.trim_end_matches('\r') == "---" {
+            header_end = Some(cursor);
+            break;
+        }
+        cursor += advance;
+    }
+    let header_end =
+        header_end.ok_or_else(|| anyhow!("Malformed frontmatter: no closing '---' fence"))?;
+    let body = body.trim_end();
+    let mut rebuilt = String::new();
+    rebuilt.push_str("---");
+    rebuilt.push_str(newline);
+    rebuilt.push_str(&after_open[..header_end]);
+    rebuilt.push_str("---");
+    rebuilt.push_str(newline);
+    rebuilt.push_str(newline);
+    rebuilt.push_str(&body.replace('\n', newline));
+    rebuilt.push_str(newline);
+    write_atomic(path, rebuilt.as_bytes())
+        .with_context(|| format!("Failed to write file: {}", path.display()))
+}
+
+/// The part of a draft body from the quote marker on, `None` when the body
+/// has no marker: what a pull keeps of the local file (#0143), since Outlook
+/// and Apple Mail rewrite a quoted thread in ways mp would not round-trip.
+pub fn quoted_tail(body: &str) -> Option<&str> {
+    let mut offset = 0usize;
+    for line in body.split_inclusive('\n') {
+        if is_quote_marker_line(line) {
+            return Some(&body[offset..]);
+        }
+        offset += line.len();
+    }
+    None
+}
+
 /// Which draft a [`SourceMessage`] is turned into.
 ///
 /// It lives beside the source rather than beside the builder that consumes it

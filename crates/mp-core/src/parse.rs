@@ -494,6 +494,121 @@ pub fn looks_like_html(s: &str) -> bool {
     .is_match(s)
 }
 
+/// The comment a draft's copy in the server's Drafts folder carries its source
+/// file in (#0143): the draft's Markdown file whole, base64, at the end of the
+/// HTML part.
+///
+/// HTML comments survive mp's own APPEND on both servers and are dropped by
+/// every foreign edit (the probe of 2026-10-20), so a copy that still carries
+/// one is exactly the file mp pushed: mp on the other machine reads it back
+/// byte for byte, and a copy without it was edited elsewhere and is converted
+/// from its HTML instead ([`draft_html_to_markdown`]).
+const DRAFT_SOURCE_TAG: &str = "mp:source v1";
+
+/// The comment carrying `bytes` as a draft's source.
+pub fn draft_source_comment(bytes: &[u8]) -> String {
+    use base64::Engine;
+    format!(
+        "<!-- {DRAFT_SOURCE_TAG} {} -->",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+/// The source file a draft copy's HTML carries, `None` when it carries none or
+/// the comment does not decode.
+pub fn draft_source_of(html: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let start = html.find(&format!("<!-- {DRAFT_SOURCE_TAG} "))? + DRAFT_SOURCE_TAG.len() + 6;
+    let end = start + html[start..].find("-->")?;
+    let encoded: String = html[start..end]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()
+}
+
+/// Where a draft's own text ends in the HTML of its server copy (#0143): mp's
+/// quote marker when the comment survived, Apple Mail's cited block quote,
+/// Outlook's reply header (`divRplyFwdMsg`) or its append-on-send block,
+/// whichever comes first. `None` for a draft that quotes nothing.
+pub fn draft_reply_boundary(html: &str) -> Option<usize> {
+    let lower = html.to_ascii_lowercase();
+    let mut found: Vec<usize> = Vec::new();
+    for marker in ["<!-- mp:quote -->", "<blockquote type=\"cite\""] {
+        if let Some(at) = lower.find(marker) {
+            found.push(at);
+        }
+    }
+    for id in [
+        "id=\"divrplyfwdmsg\"",
+        "id=divrplyfwdmsg",
+        "id=\"appendonsend\"",
+        "id=appendonsend",
+    ] {
+        if let Some(at) = lower.find(id) {
+            // The tag the attribute sits in starts the boundary.
+            found.push(lower[..at].rfind('<').unwrap_or(at));
+        }
+    }
+    found.into_iter().min()
+}
+
+/// The Markdown of a draft's own text in the HTML of a server copy edited in
+/// Outlook, Apple Mail or the Proton app (#0143): the part above
+/// [`draft_reply_boundary`], through `htmd` (CommonMark with GFM tables,
+/// escaping and nested block quotes), with `<head>`, `<style>` and
+/// `<script>` skipped, Word's fake list bullets turned into Markdown items and
+/// trailing non-breaking spaces trimmed.
+///
+/// [`html_to_plain`] stays the renderer of received mail; this one keeps the
+/// structure a draft's Markdown has.
+pub fn draft_html_to_markdown(html: &str) -> String {
+    let own = match draft_reply_boundary(html) {
+        Some(at) => &html[..at],
+        None => html,
+    };
+    // The list and rule markers a draft written in mp uses: `- ` items with
+    // one space, as a person types them.
+    let options = htmd::options::Options {
+        bullet_list_marker: htmd::options::BulletListMarker::Dash,
+        ul_bullet_spacing: 1,
+        ol_number_spacing: 1,
+        hr_style: htmd::options::HrStyle::Dashes,
+        ..Default::default()
+    };
+    let converter = htmd::HtmlToMarkdown::builder()
+        .options(options)
+        .skip_tags(vec!["head", "style", "script", "title", "meta"])
+        .build();
+    let markdown = converter
+        .convert(own)
+        .unwrap_or_else(|_| html_to_plain(own));
+    let mut lines: Vec<String> = Vec::new();
+    for line in markdown.lines() {
+        let line = line.trim_end_matches(|c: char| c == '\u{a0}' || c.is_whitespace());
+        // Word writes a list as paragraphs whose bullet is a character of
+        // their own (`·`, `o`, `§` in Symbol and Wingdings), which arrive as
+        // text: a Markdown list item is what the draft meant.
+        let trimmed = line.trim_start_matches('\u{a0}').trim_start();
+        let line = match trimmed.chars().next() {
+            Some(bullet @ ('·' | '•' | '▪' | '§'))
+                if trimmed[bullet.len_utf8()..].starts_with(|c: char| c.is_whitespace()) =>
+            {
+                format!("- {}", trimmed[bullet.len_utf8()..].trim_start())
+            }
+            _ => line.to_string(),
+        };
+        let blank = line.trim().is_empty();
+        if blank && lines.last().is_some_and(|last: &String| last.is_empty()) {
+            continue;
+        }
+        lines.push(if blank { String::new() } else { line });
+    }
+    lines.join("\n").trim().to_string()
+}
+
 /// Convert a small snippet of HTML to Markdown, preserving links as
 /// `[text](url)` and line breaks.
 ///
@@ -2802,5 +2917,58 @@ Content-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n--B--\r\n"
             assert!(subject.starts_with(stem));
             assert!(name.len() <= 255);
         }
+    }
+
+    /// A draft's source comment round-trips its bytes whole, and HTML without
+    /// one, or with one that does not decode, carries none (#0143).
+    #[test]
+    fn a_drafts_source_comment_round_trips() {
+        let file = "---\nid: \"d1\"\nsubject: Grüße\nstatus: draft\n---\n\n<!-- mp:quote -->\n";
+        let html = format!("<p>x</p>\n{}\n", draft_source_comment(file.as_bytes()));
+        assert_eq!(draft_source_of(&html).as_deref(), Some(file.as_bytes()));
+        assert_eq!(draft_source_of("<p>x</p>"), None);
+        assert_eq!(draft_source_of("<!-- mp:source v1 not*base64 -->"), None);
+    }
+
+    /// The draft's own text ends at the first quote wrapper: mp's marker,
+    /// Apple Mail's cited block quote, Outlook's reply header or its
+    /// append-on-send block.
+    #[test]
+    fn the_reply_boundary_is_the_first_quote_wrapper() {
+        assert_eq!(draft_reply_boundary("<p>hi</p>"), None);
+        for html in [
+            "<p>hi</p><!-- mp:quote --><p>q</p>",
+            "<p>hi</p><blockquote type=\"cite\"><p>q</p></blockquote>",
+            "<p>hi</p><div id=\"divRplyFwdMsg\" dir=\"ltr\">From</div>",
+            "<p>hi</p><div class=x id=appendonsend></div>",
+        ] {
+            assert_eq!(draft_reply_boundary(html), Some(9), "{html}");
+        }
+    }
+
+    /// A foreign edit's HTML becomes the Markdown a draft has: emphasis,
+    /// links and `- ` lists kept, `<style>` skipped, Word's fake bullets
+    /// turned into items, trailing non-breaking spaces trimmed, and nothing
+    /// below the quote boundary.
+    #[test]
+    fn a_foreign_drafts_html_converts_to_draft_markdown() {
+        let html = "<html><head><style>p { color: red }</style></head><body>\
+            <p>Hallo <b>Robin</b>,&nbsp;</p>\
+            <p class=MsoListParagraph>·&nbsp;&nbsp;erstens</p>\
+            <ul><li>zwei</li></ul>\
+            <p><a href=\"https://example.com\">Link</a></p>\
+            <div id=\"divRplyFwdMsg\">From: Robin</div><p>alter Text</p></body></html>";
+        let md = draft_html_to_markdown(html);
+        assert!(md.starts_with("Hallo **Robin**,"), "{md}");
+        assert!(md.contains("- erstens"), "{md}");
+        assert!(md.contains("- zwei"), "{md}");
+        assert!(md.contains("[Link](https://example.com)"), "{md}");
+        assert!(!md.contains("color"), "{md}");
+        assert!(!md.contains("alter Text"), "{md}");
+        assert!(
+            md.lines()
+                .all(|l| !l.ends_with('\u{a0}') && !l.ends_with(' ')),
+            "{md:?}"
+        );
     }
 }

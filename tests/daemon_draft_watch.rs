@@ -2694,3 +2694,19 @@ fn conflicts_failures_and_a_switched_off_mirror_have_their_own_states() {
         assert!(!summary.owes_push);
     }
 }
+
+/// A second conflict copy is `<stem>.conflict-2.md`, which marks its draft as
+/// much as the first does; a draft whose name merely starts the same way is
+/// no conflict copy.
+#[test]
+fn a_numbered_conflict_copy_marks_its_draft_too() {
+    let root = TempDir::new().expect("tempdir");
+    let dir = drafts_dir_of(&root, "alpha");
+    let draft = dir.join("angebot.md");
+    fs::write(&draft, "x").unwrap();
+    assert!(!mailypoppins::daemon::watch::has_conflict_copy(&draft));
+    fs::write(dir.join("angebot.conflictual.md"), "x").unwrap();
+    assert!(!mailypoppins::daemon::watch::has_conflict_copy(&draft));
+    fs::write(dir.join("angebot.conflict-2.md"), "x").unwrap();
+    assert!(mailypoppins::daemon::watch::has_conflict_copy(&draft));
+}

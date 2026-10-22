@@ -484,3 +484,294 @@ fn a_retired_draft_is_pruned_after_thirty_days_from_its_retirement() {
     assert_eq!(prune_retired("tum", later), 1);
     assert!(!retired.exists());
 }
+
+// ---------------------------------------------------------------------------
+// The reconcile (#0143 step 5)
+// ---------------------------------------------------------------------------
+
+use super::reconcile::{reconcile, ReconcileReport};
+
+/// A copy of `mid` as Outlook saves an edit of it: one `text/html` part, no
+/// source comment, Outlook's reply header above the quote it rewrote.
+fn outlook_copy(mid: &str, to: &str, subject: &str, html_body: &str) -> Vec<u8> {
+    format!(
+        "Message-ID: {mid}\r\nSubject: {subject}\r\nFrom: me@tum.de\r\nTo: {to}\r\n\
+         Bcc: chef@example.com\r\nMIME-Version: 1.0\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\r\n\
+         <html><head><style>p {{ margin: 0 }}</style></head><body>{html_body}\
+         <div id=\"divRplyFwdMsg\"><b>From:</b> Robin</div><p>rewritten quote</p></body></html>\r\n"
+    )
+    .into_bytes()
+}
+
+fn mid_of(path: &std::path::Path) -> String {
+    crate::draft::parse_email_draft(path)
+        .unwrap()
+        .frontmatter
+        .server_message_id
+        .unwrap()
+}
+
+fn reconciled(fx: &Fixture, folder: &mut FakeFolder) -> ReconcileReport {
+    block_on(reconcile(&fx.mirror(9000), folder)).unwrap()
+}
+
+/// Losing the store loses the rows and nothing else: the reconcile finds each
+/// draft's copy by its Message-ID, sees the copy is the file, and writes the
+/// row back, with no second copy and no conflict.
+#[test]
+fn a_lost_row_is_recovered_from_the_copy_that_is_the_file() {
+    let fx = Fixture::new();
+    let path = fx.write("a", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let uid = fx.row("d1").unwrap().uid;
+    draft_sync::delete(&fx.store, "tum", "d1").unwrap();
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(report.recovered, 1, "{report:?}");
+    assert_eq!(report.conflicts, 0);
+    assert_eq!(fx.row("d1").unwrap().uid, uid);
+    assert_eq!(folder.live().len(), 1);
+    assert_eq!(
+        push::enqueue_owed(&fx.store, &fx.account).unwrap(),
+        0,
+        "synced"
+    );
+
+    // A push before the reconcile ran reconciles instead of duplicating.
+    draft_sync::delete(&fx.store, "tum", "d1").unwrap();
+    block_on(push::push(&fx.mirror(2), &mut folder, "d1")).unwrap();
+    assert_eq!(folder.live().len(), 1, "{:?}", folder.log);
+    assert!(fx.row("d1").is_some());
+    let _ = path;
+}
+
+/// An edit in Outlook reaches the file: the recipients and the subject from
+/// the copy's headers, the text above the quote from its HTML in Markdown,
+/// and the quote below the marker as the file had it. An approved draft is
+/// demoted, and the row names the edited copy.
+#[test]
+fn an_outlook_edit_is_pulled_above_the_quote_and_demotes_an_approval() {
+    let fx = Fixture::new();
+    let path = fx.write(
+        "re",
+        "d1",
+        "",
+        "Danke!\n\n<!-- mp:quote -->\n\n> Robin wrote:\n> Original",
+    );
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let approved = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("status: draft", "status: approved");
+    std::fs::write(&path, approved).unwrap();
+    block_on(push::push(&fx.mirror(2), &mut folder, "d1")).unwrap();
+    let mid = mid_of(&path);
+    let old = folder.live()[0].uid;
+    folder.remove(old);
+    let edited = folder.put(&outlook_copy(
+        &mid,
+        "robin@example.com, kim@example.com",
+        "Angebot (neu)",
+        "<p>Danke, <b>gerne</b>!</p><ul><li>eins</li><li>zwei</li></ul>",
+    ));
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!((report.pulled, report.conflicts), (1, 0), "{report:?}");
+    let draft = crate::draft::parse_email_draft(&path).unwrap();
+    assert_eq!(
+        draft.frontmatter.to.as_deref(),
+        Some("robin@example.com, kim@example.com")
+    );
+    assert_eq!(draft.frontmatter.subject, "Angebot (neu)");
+    assert_eq!(
+        draft.frontmatter.status,
+        crate::types::EmailStatus::Draft,
+        "demoted"
+    );
+    assert_eq!(
+        draft.frontmatter.server_message_id.as_deref(),
+        Some(mid.as_str())
+    );
+    let body = &draft.body_markdown;
+    assert!(body.contains("Danke, **gerne**!"), "{body}");
+    assert!(body.contains("- eins\n- zwei"), "{body}");
+    assert!(!body.contains("rewritten quote"), "{body}");
+    assert!(
+        !body.contains("margin"),
+        "the style block is skipped: {body}"
+    );
+    assert!(
+        body.contains("<!-- mp:quote -->\n\n> Robin wrote:"),
+        "{body}"
+    );
+    let row = fx.row("d1").unwrap();
+    assert_eq!(row.uid, edited);
+    assert_eq!(row.synced_hash, file_hash(&std::fs::read(&path).unwrap()));
+    assert_eq!(
+        push::enqueue_owed(&fx.store, &fx.account).unwrap(),
+        0,
+        "no echo push"
+    );
+}
+
+/// Both sides changed since they last agreed: the draft takes the server's
+/// version and the local text is kept in `<name>.conflict.md` under a fresh
+/// id, which is never pushed.
+#[test]
+fn an_edit_on_both_sides_keeps_the_local_text_as_a_conflict_copy() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Original");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let mid = mid_of(&path);
+    folder.remove(folder.live()[0].uid);
+    folder.put(&outlook_copy(
+        &mid,
+        "robin@example.com",
+        "Angebot",
+        "<p>Server text</p>",
+    ));
+    let local = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Original", "Local text");
+    std::fs::write(&path, &local).unwrap();
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(report.conflicts, 1, "{report:?}");
+    let draft = crate::draft::parse_email_draft(&path).unwrap();
+    assert!(draft.body_markdown.contains("Server text"));
+    let copy_path = path.with_file_name("angebot.conflict.md");
+    let copy = crate::draft::parse_email_draft(&copy_path).unwrap();
+    assert!(copy.body_markdown.contains("Local text"));
+    assert_eq!(copy.frontmatter.conflict_of.as_deref(), Some("d1"));
+    assert_ne!(copy.frontmatter.id.as_deref(), Some("d1"), "a fresh id");
+    assert_eq!(copy.frontmatter.server_message_id, None);
+    assert_eq!(
+        push::enqueue_owed(&fx.store, &fx.account).unwrap(),
+        0,
+        "never pushed"
+    );
+}
+
+/// A copy sent or deleted in another client takes the draft with it: the file
+/// moves to `drafts/.retired/` and is not imported back.
+#[test]
+fn a_copy_gone_elsewhere_retires_the_draft() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    folder.remove(folder.live()[0].uid);
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(report.retired, 1);
+    assert!(!path.exists());
+    assert!(path
+        .parent()
+        .unwrap()
+        .join(crate::draft::RETIRED_DIR)
+        .join("angebot.md")
+        .exists());
+    assert!(fx.row("d1").is_none());
+    assert_eq!(reconciled(&fx, &mut folder), ReconcileReport::default());
+}
+
+/// Apple Mail saves an edit under a new Message-ID. The one new copy with the
+/// draft's subject, recipients and reply target is the draft, relinked and
+/// pulled rather than retired and imported twice.
+#[test]
+fn an_apple_mail_edit_under_a_new_message_id_is_relinked() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    folder.remove(folder.live()[0].uid);
+    folder.put(&outlook_copy(
+        "<0DC386F6-APPLE@tum.de>",
+        "robin@example.com",
+        "Angebot",
+        "<p>Apple text</p>",
+    ));
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!((report.pulled, report.retired), (1, 0), "{report:?}");
+    assert_eq!(mid_of(&path), "<0DC386F6-APPLE@tum.de>");
+    assert!(crate::draft::parse_email_draft(&path)
+        .unwrap()
+        .body_markdown
+        .contains("Apple text"));
+}
+
+/// A draft mp pushed on the other machine arrives whole, under its own id,
+/// with a row, and converges: a second reconcile changes nothing.
+#[test]
+fn a_draft_from_the_other_machine_is_imported_under_its_id() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    {
+        // The other machine: its own data dir, the same server folder.
+        let other = Fixture::new();
+        other.write("fern", "d-remote", "", "Von drüben");
+        block_on(push::push(&other.mirror(1), &mut folder, "d-remote")).unwrap();
+    }
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(report.imported, 1, "{report:?}");
+    let local = find_local("tum", "d-remote").expect("imported under its id");
+    assert!(local.draft.body_markdown.contains("Von drüben"));
+    assert!(fx.row("d-remote").is_some());
+    assert_eq!(reconciled(&fx, &mut folder), ReconcileReport::default());
+    assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 0);
+}
+
+/// A copy whose draft was retired here is deleted, never imported back; a
+/// draft removed by hand keeps its copy's text in `.retired/` before the copy
+/// goes.
+#[test]
+fn a_retired_drafts_copy_is_deleted_and_a_hand_removed_one_is_kept() {
+    let fx = Fixture::new();
+    let gone = fx.write("gone", "d-gone", "", "weg");
+    let removed = fx.write("removed", "d-hand", "", "von Hand");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d-gone")).unwrap();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d-hand")).unwrap();
+    crate::draft::retire_draft_files(&gone).unwrap();
+    std::fs::remove_file(&removed).unwrap();
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(report.deleted, 2, "{report:?}");
+    assert_eq!(report.imported, 0);
+    assert!(folder.live().is_empty());
+    let kept = crate::config::drafts_dir("tum")
+        .join(crate::draft::RETIRED_DIR)
+        .join("d-hand.md");
+    assert!(std::fs::read_to_string(kept).unwrap().contains("von Hand"));
+    assert!(fx.row("d-hand").is_none() && fx.row("d-gone").is_none());
+}
+
+/// A push that died between its APPEND and its delete leaves two copies; the
+/// newer one is the file, so the reconcile records it and removes the older,
+/// with no conflict.
+#[test]
+fn a_crash_between_append_and_delete_leaves_one_copy_after_the_reconcile() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let edited = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("eins", "zwei");
+    std::fs::write(&path, &edited).unwrap();
+    // The APPEND of the edit landed; the delete and the row did not.
+    let local = find_local("tum", "d1").unwrap();
+    let raw = crate::send::build_server_draft(&local.draft, "me@tum.de", &fx.email, &mid_of(&path))
+        .unwrap();
+    let newer = folder.put(&raw);
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(report.conflicts, 0, "{report:?}");
+    assert_eq!(folder.live().len(), 1);
+    assert_eq!(fx.row("d1").unwrap().uid, newer);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+}

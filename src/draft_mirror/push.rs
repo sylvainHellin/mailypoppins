@@ -93,15 +93,30 @@ pub async fn push<F: DraftsFolder>(
 
     let mailbox = drafts_mailbox(mirror.store, mirror.account);
     let info = folder.select(&mailbox).await?;
+    // Every copy before this one, which the row names when there is one; the
+    // reconcile owns the copies a crash or another machine left beside it.
+    let before = folder.uids_of(&message_id).await?;
+    let row_current = row
+        .as_ref()
+        .is_some_and(|row| row.mailbox == mailbox && row.uidvalidity == info.uidvalidity);
+    if !row_current && !before.is_empty() {
+        // A draft with copies and no row of this folder: the store was
+        // rebuilt, or a push died before its row. Which side changed is the
+        // reconcile's to decide, and a push here would replace a copy edited
+        // elsewhere; the reconcile records or pulls, and a push still owed
+        // after it is queued again.
+        info!(
+            "[drafts] {account}/{draft_id} has copies and no row; reconciling instead of pushing"
+        );
+        super::reconcile::reconcile(mirror, folder).await?;
+        return Ok(());
+    }
     let raw = crate::send::build_server_draft(
         &local.draft,
         &mirror.account.default_from,
         mirror.email,
         &message_id,
     )?;
-    // Every copy before this one, which the row names when there is one; the
-    // reconcile owns the copies a crash or another machine left beside it.
-    let before = folder.uids_of(&message_id).await?;
     folder.append(&raw).await?;
     let after = folder.uids_of(&message_id).await?;
     let new_uid = after
@@ -112,19 +127,13 @@ pub async fn push<F: DraftsFolder>(
         .or_else(|| after.last().copied())
         .ok_or_else(|| anyhow!("the copy of {draft_id} was appended and is not in {mailbox}"))?;
 
+    // The copy the row named; any other is the reconcile's.
     let replaced: Vec<u32> = match &row {
-        Some(row) if row.mailbox == mailbox && row.uidvalidity == info.uidvalidity => [row.uid]
+        Some(row) if row_current => [row.uid]
             .into_iter()
             .filter(|uid| *uid != new_uid)
             .collect(),
-        // No row, or one from another folder or UIDVALIDITY: this is a first
-        // push, or the store was rebuilt, and every older copy is one mp wrote
-        // under this draft's Message-ID.
-        _ => before
-            .iter()
-            .copied()
-            .filter(|uid| *uid != new_uid)
-            .collect(),
+        _ => Vec::new(),
     };
     if !replaced.is_empty() {
         if let Err(e) = folder.delete(&replaced).await {

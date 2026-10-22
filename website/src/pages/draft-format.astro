@@ -188,6 +188,18 @@ Email body here.`;
         open is not interrupted.
       </p>
       <p>
+        Every sync also reads the server's Drafts folder back. An edit made in Outlook, Apple
+        Mail or the Proton app is written into the draft file: the recipients, the subject and
+        the text above the quote, converted to Markdown, while the quoted thread below
+        <code>&lt;!-- mp:quote --&gt;</code> stays as mp wrote it. A draft edited both here and
+        on the server keeps the server's version, and your local text is saved beside it as
+        <code>&lt;name&gt;.conflict.md</code> to merge by hand and delete. A draft sent or
+        deleted in another client moves to <code>drafts/.retired/</code>, and a draft written
+        in mp on your other machine appears here as it was written there. An approved draft
+        that the server changed goes back to <code>status: draft</code>, so nothing is sent
+        that you did not approve.
+      </p>
+      <p>
         The Drafts list shows where each draft stands: synced, pending (a push is owed),
         conflict, or failed (the server refused the push; the next save tries again).
         A conflict copy (<code>conflict_of</code>) is never pushed, and neither is a sent draft.
