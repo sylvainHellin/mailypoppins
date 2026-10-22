@@ -102,17 +102,11 @@ fn run_loop(
     // The daemon's event stream, which is where the two watcher threads per
     // account went (P5-U8): the daemon holds the IDLE connection and the Graph
     // poller now, beside the engine that ingests what they find, and this
-    // client is told about a tick rather than running one.
-    //
-    // `watcher_active` keeps its name and changes its meaning with them: it is
-    // the session's health, which is the honest answer to "is anything telling
-    // me about new mail", and the sidebar renders it unchanged.
+    // client is told about a tick rather than running one. A lost session is
+    // a warning line in the activity log and a reconnect is another, which is
+    // what the desktop's reconnecting banner says; no pane draws a watcher
+    // indicator.
     let events = app.session.as_mut().and_then(session::Session::events);
-    let watching = events.is_some();
-    for acct in app.accounts.iter_mut() {
-        acct.watcher_active = watching;
-    }
-    app.watcher_active = watching;
 
     // Background task results channel
     let (bg_tx, bg_rx) = mpsc::channel::<BgResult>();

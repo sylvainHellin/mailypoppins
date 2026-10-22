@@ -134,7 +134,7 @@ use crate::daemon::dispatch::{ClientCtx, ClientKind};
 use crate::daemon::runtime::InstanceMeta;
 use crate::daemon::server::DaemonState;
 use crate::parse::FetchedEmail;
-use crate::tui::app::{build_mailboxes, Action, App, MailboxKind};
+use crate::tui::app::{build_mailboxes, Action, App, MailboxKind, StatusLevel};
 use crate::tui::commands::dispatch;
 use crate::tui::events::{drain, Applied, Incoming, Subscription};
 use crate::tui::queries::{list_emails, Queries};
@@ -816,19 +816,16 @@ fn a_reconnect_re_bootstraps_before_it_accepts_the_new_instance() {
 
 /// A disconnect is shown and calls nobody.
 ///
-/// `watcher_active` is the sidebar indicator the IMAP watcher used to own
-/// (`src/tui/mod.rs`, `WatchEvent::Error` / `WatchEvent::Reconnected`); the
-/// daemon session owns it now, and it is the one field a frame reads to say
-/// whether this client is being told about new mail at all. Calling the daemon
-/// on the way down is the direct fallback P5-U7 forbids, expressed as a call
-/// count.
+/// The warning lands in the activity log, which is where the TUI says it is
+/// no longer being told about new mail, as the desktop's reconnecting banner
+/// does. Calling the daemon on the way down is the direct fallback P5-U7
+/// forbids, expressed as a call count.
 #[test]
 fn a_disconnect_is_shown_and_calls_nobody() {
     let fixture = Fixture::new();
     seed_inbox();
     let mut app = app_on_inbox(&fixture);
     watermarked(&mut app);
-    app.watcher_active = true;
     fixture.forget();
     let (sender, events) = stream();
     sender
@@ -839,9 +836,14 @@ fn a_disconnect_is_shown_and_calls_nobody() {
 
     assert_eq!(drain(&mut app, &fixture, &events), 1);
 
+    let last = app.status_log.back().expect("the disconnect is logged");
+    assert_eq!(
+        last.message, "The daemon is not reachable; reconnecting...",
+        "a client with no session says it is not being told about new mail"
+    );
     assert!(
-        !app.watcher_active,
-        "a client with no session is not being told about new mail"
+        matches!(last.level, StatusLevel::Warning),
+        "as a warning"
     );
     assert!(
         fixture.methods().is_empty(),
@@ -1377,7 +1379,6 @@ fn account_state(name: &str) -> crate::tui::app::AccountState {
         preview_scroll: 0,
         selection: std::collections::HashSet::new(),
         search_query: String::new(),
-        watcher_active: false,
         opening: false,
         has_unseen: false,
         sync_health: crate::sync_health::SyncHealth::default(),

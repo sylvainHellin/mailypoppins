@@ -748,7 +748,6 @@ fn handle(app: &mut App, door: &dyn Queries, incoming: Incoming) {
         }
         Incoming::Reconnected { instance_id } => {
             log::info!("[events] reconnected to {instance_id}");
-            watching(app, true);
             app.set_status("Reconnected to the daemon".to_string());
             // The instance and the revision come from the bootstrap's answer
             // rather than from this notice: the notice is the client's guess,
@@ -757,22 +756,12 @@ fn handle(app: &mut App, door: &dyn Queries, incoming: Incoming) {
         }
         Incoming::Disconnected { reason } => {
             log::warn!("[events] the daemon session was lost: {reason}");
-            watching(app, false);
             app.set_status_level(
                 "The daemon is not reachable; reconnecting...".to_string(),
                 StatusLevel::Warning,
             );
         }
     }
-}
-
-/// Whether this client is being told about new mail at all, which is what the
-/// sidebar's watcher indicator means since the watch moved into the daemon.
-fn watching(app: &mut App, live: bool) {
-    for account in &mut app.accounts {
-        account.watcher_active = live;
-    }
-    app.watcher_active = live;
 }
 
 /// Ask for the whole state again and apply it.

@@ -366,7 +366,6 @@ fn account_state() -> crate::tui::app::AccountState {
         preview_scroll: 0,
         selection: std::collections::HashSet::new(),
         search_query: String::new(),
-        watcher_active: false,
         opening: false,
         has_unseen: false,
         sync_health: crate::sync_health::SyncHealth::default(),

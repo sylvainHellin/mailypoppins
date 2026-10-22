@@ -124,7 +124,6 @@ pub struct App {
     /// pane is focused. `Some` means armed; the key handler and the list
     /// renderer both read exactly that.
     pub attach_file_input: Option<String>,
-    pub watcher_active: bool,
     pub imap_config: Option<mp_core::config::ImapConfig>,
     pub smtp_config: Option<mp_core::config::SmtpConfig>,
     pub graph_config: Option<mp_core::config::GraphConfig>,
@@ -391,7 +390,6 @@ impl App {
             zoomed: false,
             jump_date_input: None,
             attach_file_input: None,
-            watcher_active: false,
             imap_config: None,
             smtp_config: None,
             graph_config: None,
@@ -477,7 +475,6 @@ impl App {
             zoomed: false,
             jump_date_input: None,
             attach_file_input: None,
-            watcher_active: false,
             imap_config: None,
             smtp_config: None,
             graph_config: None,
@@ -545,7 +542,6 @@ impl App {
             acct.selection = self.selection.clone();
             acct.email_cache = self.email_cache.clone();
             acct.search_query = self.search_query.clone();
-            acct.watcher_active = self.watcher_active;
         }
     }
 
@@ -561,7 +557,6 @@ impl App {
             self.selection = acct.selection.clone();
             self.email_cache = acct.email_cache.clone();
             self.search_query = acct.search_query.clone();
-            self.watcher_active = acct.watcher_active;
             self.imap_config = acct.imap_config.clone();
             self.smtp_config = acct.smtp_config.clone();
             self.graph_config = acct.graph_config.clone();

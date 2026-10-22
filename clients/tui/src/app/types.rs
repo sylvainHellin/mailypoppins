@@ -934,7 +934,6 @@ pub struct AccountState {
     pub preview_scroll: u16,
     pub selection: std::collections::HashSet<EntryKey>,
     pub search_query: String,
-    pub watcher_active: bool,
     pub has_unseen: bool,
     /// Whether this account's store has not yet been opened in the background
     /// (#0003 two-phase startup). `AccountState::new` no longer opens the
@@ -1015,7 +1014,6 @@ impl AccountState {
             preview_scroll: 0,
             selection: std::collections::HashSet::new(),
             search_query: String::new(),
-            watcher_active: false,
             has_unseen: false,
             opening: true,
             sync_health: mp_core::sync_health::SyncHealth::default(),
@@ -1049,7 +1047,6 @@ impl AccountState {
             preview_scroll: 0,
             selection: std::collections::HashSet::new(),
             search_query: String::new(),
-            watcher_active: false,
             has_unseen: false,
             opening: false,
             sync_health: mp_core::sync_health::SyncHealth::default(),

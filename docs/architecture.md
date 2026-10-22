@@ -564,7 +564,7 @@ The watermark is `mp_client::StateTracker`; `EventState` wraps it with what is t
 
 `imap_watch`, the Graph poller, `watcher_loop` and `WatchEvent` are gone from the TUI; `src/daemon/runtime/watcher.rs` is where they went.
 One IDLE round of 300 s per IMAP account and one 60 s enumeration per Graph account, the same numbers and the same backoff curve the TUI's threads used, and a round that sees the mailbox move runs one quick tick and publishes the counts that moved with it.
-`AccountState::watcher_active` keeps its name and means the daemon session's health now.
+The TUI keeps no watcher flag: a lost daemon session is a warning line in the activity log and a reconnect another, as the desktop's reconnecting banner says it.
 
 ### No sessionless fallback, and the oracle that replaced it
 
