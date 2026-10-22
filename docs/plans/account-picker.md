@@ -2,7 +2,7 @@
 
 > Status: proposed (2026-10-22), implementation not started.
 > The ticket is [#0147](../tickets/0147-account-picker.md).
-> The plan proceeds on the recommendation of every decision under "Decisions for the owner", so a worker can start at Unit 1 without waiting.
+> The plan proceeds on the recommendation of every open decision under "Decisions for the owner", so a worker can start at Unit 1 without waiting; Decision 6 was decided on 2026-10-22.
 > Citations name a symbol and its file; line numbers are hints from 2026-10-22 and move with the code.
 > Research: [account picker scouting](../../.agents/research/2026-10-22-account-picker-scouting.md), [chord timeout scouting](../../.agents/research/2026-10-22-chord-timeout-scouting.md), [prior art](../../.agents/research/2026-10-22-chord-timeout-and-account-picker-prior-art.md).
 
@@ -152,11 +152,8 @@ Recommendation: remove the variant and the arm in Unit 1, since `ga` then a digi
 
 ### 6. Whether the TUI sidebar should list other accounts as collapsed rows
 
-The TUI sidebar shows only the active account, which already hides the others completely.
-Adding a collapsed row per other account would show their new-mail dot without opening the picker, at the cost of sidebar height in a forty-column pane and a second account switcher.
-Sylvain asked for the collapse "especially for the GUI, but same for the TUI".
-The recommendation leaves the TUI unchanged because its sidebar already shows only the active account.
-Recommendation: no TUI sidebar change; the picker carries the account list and the dot.
+Decided by Sylvain on 2026-10-22 (decision log, same date): the TUI sidebar stays as it is, and collapsing the other accounts is desktop only.
+The TUI sidebar shows only the active account, so the request is already met there; the picker carries the account list and the new-mail dot.
 
 ## Work units
 

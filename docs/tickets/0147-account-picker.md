@@ -16,7 +16,7 @@ Today the desktop sidebar draws every account expanded; the TUI sidebar already 
 
 ## Plan
 
-[docs/plans/account-picker.md](../plans/account-picker.md) holds the design, six owner decisions with a recommendation each, four work units, the docs to change and the risks.
+[docs/plans/account-picker.md](../plans/account-picker.md) holds the design, six owner decisions (five with a recommendation, Decision 6 decided on 2026-10-22), four work units, the docs to change and the risks.
 
 Research:
 
@@ -28,8 +28,8 @@ Research:
 
 - `ga` and the palette's "Switch account" open a list of every account in both clients, the current one preselected; `j`/`k` move, Enter switches, `1` to `9` jump, Esc and `q` cancel.
 - With one account, `ga` does nothing and the which-key popup leaves it out.
-- The desktop sidebar starts with only the selected account expanded; switching expands the new account, and a header click toggles an account for the session.
-- The TUI sidebar is unchanged, on the recommendation of the plan's Decision 6; the unreachable `KeyAction::JumpAccount` goes.
+- The desktop sidebar starts with only the selected account expanded; switching expands the new account, and a header click toggles an account for the session; an account expanded by hand stays expanded after it is left.
+- The TUI sidebar is unchanged (decided 2026-10-22, the plan's Decision 6); the unreachable `KeyAction::JumpAccount` goes.
 - `cargo test --workspace`, `pnpm test` and `pnpm build` pass, with the help and palette golden frames and `tui-keys.json` unchanged.
 
 ## Status

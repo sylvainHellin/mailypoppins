@@ -51,3 +51,10 @@ Why: the 1.2 s wait was too short, so a late second key fired its flat action (`
 Rejected: no timeout by default (an accidental prefix keeps the which-key overlay up until Escape; it stays a choice in Settings); 3 s (less room for the second key).
 Source: chat with Sylvain, 2026-10-22.
 Status: accepted
+
+## 2026-10-22 - The TUI sidebar keeps showing only the active account; collapsing the other accounts is desktop only
+
+Why: the TUI sidebar never lists the other accounts, so the request is already met there, and the `ga` picker covers switching. Ticket [#0147](docs/tickets/0147-account-picker.md), plan `docs/plans/account-picker.md` (Decision 6).
+Rejected: collapsed header rows for the other accounts in the TUI sidebar (extra work for the same result).
+Source: chat with Sylvain, 2026-10-22.
+Status: accepted
