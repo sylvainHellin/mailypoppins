@@ -1092,7 +1092,9 @@ function mutate(cmd: string, account: string, args: Record<string, unknown>): Mu
     if (cmd === "message_archive") dest = "archive";
     if (cmd === "message_move") {
       const wanted = String(args.destination);
-      dest = fixtures.bootstrap.snapshot.mailboxes[account]?.find((m) => m.slug === wanted || m.label === wanted)?.slug ?? null;
+      // A store key before a label, as the daemon resolves a destination (#0141).
+      const boxes = fixtures.bootstrap.snapshot.mailboxes[account] ?? [];
+      dest = (boxes.find((m) => m.slug === wanted) ?? boxes.find((m) => m.label === wanted))?.slug ?? null;
       if (dest === null) {
         out.failed.push({ row_id: rowId, error: refusedRow(method, `'${wanted}' is not a mailbox of ${account}`) });
         continue;

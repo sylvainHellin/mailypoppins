@@ -1331,9 +1331,10 @@ async fn daemon_mailboxes(
 /// The mailboxes a listing covers: the one `--mailbox` names, or every mailbox
 /// of the account but drafts.
 ///
-/// A name matches a store key, a sidebar label or a server name,
-/// case-insensitively, and an unknown one is an error naming what it could
-/// have been rather than an empty result.
+/// A name matches a store key, then a sidebar label, then a server name,
+/// case-insensitively ([`mp_protocol::state::pick_mailbox`], as the daemon
+/// resolves it), and an unknown one is an error naming what it could have been
+/// rather than an empty result.
 fn select_mailboxes(
     account: &str,
     rows: Vec<mp_protocol::state::MailboxRow>,
@@ -1346,14 +1347,9 @@ fn select_mailboxes(
     let Some(want) = mailbox else {
         return Ok(mailboxes);
     };
-    let names = |m: &mp_protocol::state::MailboxRow| {
-        want.eq_ignore_ascii_case(&m.slug)
-            || want.eq_ignore_ascii_case(&m.label)
-            || m.server
-                .as_deref()
-                .is_some_and(|server| want.eq_ignore_ascii_case(server))
-    };
-    if let Some(hit) = mailboxes.iter().find(|m| names(m)) {
+    if let Some(hit) =
+        mp_protocol::state::pick_mailbox(&mailboxes, want, mp_protocol::state::MailboxRow::names)
+    {
         return Ok(vec![hit.clone()]);
     }
     let known = mailboxes

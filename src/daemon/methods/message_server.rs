@@ -498,12 +498,24 @@ fn ingest_into(
 // message.search_server
 // ---------------------------------------------------------------------------
 
-/// One mailbox a search runs against: the sidebar label the hits are reported
-/// under, and the server name the session selects.
+/// One mailbox a search runs against: the store key a caller may name it by,
+/// the sidebar label the hits are reported under, and the server name the
+/// session selects.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchTarget {
+    slug: String,
     label: String,
     server_name: String,
+}
+
+impl SearchTarget {
+    fn names(&self) -> mp_protocol::state::MailboxNames<'_> {
+        mp_protocol::state::MailboxNames {
+            slug: &self.slug,
+            label: &self.label,
+            server: Some(&self.server_name),
+        }
+    }
 }
 
 /// The label a Graph search across every folder is reported under when it
@@ -577,6 +589,7 @@ fn search_request(
             .filter(|row| !default_only || row.policy == crate::config::FolderPolicy::Sync)
             .filter_map(|row| {
                 row.server.clone().map(|server_name| SearchTarget {
+                    slug: row.slug.clone(),
                     label: row.label.clone(),
                     server_name,
                 })
@@ -672,11 +685,12 @@ fn search_targets(
 
 /// The target `wanted` names.
 ///
-/// A configured mailbox by its sidebar label **or its server name**, which is
-/// one spelling more than [`super::message::resolve_mailbox`] accepts: the
-/// overlay holds a target of `(label, server_name)` and the search grammar's
-/// `in:` directive is matched against both, so the wire takes whichever the
-/// caller has in hand rather than making it re-derive the other.
+/// A sidebar mailbox by its store key, its label or its server name, in that
+/// order ([`mp_protocol::state::pick_mailbox`], as
+/// [`super::message::resolve_mailbox`] matches): the overlay holds a target of
+/// `(label, server_name)` and the search grammar's `in:` directive is matched
+/// against both, so the wire takes whichever the caller has in hand rather
+/// than making it re-derive the other.
 ///
 /// Any other name is a folder on the server, searched under its own name
 /// (Sylvain, 2026-10-22): the rule mailbox discovery (#0141) brings, where
@@ -687,17 +701,15 @@ fn pick_target(configured: &[SearchTarget], wanted: &str) -> Result<SearchTarget
     if wanted.trim().is_empty() {
         return Err(invalid_params("a mailbox name is not empty"));
     }
-    Ok(configured
-        .iter()
-        .find(|target| {
-            wanted.eq_ignore_ascii_case(&target.label)
-                || wanted.eq_ignore_ascii_case(&target.server_name)
-        })
-        .cloned()
-        .unwrap_or_else(|| SearchTarget {
-            label: wanted.to_string(),
-            server_name: wanted.to_string(),
-        }))
+    Ok(
+        mp_protocol::state::pick_mailbox(configured, wanted, SearchTarget::names)
+            .cloned()
+            .unwrap_or_else(|| SearchTarget {
+                slug: wanted.to_string(),
+                label: wanted.to_string(),
+                server_name: wanted.to_string(),
+            }),
+    )
 }
 
 /// One server search, from the credential resolution to the settle.
@@ -1110,10 +1122,12 @@ mod tests {
     fn a_target_is_a_configured_mailbox_or_any_server_folder() {
         let configured = vec![
             SearchTarget {
+                slug: "inbox".to_string(),
                 label: "Inbox".to_string(),
                 server_name: "INBOX".to_string(),
             },
             SearchTarget {
+                slug: "Team/Reports".to_string(),
                 label: "Extra".to_string(),
                 server_name: "Team/Reports".to_string(),
             },
@@ -1129,12 +1143,42 @@ mod tests {
         assert_eq!(
             pick_target(&configured, "Spesen").unwrap(),
             SearchTarget {
+                slug: "Spesen".to_string(),
                 label: "Spesen".to_string(),
                 server_name: "Spesen".to_string(),
             }
         );
         let refused = pick_target(&configured, " ").expect_err("an empty name");
         assert_eq!(refused.code, -32602);
+    }
+
+    /// #0141: a pinned extra called `Trash` is searched when it is named, not
+    /// the folder the server marks `\Trash`, which the sidebar labels `Trash`
+    /// and lists first.
+    #[test]
+    fn a_store_key_outranks_another_folders_label() {
+        let configured = vec![
+            SearchTarget {
+                slug: "Deleted Items".to_string(),
+                label: "Trash".to_string(),
+                server_name: "Deleted Items".to_string(),
+            },
+            SearchTarget {
+                slug: "Trash".to_string(),
+                label: "Trash".to_string(),
+                server_name: "Trash".to_string(),
+            },
+        ];
+        assert_eq!(
+            pick_target(&configured, "trash").unwrap().server_name,
+            "Trash"
+        );
+        assert_eq!(
+            pick_target(&configured, "deleted items")
+                .unwrap()
+                .server_name,
+            "Deleted Items"
+        );
     }
 
     /// A search that names no mailbox and no `in:` runs across every folder
@@ -1145,6 +1189,7 @@ mod tests {
     #[test]
     fn graph_searches_every_folder_at_once_when_no_mailbox_is_named() {
         let target = |name: &str| SearchTarget {
+            slug: name.to_string(),
             label: name.to_string(),
             server_name: name.to_string(),
         };

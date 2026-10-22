@@ -195,6 +195,53 @@ pub struct MailboxRow {
     pub badge: u64,
 }
 
+/// The names a mailbox goes by, in the order a name a person typed is matched
+/// against them: the store key, the sidebar label, then the server name.
+pub struct MailboxNames<'a> {
+    pub slug: &'a str,
+    pub label: &'a str,
+    pub server: Option<&'a str>,
+}
+
+/// The mailbox `wanted` names, matched case-insensitively one tier at a time
+/// across every row (#0141): any row's store key before any row's label, and
+/// any label before any server name.
+///
+/// The tiers are what keeps a pinned extra called `Trash` reachable: the
+/// folder the server marks `\Trash` (Exchange's `Deleted Items`) is labelled
+/// `Trash` and sorts first in the sidebar, so matching every name of one row
+/// before the next row's resolved `Trash` to it. The daemon, `mp` and the TUI
+/// all match through this one function.
+pub fn pick_mailbox<'r, T>(
+    rows: &'r [T],
+    wanted: &str,
+    names: impl Fn(&T) -> MailboxNames<'_>,
+) -> Option<&'r T> {
+    let wanted = wanted.trim();
+    (0..3).find_map(|tier| {
+        rows.iter().find(|row| {
+            let names = names(row);
+            let name = match tier {
+                0 => Some(names.slug),
+                1 => Some(names.label),
+                _ => names.server,
+            };
+            name.is_some_and(|n| n.eq_ignore_ascii_case(wanted))
+        })
+    })
+}
+
+impl MailboxRow {
+    /// This row's names, for [`pick_mailbox`].
+    pub fn names(&self) -> MailboxNames<'_> {
+        MailboxNames {
+            slug: &self.slug,
+            label: &self.label,
+            server: self.server.as_deref(),
+        }
+    }
+}
+
 /// One draft row: the same fields the `draft.changed` event carries, so a
 /// client's reducer is "replace the row with the payload".
 ///

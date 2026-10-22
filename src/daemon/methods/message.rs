@@ -2449,7 +2449,8 @@ pub(super) fn resolve_mailbox(account: &AccountConfig, wanted: &str) -> Result<S
 
 /// [`resolve_mailbox`] against a catalogue already in hand, which is the part
 /// a test drives. The mailboxes are the sidebar's (#0141): the fixed rows and
-/// every listed folder, matched by store key, label or server name.
+/// every listed folder, matched by store key, then label, then server name
+/// ([`mp_protocol::state::pick_mailbox`]).
 pub(super) fn resolve_in(
     account: &AccountConfig,
     catalogue: &crate::catalogue::Catalogue,
@@ -2459,13 +2460,9 @@ pub(super) fn resolve_in(
         .into_iter()
         .filter(|mailbox| mailbox.slug != DRAFTS_MAILBOX)
         .collect();
-    if let Some(hit) = mailboxes.iter().find(|m| {
-        wanted.eq_ignore_ascii_case(&m.slug)
-            || wanted.eq_ignore_ascii_case(&m.label)
-            || m.server
-                .as_deref()
-                .is_some_and(|server| wanted.eq_ignore_ascii_case(server))
-    }) {
+    if let Some(hit) =
+        mp_protocol::state::pick_mailbox(&mailboxes, wanted, crate::catalogue::SidebarRow::names)
+    {
         return Ok(hit.slug.clone());
     }
     let known: Vec<&str> = mailboxes.iter().map(|m| m.slug.as_str()).collect();
@@ -2496,6 +2493,45 @@ mod tests {
         let refused = resolve_mailbox(&account(), "drafts").expect_err("drafts is not listable");
         assert_eq!(refused.code, -32602);
         assert!(refused.message.contains("inbox"), "{}", refused.message);
+    }
+
+    /// #0141: a pinned extra called `Trash` beside Exchange's `Deleted Items`,
+    /// which the server marks `\Trash` and the sidebar labels `Trash`. The
+    /// name resolves to the extra's store key, not to the label that sorts
+    /// first; the role folder stays reachable by its own key.
+    #[test]
+    fn an_extra_named_like_a_role_label_resolves_to_its_own_key() {
+        use crate::catalogue::{Catalogue, ListedFolder};
+        use crate::config::{MailboxMapping, MailboxesConfig};
+        let account = AccountConfig {
+            name: "tum".to_string(),
+            mailboxes: MailboxesConfig {
+                inbox: Some(MailboxMapping {
+                    server: "INBOX".to_string(),
+                }),
+                extra: Some(vec![MailboxMapping {
+                    server: "Trash".to_string(),
+                }]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let listed = [
+            ListedFolder::named("INBOX"),
+            ListedFolder::named("Deleted Items").with_attributes(&["\\Trash"]),
+            ListedFolder::named("Trash"),
+        ];
+        let catalogue = Catalogue::resolve(&account, &listed);
+        assert_eq!(resolve_in(&account, &catalogue, "Trash").unwrap(), "Trash");
+        assert_eq!(resolve_in(&account, &catalogue, "trash").unwrap(), "Trash");
+        assert_eq!(
+            resolve_in(&account, &catalogue, "deleted items").unwrap(),
+            "Deleted Items"
+        );
+        assert_eq!(
+            catalogue.find("trash").map(|f| f.server.as_str()),
+            Some("Trash")
+        );
     }
 
     /// A rendition at the inline limit is answered whole; one byte over it is

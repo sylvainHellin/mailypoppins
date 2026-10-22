@@ -965,16 +965,21 @@ impl App {
     /// The `messages.mailbox` key of the mailbox an `in:` clause named,
     /// matched the way [`Self::search_target_by_name`] matches (#0105).
     pub fn local_mailbox_key_by_name(&self, name: &str) -> Option<String> {
-        let lower = name.to_lowercase();
-        self.mailboxes
-            .iter()
-            .find(|m| {
-                m.server_name
-                    .as_ref()
-                    .is_some_and(|s| s.to_lowercase() == lower)
-                    || m.label.to_lowercase() == lower
-            })
-            .map(mailbox_key)
+        self.mailbox_by_name(name).map(mailbox_key)
+    }
+
+    /// The sidebar mailbox `name` names: its store key, then its label, then
+    /// its server name, as the daemon and `mp` resolve one (#0141,
+    /// [`mp_protocol::state::pick_mailbox`]).
+    fn mailbox_by_name(&self, name: &str) -> Option<&MailboxInfo> {
+        fn names(m: &MailboxInfo) -> mp_protocol::state::MailboxNames<'_> {
+            mp_protocol::state::MailboxNames {
+                slug: &m.id,
+                label: &m.label,
+                server: m.server_name.as_deref(),
+            }
+        }
+        mp_protocol::state::pick_mailbox(&self.mailboxes, name, names)
     }
 
     /// The focused mailbox as a single [`SearchTarget`] for the form's
@@ -989,21 +994,12 @@ impl App {
     }
 
     pub fn search_target_by_name(&self, name: &str) -> Option<SearchTarget> {
-        let lower = name.to_lowercase();
-        self.mailboxes
-            .iter()
-            .find(|m| {
-                m.server_name
-                    .as_ref()
-                    .is_some_and(|s| s.to_lowercase() == lower)
-                    || m.label.to_lowercase() == lower
+        self.mailbox_by_name(name).and_then(|m| {
+            Some(SearchTarget {
+                server_name: m.server_name.clone()?,
+                label: m.label.clone(),
             })
-            .and_then(|m| {
-                Some(SearchTarget {
-                    server_name: m.server_name.clone()?,
-                    label: m.label.clone(),
-                })
-            })
+        })
     }
 
     pub fn find_mailbox_by_kind(&self, kind: MailboxKind) -> Option<usize> {

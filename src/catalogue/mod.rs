@@ -417,23 +417,29 @@ impl Catalogue {
     }
 
     /// The folder a person or a client named: its exact server name first,
-    /// then its store key, server name or label case-insensitively, a present
-    /// folder before a missing one. The exact name leads because a label can
-    /// repeat a name: the folder the server marks `\Sent` is labelled `Sent`,
-    /// and a second folder may be called that.
+    /// then a store key, a label and a server name case-insensitively, one
+    /// tier at a time ([`mp_protocol::state::pick_mailbox`]), a present folder
+    /// before a missing one. The exact name leads because a label can repeat a
+    /// name: the folder the server marks `\Trash` is labelled `Trash`, and a
+    /// second folder may be called that.
     pub fn find(&self, wanted: &str) -> Option<&Folder> {
         let wanted = wanted.trim();
-        let present = || self.folders.iter().filter(|f| !f.missing);
-        let loose = |f: &&Folder| {
-            f.key.eq_ignore_ascii_case(wanted)
-                || f.server.eq_ignore_ascii_case(wanted)
-                || f.label.eq_ignore_ascii_case(wanted)
-        };
-        present()
-            .find(|f| f.server == wanted)
-            .or_else(|| present().find(loose))
-            .or_else(|| self.folders.iter().find(|f| f.server == wanted))
-            .or_else(|| self.folders.iter().find(loose))
+        let (present, missing): (Vec<&Folder>, Vec<&Folder>) =
+            self.folders.iter().partition(|f| !f.missing);
+        fn names<'a>(f: &'a &Folder) -> mp_protocol::state::MailboxNames<'a> {
+            mp_protocol::state::MailboxNames {
+                slug: &f.key,
+                label: &f.label,
+                server: Some(&f.server),
+            }
+        }
+        [present, missing].into_iter().find_map(|folders| {
+            folders
+                .iter()
+                .find(|f| f.server == wanted)
+                .or_else(|| mp_protocol::state::pick_mailbox(&folders, wanted, names))
+                .copied()
+        })
     }
 
     /// The server name behind a store key, which is what a move, a delete and
@@ -558,6 +564,15 @@ pub struct SidebarRow {
 }
 
 impl SidebarRow {
+    /// This row's names, for [`mp_protocol::state::pick_mailbox`].
+    pub fn names(&self) -> mp_protocol::state::MailboxNames<'_> {
+        mp_protocol::state::MailboxNames {
+            slug: &self.slug,
+            label: &self.label,
+            server: self.server.as_deref(),
+        }
+    }
+
     /// The counts the sidebar shows: the server's for a `status-only` folder,
     /// whose store holds at most a tail of it, and the store's otherwise.
     pub fn counts(&self, store: Option<(u64, u64)>) -> (u64, u64) {
