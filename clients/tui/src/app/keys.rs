@@ -3094,16 +3094,175 @@ pub(super) fn refresh_mailbox_picker_filter(picker: &mut MailboxPicker) {
 }
 
 /// Recompute `palette.filtered` from `palette.query` and reset the cursor
-/// (#0100). Fuzzy-matches the same way the mailbox picker filters its labels.
+/// (#0100). Each entry's section, label and keys are scored with
+/// [`command_score`], the desktop palette's scorer, and the matches are listed
+/// best first (ties keep catalogue order), so a query and Enter run the same
+/// action in both clients.
 pub(super) fn refresh_palette_filter(palette: &mut CommandPalette) {
-    palette.filtered = palette
+    if palette.query.is_empty() {
+        palette.filtered = (0..palette.entries.len()).collect();
+        palette.selected = 0;
+        return;
+    }
+    let mut scored: Vec<(usize, f64)> = palette
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| fuzzy_match(&palette.query, entry.label))
-        .map(|(i, _)| i)
+        .map(|(i, entry)| (i, command_score(&entry.search, &palette.query)))
+        .filter(|&(_, score)| score > 0.0)
         .collect();
+    // A stable sort, so equal scores keep catalogue order, as cmdk's does.
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    palette.filtered = scored.into_iter().map(|(i, _)| i).collect();
     palette.selected = 0;
+}
+
+/// How well `search` matches `value`, from 0 (no match) to 1: a port of
+/// `command-score` as cmdk 1.1 ships it, the scorer the desktop palette ranks
+/// with. Every char of the search must appear in order; a match at the start,
+/// after a word break or after punctuation scores above one in mid-word, a
+/// gap costs a little per skipped char, and a case mismatch a little more.
+pub(super) fn command_score(value: &str, search: &str) -> f64 {
+    fn fold(s: &[char]) -> Vec<char> {
+        s.iter()
+            .map(|&c| {
+                if c.is_whitespace() || c == '-' {
+                    ' '
+                } else {
+                    c.to_lowercase().next().unwrap_or(c)
+                }
+            })
+            .collect()
+    }
+    let value: Vec<char> = value.chars().collect();
+    let search: Vec<char> = search.chars().collect();
+    let s = Scorer {
+        lower_value: fold(&value),
+        lower_search: fold(&search),
+        value,
+        search,
+    };
+    s.score(0, 0, &mut std::collections::HashMap::new())
+}
+
+struct Scorer {
+    value: Vec<char>,
+    search: Vec<char>,
+    lower_value: Vec<char>,
+    lower_search: Vec<char>,
+}
+
+impl Scorer {
+    const CONTINUE_MATCH: f64 = 1.0;
+    const SPACE_WORD_JUMP: f64 = 0.9;
+    const NON_SPACE_WORD_JUMP: f64 = 0.8;
+    const CHARACTER_JUMP: f64 = 0.17;
+    const TRANSPOSITION: f64 = 0.1;
+    const PENALTY_SKIPPED: f64 = 0.999;
+    const PENALTY_CASE_MISMATCH: f64 = 0.9999;
+    const PENALTY_NOT_COMPLETE: f64 = 0.99;
+
+    fn is_gap(c: char) -> bool {
+        matches!(
+            c,
+            '\\' | '/' | '_' | '+' | '.' | '#' | '"' | '@' | '[' | '(' | '{' | '&'
+        )
+    }
+
+    fn is_space(c: char) -> bool {
+        c.is_whitespace() || c == '-'
+    }
+
+    fn at(chars: &[char], i: usize) -> Option<char> {
+        chars.get(i).copied()
+    }
+
+    fn before(chars: &[char], i: usize) -> Option<char> {
+        i.checked_sub(1).and_then(|j| chars.get(j).copied())
+    }
+
+    fn find(&self, c: char, from: usize) -> Option<usize> {
+        self.lower_value
+            .get(from..)
+            .and_then(|rest| rest.iter().position(|&h| h == c))
+            .map(|p| p + from)
+    }
+
+    fn score(
+        &self,
+        vi: usize,
+        si: usize,
+        memo: &mut std::collections::HashMap<(usize, usize), f64>,
+    ) -> f64 {
+        if si == self.search.len() {
+            return if vi == self.value.len() {
+                Self::CONTINUE_MATCH
+            } else {
+                Self::PENALTY_NOT_COMPLETE
+            };
+        }
+        if si > self.search.len() {
+            return 0.0;
+        }
+        if let Some(&s) = memo.get(&(vi, si)) {
+            return s;
+        }
+        let wanted = self.lower_search[si];
+        let mut best = 0.0;
+        let mut idx = self.find(wanted, vi);
+        while let Some(i) = idx {
+            let mut score = self.score(i + 1, si + 1, memo);
+            if score > best {
+                let prev = Self::before(&self.value, i);
+                if i == vi {
+                    score *= Self::CONTINUE_MATCH;
+                } else if prev.is_some_and(Self::is_gap) {
+                    score *= Self::NON_SPACE_WORD_JUMP;
+                    let skipped = self.value[vi..i - 1]
+                        .iter()
+                        .filter(|&&c| Self::is_gap(c))
+                        .count();
+                    if skipped > 0 && vi > 0 {
+                        score *= Self::PENALTY_SKIPPED.powi(skipped as i32);
+                    }
+                } else if prev.is_some_and(Self::is_space) {
+                    score *= Self::SPACE_WORD_JUMP;
+                    let skipped = self.value[vi..i - 1]
+                        .iter()
+                        .filter(|&&c| Self::is_space(c))
+                        .count();
+                    if skipped > 0 && vi > 0 {
+                        score *= Self::PENALTY_SKIPPED.powi(skipped as i32);
+                    }
+                } else {
+                    score *= Self::CHARACTER_JUMP;
+                    if vi > 0 {
+                        score *= Self::PENALTY_SKIPPED.powi((i - vi) as i32);
+                    }
+                }
+                if Self::at(&self.value, i) != Self::at(&self.search, si) {
+                    score *= Self::PENALTY_CASE_MISMATCH;
+                }
+            }
+            let next = Self::at(&self.lower_search, si + 1);
+            if (score < Self::TRANSPOSITION
+                && Self::before(&self.lower_value, i) == next
+                && next.is_some())
+                || (next == Some(wanted) && Self::before(&self.lower_value, i) != Some(wanted))
+            {
+                let transposed = self.score(i + 1, si + 2, memo);
+                if transposed * Self::TRANSPOSITION > score {
+                    score = transposed * Self::TRANSPOSITION;
+                }
+            }
+            if score > best {
+                best = score;
+            }
+            idx = self.find(wanted, i + 1);
+        }
+        memo.insert((vi, si), best);
+        best
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4693,6 +4852,76 @@ mod tests {
         // The palette closed and the action ran in the current context: the
         // help overlay is now up.
         assert!(matches!(app.overlay, Overlay::Help));
+    }
+
+    /// The scorer gives what cmdk's `command-score` gives the desktop palette,
+    /// to the last digit (values from cmdk 1.1's dist/command-score.mjs).
+    #[test]
+    fn command_score_matches_cmdk() {
+        for (value, search, want) in [
+            ("GLOBAL Toggle this help ?", "help", 0.891),
+            (
+                "MESSAGE (list, headers, body) Archive a",
+                "arc",
+                0.8909109000000001,
+            ),
+            ("EMAIL LIST Jump to top gg", "gg", 0.9),
+            ("APP Add account", "Add account", 0.9),
+            ("SIDEBAR Next mailbox j", "nxt", 0.151303398147),
+            ("a-b_c d", "bd", 0.81),
+            ("Archive", "ahcrive", 0.0),
+            ("foo.bar/baz", "fbb", 0.6336),
+            ("GLOBAL Quit q", "QUIT", 0.8907327267291091),
+            ("abc", "abcd", 0.0),
+        ] {
+            let got = command_score(value, search);
+            assert!(
+                (got - want).abs() < 1e-12,
+                "{search:?} in {value:?}: {got}, cmdk gives {want}"
+            );
+        }
+    }
+
+    /// The palette lists the best match first, as the desktop palette does:
+    /// "Forward" puts the Forward action above "Cycle focus forward", which
+    /// comes first in the keymap, so Enter forwards.
+    #[test]
+    fn command_palette_ranks_the_best_match_first() {
+        let mut app = app_with_emails(sample());
+        app.handle_key(KeyEvent::from(KeyCode::Char(':')));
+        for c in "Forward".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let Overlay::Palette(palette) = &app.overlay else {
+            panic!("palette should be open");
+        };
+        let labels: Vec<&str> = palette
+            .filtered
+            .iter()
+            .map(|&i| palette.entries[i].label)
+            .collect();
+        assert_eq!(labels.first(), Some(&"Forward"), "ranked: {labels:?}");
+        assert!(
+            labels.contains(&"Cycle focus forward"),
+            "the weaker match stays listed: {labels:?}"
+        );
+
+        // The section and the keys match too, as on the desktop.
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        app.handle_key(KeyEvent::from(KeyCode::Char(':')));
+        for c in "cf".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let Overlay::Palette(palette) = &app.overlay else {
+            panic!("palette should be open");
+        };
+        assert!(
+            palette
+                .filtered
+                .iter()
+                .any(|&i| palette.entries[i].label == "Forward"),
+            "its key cf finds Forward"
+        );
     }
 
     /// Enter with no match (an over-narrow query) is a no-op: nothing runs and

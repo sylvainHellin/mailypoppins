@@ -2114,12 +2114,14 @@ pub struct ConfirmDialog {
     pub action: ConfirmAction,
 }
 
-/// One selectable row of the command palette (#0100): a runnable action and
-/// the label the fuzzy filter matches against and the list renders.
-#[derive(Debug, Clone, Copy)]
+/// One selectable row of the command palette (#0100): a runnable action, the
+/// label the list renders, and the section, label and keys a query is scored
+/// against ([`super::palette_match_text`]).
+#[derive(Debug, Clone)]
 pub struct PaletteEntry {
     pub action: super::KeyAction,
     pub label: &'static str,
+    pub search: String,
 }
 
 /// Scratch state for the command palette overlay (`:` / `Ctrl+p`, #0100).
@@ -2131,14 +2133,16 @@ pub struct PaletteEntry {
 /// entries derive from the same `KEYMAP` the help/hint surfaces read.
 ///
 /// Modelled on [`MailboxPicker`]: `entries` is the full catalogue captured when
-/// the overlay opens, `filtered` holds the indices that match `query` (in
-/// catalogue order), and `selected` is the cursor into `filtered`.
+/// the overlay opens, `filtered` holds the indices that match `query` (best
+/// match first, as the desktop palette ranks them), and `selected` is the
+/// cursor into `filtered`.
 pub struct CommandPalette {
     /// The full runnable catalogue, snapshotted on open.
     pub entries: Vec<PaletteEntry>,
     /// Type-to-filter query (family leaders typed here are literal).
     pub query: String,
-    /// Indices into `entries` whose label fuzzy-matches `query`.
+    /// Indices into `entries` that match `query`, best match first; catalogue
+    /// order while the query is empty.
     pub filtered: Vec<usize>,
     /// Cursor into `filtered`.
     pub selected: usize,
@@ -2151,7 +2155,11 @@ impl CommandPalette {
     pub fn new() -> Self {
         let entries = super::palette_actions()
             .into_iter()
-            .map(|(action, label)| PaletteEntry { action, label })
+            .map(|(action, label)| PaletteEntry {
+                action,
+                label,
+                search: super::palette_match_text(action),
+            })
             .collect::<Vec<_>>();
         let filtered = (0..entries.len()).collect();
         Self {

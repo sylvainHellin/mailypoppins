@@ -1769,6 +1769,34 @@ pub fn palette_actions() -> Vec<(KeyAction, &'static str)> {
     out
 }
 
+/// The text the command palette scores a query against for `action`: its
+/// section, label and keys, `"{section} {label} {keys}"`, the value the
+/// desktop palette gives its row (CommandPalette.tsx), so a query ranks the
+/// same actions first in both clients. The row is the one
+/// [`palette_actions`] takes the label from, and its keys are those of every
+/// row of that section with the same description (`:` and `Ctrl+p`).
+pub fn palette_match_text(action: KeyAction) -> String {
+    let Some(first) = KEYMAP
+        .iter()
+        .find(|kb| kb.action == action && !kb.desc.is_empty() && kb.action.palette_runnable())
+    else {
+        return String::new();
+    };
+    let keys: Vec<&str> = KEYMAP
+        .iter()
+        .filter(|kb| kb.ctx == first.ctx && kb.desc == first.desc)
+        .map(|kb| kb.keys)
+        .collect();
+    format!(
+        "{} {} {}",
+        first.ctx.group_title(),
+        first.desc,
+        keys.join(" ")
+    )
+    .trim()
+    .to_string()
+}
+
 /// Machine-readable dump of `KEYMAP` for regenerating the website key table
 /// (`mp dump-keys`). Emitted as a Markdown table grouped by context so the
 /// output is diff-friendly and human-auditable.

@@ -1286,8 +1286,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `:` (`clients/tui/src/app/keymap.rs:564`) and `Ctrl+p` (`clients/tui/src/app/keymap.rs:565`), `palette_actions()` (`clients/tui/src/app/keymap.rs:841`)
 - Daemon surface: client-side, derived from `KEYMAP` so it cannot drift from the bindings
-- GUI location: clients/desktop: `:` or `Ctrl+p` opens the command palette over every row of the generated `keymap.json` and the desktop's own rows, each runnable or disabled with its badge (M1, #0129)
-- Validation: unit tests in `clients/tui/src/app/keymap.rs`, TUI golden frames; `clients/desktop/src/components/palette/palette.test.tsx` (`lists every action of the generated keymap`, `marks what this build cannot run as disabled with its milestone`, `runs an enabled action`), `clients/desktop/src/keymap/keymap.test.tsx` (`: and Ctrl+p open the palette, ? the key help`)
+- GUI location: clients/desktop: `:` or `Ctrl+p` opens the command palette over every row of the generated `keymap.json` and the desktop's own rows, each runnable or disabled with its badge (M1, #0129); a query matches each row's section, label and keys and lists the best match first, scored by cmdk's `command-score`, which the TUI's `command_score` ports
+- Validation: unit tests in `clients/tui/src/app/keymap.rs`, `clients/tui/src/app/keys.rs` (`command_score_matches_cmdk`, `command_palette_ranks_the_best_match_first`), TUI golden frames; `clients/desktop/src/components/palette/palette.test.tsx` (`lists every action of the generated keymap`, `ranks the best match first across sections, so a typed name and Enter run it`, `marks what this build cannot run as disabled with its milestone`, `runs an enabled action`), `clients/desktop/src/keymap/keymap.test.tsx` (`: and Ctrl+p open the palette, ? the key help`)
 - Status: GUI shipped (M1, #0129)
 
 ### OBS-03 Help overlay and hint bar

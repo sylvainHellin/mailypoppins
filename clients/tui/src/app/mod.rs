@@ -6,7 +6,8 @@ mod types;
 
 pub use keymap::{
     dump_json, dump_markdown, help_sections, hint_bindings, leader_is_view_agnostic,
-    palette_actions, prefix_continuations, resolve, Guard, KeyAction, KeyBinding, KeyCtx, KEYMAP,
+    palette_actions, palette_match_text, prefix_continuations, resolve, Guard, KeyAction,
+    KeyBinding, KeyCtx, KEYMAP,
 };
 pub use types::*;
 
