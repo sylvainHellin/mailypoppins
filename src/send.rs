@@ -535,6 +535,206 @@ mod tests {
         }
     }
 
+    /// A sent message carrying `eml` as a `message/rfc822` attachment, built
+    /// the way [`build_draft_message`] builds one.
+    fn message_with_eml(eml: &[u8]) -> Vec<u8> {
+        let mixed = MultiPart::mixed()
+            .singlepart(SinglePart::plain("see attached".to_string()))
+            .singlepart(attachment_part(
+                "Bericht.eml".to_string(),
+                eml.to_vec(),
+                "message/rfc822",
+            ));
+        Message::builder()
+            .from("me@example.com".parse().unwrap())
+            .to("a@example.com".parse().unwrap())
+            .subject("Fwd: Bericht")
+            .message_id(None)
+            .multipart(mixed)
+            .unwrap()
+            .formatted()
+    }
+
+    const UMLAUT_EML: &[u8] =
+        "Subject: Bericht\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nGrüße\r\n".as_bytes();
+
+    /// The bytes a server without 8BITMIME gets: the `.eml` as base64
+    /// `application/octet-stream` under its name, decoding to the same
+    /// message, and the rest of the message untouched (PERSO-174).
+    #[test]
+    fn the_seven_bit_fallback_carries_the_eml_as_a_base64_octet_stream() {
+        let raw = message_with_eml(UMLAUT_EML);
+        assert!(!raw.is_ascii());
+        let fallback = seven_bit_fallback(&raw).expect("an 8bit message/rfc822 part");
+        assert!(
+            fallback.is_ascii(),
+            "{}",
+            String::from_utf8_lossy(&fallback)
+        );
+        let parsed = mailparse::parse_mail(&fallback).unwrap();
+        assert_eq!(message_id_of(&fallback), message_id_of(&raw));
+        assert_eq!(parsed.subparts.len(), 2);
+        assert_eq!(
+            parsed.subparts[0].get_body().unwrap().trim(),
+            "see attached"
+        );
+        let eml = &parsed.subparts[1];
+        assert_eq!(eml.ctype.mimetype, "application/octet-stream");
+        assert_eq!(
+            eml.get_content_disposition()
+                .params
+                .get("filename")
+                .map(String::as_str),
+            Some("Bericht.eml")
+        );
+        assert_eq!(eml.get_body_raw().unwrap(), UMLAUT_EML);
+    }
+
+    #[test]
+    fn an_ascii_message_has_no_seven_bit_fallback() {
+        assert!(seven_bit_fallback(&message_with_eml(b"Subject: x\r\n\r\nbody\r\n")).is_none());
+    }
+
+    /// What a fake SMTP server saw: every command line, and every message
+    /// body it took after DATA.
+    #[derive(Default)]
+    struct SmtpLog {
+        commands: Vec<String>,
+        messages: Vec<Vec<u8>>,
+    }
+
+    /// A plain-TCP SMTP server on localhost that offers `8BITMIME` in its
+    /// EHLO only when told to, accepts every sender and recipient, and logs.
+    async fn fake_smtp(eight_bit_mime: bool) -> (u16, std::sync::Arc<std::sync::Mutex<SmtpLog>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(SmtpLog::default()));
+        let shared = log.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let log = shared.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = BufReader::new(read);
+                    write.write_all(b"220 fake ESMTP\r\n").await.unwrap();
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if lines.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let command = line.trim_end().to_string();
+                        log.lock().unwrap().commands.push(command.clone());
+                        let verb = command.split(' ').next().unwrap_or("").to_ascii_uppercase();
+                        let reply: &[u8] = match verb.as_str() {
+                            "EHLO" if eight_bit_mime => b"250-fake\r\n250 8BITMIME\r\n",
+                            "EHLO" | "HELO" => b"250 fake\r\n",
+                            "DATA" => {
+                                write.write_all(b"354 go ahead\r\n").await.unwrap();
+                                let mut message = Vec::new();
+                                loop {
+                                    let mut data = Vec::new();
+                                    lines.read_until(b'\n', &mut data).await.unwrap();
+                                    if data == b".\r\n" || data.is_empty() {
+                                        break;
+                                    }
+                                    message.extend_from_slice(&data);
+                                }
+                                log.lock().unwrap().messages.push(message);
+                                b"250 queued\r\n"
+                            }
+                            "QUIT" => {
+                                let _ = write.write_all(b"221 bye\r\n").await;
+                                return;
+                            }
+                            _ => b"250 OK\r\n",
+                        };
+                        write.write_all(reply).await.unwrap();
+                    }
+                });
+            }
+        });
+        (port, log)
+    }
+
+    fn built_with_eml(eml: &[u8]) -> BuiltMessage {
+        let raw = message_with_eml(eml);
+        BuiltMessage {
+            message_id: message_id_of(&raw),
+            raw,
+            recipients: vec![
+                ("a@example.com".to_string(), RecipientRole::To),
+                ("b@example.com".to_string(), RecipientRole::Cc),
+            ],
+            from: "me@example.com".to_string(),
+            draft_key: None,
+        }
+    }
+
+    async fn submit_to_fake(eight_bit_mime: bool, built: &BuiltMessage) -> (SendResult, SmtpLog) {
+        let (port, log) = fake_smtp(eight_bit_mime).await;
+        let mailer = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous("127.0.0.1")
+            .port(port)
+            .build();
+        let from: lettre::Address = built.from.parse().unwrap();
+        let result = submit_through(built, &from, &mailer).await;
+        drop(mailer);
+        let log = std::mem::take(&mut *log.lock().unwrap());
+        (result, log)
+    }
+
+    /// lettre refuses 8bit bytes to a server without 8BITMIME before
+    /// `MAIL FROM`: the send goes again as 7bit, and each recipient still
+    /// sees exactly one `MAIL FROM` and one message (PERSO-174).
+    #[tokio::test]
+    async fn a_server_without_8bitmime_gets_the_eml_as_7bit_exactly_once() {
+        let built = built_with_eml(UMLAUT_EML);
+        let (result, log) = submit_to_fake(false, &built).await;
+        assert!(
+            result.results.iter().all(|r| r.success),
+            "{:?}",
+            result.results
+        );
+        let mails = log
+            .commands
+            .iter()
+            .filter(|c| c.to_ascii_uppercase().starts_with("MAIL FROM"))
+            .count();
+        assert_eq!(mails, 2, "one MAIL FROM per recipient: {:?}", log.commands);
+        assert_eq!(log.messages.len(), 2);
+        for message in &log.messages {
+            assert!(message.is_ascii());
+            let text = String::from_utf8_lossy(message);
+            assert!(text.contains("application/octet-stream"), "{text}");
+            assert!(text.contains("Bericht.eml"), "{text}");
+            assert_eq!(message_id_of(message), built.message_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_with_8bitmime_gets_the_eml_8bit_unchanged() {
+        let built = built_with_eml(UMLAUT_EML);
+        let (result, log) = submit_to_fake(true, &built).await;
+        assert!(result.results.iter().all(|r| r.success));
+        assert_eq!(log.messages.len(), 2);
+        for message in &log.messages {
+            // lettre ends DATA with CRLF . CRLF, adding the CRLF the bytes
+            // may already end with.
+            assert_eq!(&message[..built.raw.len()], &built.raw[..]);
+            assert!(message[built.raw.len()..]
+                .iter()
+                .all(|b| b"\r\n".contains(b)));
+        }
+        assert!(log
+            .commands
+            .iter()
+            .any(|c| c.to_ascii_uppercase().contains("BODY=8BITMIME")));
+    }
+
     #[test]
     fn test_resolve_attachment_paths_expands_folder() {
         let dir = tempfile::tempdir().unwrap();
@@ -2804,7 +3004,9 @@ const MAX_LINE_OCTETS: usize = 998;
 /// over 76 octets, so that part is labelled by [`rfc822_body`] instead
 /// (PERSO-174). A message neither can carry, a line over 998 octets or a NUL,
 /// goes as `application/octet-stream` under the same `.eml` name, which a
-/// mail client still opens as a message, and the reason is logged.
+/// mail client still opens as a message, and the reason is logged. An SMTP
+/// server without `8BITMIME` gets an `8bit` part in that same form, swapped in
+/// by [`seven_bit_fallback`] when lettre refuses the bytes.
 fn attachment_part(filename: String, bytes: Vec<u8>, content_type: &str) -> SinglePart {
     let octet_stream = || {
         "application/octet-stream"
@@ -2876,6 +3078,84 @@ fn rfc822_body(bytes: Vec<u8>) -> std::result::Result<Body, (Vec<u8>, String)> {
         ContentTransferEncoding::EightBit
     };
     Ok(Body::dangerous_pre_encoded(canonical, encoding))
+}
+
+/// `raw` as a server without `8BITMIME` can take it: every `8bit`
+/// `message/rfc822` part becomes a base64 `application/octet-stream` part
+/// under the same name, the fallback [`attachment_part`] already takes for a
+/// message no line limit holds, and every other byte stays where it was, the
+/// `Message-ID` included. `None` when `raw` has no such part, which is the
+/// only 8-bit content the builder writes.
+///
+/// It works on the bytes rather than on the draft because a resumed outbox
+/// row has only its committed bytes to submit ([`resubmit_row`]).
+fn seven_bit_fallback(raw: &[u8]) -> Option<Vec<u8>> {
+    fn eight_bit_messages<'a>(
+        part: &'a mailparse::ParsedMail<'a>,
+        out: &mut Vec<&'a mailparse::ParsedMail<'a>>,
+    ) {
+        let eight_bit = part
+            .headers
+            .iter()
+            .find(|h| {
+                h.get_key()
+                    .eq_ignore_ascii_case("Content-Transfer-Encoding")
+            })
+            .is_some_and(|h| h.get_value().trim().eq_ignore_ascii_case("8bit"));
+        if part.ctype.mimetype.eq_ignore_ascii_case("message/rfc822") {
+            if eight_bit {
+                out.push(part);
+            }
+            // What the forwarded message holds is its own business.
+            return;
+        }
+        for sub in &part.subparts {
+            eight_bit_messages(sub, out);
+        }
+    }
+
+    let parsed = mailparse::parse_mail(raw).ok()?;
+    let mut parts = Vec::new();
+    for sub in &parsed.subparts {
+        eight_bit_messages(sub, &mut parts);
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(raw.len() + raw.len() / 3);
+    let mut at = 0usize;
+    for part in parts {
+        let start = part.raw_bytes.as_ptr() as usize - raw.as_ptr() as usize;
+        let filename = part
+            .get_content_disposition()
+            .params
+            .get("filename")
+            .or_else(|| part.ctype.params.get("name"))
+            .cloned()
+            .unwrap_or_else(|| "message.eml".to_string());
+        // mailparse ends a part with the CRLF that opens the next boundary
+        // line: that CRLF is the delimiter's (RFC 2046 5.1.1), not the
+        // message's, and lettre writes it again after the new part.
+        let delimiter = part.raw_bytes.ends_with(b"\r\n");
+        let mut body = part.get_body_raw().ok()?;
+        if delimiter && body.ends_with(b"\r\n") {
+            body.truncate(body.len() - 2);
+        }
+        let octet_stream = "application/octet-stream"
+            .parse::<ContentType>()
+            .expect("static MIME type");
+        let mut formatted = Attachment::new(filename)
+            .body(body, octet_stream)
+            .formatted();
+        if !delimiter && formatted.ends_with(b"\r\n") {
+            formatted.truncate(formatted.len() - 2);
+        }
+        out.extend_from_slice(&raw[at..start]);
+        out.extend_from_slice(&formatted);
+        at = start + part.raw_bytes.len();
+    }
+    out.extend_from_slice(&raw[at..]);
+    Some(out)
 }
 
 /// The attachments a draft names, read off the paths in its frontmatter.
@@ -3823,7 +4103,23 @@ pub async fn submit(built: &BuiltMessage, smtp_config: &SmtpConfig) -> Result<Se
 
     // Create SMTP transport (branching on auth method / TLS mode).
     let mailer = build_smtp_transport(smtp_config)?;
+    Ok(submit_through(built, &from_addr, &mailer).await)
+}
 
+/// [`submit`]'s per-recipient loop over a transport already built, split out
+/// so a test can hand it a plain-TCP transport to a fake server.
+///
+/// A server whose EHLO offers no `8BITMIME` gets the 7bit bytes of
+/// [`seven_bit_fallback`] once lettre refuses the 8bit ones. lettre refuses
+/// before `MAIL FROM`, so nothing of the message reached the server and the
+/// retry is that recipient's first submission, not a second one; every later
+/// recipient takes the 7bit bytes straight away.
+async fn submit_through(
+    built: &BuiltMessage,
+    from_addr: &lettre::Address,
+    mailer: &AsyncSmtpTransport<Tokio1Executor>,
+) -> SendResult {
+    let mut seven_bit: Option<Vec<u8>> = None;
     let mut results = Vec::with_capacity(built.recipients.len());
 
     for (addr, role) in &built.recipients {
@@ -3861,7 +4157,19 @@ pub async fn submit(built: &BuiltMessage, smtp_config: &SmtpConfig) -> Result<Se
             }
         };
 
-        match mailer.send_raw(&envelope, &built.raw).await {
+        let wire = seven_bit.as_deref().unwrap_or(&built.raw);
+        let mut sent = mailer.send_raw(&envelope, wire).await;
+        if seven_bit.is_none() && sent.as_ref().is_err_and(is_8bitmime_refusal) {
+            if let Some(fallback) = seven_bit_fallback(&built.raw) {
+                warn!(
+                    "[send] {} holds an 8bit message/rfc822 part and the SMTP server offers no \
+                     8BITMIME; sending it as base64 application/octet-stream instead",
+                    built.message_id
+                );
+                sent = mailer.send_raw(&envelope, seven_bit.insert(fallback)).await;
+            }
+        }
+        match sent {
             Ok(_) => {
                 info!("Sent to {} ({})", addr, role);
                 results.push(RecipientResult {
@@ -3886,5 +4194,12 @@ pub async fn submit(built: &BuiltMessage, smtp_config: &SmtpConfig) -> Result<Se
         }
     }
 
-    Ok(SendResult { results })
+    SendResult { results }
+}
+
+/// lettre's refusal of a message with 8-bit octets to a server whose EHLO
+/// offered no `8BITMIME`, raised before `MAIL FROM` is written
+/// (`AsyncSmtpConnection::send`), so it is a client error and not a reply.
+fn is_8bitmime_refusal(err: &lettre::transport::smtp::Error) -> bool {
+    err.is_client() && err.to_string().contains("8BITMIME")
 }
