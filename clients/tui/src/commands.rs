@@ -924,6 +924,30 @@ pub(super) fn attachment_files(
     Ok(crate::app::AttachmentFiles { files, inline_from })
 }
 
+/// One row as the RFC 822 file `mp export` writes, `<date>_<subject>.eml`,
+/// materialised for the directory picker `te` opens (PERSO-174).
+///
+/// `message.materialise_eml` answers the stored raw message, or the server's
+/// copy for a row stored without one (every Graph row), so this one can be a
+/// round trip. The handle is left to its lifetime, as the parts `ts` saves
+/// are: the copy into the picked directory reads the file after this returns.
+pub(super) fn eml_file(
+    commands: &dyn Queries,
+    account: &str,
+    row_id: i64,
+) -> Result<PathBuf, String> {
+    let handle = commands
+        .call(
+            "message.materialise_eml",
+            json!({"account": account, "row_id": row_id}),
+        )
+        .map_err(|e| format!("{e:#}"))?;
+    handle["path"]
+        .as_str()
+        .map(PathBuf::from)
+        .ok_or_else(|| "the message was materialised without a path".to_string())
+}
+
 /// The `Fwd:` subject the forward wizard opens with, built from the row's own
 /// subject rather than from the list entry, whose `(no subject)` placeholder
 /// must never reach a sent header.
@@ -1068,7 +1092,9 @@ pub(super) fn draft_path(commands: &dyn Queries, account: &str, id: &str) -> Opt
 /// `create_draft_from_source`), and the daemon runs them through the very same
 /// library functions, so the file is byte-identical to the one `mp reply` and
 /// `mp forward` write. `headers` is the compose wizard's override of the
-/// recipients and the subject it asked for before the draft existed.
+/// recipients and the subject it asked for before the draft existed, and a
+/// forward as attachment (`cF`) is `draft.forward`'s `as_attachment`, the
+/// call `mp forward --as-attachment` makes (PERSO-174).
 pub(super) fn draft_from_source(
     commands: &dyn Queries,
     account: &str,
@@ -1076,14 +1102,19 @@ pub(super) fn draft_from_source(
     kind: mp_core::draft::DraftFromSource,
     headers: Option<&mp_core::draft::DraftRecipientEdit>,
 ) -> Result<(PathBuf, String), String> {
-    let (method, all) = match kind {
-        mp_core::draft::DraftFromSource::Reply { all } => ("draft.reply", Some(all)),
-        mp_core::draft::DraftFromSource::Forward => ("draft.forward", None),
-    };
     let mut params = json!({"account": account, "source": {"row_id": row_id}});
-    if let Some(all) = all {
-        params["all"] = json!(all);
-    }
+    let method = match kind {
+        mp_core::draft::DraftFromSource::Reply { all } => {
+            params["all"] = json!(all);
+            "draft.reply"
+        }
+        mp_core::draft::DraftFromSource::Forward { as_attachment } => {
+            if as_attachment {
+                params["as_attachment"] = json!(true);
+            }
+            "draft.forward"
+        }
+    };
     if let Some(headers) = headers {
         params["headers"] = json!({
             "to": headers.to,
@@ -1126,7 +1157,19 @@ pub(super) fn draft_from_message(
     let kind = match kind {
         mp_core::draft::DraftFromSource::Reply { all: false } => "reply",
         mp_core::draft::DraftFromSource::Reply { all: true } => "reply_all",
-        mp_core::draft::DraftFromSource::Forward => "forward",
+        mp_core::draft::DraftFromSource::Forward {
+            as_attachment: false,
+        } => "forward",
+        // The `.eml` is the store's or the server's copy of a row, and a hit
+        // with no row has neither on this side.
+        mp_core::draft::DraftFromSource::Forward {
+            as_attachment: true,
+        } => {
+            return Err(
+                "A forward as attachment needs the message in the store: fetch it first"
+                    .to_string(),
+            )
+        }
     };
     let params = json!({
         "account": account,
@@ -1710,4 +1753,110 @@ pub(super) fn refresh_drafts_after_flip(app: &mut App) {
     }
     app.recount_all_mailboxes();
     app.reload_current_mailbox();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use mp_core::draft::DraftFromSource;
+    use serde_json::{json, Value};
+
+    use super::{draft_from_message, draft_from_source, eml_file};
+    use crate::queries::Queries;
+
+    /// A door that records every call and answers each with `answer`.
+    struct Recorder {
+        answer: Value,
+        calls: RefCell<Vec<(String, Value)>>,
+    }
+
+    impl Recorder {
+        fn answering(answer: Value) -> Recorder {
+            Recorder {
+                answer,
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Queries for Recorder {
+        fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+            self.calls.borrow_mut().push((method.to_string(), params));
+            Ok(self.answer.clone())
+        }
+    }
+
+    /// `cF` makes the call `mp forward --as-attachment` makes: `draft.forward`
+    /// with `as_attachment`, which `cf` leaves out (PERSO-174).
+    #[test]
+    fn a_forward_as_attachment_is_draft_forward_with_as_attachment() {
+        let door =
+            Recorder::answering(json!({"path": "/d/fwd.md", "selector": "mp://alice/drafts/x"}));
+        for as_attachment in [false, true] {
+            let (path, selector) = draft_from_source(
+                &door,
+                "alice",
+                7,
+                DraftFromSource::Forward { as_attachment },
+                None,
+            )
+            .unwrap();
+            assert_eq!(path.to_str(), Some("/d/fwd.md"));
+            assert_eq!(selector, "mp://alice/drafts/x");
+        }
+        let calls = door.calls.borrow();
+        assert_eq!(
+            *calls,
+            vec![
+                (
+                    "draft.forward".to_string(),
+                    json!({"account": "alice", "source": {"row_id": 7}})
+                ),
+                (
+                    "draft.forward".to_string(),
+                    json!({"account": "alice", "source": {"row_id": 7}, "as_attachment": true})
+                ),
+            ]
+        );
+    }
+
+    /// A hit with no row has no `.eml` on this side, so it is refused before
+    /// any call.
+    #[test]
+    fn a_hit_with_no_row_is_not_forwarded_as_attachment() {
+        let door = Recorder::answering(json!({}));
+        let refused = draft_from_message(
+            &door,
+            "alice",
+            DraftFromSource::Forward {
+                as_attachment: true,
+            },
+            &mp_core::parse::parse_rfc822_to_fetched_email(b"Subject: x\r\n\r\nbody\r\n")
+                .expect("a message parses"),
+        )
+        .unwrap_err();
+        assert!(refused.contains("fetch it first"), "{refused}");
+        assert!(door.calls.borrow().is_empty());
+    }
+
+    /// `te` reads the file `message.materialise_eml` wrote, as `mp export`.
+    #[test]
+    fn the_eml_is_the_file_message_materialise_eml_wrote() {
+        let door = Recorder::answering(json!({
+            "handle": "h1", "path": "/run/handles/h1/2024-01-01_Report.eml",
+            "name": "2024-01-01_Report.eml", "bytes": 10, "expires_at": "x",
+        }));
+        let path = eml_file(&door, "alice", 7).unwrap();
+        assert_eq!(path.to_str(), Some("/run/handles/h1/2024-01-01_Report.eml"));
+        assert_eq!(
+            *door.calls.borrow(),
+            vec![(
+                "message.materialise_eml".to_string(),
+                json!({"account": "alice", "row_id": 7})
+            )]
+        );
+        let pathless = Recorder::answering(json!({}));
+        assert!(eml_file(&pathless, "alice", 7).is_err());
+    }
 }

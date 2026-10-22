@@ -1455,8 +1455,15 @@ impl ComposeField {
 #[derive(Debug, Clone)]
 pub enum ComposeMode {
     New,
-    Forward { msg: MessageRef },
-    EditDraft { id: String },
+    /// `as_attachment` is `cF`: the forward carries the message as its `.eml`
+    /// instead of its parts (`mp forward --as-attachment`, PERSO-174).
+    Forward {
+        msg: MessageRef,
+        as_attachment: bool,
+    },
+    EditDraft {
+        id: String,
+    },
 }
 
 /// A fuzzy-matched contact suggestion under the focused address field.

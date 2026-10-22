@@ -368,8 +368,14 @@ pub fn set_draft_id(path: &Path, id: &str) -> Result<()> {
 /// since #0126 (P5-U10f) that wizard is in a crate that links no engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftFromSource {
-    Reply { all: bool },
-    Forward,
+    Reply {
+        all: bool,
+    },
+    /// `as_attachment` carries the source as its `.eml` instead of its parts,
+    /// over an [`ATTACHED_FORWARD_BODY`] (PERSO-174).
+    Forward {
+        as_attachment: bool,
+    },
 }
 
 /// The message a reply or a forward is built from, independent of where it

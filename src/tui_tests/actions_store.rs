@@ -290,7 +290,9 @@ mod store_backed_drafts {
             "alice",
             "me@example.com",
             &source,
-            DraftFromSource::Forward,
+            DraftFromSource::Forward {
+                as_attachment: false,
+            },
             None,
             None,
         )
@@ -396,7 +398,9 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
             "alice",
             "me@example.com",
             &source,
-            DraftFromSource::Forward,
+            DraftFromSource::Forward {
+                as_attachment: false,
+            },
             None,
             None,
         )
@@ -487,7 +491,9 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
             "alice",
             "me@example.com",
             &source,
-            DraftFromSource::Forward,
+            DraftFromSource::Forward {
+                as_attachment: false,
+            },
             Some(&DraftRecipientEdit {
                 to: "dave@example.com".to_string(),
                 cc: String::new(),
@@ -579,7 +585,9 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
             "alice",
             "me@example.com",
             &source,
-            DraftFromSource::Forward,
+            DraftFromSource::Forward {
+                as_attachment: false,
+            },
             None,
             None,
         )
@@ -1308,6 +1316,54 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
             app.status_message.as_deref(),
             Some("No HTML version available")
         );
+    }
+
+    /// `te` (PERSO-174): the message's own raw bytes, materialised as
+    /// `<date>_<subject>.eml`, go into the directory picker `ts` opens, so the
+    /// copy is the one a saved part takes; on a draft it says why not.
+    #[test]
+    fn te_hands_the_messages_eml_to_the_directory_picker() {
+        let fx = Fixture::new();
+        let raw = b"From: Alice <alice@example.com>\r\nTo: me@example.com\r\n\
+            Subject: Quarterly report\r\nDate: Mon, 01 Jan 2024 12:00:00 +0000\r\n\
+            Message-ID: <q@example.com>\r\n\r\nThe numbers.\r\n";
+        let row = fx.ingest_raw(raw);
+        let mut app = app_on_row(&fx, &row);
+
+        press(&mut app, "te");
+
+        let sources = match &app.overlay {
+            crate::tui::app::Overlay::Dir(picker) => picker.sources.clone(),
+            _ => panic!("te opened no directory picker: {:?}", app.status_message),
+        };
+        assert_eq!(sources.len(), 1, "{sources:?}");
+        assert_eq!(
+            sources[0].file_name().unwrap(),
+            "2024-01-01_Quarterly report.eml"
+        );
+        assert_eq!(std::fs::read(&sources[0]).unwrap(), raw);
+    }
+
+    /// `cf` and `cF` open the one forward wizard; `cF`'s carries the message
+    /// as its `.eml` (PERSO-174).
+    #[test]
+    fn cf_and_cf_upper_open_the_forward_wizard_with_and_without_the_eml() {
+        let fx = Fixture::new();
+        let row = fx.ingest(&fixture_email("Report"));
+        let mut app = app_on_row(&fx, &row);
+        for (chord, attached) in [("cf", false), ("cF", true)] {
+            app.pending_actions.clear();
+            press(&mut app, chord);
+            match app.pending_actions.back() {
+                Some(crate::tui::app::Action::OpenComposeWizard(
+                    crate::tui::app::ComposeMode::Forward { msg, as_attachment },
+                )) => {
+                    assert_eq!(msg.row_id(), row.id);
+                    assert_eq!(*as_attachment, attached, "{chord}");
+                }
+                other => panic!("{chord} queued no forward wizard: {other:?}"),
+            }
+        }
     }
 
     /// An app on the Drafts mailbox with the cursor on the one draft `file`

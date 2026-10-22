@@ -299,6 +299,9 @@ pub enum KeyAction {
     Reply,
     ReplyAll,
     Forward,
+    /// Leader `c F`: the forward wizard, the message carried as its `.eml`
+    /// (`mp forward --as-attachment`, PERSO-174).
+    ForwardAsAttachment,
     EditRecipients,
     Archive,
     Delete,
@@ -327,6 +330,9 @@ pub enum KeyAction {
     CopyMessageRef,
     OpenAttachment,
     SaveAttachment,
+    /// Leader `t e`: save the message itself as `<date>_<subject>.eml` into a
+    /// picked directory (`mp export`, PERSO-174).
+    ExportMessage,
     OpenInBrowser,
     NewDraft,
     QuickSync,
@@ -1027,6 +1033,18 @@ pub static KEYMAP: &[KeyBinding] = &[
         "Forward",
         false,
     ),
+    // An uppercase continuation, as the draft-status trio's: the forward's
+    // own letter, carrying the message whole.
+    pg(
+        "cF",
+        Chord::Char('F'),
+        'c',
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::ForwardAsAttachment,
+        "Forward as attachment (.eml)",
+        false,
+    ),
     // `t` thread / attachment family.
     pg(
         "tt",
@@ -1069,6 +1087,16 @@ pub static KEYMAP: &[KeyBinding] = &[
         Guard::NonEmptyList,
         KeyAction::SaveAttachment,
         "Save attachment to disk",
+        false,
+    ),
+    pg(
+        "te",
+        Chord::Char('e'),
+        't',
+        KeyCtx::Message,
+        Guard::NonEmptyList,
+        KeyAction::ExportMessage,
+        "Export message as .eml",
         false,
     ),
     pg(

@@ -633,10 +633,14 @@ impl App {
                 self.pending_prefix = None;
                 self.push_action(Action::Reply(true));
             }
-            A::Forward => {
+            A::Forward | A::ForwardAsAttachment => {
                 self.pending_prefix = None;
+                let as_attachment = matches!(action, A::ForwardAsAttachment);
                 if let Some(msg) = self.selected_email_ref() {
-                    self.push_action(Action::OpenComposeWizard(ComposeMode::Forward { msg }));
+                    self.push_action(Action::OpenComposeWizard(ComposeMode::Forward {
+                        msg,
+                        as_attachment,
+                    }));
                 } else if self.selected_email().is_some() {
                     // A Drafts row has no message behind it to forward.
                     self.set_status(
@@ -851,6 +855,14 @@ impl App {
             A::SaveAttachment => {
                 self.pending_prefix = None;
                 self.open_attachment_picker(AttachmentPickerMode::Save);
+            }
+            A::ExportMessage => {
+                self.pending_prefix = None;
+                // The message's `.eml` goes where `ts` puts a part: the
+                // directory picker, then the same copy (PERSO-174).
+                if let Some(path) = crate::actions::cursor_eml_file(self) {
+                    self.open_dir_picker(vec![path]);
+                }
             }
             A::OpenInBrowser => {
                 self.pending_prefix = None;

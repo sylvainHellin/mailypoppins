@@ -46,10 +46,12 @@
       { "key": "cr", "action": "Reply" },
       { "key": "ca", "action": "Reply all" },
       { "key": "cf", "action": "Forward" },
+      { "key": "cF", "action": "Forward as attachment (.eml)" },
       { "key": "tt", "action": "Show conversation (thread)" },
       { "key": "tc", "action": "Conversation view on / off for this account" },
       { "key": "to", "action": "Open attachment" },
       { "key": "ts", "action": "Save attachment to disk" },
+      { "key": "te", "action": "Export message as .eml" },
       { "key": "tb", "action": "Open HTML in browser" },
       { "key": "tv", "action": "RSVP to invitation (Accept/Tentative/Decline)" }
     ]

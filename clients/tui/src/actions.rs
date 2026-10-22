@@ -295,6 +295,29 @@ fn html_temp_file(html: &str, stem: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// The cursor's received message as its `.eml` file, for `te` to hand to the
+/// directory picker, or `None` with the status line saying why (PERSO-174).
+///
+/// A Drafts row has no message to export: the draft is a file already.
+pub fn cursor_eml_file(app: &mut App) -> Option<PathBuf> {
+    let Some(msg) = app.selected_email_ref() else {
+        if app.selected_email().is_some() {
+            app.set_status(
+                "Export needs a received message; a draft is a file already".to_string(),
+            );
+        }
+        return None;
+    };
+    let account = app.account_config.name.clone();
+    match commands::eml_file(&daemon_door(app), &account, msg.row_id()) {
+        Ok(path) => Some(path),
+        Err(e) => {
+            app.set_status_level(format!("Export failed: {e}"), StatusLevel::Error);
+            None
+        }
+    }
+}
+
 /// The browser rendition of a stored row, or `None` with the status line
 /// saying why: a message whose sender wrote no markup has none, which is not
 /// an error.
@@ -1247,7 +1270,7 @@ fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
         ),
         // The forward's subject is shown before its draft exists, so it is
         // built by the same rule the draft will use.
-        ComposeMode::Forward { msg } => {
+        ComposeMode::Forward { msg, .. } => {
             let account = app.account_config.name.clone();
             let subject = commands::forward_subject(&daemon_door(app), &account, msg.row_id());
             (
@@ -1679,12 +1702,12 @@ fn submit_compose_wizard(
 
     // A forward keeps the wizard's recipients and subject over the ones the
     // builder derived, which is the whole reason it asks for them first.
-    if let ComposeMode::Forward { msg } = wizard.mode {
+    if let ComposeMode::Forward { msg, as_attachment } = wizard.mode {
         let clean = write_draft_and_edit(
             app,
             terminal,
             msg,
-            DraftFromSource::Forward,
+            DraftFromSource::Forward { as_attachment },
             Some(&edit),
             "Forward",
         )?;
@@ -2001,7 +2024,14 @@ fn handle_search_result_action(
         }
 
         Action::SearchResultForward => {
-            search_result_draft(app, terminal, DraftFromSource::Forward, "Forward")?;
+            search_result_draft(
+                app,
+                terminal,
+                DraftFromSource::Forward {
+                    as_attachment: false,
+                },
+                "Forward",
+            )?;
         }
 
         Action::SearchResultArchive => {
