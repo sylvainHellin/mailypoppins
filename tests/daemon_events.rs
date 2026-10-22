@@ -262,6 +262,9 @@ const KIND_ACCOUNT_STATE_CHANGED: &str = "account.state_changed";
 /// The kind a draft change travels as.
 const KIND_DRAFT_CHANGED: &str = "draft.changed";
 
+/// The kind a draft file that no longer parses travels as.
+const KIND_DRAFT_INVALID: &str = "draft.invalid";
+
 /// How many changes the burst hook commits in the slow-client tests. Far above
 /// the 512-event default cap, so the queue overflows within milliseconds of the
 /// bootstrap that armed it, and far above anything a socket buffer holds, so a
@@ -1451,13 +1454,38 @@ async fn drain_until_resync(conn: &mut Connection, bootstrap: u64, instance: &st
     }
 }
 
-/// Assert that nothing arrives on this connection for `window`. Bounded by
-/// construction: it waits exactly that long and never longer.
-async fn assert_no_event_within(conn: &mut Connection, window: Duration, label: &str) {
-    if let Ok(Some(notification)) = tokio::time::timeout(window, conn.next_notification()).await {
-        assert_ne!(
-            notification.method, METHOD_STATE_EVENT,
-            "{label}: a domain event arrived after the resync: {notification:?}"
+/// The kinds a domain event travels as: every kind `Event::from_change` maps a
+/// committed change onto other than a lifecycle one, plus the `state.remove`
+/// a configuration reload publishes. A poisoned queue drops exactly these.
+const DOMAIN_KINDS: [&str; 5] = [
+    KIND_INVALIDATE,
+    KIND_REMOVE,
+    KIND_ACCOUNT_STATE_CHANGED,
+    KIND_DRAFT_CHANGED,
+    KIND_DRAFT_INVALID,
+];
+
+/// Assert that no domain event arrives on this connection for `window`.
+///
+/// A lifecycle event may: the contract keeps it through an overflow and past
+/// the poison, because no snapshot carries it. The daemon's own startup
+/// publishes one beside the burst, the `diagnostic.check_changed` of the
+/// account check that flips once the account runtime has started, and on a
+/// loaded machine that lands after the resync. Bounded by construction: it
+/// waits exactly `window` and never longer.
+async fn assert_no_domain_event_within(conn: &mut Connection, window: Duration, label: &str) {
+    let deadline = tokio::time::Instant::now() + window;
+    while let Ok(Some(notification)) =
+        tokio::time::timeout_at(deadline, conn.next_notification()).await
+    {
+        if notification.method != METHOD_STATE_EVENT {
+            continue;
+        }
+        let event: EventEnvelope = serde_json::from_value(notification.params.clone())
+            .unwrap_or_else(|e| panic!("the params are an event envelope: {e}"));
+        assert!(
+            !DOMAIN_KINDS.contains(&event.kind.as_str()),
+            "{label}: a domain event arrived after the resync: {event:?}"
         );
     }
 }
@@ -1589,7 +1617,10 @@ async fn a_stalled_reader_does_not_delay_another_clients_round_trip() {
     );
 
     // And a bootstrap, the heaviest query the daemon serves, is just as
-    // unaffected.
+    // unaffected. It takes the state gate every burst commit takes, so this is
+    // also the sample that catches a gate handing itself back to the committer:
+    // a barging gate kept this bootstrap waiting for the rest of the burst, past
+    // the bound on a loaded machine.
     let started = Instant::now();
     let _ = bootstrap_revision(&mut healthy).await;
     let elapsed = started.elapsed();
@@ -1623,7 +1654,7 @@ async fn a_stalled_reader_is_told_to_resync_and_sees_no_domain_event_after_it() 
         "the daemon delivered {seen} of {BURST} events before resyncing, which is not a \
          discard: a bounded queue plus a socket buffer cannot hold that many"
     );
-    assert_no_event_within(
+    assert_no_domain_event_within(
         &mut conn,
         Duration::from_millis(500),
         "a client that has been asked to resync",
