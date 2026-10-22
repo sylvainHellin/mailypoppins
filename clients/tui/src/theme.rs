@@ -118,36 +118,36 @@ impl Theme {
     }
 
     /// Catppuccin Latte (light variant), deliberately not the upstream palette
-    /// in five slots: `text_muted` takes subtext1 instead of subtext0, and
-    /// `selection`, `unread`, `accent` and `warning` are darkened versions of
-    /// green, blue, blue and yellow. Upstream Latte puts those colours under
-    /// the WCAG AA 4.5:1 text contrast on `bg` or `panel_bg`, and each slot
-    /// draws text, so each is moved just far enough to reach it (PERSO-179).
-    /// Re-syncing with upstream must keep these five, or the light theme's
-    /// muted, selected, unread, accent and warning text falls under 4.5:1
-    /// again.
+    /// in every slot that draws text: upstream Latte puts most of its colours
+    /// under the WCAG AA 4.5:1 text contrast on `bg`, on `panel_bg` or, for
+    /// the cursor row, the pickers' cursor and code, on `surface`. Each such
+    /// slot is the upstream colour darkened just far enough to reach 4.5:1 on
+    /// every ground it is drawn on (PERSO-179, and the light-theme pair table
+    /// in the tests), and `text_faint` far enough to reach 3:1, the bar the
+    /// desktop sets for its disabled text. Re-syncing with upstream must keep
+    /// the darkened values, or the light theme's text falls under 4.5:1 again.
     pub const fn catppuccin_latte() -> Self {
         Self {
-            bg: Color::Rgb(239, 241, 245),            // base
-            surface: Color::Rgb(204, 208, 218),       // surface0
-            text: Color::Rgb(76, 79, 105),            // text
-            text_muted: Color::Rgb(92, 95, 119),      // subtext1, subtext0 is under 4.5:1
-            text_faint: Color::Rgb(156, 160, 176),    // overlay0
-            border: Color::Rgb(30, 102, 245),         // blue
-            border_focused: Color::Rgb(254, 100, 11), // peach
-            panel_bg: Color::Rgb(230, 233, 239),      // mantle (below base)
-            selection: Color::Rgb(48, 120, 32),       // green darkened to 4.5:1
-            unread: Color::Rgb(13, 90, 244),          // blue darkened to 4.5:1
-            unread_count: Color::Rgb(254, 100, 11),   // peach
-            accent: Color::Rgb(13, 90, 244),          // blue darkened to 4.5:1
-            accent_alt: Color::Rgb(23, 146, 153),     // teal
-            heading: Color::Rgb(136, 57, 239),        // mauve
-            emphasis: Color::Rgb(223, 142, 29),       // yellow
-            code: Color::Rgb(254, 100, 11),           // peach
-            success: Color::Rgb(64, 160, 43),         // green
-            warning: Color::Rgb(146, 93, 19),         // yellow darkened to 4.5:1
-            error: Color::Rgb(210, 15, 57),           // red
-            info: Color::Rgb(30, 102, 245),           // blue
+            bg: Color::Rgb(239, 241, 245),          // base
+            surface: Color::Rgb(204, 208, 218),     // surface0
+            text: Color::Rgb(76, 79, 105),          // text
+            text_muted: Color::Rgb(86, 88, 111),    // subtext1 darkened to 4.5:1 on surface
+            text_faint: Color::Rgb(129, 133, 146),  // overlay0 darkened to 3:1
+            border: Color::Rgb(30, 102, 245),       // blue
+            border_focused: Color::Rgb(179, 70, 8), // peach darkened to 4.5:1, it titles overlays
+            panel_bg: Color::Rgb(230, 233, 239),    // mantle (below base)
+            selection: Color::Rgb(41, 102, 27),     // green darkened to 4.5:1 on surface
+            unread: Color::Rgb(13, 90, 244),        // blue darkened to 4.5:1
+            unread_count: Color::Rgb(254, 100, 11), // peach
+            accent: Color::Rgb(13, 90, 244),        // blue darkened to 4.5:1
+            accent_alt: Color::Rgb(18, 116, 122),   // teal darkened to 4.5:1
+            heading: Color::Rgb(115, 48, 202),      // mauve darkened to 4.5:1 on surface
+            emphasis: Color::Rgb(146, 93, 19),      // yellow darkened to 4.5:1
+            code: Color::Rgb(152, 60, 7),           // peach darkened to 4.5:1 on surface
+            success: Color::Rgb(41, 102, 28),       // green darkened to 4.5:1 on surface
+            warning: Color::Rgb(146, 93, 19),       // yellow darkened to 4.5:1
+            error: Color::Rgb(208, 15, 56),         // red darkened to 4.5:1
+            info: Color::Rgb(28, 95, 229),          // blue darkened to 4.5:1
         }
     }
 
@@ -182,7 +182,10 @@ impl Theme {
     }
 
     /// The Mac app's light palette (Basenord Palette D): Cream ground,
-    /// Prussian text, the same roles as [`Theme::mailypoppins`].
+    /// Prussian text, the same roles as [`Theme::mailypoppins`]. Three slots
+    /// are a step darker than the app's colour they come from, `selection`,
+    /// `accent_alt` and `success`, so they reach 4.5:1 on every ground the TUI
+    /// draws them on (the light-theme pair table in the tests).
     pub const fn mailypoppins_light() -> Self {
         Self {
             bg: Color::Rgb(244, 241, 232),       // #F4F1E8 Cream, the app's canvas
@@ -193,18 +196,18 @@ impl Theme {
             border: Color::Rgb(119, 131, 154),   // #77839A
             border_focused: Color::Rgb(31, 111, 147), // #1F6F93 ring
             panel_bg: Color::Rgb(236, 232, 221), // #ECE8DD muted, set off from bg
-            selection: Color::Rgb(178, 70, 0),   // #B24600 Pumpkin darkened, 4.5:1 on panel_bg
+            selection: Color::Rgb(170, 67, 0),   // #AA4300 Pumpkin darkened, 4.5:1 on surface
             unread: Color::Rgb(31, 111, 147),    // #1F6F93
             unread_count: Color::Rgb(178, 70, 0), // #B24600
             accent: Color::Rgb(26, 99, 133),     // #1A6385 link
-            accent_alt: Color::Rgb(30, 122, 122), // #1E7A7A terminal cyan
-            heading: Color::Rgb(138, 63, 160),   // #8A3FA0 terminal magenta
-            emphasis: Color::Rgb(138, 97, 0),    // #8A6100 terminal yellow
-            code: Color::Rgb(160, 64, 0),        // #A04000
-            success: Color::Rgb(47, 122, 62),    // #2F7A3E terminal green
-            warning: Color::Rgb(178, 70, 0),     // #B24600 the app's warning, Pumpkin darkened
-            error: Color::Rgb(180, 35, 46),      // #B4232E destructive
-            info: Color::Rgb(31, 111, 147),      // #1F6F93
+            accent_alt: Color::Rgb(28, 116, 116), // #1C7474 terminal cyan darkened, 4.5:1 on panel_bg
+            heading: Color::Rgb(138, 63, 160),    // #8A3FA0 terminal magenta
+            emphasis: Color::Rgb(138, 97, 0),     // #8A6100 terminal yellow
+            code: Color::Rgb(160, 64, 0),         // #A04000
+            success: Color::Rgb(43, 113, 57), // #2B7139 terminal green darkened, 4.5:1 on surface
+            warning: Color::Rgb(178, 70, 0),  // #B24600 the app's warning, Pumpkin darkened
+            error: Color::Rgb(180, 35, 46),   // #B4232E destructive
+            info: Color::Rgb(31, 111, 147),   // #1F6F93
         }
     }
 
@@ -494,6 +497,115 @@ mod tests {
             }
         }
         assert!(checked >= 5 * 12, "every opaque theme is checked");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// What a pair has to reach: text 4.5:1, and 3:1 for borders and the
+    /// faint text the desktop also holds to 3:1 (its disabled-foreground).
+    const TEXT: f64 = 4.5;
+    const UI: f64 = 3.0;
+
+    /// `(foreground, its colour, ground, its colour, minimum, where it is
+    /// drawn)`.
+    type Pair = (&'static str, Color, &'static str, Color, f64, &'static str);
+
+    /// Every foreground and ground the TUI draws text or chrome with, the
+    /// desktop's `PAIRS` (clients/desktop/src/design/contrast.ts) for the
+    /// terminal.
+    fn pairs(t: &Theme) -> Vec<Pair> {
+        let mut pairs = Vec::new();
+        for (ground_name, ground) in [("bg", t.bg), ("panel_bg", t.panel_bg)] {
+            for (slot, fg, need, use_) in [
+                ("text", t.text, TEXT, "body text, list rows"),
+                ("text_muted", t.text_muted, TEXT, "read rows, hints, labels"),
+                ("selection", t.selection, TEXT, "highlighted sidebar item"),
+                ("unread", t.unread, TEXT, "unread dot"),
+                ("accent", t.accent, TEXT, "key hints, links, H2"),
+                (
+                    "accent_alt",
+                    t.accent_alt,
+                    TEXT,
+                    "input cursors, H3, progress",
+                ),
+                ("heading", t.heading, TEXT, "header labels, H1, help titles"),
+                ("emphasis", t.emphasis, TEXT, "focused compose label"),
+                ("success", t.success, TEXT, "success status, save-here row"),
+                (
+                    "warning",
+                    t.warning,
+                    TEXT,
+                    "warning status, sync failed tag",
+                ),
+                ("error", t.error, TEXT, "error status, sidebar sync failure"),
+                ("info", t.info, TEXT, "info status"),
+                (
+                    "border_focused",
+                    t.border_focused,
+                    TEXT,
+                    "overlay titles, input labels",
+                ),
+                ("border", t.border, UI, "pane borders"),
+                (
+                    "text_faint",
+                    t.text_faint,
+                    UI,
+                    "timestamps, separators, placeholders",
+                ),
+            ] {
+                pairs.push((slot, fg, ground_name, ground, need, use_));
+            }
+        }
+        for (slot, fg, use_) in [
+            ("text", t.text, "compose field under the cursor"),
+            ("text_muted", t.text_muted, "compose label under the cursor"),
+            ("selection", t.selection, "the cursor row of every list"),
+            ("heading", t.heading, "the cursor of every picker"),
+            ("code", t.code, "inline code and code blocks"),
+            ("success", t.success, "the save-here row under the cursor"),
+        ] {
+            pairs.push((slot, fg, "surface", t.surface, TEXT, use_));
+        }
+        pairs.push((
+            "bg",
+            t.bg,
+            "accent",
+            t.accent,
+            TEXT,
+            "mode badge, view chip",
+        ));
+        pairs.push((
+            "panel_contrast_fg",
+            t.panel_contrast_fg(),
+            "border_focused",
+            t.border_focused,
+            TEXT,
+            "action chips",
+        ));
+        pairs
+    }
+
+    /// The light themes keep every pair of [`pairs`] at its minimum, the
+    /// check the desktop's contrast test runs over its light palette: dark
+    /// text on a light ground is where a terminal palette's colours most
+    /// often fall short.
+    #[test]
+    fn the_light_themes_keep_every_pair_at_its_minimum() {
+        let mut failures = Vec::new();
+        for name in ["catppuccin-latte", "mailypoppins-light"] {
+            let t = Theme::by_name(name).expect("an advertised theme");
+            for (slot, fg, ground_name, ground, need, use_) in pairs(&t) {
+                let (a, b) = (
+                    luminance(fg).expect("an RGB slot"),
+                    luminance(ground).expect("an RGB ground"),
+                );
+                let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                if ratio < need {
+                    failures.push(format!(
+                        "{name}: {slot} on {ground_name} ({use_}) is {ratio:.2}:1, under {need}:1"
+                    ));
+                }
+            }
+        }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
