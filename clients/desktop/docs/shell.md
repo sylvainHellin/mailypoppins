@@ -932,7 +932,7 @@ The labels are "config.toml", "Account stores", "Daemon socket", "Daemon log" an
 The `config_loaded` line has "Open config.toml", since a warning there, such as a key the load ignored (PERSO-118), is fixed in the file.
 While the config.toml banner shows, the `config_loaded` line does not: that banner says the same with the line and keeps its own button.
 Each line has a dismiss button, since an account blocked by another engine's lock is a normal state of a machine running two.
-A dismissal is `state.healthDismissed`, the check's name and the detail it had: the line stays hidden while the check says exactly that, and a new detail or a recovery drops the dismissal, so the same sentence coming back later shows again.
+A dismissal is `state.healthDismissed`, the check's name with the status and the detail it had: the line stays hidden while the check says exactly that, and a new status, a new detail or a recovery drops the dismissal, so a warning that turns into a failure with the same sentence shows again, and so does the same line coming back later.
 
 ### config.changed
 

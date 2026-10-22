@@ -1,7 +1,7 @@
 // The daemon's health checks that are not ok (P6-U8): the bootstrap
 // snapshot's `diagnostics` seeds them and each `diagnostic.check_changed`
 // replaces, adds or, on `ok`, drops one by name. A dismissed line stays
-// hidden until its check's detail changes. Pure; the reducer applies,
+// hidden until its check's status or detail changes. Pure; the reducer applies,
 // StatusRegion shows (clients/desktop/docs/shell.md, "Health checks").
 
 import type { CheckStatus, HealthCheck } from "@/protocol/types";
@@ -56,27 +56,37 @@ export function withCheck(health: readonly HealthCheck[], check: HealthCheck): H
   return health.map((c, i) => (i === at ? check : c));
 }
 
+/** What a dismissal remembers of the line it hid: its status and its sentence. */
+export type Dismissal = Pick<HealthCheck, "status" | "detail">;
+
+/** Whether `dismissal` still hides `check`: the same status and the same sentence. */
+export function hides(dismissal: Dismissal | undefined, check: HealthCheck): boolean {
+  return !!dismissal && dismissal.status === check.status && dismissal.detail === check.detail;
+}
+
 /**
  * The dismissals that still hold after `health` changed: one whose check
- * still carries the detail it was dismissed with. A new detail or a recovery
- * lets it go, so the same sentence coming back later shows again.
+ * still carries the status and the detail it was dismissed with. A new
+ * status, a new detail or a recovery lets it go, so a warning that turns
+ * into a failure with the same sentence shows again, and so does the same
+ * line coming back later.
  */
-export function keptDismissals(dismissed: Readonly<Record<string, string>>, health: readonly HealthCheck[]): Record<string, string> {
-  const kept: Record<string, string> = {};
+export function keptDismissals(dismissed: Readonly<Record<string, Dismissal>>, health: readonly HealthCheck[]): Record<string, Dismissal> {
+  const kept: Record<string, Dismissal> = {};
   for (const check of health) {
-    if (dismissed[check.name] === check.detail) kept[check.name] = check.detail;
+    if (hides(dismissed[check.name], check)) kept[check.name] = dismissed[check.name];
   }
   return kept;
 }
 
 /**
  * The checks the banner shows: all of them, but a dismissed one while its
- * detail has not changed, and `config_loaded` while the config.toml banner is
+ * status and detail have not changed, and `config_loaded` while the config.toml banner is
  * up, which says the same with the line and the daemon's sentence.
  */
 export function shownChecks(s: Pick<AppState, "health" | "healthDismissed" | "configProblem">): HealthCheck[] {
   return s.health.filter(
-    (c) => s.healthDismissed[c.name] !== c.detail && !(s.configProblem && c.name === "config_loaded"),
+    (c) => !hides(s.healthDismissed[c.name], c) && !(s.configProblem && c.name === "config_loaded"),
   );
 }
 

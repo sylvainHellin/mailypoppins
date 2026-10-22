@@ -59,7 +59,7 @@ function HealthLine({ check }: { check: HealthCheck }) {
         size="icon-xs"
         variant="ghost"
         aria-label={`Dismiss ${checkLabel(check.name)}`}
-        onClick={() => dispatch({ type: "dismiss_check", name: check.name, detail: check.detail })}
+        onClick={() => dispatch({ type: "dismiss_check", name: check.name, status: check.status, detail: check.detail })}
       >
         <X aria-hidden="true" />
       </Button>

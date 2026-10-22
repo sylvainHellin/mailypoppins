@@ -198,7 +198,7 @@ import {
   staleAllContacts,
 } from "@/app/contacts";
 import type { ConfigSnapshot, ContactSearch, SecretKind, SignatureListing } from "@/lib/gui-types";
-import type { ConfigChanged, ConfigInvalid } from "@/protocol/types";
+import type { CheckStatus, ConfigChanged, ConfigInvalid } from "@/protocol/types";
 import {
   closePasswordDialog,
   configChanged,
@@ -359,7 +359,7 @@ export type Action =
   | { type: "intercepted_fetched"; urls: InterceptedUrl[] }
   | { type: "dismiss_intercept"; entry: InterceptedUrl }
   /** Hide a health line until its check's detail changes (src/app/health.ts). */
-  | { type: "dismiss_check"; name: string; detail: string }
+  | { type: "dismiss_check"; name: string; status: CheckStatus; detail: string }
   // Mutations (app/mutations.ts dispatches these around each command).
   | {
       type: "mutation_apply";
@@ -2006,10 +2006,11 @@ function reduce(s: AppState, a: Action): AppState {
       return { ...s, intercepted: [...s.intercepted, ...fresh].slice(-INTERCEPT_CAP) };
     }
     case "dismiss_check":
-      // Keyed by the detail shown, so a line that changed under the click is
-      // not hidden in its new form.
-      return s.health.some((c) => c.name === a.name && c.detail === a.detail)
-        ? { ...s, healthDismissed: { ...s.healthDismissed, [a.name]: a.detail } }
+      // Keyed by the status and the detail shown, so a line that changed
+      // under the click, a warning turned failure included, is not hidden in
+      // its new form.
+      return s.health.some((c) => c.name === a.name && c.status === a.status && c.detail === a.detail)
+        ? { ...s, healthDismissed: { ...s.healthDismissed, [a.name]: { status: a.status, detail: a.detail } } }
         : s;
     case "dismiss_intercept":
       // The notice names the link it is for: a timer armed for an older link

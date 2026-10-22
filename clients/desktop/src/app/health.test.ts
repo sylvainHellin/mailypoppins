@@ -70,7 +70,7 @@ describe("health checks", () => {
   });
 
   it("a dismissed line stays hidden until its check's detail changes or it recovers", () => {
-    const dismiss: Action = { type: "dismiss_check", name: storeFail.name, detail: storeFail.detail };
+    const dismiss: Action = { type: "dismiss_check", name: storeFail.name, status: storeFail.status, detail: storeFail.detail };
     const s0 = run(initialState(), boot([mailboxWarn, storeFail]), dismiss);
     expect(shownChecks(s0)).toEqual([mailboxWarn]);
     // The same sentence again, by event or by a reconnect's snapshot, stays hidden.
@@ -84,7 +84,21 @@ describe("health checks", () => {
     expect(back.healthDismissed).toEqual({});
     expect(shownChecks(back)).toEqual([mailboxWarn, storeFail]);
     // A click on a line whose detail already moved hides nothing.
-    expect(run(s0, { type: "dismiss_check", name: mailboxWarn.name, detail: "stale" }).healthDismissed).toEqual({ [storeFail.name]: storeFail.detail });
+    expect(run(s0, { type: "dismiss_check", name: mailboxWarn.name, status: "warn", detail: "stale" }).healthDismissed).toEqual({
+      [storeFail.name]: { status: storeFail.status, detail: storeFail.detail },
+    });
+  });
+
+  it("a dismissed warning shows again when the same sentence turns into a failure", () => {
+    const warn: HealthCheck = { name: "account:home", status: "warn", detail: "blocked: the store is locked" };
+    const fail: HealthCheck = { ...warn, status: "fail" };
+    const s0 = run(initialState(), boot([warn]), { type: "dismiss_check", name: warn.name, status: warn.status, detail: warn.detail });
+    expect(shownChecks(s0)).toEqual([]);
+    const s1 = run(s0, envelope("diagnostic.check_changed", fail));
+    expect(shownChecks(s1)).toEqual([fail]);
+    expect(s1.healthDismissed).toEqual({});
+    // A click on a line whose status already moved hides nothing.
+    expect(run(s1, { type: "dismiss_check", name: warn.name, status: "warn", detail: warn.detail }).healthDismissed).toEqual({});
   });
 
   it("orders and labels: a new check joins the end, a known one keeps its place", () => {

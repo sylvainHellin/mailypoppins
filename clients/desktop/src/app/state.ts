@@ -2,6 +2,7 @@
 // selection and the presentation state. Pure; the reducer is in reducer.ts.
 
 import type { Theme } from "@/app/theme";
+import type { Dismissal } from "@/app/health";
 import type { ReaderMode } from "@/app/readerMode";
 import type { Action } from "@/app/reducer";
 import type {
@@ -934,11 +935,12 @@ export type AppState = {
    */
   health: HealthCheck[];
   /**
-   * The health lines the user dismissed, check name to the detail it had
-   * then: hidden while that check still says exactly that, shown again once
-   * its detail changes or it recovers (src/app/health.ts).
+   * The health lines the user dismissed, check name to the status and the
+   * detail it had then: hidden while that check still says exactly that,
+   * shown again once its status or detail changes or it recovers
+   * (src/app/health.ts).
    */
-  healthDismissed: Record<string, string>;
+  healthDismissed: Record<string, Dismissal>;
   /** What the `password` overlay shows; null whenever another overlay or none is open. */
   passwordDialog: PasswordDialog | null;
   /** What the `account_wizard` overlay shows; null whenever another overlay or none is open. */
