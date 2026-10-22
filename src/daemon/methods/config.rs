@@ -1034,6 +1034,14 @@ fn plan_oauth2(
 /// open a browser (`INT-04`).
 async fn oauth2_login(work: OAuth2Work, handle: crate::daemon::operations::OperationHandle) {
     handle.set_running();
+    // A candidate sign-in is a wizard starting: the sign-ins wizards staged
+    // and abandoned more than a day ago go, so `candidates/` does not keep
+    // them until `config.reset_secrets`.
+    if work.staged {
+        if let Err(e) = crate::oauth2::sweep_staged_tokens() {
+            log::warn!("[daemon] could not drop the abandoned staged sign-ins: {e:#}");
+        }
+    }
     let report = |uri: &str, code: &str| {
         handle.report(crate::daemon::operations::Progress {
             phase: DEVICE_CODE_PHASE.to_string(),

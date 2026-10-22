@@ -157,6 +157,54 @@ pub fn promote_staged_token(account_name: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// How old a staged sign-in may grow before the next candidate sign-in drops
+/// it. A wizard that signed in a day ago and still has not written its
+/// account was abandoned; one that comes back after that signs in again.
+pub const STAGED_TOKEN_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Drop the staged sign-ins older than [`STAGED_TOKEN_MAX_AGE`], which an
+/// abandoned wizard left behind. The daemon runs it as each candidate sign-in
+/// starts, the first token-cache write of every OAuth2 or Graph wizard in
+/// either client; a younger sign-in may belong to a wizard still running and
+/// is kept. Answers how many it dropped.
+pub fn sweep_staged_tokens() -> Result<usize> {
+    sweep_staged_tokens_in(
+        &crate::config::tokens_dir().join(STAGED_TOKEN_DIR),
+        SystemTime::now(),
+        STAGED_TOKEN_MAX_AGE,
+    )
+}
+
+/// [`sweep_staged_tokens`] over `dir` at `now`: every `.enc` file last written
+/// more than `max_age` before `now`. A missing directory holds nothing.
+fn sweep_staged_tokens_in(
+    dir: &std::path::Path,
+    now: SystemTime,
+    max_age: Duration,
+) -> Result<usize> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e).with_context(|| format!("Failed to read {}", dir.display())),
+    };
+    let mut dropped = 0;
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("enc") || !path.is_file() {
+            continue;
+        }
+        let written = fs::metadata(&path)?.modified()?;
+        if now.duration_since(written).unwrap_or_default() <= max_age {
+            continue;
+        }
+        fs::remove_file(&path)
+            .with_context(|| format!("Failed to drop the staged token {}", path.display()))?;
+        info!("Abandoned staged token {} dropped", path.display());
+        dropped += 1;
+    }
+    Ok(dropped)
+}
+
 fn save_token_cache(account_name: &str, cache: &TokenCache) -> Result<()> {
     let path = token_cache_path(account_name);
     // The parent rather than the token directory: a staged sign-in lives one
@@ -518,6 +566,39 @@ pub fn build_xoauth2_string(username: &str, access_token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A staged sign-in older than the limit goes, a younger one stays for
+    /// the wizard that may still be running, and nothing else is touched.
+    #[test]
+    fn the_sweep_drops_only_staged_sign_ins_past_their_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let write = |name: &str, age: Duration| {
+            let path = dir.path().join(name);
+            fs::write(&path, b"x").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(now - age)
+                .unwrap();
+        };
+        let day = STAGED_TOKEN_MAX_AGE;
+        write("abandoned.enc", day + Duration::from_secs(60));
+        write("running.enc", day - Duration::from_secs(60));
+        write("notes.txt", day * 3);
+        assert_eq!(sweep_staged_tokens_in(dir.path(), now, day).unwrap(), 1);
+        let mut left: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["notes.txt", "running.enc"]);
+        assert_eq!(
+            sweep_staged_tokens_in(&dir.path().join("missing"), now, day).unwrap(),
+            0
+        );
+    }
 
     #[test]
     fn test_build_xoauth2_string() {
