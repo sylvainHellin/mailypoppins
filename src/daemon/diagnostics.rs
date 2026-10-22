@@ -227,7 +227,8 @@ pub struct Diagnostics {
     ledger: Mutex<BTreeMap<String, Check>>,
     /// Since when each account that is `opening` has been: the daemon's start
     /// for the accounts configured then, the first evaluation that saw it
-    /// opening for any other. Forgotten once its start settles.
+    /// opening for any other. Forgotten once its start settles or a reload
+    /// removes the account.
     opening_since: Mutex<BTreeMap<String, Instant>>,
     /// Held across a whole [`Diagnostics::refresh`], from evaluating the
     /// checks to publishing what flipped. Each account task refreshes on its
@@ -405,6 +406,10 @@ impl Diagnostics {
     /// seen opening.
     pub fn checks(&self) -> Vec<Check> {
         let accounts = self.config.accounts();
+        // An account a reload removed is forgotten with its start, so adding
+        // it back starts a fresh grace rather than inheriting the old clock.
+        lock(&self.opening_since)
+            .retain(|name, _| accounts.iter().any(|account| &account.name == name));
         let mut checks = vec![
             self.config_loaded(),
             store_open(&accounts),

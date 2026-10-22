@@ -1360,6 +1360,51 @@ mod tests {
         );
     }
 
+    /// An account a reload removes while it is opening, and a later reload
+    /// adds back, gets a fresh grace: its old start is forgotten with it, so
+    /// the re-added account reads `ok` rather than warning at once.
+    #[test]
+    fn a_re_added_account_opens_with_a_fresh_grace() {
+        use super::super::config::ConfigState;
+        let state = state_with_one_account("alpha");
+        let config_with = |names: &[&str]| crate::config::GlobalConfig {
+            accounts: names
+                .iter()
+                .map(|name| crate::config::AccountConfig {
+                    name: name.to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let alpha_status = |state: &DaemonState| {
+            state
+                .diagnostics
+                .checks()
+                .into_iter()
+                .find(|check| check.name == "account:alpha")
+                .map(|check| check.status)
+        };
+
+        // Alpha's start began longer ago than the grace when a reload drops it.
+        state.diagnostics.backdate_opening(
+            "alpha",
+            super::super::diagnostics::OPENING_GRACE + Duration::from_secs(5),
+        );
+        state.config.install(ConfigState::Ok, config_with(&[]));
+        state.diagnostics.refresh();
+        assert_eq!(alpha_status(&state), None, "a removed account has no check");
+
+        state
+            .config
+            .install(ConfigState::Ok, config_with(&["alpha"]));
+        assert_eq!(
+            alpha_status(&state),
+            Some(super::super::diagnostics::Status::Ok),
+            "the re-added account is within a fresh grace"
+        );
+    }
+
     /// A tick whose body fails, so the commit path is exercised without an
     /// IMAP server: the hooks are injected, and the failure is what makes the
     /// committed severity distinguishable from a default.
