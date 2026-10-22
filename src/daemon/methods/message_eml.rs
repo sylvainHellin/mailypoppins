@@ -256,7 +256,8 @@ pub(super) struct Hit {
 
 impl Hit {
     /// The `{message_id, mailbox}` object a client sends, `mailbox` resolved
-    /// as `message.fetch` resolves it (a sidebar label or a mailbox key).
+    /// as `message.fetch` resolves it: a sidebar mailbox, or since #0141 any
+    /// folder the server lists, whatever its policy.
     pub(super) fn from_param(account: &AccountConfig, value: &Value) -> Result<Self, RpcError> {
         if !value.is_object() {
             return Err(invalid_params(
@@ -271,7 +272,9 @@ impl Hit {
             ));
         }
         let wanted = string_param(value, "mailbox")?;
-        let mailbox = super::message::resolve_mailbox(account, &wanted)?;
+        let catalogue = crate::catalogue::Catalogue::load(account);
+        let (mailbox, _server) =
+            super::message_server::fetch_storage(account, &catalogue, &wanted)?;
         Ok(Self {
             mailbox,
             message_id,
@@ -513,7 +516,10 @@ async fn fetch_raw(
             .ok_or_else(|| anyhow::anyhow!("the server no longer has {message_id}"))?;
         return client.fetch_mime(&graph_id).await;
     }
-    let server_name = crate::config::find_server_name_for_role(account, mailbox);
+    // The folder behind the key from the catalogue (#0141), which knows a
+    // discovered folder and a role found on the server as well as a
+    // configured one.
+    let server_name = crate::catalogue::Catalogue::load(account).server_for_key(mailbox);
     let imap = crate::config::ImapConfig::load(account)?;
     let mut session = crate::imap_client::open_imap_session(&imap).await?;
     let found =
@@ -527,6 +533,7 @@ async fn fetch_raw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalogue::{listing, ListedFolder};
 
     /// A message with a PDF and an inline logo the HTML body shows by
     /// `cid:`, as a server hands it over.
@@ -665,5 +672,48 @@ JVBERi0xLjQK\r\n\
             .expect("the export");
 
         assert_eq!(downloads.load(Ordering::SeqCst), 1);
+    }
+
+    /// A hit's `.eml` export and its forward as attachment address the hit's
+    /// folder as `message.fetch` does (#0141): any folder the server lists,
+    /// a counts-only or an ignored one included, where the configured
+    /// mailboxes alone used to answer "not a mailbox of" the account.
+    #[test]
+    fn a_hit_from_a_folder_only_the_server_names_is_addressable() {
+        let data = tempfile::tempdir().unwrap();
+        let _data = crate::config::test_env::DataDirOverride::set(data.path());
+        let account = AccountConfig {
+            name: "tum".to_string(),
+            ..Default::default()
+        };
+        crate::config::create_private_dir_all(crate::config::account_dir("tum")).unwrap();
+        let store = Store::open_account("tum").unwrap();
+        listing::replace(
+            &store,
+            "tum",
+            &[
+                ListedFolder::named("INBOX"),
+                ListedFolder::named("Projects"),
+                ListedFolder::named("Junk Email").with_attributes(&["\\Junk"]),
+                ListedFolder::named("All Mail").with_attributes(&["\\All"]),
+            ],
+        )
+        .unwrap();
+        drop(store);
+
+        let hit = |mailbox: &str| {
+            Hit::from_param(
+                &account,
+                &serde_json::json!({"message_id": "<m@x>", "mailbox": mailbox}),
+            )
+        };
+        assert_eq!(hit("Projects").unwrap().mailbox, "Projects");
+        assert_eq!(hit("Junk").unwrap().mailbox, "Junk Email");
+        assert_eq!(
+            hit("All Mail").unwrap().mailbox,
+            "All Mail",
+            "an ignored folder"
+        );
+        assert_eq!(hit("Nowhere").err().map(|e| e.code), Some(-32602));
     }
 }

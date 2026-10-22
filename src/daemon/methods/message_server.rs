@@ -239,7 +239,7 @@ fn fetch_request(
 /// and the local search find it; nothing syncs an `ignore` folder, so such a
 /// row stays as fetched. Refused: a name the last listing did not have, and
 /// one that would land the row in a role's or the local Drafts' mailbox.
-fn fetch_storage(
+pub(super) fn fetch_storage(
     account: &AccountConfig,
     catalogue: &crate::catalogue::Catalogue,
     wanted: &str,
