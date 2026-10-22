@@ -189,7 +189,8 @@ There is no `UPDATE_` switch for it: an entry is added by hand, with its reason,
 `mp daemon` and `mp account` are listed in `mp --help`; only the debug `--daemon` flag of `mp account list` carries `hide = true`, which `tests/daemon_read_only_methods.rs` asserts.
 
 - `mp daemon run | start | status | stop | restart`, the lifecycle commands, plus `install-service | uninstall-service` (the login units) and `health | logs | support-bundle` (the diagnostics), all added in Phase 6 under the same subtree.
-- `mp account list --daemon`, a hidden flag that asks the daemon's `account.list` instead of answering in process, scoped to the one command that has an in-process answer to compare against. It never falls back; with no daemon to reach it exits 4.
+- `mp account list --daemon`, a hidden flag that asks the daemon's `account.list` instead of answering in process, scoped to the one command that has an in-process answer to compare against.
+  It never falls back; with no daemon to reach it exits 4.
 - `mp account list`, which lands with the daemon work because it is the oracle `mp account list --daemon` must match.
 
 ## The store
