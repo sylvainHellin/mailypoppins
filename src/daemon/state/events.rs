@@ -232,6 +232,27 @@ impl Event {
         self.payload().to_string().len() + self.kind().len()
     }
 
+    /// Whether [`Event::key`] would be `key`, without building it.
+    fn has_key(&self, key: &Key) -> bool {
+        match (self, key) {
+            (
+                Event::Replace { kind, .. },
+                Key::Replace {
+                    kind: wanted,
+                    resource,
+                },
+            ) => kind == wanted && self.resource() == *resource,
+            (
+                Event::Invalidate { resource, scope },
+                Key::Invalidate {
+                    resource: wanted,
+                    scope: wanted_scope,
+                },
+            ) => resource == wanted && scope == wanted_scope,
+            _ => false,
+        }
+    }
+
     /// The key two events coalesce on, or `None` for an event that merges with
     /// nothing.
     fn key(&self) -> Option<Key> {
@@ -457,9 +478,13 @@ impl Outbound {
     }
 
     /// Where a queued entry shares `key`, if one does.
+    ///
+    /// Compared in place rather than through [`Event::key`]: that clones a
+    /// resource and a scope per queued entry, and a push scans the whole queue,
+    /// so filling a 512-entry queue cost a quarter of a million allocations.
     fn position_of(&self, key: &Key) -> Option<usize> {
         self.queue.iter().position(|entry| match entry {
-            Entry::Event { event, .. } => event.key().as_ref() == Some(key),
+            Entry::Event { event, .. } => event.has_key(key),
             Entry::Resync => false,
         })
     }

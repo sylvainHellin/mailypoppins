@@ -26,6 +26,8 @@
 //! state - can commit a change from the *same* thread, and a non-reentrant lock
 //! held across that call deadlocks on itself. [`Gate`] therefore records the
 //! thread that holds it: a reentrant entry proceeds, another thread blocks.
+//! Blocked threads are let in by ticket, in the order they arrived, so a
+//! thread committing in a loop cannot keep re-entering ahead of a waiter.
 
 pub mod events;
 pub mod revision;
@@ -845,7 +847,15 @@ impl std::fmt::Debug for CanonicalState {
 // The reentrant gate
 // ---------------------------------------------------------------------------
 
-/// A mutual exclusion that a thread already holding may enter again.
+/// A mutual exclusion that a thread already holding may enter again, handed
+/// over in the order its entrants arrived.
+///
+/// First come, first served, by ticket: a thread that leaves and at once
+/// enters again queues behind every thread already waiting. Without the
+/// tickets the gate barges, because the leaving thread still runs while a
+/// waiter it woke has yet to be scheduled, so a run of commits (the test-only
+/// event burst is one) re-enters ahead of a `state.bootstrap` for as long as
+/// it lasts, and on a loaded machine the bootstrap waited out the whole run.
 #[derive(Debug, Default)]
 struct Gate {
     state: Mutex<GateState>,
@@ -856,31 +866,30 @@ struct Gate {
 struct GateState {
     owner: Option<ThreadId>,
     depth: usize,
+    /// The ticket the next new entrant takes.
+    next: u64,
+    /// The ticket allowed in once the gate is free.
+    serving: u64,
 }
 
 impl Gate {
     fn enter(&self) -> GateGuard<'_> {
         let me = std::thread::current().id();
         let mut state = lock(&self.state);
-        loop {
-            match state.owner {
-                None => {
-                    state.owner = Some(me);
-                    state.depth = 1;
-                    break;
-                }
-                Some(owner) if owner == me => {
-                    state.depth += 1;
-                    break;
-                }
-                Some(_) => {
-                    state = self
-                        .changed
-                        .wait(state)
-                        .unwrap_or_else(PoisonError::into_inner)
-                }
-            }
+        if state.owner == Some(me) {
+            state.depth += 1;
+            return GateGuard { gate: self };
         }
+        let ticket = state.next;
+        state.next = state.next.wrapping_add(1);
+        while state.owner.is_some() || state.serving != ticket {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        state.owner = Some(me);
+        state.depth = 1;
         GateGuard { gate: self }
     }
 }
@@ -896,6 +905,7 @@ impl Drop for GateGuard<'_> {
         state.depth = state.depth.saturating_sub(1);
         if state.depth == 0 {
             state.owner = None;
+            state.serving = state.serving.wrapping_add(1);
             self.gate.changed.notify_all();
         }
     }
@@ -964,6 +974,35 @@ mod tests {
         let inner = gate.enter();
         drop(inner);
         drop(outer);
+    }
+
+    /// A thread that leaves the gate and enters it again queues behind a
+    /// thread already waiting, so a run of commits cannot starve a bootstrap.
+    /// Deterministic: the waiter is known to hold its ticket before the holder
+    /// leaves, because the test waits for the ticket counter to move.
+    #[test]
+    fn the_gate_admits_a_waiter_before_a_holder_that_re_enters() {
+        let gate = Arc::new(Gate::default());
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let held = gate.enter();
+        let waiter = {
+            let gate = Arc::clone(&gate);
+            let order = Arc::clone(&order);
+            std::thread::spawn(move || {
+                let _inside = gate.enter();
+                lock(&order).push("waiter");
+            })
+        };
+        while lock(&gate.state).next < 2 {
+            std::thread::yield_now();
+        }
+        drop(held);
+        {
+            let _again = gate.enter();
+            lock(&order).push("holder");
+        }
+        waiter.join().expect("the waiter finishes");
+        assert_eq!(*lock(&order), vec!["waiter", "holder"]);
     }
 
     /// The merged drain is revision-ordered *across* calls, which is what one
