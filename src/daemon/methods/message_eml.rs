@@ -196,7 +196,9 @@ async fn fetch_raw(account: &AccountConfig, row: &MessageRow) -> anyhow::Result<
 /// inventing a day. The subject keeps its spaces and its case, since the file
 /// is usually attached to another mail and its name is what the recipient
 /// reads; the characters a file system or a mail client refuses in a name are
-/// dropped, and a separator becomes `-`. An empty subject is `message`.
+/// dropped, and a separator becomes `-`. An empty subject is `message`, and a
+/// long one is cut as an attachment's name is (`parse::cut_name`), by bytes
+/// on a char boundary.
 pub fn eml_name(subject: &str, date: Option<&str>) -> String {
     let cleaned: String = subject
         .chars()
@@ -209,15 +211,10 @@ pub fn eml_name(subject: &str, date: Option<&str>) -> String {
         .collect();
     let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     let cleaned = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
-    let stem: String = if cleaned.is_empty() {
-        "message".to_string()
+    let stem = if cleaned.is_empty() {
+        "message"
     } else {
-        cleaned
-            .chars()
-            .take(100)
-            .collect::<String>()
-            .trim()
-            .to_string()
+        crate::parse::cut_name(cleaned).trim_end()
     };
     let day = date
         .and_then(|d| chrono::DateTime::parse_from_rfc2822(d.trim()).ok())
@@ -231,6 +228,7 @@ pub fn eml_name(subject: &str, date: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::eml_name;
+    use crate::parse::MAX_NAME_BYTES;
 
     #[test]
     fn the_name_is_the_day_and_the_subject() {
@@ -261,6 +259,25 @@ mod tests {
         assert_eq!(eml_name(" ... ", Some("(unknown date)")), "message.eml");
         assert_eq!(eml_name("..", None), "message.eml");
         let long = "x".repeat(300);
-        assert_eq!(eml_name(&long, None).len(), 100 + ".eml".len());
+        assert_eq!(eml_name(&long, None).len(), MAX_NAME_BYTES + ".eml".len());
+    }
+
+    /// A CJK or emoji subject is three or four bytes a character: the cut is
+    /// by bytes, on a char boundary, so the name fits a file system's 255 and
+    /// never splits a character.
+    #[test]
+    fn a_long_cjk_or_emoji_subject_is_cut_by_bytes_on_a_char_boundary() {
+        let date = Some("Wed, 21 Oct 2026 09:12:00 +0200");
+        for subject in ["会議の議事録".repeat(40), "📬🎉".repeat(80)] {
+            let name = eml_name(&subject, date);
+            let stem = name
+                .strip_prefix("2026-10-21_")
+                .and_then(|n| n.strip_suffix(".eml"))
+                .expect("the day and the extension frame the stem");
+            assert!(stem.len() <= MAX_NAME_BYTES, "{} bytes", stem.len());
+            assert!(stem.len() > MAX_NAME_BYTES - 4, "{} bytes", stem.len());
+            assert!(subject.starts_with(stem));
+            assert!(name.len() <= 255);
+        }
     }
 }

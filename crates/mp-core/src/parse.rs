@@ -19,6 +19,17 @@ pub fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
     idx
 }
 
+/// The most bytes a name this crate writes to disk keeps, well under the
+/// 255 a file system allows, so a prefix or an extension still fits.
+pub const MAX_NAME_BYTES: usize = 200;
+
+/// `name` cut to at most [`MAX_NAME_BYTES`] bytes, on a char boundary: the
+/// one cut every file and directory name built from mail content takes, since
+/// a CJK or emoji subject is three or four bytes a character.
+pub fn cut_name(name: &str) -> &str {
+    &name[..floor_char_boundary(name, MAX_NAME_BYTES)]
+}
+
 /// Find the first occurrence of `needle` in `haystack`, ignoring ASCII case.
 ///
 /// Returns a byte offset valid for `haystack` itself. Never lowercase the
@@ -831,10 +842,8 @@ pub fn sanitize_attachment_filename(name: &str) -> String {
     let name = name.trim().to_string();
     if name.is_empty() {
         "attachment.bin".to_string()
-    } else if name.len() > 200 {
-        name[..floor_char_boundary(&name, 200)].to_string()
     } else {
-        name
+        cut_name(&name).to_string()
     }
 }
 
@@ -868,11 +877,7 @@ pub fn sanitize_message_id_for_path(mid: &str) -> String {
             .collect();
         return format!("unknown-mid-{}", hex);
     }
-    if cleaned.len() > 200 {
-        cleaned[..floor_char_boundary(&cleaned, 200)].to_string()
-    } else {
-        cleaned
-    }
+    cut_name(&cleaned).to_string()
 }
 
 /// Return the per-account stable attachments directory for a Message-ID:

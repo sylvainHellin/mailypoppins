@@ -3877,18 +3877,18 @@ fn search_url(
     Ok(url)
 }
 
-/// The URL looking a message up by its `Message-ID` across every folder.
-///
-/// The id goes into an OData string literal, so a single quote in it is
-/// doubled, and the whole `$filter` value is percent-encoded: a raw `+` would
-/// read as a space, a `&` would end the parameter and a `#` the query, and the
-/// lookup would quietly find nothing.
 /// The `$value` URL of one Graph message: its MIME export. The id goes into
 /// the path as the move, delete and patch URLs put it.
 fn mime_url(graph_id: &str) -> String {
     format!("{GRAPH_BASE}/me/messages/{graph_id}/$value")
 }
 
+/// The URL looking a message up by its `Message-ID` across every folder.
+///
+/// The id goes into an OData string literal, so a single quote in it is
+/// doubled, and the whole `$filter` value is percent-encoded: a raw `+` would
+/// read as a space, a `&` would end the parameter and a `#` the query, and the
+/// lookup would quietly find nothing.
 fn message_lookup_url(internet_message_id: &str) -> Result<reqwest::Url> {
     let clean_id = internet_message_id.trim_matches(|c| c == '<' || c == '>');
     let filter = format!("internetMessageId eq '<{}>'", clean_id.replace('\'', "''"));
