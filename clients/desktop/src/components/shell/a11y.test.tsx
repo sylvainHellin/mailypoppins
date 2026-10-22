@@ -342,6 +342,27 @@ describe("accessibility primitives", () => {
     expect(file).toHaveAttribute("aria-invalid", "true");
   });
 
+  it("keeps the palette's and the move picker's titles out of the page while they are closed", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    for (const text of ["Command palette", "Run an action by name", /^Move (the message|\d+ messages) to$/, /Enter to move/]) {
+      expect(screen.queryByText(text)).toBeNull();
+    }
+    await user.keyboard(":");
+    const palette = await screen.findByRole("dialog", { name: "Command palette" });
+    expect(palette).toHaveAccessibleDescription("Run an action by name");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByText("Command palette")).toBeNull();
+
+    await user.keyboard("jM");
+    const move = await screen.findByRole("dialog", { name: "Move the message to" });
+    expect(move).toHaveAccessibleDescription(/Enter to move/);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByText(/Enter to move/)).toBeNull();
+  });
+
   it("names each attachment's buttons after the file, in the reader", async () => {
     const { user } = renderApp();
     await shellReady();
