@@ -529,8 +529,8 @@ pub(super) fn land_sync(
 /// (P5-U4).
 ///
 /// The consumer end of [`crate::queries::MessageRowDelta`], called by the
-/// event drain (P5-U8): a replace lands where the row stands, a removal drops
-/// it, and anything the client cannot apply reloads the mailbox through the
+/// event drain (P5-U8): a removal drops the row, and an invalidate or a
+/// removal of a uid this session never listed reloads the mailbox through the
 /// same off-thread path a mailbox switch takes.
 ///
 /// The cache slot moves with the list, because the two share the allocation and
@@ -1222,5 +1222,66 @@ mod tests {
                 .any(|a| matches!(a, crate::app::Action::LoadMailbox { mailbox_idx: 1, .. })),
             "the reload is queued as the background load, not run here"
         );
+    }
+
+    /// A door that answers every `message.list` with one fixed listing.
+    struct Listing(serde_json::Value);
+
+    impl super::super::queries::Queries for Listing {
+        fn call(
+            &self,
+            _method: &str,
+            _params: serde_json::Value,
+        ) -> anyhow::Result<serde_json::Value> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A remove of a listed row drops it from the open list and from the
+    /// mailbox's cache slot alike, so a later visit to the mailbox does not
+    /// bring the removed row back from the cache. The account name is this
+    /// test's own, because the uid index is process-wide.
+    #[test]
+    fn a_remove_drops_the_row_from_the_open_list_and_its_cache_slot() {
+        let _data = DataDir::new();
+        let mut app = app_with_warm_caches();
+        let account = "bg-remove-delta";
+        app.account_config.name = account.to_string();
+
+        // The listing seeds the uid index, as a mailbox load does.
+        let row = |id: i64, uid: i64| serde_json::json!({"id": id, "uid": uid, "subject": format!("row {id}")});
+        let door = Listing(serde_json::json!({
+            "account": account,
+            "mailbox": "archive",
+            "messages": [row(11, 101), row(12, 102)],
+        }));
+        let rows = std::sync::Arc::new(
+            super::super::queries::list_emails(&door, account, "archive").expect("a listing"),
+        );
+        app.email_cache[1] = Some(std::sync::Arc::clone(&rows));
+        app.emails = rows;
+
+        let delta = super::super::queries::MessageRowDelta::decode(&mp_protocol::EventEnvelope {
+            instance_id: "bg".to_string(),
+            revision: 5,
+            kind: mp_protocol::events::KIND_REMOVE.to_string(),
+            payload: serde_json::json!({"resource": format!("message:{account}/archive/101")}),
+        })
+        .expect("a state.remove of a message decodes");
+
+        assert!(
+            apply_row_delta(&mut app, &delta),
+            "a listed uid folds in place"
+        );
+        let left = |rows: &[crate::app::EmailEntry]| -> Vec<Option<MessageRef>> {
+            rows.iter().map(|row| row.msg).collect()
+        };
+        assert_eq!(left(&app.emails), [Some(MessageRef::new(12))]);
+        assert_eq!(
+            left(app.email_cache[1].as_deref().expect("the slot stays warm")),
+            [Some(MessageRef::new(12))],
+            "the cache slot holds the post-delta rows"
+        );
+        assert!(app.pending_actions.is_empty(), "nothing to reload");
     }
 }

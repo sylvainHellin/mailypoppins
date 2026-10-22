@@ -26,11 +26,12 @@
 //! removes a row by `message:<account>/<mailbox>/<uid>`. `MessageListRow`
 //! carries the uid, so `mp_client::queries::apply_row_delta` needs no index,
 //! but an [`EmailEntry`] does not, so the correspondence has to be remembered
-//! where both are seen: every listing and every row replace records
-//! `(account, mailbox, uid) -> id` here, and a remove resolves through it. A
-//! listing replaces its mailbox's table whole, so the memory is one entry per
-//! row of the mailboxes this session has opened, and a uid the table does not
-//! know owes a refetch rather than a guess.
+//! where both are seen: every listing records `(account, mailbox, uid) -> id`
+//! here, and a remove resolves through it. The only other delta is an
+//! invalidate, which owes a re-list and needs no index. A listing replaces its
+//! mailbox's table whole, so the memory is one entry per row of the mailboxes
+//! this session has opened, and a uid the table does not know owes a refetch
+//! rather than a guess.
 //!
 //! The alternative is a `uid` field on `EmailEntry`, which is 31 struct
 //! literals across seven files, two of them the frozen golden-frame fixtures.
