@@ -191,8 +191,9 @@ pub async fn delete<F: DraftsFolder>(
 /// Queue a push for every draft of `account` that owes one: pushable, and its
 /// file's hash differs from its row's or it has no row. A draft that already
 /// has a push queued is not queued twice, and one whose push for these very
-/// bytes is parked `failed` is not queued again: the next edit retries it.
-/// Returns how many were queued.
+/// bytes was parked `failed` is not queued again until
+/// [`crate::pending_ops::PUSH_RETRY_COOL_DOWN_SECS`] have passed; the next
+/// edit queues it at once. Returns how many were queued.
 ///
 /// It also prunes the account's retired drafts past their 30 days, mirror or
 /// not, since every drain point passes here.
@@ -202,6 +203,7 @@ pub fn enqueue_owed(store: &Store, account: &AccountConfig) -> Result<usize> {
         return Ok(0);
     }
     let rows = draft_sync::load(store, &account.name)?;
+    let now = crate::outbox::unix_now();
     let mut queued = 0;
     for local in local_drafts(&account.name) {
         if !local.pushable() {
@@ -212,7 +214,13 @@ pub fn enqueue_owed(store: &Store, account: &AccountConfig) -> Result<usize> {
             .find(|row| row.draft_id == local.id)
             .is_some_and(|row| row.synced_hash == local.hash);
         if synced
-            || crate::pending_ops::push_failed_for(store, &account.name, &local.id, &local.hash)?
+            || crate::pending_ops::push_failed_for(
+                store,
+                &account.name,
+                &local.id,
+                &local.hash,
+                now,
+            )?
         {
             continue;
         }

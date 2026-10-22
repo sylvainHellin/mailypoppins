@@ -536,15 +536,65 @@ pub fn failed_draft_pushes(store: &Store, account: &str) -> Result<Vec<String>> 
         .collect())
 }
 
-/// Whether a push of the draft `draft_id` for the bytes hashing to `hash` is
-/// parked `failed` (#0143): the owed-push scan does not queue it again, so a
-/// push that keeps failing is one failed row and one `mutations.rolled_back`,
-/// and the next edit, a new hash, retries it.
-pub fn push_failed_for(store: &Store, account: &str, draft_id: &str, hash: &str) -> Result<bool> {
+/// How long a push parked `failed` keeps the owed-push scan from queueing the
+/// same bytes again (#0143): the queue's longest backoff.
+pub const PUSH_RETRY_COOL_DOWN_SECS: i64 = crate::outbox::BACKOFF_MAX_SECS;
+
+/// Whether a push of the draft `draft_id` for the bytes hashing to `hash` was
+/// parked `failed` less than [`PUSH_RETRY_COOL_DOWN_SECS`] before `now`
+/// (#0143): the owed-push scan does not queue it again until then, so a
+/// server out of reach is not hammered at every drain. Past the cool-down the
+/// scan queues one fresh push, and the next edit, a new hash, queues one at
+/// once.
+pub fn push_failed_for(
+    store: &Store,
+    account: &str,
+    draft_id: &str,
+    hash: &str,
+    now: i64,
+) -> Result<bool> {
     Ok(failed_ops(store, account)?.iter().any(|row| {
-        matches!(&row.op, ServerOp::PushDraft { draft_id: id, hash: Some(h) }
-            if id == draft_id && h == hash)
+        row.updated + PUSH_RETRY_COOL_DOWN_SECS > now
+            && matches!(&row.op, ServerOp::PushDraft { draft_id: id, hash: Some(h) }
+                if id == draft_id && h == hash)
     }))
+}
+
+/// Settle the other failed pushes of the draft whose push `parked` was just
+/// parked `failed` (#0143): each is retired, so a draft has one failed row at
+/// a time. Returns whether one of them was for the same bytes, which makes
+/// this park a retry after the cool-down whose failure was already
+/// announced.
+fn supersede_failed_pushes(store: &Store, account: &str, parked: i64) -> Result<bool> {
+    let failed = failed_ops(store, account)?;
+    let Some((draft_id, hash)) =
+        failed
+            .iter()
+            .find(|row| row.id == parked)
+            .and_then(|row| match &row.op {
+                ServerOp::PushDraft { draft_id, hash } => Some((draft_id.clone(), hash.clone())),
+                _ => None,
+            })
+    else {
+        return Ok(false);
+    };
+    let mut repeat = false;
+    for row in &failed {
+        if row.id == parked {
+            continue;
+        }
+        if let ServerOp::PushDraft {
+            draft_id: id,
+            hash: h,
+        } = &row.op
+        {
+            if *id == draft_id {
+                repeat |= *h == hash;
+                retire(store, row.id)?;
+            }
+        }
+    }
+    Ok(repeat)
 }
 
 /// Forget the failed pushes of one draft, which a push that succeeded has
@@ -761,7 +811,20 @@ pub(crate) async fn drain<E: OpExecutor>(
                     if let Err(e) = fail_and_roll_back(store, blobs, &row, &err) {
                         warn!("[pending_ops] could not settle failed op {}: {e:#}", row.id);
                     }
-                    result.failed += 1;
+                    // A drafts-mirror push retried after its cool-down that
+                    // fails again for the same bytes replaces its old failed
+                    // row and is not counted, so it is not announced twice.
+                    let repeat = matches!(row.op, ServerOp::PushDraft { .. })
+                        && supersede_failed_pushes(store, account, row.id).unwrap_or_else(|e| {
+                            warn!(
+                                "[pending_ops] could not settle the failed pushes beside op {}: {e:#}",
+                                row.id
+                            );
+                            false
+                        });
+                    if !repeat {
+                        result.failed += 1;
+                    }
                 } else {
                     if let Err(e) = bump_attempt(store, row.id, &err) {
                         warn!(

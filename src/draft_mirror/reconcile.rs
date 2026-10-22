@@ -86,6 +86,8 @@ struct Copy {
 }
 
 impl Copy {
+    /// The copy `head` lists; every header read here is one of
+    /// [`super::folder::HEAD_FIELDS`], the only ones a listing carries.
     fn of(head: &ServerHead) -> Copy {
         let header = &head.header;
         let addresses = |name: &str| -> Vec<String> {
@@ -127,6 +129,29 @@ impl Copy {
 /// server copy went: no tombstone, and brought back when a copy returns.
 const COPY_GONE_SUFFIX: &str = ".copy-gone";
 
+/// The file name in `drafts/.retired/` of the `n`th draft named `stem` that
+/// was retired because its copy went: `<stem>.copy-gone.md` for the first,
+/// `<stem>.copy-gone-<n>.md` from the second, which [`copy_gone_original`]
+/// reads back.
+fn copy_gone_name(stem: &str, n: u32) -> String {
+    if n <= 1 {
+        format!("{stem}{COPY_GONE_SUFFIX}.md")
+    } else {
+        format!("{stem}{COPY_GONE_SUFFIX}-{n}.md")
+    }
+}
+
+/// The stem the draft had in `drafts/` when `retired_stem` is the stem of a
+/// name [`copy_gone_name`] gave it, `None` for a draft retired for another
+/// reason, which is a tombstone.
+fn copy_gone_original(retired_stem: &str) -> Option<&str> {
+    let (base, rest) = retired_stem.rsplit_once(COPY_GONE_SUFFIX)?;
+    let counted = rest
+        .strip_prefix('-')
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    (rest.is_empty() || counted).then_some(base)
+}
+
 /// The absence of a draft's server copy, as [`draft_sync::note_absent`]
 /// records it.
 const COPY_ABSENT: &str = "copy";
@@ -157,7 +182,7 @@ fn retired(account: &str) -> Vec<Retired> {
             let draft = crate::draft::parse_email_draft(&path).ok()?;
             let copy_gone = path
                 .file_stem()
-                .is_some_and(|stem| stem.to_string_lossy().ends_with(COPY_GONE_SUFFIX));
+                .is_some_and(|stem| copy_gone_original(&stem.to_string_lossy()).is_some());
             Some(Retired {
                 id: draft.frontmatter.id,
                 message_id: draft
@@ -659,9 +684,8 @@ fn conflict_path(local: &LocalDraft) -> PathBuf {
 }
 
 /// Put the file at `staging` at `target`, or at the next free name beside it
-/// (`-2`, `-3` before the extension), never over a file that is there: a
-/// link fails rather than replace, where a rename would not. Returns where it
-/// went.
+/// (`-2`, `-3` before the extension), never over a file that is there
+/// ([`place_first_free`]). Returns where it went.
 fn place_new(staging: &Path, target: &Path) -> Result<PathBuf> {
     let dir = target.parent().unwrap_or(Path::new("."));
     let stem = target
@@ -672,14 +696,27 @@ fn place_new(staging: &Path, target: &Path) -> Result<PathBuf> {
         .extension()
         .map(|e| e.to_string_lossy().into_owned())
         .unwrap_or_else(|| "md".to_string());
-    let mut candidate = target.to_path_buf();
-    let mut n = 2;
+    place_first_free(staging, dir, |n| {
+        if n <= 1 {
+            format!("{stem}.{ext}")
+        } else {
+            format!("{stem}-{n}.{ext}")
+        }
+    })
+}
+
+/// Put the file at `staging` in `dir` under the first name `name` gives,
+/// counting from 1, that no file there holds: a link fails rather than
+/// replace, where a rename would not. Returns where it went.
+fn place_first_free(staging: &Path, dir: &Path, name: impl Fn(u32) -> String) -> Result<PathBuf> {
+    let mut n = 1;
+    let mut candidate = dir.join(name(n));
     loop {
         match std::fs::hard_link(staging, &candidate) {
             Ok(()) => break,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                candidate = dir.join(format!("{stem}-{n}.{ext}"));
                 n += 1;
+                candidate = dir.join(name(n));
             }
             Err(e) => {
                 return Err(e).with_context(|| format!("placing {}", candidate.display()));
@@ -944,10 +981,8 @@ fn retire_copy_gone(path: &Path) -> Result<()> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let renamed = place_new(
-        &target,
-        &target.with_file_name(format!("{stem}{COPY_GONE_SUFFIX}.md")),
-    )?;
+    let dir = target.parent().unwrap_or(Path::new("."));
+    let renamed = place_first_free(&target, dir, |n| copy_gone_name(&stem, n))?;
     let companion = target.with_extension("html");
     if companion.exists() {
         std::fs::rename(&companion, renamed.with_extension("html")).ok();
@@ -971,7 +1006,7 @@ fn revive(
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let name = stem.strip_suffix(COPY_GONE_SUFFIX).unwrap_or(&stem);
+    let name = copy_gone_original(&stem).unwrap_or(&stem);
     let back = place_new(&returning.path, &dir.join(format!("{name}.md")))?;
     let companion = returning.path.with_extension("html");
     if companion.exists() {
@@ -1130,7 +1165,22 @@ fn unique_draft_path(dir: &Path, slug: &str, id: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::scanned_id;
+    use super::{copy_gone_name, copy_gone_original, scanned_id};
+
+    /// Every name a copy-gone retirement is given reads back as one, to the
+    /// stem the draft had, and no other retired name does.
+    #[test]
+    fn a_copy_gone_name_reads_back_whatever_its_count() {
+        for n in 1..=12 {
+            let name = copy_gone_name("angebot", n);
+            let stem = name.strip_suffix(".md").unwrap();
+            assert_eq!(copy_gone_original(stem), Some("angebot"), "{name}");
+        }
+        assert_eq!(copy_gone_original("angebot"), None);
+        assert_eq!(copy_gone_original("angebot-2"), None);
+        assert_eq!(copy_gone_original("angebot.copy-gone-x"), None);
+        assert_eq!(copy_gone_original("angebot.copy-gone-"), None);
+    }
 
     /// A half-typed frontmatter still names its draft to a line scan.
     #[test]

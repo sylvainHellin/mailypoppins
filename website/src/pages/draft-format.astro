@@ -210,7 +210,8 @@ Email body here.`;
       </p>
       <p>
         The Drafts list shows where each draft stands: synced, pending (a push is owed),
-        conflict, or failed (the server refused the push; the next save tries again).
+        conflict, or failed (the server refused the push; mp tries again fifteen minutes later,
+        or at once after the next save).
         A conflict copy (<code>conflict_of</code>) is never pushed, and neither is a sent draft.
         Approval stays local: a copy on the server carries no <code>status</code>.
       </p>

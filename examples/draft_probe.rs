@@ -41,6 +41,7 @@ use mailypoppins::config::{
 use mailypoppins::draft::{
     strip_quote_markers, strip_signature_sentinels, QUOTE_MARKER, SIG_END, SIG_START,
 };
+use mailypoppins::draft_mirror::carrier::{self, SOURCE_HEADER};
 use mailypoppins::imap_client::{open_imap_session, ImapSession};
 use mailypoppins::send::markdown_to_html;
 
@@ -835,10 +836,74 @@ fn format_message(m: &ProbeMessage) -> String {
         };
         let _ = writeln!(out, "{name}: {shown}");
     }
+    let _ = writeln!(out, "{}", source_line(&parsed));
+    let _ = writeln!(out, "{}", carrier_line(raw));
     let _ = writeln!(out, "MIME:");
     mime_tree(&parsed, "1", 1, &mut out);
     text_parts(&parsed, "1", &mut out);
     out
+}
+
+/// Whether the copy carries the draft file in `X-Mailypoppins-Draft-Source`
+/// headers, and how much of it: the server may have dropped them.
+fn source_line(parsed: &mailparse::ParsedMail<'_>) -> String {
+    let values: Vec<String> = parsed
+        .headers
+        .iter()
+        .filter(|h| h.get_key().eq_ignore_ascii_case(SOURCE_HEADER))
+        .map(|h| h.get_value())
+        .collect();
+    if values.is_empty() {
+        return format!("{SOURCE_HEADER}: (absent)");
+    }
+    let bytes: usize = values.iter().map(String::len).sum();
+    let chunks: Vec<&str> = values
+        .iter()
+        .filter_map(|v| v.split_whitespace().next())
+        .collect();
+    format!(
+        "{SOURCE_HEADER}: {} header(s), {bytes} bytes, chunks {}",
+        values.len(),
+        chunks.join(" ")
+    )
+}
+
+/// What the drafts mirror reads off the copy (`draft_mirror::carrier::read`):
+/// mp's own unedited copy with or without its source, or one edited
+/// elsewhere.
+fn carrier_line(raw: &[u8]) -> String {
+    match carrier::read(raw) {
+        Some(copy) => format!(
+            "carrier: mp's copy of file {}, source {}",
+            short_hash(&copy.file_hash),
+            copy.source
+                .map(|s| format!("{} bytes", s.len()))
+                .unwrap_or_else(|| "(not carried)".to_string())
+        ),
+        None => "carrier: none (edited elsewhere, or not mp's)".to_string(),
+    }
+}
+
+/// The `mp:copy` mark a `text/html` part ends with, if it is mp's.
+fn copy_mark_line(body: &str) -> String {
+    match mailypoppins::parse::draft_copy_mark(body) {
+        Some(mark) => format!(
+            "mp:copy mark: file={} src={}",
+            short_hash(&mark.file_hash),
+            mark.source_hash
+                .as_deref()
+                .map(short_hash)
+                .unwrap_or("(none)")
+        ),
+        None if body.contains("mp:copy") => {
+            "mp:copy mark: no (an mp:copy comment that is not the part's last)".to_string()
+        }
+        None => "mp:copy mark: no".to_string(),
+    }
+}
+
+fn short_hash(hash: &str) -> &str {
+    head(hash, 12)
 }
 
 /// The MIME tree, one part per line: path, type, charset, encoding,
@@ -888,6 +953,7 @@ fn text_parts(part: &mailparse::ParsedMail<'_>, path: &str, out: &mut String) {
                     yes_no(body.contains(SIG_START)),
                     yes_no(body.contains(SIG_END))
                 );
+                let _ = writeln!(out, "{path} {}", copy_mark_line(&body));
             }
             let _ = writeln!(
                 out,
@@ -1292,6 +1358,9 @@ JVBERi0xLjQK\r\n\
             "    1.2 application/pdf",
             "filename=mp-probe.pdf 9 bytes",
             "1.1 comments: mp:quote yes  mp:sig-start no  mp:sig-end no",
+            "1.1 mp:copy mark: no",
+            "X-Mailypoppins-Draft-Source: (absent)",
+            "carrier: none (edited elsewhere, or not mp's)",
             "1.1 text/html (first",
             "<p>Hello edited</p>",
         ] {
@@ -1299,6 +1368,46 @@ JVBERi0xLjQK\r\n\
         }
         // The attachment is not previewed as text.
         assert!(!out.contains("JVBERi0"));
+    }
+
+    /// A copy the drafts mirror wrote: the dump names its source headers,
+    /// the mark its HTML part ends with, and the source the carrier reads.
+    #[test]
+    fn the_dump_of_an_mp_copy_names_its_source_and_mark() {
+        let mid = "<mp-copy@example.org>";
+        let text = format!(
+            "---\nid: \"d1\"\nto: robin@example.com\nbcc: chef@example.com\n\
+             subject: Angebot\nstatus: draft\nserver_message_id: \"{mid}\"\n---\n\nHallo\n"
+        );
+        let draft =
+            mailypoppins::draft::parse_email_draft_content(std::path::Path::new("copy.md"), &text)
+                .unwrap();
+        let raw = mailypoppins::send::build_server_draft(
+            &draft,
+            "me@example.org",
+            &EmailSettings::default(),
+            mid,
+            text.as_bytes(),
+        )
+        .unwrap();
+        let out = format_message(&ProbeMessage {
+            uid: 42,
+            uidvalidity: Some(7),
+            reasons: vec!["message-id"],
+            flags: vec![],
+            internal_date: None,
+            bodystructure: None,
+            raw: Some(raw),
+        });
+        for want in [
+            "X-Mailypoppins-Draft-Source: 1 header(s), ",
+            "chunks 1/1",
+            "mp:copy mark: file=",
+            "carrier: mp's copy of file ",
+            &format!("source {} bytes", text.len()),
+        ] {
+            assert!(out.contains(want), "missing {want:?} in:\n{out}");
+        }
     }
 
     #[test]

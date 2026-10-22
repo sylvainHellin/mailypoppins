@@ -322,7 +322,8 @@ pub enum DraftSyncState {
     /// draft took the server's version and the local text is a conflict copy
     /// beside it, or this is that conflict copy.
     Conflict,
-    /// The push was refused past its retry budget; the next edit tries again.
+    /// The push was refused past its retry budget; it is tried again fifteen
+    /// minutes later, or at once after the next edit.
     Failed,
 }
 

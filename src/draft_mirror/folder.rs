@@ -26,8 +26,28 @@ pub struct FolderInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerHead {
     pub uid: u32,
-    /// The raw header block.
+    /// The [`HEAD_FIELDS`] of the header block, raw.
     pub header: Vec<u8>,
+}
+
+/// The headers [`DraftsFolder::heads`] carries: those the reconcile links a
+/// copy to a file by, and none of the `X-Mailypoppins-Draft-Source` chunks,
+/// up to 64 KiB per copy, which only [`DraftsFolder::fetch`] brings.
+pub const HEAD_FIELDS: [&str; 6] = [
+    "Message-ID",
+    crate::send::DRAFT_ID_HEADER,
+    "Subject",
+    "To",
+    "Cc",
+    "In-Reply-To",
+];
+
+/// The `UID FETCH` items of [`DraftsFolder::heads`] over IMAP.
+fn heads_query() -> String {
+    format!(
+        "(UID BODY.PEEK[HEADER.FIELDS ({})])",
+        HEAD_FIELDS.join(" ").to_uppercase()
+    )
 }
 
 /// The server Drafts folder of one account.
@@ -51,7 +71,7 @@ pub trait DraftsFolder {
     /// `UID EXPUNGE` of exactly those.
     fn delete(&mut self, uids: &[u32]) -> impl Future<Output = Result<()>>;
 
-    /// Every message of the folder, by its header.
+    /// Every message of the folder, by its [`HEAD_FIELDS`].
     fn heads(&mut self) -> impl Future<Output = Result<Vec<ServerHead>>>;
 
     /// One message whole, `None` when the UID is gone.
@@ -233,7 +253,7 @@ impl DraftsFolder for ImapDraftsFolder {
                 .collect::<Vec<_>>()
                 .join(",");
             let fetched: Vec<_> = session
-                .uid_fetch(&set, "(UID BODY.PEEK[HEADER])")
+                .uid_fetch(&set, heads_query())
                 .await
                 .map_err(|e| anyhow!("Failed to fetch the drafts' headers: {e}"))?
                 .try_collect()
@@ -275,6 +295,28 @@ impl DraftsFolder for ImapDraftsFolder {
         }
         .await;
         self.settle(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The listing asks for the linking headers by name, so the draft source
+    /// a copy carries never rides along.
+    #[test]
+    fn the_listing_fetches_only_the_linking_headers() {
+        let query = heads_query();
+        assert!(
+            query.starts_with("(UID BODY.PEEK[HEADER.FIELDS ("),
+            "{query}"
+        );
+        for field in HEAD_FIELDS {
+            assert!(query.contains(&field.to_uppercase()), "{field} in {query}");
+        }
+        assert!(!query
+            .to_uppercase()
+            .contains(&super::super::carrier::SOURCE_HEADER.to_uppercase()));
     }
 }
 
@@ -409,6 +451,9 @@ pub mod fake {
             Ok(())
         }
 
+        /// The [`HEAD_FIELDS`] of every listed copy, as a server answers
+        /// `BODY.PEEK[HEADER.FIELDS (...)]`: those header lines, folds kept,
+        /// and the blank line.
         async fn heads(&mut self) -> Result<Vec<ServerHead>> {
             Ok(self
                 .listed()
@@ -418,12 +463,23 @@ pub mod fake {
                         .raw
                         .windows(4)
                         .position(|w| w == b"\r\n\r\n")
-                        .map(|at| at + 4)
+                        .map(|at| at + 2)
                         .unwrap_or(c.raw.len());
-                    ServerHead {
-                        uid: c.uid,
-                        header: c.raw[..end].to_vec(),
+                    let mut header = Vec::new();
+                    let mut keep = false;
+                    for line in c.raw[..end].split_inclusive(|b| *b == b'\n') {
+                        if !line.starts_with(b" ") && !line.starts_with(b"\t") {
+                            let name = line.split(|b| *b == b':').next().unwrap_or_default();
+                            keep = HEAD_FIELDS
+                                .iter()
+                                .any(|f| f.as_bytes().eq_ignore_ascii_case(name));
+                        }
+                        if keep {
+                            header.extend_from_slice(line);
+                        }
                     }
+                    header.extend_from_slice(b"\r\n");
+                    ServerHead { uid: c.uid, header }
                 })
                 .collect())
         }

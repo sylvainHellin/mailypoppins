@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use super::folder::fake::FakeFolder;
-use super::folder::header_value;
+use super::folder::{header_value, DraftsFolder};
 use super::push::{self, Mirror};
 use super::*;
 use crate::config::{AccountConfig, EmailSettings};
@@ -412,6 +412,85 @@ fn a_queued_push_drains_and_a_refused_one_parks_failed() {
         "the success forgets the failure"
     );
     assert_eq!(folder.live().len(), 1);
+}
+
+/// A draft saved while the server is out of reach reaches it once the server
+/// is back, with no edit: a push parked `failed` holds the owed-push scan back
+/// only for a cool-down, then one fresh push is queued. A draft has one
+/// failed row at a time, and a retry that fails again for the same bytes is
+/// not announced a second time.
+#[test]
+fn a_push_parked_offline_is_retried_after_the_cool_down() {
+    let fx = Fixture::new();
+    fx.write("a", "d1", "", "eins");
+    let blobs = BlobStore::for_account("tum");
+    let mut folder = FakeFolder {
+        fail_append: true,
+        ..FakeFolder::default()
+    };
+    let mut now = crate::outbox::unix_now();
+    // Every drain point queues the owed pushes, then drains.
+    let drain_all = |folder: &mut FakeFolder, now: &mut i64| -> usize {
+        let mut failed = 0;
+        for _ in 0..pending_ops::MAX_ATTEMPTS {
+            push::enqueue_owed(&fx.store, &fx.account).unwrap();
+            let mut exec = FakeExecutor {
+                folder: &mut *folder,
+                account: fx.account.clone(),
+                email: EmailSettings::default(),
+            };
+            let result = block_on(pending_ops::drain(
+                &fx.store, &blobs, "tum", &mut exec, *now,
+            ))
+            .unwrap();
+            failed += result.failed;
+            *now += 100_000;
+        }
+        failed
+    };
+    let past_the_cool_down = |store: &Store| {
+        store
+            .conn()
+            .execute(
+                "UPDATE pending_ops SET updated = updated - ?1 WHERE state = 'failed'",
+                [pending_ops::PUSH_RETRY_COOL_DOWN_SECS + 1],
+            )
+            .unwrap();
+    };
+
+    assert_eq!(
+        drain_all(&mut folder, &mut now),
+        1,
+        "parked and announced once"
+    );
+    assert_eq!(pending_ops::failed_ops(&fx.store, "tum").unwrap().len(), 1);
+    assert_eq!(
+        push::enqueue_owed(&fx.store, &fx.account).unwrap(),
+        0,
+        "not queued again during the cool-down"
+    );
+
+    past_the_cool_down(&fx.store);
+    assert_eq!(
+        drain_all(&mut folder, &mut now),
+        0,
+        "the retry failed for the same bytes: not announced again"
+    );
+    assert_eq!(
+        pending_ops::failed_ops(&fx.store, "tum").unwrap().len(),
+        1,
+        "one failed row at a time"
+    );
+    assert!(fx.row("d1").is_none());
+
+    folder.fail_append = false;
+    past_the_cool_down(&fx.store);
+    drain_all(&mut folder, &mut now);
+    assert!(fx.row("d1").is_some(), "pushed once the server is back");
+    assert_eq!(folder.live().len(), 1);
+    assert!(pending_ops::failed_ops(&fx.store, "tum")
+        .unwrap()
+        .is_empty());
 }
 
 /// A push for a draft that is gone does nothing and succeeds; a Graph
@@ -1172,6 +1251,64 @@ fn a_returning_copy_brings_back_a_draft_retired_for_its_absence() {
     let back = find_local("tum", "d1").expect("the draft is back in drafts/");
     assert!(back.draft.body_markdown.contains("zwei"));
     assert_eq!(fx.row("d1").unwrap().uid, folder.live()[0].uid);
+}
+
+/// The listing after every sync carries only the headers a copy is linked
+/// by, never the draft file a copy carries in its source headers, which only
+/// a fetch of the one copy a pull or an import reads brings.
+#[test]
+fn the_listing_carries_no_draft_source() {
+    let fx = Fixture::new();
+    fx.write("angebot", "d1", "", &"lang ".repeat(2000));
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let uid = folder.live()[0].uid;
+    let heads = block_on(folder.heads()).unwrap();
+    let header = &heads[0].header;
+    assert!(header_value(header, "Message-ID").is_some());
+    assert!(header_value(header, crate::send::DRAFT_ID_HEADER).is_some());
+    assert!(header_value(header, "Subject").is_some());
+    assert!(
+        header_value(header, super::carrier::SOURCE_HEADER).is_none(),
+        "{} bytes of header",
+        header.len()
+    );
+    assert!(header.len() < 1024, "{} bytes of header", header.len());
+    let raw = block_on(folder.fetch(uid)).unwrap().unwrap();
+    assert!(header_value(&raw, super::carrier::SOURCE_HEADER).is_some());
+}
+
+/// A second draft of one file name retired because its copy went is no
+/// tombstone either: its retired name counts after the suffix, so a copy that
+/// comes back still brings it back instead of being deleted.
+#[test]
+fn a_second_copy_gone_retirement_of_one_name_still_comes_back() {
+    let fx = Fixture::new();
+    let retired = crate::config::drafts_dir("tum").join(crate::draft::RETIRED_DIR);
+    std::fs::create_dir_all(&retired).unwrap();
+    std::fs::write(
+        retired.join("angebot.copy-gone.md"),
+        "---\nid: \"d0\"\nto: robin@example.com\nsubject: Alt\nstatus: draft\n---\n\nalt\n",
+    )
+    .unwrap();
+    let path = fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let mid = mid_of(&path);
+    let text = std::fs::read_to_string(&path).unwrap();
+    folder.remove(folder.live()[0].uid);
+    reconciled(&fx, &mut folder);
+    reconciled(&fx, &mut folder);
+    assert!(!path.exists(), "retired after two reconciles");
+    assert!(retired.join("angebot.copy-gone-2.md").exists());
+
+    folder.put(&server_copy_of(&text.replace("eins", "zwei"), &mid));
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(report.deleted, 0, "{report:?} {:?}", folder.log);
+    assert_eq!(folder.live().len(), 1, "the copy stays");
+    let back = find_local("tum", "d1").expect("the draft is back in drafts/");
+    assert_eq!(back.path, path, "under its old name");
+    assert!(back.draft.body_markdown.contains("zwei"));
 }
 
 /// A save that lands while the reconcile waits on the server is never

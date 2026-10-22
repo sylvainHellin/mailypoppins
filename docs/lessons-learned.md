@@ -3195,3 +3195,11 @@ A reply embeds the original's HTML verbatim, so a marker found by the first `fin
 The first push of a draft writes its `server_message_id`, so the bytes it pushes hash differently from the bytes the owed-push scan queued it for.
 A failed push recorded with the queued hash was therefore queued again at every drain, piling up failed rows and announcing `mutations.rolled_back` each time.
 `push::push` records the hash it runs for on its queued row (`pending_ops::note_push_hash`), and the scan skips a draft whose parked push is for its current hash.
+Skipping it for good left a draft saved offline off the server until its next edit, so the skip lasts `pending_ops::PUSH_RETRY_COOL_DOWN_SECS` (the queue's 15-minute backoff ceiling) and then one fresh push is queued.
+A retry that is parked again retires the draft's older failed row (`supersede_failed_pushes`) and, when that row was for the same bytes, is not counted in the drain's `failed`, so `mutations.rolled_back` is announced once per hash.
+
+## A retired name with a counter must still read as its kind (2026-10-23)
+
+A second draft of one file name retired because its copy went landed as `angebot.copy-gone-2.md`, which a reader matching `ends_with(".copy-gone")` took for a tombstone, so the copy that came back was deleted.
+`reconcile::copy_gone_name` writes the names and `reconcile::copy_gone_original` reads them, `.copy-gone` with an optional `-<n>`, and a unit test round-trips every count.
+Conflict copies were already safe: `daemon::watch::has_conflict_copy` accepts `.conflict` followed by anything starting with `-`.
