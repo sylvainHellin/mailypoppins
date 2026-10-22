@@ -516,7 +516,18 @@ impl CanonicalState {
     /// comparable on one client's watermark. Nothing is reduced: a lifecycle
     /// event is about the daemon rather than about the state, and no snapshot
     /// brings it back.
+    ///
+    /// The one door an [`events::Event`] built outside
+    /// [`events::Event::from_change`] enters by, so a debug build checks its
+    /// kind against the protocol's `DOMAIN_KINDS` here; the changes
+    /// [`CanonicalState::apply`] commits are checked once per variant by a
+    /// unit test in `events.rs`.
     pub fn publish(&self, event: events::Event) -> Revision {
+        debug_assert!(
+            event.kind_is_classified(),
+            "mp_protocol::events::DOMAIN_KINDS classifies {} the other way",
+            event.kind()
+        );
         let _gate = self.gate.enter();
         let mut inner = lock(&self.inner);
         inner.revision += 1;

@@ -38,9 +38,12 @@
 use std::collections::VecDeque;
 
 use mp_protocol::events::{
-    KIND_ACCOUNT_STATE_CHANGED, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK,
-    KIND_SYNC_COMPLETED,
+    is_domain_kind, KIND_ACCOUNT_STATE_CHANGED, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID,
+    KIND_MUTATIONS_ROLLED_BACK, KIND_SYNC_COMPLETED,
 };
+/// The kinds an [`Event::Invalidate`] and an [`Event::Remove`] travel as, which
+/// the protocol crate owns beside the rest of [`mp_protocol::events::DOMAIN_KINDS`].
+pub use mp_protocol::events::{KIND_INVALIDATE, KIND_REMOVE};
 use serde_json::{json, Value};
 
 use crate::daemon::dispatch::ResourceId;
@@ -62,12 +65,6 @@ pub const REASON_QUEUE_OVERFLOW: &str = "event_queue_overflow";
 /// [`FAKE_READY_ENV`](super::FAKE_READY_ENV) precedent: no flag exposes it and
 /// `mp --help` never moves. Documented in `docs/daemon-operations.md`.
 pub const FAKE_EVENT_BURST_ENV: &str = "MAILYPOPPINS_DAEMON_FAKE_EVENT_BURST";
-
-/// The kind an [`Event::Invalidate`] travels as.
-pub const KIND_INVALIDATE: &str = "state.invalidate";
-
-/// The kind an [`Event::Remove`] travels as.
-pub const KIND_REMOVE: &str = "state.remove";
 
 /// How many changes [`FAKE_EVENT_BURST_ENV`] asks for, or `None` when it is
 /// unset, is not a number, or is zero.
@@ -224,6 +221,16 @@ impl Event {
     /// branches on.
     pub fn is_lifecycle(&self) -> bool {
         matches!(self, Event::Lifecycle { .. })
+    }
+
+    /// Whether the protocol's [`DOMAIN_KINDS`](mp_protocol::events::DOMAIN_KINDS)
+    /// classify this event's kind the way [`Event::is_lifecycle`] does.
+    ///
+    /// A client and a test tell a domain event from a lifecycle one by its
+    /// kind alone, so a kind the list classified the other way would be one
+    /// the poison drops while a client expects it to survive, or the reverse.
+    pub fn kind_is_classified(&self) -> bool {
+        is_domain_kind(self.kind()) != self.is_lifecycle()
     }
 
     /// What this event weighs in a queue: the bytes it would put on the wire,
@@ -605,5 +612,113 @@ mod tests {
         }
         .key()
         .is_none());
+    }
+
+    /// One change of every variant, which [`variant_index`] proves complete.
+    fn one_change_of_each_variant() -> Vec<Change> {
+        let account = || "alpha".to_string();
+        vec![
+            Change::AccountReady { account: account() },
+            Change::AccountBlocked {
+                account: account(),
+                reason: "no store".to_string(),
+            },
+            Change::MailboxCounts {
+                account: account(),
+                mailbox: "inbox".to_string(),
+                total: 1,
+                unread: 0,
+                badge: 0,
+            },
+            Change::DraftUpsert {
+                account: account(),
+                id: "d1".to_string(),
+                path: "/drafts/d1.md".to_string(),
+                to: None,
+                subject: String::new(),
+                status: "draft".to_string(),
+                valid: true,
+                ready: false,
+            },
+            Change::DraftInvalid {
+                account: account(),
+                id: "d2".to_string(),
+                path: "/drafts/d2.md".to_string(),
+                diagnostics: Vec::new(),
+            },
+            Change::DraftRemoved {
+                account: account(),
+                id: "d1".to_string(),
+            },
+            Change::OutboxCounts {
+                account: account(),
+                queued: 1,
+                failed: 0,
+            },
+            Change::SyncCompleted(crate::daemon::sync_outcome::from_sync_result(
+                "alpha",
+                &crate::sync::SyncResult::default(),
+                0,
+                None,
+            )),
+            Change::MutationsRolledBack(mp_protocol::events::MutationsRolledBack {
+                account: account(),
+                failed: 1,
+            }),
+        ]
+    }
+
+    /// The position of `change`'s variant in [`one_change_of_each_variant`].
+    ///
+    /// No wildcard arm: a new variant stops this from compiling, which is the
+    /// prompt to give it the next index and one change in the list.
+    fn variant_index(change: &Change) -> usize {
+        match change {
+            Change::AccountReady { .. } => 0,
+            Change::AccountBlocked { .. } => 1,
+            Change::MailboxCounts { .. } => 2,
+            Change::DraftUpsert { .. } => 3,
+            Change::DraftInvalid { .. } => 4,
+            Change::DraftRemoved { .. } => 5,
+            Change::OutboxCounts { .. } => 6,
+            Change::SyncCompleted(_) => 7,
+            Change::MutationsRolledBack(_) => 8,
+        }
+    }
+
+    /// The protocol's `DOMAIN_KINDS` are exactly the kinds a committed change
+    /// travels as when it is not a lifecycle event: a client and a test tell
+    /// the two apart by kind alone, and the poison drops one and keeps the
+    /// other.
+    #[test]
+    fn the_protocols_domain_kinds_are_the_kinds_a_change_travels_as_outside_lifecycle() {
+        let changes = one_change_of_each_variant();
+        let indices: Vec<usize> = changes.iter().map(variant_index).collect();
+        assert_eq!(
+            indices,
+            (0..changes.len()).collect::<Vec<_>>(),
+            "one change of every variant, in variant order"
+        );
+
+        let mut domain: Vec<&str> = Vec::new();
+        for change in &changes {
+            let event = Event::from_change(change);
+            assert!(
+                event.kind_is_classified(),
+                "{change:?} travels as {}, which DOMAIN_KINDS classifies the other way",
+                event.kind()
+            );
+            if !event.is_lifecycle() && !domain.contains(&event.kind()) {
+                domain.push(event.kind());
+            }
+        }
+        domain.sort_unstable();
+        let mut listed = mp_protocol::events::DOMAIN_KINDS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(
+            domain, listed,
+            "every domain kind is one a change travels as, and no change travels as an \
+             unlisted one"
+        );
     }
 }

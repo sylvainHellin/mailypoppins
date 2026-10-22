@@ -61,6 +61,7 @@ use serde_json::{json, Value};
 
 use mp_protocol::calendar::{AgendaEvent, EventFrontmatter};
 use mp_protocol::draft::{DraftListing, DraftLocation};
+use mp_protocol::events::{KIND_INVALIDATE, KIND_REMOVE};
 use mp_protocol::listing::{
     ConversationListing, MessageListRow, MessageListing, ThreadListing,
     METHOD_MESSAGE_LIST_CONVERSATIONS,
@@ -485,7 +486,7 @@ impl MessageRowDelta {
                 mailbox: event.payload["mailbox"].as_str()?.to_string(),
                 row: Box::new(row_from_wire(&event.payload["message"])),
             }),
-            "state.remove" => {
+            KIND_REMOVE => {
                 let (account, mailbox, uid) =
                     message_resource(event.payload["resource"].as_str()?)?;
                 Some(MessageRowDelta::Remove {
@@ -494,7 +495,7 @@ impl MessageRowDelta {
                     uid,
                 })
             }
-            "state.invalidate" => {
+            KIND_INVALIDATE => {
                 if event.payload["scope"]["query"].as_str() == Some("counts") {
                     return None;
                 }

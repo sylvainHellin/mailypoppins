@@ -230,6 +230,37 @@ pub const KIND_OPERATION_FINISHED: &str = "operation.finished";
 /// activity log with news that nothing happened.
 pub const KIND_DIAGNOSTIC_CHECK_CHANGED: &str = "diagnostic.check_changed";
 
+/// The `kind` a cached query that went stale travels as, with a payload of
+/// `{resource, scope}` naming the query a client re-reads.
+pub const KIND_INVALIDATE: &str = "state.invalidate";
+
+/// The `kind` a resource that is gone travels as, with a payload of
+/// `{resource}`.
+pub const KIND_REMOVE: &str = "state.remove";
+
+/// The kinds a domain event travels as: a change to the state a
+/// `state.bootstrap` snapshot carries.
+///
+/// A connection queue that overflows drops exactly these and asks for a
+/// resync, because the next snapshot brings back what they said. Every other
+/// kind is a lifecycle event, which no snapshot carries, so it outlives the
+/// overflow and the poison. The daemon pins its own events to this list: a
+/// unit test maps one change of every variant it commits, and a debug build
+/// checks every event it publishes otherwise, so a new domain kind missing
+/// from it fails a test.
+pub const DOMAIN_KINDS: [&str; 5] = [
+    KIND_INVALIDATE,
+    KIND_REMOVE,
+    KIND_ACCOUNT_STATE_CHANGED,
+    KIND_DRAFT_CHANGED,
+    KIND_DRAFT_INVALID,
+];
+
+/// Whether `kind` is one of the [`DOMAIN_KINDS`].
+pub fn is_domain_kind(kind: &str) -> bool {
+    DOMAIN_KINDS.contains(&kind)
+}
+
 /// One thing wrong with a file, positioned when the parser gave a position.
 ///
 /// `line` is 1-based and relative to the file rather than to the block the
