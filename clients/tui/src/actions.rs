@@ -1050,10 +1050,10 @@ pub(super) fn handle_action(
 
             // The server leg is `message.search_server` since P5-U10c
             // (`LST-08`, #0126): one durable operation on the daemon, which
-            // opens the session, splits the budget across the mailboxes and
-            // streams one `message.server_hit` per hit, where this spawned a
-            // thread and painted the whole batch when the last mailbox
-            // answered. The Message-IDs the local pass is already showing
+            // opens the session, keeps the newest hits across the mailboxes
+            // (PERSO-175) and streams one `message.server_hit` per hit, where
+            // this spawned a thread and painted the whole batch when the last
+            // mailbox answered. The Message-IDs the local pass is already showing
             // travel as `exclude_message_ids`, so the dedup is the daemon's
             // and the count it settles with is a fact any client reproduces.
             app.server_search_loading = true;

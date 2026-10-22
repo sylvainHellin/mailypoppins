@@ -140,7 +140,10 @@ pub(super) fn land_rollback(app: &mut App, account_index: usize, failed: u64) {
 
 /// The overlay footer a settled `message.search_server` paints: the count of
 /// hits in the list, the CLI's caveat when the store answered a term (`local
-/// store only: has:attachment`, PERSO-131), and the mailboxes that refused.
+/// store only: has:attachment`, PERSO-131), the mailboxes that refused, and
+/// the CLI's sentence when the limit or Graph's cap cut the answer
+/// (PERSO-175), with a narrower search as the remedy, since the overlay takes
+/// no limit.
 ///
 /// `count` is the list's, not the settle's `hits`: the list also holds the
 /// local pass's hits, which the daemon deduplicated against.
@@ -156,6 +159,14 @@ pub(crate) fn server_search_footer(count: usize, settled: &serde_json::Value) ->
         line.push_str(&format!(
             "; {unreachable} mailbox{} unreachable",
             if unreachable == 1 { "" } else { "es" }
+        ));
+    }
+    if settled.capped {
+        line.push_str(&format!(". {}", mp_client::format::graph_search_cap_line()));
+    } else if settled.truncated {
+        line.push_str(&format!(
+            ". {}",
+            mp_client::format::more_results_line(count, "narrow the search to see the rest")
         ));
     }
     line
@@ -677,6 +688,31 @@ mod tests {
         assert_eq!(
             server_search_footer(3, &older),
             "3 results; 2 mailboxes unreachable"
+        );
+    }
+
+    /// A settle the limit cut says so after the count, in the CLI's words
+    /// with the overlay's remedy; one Graph's cap cut names the cap instead
+    /// (PERSO-175).
+    #[test]
+    fn a_cut_server_search_says_so_in_the_overlay_footer() {
+        let cut = serde_json::json!({
+            "account": "tum", "query": "ledger", "hits": 50,
+            "deduplicated": 0, "unreachable": [],
+            "coverage": "server", "local_terms": [],
+            "truncated": true, "capped": false,
+        });
+        assert_eq!(
+            server_search_footer(53, &cut),
+            "53 results. More results than the 53 shown: narrow the search to see the rest."
+        );
+
+        let mut capped = cut.clone();
+        capped["capped"] = serde_json::json!(true);
+        assert_eq!(
+            server_search_footer(1000, &capped),
+            "1000 results. Microsoft Graph stops a search at 1000 results: narrow the query \
+             (after:, before:, in:) to reach the rest."
         );
     }
 
