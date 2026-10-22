@@ -3133,3 +3133,12 @@ The same holds for a connection test, which takes a still-mounted check so a wiz
 
 A SQLite `RAISE(IGNORE)` trigger makes an UPDATE skip its row without an error, which is how a test injects a write that silently does not land; `RAISE(ABORT, ...)` injects one that fails.
 The send tests in `src/send.rs` use both on the send-start marker, to hold back a send whose marker changed no row and one whose marker write failed.
+
+## A scoped tracing capture misses a line another test's thread reached first (2026-10-22)
+
+While only one subscriber is registered, tracing-core 0.1 (`Dispatchers::rebuilder`, the `has_just_one` path) caches a new callsite's interest from the default subscriber of whichever thread reaches the callsite first.
+A test capturing through `tracing::subscriber::with_default` is that one subscriber while it runs, so another test reaching the same line on its own thread, with no subscriber, caches it as never wanted, and the capture then records nothing of it.
+That was the empty capture of the desktop's `configuration::tests` (7 of 60 full `cargo test` runs on the Mac, in the stored-password and the probe tests, then none in 200).
+The fix keeps a second, uninterested subscriber registered for the whole test binary (`SECOND_SUBSCRIBER` in `traced()`), so every callsite's interest is asked of every live subscriber, the capture included.
+Rebuilding the interest cache inside the capture is not enough: a callsite another thread registers after the rebuild is cached by that thread alone again.
+`the_capture_keeps_a_line_another_thread_reached_first` reproduces it deterministically when run alone.

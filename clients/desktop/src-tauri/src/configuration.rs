@@ -776,8 +776,22 @@ mod tests {
         }
     }
 
+    /// A subscriber registered for the whole test run and interested in
+    /// nothing.
+    ///
+    /// While a single subscriber is registered, tracing-core caches a new
+    /// callsite's interest from the default of the thread that reaches it
+    /// first. A test reaching a line on its own thread, with no subscriber,
+    /// while another test's capture was the one registered, cached that line
+    /// as never wanted, and the capture then saw nothing of it. With this one
+    /// registered beside every capture, a callsite's interest is asked of
+    /// every live subscriber, the capture included.
+    static SECOND_SUBSCRIBER: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+
     /// Run `f` under a subscriber that records every level, and answer what it wrote.
     fn traced<T>(f: impl FnOnce() -> T) -> (T, String) {
+        SECOND_SUBSCRIBER
+            .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
         let captured = Captured::default();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -787,6 +801,24 @@ mod tests {
             .finish();
         let out = tracing::subscriber::with_default(subscriber, f);
         (out, captured.text())
+    }
+
+    /// A line whose callsite another thread, with no subscriber of its own,
+    /// reached first while the capture was the only live subscriber: the
+    /// capture still has it.
+    #[test]
+    fn the_capture_keeps_a_line_another_thread_reached_first() {
+        fn line() {
+            tracing::info!("[test] reached first on another thread");
+        }
+        let ((), lines) = traced(|| {
+            std::thread::spawn(line).join().expect("the other thread");
+            line();
+        });
+        assert!(
+            lines.contains("reached first on another thread"),
+            "{lines:?}"
+        );
     }
 
     /// The keys the daemon's `account_block` reads (src/daemon/methods/config.rs),
