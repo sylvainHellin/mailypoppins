@@ -117,27 +117,28 @@ impl Theme {
         }
     }
 
-    /// Catppuccin Latte (light variant).
+    /// Catppuccin Latte (light variant), its text-bearing slots darkened where
+    /// the palette falls under 4.5:1 on `bg` or `panel_bg` (PERSO-179).
     pub const fn catppuccin_latte() -> Self {
         Self {
             bg: Color::Rgb(239, 241, 245),            // base
             surface: Color::Rgb(204, 208, 218),       // surface0
             text: Color::Rgb(76, 79, 105),            // text
-            text_muted: Color::Rgb(108, 111, 133),    // subtext0
+            text_muted: Color::Rgb(92, 95, 119),      // subtext1, subtext0 is under 4.5:1
             text_faint: Color::Rgb(156, 160, 176),    // overlay0
             border: Color::Rgb(30, 102, 245),         // blue
             border_focused: Color::Rgb(254, 100, 11), // peach
             panel_bg: Color::Rgb(230, 233, 239),      // mantle (below base)
-            selection: Color::Rgb(64, 160, 43),       // green
-            unread: Color::Rgb(30, 102, 245),         // blue
+            selection: Color::Rgb(48, 120, 32),       // green darkened to 4.5:1
+            unread: Color::Rgb(13, 90, 244),          // blue darkened to 4.5:1
             unread_count: Color::Rgb(254, 100, 11),   // peach
-            accent: Color::Rgb(30, 102, 245),         // blue
+            accent: Color::Rgb(13, 90, 244),          // blue darkened to 4.5:1
             accent_alt: Color::Rgb(23, 146, 153),     // teal
             heading: Color::Rgb(136, 57, 239),        // mauve
             emphasis: Color::Rgb(223, 142, 29),       // yellow
             code: Color::Rgb(254, 100, 11),           // peach
             success: Color::Rgb(64, 160, 43),         // green
-            warning: Color::Rgb(223, 142, 29),        // yellow
+            warning: Color::Rgb(146, 93, 19),         // yellow darkened to 4.5:1
             error: Color::Rgb(210, 15, 57),           // red
             info: Color::Rgb(30, 102, 245),           // blue
         }
@@ -185,16 +186,16 @@ impl Theme {
             border: Color::Rgb(119, 131, 154),   // #77839A
             border_focused: Color::Rgb(31, 111, 147), // #1F6F93 ring
             panel_bg: Color::Rgb(236, 232, 221), // #ECE8DD muted, set off from bg
-            selection: Color::Rgb(179, 71, 0),   // #B34700 Pumpkin darkened
+            selection: Color::Rgb(178, 70, 0),   // #B24600 Pumpkin darkened, 4.5:1 on panel_bg
             unread: Color::Rgb(31, 111, 147),    // #1F6F93
-            unread_count: Color::Rgb(179, 71, 0), // #B34700
+            unread_count: Color::Rgb(178, 70, 0), // #B24600
             accent: Color::Rgb(26, 99, 133),     // #1A6385 link
             accent_alt: Color::Rgb(30, 122, 122), // #1E7A7A terminal cyan
             heading: Color::Rgb(138, 63, 160),   // #8A3FA0 terminal magenta
             emphasis: Color::Rgb(138, 97, 0),    // #8A6100 terminal yellow
             code: Color::Rgb(160, 64, 0),        // #A04000
             success: Color::Rgb(47, 122, 62),    // #2F7A3E terminal green
-            warning: Color::Rgb(179, 71, 0),     // #B34700 warning
+            warning: Color::Rgb(178, 70, 0),     // #B24600 warning, the app's #B34700 a step darker
             error: Color::Rgb(180, 35, 46),      // #B4232E destructive
             info: Color::Rgb(31, 111, 147),      // #1F6F93
         }
@@ -433,6 +434,60 @@ mod tests {
                 "terminal theme slot {slot:?} is not an ANSI named color"
             );
         }
+    }
+
+    /// The WCAG relative luminance of an sRGB colour.
+    fn luminance(color: Color) -> Option<f64> {
+        let Color::Rgb(r, g, b) = color else {
+            return None;
+        };
+        let channel = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        Some(0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b))
+    }
+
+    /// PERSO-179: every colour the list paints text in reads at 4.5:1, the
+    /// WCAG AA bar for text, on both grounds a row can sit on, `bg` and the
+    /// `panel_bg` of an expanded conversation, in every theme with colours of
+    /// its own; the terminal theme's ANSI colours are the terminal's to pick.
+    #[test]
+    fn text_slots_reach_4_5_to_1_on_bg_and_panel_bg_in_every_opaque_theme() {
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        for name in THEME_NAMES {
+            let t = Theme::by_name(name).expect("an advertised theme");
+            if luminance(t.bg).is_none() {
+                continue;
+            }
+            for (ground_name, ground) in [("bg", t.bg), ("panel_bg", t.panel_bg)] {
+                for (slot, fg) in [
+                    ("text", t.text),
+                    ("text_muted", t.text_muted),
+                    ("selection", t.selection),
+                    ("accent", t.accent),
+                    ("unread", t.unread),
+                    ("warning", t.warning),
+                ] {
+                    let (a, b) = (
+                        luminance(fg).expect("an RGB slot"),
+                        luminance(ground).expect("an RGB ground"),
+                    );
+                    let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                    checked += 1;
+                    if ratio < 4.5 {
+                        failures.push(format!("{name}: {slot} on {ground_name} is {ratio:.2}:1"));
+                    }
+                }
+            }
+        }
+        assert!(checked >= 5 * 12, "every opaque theme is checked");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
