@@ -1712,6 +1712,29 @@ fn a_check_that_flips_publishes_an_event() {
     diag.stop();
 }
 
+/// A mailbox table the load ignores (PERSO-118) leaves the file loading and
+/// turns `config_loaded` amber, naming the key and the list it belongs in.
+#[test]
+fn an_unknown_mailbox_table_turns_config_loaded_into_a_warning() {
+    let diag = Diag::start();
+    fs::write(
+        diag.root().join("config.toml"),
+        format!("{CONFIG}\n[accounts.mailboxes.spesen]\nserver = \"Spesen\"\n"),
+    )
+    .expect("add a stray mailbox table");
+    let health = block_on(async {
+        let mut conn = client(diag.root()).await;
+        call(&mut conn, "diagnostic.health", json!({})).await
+    });
+    let entry = check(&health, "config_loaded");
+    assert_eq!(text(&entry, "status"), "warn", "{entry}");
+    let detail = text(&entry, "detail");
+    assert!(detail.contains("loaded, 2 account(s)"), "{detail}");
+    assert!(detail.contains("accounts.mailboxes.spesen"), "{detail}");
+    assert!(detail.contains("[[accounts.mailboxes.extra]]"), "{detail}");
+    diag.stop();
+}
+
 /// A check that did not move publishes nothing: a daemon that republished its
 /// whole check set on every evaluation would fill the activity overlay with
 /// news that nothing happened.

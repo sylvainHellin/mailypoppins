@@ -30,7 +30,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use log::info;
+use log::{info, warn};
 use serde_json::{json, Value};
 
 use mp_protocol::events::{ConfigChanged, ConfigInvalid, KIND_CONFIG_CHANGED, KIND_CONFIG_INVALID};
@@ -287,7 +287,16 @@ fn command(family: &ConfigFamily, result: Value, affected: Vec<ResourceId>) -> O
 fn validate(family: &ConfigFamily, params: &Value) -> Result<Value, DomainError> {
     let text = string_param(params, "toml")?;
     match validate_document(&text, family.store.path()) {
-        Ok(_) => Ok(json!({"ok": true})),
+        Ok(_) => {
+            // Present only when there is something to say, so a clean
+            // document still answers exactly `{ok: true}` (PERSO-118).
+            let warnings = crate::config::config_warnings(&text);
+            if warnings.is_empty() {
+                Ok(json!({"ok": true}))
+            } else {
+                Ok(json!({"ok": true, "warnings": warnings}))
+            }
+        }
         Err(diagnostic) => Ok(json!({
             "ok": false,
             "errors": [{"line": diagnostic.line, "message": diagnostic.message}],
@@ -624,7 +633,14 @@ async fn swap(family: &ConfigFamily, source: Source) -> Result<(Reconcile, u64),
 /// travels back as `-32007`: one shape, so a watcher and a caller render one
 /// diagnostic.
 fn load(family: &ConfigFamily, path: &Path, text: &str) -> Result<GlobalConfig, DomainError> {
-    validate_document(text, path).map_err(|diagnostic| refuse(family, path, diagnostic))
+    let config =
+        validate_document(text, path).map_err(|diagnostic| refuse(family, path, diagnostic))?;
+    // What the load ignored but still took (PERSO-118): a line in the log per
+    // finding, as `load_global_config` writes at startup.
+    for warning in crate::config::config_warnings(text) {
+        warn!("[daemon] {}: {warning}", path.display());
+    }
+    Ok(config)
 }
 
 /// Publish `config.invalid` and build the `-32007` that carries the same three

@@ -271,6 +271,33 @@ fn an_auto_start_that_never_becomes_ready_gives_up_after_the_bound() {
 /// `mp daemon status` stands for `mp daemon *`: it is the member of that family
 /// that answers without side effects, where `run` would block and `start`
 /// would do the very thing this test forbids.
+/// A config with a mailbox table the load ignores (PERSO-118) says so on
+/// stderr at the client preamble, and the command still runs: `mp config path`
+/// is on the no-daemon list, so the warning is all this test can see.
+#[test]
+fn an_unknown_mailbox_table_warns_on_stderr_and_the_command_still_runs() {
+    let tmp = root();
+    fs::write(
+        tmp.path().join("config.toml"),
+        "[[accounts]]\nname = \"tum\"\n\n[accounts.mailboxes.inbox]\nserver = \"INBOX\"\n\n\
+         [accounts.mailboxes.spesen]\nserver = \"Spesen\"\n",
+    )
+    .expect("write config.toml");
+
+    let out = mp_autostart(&["config", "path"], tmp.path(), FAIL_BUDGET_MS, None);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stderr.contains("account \"tum\": unknown mailbox key `accounts.mailboxes.spesen`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("[[accounts.mailboxes.extra]]"), "{stderr}");
+    assert!(
+        !stderr.contains("Failed to parse config file") && !stderr.contains("Invalid config"),
+        "a warning is not a failed load: {stderr}"
+    );
+}
+
 #[test]
 fn every_no_daemon_command_runs_with_nothing_listening_and_starts_nothing() {
     let tmp = root();

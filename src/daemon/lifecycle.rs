@@ -305,12 +305,19 @@ async fn run(foreground_logs: bool) -> Result<()> {
         echo(&format!("no config at {}", config_path.display()));
         (ConfigState::Absent, crate::config::GlobalConfig::default())
     } else {
-        match crate::config::load_global_config() {
-            Ok(config) => {
+        match crate::config::load_global_config_with_warnings() {
+            Ok((config, warnings)) => {
                 echo(&format!(
                     "config loaded, {} accounts",
                     config.accounts.len()
                 ));
+                // Already in the log through the load; a foreground daemon
+                // says it on the terminal too (PERSO-118).
+                if foreground_logs {
+                    for warning in &warnings {
+                        eprintln!("{}: {warning}", config_path.display());
+                    }
+                }
                 (ConfigState::Ok, config)
             }
             Err(e) => {

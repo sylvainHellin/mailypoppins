@@ -402,11 +402,21 @@ impl Diagnostics {
             }
         };
         match validate_document(&text, path) {
-            Ok(config) => Check::new(
-                "config_loaded",
-                Status::Ok,
-                format!("{shown} loaded, {} account(s)", config.accounts.len()),
-            ),
+            Ok(config) => {
+                let loaded = format!("{shown} loaded, {} account(s)", config.accounts.len());
+                // A key the load ignored (PERSO-118) does not stop the load
+                // but is worth the amber: it is a folder that never syncs.
+                let warnings = crate::config::config_warnings(&text);
+                if warnings.is_empty() {
+                    Check::new("config_loaded", Status::Ok, loaded)
+                } else {
+                    Check::new(
+                        "config_loaded",
+                        Status::Warn,
+                        format!("{loaded}; {}", warnings.join("; ")),
+                    )
+                }
+            }
             Err(diagnostic) => Check::new(
                 "config_loaded",
                 Status::Fail,

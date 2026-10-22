@@ -236,6 +236,13 @@ sync_interval_secs = 900    # Seconds without a sync before the daemon runs one 
         syntax. They are included in sync alongside the three core mailboxes, and their key is
         the server name verbatim.
       </p>
+      <p>
+        Any other name under <code>[mailboxes]</code>, such as a
+        <code>[mailboxes.spesen]</code> table written where a <code>[[mailboxes.extra]]</code>
+        entry was meant, is not a mailbox: the config still loads, the table is ignored, and
+        <code>mp</code> prints a warning naming it on every command, as do the daemon log and
+        the TUI's activity log.
+      </p>
       <ConfigExample code={`[mailboxes.inbox]
 server = "INBOX"
 

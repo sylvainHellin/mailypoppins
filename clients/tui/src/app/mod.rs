@@ -287,7 +287,11 @@ fn preview_query_span(context: String) -> mp_core::timing::TimingSpan {
 
 impl App {
     pub fn new() -> Self {
-        let global_config = mp_core::config::load_global_config().unwrap_or_default();
+        // A config warning (an ignored mailbox key, PERSO-118) printed on
+        // stderr before the alternate screen is gone by the first frame, so it
+        // goes to the activity log with the theme's.
+        let (global_config, config_warnings) =
+            mp_core::config::load_global_config_with_warnings().unwrap_or_default();
 
         // Select the TUI theme once, before the first frame. Unknown names
         // warn (surfaced in the activity log below) and fall back to the
@@ -321,6 +325,9 @@ impl App {
 
         if let Some(warning) = theme_warning {
             app.push_status(warning, StatusLevel::Warning);
+        }
+        for warning in config_warnings {
+            app.push_status(format!("config.toml: {warning}"), StatusLevel::Warning);
         }
         if let Some(warning) = prefs_warning {
             app.push_status(warning, StatusLevel::Warning);

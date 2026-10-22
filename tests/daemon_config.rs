@@ -1450,6 +1450,37 @@ async fn config_validate_accepts_a_good_document_and_changes_nothing() {
     );
 }
 
+/// A document that loads but carries a mailbox table the load ignores
+/// (PERSO-118) is accepted, with the finding under `warnings`.
+#[tokio::test]
+async fn config_validate_warns_on_an_unknown_mailbox_table() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let _daemon = sandbox.start_daemon().await;
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+
+    let candidate = format!(
+        "{}[accounts.mailboxes.spesen]\nserver = \"Spesen\"\n",
+        account_toml("alpha", DEFAULT_BODY_FETCH_DEADLINE_SECS)
+    );
+    let result = call_ok(&mut conn, "config.validate", json!({"toml": candidate})).await;
+    assert_keys(
+        &result,
+        &["ok", "warnings"],
+        "a candidate with a stray table",
+    );
+    assert_eq!(result["ok"], json!(true));
+    let warnings = result["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("warnings is an array, got {result}"));
+    assert_eq!(warnings.len(), 1, "{result}");
+    let warning = warnings[0].as_str().unwrap_or_default();
+    assert!(warning.contains("accounts.mailboxes.spesen"), "{warning}");
+    assert!(
+        warning.contains("[[accounts.mailboxes.extra]]"),
+        "{warning}"
+    );
+}
+
 #[tokio::test]
 async fn config_validate_reports_the_line_of_a_syntax_error() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);

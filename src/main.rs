@@ -3740,11 +3740,22 @@ async fn main() -> Result<()> {
     }
 
     // Load global config from ~/.config/mailypoppins/config.toml
-    let global_config = load_global_config().unwrap_or_else(|e| {
-        eprintln!("{} {}", "⚠".yellow(), e);
-        eprintln!("  Some commands may not work without proper configuration.");
-        GlobalConfig::default()
-    });
+    // A warning (a key the load ignored, PERSO-118) goes to stderr as well as
+    // the log, because a config typo otherwise surfaces only as a command
+    // that cannot find what the user believes they configured.
+    let global_config = match mailypoppins::config::load_global_config_with_warnings() {
+        Ok((config, warnings)) => {
+            for warning in &warnings {
+                eprintln!("{} {}: {warning}", "⚠".yellow(), config_path().display());
+            }
+            config
+        }
+        Err(e) => {
+            eprintln!("{} {}", "⚠".yellow(), e);
+            eprintln!("  Some commands may not work without proper configuration.");
+            GlobalConfig::default()
+        }
+    };
 
     // Copy any legacy `[accounts.*.signatures]` tables into the app-managed
     // signatures directory + state file (#0107), before anything resolves a

@@ -1013,7 +1013,18 @@ fn self_referencing_values(
 }
 
 /// Load the global config from ~/.config/mailypoppins/config.toml
+///
+/// Every [`config_warnings`] line goes to the log; a caller that owns a
+/// terminal and wants them on stderr too uses
+/// [`load_global_config_with_warnings`].
 pub fn load_global_config() -> Result<GlobalConfig> {
+    load_global_config_with_warnings().map(|(config, _)| config)
+}
+
+/// [`load_global_config`], also returning the [`config_warnings`] of the file:
+/// keys the load ignored that are worth a line to the user, and that do not
+/// stop the load.
+pub fn load_global_config_with_warnings() -> Result<(GlobalConfig, Vec<String>)> {
     let path = config_path();
     if !path.exists() {
         return Err(anyhow::anyhow!(
@@ -1031,8 +1042,59 @@ pub fn load_global_config() -> Result<GlobalConfig> {
     validate_account_names(&config)
         .with_context(|| format!("Invalid config file: {}", path.display()))?;
     validate_hooks(&config).with_context(|| format!("Invalid config file: {}", path.display()))?;
+    let warnings = config_warnings(&content);
+    for warning in &warnings {
+        log::warn!("{}: {warning}", path.display());
+    }
     debug!("Loaded global config from {}", path.display());
-    Ok(config)
+    Ok((config, warnings))
+}
+
+/// The mailbox keys an account's `mailboxes` table understands; serde ignores
+/// any other, which is what [`config_warnings`] exists to say out loud.
+const MAILBOX_KEYS: [&str; 4] = ["inbox", "archive", "sent", "extra"];
+
+/// Non-fatal findings about a config document, one line each.
+///
+/// Today that is one kind: a key under `[accounts.mailboxes]` other than the
+/// three roles and `extra`. serde drops it without a word, so a
+/// `[accounts.mailboxes.spesen]` table written where a
+/// `[[accounts.mailboxes.extra]]` entry was meant loads cleanly and the folder
+/// is never synced; `mp sync --mailbox Spesen` then reports the account has no
+/// such mailbox and nothing points at the config (PERSO-118). A warning rather
+/// than a refusal, because a config that loaded yesterday must load today.
+///
+/// A document that does not parse yields nothing: the parse error is the
+/// caller's to report.
+pub fn config_warnings(content: &str) -> Vec<String> {
+    let Ok(document) = content.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let Some(accounts) = document.get("accounts").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    for (index, account) in accounts.iter().enumerate() {
+        let Some(mailboxes) = account.get("mailboxes").and_then(|v| v.as_table()) else {
+            continue;
+        };
+        let name = account
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|name| format!("account {name:?}"))
+            .unwrap_or_else(|| format!("account #{}", index + 1));
+        for key in mailboxes.keys() {
+            if MAILBOX_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            warnings.push(format!(
+                "{name}: unknown mailbox key `accounts.mailboxes.{key}` is ignored; \
+                 the mailbox roles are inbox, archive and sent, and any other folder \
+                 goes in a `[[accounts.mailboxes.extra]]` entry with `server = \"...\"`"
+            ));
+        }
+    }
+    warnings
 }
 
 /// Reject out-of-range retention values at load time rather than at the first
@@ -2464,6 +2526,100 @@ server = "INBOX"
 "#;
         let path = std::path::PathBuf::from("/tmp/fake.toml");
         assert!(reject_legacy_keys(toml, &path).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // config_warnings: unknown mailbox keys (PERSO-118)
+    // -----------------------------------------------------------------------
+
+    /// The shape the ticket was found with: a named table where an `extra`
+    /// entry was meant, on the second of two accounts.
+    const STRAY_MAILBOX: &str = r#"
+[[accounts]]
+name = "home"
+
+[accounts.mailboxes.inbox]
+server = "INBOX"
+
+[[accounts]]
+name = "tum"
+
+[accounts.mailboxes.inbox]
+server = "INBOX"
+
+[accounts.mailboxes.spesen]
+server = "Spesen"
+
+[[accounts.mailboxes.extra]]
+server = "Projects"
+"#;
+
+    #[test]
+    fn config_warnings_names_a_stray_mailbox_table_and_its_account() {
+        let warnings = config_warnings(STRAY_MAILBOX);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("account \"tum\""), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("accounts.mailboxes.spesen"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("[[accounts.mailboxes.extra]]"),
+            "the warning names the list the entry belongs in: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn config_warnings_is_silent_on_the_known_mailbox_keys() {
+        let toml = r#"
+[[accounts]]
+name = "x"
+
+[accounts.mailboxes.inbox]
+server = "INBOX"
+[accounts.mailboxes.archive]
+server = "Archive"
+[accounts.mailboxes.sent]
+server = "Sent"
+[[accounts.mailboxes.extra]]
+server = "Spesen"
+"#;
+        assert!(config_warnings(toml).is_empty());
+        assert!(config_warnings("theme = \"terminal\"\n").is_empty());
+        assert!(config_warnings("[[accounts]\nbroken").is_empty());
+    }
+
+    #[test]
+    fn config_warnings_falls_back_to_the_account_position_without_a_name() {
+        let warnings = config_warnings("[[accounts]]\n[accounts.mailboxes]\ndrafts = 1\n");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("account #1:"), "{}", warnings[0]);
+    }
+
+    /// The warning does not cost the load: the account and its known
+    /// mailboxes still come through.
+    #[test]
+    fn a_stray_mailbox_table_warns_and_still_loads() {
+        let home = tempfile::tempdir().unwrap();
+        let env = test_env::ConfigDirOverride::new(home.path());
+        let dir = home.path().join("cfg");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.toml"), STRAY_MAILBOX).unwrap();
+        env.set_config_dir(&dir);
+
+        let (config, warnings) = load_global_config_with_warnings().expect("loads");
+        assert_eq!(config.accounts.len(), 2);
+        assert_eq!(
+            all_configured_mailboxes(&config.accounts[1])
+                .iter()
+                .map(|(_, m)| m.server.as_str())
+                .collect::<Vec<_>>(),
+            ["INBOX", "Projects"]
+        );
+        assert_eq!(warnings, config_warnings(STRAY_MAILBOX));
+        assert!(load_global_config().is_ok());
     }
 
     // -----------------------------------------------------------------------
