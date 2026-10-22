@@ -4436,8 +4436,15 @@ async fn main() -> Result<()> {
             if account_config.auth_method == AuthMethod::Graph {
                 let graph_config = GraphConfig::load(&account_config)?;
                 let client = graph::GraphClient::new_async(&graph_config).await?;
+                // A role or label (`in:sent`) names the configured server
+                // folder, as the daemon's `pick_target` resolves it; passed
+                // through raw, Graph read `sent` as a malformed folder id
+                // (PERSO-173).
+                let server_folder = mailbox_name
+                    .as_deref()
+                    .map(|mb| find_server_name_for_role(&account_config, mb));
                 let mut emails = client
-                    .search_messages(&query_ast, mailbox_name.as_deref(), limit)
+                    .search_messages(&query_ast, server_folder.as_deref(), limit)
                     .await?;
                 sort_fetched_by_date(&mut emails);
                 if json {

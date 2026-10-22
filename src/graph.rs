@@ -547,7 +547,9 @@ fn iso_to_rfc2822(iso: &str) -> String {
 /// display name: "Sent Items" in the URL is read as a malformed id (HTTP 400
 /// `ErrorInvalidIdMalformed`), so Sent Items and Junk Email never synced.
 /// Both the well-known names and Exchange's English default display names map
-/// here, matched case-insensitively. A localized display name ("Gesendete
+/// here, matched case-insensitively, and so does mp's own role name `sent`,
+/// which `in:sent` passes when the account configures no sent mailbox
+/// (PERSO-173). A localized display name ("Gesendete
 /// Elemente") is not listed: [`GraphClient::folder_path`] resolves it through
 /// the folder list.
 fn well_known_folder(folder: &str) -> Option<&'static str> {
@@ -555,7 +557,7 @@ fn well_known_folder(folder: &str) -> Option<&'static str> {
     Some(match lower.as_str() {
         "inbox" => "inbox",
         "archive" => "archive",
-        "sentitems" | "sent items" => "sentitems",
+        "sentitems" | "sent items" | "sent" => "sentitems",
         "drafts" => "drafts",
         "deleteditems" | "deleted items" => "deleteditems",
         "junkemail" | "junk email" | "junk e-mail" => "junkemail",
@@ -2879,31 +2881,42 @@ const QUERY_VALUE_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::N
     .remove(b'_')
     .remove(b'~');
 
+/// The most messages one Graph page returns: `$top` takes 1 to 1000, and a
+/// `$search` answers at most 1000 results.
+const GRAPH_MAX_TOP: usize = 1000;
+
+/// The query parameter a [`crate::search::GraphQuery`] travels as, for the URL
+/// and for the error that names a refused search.
+fn graph_query_param(query: &crate::search::GraphQuery) -> Option<(&'static str, String)> {
+    use crate::search::GraphQuery;
+    match query {
+        GraphQuery::All => None,
+        GraphQuery::Search(kql) => Some(("$search", format!("\"{kql}\""))),
+        GraphQuery::Filter(filter) => Some(("$filter", filter.clone())),
+    }
+}
+
 /// The message-search URL under `base`, with every query value
 /// percent-encoded: a raw `+` in a plus-address would otherwise read as a
 /// space, and a `&` or `#` in a subject would end the parameter or the query.
-/// `search` is wrapped in the double quotes Graph's `$search` expects; the
-/// quotes and backslashes inside it are already escaped by `to_graph`.
-fn search_url(
-    base: &str,
-    limit: usize,
-    search: Option<&str>,
-    filter: Option<&str>,
-) -> Result<reqwest::Url> {
-    let search = search.map(|search| format!("\"{search}\""));
-    let mut pairs: Vec<(&str, &str)> = Vec::new();
-    let top = limit.to_string();
-    pairs.push(("$top", &top));
-    pairs.push(("$orderby", "receivedDateTime desc"));
+///
+/// One of `$search` or `$filter` at most, never both (PERSO-173): Graph
+/// answers `SearchWithFilter` to the pair and `SearchWithOrderBy` to
+/// `$orderby` beside `$search`, and a `$filter` beside
+/// `$orderby=receivedDateTime` that does not start with `receivedDateTime` is
+/// `InefficientFilter`. Only the term-less listing is sorted server-side; a
+/// `$search` comes back newest first on its own, and the Message-ID filter
+/// matches a handful of copies at most.
+fn search_url(base: &str, limit: usize, query: &crate::search::GraphQuery) -> Result<reqwest::Url> {
+    let mut pairs: Vec<(&str, String)> = Vec::new();
+    pairs.push(("$top", limit.clamp(1, GRAPH_MAX_TOP).to_string()));
     pairs.push((
         "$select",
-        "id,internetMessageId,subject,from,toRecipients,ccRecipients,body,receivedDateTime,hasAttachments,isRead",
+        "id,internetMessageId,subject,from,toRecipients,ccRecipients,body,receivedDateTime,hasAttachments,isRead".to_string(),
     ));
-    if let Some(search) = search.as_deref() {
-        pairs.push(("$search", search));
-    }
-    if let Some(filter) = filter {
-        pairs.push(("$filter", filter));
+    match graph_query_param(query) {
+        Some(param) => pairs.push(param),
+        None => pairs.push(("$orderby", "receivedDateTime desc".to_string())),
     }
     let query = pairs
         .iter()
@@ -2939,16 +2952,33 @@ fn message_lookup_url(internet_message_id: &str) -> Result<reqwest::Url> {
     Ok(url)
 }
 
+/// The error a refused Graph search answers with: the request it sent and
+/// Graph's own reason, never a quieter search for less (PERSO-173).
+fn search_refused(
+    query: &crate::search::GraphQuery,
+    status: reqwest::StatusCode,
+    body: &str,
+) -> anyhow::Error {
+    let sent = graph_query_param(query)
+        .map(|(name, value)| format!("{name}={value}"))
+        .unwrap_or_else(|| "the folder listing".to_string());
+    anyhow!("Microsoft Graph refused the search {sent} (HTTP {status}): {body}")
+}
+
 impl GraphClient {
-    /// Search messages using Graph $search and $filter.
+    /// Search messages with one Graph request: a KQL `$search` for every
+    /// match term, or the `$filter` of an exact Message-ID lookup.
+    ///
+    /// A refused request is an error naming what was sent. There is no
+    /// fallback: the one this replaced dropped the `$search` half and listed
+    /// the folder's newest messages as if they were the hits (PERSO-173).
     pub async fn search_messages(
         &self,
         query: &crate::search::Query,
         folder: Option<&str>,
         limit: usize,
     ) -> Result<Vec<FetchedEmail>> {
-        let (search_param, filter_param) =
-            crate::search::to_graph(query).map_err(|e| anyhow!("{e}"))?;
+        let graph_query = crate::search::to_graph(query).map_err(|e| anyhow!("{e}"))?;
 
         let base = if let Some(f) = folder {
             let fp = self.folder_path(f).await?;
@@ -2957,19 +2987,15 @@ impl GraphClient {
             format!("{}/me/messages", GRAPH_BASE)
         };
 
-        let url = search_url(
-            &base,
-            limit,
-            search_param.as_deref(),
-            filter_param.as_deref(),
-        )?;
+        let url = search_url(&base, limit, &graph_query)?;
         debug!("Graph search URL: {}", url);
 
+        // No `ConsistencyLevel: eventual`: Graph wants it for advanced queries
+        // on directory objects, not for `$search` on messages.
         let resp = self
             .client
             .get(url)
             .bearer_auth(self.bearer())
-            .header("ConsistencyLevel", "eventual") // Required for $search
             .send()
             .await
             .context("Failed to search messages")?;
@@ -2977,73 +3003,7 @@ impl GraphClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            // If $search failed, fall back to $filter only
-            if search_param.is_some() {
-                warn!(
-                    "Graph $search failed (HTTP {}), falling back to $filter only",
-                    status
-                );
-                return self.search_messages_filter_only(query, folder, limit).await;
-            }
-            return Err(anyhow!("Graph search failed (HTTP {}): {}", status, body));
-        }
-
-        let msg_list: GraphMessageList = resp
-            .json()
-            .await
-            .context("Failed to parse search results")?;
-
-        let mut emails = Vec::with_capacity(msg_list.value.len());
-        for msg in &msg_list.value {
-            let mut email = graph_message_to_fetched_email(msg);
-            if lists_attachments(msg) {
-                if let Ok(att) = self.fetch_attachments(&msg.id).await {
-                    email.attachments = att;
-                }
-            }
-            populate_calendar_from_attachments(&mut email);
-            emails.push(email);
-        }
-
-        retain_exact_message_id_graph(&mut emails, query.message_id.as_deref());
-
-        Ok(emails)
-    }
-
-    /// Fallback search using only $filter (when $search is not available).
-    async fn search_messages_filter_only(
-        &self,
-        query: &crate::search::Query,
-        folder: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<FetchedEmail>> {
-        let (_, filter_param) = crate::search::to_graph(query).map_err(|e| anyhow!("{e}"))?;
-
-        let base = if let Some(f) = folder {
-            let fp = self.folder_path(f).await?;
-            format!("{}/me/mailFolders/{}/messages", GRAPH_BASE, fp)
-        } else {
-            format!("{}/me/messages", GRAPH_BASE)
-        };
-
-        let url = search_url(&base, limit, None, filter_param.as_deref())?;
-
-        let resp = self
-            .client
-            .get(url)
-            .bearer_auth(self.bearer())
-            .send()
-            .await
-            .context("Failed to search messages (filter only)")?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "Graph search (filter) failed (HTTP {}): {}",
-                status,
-                body
-            ));
+            return Err(search_refused(&graph_query, status, &body));
         }
 
         let msg_list: GraphMessageList = resp
@@ -3977,6 +3937,7 @@ mod tests {
             ("SentItems", "sentitems"),
             ("Sent Items", "sentitems"),
             ("sentitems", "sentitems"),
+            ("sent", "sentitems"),
             ("Drafts", "drafts"),
             ("Deleted Items", "deleteditems"),
             ("deleteditems", "deleteditems"),
@@ -4037,12 +3998,11 @@ mod tests {
     #[test]
     fn search_url_encodes_every_value() {
         let query = crate::search::parse(r#"from:a+b@x.com subject:"R&D #1""#).unwrap();
-        let (search, filter) = crate::search::to_graph(&query).unwrap();
+        let graph_query = crate::search::to_graph(&query).unwrap();
         let url = search_url(
             "https://graph.microsoft.com/v1.0/me/messages",
             10,
-            search.as_deref(),
-            filter.as_deref(),
+            &graph_query,
         )
         .unwrap();
         let raw = url.as_str();
@@ -4052,13 +4012,80 @@ mod tests {
         assert!(url.fragment().is_none(), "{raw}");
         let pairs: std::collections::HashMap<String, String> =
             url.query_pairs().into_owned().collect();
-        assert_eq!(pairs["$filter"], "from/emailAddress/address eq 'a+b@x.com'");
-        assert!(
-            pairs["$search"].contains("subject:R&D #1"),
-            "{}",
-            pairs["$search"]
+        assert_eq!(
+            pairs["$search"],
+            r#""from:a+b@x.com AND subject:\"R&D #1\"""#
         );
         assert_eq!(pairs["$top"], "10");
+    }
+
+    fn url_pairs(query: &str, limit: usize) -> std::collections::HashMap<String, String> {
+        let graph_query = crate::search::to_graph(&crate::search::parse(query).unwrap()).unwrap();
+        search_url(
+            "https://graph.microsoft.com/v1.0/me/messages",
+            limit,
+            &graph_query,
+        )
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect()
+    }
+
+    /// The parameter combinations Graph refuses never go out (PERSO-173):
+    /// `$search` travels alone, without `$orderby` (`SearchWithOrderBy`) or
+    /// `$filter` (`SearchWithFilter`), and a filter-only query no longer
+    /// carries an `$orderby` its filter does not start with
+    /// (`InefficientFilter`).
+    #[test]
+    fn a_search_url_never_pairs_parameters_graph_refuses() {
+        for query in [
+            "from:amazon",
+            "from:ovh mailypoppins after:2026-10-01",
+            "subject:PERSO-144",
+            "after:2026-10-01 before:2026-10-15",
+            "has:attachment",
+            "invoice",
+        ] {
+            let pairs = url_pairs(query, 20);
+            assert!(pairs.contains_key("$search"), "{query}: {pairs:?}");
+            assert!(!pairs.contains_key("$orderby"), "{query}: {pairs:?}");
+            assert!(!pairs.contains_key("$filter"), "{query}: {pairs:?}");
+        }
+        assert_eq!(url_pairs("from:amazon", 20)["$search"], "\"from:amazon\"");
+
+        let lookup = url_pairs("message-id:<a@x>", 1);
+        assert_eq!(lookup["$filter"], "internetMessageId eq '<a@x>'");
+        assert!(!lookup.contains_key("$orderby"), "{lookup:?}");
+        assert!(!lookup.contains_key("$search"), "{lookup:?}");
+
+        // Only the term-less listing is sorted server-side.
+        let all = url_pairs("", 20);
+        assert_eq!(all["$orderby"], "receivedDateTime desc");
+        assert!(!all.contains_key("$search") && !all.contains_key("$filter"));
+    }
+
+    #[test]
+    fn the_page_size_stays_within_what_graph_accepts() {
+        assert_eq!(url_pairs("x", 0)["$top"], "1");
+        assert_eq!(url_pairs("x", 5000)["$top"], "1000");
+    }
+
+    /// A refused search is an error that names what was sent, never a quiet
+    /// listing of the newest messages.
+    #[test]
+    fn a_refused_search_names_the_query_it_sent() {
+        let graph_query =
+            crate::search::to_graph(&crate::search::parse("subject:invoice").unwrap()).unwrap();
+        let err = search_refused(
+            &graph_query,
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"code":"SearchWithOrderBy"}}"#,
+        )
+        .to_string();
+        assert!(err.contains(r#"$search="subject:invoice""#), "{err}");
+        assert!(err.contains("400"), "{err}");
+        assert!(err.contains("SearchWithOrderBy"), "{err}");
     }
 
     /// A Message-ID carrying URL and OData metacharacters reaches Graph as
@@ -4129,26 +4156,30 @@ mod tests {
     #[test]
     fn graph_params_text_only() {
         let query = crate::search::parse("hello world").unwrap();
-        let (search, filter) = crate::search::to_graph(&query).unwrap();
-        assert_eq!(search.unwrap(), "hello world");
-        assert!(filter.is_none());
+        assert_eq!(
+            crate::search::to_graph(&query).unwrap(),
+            crate::search::GraphQuery::Search("hello AND world".into())
+        );
     }
 
     #[test]
-    fn graph_params_from_filter() {
+    fn graph_params_from_is_kql() {
         let query = crate::search::parse("from:alice@example.com").unwrap();
-        let (search, filter) = crate::search::to_graph(&query).unwrap();
-        assert!(search.is_none());
-        assert!(filter.unwrap().contains("from/emailAddress/address"));
+        assert_eq!(
+            crate::search::to_graph(&query).unwrap(),
+            crate::search::GraphQuery::Search("from:alice@example.com".into())
+        );
     }
 
     #[test]
     fn graph_params_date_range() {
         let query = crate::search::parse("after:2024-01-01 before:2024-02-01").unwrap();
-        let (_, filter) = crate::search::to_graph(&query).unwrap();
-        let f = filter.unwrap();
-        assert!(f.contains("receivedDateTime ge"));
-        assert!(f.contains("receivedDateTime lt"));
+        assert_eq!(
+            crate::search::to_graph(&query).unwrap(),
+            crate::search::GraphQuery::Search(
+                "received>=2024-01-01 AND received<2024-02-01".into()
+            )
+        );
     }
 
     // -----------------------------------------------------------------------

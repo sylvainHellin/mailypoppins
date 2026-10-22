@@ -874,99 +874,101 @@ pub fn to_gmail_search_command(q: &Query) -> Result<String, RenderError> {
 // Renderer: Microsoft Graph
 // ---------------------------------------------------------------------------
 
-/// Whether a term is answered by Graph `$filter` (addresses, dates,
-/// attachments) or `$search` (free text over subject/body/filename).
-enum GraphKind {
-    Filter(String),
+/// What one Graph message request asks the server for (PERSO-173).
+///
+/// Graph refuses `$search` beside `$filter` (`SearchWithFilter`) or beside
+/// `$orderby` (`SearchWithOrderBy`) on a message collection, and refuses a
+/// `$filter` beside `$orderby=receivedDateTime` unless the filter starts with
+/// `receivedDateTime` (`InefficientFilter`). So a query takes exactly one
+/// path: every match term goes into one KQL `$search`, and only the exact
+/// Message-ID lookup, which KQL cannot express, goes into a `$filter`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphQuery {
+    /// No term at all: the folder's newest messages, sorted server-side.
+    All,
+    /// A KQL expression for `$search`, without the surrounding double quotes
+    /// the URL builder adds.
     Search(String),
+    /// An OData `$filter` expression, sent without `$orderby`.
+    Filter(String),
 }
 
-fn graph_term(term: &Term) -> GraphKind {
+/// One term as a KQL restriction.
+///
+/// `from:`, `to:` and `cc:` match a display name or any token of the address
+/// by prefix (`from:amaz` finds `order-update@amazon.de`), which is as close
+/// to the IMAP substring match as Graph offers; an OData `eq` would match only
+/// the full address.
+fn kql_term(term: &Term) -> String {
     match term {
-        Term::From(s) => GraphKind::Filter(format!(
-            "from/emailAddress/address eq '{}'",
-            s.replace('\'', "''")
-        )),
-        Term::To(s) => GraphKind::Filter(format!(
-            "toRecipients/any(r: r/emailAddress/address eq '{}')",
-            s.replace('\'', "''")
-        )),
-        Term::Cc(s) => GraphKind::Filter(format!(
-            "ccRecipients/any(r: r/emailAddress/address eq '{}')",
-            s.replace('\'', "''")
-        )),
-        Term::HasAttachment => GraphKind::Filter("hasAttachments eq true".to_string()),
-        Term::Before(d) => GraphKind::Filter(format!("receivedDateTime lt {d}")),
-        Term::After(d) => GraphKind::Filter(format!("receivedDateTime ge {d}")),
-        Term::Subject(s) => GraphKind::Search(format!("subject:{}", kql_escape(s))),
-        Term::Body(s) => GraphKind::Search(format!("body:{}", kql_escape(s))),
-        Term::Filename(s) => GraphKind::Search(format!("attachmentnames:{}", kql_escape(s))),
-        Term::Text(s) => GraphKind::Search(kql_escape(s)),
+        Term::From(s) => format!("from:{}", kql_value(s)),
+        Term::To(s) => format!("to:{}", kql_value(s)),
+        Term::Cc(s) => format!("cc:{}", kql_value(s)),
+        Term::Subject(s) => format!("subject:{}", kql_value(s)),
+        Term::Body(s) => format!("body:{}", kql_value(s)),
+        Term::Filename(s) => format!("attachment:{}", kql_value(s)),
+        Term::Text(s) => kql_value(s),
+        Term::HasAttachment => "hasAttachments:true".to_string(),
+        Term::After(d) => format!("received>={d}"),
+        Term::Before(d) => format!("received<{d}"),
     }
 }
 
-/// A free-text value made safe inside the double-quoted Graph `$search`
-/// string: a backslash and a double quote are backslash-escaped, so a quote
-/// in a subject cannot close the string early.
-fn kql_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+/// A value as KQL reads it inside the double-quoted `$search` string.
+///
+/// A plain token stays bare, which keeps Graph's prefix match. Anything KQL
+/// would split or read as syntax (whitespace, a parenthesis, a colon, a
+/// comparison, a leading sign, an operator word) becomes a phrase in escaped
+/// double quotes. A phrase cannot carry a double quote, so one is replaced by
+/// a space, and a backslash is escaped for the outer string.
+fn kql_value(s: &str) -> String {
+    let needs_phrase = s.is_empty()
+        || s.starts_with(['-', '+'])
+        || matches!(s, "AND" | "OR" | "NOT" | "NEAR" | "ONEAR")
+        || s.chars().any(|c| {
+            c.is_whitespace() || matches!(c, '"' | '\\' | '(' | ')' | ':' | '<' | '>' | '=')
+        });
+    if !needs_phrase {
+        return s.to_string();
+    }
+    let inner = s.replace('\\', "\\\\").replace('"', " ");
+    format!("\\\"{inner}\\\"")
 }
 
-/// Lower a [`Query`] to Graph `($search, $filter)`. An `OR` group is allowed
-/// only when all its terms land in the same half (all `$filter` or all
-/// `$search`); a group that mixes an address/date/attachment with free text
-/// cannot be expressed as one Graph clause and is refused rather than split.
-pub fn to_graph(q: &Query) -> Result<(Option<String>, Option<String>), RenderError> {
-    let mut filter_parts: Vec<String> = Vec::new();
-    let mut search_parts: Vec<String> = Vec::new();
-
+/// Lower a [`Query`] to the one Graph request that answers it.
+///
+/// Clauses are joined with an explicit `AND`: KQL ORs two adjacent
+/// restrictions on the same property, so `received>=A received<B` would match
+/// everything after `A` (seen live on PERSO-173). A `message-id:` lookup is a
+/// `$filter` of its own and is refused beside any other term, since Graph
+/// cannot combine the two halves in one request.
+pub fn to_graph(q: &Query) -> Result<GraphQuery, RenderError> {
     if let Some(ref mid) = q.message_id {
-        filter_parts.push(format!(
+        if !q.clauses.is_empty() {
+            return Err(RenderError(
+                "message-id: cannot be combined with other terms on Microsoft Graph; search by the Message-ID alone".into(),
+            ));
+        }
+        return Ok(GraphQuery::Filter(format!(
             "internetMessageId eq '{}'",
             crate::imap_query::bracketed_message_id(mid).replace('\'', "''")
-        ));
+        )));
     }
-
-    for clause in &q.clauses {
-        match clause {
-            Clause::Single(t) => match graph_term(t) {
-                GraphKind::Filter(f) => filter_parts.push(f),
-                GraphKind::Search(s) => search_parts.push(s),
-            },
-            Clause::Or(terms) => {
-                let kinds: Vec<GraphKind> = terms.iter().map(graph_term).collect();
-                let all_filter = kinds.iter().all(|k| matches!(k, GraphKind::Filter(_)));
-                let all_search = kinds.iter().all(|k| matches!(k, GraphKind::Search(_)));
-                if all_filter {
-                    let inner: Vec<String> = kinds
-                        .into_iter()
-                        .map(|k| match k {
-                            GraphKind::Filter(f) => f,
-                            GraphKind::Search(_) => unreachable!(),
-                        })
-                        .collect();
-                    filter_parts.push(format!("({})", inner.join(" or ")));
-                } else if all_search {
-                    let inner: Vec<String> = kinds
-                        .into_iter()
-                        .map(|k| match k {
-                            GraphKind::Search(s) => s,
-                            GraphKind::Filter(_) => unreachable!(),
-                        })
-                        .collect();
-                    search_parts.push(format!("({})", inner.join(" OR ")));
-                } else {
-                    return Err(RenderError(
-                        "an OR group cannot mix address/date/attachment terms with free-text terms on Microsoft Graph".into(),
-                    ));
-                }
-            }
-        }
+    if q.clauses.is_empty() {
+        return Ok(GraphQuery::All);
     }
-
-    let search = (!search_parts.is_empty()).then(|| search_parts.join(" "));
-    let filter = (!filter_parts.is_empty()).then(|| filter_parts.join(" and "));
-    Ok((search, filter))
+    let parts: Vec<String> = q
+        .clauses
+        .iter()
+        .map(|clause| match clause {
+            Clause::Single(t) => kql_term(t),
+            Clause::Or(terms) => format!(
+                "({})",
+                terms.iter().map(kql_term).collect::<Vec<_>>().join(" OR ")
+            ),
+        })
+        .collect();
+    Ok(GraphQuery::Search(parts.join(" AND ")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1505,42 +1507,86 @@ mod tests {
 
     // -- to_graph -----------------------------------------------------------
 
-    /// A double quote or a backslash in a free-text value cannot close the
-    /// quoted `$search` string early.
+    /// A double quote cannot close the quoted `$search` string early: a value
+    /// that needs a phrase is wrapped in escaped quotes, an inner quote
+    /// becomes a space, and a backslash is escaped.
     #[test]
     fn graph_search_values_escape_quotes_and_backslashes() {
-        assert_eq!(kql_escape(r#"say "hi" \ now"#), r#"say \"hi\" \\ now"#);
+        assert_eq!(kql_value(r#"say "hi" \ now"#), r#"\"say  hi  \\ now\""#);
+        assert_eq!(kql_value("amazon"), "amazon");
+        assert_eq!(kql_value("a+b@x.com"), "a+b@x.com");
+        assert_eq!(kql_value("PERSO-144"), "PERSO-144");
+        assert_eq!(kql_value("-draft"), r#"\"-draft\""#);
+        assert_eq!(kql_value("OR"), r#"\"OR\""#);
+        assert_eq!(kql_value("a:b"), r#"\"a:b\""#);
     }
 
+    /// Every match term lands in one KQL `$search`, joined by an explicit
+    /// `AND`: Graph refuses `$search` beside `$filter`, and KQL ORs two
+    /// adjacent restrictions on one property.
     #[test]
-    fn graph_splits_search_and_filter() {
-        let (search, filter) = to_graph(&q("from:alice subject:report has:attachment")).unwrap();
-        assert_eq!(search.as_deref(), Some("subject:report"));
+    fn graph_renders_every_term_as_kql() {
         assert_eq!(
-            filter.as_deref(),
-            Some("from/emailAddress/address eq 'alice' and hasAttachments eq true")
+            to_graph(&q("from:alice subject:report has:attachment")).unwrap(),
+            GraphQuery::Search("from:alice AND subject:report AND hasAttachments:true".into())
+        );
+        assert_eq!(
+            to_graph(&q("to:bob cc:carol body:x filename:pdf")).unwrap(),
+            GraphQuery::Search("to:bob AND cc:carol AND body:x AND attachment:pdf".into())
+        );
+        assert_eq!(
+            to_graph(&q("from:amazon")).unwrap(),
+            GraphQuery::Search("from:amazon".into())
+        );
+        assert_eq!(
+            to_graph(&q("from:ovh mailypoppins after:2026-10-01")).unwrap(),
+            GraphQuery::Search("from:ovh AND mailypoppins AND received>=2026-10-01".into())
         );
     }
 
     #[test]
-    fn graph_or_group_of_text_terms() {
-        let (search, filter) = to_graph(&q("(invoice OR receipt)")).unwrap();
-        assert_eq!(search.as_deref(), Some("(invoice OR receipt)"));
-        assert!(filter.is_none());
-    }
-
-    #[test]
-    fn graph_mixed_or_group_is_refused() {
-        assert!(to_graph(&q("(from:a OR invoice)")).is_err());
-    }
-
-    #[test]
-    fn graph_dates_and_message_id() {
-        let (_, filter) = to_graph(&q("after:2026-01-01 before:2026-07-01")).unwrap();
+    fn graph_phrases_are_quoted_inside_the_search_string() {
         assert_eq!(
-            filter.as_deref(),
-            Some("receivedDateTime ge 2026-01-01 and receivedDateTime lt 2026-07-01")
+            to_graph(&q(r#"subject:"quarterly report""#)).unwrap(),
+            GraphQuery::Search(r#"subject:\"quarterly report\""#.into())
         );
+    }
+
+    #[test]
+    fn graph_or_groups_may_mix_fields() {
+        assert_eq!(
+            to_graph(&q("(invoice OR receipt)")).unwrap(),
+            GraphQuery::Search("(invoice OR receipt)".into())
+        );
+        assert_eq!(
+            to_graph(&q("(from:a OR invoice)")).unwrap(),
+            GraphQuery::Search("(from:a OR invoice)".into())
+        );
+    }
+
+    #[test]
+    fn graph_dates_are_an_and_ed_range() {
+        assert_eq!(
+            to_graph(&q("after:2026-01-01 before:2026-07-01")).unwrap(),
+            GraphQuery::Search("received>=2026-01-01 AND received<2026-07-01".into())
+        );
+    }
+
+    #[test]
+    fn graph_message_id_is_a_filter_of_its_own() {
+        assert_eq!(
+            to_graph(&q("message-id:<a'b@x>")).unwrap(),
+            GraphQuery::Filter("internetMessageId eq '<a''b@x>'".into())
+        );
+        let err = to_graph(&q("message-id:<a@x> from:bob")).unwrap_err();
+        assert!(err.to_string().contains("message-id:"), "{err}");
+    }
+
+    #[test]
+    fn graph_empty_query_lists_everything() {
+        assert_eq!(to_graph(&Query::default()).unwrap(), GraphQuery::All);
+        // `in:` is a scope, not a term.
+        assert_eq!(to_graph(&q("in:sent")).unwrap(), GraphQuery::All);
     }
 
     // -- to_fts -------------------------------------------------------------
@@ -1673,7 +1719,7 @@ mod tests {
         let query = q("from:boss@corp.com (invoice OR receipt) has:attachment");
         let imap = to_imap(&query).unwrap();
         let gmail = to_gmail(&query);
-        let (gsearch, gfilter) = to_graph(&query).unwrap();
+        let graph = to_graph(&query).unwrap();
         let fts = to_fts(&query).unwrap();
 
         // Every backend sees the sender, the OR group, and the attachment.
@@ -1685,8 +1731,12 @@ mod tests {
         assert!(gmail.contains("(invoice OR receipt)"));
         assert!(gmail.contains("has:attachment")); // Gmail runs it server-side
 
-        assert_eq!(gsearch.as_deref(), Some("(invoice OR receipt)"));
-        assert!(gfilter.unwrap().contains("hasAttachments eq true")); // Graph server-side
+        assert_eq!(
+            graph,
+            GraphQuery::Search(
+                "from:boss@corp.com AND (invoice OR receipt) AND hasAttachments:true".into()
+            )
+        ); // Graph server-side, one KQL search
 
         assert!(fts
             .match_expr
