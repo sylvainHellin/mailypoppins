@@ -295,7 +295,10 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use mp_protocol::events::{ConfigChanged, ConfigInvalid, KIND_CONFIG_CHANGED, KIND_CONFIG_INVALID};
+use mp_protocol::events::{
+    ConfigChanged, ConfigInvalid, KIND_CONFIG_CHANGED, KIND_CONFIG_INVALID,
+    KIND_DIAGNOSTIC_CHECK_CHANGED,
+};
 use mp_protocol::{ErrorCode, EventEnvelope, RpcError, METHOD_STATE_EVENT};
 
 use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity, InitializeResult};
@@ -1072,7 +1075,12 @@ async fn bootstrap_settled(conn: &mut Connection) -> Value {
 }
 
 /// Read `state.event` notifications until one of kind `config.changed`
-/// arrives, and return every event up to and including it.
+/// arrives, and return every event up to and including it, health checks
+/// aside.
+///
+/// A health check is not part of a swap: the refresh that follows a startup
+/// report, or the swap's own, runs beside the reconciliation rather than inside
+/// it, so its `diagnostic.check_changed` can land anywhere in the sequence.
 async fn events_through_config_changed(conn: &mut Connection) -> Vec<EventEnvelope> {
     let mut seen: Vec<EventEnvelope> = Vec::new();
     loop {
@@ -1086,6 +1094,9 @@ async fn events_through_config_changed(conn: &mut Connection) -> Vec<EventEnvelo
             .unwrap_or_else(|e| {
                 panic!("the params are an event envelope: {e}; got {notification:?}")
             });
+        if envelope.kind == KIND_DIAGNOSTIC_CHECK_CHANGED {
+            continue;
+        }
         let done = envelope.kind == KIND_CONFIG_CHANGED;
         seen.push(envelope);
         if done {
@@ -1534,13 +1545,14 @@ async fn config_validate_needs_its_toml_parameter() {
 async fn a_valid_swap_stops_removed_updates_changed_and_starts_added_in_that_order() {
     let sandbox = Sandbox::with_accounts(&["alpha", "beta"]);
     let _daemon = sandbox.start_daemon().await;
-    // Both runtimes settle before the connection subscribes, so every event
-    // this test collects belongs to the reload and nothing races it.
     assert_eq!(sandbox.wait_settled_state("alpha"), "ready");
     assert_eq!(sandbox.wait_settled_state("beta"), "ready");
 
+    // The runtime table reads `ready` before the report is committed, so a
+    // bootstrap taken now can still owe this connection a startup report:
+    // read past it, so every state change this test collects is the reload's.
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
-    bootstrap(&mut conn).await;
+    bootstrap_settled(&mut conn).await;
 
     // alpha goes, beta's body-fetch budget changes, gamma appears - and
     // gamma's data directory deliberately does not exist yet.
@@ -1585,6 +1597,11 @@ async fn a_valid_swap_stops_removed_updates_changed_and_starts_added_in_that_ord
             && envelope.payload["state"] != json!("opening")
         {
             alpha_lock_at_gamma_ready = Some(sandbox.engine_lock_is_free("alpha"));
+        }
+        // A health check is not part of the swap, as
+        // `events_through_config_changed` says.
+        if envelope.kind == KIND_DIAGNOSTIC_CHECK_CHANGED {
+            continue;
         }
         let done = envelope.kind == KIND_CONFIG_CHANGED;
         events.push(envelope);
@@ -1786,13 +1803,6 @@ async fn a_reload_that_changes_nothing_still_announces_itself() {
     );
 
     let first = events_through_config_changed(&mut conn).await;
-    // A health check is not part of the swap: the refresh that follows alpha's
-    // startup report runs once the swap lock is free, which is beside the
-    // reload rather than before it.
-    let first: Vec<EventEnvelope> = first
-        .into_iter()
-        .filter(|event| event.kind != "diagnostic.check_changed")
-        .collect();
     assert_eq!(
         describe(&first),
         vec!["config.changed".to_string()],
@@ -2004,8 +2014,10 @@ async fn config_add_account_appends_an_account_and_reconciles_it() {
     let _daemon = sandbox.start_daemon().await;
     assert_eq!(sandbox.wait_settled_state("alpha"), "ready");
 
+    // A bootstrap taken now can still owe alpha's startup report, as in the
+    // reload row: read past it, so the state changes below are the append's.
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
-    bootstrap(&mut conn).await;
+    bootstrap_settled(&mut conn).await;
 
     let result = call_ok(
         &mut conn,

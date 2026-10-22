@@ -209,6 +209,8 @@
 //! The readiness wait is the exception: every daemon suite needs all of it,
 //! so it is the one small file `tests/support/readiness.rs`, included by path.
 
+#[path = "support/events.rs"]
+mod events;
 #[path = "support/readiness.rs"]
 mod readiness;
 
@@ -257,7 +259,6 @@ const FAKE_READY_MS: u64 = 50;
 
 /// The event kind an account's readiness travels as.
 const KIND_ACCOUNT_STATE_CHANGED: &str = "account.state_changed";
-const KIND_DIAGNOSTIC_CHECK_CHANGED: &str = "diagnostic.check_changed";
 
 // ---------------------------------------------------------------------------
 // Layer (a) helpers: an in-process canonical state and a client-side reducer
@@ -1898,7 +1899,7 @@ async fn a_bootstrapped_connection_keeps_answering_calls_while_events_arrive() {
     let (mut conn, _) = connect_initialized(&sandbox).await;
 
     let first = bootstrap(&mut conn).await;
-    let event = next_event(&mut conn).await;
+    let event = events::next_domain_event(&mut conn, DEADLINE, "the readiness report").await;
     assert_eq!(event.kind, KIND_ACCOUNT_STATE_CHANGED);
 
     let second = bootstrap(&mut conn).await;
@@ -1935,13 +1936,9 @@ async fn the_snapshot_of_a_converged_daemon_still_has_the_documented_shape() {
     let mut ready = BTreeMap::new();
     let mut reports = 0;
     while reports < 2 {
-        let event = next_event(&mut conn).await;
-        // The refresh that alpha's readiness triggers can find beta still
-        // opening under load and publish `account:beta` flipping to warn
-        // before beta reports: a health check, not a readiness event.
-        if event.kind == KIND_DIAGNOSTIC_CHECK_CHANGED {
-            continue;
-        }
+        // Readiness is a domain event, and a lifecycle event may arrive at any
+        // time: this test waits for the state to converge, not for silence.
+        let event = events::next_domain_event(&mut conn, DEADLINE, "a readiness report").await;
         assert_eq!(event.kind, KIND_ACCOUNT_STATE_CHANGED);
         let account = event.payload["account"]
             .as_str()

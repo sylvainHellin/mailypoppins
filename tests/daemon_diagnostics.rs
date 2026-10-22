@@ -564,6 +564,12 @@ async fn await_check(conn: &mut Connection, name: &str) -> Value {
     }
 }
 
+/// Whether the check called `name` is one an account runtime's start moves:
+/// `store_open`, which counts the open stores, and the account's own check.
+fn is_refreshed_by_a_start(name: &str) -> bool {
+    name == "store_open" || name.starts_with("account:")
+}
+
 /// An object's keys, sorted.
 fn keys(value: &Value) -> Vec<String> {
     let mut keys: Vec<String> = value
@@ -842,7 +848,17 @@ fn health_counts_the_connections_the_holds_and_the_operations() {
     let diag = Diag::start();
     let (alone, together) = block_on(async {
         let mut first = client(diag.root()).await;
-        let alone = call(&mut first, "diagnostic.health", json!({})).await;
+        // The probes `wait_settled` closed are dropped by the daemon when it
+        // reads their end of the socket, which on a loaded machine can be
+        // after this connection's first call: ask until they are gone.
+        let deadline = Instant::now() + DEADLINE;
+        let alone = loop {
+            let health = call(&mut first, "diagnostic.health", json!({})).await;
+            if number(&health, "clients") == 1 || Instant::now() >= deadline {
+                break health;
+            }
+            tokio::time::sleep(TICK).await;
+        };
         let mut second = client(diag.root()).await;
         let together = call(&mut second, "diagnostic.health", json!({})).await;
         (alone, together)
@@ -1211,27 +1227,47 @@ fn logs_answers_parsed_lines_of_the_daemons_own_log() {
 }
 
 /// The lines are the *last* ones, in file order, and `lines` bounds them.
+///
+/// The daemon may still be logging its startup between two calls (an account
+/// check's flip, a handshake), so the bounded tail is taken between two whole
+/// reads rather than compared with one: it is a run of the later read that
+/// starts no earlier than the last three lines of the earlier one.
 #[test]
 fn logs_answers_the_tail_in_file_order() {
     let diag = Diag::start();
-    let (few, many) = block_on(async {
+    let (before, few, after) = block_on(async {
         let mut conn = client(diag.root()).await;
+        let before = call(&mut conn, "diagnostic.logs", json!({"lines": 500})).await;
         let few = call(&mut conn, "diagnostic.logs", json!({"lines": 3})).await;
-        let many = call(&mut conn, "diagnostic.logs", json!({"lines": 500})).await;
-        (few, many)
+        let after = call(&mut conn, "diagnostic.logs", json!({"lines": 500})).await;
+        (before, few, after)
     });
 
     let few_lines = few["lines"].as_array().expect("lines").clone();
-    let many_lines = many["lines"].as_array().expect("lines").clone();
+    let before_lines = before["lines"].as_array().expect("lines").clone();
+    let after_lines = after["lines"].as_array().expect("lines").clone();
     assert_eq!(few_lines.len(), 3, "`lines` is a bound and it is honoured");
     assert!(
-        many_lines.len() >= few_lines.len(),
-        "a larger bound answers at least as much"
+        before_lines.len() > few_lines.len(),
+        "a larger bound answers more, or the rows below prove nothing"
     );
     assert_eq!(
-        &many_lines[many_lines.len() - 3..],
-        &few_lines[..],
-        "the three are the last three, not the first three"
+        before["truncated"],
+        json!(false),
+        "the whole log fits the larger bound, so it is the whole file"
+    );
+    let at = after_lines
+        .windows(3)
+        .rposition(|window| window == &few_lines[..])
+        .unwrap_or_else(|| {
+            panic!("the three are consecutive lines of the file, in its order: {few_lines:?}")
+        });
+    assert!(
+        at >= before_lines.len() - 3,
+        "the three are the last three, not the first three: line {at} of {}, and the \
+         log already had {} lines",
+        after_lines.len(),
+        before_lines.len()
     );
     assert_eq!(
         few["truncated"],
@@ -1708,7 +1744,7 @@ fn a_check_that_flips_publishes_an_event() {
             error.code, CONFIG_INVALID,
             "the reload is refused, which is what flips the check: {error:?}"
         );
-        await_kind(&mut conn, KIND_CHECK_CHANGED).await
+        await_check(&mut conn, "config_loaded").await
     });
 
     assert_eq!(keys(&payload), CHECK_KEYS, "the event carries one check");
@@ -1843,6 +1879,15 @@ fn a_new_detail_under_a_warning_publishes_an_event() {
 /// A check that did not move publishes nothing: a daemon that republished its
 /// whole check set on every evaluation would fill the activity overlay with
 /// news that nothing happened.
+///
+/// The checks an account runtime's start refreshes, `store_open` and each
+/// `account:<name>`, are left out of the silence. [`wait_settled`] sees the
+/// runtimes report, and the refresh each start runs after its report can
+/// still publish a flip once this connection subscribed: with two accounts,
+/// the first start's refresh finds the second still opening and announces it
+/// as a warning, and the second announces its recovery. The fixed checks no
+/// start touches stay in, and a health call that republished the whole set
+/// would publish them too.
 #[test]
 fn a_check_that_did_not_flip_publishes_nothing() {
     let diag = Diag::start();
@@ -1854,7 +1899,14 @@ fn a_check_that_did_not_flip_publishes_nothing() {
         let quiet = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match conn.next_notification().await {
-                    Some(notification) if notification.params["kind"] == KIND_CHECK_CHANGED => {
+                    Some(notification)
+                        if notification.params["kind"] == KIND_CHECK_CHANGED
+                            && !is_refreshed_by_a_start(
+                                notification.params["payload"]["name"]
+                                    .as_str()
+                                    .unwrap_or_default(),
+                            ) =>
+                    {
                         return notification
                     }
                     Some(_) => continue,

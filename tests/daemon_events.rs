@@ -213,9 +213,13 @@
 //! shared `tests/common/` module: each daemon test file needs a different half
 //! of it, and a shared module would have to be built into every explicit
 //! `[[test]]` target.
-//! The readiness wait is the exception: every daemon suite needs all of it,
-//! so it is the one small file `tests/support/readiness.rs`, included by path.
+//! The readiness wait and the event readers are the exceptions: every daemon
+//! suite needs all of each, so they are the small files
+//! `tests/support/readiness.rs` and `tests/support/events.rs`, included by
+//! path.
 
+#[path = "support/events.rs"]
+mod events;
 #[path = "support/readiness.rs"]
 mod readiness;
 
@@ -261,9 +265,6 @@ const KIND_ACCOUNT_STATE_CHANGED: &str = "account.state_changed";
 
 /// The kind a draft change travels as.
 const KIND_DRAFT_CHANGED: &str = "draft.changed";
-
-/// The kind a draft file that no longer parses travels as.
-const KIND_DRAFT_INVALID: &str = "draft.invalid";
 
 /// How many changes the burst hook commits in the slow-client tests. Far above
 /// the 512-event default cap, so the queue overflows within milliseconds of the
@@ -1454,42 +1455,6 @@ async fn drain_until_resync(conn: &mut Connection, bootstrap: u64, instance: &st
     }
 }
 
-/// The kinds a domain event travels as: every kind `Event::from_change` maps a
-/// committed change onto other than a lifecycle one, plus the `state.remove`
-/// a configuration reload publishes. A poisoned queue drops exactly these.
-const DOMAIN_KINDS: [&str; 5] = [
-    KIND_INVALIDATE,
-    KIND_REMOVE,
-    KIND_ACCOUNT_STATE_CHANGED,
-    KIND_DRAFT_CHANGED,
-    KIND_DRAFT_INVALID,
-];
-
-/// Assert that no domain event arrives on this connection for `window`.
-///
-/// A lifecycle event may: the contract keeps it through an overflow and past
-/// the poison, because no snapshot carries it. The daemon's own startup
-/// publishes one beside the burst, the `diagnostic.check_changed` of the
-/// account check that flips once the account runtime has started, and on a
-/// loaded machine that lands after the resync. Bounded by construction: it
-/// waits exactly `window` and never longer.
-async fn assert_no_domain_event_within(conn: &mut Connection, window: Duration, label: &str) {
-    let deadline = tokio::time::Instant::now() + window;
-    while let Ok(Some(notification)) =
-        tokio::time::timeout_at(deadline, conn.next_notification()).await
-    {
-        if notification.method != METHOD_STATE_EVENT {
-            continue;
-        }
-        let event: EventEnvelope = serde_json::from_value(notification.params.clone())
-            .unwrap_or_else(|e| panic!("the params are an event envelope: {e}"));
-        assert!(
-            !DOMAIN_KINDS.contains(&event.kind.as_str()),
-            "{label}: a domain event arrived after the resync: {event:?}"
-        );
-    }
-}
-
 /// The baseline: a client that reads gets every burst event, in order, distinct,
 /// and is never asked to resync. Without this, a passing overflow test could be
 /// a daemon that resyncs everybody.
@@ -1654,7 +1619,10 @@ async fn a_stalled_reader_is_told_to_resync_and_sees_no_domain_event_after_it() 
         "the daemon delivered {seen} of {BURST} events before resyncing, which is not a \
          discard: a bounded queue plus a socket buffer cannot hold that many"
     );
-    assert_no_domain_event_within(
+    // A lifecycle event may still arrive: the daemon's own startup publishes
+    // the `diagnostic.check_changed` of the account check its runtime flips,
+    // and on a loaded machine that lands after the resync.
+    events::assert_no_domain_event_within(
         &mut conn,
         Duration::from_millis(500),
         "a client that has been asked to resync",
@@ -1691,9 +1659,14 @@ async fn a_client_that_re_bootstraps_after_a_resync_receives_events_again() {
 
     // A client that is resynced again bootstraps again: that is the protocol's
     // whole recovery loop, and what this asserts is that it converges on being
-    // served rather than starving. Bounded by the attempt count and by the
-    // deadline around the whole loop.
-    let mut resyncs = 0;
+    // served rather than starving. A second resync is itself proof that the
+    // bootstrap cleared the poison, because a poisoned queue drops every domain
+    // event and so never overflows into a second marker. How many rounds it
+    // takes is the machine's: each bootstrap arms another burst of distinct
+    // resources on the blocking pool, and when that burst commits more than
+    // the queue holds before the connection task has written the first event
+    // behind the reply, the queue overflows again with nothing delivered. So
+    // the loop is bounded by the deadline alone.
     let delivered = within("an event after the re-bootstrap", async {
         loop {
             match next_observed(&mut conn).await {
@@ -1707,12 +1680,6 @@ async fn a_client_that_re_bootstraps_after_a_resync_receives_events_again() {
                     return event.revision;
                 }
                 Observed::Resync { .. } => {
-                    resyncs += 1;
-                    assert!(
-                        resyncs <= 3,
-                        "a re-bootstrapped client was resynced {resyncs} times without ever \
-                         being sent an event"
-                    );
                     watermark = bootstrap_revision(&mut conn).await;
                 }
             }

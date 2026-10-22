@@ -271,6 +271,8 @@
 //! The readiness wait is the exception: every daemon suite needs all of it,
 //! so it is the one small file `tests/support/readiness.rs`, included by path.
 
+#[path = "support/events.rs"]
+mod events;
 #[path = "support/readiness.rs"]
 mod readiness;
 
@@ -285,7 +287,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
-use mp_protocol::{ErrorCode, EventEnvelope, JSONRPC_VERSION, METHOD_STATE_EVENT};
+use mp_protocol::{ErrorCode, EventEnvelope};
 
 use mailypoppins::daemon::dispatch::{CancelScope, DomainError, MethodKind, MethodSpec};
 use mailypoppins::daemon::operations::{
@@ -1188,19 +1190,12 @@ async fn wait_for_state(conn: &mut Connection, id: &str, want: OperationState) -
 }
 
 /// The next `state.event` whose kind is one of this unit's two, failing on
-/// anything else: this sandbox has no readiness hook and no burst, so an
-/// operation event is the only event a daemon here can produce.
+/// anything else: this sandbox has no readiness hook and no burst, so besides
+/// the daemon's own startup events ([`events::STARTUP_KINDS`]), which land
+/// after a bootstrap on a loaded machine, an operation event is the only event
+/// a daemon here can produce.
 async fn next_operation_event(conn: &mut Connection) -> EventEnvelope {
-    let notification = within("an operation event", conn.next_notification())
-        .await
-        .expect("the daemon delivers a notification rather than closing");
-    assert_eq!(notification.jsonrpc, JSONRPC_VERSION);
-    assert_eq!(
-        notification.method, METHOD_STATE_EVENT,
-        "operation progress travels as an ordinary state.event notification"
-    );
-    let event: EventEnvelope = serde_json::from_value(notification.params.clone())
-        .unwrap_or_else(|e| panic!("the params are an event envelope: {e}; got {notification:?}"));
+    let event = events::next_event_past_startup(conn, DEADLINE, "an operation event").await;
     assert!(
         event.kind == KIND_OPERATION_PROGRESS || event.kind == KIND_OPERATION_FINISHED,
         "nothing but this unit's two kinds can arrive in this sandbox, got {event:?}"
