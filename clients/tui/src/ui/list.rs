@@ -451,148 +451,127 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
     // forwarded, one glyph at a time (#TKT-0051).
     let unread_col_width: usize = 2;
 
-    if available_width > 45 {
-        let checkbox_extra: usize = if has_selection { 3 } else { 0 };
+    let checkbox_extra: usize = if has_selection { 3 } else { 0 };
+    let layout = if available_width > 45 {
         let effective_width = available_width.saturating_sub(checkbox_extra + unread_col_width + 1);
-        let contact_width = 15.min(effective_width.saturating_sub(date_width + spacing + 10));
-        let subject_width = effective_width.saturating_sub(date_width + contact_width + spacing);
-
-        let mut header_cells = Vec::new();
-        if has_selection {
-            header_cells
-                .push(Cell::from("").style(Style::default().fg(theme::active().text_muted)));
+        let contact = 15.min(effective_width.saturating_sub(date_width + spacing + 10));
+        RowLayout::Wide {
+            contact,
+            subject: effective_width.saturating_sub(date_width + contact + spacing),
         }
-        header_cells.push(Cell::from("").style(Style::default().fg(theme::active().text_muted)));
-        header_cells
-            .push(Cell::from("DATE").style(Style::default().fg(theme::active().text_muted)));
-        header_cells
-            .push(Cell::from("CONTACT").style(Style::default().fg(theme::active().text_muted)));
-        header_cells
-            .push(Cell::from("SUBJECT").style(Style::default().fg(theme::active().text_muted)));
-        let header = Row::new(header_cells).height(1);
-
-        let rows: Vec<Row> = visible
-            .iter()
-            .zip(&places)
-            .enumerate()
-            .map(|(i, (&email, &place))| {
-                let is_cursor = i == app.list_index;
-                let is_in_selection = has_selection && app.is_selected(email);
-                let contact = contact_cell(app, email, place, contact_width);
-
-                let style = list_row_style(email, place, is_cursor, is_in_selection);
-
-                let mut cells = Vec::new();
-                if has_selection {
-                    let icon = if is_in_selection {
-                        Span::styled("\u{f0134}", Style::default().fg(theme::active().selection))
-                    } else {
-                        Span::styled("\u{f0131}", Style::default().fg(theme::active().text_faint))
-                    };
-                    cells.push(Cell::from(icon));
-                }
-                // Read/answered/forwarded indicator (#TKT-0051).
-                cells.push(Cell::from(status_marker(email)));
-                cells.push(Cell::from(email.list_date_display().to_string()));
-                cells.push(contact);
-                // Invite/attachment badges, subject, and the flag star (#0007).
-                cells.push(subject_cell(email, subject_width));
-
-                Row::new(cells).style(style)
-            })
-            .collect();
-
-        let mut constraints = Vec::new();
-        if has_selection {
-            constraints.push(Constraint::Length(2));
-        }
-        constraints.push(Constraint::Length(unread_col_width as u16));
-        constraints.push(Constraint::Length(date_width as u16));
-        constraints.push(Constraint::Length(contact_width as u16));
-        constraints.push(Constraint::Min(subject_width as u16));
-
-        let table = Table::new(rows, constraints)
-            .header(header)
-            .column_spacing(1)
-            .row_highlight_style(
-                Style::default()
-                    .bg(theme::active().surface)
-                    .fg(theme::active().selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-
-        let mut state = TableState::default();
-        state.select(Some(app.list_index));
-        frame.render_stateful_widget(table, list_area, &mut state);
     } else {
-        let checkbox_extra: usize = if has_selection { 3 } else { 0 };
-        let subject_width =
-            available_width.saturating_sub(date_width + 2 + checkbox_extra + unread_col_width + 1);
-
-        let mut header_cells = Vec::new();
-        if has_selection {
-            header_cells
-                .push(Cell::from("").style(Style::default().fg(theme::active().text_muted)));
+        RowLayout::Narrow {
+            subject: available_width
+                .saturating_sub(date_width + 2 + checkbox_extra + unread_col_width + 1),
         }
-        header_cells.push(Cell::from("").style(Style::default().fg(theme::active().text_muted)));
-        header_cells
-            .push(Cell::from("DATE").style(Style::default().fg(theme::active().text_muted)));
-        header_cells
-            .push(Cell::from("SUBJECT").style(Style::default().fg(theme::active().text_muted)));
-        let header = Row::new(header_cells).height(1);
+    };
 
-        let rows: Vec<Row> = visible
-            .iter()
-            .zip(&places)
-            .enumerate()
-            .map(|(i, (&email, &place))| {
-                let is_cursor = i == app.list_index;
-                let is_in_selection = has_selection && app.is_selected(email);
-
-                let style = list_row_style(email, place, is_cursor, is_in_selection);
-
-                let mut cells = Vec::new();
-                if has_selection {
-                    let icon = if is_in_selection {
-                        Span::styled("\u{f0134}", Style::default().fg(theme::active().selection))
-                    } else {
-                        Span::styled("\u{f0131}", Style::default().fg(theme::active().text_faint))
-                    };
-                    cells.push(Cell::from(icon));
-                }
-                // Read/answered/forwarded indicator (#TKT-0051).
-                cells.push(Cell::from(status_marker(email)));
-                cells.push(Cell::from(email.list_date_display().to_string()));
-                // Subject with badges and the flag star (#0007).
-                let lead = narrow_subject_prefix(app, email, place);
-                cells.push(subject_cell_after(email, lead, subject_width));
-
-                Row::new(cells).style(style)
-            })
-            .collect();
-
-        let mut constraints = Vec::new();
-        if has_selection {
-            constraints.push(Constraint::Length(2));
-        }
-        constraints.push(Constraint::Length(unread_col_width as u16));
-        constraints.push(Constraint::Length(date_width as u16));
-        constraints.push(Constraint::Min(subject_width as u16));
-
-        let table = Table::new(rows, constraints)
-            .header(header)
-            .column_spacing(1)
-            .row_highlight_style(
-                Style::default()
-                    .bg(theme::active().surface)
-                    .fg(theme::active().selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-
-        let mut state = TableState::default();
-        state.select(Some(app.list_index));
-        frame.render_stateful_widget(table, list_area, &mut state);
+    let mut titles = vec!["", "DATE"];
+    if has_selection {
+        titles.insert(0, "");
     }
+    if matches!(layout, RowLayout::Wide { .. }) {
+        titles.push("CONTACT");
+    }
+    titles.push("SUBJECT");
+    let header = Row::new(
+        titles
+            .into_iter()
+            .map(|title| Cell::from(title).style(Style::default().fg(theme::active().text_muted))),
+    )
+    .height(1);
+
+    let rows: Vec<Row> = visible
+        .iter()
+        .zip(&places)
+        .enumerate()
+        .map(|(i, (&email, &place))| {
+            list_row(
+                app,
+                email,
+                place,
+                i == app.list_index,
+                has_selection,
+                layout,
+            )
+        })
+        .collect();
+
+    let mut constraints = Vec::new();
+    if has_selection {
+        constraints.push(Constraint::Length(2));
+    }
+    constraints.push(Constraint::Length(unread_col_width as u16));
+    constraints.push(Constraint::Length(date_width as u16));
+    let subject_width = match layout {
+        RowLayout::Wide { contact, subject } => {
+            constraints.push(Constraint::Length(contact as u16));
+            subject
+        }
+        RowLayout::Narrow { subject } => subject,
+    };
+    constraints.push(Constraint::Min(subject_width as u16));
+
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .column_spacing(1)
+        .row_highlight_style(
+            Style::default()
+                .bg(theme::active().surface)
+                .fg(theme::active().selection)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut state = TableState::default();
+    state.select(Some(app.list_index));
+    frame.render_stateful_widget(table, list_area, &mut state);
+}
+
+/// The columns a list row fills, by the width of the pane: the wide layout
+/// has a contact column of its own, the narrow one folds what a row needs of
+/// it into the subject column.
+#[derive(Debug, Clone, Copy)]
+enum RowLayout {
+    Wide { contact: usize, subject: usize },
+    Narrow { subject: usize },
+}
+
+/// One row of the list in either layout: the selection checkbox while a
+/// selection is on, the status marker, the date, the contact cell in the wide
+/// layout, then the subject cell with its badges and the flag star (#0007),
+/// led in the narrow layout by what the missing contact column would have held.
+fn list_row(
+    app: &App,
+    email: &EmailEntry,
+    place: Place,
+    is_cursor: bool,
+    has_selection: bool,
+    layout: RowLayout,
+) -> Row<'static> {
+    let is_in_selection = has_selection && app.is_selected(email);
+    let mut cells = Vec::new();
+    if has_selection {
+        let icon = if is_in_selection {
+            Span::styled("\u{f0134}", Style::default().fg(theme::active().selection))
+        } else {
+            Span::styled("\u{f0131}", Style::default().fg(theme::active().text_faint))
+        };
+        cells.push(Cell::from(icon));
+    }
+    // Read/answered/forwarded indicator (#TKT-0051).
+    cells.push(Cell::from(status_marker(email)));
+    cells.push(Cell::from(email.list_date_display().to_string()));
+    match layout {
+        RowLayout::Wide { contact, subject } => {
+            cells.push(contact_cell(app, email, place, contact));
+            cells.push(subject_cell(email, subject));
+        }
+        RowLayout::Narrow { subject } => {
+            let lead = narrow_subject_prefix(app, email, place);
+            cells.push(subject_cell_after(email, lead, subject));
+        }
+    }
+    Row::new(cells).style(list_row_style(email, place, is_cursor, is_in_selection))
 }
 
 #[cfg(test)]
