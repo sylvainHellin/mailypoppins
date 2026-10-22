@@ -261,18 +261,29 @@ pub fn parse_in(
             anyhow!("no account for {input}: name one with -A/--account or configure a default")
         })?;
 
+    let from_selector = parts.mailbox.is_some();
     let named_mailbox = parts.mailbox.or_else(|| mailbox_flag.map(str::to_string));
     let mailbox = match namespace {
         Namespace::Drafts => {
             if let Some(mb) = named_mailbox.as_deref() {
                 // The likeliest mistake is a received-mail selector handed to
                 // a draft command, `mp <selector>` above all, so the refusal
-                // names the command that reads one.
+                // names the command that reads one. A mailbox given beside the
+                // selector goes into the suggested one, fully qualified, so
+                // the suggestion reads the message the command was pointed at.
                 if mb != DRAFTS_MAILBOX {
+                    if from_selector {
+                        bail!(
+                            "{input} names the mailbox {mb}, but a draft selector's mailbox \
+                             segment is the reserved name `{DRAFTS_MAILBOX}`; to read received \
+                             mail, run `mp show {input}`"
+                        );
+                    }
+                    let received = Selector::new(&account, mb, &parts.key);
                     bail!(
-                        "{input} names the mailbox {mb}, but a draft selector's mailbox segment \
-                         is the reserved name `{DRAFTS_MAILBOX}`; to read received mail, run \
-                         `mp show {input}`"
+                        "--mailbox {mb} names a received-mail mailbox, but a draft's mailbox is \
+                         the reserved name `{DRAFTS_MAILBOX}`; to read received mail, run \
+                         `mp show {received}`"
                     );
                 }
             }
@@ -280,8 +291,13 @@ pub fn parse_in(
         }
         Namespace::Received => {
             if named_mailbox.as_deref() == Some(DRAFTS_MAILBOX) {
+                let named_by = if from_selector {
+                    input.to_string()
+                } else {
+                    format!("--mailbox {DRAFTS_MAILBOX}")
+                };
                 bail!(
-                    "{input} names the reserved mailbox `{DRAFTS_MAILBOX}`, which holds local \
+                    "{named_by} names the reserved mailbox `{DRAFTS_MAILBOX}`, which holds local \
                      drafts; this command addresses received mail"
                 );
             }
@@ -553,10 +569,53 @@ mod tests {
         );
     }
 
+    /// A mailbox given beside the selector rather than in it is carried into
+    /// the suggested `mp show`, with the account, as one qualified selector.
+    #[test]
+    fn a_draft_selector_refusal_carries_a_mailbox_given_beside_it() {
+        let err = parse_in("some-id", Namespace::Drafts, "work", Some("Sent Items")).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("--mailbox Sent Items"), "{err}");
+        assert!(
+            err.contains("run `mp show mp://work/Sent%20Items/some-id`"),
+            "the suggestion reads the message in the mailbox it was given: {err}"
+        );
+
+        let err = parse_in(
+            "mp://home/some-id",
+            Namespace::Drafts,
+            "work",
+            Some("inbox"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("run `mp show mp://home/inbox/some-id`"),
+            "the selector's own account wins over the default: {err}"
+        );
+        let suggested = err.split('`').rev().nth(1).unwrap();
+        let query = parse_in(
+            suggested.strip_prefix("mp show ").unwrap(),
+            Namespace::Received,
+            "work",
+            None,
+        )
+        .unwrap();
+        assert_eq!(query.account, "home");
+        assert_eq!(query.mailbox.as_deref(), Some("inbox"));
+        assert_eq!(query.key, "some-id");
+    }
+
     #[test]
     fn a_received_selector_rejects_the_reserved_drafts_mailbox() {
         let err = parse_in("drafts/some-id", Namespace::Received, "work", None).unwrap_err();
         assert!(err.to_string().contains("reserved mailbox"), "{err}");
+        let err = parse_in("some-id", Namespace::Received, "work", Some("drafts")).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("--mailbox drafts names the reserved mailbox"),
+            "the refusal names the flag that said it: {err}"
+        );
     }
 
     #[test]
