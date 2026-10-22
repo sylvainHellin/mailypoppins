@@ -256,7 +256,7 @@ this repo; the public half is a write-enabled deploy key on the tap repo.
 3. On **`sylvainHellin/homebrew-mailypoppins`**, add the **public** half
    (`/tmp/mailypoppins-tap-deploy.pub`) as a deploy key
    (Settings -> Deploy keys -> Add deploy key) and **tick "Allow write
-   access"** -- the workflow pushes commits through it.
+   access"**, since the workflow pushes commits through it.
 4. On **`sylvainHellin/mailypoppins`**, add the **private** half
    (`/tmp/mailypoppins-tap-deploy`, the whole PEM including the
    `-----BEGIN/END-----` lines) as an Actions secret named

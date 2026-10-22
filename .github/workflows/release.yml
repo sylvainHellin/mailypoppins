@@ -283,7 +283,7 @@ jobs:
   # PUBLIC half is registered (with write access) on
   # sylvainHellin/homebrew-mailypoppins. Auth is over SSH via ssh-agent;
   # no PAT is involved. Skipped with a notice (not a failure) until the
-  # tap repo + key exist -- see docs/release-process.md for the one-time
+  # tap repo and key exist; docs/release-process.md describes the one-time
   # setup. Skipped for a prerelease tag, the same rule as create-release's,
   # so `brew upgrade` never moves to a prerelease.
   homebrew-tap:

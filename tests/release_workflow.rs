@@ -113,14 +113,69 @@ fn only_a_release_tag_is_marked_latest_after_its_manifest() {
     );
 }
 
+/// Evaluate a job's `if:` for the tag `ref_name`, for the one expression form
+/// the workflow uses: terms `contains(github.ref_name, '<literal>')`, each
+/// optionally negated with `!`, joined by `&&`, optionally wrapped in
+/// `${{ }}`. Whitespace and the quote style do not matter; any other form
+/// panics, so a rewrite the matcher cannot read fails the test instead of
+/// passing it by accident.
+fn eval_ref_condition(condition: &str, ref_name: &str) -> bool {
+    let mut expr = condition.trim();
+    if let Some(inner) = expr.strip_prefix("${{").and_then(|e| e.strip_suffix("}}")) {
+        expr = inner.trim();
+    }
+    expr.split("&&").all(|term| {
+        let mut term = term.trim();
+        let negated = term.starts_with('!');
+        if negated {
+            term = term[1..].trim_start();
+        }
+        let args = term
+            .strip_prefix("contains")
+            .map(str::trim_start)
+            .and_then(|t| t.strip_prefix('('))
+            .and_then(|t| t.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("unsupported term {term:?} in {condition:?}"));
+        let (subject, needle) = args
+            .split_once(',')
+            .unwrap_or_else(|| panic!("contains() needs two arguments in {condition:?}"));
+        assert_eq!(subject.trim(), "github.ref_name", "{condition:?}");
+        let needle = needle.trim();
+        let literal = needle
+            .strip_prefix('\'')
+            .and_then(|n| n.strip_suffix('\''))
+            .or_else(|| needle.strip_prefix('"').and_then(|n| n.strip_suffix('"')))
+            .unwrap_or_else(|| panic!("unquoted literal {needle:?} in {condition:?}"));
+        ref_name.contains(literal) != negated
+    })
+}
+
+#[test]
+fn the_ref_condition_matcher_reads_reformatted_conditions() {
+    for form in [
+        "${{ !contains(github.ref_name, '-') }}",
+        "!contains(github.ref_name,'-')",
+        "${{!contains( github.ref_name , \"-\" )}}",
+        "${{ ! contains (github.ref_name, '-') }}",
+    ] {
+        assert!(eval_ref_condition(form, "v0.12.0"), "{form}");
+        assert!(!eval_ref_condition(form, "v0.12.0-rc.1"), "{form}");
+    }
+    assert!(eval_ref_condition(
+        "contains(github.ref_name, '-')",
+        "v0.12.0-rc.1"
+    ));
+}
+
 #[test]
 fn the_homebrew_tap_skips_a_prerelease_tag() {
     let wf = workflow();
     let condition = job(&wf, "homebrew-tap")["if"]
         .as_str()
         .expect("homebrew-tap has a job-level if");
+    assert!(eval_ref_condition(condition, "v0.12.0"), "{condition}");
     assert!(
-        condition.contains("!contains(github.ref_name, '-')"),
+        !eval_ref_condition(condition, "v0.12.0-rc.1"),
         "{condition}"
     );
 }
