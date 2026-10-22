@@ -1117,47 +1117,6 @@ impl GraphClient {
 // ---------------------------------------------------------------------------
 
 impl GraphClient {
-    /// Fetch messages from a folder, converting to FetchedEmail.
-    pub async fn fetch_messages(&self, folder: &str, limit: usize) -> Result<Vec<FetchedEmail>> {
-        let folder_path = self.folder_path(folder).await?;
-        let url = format!(
-            "{}/me/mailFolders/{}/messages?\
-             $top={}&\
-             $orderby=receivedDateTime desc&\
-             $select={}",
-            GRAPH_BASE, folder_path, limit, MESSAGE_SELECT
-        );
-
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(self.bearer())
-            .send()
-            .await
-            .context("Failed to fetch messages")?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "Fetch messages from '{}' failed (HTTP {}): {}",
-                folder,
-                status,
-                body
-            ));
-        }
-
-        let msg_list: GraphPage<GraphMessage> =
-            resp.json().await.context("Failed to parse message list")?;
-
-        let mut emails = Vec::with_capacity(msg_list.value.len());
-        for msg in &msg_list.value {
-            emails.push(self.hydrate(msg).await);
-        }
-
-        Ok(emails)
-    }
-
     /// Fetch messages by their Graph ids, in batches of
     /// [`BATCH_MAX_REQUESTS`].
     ///
@@ -1624,9 +1583,8 @@ impl GraphClient {
     /// Exchange stamps the header on everything that goes through transport,
     /// which is what makes that acceptable.
     ///
-    /// The walk is ordered by `receivedDateTime desc` (the same `$orderby`
-    /// [`GraphClient::fetch_messages`] uses on this endpoint, so it is known to
-    /// be supported without a `$filter`). Unordered paging lets a concurrent
+    /// The walk is ordered by `receivedDateTime desc`, an `$orderby` Graph
+    /// supports on this endpoint without a `$filter`. Unordered paging lets a concurrent
     /// arrival shift the skiptoken window and drop a message from the middle of
     /// the walk, and a dropped message is indistinguishable from a deleted one:
     /// with newest-first ordering an arrival lands on a page the walk has

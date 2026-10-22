@@ -1,13 +1,13 @@
 //! The seeded root the Phase 4 sync/watch slice is measured against (plan
 //! P4-U9).
 //!
-//! `mp sync`, `mp fetch`, `mp list-mailboxes` and `mp watch` all need a
+//! `mp sync`, `mp list-mailboxes` and `mp watch` all need a
 //! *server*, and this fixture has none. That is not a gap to apologise for: it
 //! is what makes the slice testable at all. Every one of those commands walks a
 //! fixed prefix before it opens a socket - resolve the account, resolve its
 //! sync targets, resolve its credentials - and that prefix is where all of the
 //! deterministic behaviour lives. What the fixture pins is therefore every way
-//! the four commands *refuse*, plus the one success `mp sync` can have without
+//! the three commands *refuse*, plus the one success `mp sync` can have without
 //! a server: an account that has nothing to sync.
 //!
 //! # The four accounts, and what each one is for

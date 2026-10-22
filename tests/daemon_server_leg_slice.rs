@@ -32,12 +32,13 @@
 //!
 //! # Why `message.search_server` and not `message.list_server`
 //!
-//! `docs/parity-matrix.md`'s `LST-08` note names the method `message.list_server`.
-//! That name is taken: P4-U10 registered it as the query behind `mp fetch`,
-//! `{account, mailbox, limit, criteria?}` against one mailbox, answering the
-//! six header fields and the body text that listing prints. It is not the
-//! search leg, and redefining a live method would be a protocol break for a
-//! command that has nothing to do with this one.
+//! `docs/parity-matrix.md`'s `LST-08` note named the method `message.list_server`.
+//! That name was taken when this was written: P4-U10 had registered it as the
+//! query behind `mp fetch`, `{account, mailbox, limit, criteria?}` against one
+//! mailbox. It was not the search leg, and redefining a live method would have
+//! been a protocol break for a command that had nothing to do with this one.
+//! `mp fetch` and its method were retired on 2026-10-22 as a duplicate of
+//! `mp search --mailbox`, which runs on this method.
 //!
 //! `LST-06`'s own note in the same document already names the method this
 //! wants: `message.search_server`, "the twin of `message.list_server`". That is
@@ -337,8 +338,8 @@ fn assert_keys(value: &Value, expected: &[&str], label: &str) {
 /// The handshake derives the capability list from the dispatcher, so the two
 /// names appearing there is what says they are registered.
 ///
-/// It also pins that `message.list_server` is *still* there and is a different
-/// method: `mp fetch` keeps its query, and the search leg gets its own name.
+/// It also pins that `message.list_server`, `mp fetch`'s query, is gone with
+/// the command (2026-10-22): the search leg is the one server message query.
 ///
 /// **Fails at HEAD**: neither name is registered.
 #[tokio::test]
@@ -376,8 +377,8 @@ async fn the_daemon_advertises_both_server_leg_methods() {
         );
     }
     assert!(
-        capabilities.contains(&"message.list_server"),
-        "`mp fetch`'s query keeps its name; the search leg does not take it"
+        !capabilities.contains(&"message.list_server"),
+        "`mp fetch`'s query was retired with it"
     );
 }
 

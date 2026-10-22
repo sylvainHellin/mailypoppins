@@ -140,8 +140,8 @@ pub struct MessageListing {
 /// The operation that streams one whole mailbox to the calling connection
 /// (#0138).
 ///
-/// A twin of `message.list` named after how it differs, as `message.list_server`
-/// and `message.search_server` are: it answers [`MessageListStreamStarted`] at
+/// A twin of `message.list` named after how it differs, as
+/// `message.search_server` is: it answers [`MessageListStreamStarted`] at
 /// once and then sends the rows as [`MessageRowsChunk`] notifications of method
 /// [`crate::METHOD_MESSAGE_ROWS`], so a mailbox past the 16 MiB response cap
 /// still lists.

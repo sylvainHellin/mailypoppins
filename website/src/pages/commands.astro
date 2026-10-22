@@ -37,7 +37,6 @@ const draftCommands = [
 ];
 
 const imapCommands = [
-  { command: 'mp fetch [filters]', description: 'Fetch emails from server' },
   { command: 'mp sync [options]', description: 'Sync local folders with server' },
   { command: 'mp watch [options]', description: 'Watch mailbox for changes (IMAP IDLE)' },
   { command: 'mp list-mailboxes [--json]', description: 'List available server mailboxes (--json prints them as JSON on stdout)' },
@@ -98,19 +97,6 @@ const contactsCommands = [
   { command: 'mp contacts search [<query>] [--parsable|--json] [-n N]', description: 'Fuzzy-search the contact index by name and email; --parsable emits tab-delimited email/name lines for mutt, aerc or vim, --json one JSON object with the counts (default limit: 20)' },
   { command: 'mp contacts rebuild', description: 'Rebuild the contact index from the local message store (every account unless -A names one)' },
   { command: 'mp contacts stats', description: 'Show contact index statistics' },
-];
-
-const fetchOptions = [
-  { command: '--from <addr>', description: 'Filter by sender' },
-  { command: '--to <addr>', description: 'Filter by recipient' },
-  { command: '--cc <addr>', description: 'Filter by CC' },
-  { command: '--subject <text>', description: 'Subject contains' },
-  { command: '--body <text>', description: 'Body contains' },
-  { command: '--since <YYYY-MM-DD>', description: 'Emails since date' },
-  { command: '--before <YYYY-MM-DD>', description: 'Emails before date' },
-  { command: '-n, --limit <N>', description: 'Max results (default: 10)' },
-  { command: '--full', description: 'Show full body instead of preview' },
-  { command: '--mailbox <name>', description: 'Mailbox name (default: INBOX)' },
 ];
 
 const syncOptions = [
@@ -345,11 +331,6 @@ eval "$(mp completions bash)"`} lang="sh" theme={codeTheme} />
     <section>
       <h2 id="contacts-commands">Contacts Commands</h2>
       <CommandTable commands={contactsCommands} />
-    </section>
-
-    <section>
-      <h2 id="fetch-options">Fetch Options</h2>
-      <CommandTable commands={fetchOptions} />
     </section>
 
     <section>

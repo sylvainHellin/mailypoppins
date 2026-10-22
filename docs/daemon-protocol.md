@@ -831,7 +831,7 @@ An invalid draft is not a refusal: `draft.validate` reports it and the exit code
 
 ### The `sync.*` family
 
-Five methods carry the four commands that need a mail server: `sync.quick`, `sync.full` and `sync.watch` here, `mailbox.list_server` beside `mailbox.list`, and `message.list_server` beside the read slice's three.
+Four methods carry the three commands that need a mail server and no search: `sync.quick`, `sync.full` and `sync.watch` here, and `mailbox.list_server` beside `mailbox.list`. A fifth, `message.list_server`, carried `mp fetch` until both were retired on 2026-10-22 as a duplicate of `mp search --mailbox`, which runs on `message.search_server` ([The server search leg](#the-server-search-leg)).
 
 ```text
 sync.quick          {account, limit?, mailbox?: [str], dry_run?}  -> {operation_id}
@@ -839,8 +839,6 @@ sync.full           {account, mailbox?: [str], dry_run?}          -> {operation_
 sync.watch          {account, mailbox?}                           -> {operation_id}
 mailbox.list_server {account}
         -> {account, source, mailboxes: [{name, delimiter, attributes, total, unread}]}
-message.list_server {account, mailbox, limit, criteria?}
-        -> {account, mailbox, messages: [{from, to, cc, subject, date, has_attachments, body}]}
 ```
 
 `sync.quick` is the newest UIDs per mailbox and takes a `limit`; `sync.full` is everything the mailbox lists and takes none, because a bounded full pass is a quick pass under another name and a caller who sent one is told rather than quietly given a different pass.
@@ -866,11 +864,9 @@ For the four drain phases, `done` is what the drain completed and `total` what i
 `message` carries the reason a drain could not run at all, which is a warning and not a failure: the queue is retried on the next tick, so a drain that could not run may not turn a sync that worked into a failed command.
 A client that labels a tail report derives the label from the phase name and from nothing else.
 
-`mailbox.list_server` and `message.list_server` are queries against the server, so they take no engine lock and read no store.
+`mailbox.list_server` is a query against the server, so it takes no engine lock and reads no store.
 `source` is `imap` or `graph`, because the two transports report different things about a mailbox: Graph's folder list carries `total` and `unread`, and IMAP's `LIST` carries `delimiter` and `attributes` and no counts, so the members the server said nothing about are `null` rather than a number nobody measured.
-`message.list_server` requires `mailbox`: a server query with no mailbox names none, and a default is the client's business.
-Its `criteria` object takes `from`, `to`, `cc`, `subject`, `body`, `since`, `before` and `message_id`, all optional.
-Neither answer names a file, and `message.list_server` writes nothing: mail enters the store through a sync, which is the only path that fetches by UID and can key a row (#0037).
+Its answer names no file.
 
 This build's watcher is INBOX-only.
 `sync.watch` accepts `mailbox` absent or `INBOX` and refuses anything else with `-32602` and `{account, mailbox}`; a client narrows before it calls and says so.
@@ -914,8 +910,7 @@ message.fetch {account, mailbox, message_id} -> {operation_id}
    settles  {account, mailbox, uid, row_id, selector, already_present}
 ```
 
-**The search leg is `message.search_server` and not `message.list_server`**, which is taken: P4-U10 registered that name for `mp fetch`'s one-mailbox query over `criteria`, and redefining it would break a command that has nothing to do with this one.
-`message.search_server` is the name `docs/parity-matrix.md`'s `LST-06` entry already gives it, "the twin of `message.list_server`".
+**The search leg is `message.search_server` and not `message.list_server`**, which was taken when it was named: P4-U10 had registered that name for `mp fetch`'s one-mailbox query over `criteria`. Both were retired on 2026-10-22, since `mp search --mailbox` asks the same question here.
 
 **It is an operation with streamed hits**, because the overlay fills in as the mailboxes answer.
 One `state.event` of kind `message.server_hit` per hit, payload `{operation_id, hit}`, where the id is on the payload because a fast retype leaves two searches in flight and a client has to tell their hits apart.
@@ -980,7 +975,7 @@ message.list_stream {account, mailbox}
    settles  operation.finished {operation_id, state, result: {account, mailbox, total}}
 ```
 
-It is a twin of `message.list` named after how it differs, on the pattern of `message.list_server` and `message.search_server`, and a method of its own rather than a changed `message.list`: a client that requires it gets `capability_missing` from an older daemon at the handshake instead of a wrong answer at the first mailbox open.
+It is a twin of `message.list` named after how it differs, on the pattern of `message.search_server`, and a method of its own rather than a changed `message.list`: a client that requires it gets `capability_missing` from an older daemon at the handshake instead of a wrong answer at the first mailbox open.
 `message.list` stays as it is for bounded calls.
 
 `account` and `mailbox` resolve and refuse exactly as `message.list` resolves and refuses them: `account_unknown`, `account_not_ready`, `-32602` naming the known mailboxes, Drafts refused.
@@ -1579,3 +1574,9 @@ PERSO-175 changed what `message.search_server`'s `limit` means and added two mem
 The method took `message.search`'s field filters, `from`, `to`, `cc`, `subject`, `body_query`, `filename`, `has_attachment`, `after` and `before`, reads the query's `in:` when `mailboxes` is absent, and searches a mailbox name the account does not configure as a server folder instead of refusing it with `-32602`.
 `mp search` without `--local` moved onto the method, so its output is now read off the settle: the per-mailbox failure lines print after the results from `unreachable`, and a Graph search that names no mailbox runs across every folder in one query, as `mp search` always did there, its hits carrying the configured mailbox they sit in or the folder's display name.
 The key list in `tests/daemon_server_leg_slice.rs` is nine names.
+
+The daemon leftovers (2026-10-22) added two methods and two optional parameters, and retired one method; no field of a shape that stayed was renamed or dropped.
+`account.credentials` `{account?}` -> `{accounts: [{account, auth_method, smtp_password, imap_password, token}]}` is a query answering whether each password and token is stored, never a value; the types are `mp_protocol::account::{AccountCredentials, AccountCredential, TokenState}`.
+`config.probe` `{account, check, password?}` -> `{ok, mailboxes?}` or `{ok: false, error}` is a query that dials a candidate account for the setup wizards; `config.init` gained `replace`, and `config.oauth2_login` gained `candidate`.
+`message.list_server`, `mp fetch`'s one-mailbox query, was retired with the command as a duplicate of `mp search --mailbox` on `message.search_server`; a client that still calls it gets `-32601`, and the capability list lost its name.
+The capability list grew by the new names, which is the derivation working rather than a change to it.

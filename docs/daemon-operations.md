@@ -90,6 +90,7 @@ The table is what routes and through what:
 | `mp list-messages [--mailbox] [-n]` | `message.list` | P4-U4 |
 | `mp dump-mailbox --json [--mailbox ...]` | `message.list` with `projection: "envelope"` | P4-U4 |
 | `mp search --local` | `message.search` | P4-U4 |
+| `mp search [--mailbox] [filters]` | `message.search_server` | PERSO-175 |
 | `mp new <name>` | `draft.create` | P4-U6 |
 | `mp list [--status]` | `draft.list` | P4-U6 |
 | `mp validate [selector]` | `draft.validate` | P4-U6 |
@@ -105,7 +106,6 @@ The table is what routes and through what:
 | `mp open <selector> [--mailbox]` | `message.get`, then `message.materialise_attachment` per part, opened in the client | P4-U8 |
 | `mp save <selector> [-o dir] [--mailbox]` | `message.get`, then `message.materialise_attachment` and `message.release_handle` per part, written in the client | P4-U8 |
 | `mp sync [-n] [--mailbox ...] [--dry-run] [--all-accounts]` | one `sync.quick` per account, in configuration order | P4-U10 |
-| `mp fetch [--from ...] [-n] [--mailbox] [--full]` | `message.list_server` | P4-U10 |
 | `mp list-mailboxes` | `mailbox.list_server` | P4-U10 |
 | `mp watch [--mailbox] [--timeout N]` | `sync.watch`, with the wait and the timeout in the client | P4-U10 |
 | `mp send <selector> [-y]` | `draft.preview` for the echo and the preview, then `send.draft` | P4-U12 |
@@ -121,8 +121,8 @@ The table is what routes and through what:
 | `mp invite accept\|tentative\|decline <selector> [--mailbox]` | `calendar.rsvp` | P4-U14 |
 | `mp store gc [--dry-run] [--force] [--all-accounts]` | one `diagnostic.store_gc` per account | P4-U14 |
 | `mp cutover [--account] [--dry-run]` | one `config.cutover` per account | P4-U14 |
-| `mp config show` | `config.get` | P4-U14 |
-| `mp config init`, `mp config add-account` | `config.get` before the first prompt, `config.reload` after the wizard writes | P4-U14 |
+| `mp config show` | `config.get`, `account.credentials` | P4-U14, 2026-10-22 |
+| `mp config init`, `mp config add-account` | `config.get` before the first prompt, `config.probe` for each connection test and mailbox list, `config.oauth2_login` with a `candidate`, then `config.init` or `config.add_account` and `config.set_password` | P4-U14, 2026-10-22 |
 | `mp config set-password <smtp\|imap> [--account]` | `config.set_password`, with the `dialoguer` prompt in the client | P4-U14 |
 | `mp config oauth2-login [--account]` | `config.oauth2_login`, with the device-code block rendered in the client | P4-U14 |
 | `mp config reset-secrets` | `config.get`, then `config.reset_secrets` and one `config.set_password` per re-entered credential | P4-U14 |

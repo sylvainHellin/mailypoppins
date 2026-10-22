@@ -137,9 +137,6 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         handles,
         Arc::clone(&copies),
     );
-    dispatcher.register(Arc::new(message::MessageListServer {
-        config: Arc::clone(&config),
-    }));
     message_server::register(
         dispatcher,
         Arc::clone(&config),

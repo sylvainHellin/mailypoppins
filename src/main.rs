@@ -278,39 +278,6 @@ enum Commands {
         json: bool,
     },
 
-    /// Fetch emails from IMAP server
-    Fetch {
-        /// Filter by sender address
-        #[arg(long)]
-        from: Option<String>,
-        /// Filter by recipient address
-        #[arg(long)]
-        to: Option<String>,
-        /// Filter by CC address
-        #[arg(long)]
-        cc: Option<String>,
-        /// Subject contains
-        #[arg(long)]
-        subject: Option<String>,
-        /// Body contains
-        #[arg(long)]
-        body: Option<String>,
-        /// Emails since date (YYYY-MM-DD)
-        #[arg(long)]
-        since: Option<String>,
-        /// Emails before date (YYYY-MM-DD)
-        #[arg(long)]
-        before: Option<String>,
-        /// Max results
-        #[arg(short = 'n', long, default_value = "10")]
-        limit: usize,
-        /// Show full body instead of preview
-        #[arg(long)]
-        full: bool,
-        /// Mailbox name
-        #[arg(long, default_value = "INBOX")]
-        mailbox: String,
-    },
     /// Sync mailboxes from the server into the local store
     Sync {
         /// Max messages per mailbox
@@ -1422,7 +1389,7 @@ const DAEMON_TIMEOUT: std::time::Duration = mailypoppins::daemon::client::CONNEC
 const DAEMON_MUTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// How long a routed *server query* waits for the daemon: `mp list-mailboxes`
-/// and `mp fetch`, whose work is a session on the mail server rather than a
+/// and `mp search`, whose work is a session on the mail server rather than a
 /// store read (P4-U10). The pre-daemon binary waited as long as the server
 /// took; this is the same order of magnitude as a mutation's round trip.
 const DAEMON_SERVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
@@ -2801,92 +2768,6 @@ async fn routed_list_mailboxes(account: &AccountConfig, json: bool) -> Result<()
         );
     }
     Ok(())
-}
-
-/// The `mp fetch` filters that become IMAP search terms.
-struct FetchFilters {
-    from: Option<String>,
-    to: Option<String>,
-    cc: Option<String>,
-    subject: Option<String>,
-    body: Option<String>,
-    since: Option<String>,
-    before: Option<String>,
-}
-
-/// `mp fetch`: what the server has, printed and not written (#0037).
-///
-/// `--full` never crosses the socket: it selects how much of a body the listing
-/// prints, and the answer already carries all of it.
-async fn routed_fetch(
-    account: &AccountConfig,
-    mailbox: &str,
-    limit: usize,
-    filters: FetchFilters,
-    full: bool,
-) -> Result<()> {
-    let mut criteria = serde_json::Map::new();
-    for (key, value) in [
-        ("from", filters.from),
-        ("to", filters.to),
-        ("cc", filters.cc),
-        ("subject", filters.subject),
-        ("body", filters.body),
-        ("since", filters.since),
-        ("before", filters.before),
-    ] {
-        if let Some(value) = value {
-            criteria.insert(key.to_string(), serde_json::json!(value));
-        }
-    }
-    let mut connection = daemon_connection().await;
-    let result = daemon_try_call_within(
-        &mut connection,
-        "message.list_server",
-        serde_json::json!({
-            "account": account.name,
-            "mailbox": mailbox,
-            "limit": limit,
-            "criteria": criteria,
-        }),
-        DAEMON_SERVER_TIMEOUT,
-    )
-    .await
-    .map_err(|e| refusal(&account.name, e))?;
-
-    let emails: Vec<FetchedEmail> = result["messages"]
-        .as_array()
-        .map(|messages| messages.iter().map(fetched_from_wire).collect())
-        .unwrap_or_default();
-    display_fetched_emails(&emails, full);
-    Ok(())
-}
-
-/// One `message.list_server` entry as the record the listing renders.
-///
-/// The fields left empty are the ones a fetch listing never reads: it prints six
-/// headers, the attachment marker and the body, and it writes nothing, so there
-/// is nowhere for a parsed attachment or a calendar part to go.
-fn fetched_from_wire(message: &serde_json::Value) -> FetchedEmail {
-    let text = |key: &str| message[key].as_str().map(str::to_string);
-    FetchedEmail {
-        from: text("from").unwrap_or_default(),
-        to: text("to").unwrap_or_default(),
-        cc: text("cc"),
-        reply_to: None,
-        bcc: None,
-        subject: text("subject").unwrap_or_default(),
-        date: text("date").unwrap_or_default(),
-        body_text: text("body").unwrap_or_default(),
-        html_body: None,
-        has_attachments: message["has_attachments"].as_bool().unwrap_or(false),
-        server_has_attachments: None,
-        message_id: None,
-        attachments: Vec::new(),
-        flags: Default::default(),
-        calendar_ics: None,
-        event: None,
-    }
 }
 
 /// Run the automatic post-sync retention sweep for one account, best-effort.
@@ -4504,40 +4385,6 @@ async fn main() -> Result<()> {
             // it opens are all the daemon's (P4-U10); what stays here is the
             // wording of the listing.
             routed_list_mailboxes(&account_config, json).await?;
-        }
-
-        Some(Commands::Fetch {
-            from,
-            to,
-            cc,
-            subject,
-            body,
-            since,
-            before,
-            limit,
-            full,
-            mailbox,
-        }) => {
-            // `mp fetch` is a lookup, not an ingest: it prints what the server
-            // has and writes nothing. Messages enter the store through
-            // `mp sync` (#0037), which is the only path that fetches by UID
-            // and can key a row.
-            routed_fetch(
-                &account_config,
-                &mailbox,
-                limit,
-                FetchFilters {
-                    from,
-                    to,
-                    cc,
-                    subject,
-                    body,
-                    since,
-                    before,
-                },
-                full,
-            )
-            .await?;
         }
 
         Some(Commands::Sync {

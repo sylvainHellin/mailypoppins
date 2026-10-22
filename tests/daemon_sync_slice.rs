@@ -3,8 +3,8 @@
 //! Four commands need a server today and must need the *daemon's* server
 //! tomorrow without a byte moving: `mp sync [-n|--mailbox|--dry-run|
 //! --all-accounts]`, `mp fetch`, `mp list-mailboxes` and `mp watch
-//! [--mailbox|--timeout]`. Five methods carry them - `sync.quick`, `sync.full`
-//! and `sync.watch` in a new family, `mailbox.list_server` beside
+//! [--mailbox|--timeout]`. Five methods carried them - `sync.quick`,
+//! `sync.full` and `sync.watch` in a new family, `mailbox.list_server` beside
 //! `mailbox.list`, and `message.list_server` beside the read slice's three -
 //! plus a rendering that stays in the client, because a summary line, an exit
 //! code and a `--timeout` are the client's business and not the daemon's.
@@ -26,9 +26,10 @@
 //! mailbox.list_server {account}
 //!                         -> {account, source, mailboxes: [{name, delimiter,
 //!                             attributes, total, unread}]}
-//! message.list_server {account, mailbox, limit, criteria?}
-//!                         -> {account, mailbox, messages: [..]}
 //! ```
+//!
+//! `mp fetch` and `message.list_server` were retired on 2026-10-22 as a
+//! duplicate of `mp search --mailbox` (see [`mp_fetch_is_retired`]).
 //!
 //! ## `sync.quick` and `sync.full` are operations, not commands
 //!
@@ -82,18 +83,13 @@
 //! the client then has to unpick, and `state` is where the account family
 //! already says why an account is not ready.
 //!
-//! ## `mp fetch`, and why it is `message.list_server`
+//! ## `mp fetch` was retired
 //!
-//! `mp fetch` prints what the server has and writes nothing (#0037), so it is
-//! a *query against a server*, which is exactly what `mailbox.list_server`
-//! is for mailboxes. Naming it `sync.fetch` would put a method that ingests
-//! nothing in the family whose whole subject is ingesting; naming it
-//! `message.fetch` would sit one letter from `message.get` and mean something
-//! else. It goes in its own array, [`MESSAGE_SERVER_METHOD_SPECS`], rather
-//! than growing `MESSAGE_READ_METHOD_SPECS`, because that array is pinned at
-//! three by `tests/daemon_read_slice.rs` and an implementer may not edit a T
-//! unit's file. `--full` never crosses the socket: it selects which of the
-//! fields the answer already carries the client prints.
+//! `mp fetch` printed what one server mailbox held, through
+//! `message.list_server`, and wrote nothing (#0037). It was a duplicate of
+//! `mp search --mailbox` with the same filters, which the daemon serves as
+//! `message.search_server`, so both went on 2026-10-22; the command is now an
+//! unknown subcommand and the method an unknown method.
 //!
 //! ## `mp watch` is narrowed to INBOX, and says so
 //!
@@ -157,8 +153,8 @@
 //! no in-process path left exits 4.
 //!
 //! Nothing in this slice writes anything, so no row needs a pristine restore:
-//! `mp sync` over this fixture never gets far enough to ingest, `mp fetch` and
-//! `mp list-mailboxes` write nothing by construction, and `mp watch` refuses.
+//! `mp sync` over this fixture never gets far enough to ingest,
+//! `mp list-mailboxes` writes nothing by construction, and `mp watch` refuses.
 //!
 //! The one clap-level row, `--all-accounts` with `-A`, is compared through
 //! `mp_routed` too even though it never reaches a socket: clap exits before
@@ -243,7 +239,6 @@ use mp_protocol::{ErrorCode, RpcError};
 
 use mailypoppins::daemon::dispatch::{CancelScope, MethodKind};
 use mailypoppins::daemon::methods::mailbox::MAILBOX_METHOD_SPECS;
-use mailypoppins::daemon::methods::message::MESSAGE_SERVER_METHOD_SPECS;
 use mailypoppins::daemon::methods::sync::SYNC_METHOD_SPECS;
 use mailypoppins::daemon::runtime::account::Phase;
 use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
@@ -282,10 +277,6 @@ const SYNC_METHODS: [&str; 3] = ["sync.full", "sync.quick", "sync.watch"];
 /// served, plus the server's own list.
 const MAILBOX_METHODS: [&str; 2] = ["mailbox.list", "mailbox.list_server"];
 
-/// The one server-side message query, in its own array beside the read
-/// slice's three.
-const MESSAGE_SERVER_METHODS: [&str; 1] = ["message.list_server"];
-
 /// The five slot names a tick's phases travel under, in the order a tick
 /// enters them.
 const PHASE_NAMES: [(Phase, &str); 5] = [
@@ -301,7 +292,6 @@ const PHASE_NAMES: [(Phase, &str); 5] = [
 /// constant, before a single test runs.
 const _: () = assert!(SYNC_METHOD_SPECS.len() == SYNC_METHODS.len());
 const _: () = assert!(MAILBOX_METHOD_SPECS.len() == MAILBOX_METHODS.len());
-const _: () = assert!(MESSAGE_SERVER_METHOD_SPECS.len() == MESSAGE_SERVER_METHODS.len());
 
 /// The one line this slice prints that the pre-daemon binary does not.
 ///
@@ -657,26 +647,6 @@ fn mailbox_list_server_is_the_second_method_of_the_mailbox_family() {
     }
 }
 
-/// The one server-side message query, in its own array so the read slice's
-/// three stay three.
-#[test]
-fn message_list_server_is_a_query_of_its_own() {
-    let names: Vec<&str> = MESSAGE_SERVER_METHOD_SPECS
-        .iter()
-        .map(|spec| spec.name)
-        .collect();
-    assert_eq!(names, MESSAGE_SERVER_METHODS);
-
-    let spec = MESSAGE_SERVER_METHOD_SPECS[0];
-    assert_eq!(
-        spec.kind,
-        MethodKind::Query,
-        "`mp fetch` writes nothing, which is what makes it a query"
-    );
-    assert_eq!(spec.since, 1);
-    assert_eq!(spec.cancel_scope, CancelScope::Durable);
-}
-
 /// The five slots a tick enters have wire names, because the client's
 /// " (after sync)" label is derived from them and from nothing else.
 #[test]
@@ -735,7 +705,6 @@ async fn the_daemon_advertises_the_sync_slice_methods() {
         "sync.full",
         "sync.watch",
         "mailbox.list_server",
-        "message.list_server",
     ] {
         assert!(
             result.capabilities.iter().any(|c| c == method),
@@ -743,6 +712,14 @@ async fn the_daemon_advertises_the_sync_slice_methods() {
             result.capabilities
         );
     }
+    assert!(
+        !result
+            .capabilities
+            .iter()
+            .any(|c| c == "message.list_server"),
+        "`mp fetch`'s method was retired with it: {:?}",
+        result.capabilities
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1135,7 +1112,7 @@ async fn a_sync_cancelled_while_it_runs_stops_before_the_next_mailbox() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. `mailbox.list_server` and `message.list_server`
+// 3. `mailbox.list_server`
 // ---------------------------------------------------------------------------
 
 /// The server mailbox list refuses what it cannot reach, in the words the user
@@ -1171,54 +1148,6 @@ async fn mailbox_list_server_refuses_what_it_cannot_reach() {
         assert_eq!(refused.message, fixture::secret_refusal(account));
         assert_path_free("mailbox.list_server", &json!(refused.data));
     }
-}
-
-/// The server message list is `mp fetch`'s method, and it refuses the same
-/// way: the account, then the mailbox, then the credentials.
-#[tokio::test]
-async fn message_list_server_refuses_what_it_cannot_reach() {
-    let slice = Slice::start();
-    let mut conn = slice.connect().await;
-
-    let missing = call_err(&mut conn, "message.list_server", json!({})).await;
-    assert_eq!(missing.code, INVALID_PARAMS);
-
-    let no_mailbox = call_err(
-        &mut conn,
-        "message.list_server",
-        json!({"account": fixture::SERVER_ACCOUNT, "limit": 10}),
-    )
-    .await;
-    assert_eq!(
-        no_mailbox.code, INVALID_PARAMS,
-        "`mp fetch --mailbox` defaults to INBOX in the client, so the wire always carries one"
-    );
-
-    let unknown = call_err(
-        &mut conn,
-        "message.list_server",
-        json!({"account": fixture::UNKNOWN_ACCOUNT, "mailbox": fixture::INBOX, "limit": 10}),
-    )
-    .await;
-    assert_eq!(unknown.code, ErrorCode::AccountUnknown.code());
-
-    let refused = call_err(
-        &mut conn,
-        "message.list_server",
-        json!({
-            "account": fixture::SERVER_ACCOUNT,
-            "mailbox": fixture::INBOX,
-            "limit": 10,
-            "criteria": {"from": "someone@example.com", "subject": "Bericht"},
-        }),
-    )
-    .await;
-    assert_eq!(refused.code, INTERNAL_ERROR);
-    assert_eq!(
-        refused.message,
-        fixture::secret_refusal(fixture::SERVER_ACCOUNT),
-        "the criteria were accepted; what failed is the backend"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1667,7 +1596,7 @@ fn the_subcommand_helps_keep_the_pre_daemon_flag_set() {
     }
 
     let slice = Slice::start();
-    for command in ["sync", "fetch", "list-mailboxes", "watch"] {
+    for command in ["sync", "list-mailboxes", "watch"] {
         let routed = slice.routed(&[command, "--help"]);
         let direct = slice.oracle(&[command, "--help"]);
         assert_eq!(routed.status.code(), Some(0), "`mp {command} --help`");
@@ -1697,7 +1626,7 @@ fn the_subcommand_helps_keep_the_pre_daemon_flag_set() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Parity: `mp list-mailboxes`, `mp fetch`, `mp watch`
+// 7. Parity: `mp list-mailboxes`, `mp watch`, and `mp fetch` retired
 // ---------------------------------------------------------------------------
 
 /// `mp list-mailboxes` needs a server it cannot reach, and refuses in the
@@ -1735,36 +1664,37 @@ fn mp_list_mailboxes_json_refuses_with_a_clean_stdout() {
     }
 }
 
-/// `mp fetch` refuses the same way, with and without its filters, and writes
-/// nothing either way.
+/// `mp fetch` is retired (2026-10-22): it duplicated `mp search --mailbox`,
+/// which takes the same filters. `fetch` is no subcommand any more, so its
+/// filters are refused by clap with the usage exit before any daemon is asked,
+/// the top-level help does not list it, and the daemon no longer serves its
+/// `message.list_server`; the same question asked of `mp search --mailbox`
+/// reaches the server.
 #[test]
-fn mp_fetch_refuses_exactly_as_before() {
+fn mp_fetch_is_retired() {
     let slice = Slice::start();
-    for args in [
-        vec!["fetch", "-A", fixture::SERVER_ACCOUNT],
-        vec![
-            "fetch",
-            "-A",
-            fixture::SERVER_ACCOUNT,
-            "--from",
-            "someone@example.com",
-            "--subject",
-            "Bericht",
-            "-n",
-            "3",
-            "--full",
-        ],
-        vec![
-            "fetch",
-            "-A",
-            fixture::SERVER_ACCOUNT,
-            "--mailbox",
-            fixture::EXTRA_MAILBOX,
-        ],
-    ] {
-        let out = slice.both(&args);
-        assert_refused(&out, &fixture::secret_refusal(fixture::SERVER_ACCOUNT));
-    }
+    let out = slice.routed(&["fetch", "-A", fixture::SERVER_ACCOUNT, "--from", "a@b"]);
+    assert_eq!(out.status.code(), Some(EXIT_USAGE), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("unexpected argument '--from'"),
+        "{}",
+        stderr(&out)
+    );
+    let help = stdout(&slice.routed(&["--help"]));
+    assert!(!help.contains("\n  fetch "), "{help}");
+    let replacement = slice.routed(&[
+        "search",
+        "-A",
+        fixture::SERVER_ACCOUNT,
+        "--mailbox",
+        fixture::INBOX,
+        "--from",
+        "someone@example.com",
+    ]);
+    assert_refused(
+        &replacement,
+        &fixture::secret_refusal(fixture::SERVER_ACCOUNT),
+    );
 }
 
 /// `mp watch` over INBOX, explicitly and by default: the same refusal, and
@@ -1857,7 +1787,6 @@ fn two_routed_runs_agree() {
         vec!["sync", "--all-accounts"],
         vec!["sync", "-A", fixture::SERVER_ACCOUNT],
         vec!["list-mailboxes", "-A", fixture::SERVER_ACCOUNT],
-        vec!["fetch", "-A", fixture::SERVER_ACCOUNT],
         vec!["watch", "-A", fixture::SERVER_ACCOUNT, "--timeout", "1"],
         vec![
             "watch",
@@ -1889,7 +1818,6 @@ fn no_sync_command_can_still_answer_without_a_daemon() {
     for args in [
         vec!["sync"],
         vec!["sync", "--all-accounts"],
-        vec!["fetch"],
         vec!["list-mailboxes"],
         vec!["watch", "--timeout", "1"],
     ] {

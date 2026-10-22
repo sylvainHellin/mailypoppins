@@ -221,7 +221,7 @@ pub fn shown_message(
 
 /// `mp show <selector>`: one message, headers then body.
 ///
-/// The layout is the headers block `mp fetch --full` prints, with the selector
+/// The layout is the headers block a server search's `--full` listing prints, with the selector
 /// and mailbox added because this command is addressed by selector and the
 /// answer should paste into the next one.
 ///
@@ -696,7 +696,7 @@ pub fn server_hits_newest_first(
 /// A server search hit as the record the text listing prints.
 ///
 /// The fields left empty are the ones the listing never reads, as for
-/// `mp fetch`'s: it prints the headers, the attachment marker and the body.
+/// the server search listing's: it prints the headers, the attachment marker and the body.
 pub fn fetched_from_hit(hit: &mp_protocol::listing::ServerSearchHit) -> crate::parse::FetchedEmail {
     crate::parse::FetchedEmail {
         from: hit.from.clone(),

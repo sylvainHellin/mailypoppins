@@ -1134,7 +1134,26 @@ fn the_help_surface_still_offers_every_pre_daemon_command() {
     let baseline = fs::read_to_string(&baseline_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", baseline_path.display()));
     let theirs = screens(&baseline);
-    let missing: Vec<&String> = theirs.difference(&ours).collect();
+    // `mp fetch` was retired on 2026-10-22, a duplicate of `mp search
+    // --mailbox`; every other command the capture records is still offered.
+    let retired: Vec<String> = theirs
+        .iter()
+        .filter(|screen| screen.starts_with("$ mp fetch"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        retired,
+        ["$ mp fetch --help"],
+        "the capture records mp fetch once"
+    );
+    assert!(
+        !ours.iter().any(|screen| screen.starts_with("$ mp fetch")),
+        "mp fetch is retired: {ours:?}"
+    );
+    let missing: Vec<&String> = theirs
+        .difference(&ours)
+        .filter(|screen| !retired.contains(screen))
+        .collect();
     assert!(
         missing.is_empty(),
         "the help walk lost pre-daemon commands recorded in {}: {missing:?}",

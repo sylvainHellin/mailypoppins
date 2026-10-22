@@ -5,12 +5,10 @@ use futures::TryStreamExt;
 use log::{info, warn};
 
 use super::{
-    pool,
     pool::ServerCaps,
     search::{build_imap_search_query, FetchCriteria},
     ImapSession,
 };
-use crate::config::ImapConfig;
 use crate::ingest::KnownUids;
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
 use crate::server_search::{Fetched, MailboxStubs, SearchStub};
@@ -39,90 +37,6 @@ fn flags_of(msg: &async_imap::types::Fetch) -> MessageFlags {
         }
     }
     out
-}
-
-/// Fetch emails on an existing session using search criteria and optional limit.
-pub async fn fetch_emails_on_session(
-    session: &mut ImapSession,
-    criteria: &FetchCriteria,
-    mailbox: &str,
-    limit: Option<usize>,
-) -> Result<Vec<FetchedEmail>> {
-    let query = build_imap_search_query(criteria);
-    search_on_session(
-        session,
-        &query,
-        criteria.message_id.as_deref(),
-        mailbox,
-        limit,
-    )
-    .await
-}
-
-/// Run a rendered IMAP `SEARCH` on an existing session and fetch the hits
-/// whole, which is what [`fetch_emails_on_session`] answers with.
-///
-/// `message_id`, when set, tightens the server's substring `HEADER` match to
-/// an exact one after the fetch.
-async fn search_on_session(
-    session: &mut ImapSession,
-    imap_search: &str,
-    message_id: Option<&str>,
-    mailbox: &str,
-    limit: Option<usize>,
-) -> Result<Vec<FetchedEmail>> {
-    session
-        .select(mailbox)
-        .await
-        .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
-
-    let uids = session
-        .uid_search(imap_search)
-        .await
-        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
-
-    if uids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut uid_list: Vec<u32> = uids.into_iter().collect();
-    uid_list.sort();
-    let selected_uids: Vec<u32> = match limit {
-        Some(n) => uid_list.into_iter().rev().take(n).collect(),
-        None => uid_list,
-    };
-
-    let uid_set = compress_uid_set(&selected_uids);
-
-    let fetched: Vec<_> = session
-        .uid_fetch(&uid_set, "(BODY.PEEK[] FLAGS)")
-        .await
-        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
-        .try_collect()
-        .await
-        .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
-
-    let mut emails = Vec::new();
-    for msg in fetched.iter() {
-        let body_raw = msg.body().unwrap_or_default();
-        if let Some(mut email) = parse_rfc822_to_fetched_email(body_raw) {
-            email.flags = flags_of(msg);
-            emails.push(email);
-        }
-    }
-
-    // `HEADER "Message-ID"` is a substring match on the server side; make the
-    // lookup exact here so every caller of this seam gets the same guarantee.
-    if let Some(mid) = message_id {
-        let wanted = super::search::normalize_message_id(mid).to_string();
-        emails.retain(|email| {
-            email.message_id.as_deref().is_some_and(|m| {
-                super::search::normalize_message_id(m).eq_ignore_ascii_case(&wanted)
-            })
-        });
-    }
-
-    Ok(emails)
 }
 
 /// The first pass of a server search (PERSO-175): the newest `limit` UIDs
@@ -316,22 +230,6 @@ pub async fn fetch_raw_by_message_id(
         }
     }
     Ok(None)
-}
-
-/// Fetch emails from an IMAP server. Opens and closes its own session.
-pub async fn fetch_emails(
-    imap_config: &ImapConfig,
-    criteria: &FetchCriteria,
-    mailbox: &str,
-    limit: Option<usize>,
-) -> Result<Vec<FetchedEmail>> {
-    info!(
-        "Fetching emails from mailbox '{}' (limit: {:?})",
-        mailbox, limit
-    );
-    let mut pooled = pool::checkout(imap_config).await?;
-    let emails = fetch_emails_on_session(pooled.session(), criteria, mailbox, limit).await;
-    pooled.check(emails)
 }
 
 // ---------------------------------------------------------------------------

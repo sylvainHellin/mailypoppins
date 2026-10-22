@@ -8,11 +8,10 @@
 //! Message-ID and ingested the bytes it got back. The search is `mp search`'s
 //! and the desktop's server leg too (`LST-06`).
 //!
-//! `message.list_server` stays in [`super::message`] and is a different
-//! method: P4-U10 registered that name for `mp fetch`'s one-mailbox query over
-//! `criteria`, which writes nothing and answers a listing. Redefining it would
-//! break a command that has nothing to do with this one, which is why the
-//! search leg is `message.search_server`.
+//! The search leg is `message.search_server` rather than `message.list_server`
+//! because P4-U10 had given that name to `mp fetch`'s one-mailbox query; both
+//! were retired on 2026-10-22 as a duplicate of `mp search --mailbox`, which
+//! runs here.
 //!
 //! # Why operations rather than queries
 //!

@@ -21,7 +21,6 @@ Commands:
   forward         Forward an email to new recipients
   invite          RSVP to a received calendar invitation (iMIP REPLY over SMTP)
   list-mailboxes  List available IMAP mailboxes/folders
-  fetch           Fetch emails from IMAP server
   sync            Sync mailboxes from the server into the local store
   watch           Watch a mailbox for changes using IMAP IDLE
   archive         Archive a received email (server + local)
@@ -269,25 +268,6 @@ Usage: mp list-mailboxes [OPTIONS]
 
 Options:
       --json               Print the listing as JSON on stdout
-  -A, --account <ACCOUNT>  Account to use
-  -h, --help               Print help
-
-$ mp fetch --help
-Fetch emails from IMAP server
-
-Usage: mp fetch [OPTIONS]
-
-Options:
-      --from <FROM>        Filter by sender address
-      --to <TO>            Filter by recipient address
-      --cc <CC>            Filter by CC address
-      --subject <SUBJECT>  Subject contains
-      --body <BODY>        Body contains
-      --since <SINCE>      Emails since date (YYYY-MM-DD)
-      --before <BEFORE>    Emails before date (YYYY-MM-DD)
-  -n, --limit <LIMIT>      Max results [default: 10]
-      --full               Show full body instead of preview
-      --mailbox <MAILBOX>  Mailbox name [default: INBOX]
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 

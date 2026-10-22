@@ -331,7 +331,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - GUI location: clients/desktop: Shift+Enter, the header's server button and the palette's "Search server" run the server leg, which keeps the hits of a finished local search and excludes their Message-IDs; hits stream in until the settle, and Cancel or leaving the search cancels it (M1, #0129). `ff`, the palette's "Search all mail" and the header's form button open the TUI overlay's form (#0086b) as a dialog: Search In (Current Mailbox or Current Account), From, To, Subject, Keywords, After, Before, the attachment toggle and the Advanced line that greys the rest, with Tab, Space, Enter and Escape as in the TUI; `search_query` builds the query with `mp-core`'s parser, the store answers first when its index can, then the server leg runs over the same scope, and the results fill the list pane (PERSO-115; shell.md, "The Server Search form")
 - Validation: TUI golden frames; `the_local_pass_finds_the_row_the_index_holds` (`src/tui_tests/commands.rs`); `clients/desktop/src/components/search/search.test.tsx` (the "server search" and "the Server Search form (PERSO-115)" blocks), `clients/desktop/src/app/search.test.ts`, `clients/desktop/src/keymap/keymap.test.tsx` (`ff opens the Server Search form, the TUI's Search all mail, and the help and palette name it`), `clients/desktop/src-tauri/src/fixture.rs` (`a_server_search_streams_hits_and_finishes`), `clients/desktop/src-tauri/src/commands.rs` (`a_server_search_is_awaited_until_cancelled`, `the_search_form_builds_the_query_the_tui_builds`, `a_recipient_term_is_not_one_the_store_can_answer`)
 - Status: routed (P5-U6 local, P5-U10c-I1 server); GUI shipped (M1, #0129), the form (PERSO-115)
-- Note: `message.search_server`, deliberately not `message.list_server`, which P4-U10 gave to `mp fetch`'s one-mailbox query. The TUI's background thread is gone: the overlay appends each hit as its `message.server_hit` event arrives, matched by operation id because a fast retype leaves two searches in flight.
+- Note: `message.search_server`, deliberately not `message.list_server`, which P4-U10 had given to `mp fetch`'s one-mailbox query, retired with it on 2026-10-22. The TUI's background thread is gone: the overlay appends each hit as its `message.server_hit` event arrives, matched by operation id because a fast retype leaves two searches in flight.
   Deduplication is by Message-ID and it is the daemon's: the client sends the Message-IDs the local pass is showing as `exclude_message_ids` and the settle counts them in `deduplicated`, so a message found twice appears once and the count is a fact any client reproduces.
   The local pass is `message.search` with `body: true` since P5-U6.
   The overlay holds a parsed query and the method takes what a user typed, so the query is rendered back into the grammar (`search::to_query_string`) rather than sent as an engine enum.
@@ -382,12 +382,12 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### LST-11 Legacy server fetch with inline filters
 
 - Classification: diagnostics and maintenance
-- Source anchor: `mp fetch [--from --to --cc --subject --body --since --before -n --full --mailbox]`, `src/main.rs`
-- Daemon surface: `message.list_server`
-- GUI location: not required (diagnostics and maintenance)
-- Validation: `tests/cli_help_snapshot.rs`
-- Status: routed (P4-U10); GUI not started
-- Note: superseded by `sync` plus `search`, kept because the migration preserves command surfaces; the deprecation decision is deferred to `BACKLOG.md` (`ANO-3`).
+- Source anchor: `mp fetch [--from --to --cc --subject --body --since --before -n --full --mailbox]`, removed from `src/main.rs`
+- Daemon surface: none; `message.list_server` was retired with it
+- GUI location: not required
+- Validation: `tests/daemon_sync_slice.rs` (`mp_fetch_is_retired`), `tests/daemon_server_leg_slice.rs` (`the_daemon_advertises_both_server_leg_methods`), `tests/cli_help_snapshot.rs`
+- Status: retired (2026-10-22)
+- Note: a duplicate of `mp search --mailbox <name>` with the same filters (`--from`, `--to`, `--cc`, `--subject`, `--body`, `--after`/`--before`, `-n`, `--full`), which runs on `message.search_server` (`LST-06`); Sylvain decided its retirement on 2026-10-22 (`ANO-3`). `mp fetch` with an argument now fails as an unknown argument, and `mp fetch` alone is read as a draft selector, the dry run every bare word is.
 
 ### LST-12 Dump message envelopes as NDJSON
 

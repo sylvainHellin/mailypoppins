@@ -119,7 +119,7 @@ When a ticket is shipped: set `status: done` in the ticket file, add an entry to
 
 Settled deferrals for the daemon migration, recorded here because the Phase 0 gate points at this list:
 
-- `mp fetch` (`LST-11`) kept its command surface through the migration. Sylvain decided on 2026-10-22 to retire it as a duplicate of `mp search --mailbox` (`ANO-3`).
+- `mp fetch` (`LST-11`) kept its command surface through the migration and was retired on 2026-10-22 as a duplicate of `mp search --mailbox` (`ANO-3`), with `message.list_server`.
 - `schemars` is not adopted. Phase 2 pins the protocol with checked-in JSON fixtures, and #0129 (M1) generates the TypeScript protocol types with ts-rs, which reads the serde attributes directly, so no consumer needs JSON Schema.
 - `notify` is not adopted. The daemon's draft, signature and config watcher uses the 1-second fingerprint poll the TUI already runs, moved into the daemon, and a filesystem-notification crate is revisited only if that poll proves inadequate under test.
 - `uuid` stays transitive. Ids are minted from `rand` plus a hex format, so no RFC-4122 shape and no new direct dependency.
