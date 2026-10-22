@@ -14,6 +14,7 @@ import {
   type AppState,
   type AttachmentItem,
   type AttachmentOwner,
+  type ExportSource,
   type SearchHit,
 } from "@/app/state";
 import { isOpenable } from "@/app/search";
@@ -130,14 +131,27 @@ export async function saveAttachment(s: AppState, dispatch: Dispatch<Action>): P
 /**
  * `te` (PERSO-174): the Save dialog's directory field for the message
  * itself, written as `<date>_<subject>.eml` by `message_export`, `mp
- * export`'s copy; a hit asks for the fetch, and a draft is a file already.
+ * export`'s copy. A hit the store holds is that row; a server-only one goes
+ * through `hit_export`, the daemon downloading the server's copy without
+ * ingesting it. A draft is a file already.
  */
 export function exportMessage(s: AppState, dispatch: Dispatch<Action>): void {
   const subj = cursorSubject(s);
   if (!subj) return;
-  if (subj.kind === "hit") return notice(dispatch, isOpenable(subj.hit) ? "Open the result first" : FETCH_FIRST);
   if (subj.kind === "draft") return notice(dispatch, "Export needs a received message; a draft is a file already");
-  dispatch({ type: "open_attachments", dialog: { kind: "export", account: subj.account, row_id: subj.row_id, subject: subj.subject } });
+  let source: ExportSource;
+  let subject: string;
+  if (subj.kind === "hit") {
+    const { hit } = subj;
+    subject = hit.subject || "(no subject)";
+    if (hit.row_id !== null) source = { kind: "row", row_id: hit.row_id };
+    else if (hit.message_id !== null) source = { kind: "hit", mailbox: hit.mailbox, message_id: hit.message_id };
+    else return notice(dispatch, "This hit carries no Message-ID; cannot export it");
+  } else {
+    source = { kind: "row", row_id: subj.row_id };
+    subject = subj.subject;
+  }
+  dispatch({ type: "open_attachments", dialog: { kind: "export", account: subj.account, source, subject } });
 }
 
 /**
@@ -279,10 +293,13 @@ export async function saveParts(
  * Export the message into `dir` as typed; resolves to why nothing was
  * written, or null. The notice names the file as it landed.
  */
-export async function exportTo(account: string, row_id: number, dir: string, dispatch: Dispatch<Action>): Promise<string | null> {
+export async function exportTo(account: string, source: ExportSource, dir: string, dispatch: Dispatch<Action>): Promise<string | null> {
   let exported;
   try {
-    exported = await cmd.messageExport(account, row_id, dir.trim());
+    exported =
+      source.kind === "row"
+        ? await cmd.messageExport(account, source.row_id, dir.trim())
+        : await cmd.hitExport(account, source.mailbox, source.message_id, dir.trim());
   } catch (e: unknown) {
     return asGuiError(e).message;
   }

@@ -208,6 +208,10 @@ export const draftForward = (
 export const draftFromMessage = (account: string, kind: DraftKind, message: DraftMessage): Promise<DraftCreated> =>
   invoke<DraftCreated>("draft_from_message", { account, kind, message });
 
+/** A server-only hit forwarded as its `.eml`, which the daemon downloads (PERSO-174). */
+export const draftForwardHit = (account: string, mailbox: string, message_id: string): Promise<DraftCreated> =>
+  invoke<DraftCreated>("draft_forward_hit", { account, mailbox, message_id });
+
 export const draftPath = (account: string, id: string): Promise<DraftLocation> =>
   invoke<DraftLocation>("draft_path", { account, id });
 
@@ -435,6 +439,10 @@ export const attachmentSave = (account: string, row_id: number, parts: number[],
 /** Copy the message's own `<date>_<subject>.eml` into `dest_dir` (absolute or `~`), as `mp export` does. */
 export const messageExport = (account: string, row_id: number, dest_dir: string): Promise<ExportedMessage> =>
   invoke<ExportedMessage>("message_export", { account, row_id, dest_dir });
+
+/** A server-only hit's `.eml`, downloaded by the daemon and not ingested (PERSO-174). */
+export const hitExport = (account: string, mailbox: string, message_id: string, dest_dir: string): Promise<ExportedMessage> =>
+  invoke<ExportedMessage>("hit_export", { account, mailbox, message_id, dest_dir });
 
 /** The daemon's browser rendition, opened; null for a message with no HTML part. */
 export const htmlOpen = (account: string, row_id: number): Promise<OpenedFile | null> =>

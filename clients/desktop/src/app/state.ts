@@ -610,8 +610,14 @@ export type AttachmentDialog =
   | { kind: "open"; owner: AttachmentOwner; subject: string; items: AttachmentItem[] }
   | { kind: "save"; account: string; row_id: number; subject: string; items: AttachmentItem[] }
   /** `te`: the message itself as `<date>_<subject>.eml`, into a directory (PERSO-174). */
-  | { kind: "export"; account: string; row_id: number; subject: string }
+  | { kind: "export"; account: string; source: ExportSource; subject: string }
   | { kind: "attach"; account: string; draftId: string; subject: string };
+
+/**
+ * What `te` exports: a stored row, or a server-only hit addressed as
+ * `message_fetch` addresses it, whose `.eml` the daemon downloads (PERSO-174).
+ */
+export type ExportSource = { kind: "row"; row_id: number } | { kind: "hit"; mailbox: string; message_id: string };
 
 /** The Save dialog's directory until one is used: `attachments.rs`'s `DEFAULT_SAVE_DIR`. */
 export const DEFAULT_SAVE_DIR = "~/Downloads";

@@ -1316,6 +1316,32 @@ pub fn draft_forward_on(
     )
 }
 
+/// A forward as attachment of a server-search hit the store holds no row
+/// for (PERSO-174): `draft.forward` with the hit as its source, addressed as
+/// `message_fetch` addresses it, so the daemon downloads the server's raw
+/// copy for the `.eml` and builds the forward from it, ingesting nothing.
+/// No wizard asks for recipients first, as for the hit's other drafts.
+pub fn draft_forward_hit_on(
+    door: &Door,
+    account: &str,
+    mailbox: &str,
+    message_id: &str,
+) -> Result<DraftCreated, GuiError> {
+    draft_from_row_on(
+        door,
+        "draft.forward",
+        json!({
+            "account": account,
+            "source": {"hit": {"message_id": message_id, "mailbox": mailbox}},
+            "as_attachment": true,
+        }),
+        None,
+        None,
+        false,
+        crate::attachments::EML_BUDGET,
+    )
+}
+
 /// A reply, reply-all or forward of a message the store holds no row for (a
 /// server-only search hit), built from the hit itself. It carries no
 /// attachments.
@@ -2007,6 +2033,19 @@ pub async fn draft_from_message(
 ) -> Result<DraftCreated, GuiError> {
     with_door(&session, move |_, door| {
         draft_from_message_on(door, &account, kind, &message)
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn draft_forward_hit(
+    session: State<'_, SessionHandle>,
+    account: String,
+    mailbox: String,
+    message_id: String,
+) -> Result<DraftCreated, GuiError> {
+    with_door(&session, move |_, door| {
+        draft_forward_hit_on(door, &account, &mailbox, &message_id)
     })
     .await
 }
@@ -3348,6 +3387,34 @@ mod tests {
         assert_eq!(
             quoted,
             mp_core::draft::ATTACHED_FORWARD_BODY == mp_core::draft::ForwardBody::Quoted
+        );
+
+        let hit = draft_forward_hit_on(&d, "work", "Archive", "<server-only@fixture.example>")
+            .expect("the forward of a server-only hit");
+        let (method, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(method, "draft.forward");
+        assert_eq!(
+            params,
+            json!({
+                "account": "work",
+                "source": {"hit": {"message_id": "<server-only@fixture.example>", "mailbox": "Archive"}},
+                "as_attachment": true,
+            })
+        );
+        let draft = parsed(&hit.path);
+        assert_eq!(
+            draft.frontmatter.forwarded_from.as_deref(),
+            Some("<server-only@fixture.example>")
+        );
+        let attachments = draft.frontmatter.attachments.unwrap_or_default();
+        assert_eq!(attachments.len(), 1, "{attachments:?}");
+        assert!(
+            attachments[0].ends_with("2025-03-03_Server-only match.eml"),
+            "{attachments:?}"
+        );
+        assert!(
+            draft_forward_hit_on(&d, "work", "Archive", "<nowhere@example.com>").is_err(),
+            "a hit the server does not have writes no draft"
         );
 
         let plain = draft_forward_on(&d, "work", 1001, false, None, None, false).expect("forward");

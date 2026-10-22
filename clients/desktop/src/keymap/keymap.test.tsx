@@ -513,10 +513,36 @@ describe("compose keys (the TUI's)", () => {
     expect(callsOf("draft_forward")).toEqual([]);
     expect(screen.queryByRole("dialog", { name: "Forward" })).toBeNull();
     await waitFor(() => expect(mock.editorOpens).toHaveLength(3));
-    // A hit has no stored message to carry as its .eml (PERSO-174).
+    // cF carries the hit as its .eml, which the daemon downloads (PERSO-174).
     await user.keyboard("cF");
-    expect(await screen.findByText("A forward as attachment needs the message in the store: fetch it first (F)")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(callsOf("draft_forward_hit")).toEqual([{ account: "work", mailbox: "Archive", message_id: "<server-only@fixture.example>" }]),
+    );
     expect(callsOf("draft_from_message")).toHaveLength(3);
+    expect(screen.queryByRole("dialog", { name: "Forward as attachment" })).toBeNull();
+    await waitFor(() => expect(mock.editorOpens).toHaveLength(4));
+  });
+
+  it("te on a server-only hit exports the server's .eml through hit_export, without a fetch (PERSO-174)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(screen.getByRole("searchbox", { name: /Filter this list/ }));
+    await user.keyboard("thread{Shift>}{Enter}{/Shift}");
+    await waitFor(() => expect(callsOf("search_server_start")).toHaveLength(1));
+    act(() => emitEnvelope("message.server_hit", { operation_id: "op-1", hit: serverOnlyHit("The old thread") }));
+    await user.click(await screen.findByRole("option", { name: /The old thread/ }));
+    await user.keyboard("te");
+    const dialog = await screen.findByRole("dialog", { name: "Export message" });
+    await waitFor(() => expect(within(dialog).getByRole("textbox", { name: "Directory" })).toHaveFocus());
+    await user.keyboard("{Enter}");
+    await waitFor(() =>
+      expect(callsOf("hit_export")).toEqual([
+        { account: "work", mailbox: "Archive", message_id: "<server-only@fixture.example>", dest_dir: "~/Downloads" },
+      ]),
+    );
+    expect(callsOf("message_export")).toEqual([]);
+    expect(callsOf("message_fetch")).toEqual([]);
+    expect(await screen.findByText("Exported 2025-03-03_Server-only match.eml to ~/Downloads")).toBeInTheDocument();
   });
 
   it("e on a message opens its Markdown rendition in the editor and Enter focuses the reader; on a draft e edits it (PERSO-92)", async () => {

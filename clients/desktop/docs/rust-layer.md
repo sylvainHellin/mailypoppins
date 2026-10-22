@@ -99,6 +99,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `draft_create` | `account`, `name`, `signature?`, `no_signature?`, `headers?: DraftHeaders`, `body?` | `DraftCreated` |
 | `draft_reply` | `account`, `row_id`, `all`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
 | `draft_forward` | `account`, `row_id`, `as_attachment?`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
+| `draft_forward_hit` | `account`, `mailbox`, `message_id` | `DraftCreated` |
 | `draft_from_message` | `account`, `kind: DraftKind`, `message: DraftMessage` | `DraftCreated` |
 | `draft_path` | `account`, `id` | `DraftLocation` |
 | `draft_approve` | `account`, `ids` | `DraftStatusBatch` |
@@ -142,6 +143,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `attachment_open` | `account`, `row_id`, `part` | `OpenedFile` |
 | `attachment_save` | `account`, `row_id`, `parts`, `dest_dir` (absolute or `~`) | `SavedAttachments` |
 | `message_export` | `account`, `row_id`, `dest_dir` (absolute or `~`) | `ExportedMessage` |
+| `hit_export` | `account`, `mailbox`, `message_id`, `dest_dir` (absolute or `~`) | `ExportedMessage` |
 | `html_open` | `account`, `row_id` | `OpenedFile`, or `null` for a message with no HTML part |
 | `hit_html_open` | `html` | `OpenedFile` |
 | `draft_html_open` | `account`, `id` | `OpenedFile` |
@@ -563,6 +565,7 @@ It passes `headers` and a non-blank `body` to `draft.create`, which writes the f
 `draft_reply` and `draft_forward` address the source by `row_id` and pass `headers` to the daemon, which then needs all four fields; an empty string clears one.
 They pass `signature` and `no_signature` as `draft_create` does, and neither means the account's default, which the daemon resolves.
 `draft_from_message` builds a reply, reply-all or forward from a server-only search hit (`DraftMessage`, the hit's own field names), with no attachments.
+`draft_forward_hit` is that hit's forward as attachment (PERSO-174): `draft.forward` with `source: {hit: {message_id, mailbox}}` and `as_attachment`, the daemon downloading the `.eml` and building the forward from it, waiting as long as an export.
 
 `draft_set_recipients` is client-side, like the TUI's `ce`: it resolves the file through `draft.path` and rewrites the `to`, `cc`, `bcc` and `subject` lines with `mp_core::draft::rewrite_draft_recipients`, which leaves the body and every other field byte for byte.
 An absent `subject` keeps the draft's own, and the signature is not re-spliced.
@@ -696,6 +699,7 @@ A part that fails lands in `failed` with its `GuiError`, and the others still go
 
 `message_export` is the same copy for the message itself (PERSO-174): `message.materialise_eml` writes its raw RFC 822 bytes as `<date>_<subject>.eml`, `mp export`'s file, and the copy into `dest_dir` takes the `_1` rule before the handle is released.
 A row stored without its raw message (every Graph row) is answered from the server, so the call waits up to 90 seconds, as `draft_forward` with `as_attachment` does, which attaches the same bytes.
+`hit_export` is the same copy for a server-only search hit, `message.materialise_eml` addressed by `hit: {message_id, mailbox}`, which the daemon answers from the server without ingesting anything.
 
 ```ts
 type OpenedFile = { name: string; path: string };

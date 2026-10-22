@@ -34,7 +34,7 @@ import type { DraftCreated, DraftKind, DraftMessage } from "@/protocol/types";
 /** What a reply or a forward is built from: a stored row, or a server-only hit's own headers. */
 export type ComposeSource =
   | { kind: "row"; account: string; row_id: number; subject: string }
-  | { kind: "hit"; account: string; message: DraftMessage };
+  | { kind: "hit"; account: string; message: DraftMessage; mailbox: string; message_id: string | null };
 
 /** The subject a forward shows before its draft exists, by `mp_core::draft::fwd_subject`'s rule. */
 export function fwdSubject(subject: string): string {
@@ -67,7 +67,7 @@ export function cursorSource(s: AppState): ComposeSource | null {
   if (!account) return null;
   if (s.search && s.selection.hit) {
     const hit = s.search.hits.find((h) => h.key === s.selection.hit);
-    if (hit?.source) return { kind: "hit", account: hit.account, message: hit.source };
+    if (hit?.source) return { kind: "hit", account: hit.account, message: hit.source, mailbox: hit.mailbox, message_id: hit.message_id };
     return null;
   }
   const m = s.selection.message;
@@ -314,8 +314,9 @@ export function reply(src: ComposeSource | null, all: boolean, dispatch: Dispatc
  * `draft_from_message` takes no recipients.
  *
  * `cF` (`asAttachment`) is the same wizard over `draft_forward`'s
- * `as_attachment`, the message carried as its `.eml` (PERSO-174); a hit has
- * no stored message to carry, so it asks for the fetch first.
+ * `as_attachment`, the message carried as its `.eml` (PERSO-174); a
+ * server-only hit goes at once through `draft_forward_hit`, the daemon
+ * downloading its `.eml` without ingesting it.
  */
 export function forward(src: ComposeSource | null, dispatch: Dispatch<Action>, asAttachment = false): void {
   if (!src) {
@@ -323,7 +324,11 @@ export function forward(src: ComposeSource | null, dispatch: Dispatch<Action>, a
     return;
   }
   if (src.kind === "hit") {
-    if (asAttachment) return notice(dispatch, "A forward as attachment needs the message in the store: fetch it first (F)");
+    if (asAttachment) {
+      if (src.message_id === null) return notice(dispatch, "This hit carries no Message-ID; cannot forward it as attachment");
+      void created(dispatch, src.account, "Forward failed", cmd.draftForwardHit(src.account, src.mailbox, src.message_id));
+      return;
+    }
     void created(dispatch, src.account, "Forward failed", cmd.draftFromMessage(src.account, FROM_HIT.forward, src.message));
     return;
   }

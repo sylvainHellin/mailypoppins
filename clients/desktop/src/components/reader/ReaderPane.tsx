@@ -25,7 +25,9 @@ function ServerHitSummary({ hit }: { hit: SearchHit }) {
   const s = useAppState();
   const dispatch = useDispatch();
   const fetching = s.fetching.includes(hit.key);
-  const src = hit.source ? { kind: "hit" as const, account: hit.account, message: hit.source } : null;
+  const src = hit.source
+    ? { kind: "hit" as const, account: hit.account, message: hit.source, mailbox: hit.mailbox, message_id: hit.message_id }
+    : null;
   return (
     <article aria-label={hit.subject || "(no subject)"} className="flex flex-col gap-3 px-5 py-4 text-sm">
       <div role="toolbar" aria-label="Message actions" className="flex flex-wrap items-center gap-1">

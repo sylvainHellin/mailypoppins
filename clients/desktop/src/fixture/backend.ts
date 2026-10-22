@@ -1405,6 +1405,11 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "draft_reply":
     case "draft_forward":
       return draftFromRow(cmd, account, args);
+    case "draft_forward_hit": {
+      // The daemon downloads the hit's `.eml` and builds the forward from it.
+      knownAccount(cmd, account);
+      return writeDraft(account, { to: "", cc: "", subject: "Fwd: Server-only match" }, null);
+    }
     case "draft_from_message": {
       knownAccount(cmd, account);
       const m = args.message as DraftMessage;
@@ -1482,6 +1487,14 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const hit = findRow(account, rowId);
       if (!hit) throw refusedRow("message.materialise_eml", `no message has row_id ${rowId}`);
       const name = emlName(hit[1].subject ?? "", hit[1].date_display ?? null);
+      return { name, path: saveName(dir, name) };
+    }
+    case "hit_export": {
+      // The daemon's copy of the server's raw message, named off its own headers.
+      const typed = String(args.dest_dir).trim();
+      const dir = expandHome(typed);
+      if (!dir.startsWith("/")) throw { kind: "protocol", message: `\`${typed}\` is not an absolute path; start it with / or ~`, code: null };
+      const name = emlName("Server-only match", "Mon, 3 Mar 2025 09:00:00 +0100");
       return { name, path: saveName(dir, name) };
     }
     case "html_open": {

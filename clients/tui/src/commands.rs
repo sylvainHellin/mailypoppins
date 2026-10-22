@@ -1148,11 +1148,17 @@ pub(super) fn draft_from_source(
 /// already rendering, under the hit's own field names. It carries no
 /// attachments, because a hit streamed by `message.search_server` has none on
 /// this side.
+///
+/// A forward as attachment is the one kind the payload cannot build, since the
+/// `.eml` is the server's raw copy: it is `draft.forward` with the hit as its
+/// source, `{hit: {message_id, mailbox}}`, `mailbox` being the hit's sidebar
+/// label as `message.fetch` takes it.
 pub(super) fn draft_from_message(
     commands: &dyn Queries,
     account: &str,
     kind: mp_core::draft::DraftFromSource,
     fetched: &mp_core::parse::FetchedEmail,
+    mailbox: &str,
 ) -> Result<(PathBuf, String), String> {
     let kind = match kind {
         mp_core::draft::DraftFromSource::Reply { all: false } => "reply",
@@ -1160,15 +1166,29 @@ pub(super) fn draft_from_message(
         mp_core::draft::DraftFromSource::Forward {
             as_attachment: false,
         } => "forward",
-        // The `.eml` is the store's or the server's copy of a row, and a hit
-        // with no row has neither on this side.
         mp_core::draft::DraftFromSource::Forward {
             as_attachment: true,
         } => {
-            return Err(
-                "A forward as attachment needs the message in the store: fetch it first"
-                    .to_string(),
-            )
+            let message_id = fetched
+                .message_id
+                .as_deref()
+                .ok_or_else(|| "This hit carries no Message-ID; cannot get its .eml".to_string())?;
+            let created = commands
+                .call(
+                    "draft.forward",
+                    json!({
+                        "account": account,
+                        "source": {"hit": {"message_id": message_id, "mailbox": mailbox}},
+                        "as_attachment": true,
+                    }),
+                )
+                .map_err(|e| format!("{e:#}"))?;
+            let path = created["path"]
+                .as_str()
+                .map(PathBuf::from)
+                .ok_or_else(|| "draft.forward wrote a draft it did not name".to_string())?;
+            let selector = created["selector"].as_str().unwrap_or_default().to_string();
+            return Ok((path, selector));
         }
     };
     let params = json!({
@@ -1821,23 +1841,44 @@ mod tests {
         );
     }
 
-    /// A hit with no row has no `.eml` on this side, so it is refused before
-    /// any call.
+    /// A hit with no row forwards as attachment through `draft.forward` with
+    /// the hit as its source, which the daemon fetches the `.eml` for; one
+    /// without a `Message-ID` cannot be addressed and makes no call.
     #[test]
-    fn a_hit_with_no_row_is_not_forwarded_as_attachment() {
-        let door = Recorder::answering(json!({}));
-        let refused = draft_from_message(
-            &door,
-            "alice",
-            DraftFromSource::Forward {
-                as_attachment: true,
-            },
-            &mp_core::parse::parse_rfc822_to_fetched_email(b"Subject: x\r\n\r\nbody\r\n")
-                .expect("a message parses"),
+    fn a_hit_with_no_row_forwards_as_attachment_through_its_message_id() {
+        let door = Recorder::answering(json!({
+            "path": "/d/fwd.md", "selector": "mp://alice/drafts/x",
+        }));
+        let fetched = mp_core::parse::parse_rfc822_to_fetched_email(
+            b"Message-ID: <hit@example.com>\r\nSubject: x\r\n\r\nbody\r\n",
         )
-        .unwrap_err();
-        assert!(refused.contains("fetch it first"), "{refused}");
-        assert!(door.calls.borrow().is_empty());
+        .expect("a message parses");
+        let as_attachment = DraftFromSource::Forward {
+            as_attachment: true,
+        };
+        let (path, selector) =
+            draft_from_message(&door, "alice", as_attachment, &fetched, "Archive").unwrap();
+        assert_eq!(path.to_str(), Some("/d/fwd.md"));
+        assert_eq!(selector, "mp://alice/drafts/x");
+        assert_eq!(
+            *door.calls.borrow(),
+            vec![(
+                "draft.forward".to_string(),
+                json!({
+                    "account": "alice",
+                    "source": {"hit": {"message_id": "<hit@example.com>", "mailbox": "Archive"}},
+                    "as_attachment": true,
+                })
+            )]
+        );
+
+        let silent = Recorder::answering(json!({}));
+        let no_id = mp_core::parse::parse_rfc822_to_fetched_email(b"Subject: x\r\n\r\nbody\r\n")
+            .expect("a message parses");
+        let refused =
+            draft_from_message(&silent, "alice", as_attachment, &no_id, "Archive").unwrap_err();
+        assert!(refused.contains("Message-ID"), "{refused}");
+        assert!(silent.calls.borrow().is_empty());
     }
 
     /// `te` reads the file `message.materialise_eml` wrote, as `mp export`.

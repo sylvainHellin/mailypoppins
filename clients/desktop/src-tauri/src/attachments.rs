@@ -348,13 +348,43 @@ pub fn message_export_on(
     dest_dir: &str,
     home: Option<&Path>,
 ) -> Result<ExportedMessage, GuiError> {
-    let dir = resolve_dir(dest_dir, home)?;
-    let handle = materialise_within(
+    export_on(
         door,
-        "message.materialise_eml",
         json!({"account": account, "row_id": row_id}),
-        EML_BUDGET,
-    )?;
+        dest_dir,
+        home,
+    )
+}
+
+/// [`message_export_on`] for a server-search hit the store holds no row for,
+/// addressed as `message_fetch` addresses it: the daemon downloads the
+/// server's raw copy and ingests nothing, so the hit stays a hit.
+pub fn hit_export_on(
+    door: &Door,
+    account: &str,
+    mailbox: &str,
+    message_id: &str,
+    dest_dir: &str,
+    home: Option<&Path>,
+) -> Result<ExportedMessage, GuiError> {
+    export_on(
+        door,
+        json!({"account": account, "hit": {"message_id": message_id, "mailbox": mailbox}}),
+        dest_dir,
+        home,
+    )
+}
+
+/// `message.materialise_eml` over `address`, copied into `dest_dir` with the
+/// `_1` rule, its handle released.
+fn export_on(
+    door: &Door,
+    address: Value,
+    dest_dir: &str,
+    home: Option<&Path>,
+) -> Result<ExportedMessage, GuiError> {
+    let dir = resolve_dir(dest_dir, home)?;
+    let handle = materialise_within(door, "message.materialise_eml", address, EML_BUDGET)?;
     let copied = mp_core::parse::save_attachment(Path::new(&handle.path), &dir);
     release(door, &handle.handle);
     let path = copied.map_err(|e| {
@@ -691,6 +721,28 @@ pub async fn message_export(
     .await
 }
 
+/// A server-only hit's `.eml`; `dest_dir` as `message_export`'s.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hit_export(
+    session: State<'_, SessionHandle>,
+    account: String,
+    mailbox: String,
+    message_id: String,
+    dest_dir: String,
+) -> Result<ExportedMessage, GuiError> {
+    with_door(&session, move |_, door| {
+        hit_export_on(
+            door,
+            &account,
+            &mailbox,
+            &message_id,
+            &dest_dir,
+            home_dir().as_deref(),
+        )
+    })
+    .await
+}
+
 /// `null` when the message has no HTML part.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn html_open(
@@ -960,6 +1012,47 @@ mod tests {
         let gone = message_export_on(&door, "work", 9999, "~/out", Some(&home)).unwrap_err();
         assert!(matches!(gone, GuiError::NotFound { .. }), "{gone:?}");
         assert!(fixture.opened().is_empty());
+    }
+
+    /// A server-only hit exports through `message.materialise_eml`'s `hit`
+    /// address, named off the server's copy; a Message-ID the server does
+    /// not have writes nothing (PERSO-174).
+    #[test]
+    fn a_server_only_hit_exports_through_its_message_id() {
+        let (door, fixture) = fixture_door();
+        let home = scratch("hit-export");
+        let exported = hit_export_on(
+            &door,
+            "work",
+            "Archive",
+            "<server-only@fixture.example>",
+            "~/out",
+            Some(&home),
+        )
+        .unwrap();
+        assert_eq!(exported.name, "2025-03-03_Server-only match.eml");
+        let eml = fs::read_to_string(&exported.path).unwrap();
+        assert!(
+            eml.contains("Message-ID: <server-only@fixture.example>\r\n"),
+            "{eml}"
+        );
+        assert_eq!(
+            calls_of(&fixture, "message.materialise_eml"),
+            vec![json!({
+                "account": "work",
+                "hit": {"message_id": "<server-only@fixture.example>", "mailbox": "Archive"},
+            })]
+        );
+        assert_eq!(calls_of(&fixture, "message.release_handle").len(), 1);
+        assert!(hit_export_on(
+            &door,
+            "work",
+            "Archive",
+            "<nowhere@example.com>",
+            "~/out",
+            Some(&home)
+        )
+        .is_err());
     }
 
     #[test]

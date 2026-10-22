@@ -600,11 +600,12 @@ fn write_fetched_draft_and_edit(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     fetched: &mp_core::parse::FetchedEmail,
+    mailbox: &str,
     kind: DraftFromSource,
     what: &str,
 ) -> Result<()> {
     let account = app.account_config.name.clone();
-    let built = commands::draft_from_message(&daemon_door(app), &account, kind, fetched);
+    let built = commands::draft_from_message(&daemon_door(app), &account, kind, fetched, mailbox);
     let (path, selector) = match built {
         Ok(pair) => pair,
         Err(e) => {
@@ -2100,8 +2101,12 @@ fn search_result_draft(
     };
     let msg = hit.entry.msg;
     // Cloned only for the unresolved hit, which is the one case that needs the
-    // fetched payload while `app` is borrowed mutably for the status line.
-    let fetched = msg.is_none().then(|| hit.fetched.clone());
+    // fetched payload (and, for a forward as attachment, the mailbox the
+    // daemon fetches its `.eml` from) while `app` is borrowed mutably for the
+    // status line.
+    let fetched = msg
+        .is_none()
+        .then(|| (hit.fetched.clone(), hit.source_label.clone()));
 
     // A hit that resolved is the list flow exactly, addressed by the row id it
     // resolved to; one that did not has no row for the daemon to read.
@@ -2110,10 +2115,10 @@ fn search_result_draft(
         write_draft_and_edit(app, terminal, msg, kind, None, what)?;
         return Ok(());
     }
-    let Some(fetched) = fetched else {
+    let Some((fetched, mailbox)) = fetched else {
         return Ok(());
     };
-    write_fetched_draft_and_edit(app, terminal, &fetched, kind, what)
+    write_fetched_draft_and_edit(app, terminal, &fetched, &mailbox, kind, what)
 }
 
 /// The `f` key of the search overlay (#0104): ingest a server-only hit.

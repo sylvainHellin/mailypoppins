@@ -324,7 +324,7 @@ function ExportForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "ex
   const submit = async () => {
     if (busy) return;
     setBusy(true);
-    const refusal = await exportTo(dialog.account, dialog.row_id, dir, dispatch);
+    const refusal = await exportTo(dialog.account, dialog.source, dir, dispatch);
     setBusy(false);
     setError(refusal);
   };
@@ -477,7 +477,11 @@ export function AttachmentsDialog({ dialog, onOpenChange }: AttachmentsDialogPro
         ) : d?.kind === "save" ? (
           <SaveForm key={`${d.account}/${d.row_id}/${d.items.map((i) => i.part).join(",")}`} dialog={d} inputRef={fieldRef} />
         ) : d?.kind === "export" ? (
-          <ExportForm key={`${d.account}/${d.row_id}`} dialog={d} inputRef={fieldRef} />
+          <ExportForm
+            key={`${d.account}/${d.source.kind === "row" ? d.source.row_id : d.source.message_id}`}
+            dialog={d}
+            inputRef={fieldRef}
+          />
         ) : d?.kind === "attach" ? (
           <AttachForm key={`${d.account}/${d.draftId}`} dialog={d} inputRef={fieldRef} />
         ) : null}

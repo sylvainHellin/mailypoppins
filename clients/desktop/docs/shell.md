@@ -290,7 +290,7 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `r`, `cr` | Reply | list, reader | `draft_reply` (`all: false`) or `draft_from_message` (`reply`), then the editor |
 | `ca` | Reply all | list, reader | `draft_reply` (`all: true`) or `draft_from_message` (`reply_all`), then the editor |
 | `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `signature_list`, then `draft_forward` with `headers` and the signature, or `draft_from_message` (`forward`), then the editor |
-| `cF` | Forward as attachment: the same wizard, the message carried as its `.eml` instead of its parts (PERSO-174); a server-only hit says to fetch it first | list, reader | `signature_list`, then `draft_forward` with `as_attachment`, `headers` and the signature, then the editor |
+| `cF` | Forward as attachment: the same wizard, the message carried as its `.eml` instead of its parts (PERSO-174); a server-only hit is forwarded at once, the daemon downloading its `.eml` | list, reader | `signature_list`, then `draft_forward` with `as_attachment`, `headers` and the signature, or `draft_forward_hit`, then the editor |
 | `e` | Edit the draft in the editor; on a received message, open its Markdown rendition read-only by the same route, the TUI's `e` (PERSO-92); Enter focuses the reader | list, reader | `draft_path`, then the editor; `message_markdown_path`, then the embedded editor, or `message_markdown_open` |
 | `ce` | Edit recipients, in Drafts or on a conversation's draft member | list, reader | `draft_set_recipients`, the dialog filled from the listed row, or from `draft_preview` for a draft member |
 | `cA` | Approve, in Drafts or on a conversation's draft member | list, reader | `draft_approve` |

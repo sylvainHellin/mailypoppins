@@ -700,7 +700,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
   P5-U6 routed the TUI's two forward keys through it and gave the method `headers`, the compose wizard's override of the recipients and the subject it collected before the draft existed.
 - Note: as after `e` (DFT-07), an editor that returns cleanly gives the keyboard back to the list in both clients, the TUI's `cf` from the headers or body pane it was pressed in; a failed editor keeps the focus, and the search overlay's `w` leaves the focus under the overlay alone (PERSO-129).
 - Note: a forward as attachment (PERSO-174) carries the source as one `<date>_<subject>.eml` part, labelled `message/rfc822` with `7bit` or `8bit`, instead of its parts: `mp forward --as-attachment`, the TUI's `cF` and the desktop's `cF` and palette entry "Forward as attachment (.eml)", the last two through the forward wizard titled "Forward as attachment", all calling `draft.forward` with `as_attachment: true`.
-  The `.eml` is `message.materialise_eml`'s bytes, so a Graph row is fetched from the server first; a server-only hit has no row and is refused with "fetch it first" in both clients.
+  The `.eml` is `message.materialise_eml`'s bytes, so a Graph row is fetched from the server first; a server-only hit has no row and is `draft.forward`'s `source: {hit: {message_id, mailbox}}`, whose `.eml` the daemon downloads without ingesting it, and whose forward it builds from those bytes (the desktop's `draft_forward_hit`).
   The body is the usual forward's; `mp_core::draft::ATTACHED_FORWARD_BODY` is the one line that would make it Outlook's, the signature alone.
   Validation: `tests/daemon_eml_export.rs`, `src/send.rs` (`an_eml_with_long_8bit_lines_goes_8bit_byte_for_byte`, `an_eml_with_a_line_over_998_octets_goes_as_an_octet_stream`), `src/tui_tests/actions_store.rs` (`cf_and_cf_upper_open_the_forward_wizard_with_and_without_the_eml`), `clients/tui/src/commands.rs` (`a_forward_as_attachment_is_draft_forward_with_as_attachment`), `clients/desktop/src/keymap/keymap.test.tsx` (`cF forwards as attachment through the same wizard, draft_forward with as_attachment (PERSO-174)`), `clients/desktop/src-tauri/src/commands.rs` (`a_forward_as_attachment_carries_the_eml_instead_of_the_parts`).
 
@@ -769,7 +769,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Status: routed (PERSO-174); GUI shipped (PERSO-174)
 - Note: the bytes are the row's stored `raw` blob, which every IMAP ingest writes; a row without one, every Graph row, is answered from the server (`$value`, or `BODY.PEEK[]` by `Message-ID`), so the call waits as long as a server query.
   The file is named `<YYYY-MM-DD>_<subject>.eml` by `mp_core::parse::eml_name`, the subject cut by bytes on a char boundary as an attachment's name is.
-  As in `ATT-02`, the destination is the client's to name and the result is a permanent user artifact; a draft has no message to export and says it is a file already, and a server-only hit asks for the fetch first.
+  As in `ATT-02`, the destination is the client's to name and the result is a permanent user artifact; a draft has no message to export and says it is a file already, and a server-only hit is `message.materialise_eml`'s `hit: {message_id, mailbox}`, downloaded from the server and not ingested (the desktop's `hit_export`).
 
 ### ATT-03 Attach a file to a draft
 

@@ -1452,6 +1452,11 @@ impl State {
     /// part is `-32602`.
     fn materialise(&mut self, method: &str, params: &Value) -> Result<Value> {
         let account = param_str(method, params, "account")?.to_string();
+        if method == "message.materialise_eml" && !params["hit"].is_null() {
+            let row = self.hit_row(method, &account, &params["hit"])?;
+            let (name, bytes) = fixture_eml(&row);
+            return self.write_handle(&name, &bytes);
+        }
         let row_id = param_row_id(method, params)?;
         let (_, row) = self
             .row(&account, row_id)
@@ -1486,11 +1491,17 @@ impl State {
             let bytes = format!("fixture attachment {name}\n").into_bytes();
             (name, bytes)
         };
+        self.write_handle(&name, &bytes)
+    }
+
+    /// One materialised file under `<root>/handles/<handle>/`, answered as
+    /// the handle family answers it.
+    fn write_handle(&mut self, name: &str, bytes: &[u8]) -> Result<Value> {
         let handle = self.next_operation_id("fixture-handle");
         let dir = self.root.join("handles").join(&handle);
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        let path = dir.join(&name);
-        fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+        let path = dir.join(name);
+        fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
         Ok(json!({
             "handle": handle, "path": path.display().to_string(), "name": name,
             "bytes": bytes.len(), "expires_at": rfc3339_in(Duration::from_secs(600)),
@@ -1578,6 +1589,83 @@ impl State {
         Ok((id, Ok(result), Some(format!("mailbox:{account}/{slug}"))))
     }
 
+    /// The row a server-search hit `{message_id, mailbox}` names, as the
+    /// daemon reads one (PERSO-174): the stored row once the store has caught
+    /// up, else the fixture's one server-only message as `message.fetch`
+    /// would land it; any other `Message-ID` is the server not having it.
+    fn hit_row(&self, method: &str, account: &str, hit: &Value) -> Result<Value> {
+        let message_id = hit["message_id"]
+            .as_str()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| refused(method, -32602, "hit is {message_id, mailbox}"))?;
+        hit["mailbox"]
+            .as_str()
+            .ok_or_else(|| refused(method, -32602, "hit is {message_id, mailbox}"))?;
+        let held = self.messages.get(account).and_then(|boxes| {
+            boxes
+                .values()
+                .flatten()
+                .find(|row| row["message_id"] == message_id)
+        });
+        if let Some(row) = held {
+            return Ok(row.clone());
+        }
+        let server = server_only_hit(account, "");
+        if server["message_id"] != message_id {
+            return Err(refused(
+                method,
+                -32603,
+                &format!("the server no longer has {message_id}"),
+            ));
+        }
+        Ok(json!({
+            "message_id": message_id, "from": server["from"], "to": server["to"],
+            "cc": null, "reply_to": null, "subject": "Server-only match",
+            "date_display": server["date_display"], "body": server["body_text"],
+        }))
+    }
+
+    /// The daemon's forward as attachment of a server-search hit: the `.eml`
+    /// of [`Self::hit_row`], and the forward built from that row.
+    fn forward_hit(
+        &mut self,
+        method: &str,
+        account: &str,
+        params: &Value,
+        dir: &Path,
+    ) -> Result<Answered> {
+        if params["as_attachment"] != true {
+            return Err(refused(
+                method,
+                -32602,
+                "a hit source is forwarded with as_attachment only",
+            ));
+        }
+        let row = self.hit_row(method, account, &params["source"]["hit"])?;
+        let (name, bytes) = fixture_eml(&row);
+        let bare = row["message_id"]
+            .as_str()
+            .unwrap_or_default()
+            .trim_matches(['<', '>']);
+        let eml_dir = self.root.join("attachments").join(account).join(bare);
+        fs::create_dir_all(&eml_dir)?;
+        let eml = eml_dir.join(name);
+        fs::write(&eml, bytes)?;
+        let message = row_message(&row, vec![eml], None);
+        let signature = self.signature_for(account, params);
+        fs::create_dir_all(dir)?;
+        let built = mp_core::draft::create_forward_draft_with(
+            &message,
+            mp_core::draft::ATTACHED_FORWARD_BODY,
+            FIXTURE_FROM,
+            Some(dir),
+            signature.as_deref(),
+        )?;
+        let headers = recipient_headers(method, params)?;
+        let (id, path) = self.finish_built(&built, headers.as_ref())?;
+        self.created(account, &id, &path, None)
+    }
+
     /// The received message `source` addresses, as a reply or a forward reads
     /// it. A forward carries the attachments, written as small files.
     fn source_of(
@@ -1602,7 +1690,6 @@ impl State {
             )
         })?;
         let text = |key: &str| row[key].as_str().unwrap_or_default().to_string();
-        let opt = |key: &str| row[key].as_str().map(str::to_string);
         let mut attachments = Vec::new();
         if forward {
             let dir = self
@@ -1618,18 +1705,7 @@ impl State {
                 attachments.push(file);
             }
         }
-        let message = SourceMessage {
-            from: text("from"),
-            to: text("to"),
-            cc: opt("cc"),
-            subject: text("subject"),
-            message_id: opt("message_id"),
-            date: opt("date_display"),
-            body: text("body").trim().to_string(),
-            attachments,
-            html: self.html.get(&row_id).cloned(),
-            reply_to: opt("reply_to"),
-        };
+        let message = row_message(row, attachments, self.html.get(&row_id).cloned());
         let source = DraftSource {
             id: format!("{mailbox}/{}", row["uid"]),
             selector: text("selector"),
@@ -1716,6 +1792,9 @@ impl State {
                     mp_core::draft::rewrite_draft_recipients(&path, &headers)?;
                 }
                 self.created(&account, &id, &path, None)
+            }
+            "draft.forward" if !params["source"]["hit"].is_null() => {
+                self.forward_hit(method, &account, params, &dir)
             }
             "draft.reply" | "draft.forward" => {
                 let reply = method == "draft.reply";
@@ -5180,6 +5259,24 @@ fn markdown_rendition(row_id: i64, row: &Value) -> (String, Vec<u8>) {
         field("body")
     );
     (name, text.into_bytes())
+}
+
+/// A row as the builders read a source message.
+fn row_message(row: &Value, attachments: Vec<PathBuf>, html: Option<String>) -> SourceMessage {
+    let text = |key: &str| row[key].as_str().unwrap_or_default().to_string();
+    let opt = |key: &str| row[key].as_str().map(str::to_string);
+    SourceMessage {
+        from: text("from"),
+        to: text("to"),
+        cc: opt("cc"),
+        subject: text("subject"),
+        message_id: opt("message_id"),
+        date: opt("date_display"),
+        body: text("body").trim().to_string(),
+        attachments,
+        html,
+        reply_to: opt("reply_to"),
+    }
 }
 
 /// A row as the RFC 822 file `message.materialise_eml` writes, named by the

@@ -130,7 +130,8 @@ A save that went through closes the dialog and says "Saved 2 files to ~/Download
 
 The Export dialog ("Export message", `te` or the palette's "Export message as .eml") has the Save dialog's Directory field and Browse, and shares its last directory both ways.
 Export calls `message_export`, which copies the daemon's `message.materialise_eml` file, the raw RFC 822 message `mp export` writes as `<date>_<subject>.eml`, into the directory with the `_1` rule and releases the handle ([rust-layer.md](rust-layer.md), "Attachments").
-It says "Exported <file> to <directory>" in the activity area; a draft says it is a file already, and a server-only hit asks for the fetch first.
+It says "Exported <file> to <directory>" in the activity area; a draft says it is a file already.
+On a server-only hit Export calls `hit_export` instead, which hands the daemon the hit's `{message_id, mailbox}`: the daemon downloads the server's raw copy without ingesting it, so the hit stays a hit, and names the file off its own `Subject:` and `Date:`.
 
 ## The browser rendition
 
@@ -168,7 +169,7 @@ A server-only search hit has no row, so there is no body to load.
 The pane shows its sender, date and mailbox, says the message is on the server only, and offers Reply, Reply all and Forward, which `draft_from_message` builds from the hit's own headers, with no attachments.
 Its Fetch button, or `F`, is the TUI search overlay's `f`: `message_fetch` downloads the message into the store, the button says "Fetching…" meanwhile, and the hit then becomes the row it landed in, so the reader loads it like any stored message and the activity area says "Fetched into the local store".
 `F` on a hit the store already holds says "Already in the local store", and a refused fetch is an alert naming the daemon's reason.
-`to` and `ts` on a server-only hit say to fetch it first, since only a stored message has parts to materialise; Open in browser shows when the hit carries markup.
+`to` and `ts` on a server-only hit say to fetch it first, since only a stored message has parts to materialise; `te` and `cF` need no fetch, since the daemon downloads the hit's `.eml` itself; Open in browser shows when the hit carries markup.
 
 ## Refused links
 
