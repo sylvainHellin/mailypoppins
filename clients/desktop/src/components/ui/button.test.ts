@@ -17,3 +17,14 @@ describe("the outline button", () => {
     }
   });
 });
+
+describe("the ghost button", () => {
+  // The Calendar view's Past events toggle is a ghost button; with no pressed
+  // style of its own it looked the same on and off in both themes.
+  it("marks a pressed toggle with the selection colours in both themes", () => {
+    const classes = buttonVariants({ variant: "ghost" }).split(/\s+/);
+    for (const c of ["aria-pressed:bg-selection", "aria-pressed:text-selection-foreground", "dark:aria-pressed:bg-selection"]) {
+      expect(classes).toContain(c);
+    }
+  });
+});
