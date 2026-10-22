@@ -11,7 +11,7 @@ import type { Action } from "@/app/reducer";
 import { pushNotice } from "@/app/pending";
 import type { AppState, OperationEnd, SignIn } from "@/app/state";
 import * as cmd from "@/lib/commands";
-import { asGuiError, type OAuth2Stored } from "@/lib/gui-types";
+import { asGuiError, type AccountDraft, type OAuth2Stored } from "@/lib/gui-types";
 import type { Bootstrap } from "@/protocol/types";
 
 /** The phase the daemon reports the device code under (`DEVICE_CODE_PHASE`). */
@@ -75,12 +75,19 @@ export function isSignInOperation(s: AppState, operationId: string): boolean {
   return s.signIn?.operation_id === operationId && s.signIn.outcome === null;
 }
 
-/** Open the device-code dialog on a new sign-in of `account`. */
-export function signInRequested(s: AppState, token: number, account: string): AppState {
+/**
+ * Open the device-code dialog on a new sign-in of `account`; a candidate's
+ * (the account wizard's) leaves every overlay as it is, since the wizard
+ * shows the code itself and must stay open.
+ */
+export function signInRequested(s: AppState, token: number, account: string, candidate = false): AppState {
+  if (candidate) {
+    return { ...s, signIn: { token, account, candidate, operation_id: null, cancelling: false, outcome: null }, signInEarly: [] };
+  }
   return {
     ...s,
     overlay: "device_code",
-    signIn: { token, account, operation_id: null, cancelling: false, outcome: null },
+    signIn: { token, account, candidate, operation_id: null, cancelling: false, outcome: null },
     signInEarly: [],
     dialog: null,
     composeDialog: null,
@@ -95,7 +102,11 @@ export function signInRequested(s: AppState, token: number, account: string): Ap
 
 function ended(s: AppState, outcome: NonNullable<SignIn["outcome"]>): AppState {
   if (!s.signIn) return s;
+  // A candidate's sign-in the wizard cancelled (or was closed on) is
+  // forgotten at once: nothing is left to show it.
+  if (s.signIn.candidate && s.signIn.cancelling) return { ...s, signIn: null, signInEarly: [] };
   const next: AppState = { ...s, signIn: { ...s.signIn, outcome, cancelling: false }, signInEarly: [] };
+  if (s.signIn.candidate) return next;
   const kind = outcome.kind === "stored" || outcome.kind === "cancelled" ? "applied" : "failed";
   return pushNotice(next, { kind, account: s.signIn.account, text: outcome.text });
 }
@@ -162,12 +173,17 @@ export function signInRebootstrapped(s: AppState, bootstrap: Bootstrap, sameInst
 
 let nextSignIn = 1;
 
-/** Sign `account` in with a device code: the dialog opens at once and shows the code once the daemon reports it. */
-export async function startSignIn(dispatch: Dispatch<Action>, account: string): Promise<void> {
+/**
+ * Sign `account` in with a device code: the dialog opens at once and shows
+ * the code once the daemon reports it. With a `candidate`, the account
+ * wizard's draft is signed in instead, its token staged by the daemon until
+ * the write, and the wizard shows the code.
+ */
+export async function startSignIn(dispatch: Dispatch<Action>, account: string, candidate?: AccountDraft): Promise<void> {
   const token = nextSignIn++;
-  dispatch({ type: "sign_in_requested", token, account });
+  dispatch({ type: "sign_in_requested", token, account, candidate: candidate !== undefined });
   try {
-    const { operation_id } = await cmd.configOauth2Login(account);
+    const { operation_id } = await cmd.configOauth2Login(account, candidate);
     dispatch({ type: "sign_in_started", token, operation_id });
   } catch (e: unknown) {
     dispatch({ type: "sign_in_failed", token, error: asGuiError(e) });

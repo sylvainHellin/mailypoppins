@@ -8,8 +8,8 @@
 //! [`WizardDaemon`]: `config.probe` for a connection test or a mailbox list,
 //! `config.oauth2_login` with the `candidate` block for a sign-in,
 //! `config.init` or `config.add_account` for the file, and
-//! `config.set_password` for each password. The desktop wizard writes through
-//! the same three last methods, so both clients describe an account with one
+//! `config.set_password` for each password. The desktop wizard makes the same
+//! calls in the same order, so both clients describe an account with one
 //! `[[accounts]]` block, the one [`imap_candidate`] and [`graph_candidate`]
 //! build.
 //!

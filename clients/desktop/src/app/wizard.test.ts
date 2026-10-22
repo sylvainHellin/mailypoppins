@@ -1,6 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   accountDraft,
+  candidateDraft,
+  checkLine,
+  connectionKey,
+  mailboxTwice,
+  missingPasswordsLine,
+  passwordKinds,
+  probePlan,
+  probeRefusalLine,
+  runConnectionTest,
+  withListing,
+  writtenLine,
   CLIENT_EMPTY,
   DEFAULT_TENANT,
   FROM_EMPTY,
@@ -22,6 +33,7 @@ import {
   type WizardForm,
 } from "@/app/wizard";
 import { parseDeviceCode } from "@/app/signin";
+import { invoke, mock, PROBE_IMAP_MAILBOXES, PROBE_WRONG_PASSWORD, probeConfiguredRefusal, probeRefused, resetMock } from "@/test/tauri-mock";
 
 /** The keys the daemon's `account_block` reads (src/daemon/methods/config.rs), as paths. */
 const ACCOUNT_BLOCK_KEYS = new Set([
@@ -174,6 +186,110 @@ describe("the account wizard's draft", () => {
     const ms = withPreset(typed, "microsoft365");
     expect(ms).toMatchObject({ name: "mine", smtp_username: "me@example.com", smtp_host: "smtp.office365.com", smtp_port: "587" });
     expect(withPreset(presetForm("imap"), "proton").name).toBe("proton");
+  });
+});
+
+describe("the account wizard's connection test", () => {
+  const secrets = { smtp: "pw", imap: "", sameImap: true };
+
+  it("probes what the CLI probes, in its order, and only a password login stops the wizard", () => {
+    expect(probePlan("imap", true)).toEqual([
+      { check: "smtp", password: "smtp", required: true },
+      { check: "imap", password: "smtp", required: false },
+      { check: "mailboxes", password: "smtp", required: false },
+    ]);
+    expect(probePlan("proton", false)).toEqual([
+      { check: "smtp", password: "smtp", required: true },
+      { check: "imap", password: "imap", required: true },
+      { check: "mailboxes", password: "imap", required: false },
+    ]);
+    expect(probePlan("microsoft365", true)).toEqual([{ check: "mailboxes", password: null, required: false }]);
+    expect(probePlan("graph", true).map((c) => [c.check, c.required])).toEqual([
+      ["graph", false],
+      ["mailboxes", false],
+    ]);
+  });
+
+  it("carries the draft without its mailbox mapping, and goes stale when the candidate or the IMAP password choice moves", () => {
+    const form = filled("imap");
+    expect(candidateDraft(form).mailboxes).toBeUndefined();
+    expect(candidateDraft(form)).toEqual({ ...accountDraft(form), mailboxes: undefined });
+    expect(connectionKey({ ...form, sent: "Other", overrides: "x ignore" }, true)).toBe(connectionKey(form, true));
+    expect(connectionKey({ ...form, imap_host: "imap2" }, true)).not.toBe(connectionKey(form, true));
+    expect(connectionKey(form, false)).not.toBe(connectionKey(form, true));
+  });
+
+  it("passes with the server's mailboxes, and fails on a refused SMTP login without going on", async () => {
+    resetMock();
+    const ok = await runConnectionTest(filled("imap"), secrets);
+    expect(ok).toMatchObject({ result: { passed: true, listed: PROBE_IMAP_MAILBOXES } });
+    resetMock();
+    const refused = await runConnectionTest(filled("imap"), { ...secrets, smtp: PROBE_WRONG_PASSWORD });
+    expect(refused).toMatchObject({ result: { passed: false, listed: null } });
+    if (!("result" in refused)) throw new Error("a result");
+    expect(refused.result.runs).toEqual([{ check: "smtp", required: true, ok: false, error: probeRefused("smtp"), mailboxes: [] }]);
+    expect(mock.calls.filter((c) => c.cmd === "config_probe")).toHaveLength(1);
+  });
+
+  it("the SMTP password failing for IMAP, and a list that cannot be read, are warnings, as in the CLI", async () => {
+    resetMock();
+    vi.mocked(invoke)
+      .mockImplementationOnce(async () => ({ ok: true, error: null, mailboxes: [] }))
+      .mockImplementationOnce(async () => ({ ok: false, error: "IMAP login failed: no", mailboxes: [] }))
+      .mockImplementationOnce(async () => ({ ok: false, error: "IMAP login failed: no", mailboxes: [] }));
+    const outcome = await runConnectionTest(filled("imap"), secrets);
+    if (!("result" in outcome)) throw new Error("a result");
+    expect(outcome.result.passed).toBe(true);
+    expect(outcome.result.listed).toBeNull();
+    const [, imap, list] = outcome.result.runs;
+    expect(checkLine(imap, true)).toBe(
+      'IMAP: the SMTP password did not work for IMAP. IMAP login failed: no. Untick "IMAP uses the SMTP password" to give IMAP its own, or set it in Settings later.',
+    );
+    expect(checkLine(list, true)).toBe("Mailboxes: the server's list could not be read. IMAP login failed: no. Type the names on the next step.");
+  });
+
+  it("names the daemon's refusal of a configured name as a taken name", async () => {
+    expect(probeRefusalLine("work", probeConfiguredRefusal("work"))).toBe("An account named work is already configured. Go back to Identity and choose another name.");
+    expect(probeRefusalLine("work", "something else")).toBe("something else");
+    resetMock();
+    mock.failing.set("config_probe", { kind: "protocol", code: -32602, message: probeConfiguredRefusal("new") });
+    expect(await runConnectionTest(filled("graph"), secrets)).toEqual({
+      refusal: "An account named new is already configured. Go back to Identity and choose another name.",
+    });
+  });
+});
+
+describe("the account wizard's mailbox defaults", () => {
+  it("picks the CLI's preferred names from the server's list, each taken once, and leaves the marked roles to the server", () => {
+    const form = { ...filled("imap"), junk: "Old", overrides: "Labels/* ignore" };
+    expect(withListing(form, PROBE_IMAP_MAILBOXES)).toMatchObject({ inbox: "INBOX", archive: "Archive", sent: "Sent", drafts: "", trash: "", junk: "", overrides: "Labels/* ignore" });
+    // Gmail's names: the archive is All Mail, the sent folder found case-insensitively.
+    const gmail = ["INBOX", "[Gmail]/Drafts", "All Mail", "sent messages"];
+    expect(withListing(form, gmail)).toMatchObject({ inbox: "INBOX", archive: "All Mail", sent: "sent messages" });
+    // No preferred name: the first mailbox the roles before did not take.
+    expect(withListing(form, ["Posteingang", "Gesendet", "Archiv"])).toMatchObject({ inbox: "Posteingang", archive: "Gesendet", sent: "Archiv" });
+    expect(withListing(filled("graph"), ["Inbox", "Sent Items", "Archive"])).toMatchObject({ inbox: "Inbox", archive: "Archive", sent: "Sent Items" });
+  });
+
+  it("refuses one mailbox for two roles, but lets the marked roles share one", () => {
+    const form = filled("imap");
+    expect(stepErrors("mailboxes", { ...form, archive: "INBOX" }, []).archive).toBe(mailboxTwice("INBOX", "inbox"));
+    expect(stepErrors("mailboxes", { ...form, trash: "Sent" }, []).trash).toBe(mailboxTwice("Sent", "sent"));
+    expect(stepErrors("mailboxes", { ...form, trash: "Bin", junk: "Bin" }, [])).toEqual({});
+  });
+});
+
+describe("the account wizard's write", () => {
+  it("stores the passwords the test used, and says what it stored or did not", () => {
+    expect(passwordKinds("imap", true)).toEqual(["smtp"]);
+    expect(passwordKinds("proton", false)).toEqual(["smtp", "imap"]);
+    expect(passwordKinds("graph", false)).toEqual([]);
+    expect(writtenLine("a", "imap", false, true)).toBe("Added the account a; its password is stored");
+    expect(writtenLine("a", "imap", true, false)).toBe("Wrote config.toml with the account a; its SMTP and IMAP passwords are stored");
+    expect(writtenLine("a", "microsoft365", false, true)).toBe("Added the account a; its sign-in is stored");
+    expect(missingPasswordsLine("a", ["smtp", "imap"])).toBe(
+      "Account a is configured, but its SMTP and IMAP passwords are not stored, so it cannot log in yet. Set them in Settings.",
+    );
   });
 });
 

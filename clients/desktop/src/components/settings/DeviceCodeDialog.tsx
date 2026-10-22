@@ -4,14 +4,56 @@
 // then how it ended. While it runs, Escape and Cancel cancel it (the
 // provider's poll runs on, which the dialog says); once it ended they close.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef, type RefObject } from "react";
 import { Copy, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { openInBrowser } from "@/components/reader/links";
-import { cancelSignIn, deviceCodeOf } from "@/app/signin";
+import { cancelSignIn, deviceCodeOf, type DeviceCode } from "@/app/signin";
 import { useAppState, useDispatch } from "@/app/store";
 import { copyText } from "@/lib/clipboard";
+
+/**
+ * The verification page and the code of a running sign-in, with Copy and
+ * Open: the dialog's body, and the account wizard's Connection step's.
+ */
+export function DeviceCodeView({ code, cancelling, copyRef }: { code: DeviceCode; cancelling: boolean; copyRef?: RefObject<HTMLButtonElement | null> }) {
+  const dispatch = useDispatch();
+  const id = useId();
+  return (
+    <div className="flex flex-col gap-3" data-slot="device-code">
+      <div className="flex flex-col gap-1">
+        <span className="text-sm text-muted-foreground" id={`${id}-url`}>
+          Verification page
+        </span>
+        <span aria-labelledby={`${id}-url`} className="font-mono text-xs break-all">
+          {code.url}
+        </span>
+      </div>
+      <div className="flex flex-col gap-1">
+        <span className="text-sm text-muted-foreground" id={`${id}-code`}>
+          Code
+        </span>
+        <output aria-labelledby={`${id}-code`} data-slot="device-code-value" className="font-mono text-2xl tracking-widest">
+          {code.code}
+        </output>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button ref={copyRef} type="button" variant="outline" size="sm" onClick={() => void copyText(code.code, "the sign-in code", dispatch)}>
+          <Copy aria-hidden="true" />
+          Copy code
+        </Button>
+        <Button type="button" variant="outline" size="sm" onClick={() => openInBrowser(code.url, dispatch)}>
+          <ExternalLink aria-hidden="true" />
+          Open verification page
+        </Button>
+      </div>
+      <p role="status" className="text-xs text-muted-foreground">
+        {cancelling ? "Cancelling…" : "Waiting for you to approve the sign-in in the browser…"}
+      </p>
+    </div>
+  );
+}
 
 export function DeviceCodeDialog({ open }: { open: boolean }) {
   const s = useAppState();
@@ -77,37 +119,7 @@ export function DeviceCodeDialog({ open }: { open: boolean }) {
             {run.outcome.text}
           </p>
         ) : code ? (
-          <div className="flex flex-col gap-3" data-slot="device-code">
-            <div className="flex flex-col gap-1">
-              <span className="text-sm text-muted-foreground" id="device-code-url-label">
-                Verification page
-              </span>
-              <span aria-labelledby="device-code-url-label" className="font-mono text-xs break-all">
-                {code.url}
-              </span>
-            </div>
-            <div className="flex flex-col gap-1">
-              <span className="text-sm text-muted-foreground" id="device-code-code-label">
-                Code
-              </span>
-              <output aria-labelledby="device-code-code-label" data-slot="device-code-value" className="font-mono text-2xl tracking-widest">
-                {code.code}
-              </output>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button ref={copyRef} type="button" variant="outline" size="sm" onClick={() => void copyText(code.code, "the sign-in code", dispatch)}>
-                <Copy aria-hidden="true" />
-                Copy code
-              </Button>
-              <Button type="button" variant="outline" size="sm" onClick={() => openInBrowser(code.url, dispatch)}>
-                <ExternalLink aria-hidden="true" />
-                Open verification page
-              </Button>
-            </div>
-            <p role="status" className="text-xs text-muted-foreground">
-              {run?.cancelling ? "Cancelling…" : "Waiting for you to approve the sign-in in the browser…"}
-            </p>
-          </div>
+          <DeviceCodeView code={code} cancelling={run?.cancelling ?? false} copyRef={copyRef} />
         ) : (
           <p role="status" className="text-sm text-muted-foreground">
             {run?.cancelling ? "Cancelling…" : "Asking the provider for a device code…"}

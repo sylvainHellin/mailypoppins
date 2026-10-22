@@ -451,7 +451,7 @@ export type Action =
   | { type: "credentials_loaded"; gen: number; credentials: AccountCredentials }
   | { type: "credentials_failed"; gen: number; error: GuiError }
   | { type: "open_account_wizard"; preset?: AccountWizard["preset"] }
-  | { type: "sign_in_requested"; token: number; account: string }
+  | { type: "sign_in_requested"; token: number; account: string; candidate?: boolean }
   | { type: "sign_in_started"; token: number; operation_id: string }
   | { type: "sign_in_failed"; token: number; error: GuiError }
   | { type: "sign_in_cancelling" }
@@ -2186,7 +2186,7 @@ function reduce(s: AppState, a: Action): AppState {
     case "open_account_wizard":
       return openAccountWizard(s, a.preset ?? "imap");
     case "sign_in_requested":
-      return signInRequested(s, a.token, a.account);
+      return signInRequested(s, a.token, a.account, a.candidate ?? false);
     case "sign_in_started":
       return signInStarted(s, a.token, a.operation_id);
     case "sign_in_failed":

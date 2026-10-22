@@ -697,11 +697,14 @@ export type AccountWizard = { preset: "imap" | "proton" | "microsoft365" | "grap
  * `operation_id` is null until `config_oauth2_login` answers, `cancelling`
  * is set once Cancel was asked, and `outcome` once it ended (stored, failed
  * with the daemon's or the provider's sentence, cancelled). The code itself
- * is the operation's progress, in `progress`.
+ * is the operation's progress, in `progress`. A `candidate` sign-in is the
+ * account wizard's, of an account not written yet: the wizard shows it
+ * inline instead of the overlay, and its end leaves no notice.
  */
 export type SignIn = {
   token: number;
   account: string;
+  candidate: boolean;
   operation_id: string | null;
   cancelling: boolean;
   outcome: { kind: "stored" | "failed" | "cancelled"; text: string } | null;

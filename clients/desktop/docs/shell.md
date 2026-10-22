@@ -30,7 +30,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/app/health.ts` | The daemon's health checks that are not ok: the snapshot's seed, `diagnostic.check_changed` by name, each check's log line and label, and which the banner shows |
 | `src/app/interop.ts` | `sc` and `sf` (config.toml and the daemon log in the editor), and the reader's copies |
 | `src/app/settings.ts` | The Settings view's configuration, the config.toml banner's problem, `config.changed`, the reload, and the password dialog's store |
-| `src/app/wizard.ts` | The account wizard's presets, per-step checks and the `AccountDraft` its review writes |
+| `src/app/wizard.ts` | The account wizard's presets, per-step checks, connection test, mailbox defaults and the `AccountDraft` its review writes |
 | `src/app/signin.ts` | The device-code sign-in this window awaits: its start, the code read from its progress, its cancel, how it ends and the lines that say so |
 | `src/app/attachments.ts` | `to`, `ts`, `tb`, `ta` and `F`, and what the attachment dialogs and buttons run |
 | `src/app/data.ts` | Boot (subscribe, status, menu), `version_info`, and the loaders |
@@ -105,7 +105,7 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `event` `operation.finished` of an RSVP | the RSVP settles: a notice says how, and the account's agenda and invitation cards are read again |
 | `event` `operation.finished` of an invitation | the invitation settles: a notice says how, and the account's agenda, invitation cards and outbox counts are read again |
 | `event` `operation.finished` of a contact rebuild | the rebuild settles: a notice says how, and a written index is read again |
-| `event` `operation.finished` of a sign-in | the sign-in settles: the device-code dialog and a notice say how (see Account wizard) |
+| `event` `operation.finished` of a sign-in | the sign-in settles: the device-code dialog and a notice say how, or for the account wizard's candidate sign-in the wizard alone (see Account wizard) |
 | `event` `daemon.shutting_down` | the shutting-down banner |
 | `event` `message.server_hit`, `operation.finished` | the running server search's hits and its end, by `operation_id` |
 | `event` `operation.progress` | the typed `operation_progress` action: the operation's last report in `progress`, by `operation_id`, until it finishes, settles or is dropped, and every report dropped on a bootstrap of another daemon instance; the Contacts view's header shows a rebuild's, and the device-code dialog a sign-in's |
@@ -989,9 +989,9 @@ After Later and a quit, the new app's first connect meets the old version's daem
 ## Account wizard
 
 The account wizard (overlay `account_wizard`, `AccountWizard.tsx`) adds an account to config.toml through the daemon (ACC-01, ACC-02).
-The TUI has none, so its model is the CLI's `mp config init` and `mp config add-account` (src/config_cmd/init.rs).
-`state.accountWizard` holds only the preset it starts on; the form lives in the dialog's own state and never holds a password.
-The pure half is `app/wizard.ts`: the presets, the per-step checks and the `AccountDraft` the review writes.
+The TUI has none, so its model is the CLI's `mp config init` and `mp config add-account` (src/config_cmd/init.rs), whose steps it takes through the same daemon calls: `config.probe` for the connection test and the mailbox list, `config.oauth2_login` with a `candidate` for a Microsoft 365 sign-in, `config.init` or `config.add_account` for the file, and `config.set_password` for each password.
+`state.accountWizard` holds only the preset it starts on; the form and the passwords live in the dialog's own state, never in the store.
+The pure half is `app/wizard.ts`: the presets, the per-step checks, the probes the test runs, the mailbox defaults and the `AccountDraft` the review writes.
 
 ### Steps
 
@@ -1003,9 +1003,14 @@ The pure half is `app/wizard.ts`: the presets, the per-step checks and the `Acco
    Switching the preset replaces the provider's values and keeps the name the user typed, the usernames and the app registration.
 2. Identity: the account name, and the From address ("Email address" for Graph, where it is required).
 3. Servers: SMTP host, port and username, IMAP host, port and username, then for both Microsoft 365 presets the client ID and the tenant ID; Graph shows only the last two.
-4. Mailboxes: the server names of Inbox, Archive and Sent (INBOX, Archive and Sent by default), then Drafts, Trash and Junk, each left empty for the folder the server marks, and the policy overrides, one `<pattern> <sync|status-only|ignore>` per line (#0141).
+4. Connection: the test, before anything is written (see "The connection test").
+5. Mailboxes: the server names of Inbox, Archive and Sent, then Drafts, Trash and Junk, and the policy overrides, one `<pattern> <sync|status-only|ignore>` per line (#0141).
+   When the test listed the server's mailboxes, each role is a select over that list, preselected as the CLI does: for Inbox, Archive and Sent in turn, the first of the CLI's preferred names the server lists, compared without case (INBOX; Archive, archive, All Mail; Sent, Sent Items, Sent Messages, INBOX.Sent; for Graph Inbox, Archive, Sent Items), else the first mailbox the roles before did not take.
+   Drafts, Trash and Junk start on "The one the server marks" and offer the list too.
+   A test that lists the same mailboxes again keeps the user's picks.
+   When the list could not be read, the roles are text fields with the provider's usual names, and Drafts, Trash and Junk are left empty for the folder the server marks.
    There is no list of extra mailboxes: the daemon finds and syncs every other folder the server lists.
-5. Review: what will be written, then "Add account", or "Write config.toml" when the daemon has none.
+6. Review: what will be written and what the test found, then "Add account", or "Write config.toml" when the daemon has none.
 
 Next checks the step, and Enter in a field is Next.
 A refused step marks each field `aria-invalid`, ties its sentence to it with `aria-describedby`, and focuses the first one.
@@ -1013,21 +1018,44 @@ The name must be non-empty, letters, digits, `.`, `-` and `_` starting with a le
 The SMTP host, the SMTP username and valid ports are required for the three IMAP presets; an empty IMAP host or username falls back to the SMTP one.
 The client ID and the tenant ID are required for the OAuth2 preset.
 The Graph preset may leave both empty, as the CLI wizard does: the client ID then becomes the shared mailypoppins app (`MAILYPOPPINS_CLIENT_ID`) and the tenant `common`, and the review shows "the mailypoppins app, tenant common".
+One server mailbox plays one role: Archive or Sent naming the Inbox's mailbox, or Drafts, Trash or Junk naming one of the three, is refused with "<name> is already the <role> mailbox", since the CLI's pickers offer only what the roles before did not take; Drafts, Trash and Junk may share one.
 The review runs every check again and jumps to the step of the first failure.
-There is no connection test and no server mailbox pick, since both need a configured account; a wrong host shows as the first sync's failure in the sidebar.
+
+### The connection test
+
+The test probes the draft the review would write, without its mailboxes, as the CLI's probes do; its result belongs to that draft and to the IMAP password choice, so a change of either on an earlier step makes it stale and the Connection step tests again, and the review sends back to it with "The servers changed since the last test" should it ever be stale there.
+The Connection step also checks the name again: a name configured since goes back to Identity with the taken-name sentence.
+
+A password preset asks for the SMTP password, masked, and "IMAP uses the SMTP password", checked by default as the CLI's "Use same password as SMTP?" is; unchecked, it asks for the IMAP password too.
+"Test connection" then probes `smtp` with the SMTP password, `imap` with the IMAP one (or the SMTP one), and `mailboxes` with the same, in the CLI's order.
+The SMTP login must pass, and so must an IMAP login with its own password; a failure stops the test there and the button stays "Test connection".
+The SMTP password failing for IMAP is a warning, as in the CLI: the line says to untick the box or set the IMAP password in Settings later, and the wizard goes on.
+The passwords stay in the component and are sent to `config_probe` only; an edit of either clears the result.
+
+A Microsoft 365 preset says Microsoft signs the account in first, and its button is "Sign in": `config_oauth2_login` with the draft as `candidate`, which the daemon signs in under a staged token (`candidates/<name>`) and no configured account's.
+The sign-in is a candidate one in `state.signIn`: it opens no `device_code` overlay and leaves no notice, and the wizard shows its code inline with the device-code dialog's view (verification page, code, "Copy code", "Open verification page") and "Cancel sign-in".
+Back and the button wait while it runs.
+Stored, it says "Signed in. The token waits for the account to be written." and the test runs at once: `mailboxes` for the OAuth2 preset, `graph` then `mailboxes` for Graph, neither of which stops the wizard, as in the CLI.
+Failed, the alert says "The sign-in of <name> failed: <why>" and the button signs in again; cancelled, the sign-in is forgotten.
+
+Each probe the test ran is one line in the list "Connection test", with a check mark when it passed, a cross for a failure that stops the wizard and a warning sign for one that does not, in plain words with the server's sentence: "SMTP: the server accepted the login.", "SMTP: the login failed. <the server's sentence>", "Mailboxes: the server listed 7.", "Mailboxes: the server's list could not be read. <why>. Type the names on the next step.".
+Once it passed, the button is Next.
+The daemon refusing the probe itself shows in the alert: a token candidate named like a configured account (the daemon's refusal since its security fix, so no configured account's token travels to the host a candidate names) reads "An account named <name> is already configured. Go back to Identity and choose another name.".
 
 ### The write
 
-The review calls `config_add_account`, or `config_init` when `config_get` answered `absent`.
+Nothing is written before the review's button.
+It calls `config_add_account`, or `config_init` when `config_get` answered `absent`; the daemon promotes a staged sign-in of that name as it writes.
 The draft carries exactly the keys the daemon's `account_block` reads: `auth_method` only for the Microsoft 365 presets, `oauth2` with them, no server for Graph, and the From address defaulting to the SMTP username.
-A refusal (a taken name, a block the daemon does not load) shows in the wizard's alert, and the wizard stays open.
-On success the notice line says "Added the account <name>; ..." or "Wrote config.toml with the account <name>; ...", and the wizard hands over.
+A refusal (a taken name, a block the daemon does not load) shows in the wizard's alert, and the wizard stays open with nothing stored.
+Then each password the test used goes to `config_set_password`, the SMTP one and the IMAP one when it has its own, now that the account exists.
+On success the notice line says "Added the account <name>; its password is stored" (or "its SMTP and IMAP passwords are stored", or "its sign-in is stored"), or "Wrote config.toml with the account <name>; ...", and the dialog closes.
+A password the daemon did not store leaves the account written: the notice says "Account <name> is configured, but its SMTP password is not stored, so it cannot log in yet. Set it in Settings." and the password dialog opens for it.
 The daemon's `config.changed` then names the account as added, so the account list and its mailboxes are read and the sidebar shows it (see Settings, "config.changed").
 
-A password preset hands over to the password dialog for the SMTP password, which IMAP falls back to; "Set IMAP password" in Settings stores a different one.
-A Microsoft 365 preset starts the sign-in and opens the device-code dialog.
-A wizard dismissed while the write runs hands over to nothing, since either dialog would close the overlay opened since; the notice says what comes next, and Settings has the buttons.
-The first-run screen's wizard cannot be dismissed, and always hands over.
+Cancel or Escape at any step writes and stores nothing; a sign-in still running is cancelled (`sign_in_cancelling`, whose `operation_cancel` the always-mounted device-code dialog sends once the id is known), and a staged token waits under `candidates/` as the CLI's does, never in a configured account's cache.
+A wizard dismissed while the write runs still stores the passwords, and changes no overlay opened since: neither the close nor the password dialog runs, and the notice says what happened.
+The first-run screen's wizard cannot be dismissed, and finishes the same way after the screen gave way to the shell.
 
 ### The device-code dialog
 
@@ -1054,7 +1082,7 @@ The dialog opens on "Cancel sign-in", then moves the focus to "Copy code" when t
 
 A daemon started on an empty configuration directory has no config.toml and no account.
 With no account known, the loader reads `config_get` even outside the Settings view, and `absent` shows the setup screen (`screens/SetupScreen.tsx`, titled "Set up mailypoppins") instead of the shell.
-It names the file the daemon will write and holds the account wizard inline, with no Cancel, writing through `config_init`.
+It names the file the daemon will write and holds the account wizard inline, with no Cancel, testing the account and writing through `config_init`.
 The shell with zero accounts stays what it was when config.toml exists but names no account.
 
 Once `config.changed` names the account and the account list has it, the shell replaces the screen.

@@ -72,6 +72,34 @@ describe("the sign-in model", () => {
   });
 });
 
+describe("the account wizard's candidate sign-in", () => {
+  it("leaves the wizard's overlay open, and its end leaves no notice", () => {
+    let s = run(booted(), { type: "open_account_wizard", preset: "graph" });
+    expect(s.overlay).toBe("account_wizard");
+    s = run(s, { type: "sign_in_requested", token: 1, account: "new", candidate: true }, { type: "sign_in_started", token: 1, operation_id: "op-1" });
+    expect(s.overlay).toBe("account_wizard");
+    expect(s.accountWizard).toEqual({ preset: "graph" });
+    expect(s.signIn).toMatchObject({ account: "new", candidate: true, operation_id: "op-1" });
+    s = run(s, progress("op-1"));
+    expect(deviceCodeOf(s)?.code).toBe("FXTR-CODE");
+    const notice = s.notice;
+    s = run(s, envelope("operation.finished", { operation_id: "op-1", state: "succeeded", result: { ...stored, account: "new", staged: true } }, 902));
+    expect(s.signIn?.outcome?.kind).toBe("stored");
+    expect(s.notice).toBe(notice);
+    s = run(s, { type: "sign_in_closed" });
+    expect(s.signIn).toBeNull();
+    expect(s.overlay).toBe("account_wizard");
+  });
+
+  it("a cancelled one is forgotten once it ends", () => {
+    let s = run(booted(), { type: "sign_in_requested", token: 1, account: "new", candidate: true }, { type: "sign_in_cancelling" });
+    s = run(s, { type: "sign_in_started", token: 1, operation_id: "op-1" });
+    expect(s.signIn?.cancelling).toBe(true);
+    s = run(s, envelope("operation.finished", { operation_id: "op-1", state: "cancelled", error: { code: -32008, message: "operation_cancelled" } }, 902));
+    expect(s.signIn).toBeNull();
+  });
+});
+
 describe("the first-run screen", () => {
   const absent: ConfigSnapshot = { revision: 0, path: "/c/config.toml", state: "absent", config: { secrets_backend: "", email: { send_hold_secs: 0 }, accounts: [] } };
   it("shows for a daemon with no account and no config.toml only", () => {

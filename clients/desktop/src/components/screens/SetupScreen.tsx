@@ -6,8 +6,10 @@ import { PathRow, ScreenFrame } from "@/components/screens/ScreenFrame";
  * First run: the daemon has no config.toml and serves no account, so the
  * wizard writes the first one (`config_init`). Once the daemon's
  * `config.changed` names the account and the account list has it, the
- * shell replaces this screen; the password or sign-in step that follows is
- * an overlay, which survives the swap.
+ * shell replaces this screen. The wizard tested the account before the
+ * write and stores its passwords after it, whether or not the screen is
+ * still there; a password the daemon did not store opens the password
+ * dialog, an overlay, which survives the swap.
  */
 export function SetupScreen({ path }: { path: string }) {
   return (
