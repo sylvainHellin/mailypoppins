@@ -36,8 +36,20 @@ All notable changes to this project are documented in this file.
 - Microsoft Graph: a folder renamed on the server keeps its messages and its sync state under the new name (#0141).
 - `mp signature list|show|new|edit|rename|delete|default` manages the signatures and each account's default from the CLI, over the same daemon methods as the TUI's `cs` overlay and the desktop's Signatures dialog.
 - `mp -A <account>` with no subcommand opens the TUI on that account; a name no account carries is refused before the TUI starts.
+- Drafts are mirrored to each IMAP account's server Drafts folder (#0143).
+  A save is pushed within seconds.
+  An edit made in Outlook, Apple Mail, the Proton app or mp on another machine comes back at the next sync.
+  A draft changed on both sides keeps the server's version, and your text is saved beside it in `<name>.conflict.md`.
+  `[accounts.drafts] mirror = false` turns the mirror off for an account.
+- TUI and desktop: the Drafts list shows each draft as synced, pending, conflict or failed (#0143).
+- Drafts started in Outlook, Apple Mail or the Proton app appear in mp's Drafts view as Markdown files (#0143).
+- Sent and discarded drafts move to `drafts/.retired/` for 30 days, and their server copies are removed (#0143).
+  A draft whose server copy was sent or deleted in another client moves there once two syncs in a row miss the copy, and comes back if the copy does.
+- A draft's server copy carries nothing in its body beyond the message itself, so a copy sent unedited from another client reveals no Bcc and no frontmatter; mp's own bookkeeping rides in `X-Mailypoppins-Draft-Source` headers, without the Bcc (#0143).
+- `draft.set_headers` rewrites an existing draft's recipients and subject in the daemon (#0143).
 
 ### Changed
+- TUI `ce` and the desktop recipients dialog edit a draft's headers through `draft.set_headers` and no longer write the file themselves (#0143).
 - TUI: no password or OAuth token is read in the TUI's process any more; whether an account can sync or send is the daemon's `account.credentials` answer, and `mp` without a subcommand no longer opens the secrets backend.
 - TUI: the Contacts view and the compose wizard's recipient completion read the contact index from the daemon (`contact.search`) instead of the cache file, refresh on `contact.changed`, and say on the status line when the index build a search ran was refused.
 - TUI: the compose wizard's new draft is the daemon's `draft.create`, `x` approves through `draft.validate` and `draft.approve`, and the attach prompt calls `draft.attach`, as in the desktop app; the wizard lists and opens signatures through `signature.*`.

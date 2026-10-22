@@ -3142,3 +3142,56 @@ That was the empty capture of the desktop's `configuration::tests` (7 of 60 full
 The fix keeps a second, uninterested subscriber registered for the whole test binary (`SECOND_SUBSCRIBER` in `traced()`), so every callsite's interest is asked of every live subscriber, the capture included.
 Rebuilding the interest cache inside the capture is not enough: a callsite another thread registers after the rebuild is cached by that thread alone again.
 `the_capture_keeps_a_line_another_thread_reached_first` reproduces it deterministically when run alone.
+
+## lettre refuses a message with no recipient unless it has an envelope (2026-10-23)
+
+`Message::builder()` derives the SMTP envelope from To, Cc and Bcc and fails the build when all three are empty.
+A draft's server copy (#0143) is never submitted and may have no recipient yet, so `send::build_server_draft` sets an explicit `.envelope(...)` naming the sender alone; the formatted bytes carry no envelope.
+
+## `ts_bindings` runs only with `--features ts` (2026-10-23)
+
+`crates/mp-protocol/tests/ts_bindings.rs` is gated on the `ts` feature, which `cargo test --workspace` never enables, so a type missing from the TypeScript export list passes every default run.
+`FolderPolicy` sat unlisted that way until #0143; run `cargo test -p mp-protocol --features ts --test ts_bindings` after touching a protocol type.
+
+## The desktop colour guard reads `#0143` as a hex colour (2026-10-23)
+
+The desktop's colour-guard test scans TSX sources for hex colours, and a ticket number written `#0143` in a comment matches.
+Write "ticket 0143" in TSX comments.
+
+## `fs::rename` keeps the file's mtime (2026-10-23)
+
+A rename moves the inode and keeps its modification time, so a file aged from the moment it was moved (the 30-day prune of `drafts/.retired/`) would be aged from its last edit.
+`draft::retire_draft_files` sets the mtime to now after the rename.
+
+## A half-typed frontmatter makes a draft vanish from every parse (2026-10-23)
+
+A draft whose YAML does not parse while the user types is missing from `local_drafts`, and the first drafts mirror read that as "removed by hand": it deleted the server copy, and the other machine then retired the draft and left a tombstone that deleted the next push, until the draft was retired on both machines.
+Three rules now hold in `draft_mirror::reconcile`.
+A file whose `id:` a line scan reads still counts as present.
+An absence acts only when two reconciles in a row see it under one UIDVALIDITY (`draft_absence`).
+Only a send, a discard or a hand removal leaves a tombstone that deletes copies; a draft retired because its copy went is kept as `<name>.copy-gone.md` and comes back with the copy.
+Between two machines, any inference that deletes is amplified by the other machine's reaction to it, so a delete must follow from something the user did.
+
+## Re-hash a file before replacing it after a network wait (2026-10-23)
+
+A pull reads the draft, fetches the server copy, and renames the rewritten file over the draft; a save in the editor between the read and the rename was lost.
+`reconcile::pull_into` hashes the file again just before the rename and leaves a changed draft to the next reconcile, which sees both sides moved and keeps the save in a conflict copy.
+The `draft_sync` row records the hash of the bytes the pull wrote, never a re-read, which could take in a save made after the rename and mark it synced so it is never pushed.
+`LocalDraft::read` parses the very bytes it hashed (`parse_email_draft_content`), and a new file is placed with a hard link, which fails rather than replace a file that appeared since the name was chosen.
+
+## Anything in a draft copy's body reaches the recipients (2026-10-23)
+
+Outlook, Apple Mail and the Proton app can send a draft mp pushed without editing it, and its whole body then goes out.
+The first build carried the draft file, Bcc and private frontmatter included, in an HTML comment of the copy; the copy's HTML part now ends with hashes only (`<!-- mp:copy v2 file=... src=... -->`), and the file rides in `X-Mailypoppins-Draft-Source` headers with its `bcc:` emptied, the Bcc coming back from the copy's own `Bcc` header.
+Exchange keeps an APPEND's MIME until a client edits the copy and promotes no unmapped X-header to a property, and Proton Bridge drops unknown headers at the APPEND, so the headers are a best effort and a copy without them is read through its HTML.
+
+## The first match of a marker in mail HTML is the sender's (2026-10-23)
+
+A reply embeds the original's HTML verbatim, so a marker found by the first `find` in a draft's HTML may be one a sender planted, which is how a crafted draft could be imported.
+`parse::draft_copy_mark` accepts only the last comment of the part followed by closing tags, the companion HTML of a reply or forward has every `mp:copy` and `mp:source` comment renamed (`parse::neutralize_draft_marks`), and a carried draft whose `server_message_id` is not the copy's `Message-ID` is read as a foreign copy.
+
+## A first push changes the file it was queued for (2026-10-23)
+
+The first push of a draft writes its `server_message_id`, so the bytes it pushes hash differently from the bytes the owed-push scan queued it for.
+A failed push recorded with the queued hash was therefore queued again at every drain, piling up failed rows and announcing `mutations.rolled_back` each time.
+`push::push` records the hash it runs for on its queued row (`pending_ops::note_push_hash`), and the scan skips a draft whose parked push is for its current hash.
