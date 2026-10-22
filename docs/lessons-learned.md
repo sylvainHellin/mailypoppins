@@ -3038,3 +3038,40 @@ The setup wizards describe an account before it exists, and the daemon dials the
 Token caches are keyed by account name, so a candidate named like a configured account read that account's cached token and sent it to whatever SMTP or IMAP host the candidate named, and its sign-in overwrote that account's token even when the wizard was then abandoned.
 A candidate's sign-in is now staged under `tokens/candidates/<name>.enc`, which no account name can reach since names never contain a path separator; a probe reads only the staged token, and `config.init` or `config.add_account` renames it over the real cache after the file is written and before the runtime starts.
 Anything a client describes but the configuration does not yet hold gets its own key space, never the configured one.
+
+## async-imap's special-use attributes need their own arms (#0141, 2026-10-22)
+
+`NameAttribute::Sent`, `Trash` and the rest are variants of their own, so a catch-all `format!("{other:?}")` rendered them as `Sent` without the backslash.
+Nothing read them before discovery, so the bug stayed invisible until role detection matched nothing.
+
+## A capped target must not count against the prune gate (#0141, 2026-10-22)
+
+The #0072 coverage gate treats any short download as a partial pass.
+A folder synced only to its newest 50 messages on purpose would suspend every prune on the account for as long as it held more than 50.
+`SyncTarget::window` exempts the deliberate shortfall but still counts messages it failed to write.
+
+## A window over a by-id download is the newest N of the folder, not N of the new ones (#0141, 2026-10-22)
+
+Graph downloads what the store lacks by id, so capping the new messages at 50 took the next older 50 on every pass, and the backlog flag asked for the next pass at once: the trash drained in full over a few minutes.
+A windowed target selects among the folder's newest `window` messages, held or not, as the IMAP window takes the newest UIDs, and never owes a backlog.
+
+## Match a typed mailbox name one tier at a time across every row (#0141, 2026-10-22)
+
+Matching the store key, the label and the server name of one row before moving to the next let the `\Trash` folder, labelled `Trash` and sorted first, capture a pinned folder whose name is `Trash`.
+`mp_protocol::state::pick_mailbox` matches every row's key, then every row's label, then every server name, and every client goes through it.
+
+## Graph resolves an English well-known name whatever the mailbox's language (#0141, 2026-10-22)
+
+`/me/mailFolders/inbox` and the English display names map to the well-known folders, so a config naming `Inbox` or `Sent Items` designates the folder a German mailbox lists as `Posteingang` or `Gesendete Elemente`.
+Matching config names against the listing by name alone added a second folder for the pin and synced the inbox twice.
+A Graph display name is plain text, too: decoding it as modified UTF-7 turned `Q&A-2024` into `Q2024`.
+
+## Discovery writes the store, so a guarded pass lists under the engine turn and only after the transport loads (#0141, 2026-10-22)
+
+Listing before `run_sync_guarded` opened an IMAP session while another engine held the lock (`engine_lock_ingest_cli`).
+Taking the turn for an account with no password held the lock a newly added account must leave free (`daemon_config`).
+
+## Agent git commands that open an editor hang (2026-10-22)
+
+The agent environment exports `GIT_EDITOR=nvim`, so `git rebase --continue` waited for input until the call timed out.
+Run git with `GIT_EDITOR=true`, and `GIT_SEQUENCE_EDITOR=true` for a rebase with `--autosquash`.

@@ -22,6 +22,15 @@ All notable changes to this project are documented in this file.
 - `mp config show` and the desktop Settings say whether each password and OAuth token is stored, from the new daemon method `account.credentials`; no client reads a secret to say so.
 - Signatures are managed through the daemon (`signature.read`, `create`, `rename`, `delete`, `set_default`), and another client's delete shows at once (`signature.removed`).
 - Sending a contact as a vCard is one daemon call (`contact.vcard_draft`), contact lists refresh when any client or a sync changes the index (`contact.changed`), and a contact search whose index build was refused says so.
+- Mailbox discovery (#0141, PERSO-119): the daemon lists every folder on the server and keeps it by a policy.
+  Inbox, Sent, Archive and every folder you created sync on every tick.
+  The trash and junk folders and Proton's label folders show the server's counts, and the trash and junk folders download their newest 50 messages so a message moved there keeps its row.
+  Exchange's calendar, contact and task folders, Proton's All Mail and Starred, and folders that only hold other folders are ignored.
+  `[[accounts.mailboxes.override]]` (`match`, `policy`) changes a policy, and `[accounts.mailboxes.drafts|trash|junk]` names a role folder the server does not mark.
+- TUI and desktop: `gf` opens a fuzzy picker over every mailbox of the account, matching label or server name (#0141).
+- `mp config show` lists every folder the server listed with its policy, ignored ones included (#0141).
+- Setup wizards: `mp config init`, `mp config add-account` and the desktop account wizard ask for the drafts, trash and junk folders, each left empty for the one the server marks, and for policy overrides (#0141).
+- Microsoft Graph: a folder renamed on the server keeps its messages and its sync state under the new name (#0141).
 
 ### Changed
 - Server search: `mp search`, the TUI search overlay and the desktop search bar get the newest `--limit` results across every mailbox from one daemon search; each mailbox is asked for its newest N and only the N newest overall are downloaded (PERSO-175).
@@ -43,6 +52,12 @@ All notable changes to this project are documented in this file.
 - `-s/--signature` and `--no-signature` are taken only by `mp new`, `mp reply`, `mp forward` and `mp send --invite`; `-A` is refused by the commands that act on no account (`mp daemon`, `completions`, `dump-keys`, `account list`, `config init|show|add-account|reset-secrets|path`).
 - `mp config init` and `mp config add-account` test the login, list the mailboxes, sign in, write `config.toml` and store the passwords through the daemon (`config.probe`, `config.oauth2_login` with `candidate`, `config.init` with `replace`); nothing is written until the last answer.
   A password the daemon fails to store once the file is written is named, with the `mp config set-password <smtp|imap> --account <name>` that sets it, and the wizard ends in an error.
+- `mp sync --mailbox`, `mp search --mailbox`, `mp list-messages --mailbox`, hooks, moves and server-search fetches accept any folder the server lists, without a config entry (#0141).
+- `mp list-mailboxes` prints each folder's policy and its role, or why it is ignored; on Microsoft Graph it lists the whole folder tree (#0141).
+- A server search that names no mailbox covers the folders the account syncs (#0141).
+  The desktop's account totals count synced mailboxes only.
+- A mailbox name matches a store key first, then a sidebar label, then a server name, in every client, so a folder called Trash is reached by its name rather than the folder the server marks as trash (#0141).
+- Setup wizards no longer offer extra mailboxes to sync: the daemon finds and syncs every folder on its own (#0141).
 
 ### Fixed
 - Sending over Microsoft Graph: a message too large for one sendMail (a reply with a big attachment) is sent as a draft built from its own MIME, with the attachments uploaded separately, so it stays in its Outlook conversation; an interrupted Graph send, or one Graph answered with a server error after it may have taken it, is resumed on the next start against Drafts and Sent Items, never sent twice and leaving no draft behind (#0063).
@@ -68,6 +83,10 @@ All notable changes to this project are documented in this file.
   `archive` and `delete` refuse to act on a copy the store holds in another mailbox and name that copy's selector, and `mp invite` answers from the selector's own account instead of the default one.
 - Setup wizards: a Microsoft 365 sign-in for an account being set up is staged under `tokens/candidates/` and becomes the account's token only when `config.init` or `config.add_account` writes the account, so an abandoned `mp config init` leaves a configured account of the same name signed in as it was.
   A connection test of an account being set up never uses a configured account's token, so a candidate named like a configured account cannot carry that token to the servers it names.
+- A server-search hit from a folder the account does not configure can be fetched, read with `mp show` and `mp save`, exported as .eml and forwarded as attachment in every client (#0141).
+- `mp list-mailboxes` printed the special-use attributes without their backslash (`Sent` for `\Sent`) (#0141).
+- TUI: the sidebar scrolls to keep the open mailbox on screen when there are more mailboxes than rows (#0141).
+- Microsoft Graph: an English config (`Inbox`, `Sent Items`) on a mailbox in another language syncs each role folder once, and a folder name with `&` such as `Q&A-2024` shows as it is (#0141).
 
 ### Removed
 - The obsolete `spikes/ipc-bench` benchmark.

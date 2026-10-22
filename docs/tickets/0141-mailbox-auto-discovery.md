@@ -80,12 +80,16 @@ The design is drawn in [figures/0141-mailbox-catalogue.tex](figures/0141-mailbox
    - `sync`: the role folders, every user folder and every pin; synced every tick like Inbox.
    - `status-only`: the trash and junk folders and Proton's `Labels/*`; the sidebar shows the server's counts, read by one `STATUS (MESSAGES UNSEEN)` per folder after every tick.
      The trash and junk folders also download their newest 50 messages every tick (`STATUS_ONLY_WINDOW`), so a message another client moved there lands in the same pass that prunes its source row (pitfall 2); such a capped target's short download does not hold the account's prune gate shut (`SyncTarget::window`).
+     The tail is the folder's newest 50 whether the store holds them or not, on Graph as on IMAP, and it never owes a backlog, so back to back passes do not drain the folder.
      A label folder downloads nothing, so no Proton message is stored twice.
    - `ignore`: `\Noselect` and `\NonExistent`, `\All` and `\Flagged` views, Exchange's non-mail folders and their subtrees (`Calendar`, `Contacts`, `Tasks`, `Notes`, `Journal`, `RSS Feeds`, `RSS Subscriptions`, `Outbox`, `Conversation History`, `Sync Issues`), Proton's `All Mail` and `Starred`, the server drafts folder until #0143 mirrors it, and a folder whose name would shadow a role.
    The exclude lists apply to the provider the listing looks like (Exchange by two of its non-mail folders, Bridge by its `Folders` and `Labels` parents), so a Dovecot folder called `Notes` syncs.
    `[[accounts.mailboxes.override]]` entries (`match` glob, `policy`) change any of that except a pin, an unselectable folder and a shadowing name.
-4. Keys.
+4. Keys and names.
    `inbox`, `archive` and `sent` keep their role keys; every other folder is keyed by its server name, which is what an `extra` entry always keyed it by.
+   A name a person types matches a store key, then a sidebar label, then a server name, one tier at a time across every row, in every client (`mp_protocol::state::pick_mailbox`).
+   On Graph a config name Graph resolves to a well-known folder (`Inbox`, `Sent Items`) is the localized folder the listing marks with that role, and a Graph display name is never decoded as modified UTF-7.
+   An IMAP name is decoded for its label only, and a run that is not modified UTF-7 (`Q&A-2024`) is shown as sent.
    A folder whose name reads back as a role key or as the local drafts view (`Sent` beside the `\Sent` folder, the server `Drafts`) is ignored and refused by every resolver.
    A folder the server stops listing is marked `missing`: its rows stay, it is neither synced nor shown, and it comes back when the server lists it again.
 5. Clients.
@@ -95,18 +99,22 @@ The design is drawn in [figures/0141-mailbox-catalogue.tex](figures/0141-mailbox
 6. Search, sync, fetch and move.
    `mp sync --mailbox`, a hook's `mailbox`, `message.list`, `message.search`, a move destination and `message.fetch` all resolve through the catalogue, so any folder the server lists is reachable without a config edit.
    A server search that names no mailbox runs over the `sync` folders; a named folder of any policy is searched.
-   A server-search hit from any listed folder is fetchable and stored under that folder's key, a counts-only or ignored folder included.
+   A server-search hit from any listed folder is fetchable and stored under that folder's key, a counts-only or ignored folder included, by `mp show` and `mp save` as by the TUI and the desktop.
+   On Graph the listing stores each folder's id, so a search across every folder labels its hits with no request, an ignored child folder included, and a named search or a fetch addresses the folder by id.
    The move, delete and flag paths and the Sent copy read the server name behind a key from the catalogue.
 7. Config.
    `[accounts.mailboxes.inbox|archive|sent]` and the `extra` list keep working unchanged as pins; `drafts`, `trash` and `junk` name a role folder the server does not mark; unknown keys warn (PERSO-118).
-
-Not built: rename detection by UIDVALIDITY and Message-ID overlap (pitfall 9).
-A renamed folder is a new folder that syncs from scratch, and the old one stays `missing` with its rows.
+   The setup wizards (`mp config init`, `mp config add-account`, the desktop account wizard) ask for the drafts, trash and junk folders and for overrides, and pin no extra folders.
+   `mp config show` lists every folder of the last listing with its policy, ignored ones included.
+8. Renames (pitfall 9).
+   A Graph folder that comes back under a new name with the same folder id takes its rows, sync cursor and delta token to its new key; a pinned old name is left alone and logged.
+   IMAP renames are not detected yet: the renamed folder syncs from scratch and the old one stays `missing` with its rows; the detection by UIDVALIDITY and Message-ID overlap is planned in `docs/plans/mailbox-discovery.md`.
 
 ## Decisions
 
 - A newly found user folder syncs every tick like Inbox; the trash and junk folders and Proton's label folders get counts only; Exchange's calendar and contact folders and Proton's `All Mail` and `Starred` are ignored (policy table above).
 - The catalogue and the folder roles land first, then the server drafts of [#0143](0143-server-drafts.md), which reuse the `drafts` role.
+- The implementation choices (the 50-message tail, the hidden server Drafts, no full fetch on opening a counts-only folder, colliding names ignored, the override syntax, the name matching order, Graph's English pins, the wizards, renames) are in `decision-log.md` under 2026-10-22.
 
 ## Verified before building
 
@@ -121,7 +129,11 @@ A renamed folder is a new folder that syncs from scratch, and the old one stays 
 - A folder that exists on the server is reachable by `mp sync --mailbox`, `mp search --mailbox` and the folder picker without a config edit (`mp_sync_mailbox_reaches_any_listed_folder`, `the_folder_picker_opens_any_mailbox_by_name`, `folderPicker.test.tsx`).
 - A quick tick on TUM selects only the `sync` folders, plus the 50-message tail of Deleted Items and Junk Email (`tum_syncs_its_role_and_user_folders_and_tails_trash_and_junk`).
 - No Proton message is stored twice because of a label or `All Mail` (`proton_never_downloads_a_label_all_mail_or_starred`).
-- A message moved into Junk or Deleted Items keeps a row (`a_windowed_targets_short_download_does_not_defer_the_prune`), as long as it is among the folder's newest 50.
+- A message moved into Junk or Deleted Items keeps a row (`a_windowed_targets_short_download_does_not_defer_the_prune`), as long as it is among the folder's newest 50; on Graph the tail stays the newest 50 pass after pass (`a_windowed_target_takes_the_newest_window_and_owes_no_backlog`).
+- A pinned extra called `Trash` is that folder by name, not the `\Trash` folder (`an_extra_named_like_a_role_label_resolves_to_its_own_key`).
+- An English config on a German Graph mailbox syncs each role folder once (`a_graph_pin_by_its_english_name_is_the_localized_role_folder`).
+- `mp show` reads a hit from an ignored folder (`a_hit_from_an_ignored_folder_is_fetched_by_mp_show`).
+- A renamed Graph folder keeps its rows and cursor (`a_renamed_graph_folder_takes_its_rows_and_cursor_along`).
 - A server folder named `Drafts`, `Sent` or `Archive` never shadows a role or the local drafts (`a_folder_named_like_a_role_never_shadows_it`).
 - Existing configs keep working unchanged (`an_existing_config_keeps_its_targets_and_its_keys`).
 

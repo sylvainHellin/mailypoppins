@@ -279,6 +279,12 @@ sync_interval_secs = 900    # Seconds without a sync before the daemon runs one 
         nor unpin a pinned one.
       </p>
       <p>
+        <code>mp config show</code> lists, under <code>[folders]</code>, every folder the
+        server listed at the last sync with the policy it gets, ignored folders included.
+        The setup wizards write the <code>drafts</code>, <code>trash</code>,
+        <code>junk</code> and override entries; they pin no <code>extra</code> folder.
+      </p>
+      <p>
         Any other name under <code>[mailboxes]</code>, such as a
         <code>[mailboxes.spesen]</code> table written where a <code>[[mailboxes.extra]]</code>
         entry was meant, is not a mailbox: the config still loads, the table is ignored, and

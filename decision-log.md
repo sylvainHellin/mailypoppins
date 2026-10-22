@@ -163,3 +163,67 @@ Why: the TUI reads the daemon's account state from the bootstrap and from `accou
 Rejected: keeping the single `not ready` tag (the two pickers would say different things about the same account).
 Source: the review of the 2026-10-22 cleanup batch, under the same-capabilities principle above.
 Status: accepted
+
+## 2026-10-22 - The trash and junk folders show the server's counts and download their newest 50 messages each tick, on IMAP and Graph alike
+
+Why: a message another client moves to the trash is the newest there, so a 50-message tail lets the move land as a row in the pass that prunes its source row (#0072), without downloading the folder's history; the counts come from `STATUS` on IMAP and from the folder tree on Graph. The tail is the newest 50 of the folder whether the store holds them or not, and it never owes a backlog, so back to back passes do not drain the whole folder. Label folders download nothing.
+Rejected: counts only (a moved message would lose its row); a full sync of the trash and junk folders; on Graph, capping the new messages at 50, which took the next older 50 on every pass.
+Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
+Status: accepted
+
+## 2026-10-22 - The server's Drafts folder is catalogued with the drafts role and hidden until #0143 mirrors it
+
+Why: the sidebar's Drafts row is the local drafts directory, and listing the server copy beside it would show two Drafts for the same thing; #0143 reuses the role when it adds the reconcile.
+Rejected: syncing the server Drafts as a received folder now.
+Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
+Status: accepted
+
+## 2026-10-22 - Opening a counts-only folder does not download it in full
+
+Why: for a Proton label every message would be stored a second time, and the trash and junk tails already keep a moved message's row; `mp sync --mailbox <folder>` downloads one in full when it is wanted.
+Rejected: a full fetch on open, which the ticket suggested.
+Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
+Status: accepted
+
+## 2026-10-22 - A folder whose name would read back as a role key or the local Drafts is ignored and refused everywhere
+
+Why: a plain `Sent` beside the `\Sent` folder, or a server `Drafts`, would file rows under the role's key and show them in the wrong mailbox; `[accounts.mailboxes.<role>]` maps such a folder when it is the role's.
+Rejected: a renamed store key for the colliding folder, which no selector a person types would reach.
+Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
+Status: accepted
+
+## 2026-10-22 - A folder policy override is `[[accounts.mailboxes.override]]` with `match` and `policy`, first match wins
+
+Why: `match` is a case-insensitive glob over the server name where `*` crosses the hierarchy delimiter, `policy` is `sync`, `status-only` or `ignore`, and the order of the entries is the precedence; an override cannot unpin a configured folder or sync one that cannot be selected. The CLI and desktop setup wizards write the same entries.
+Rejected: a per-folder table keyed by name, which a glob cannot express.
+Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
+Status: accepted
+
+## 2026-10-22 - A mailbox name matches a store key, then a label, then a server name, in every client
+
+Why: matching every name of one row before the next let the `\Trash` folder, labelled `Trash` and sorted first, capture a pinned extra called `Trash`. One function (`mp_protocol::state::pick_mailbox`) serves the daemon, `mp`, the TUI and the search targets.
+Rejected: label first, the old order.
+Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
+Status: accepted
+
+## 2026-10-22 - On Graph a config name for a well-known folder designates the localized folder the listing carries
+
+Why: Graph resolves `Inbox` or `Sent Items` to the well-known folder whatever the mailbox's language, so an English config on a German mailbox pinned a second folder and synced `Posteingang` twice. Graph display names are never decoded as modified UTF-7.
+Rejected: matching config names by display name alone.
+Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
+Status: accepted
+
+## 2026-10-22 - The setup wizards stop pinning extra folders and ask for the drafts, trash and junk folders and the overrides
+
+Why: the daemon syncs every folder the server lists, so an `extra` entry only freezes a folder's key and keeps it synced against a later override. Each role folder is left empty for the one the server marks. `mp config show` lists every discovered folder with its policy, ignored ones included.
+Rejected: keeping the extra-folder prompt for familiarity.
+Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
+Status: accepted
+
+## 2026-10-22 - A renamed Graph folder keeps its rows, and IMAP rename detection waits for a check of the live servers
+
+Why: Graph's folder id survives a rename, so the listing stores it and a new name with a known id moves the folder's rows, cursor and delta token to the new key; a pinned old name is left alone and logged. IMAP has no folder id; its detection by UIDVALIDITY and Message-ID overlap is planned in `docs/plans/mailbox-discovery.md` and needs a rename on TUM and Proton first to learn whether each keeps UIDVALIDITY.
+Rejected: building the IMAP half on an assumption about the servers.
+Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
+Status: accepted
+
