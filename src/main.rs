@@ -1632,27 +1632,8 @@ async fn routed_show(
     serde_json::from_value(result).context("reading the daemon's message.get answer")
 }
 
-/// `message.get`, and when the store holds no row for a selector that names
-/// its mailbox, `message.fetch` from the server and `message.get` once more
-/// (PERSO-155).
-///
-/// `mp search` without `--local` lists what the server holds, so the
-/// selectors it prints include messages no sync stored (the reported case was
-/// a sent message eleven months old), and `mp show` and `mp save` refused
-/// exactly those with "no match". A miss is recognised by the daemon's own
-/// sentence for it, minted by the same [`selector::not_found`] the resolver
-/// raises, so any other refusal (an ambiguity, a malformed selector) is
-/// reported unchanged and fetches nothing. A selector with no mailbox, or one
-/// the account does not have, fetches nothing either: the server has to be
-/// told which mailbox to search.
-///
-/// The retry asks for the selector the fetch settled on, which names a copy
-/// the store already held in another mailbox when there was one. The stderr
-/// notice waits for the fetch's answer so it can say which of the two
-/// happened: a download from the server, or a copy the store holds in another
-/// mailbox (`already_present`, found by Message-ID with no server session).
-///
-/// [`selector::not_found`]: mailypoppins::selector::not_found
+/// `message.get` for a selector, fetching the message first when the store
+/// lacks it ([`fetch_on_miss`]).
 async fn message_get_or_fetch(
     connection: &mut mp_client::Connection,
     account_config: &AccountConfig,
@@ -1661,27 +1642,82 @@ async fn message_get_or_fetch(
     body: bool,
 ) -> Result<serde_json::Value> {
     let account = account_config.name.as_str();
-    let params = |selector: &str, mailbox: Option<&str>| {
-        let mut params = serde_json::json!({"account": account, "selector": selector});
-        if let Some(mailbox) = mailbox {
-            params["mailbox"] = serde_json::json!(mailbox);
-        }
-        if !body {
-            params["body"] = serde_json::json!(false);
-        }
-        params
-    };
-    let refused = match daemon_try_call(connection, "message.get", params(selector, mailbox)).await
-    {
-        Ok(result) => return Ok(result),
+    fetch_on_miss(
+        account_config,
+        selector,
+        mailbox,
+        StandIn::Allowed,
+        async |selector: &str, mailbox: Option<&str>| {
+            let mut params = serde_json::json!({"account": account, "selector": selector});
+            if let Some(mailbox) = mailbox {
+                params["mailbox"] = serde_json::json!(mailbox);
+            }
+            if !body {
+                params["body"] = serde_json::json!(false);
+            }
+            daemon_try_call(connection, "message.get", params)
+                .await
+                .map_err(|e| refusal(account, e))
+        },
+    )
+    .await
+}
+
+/// Whether a command may act on the copy the store holds in another mailbox
+/// than the one its selector names.
+///
+/// A read, a reply, a forward and an RSVP may: the copy is the same message
+/// by `Message-ID`, so what they read or quote is the same. An archive and a
+/// delete may not, because the Inbox and Sent copies of a message sent to
+/// oneself are two messages on the server, and moving or deleting the other
+/// one is not what the selector asked for.
+#[derive(Clone, Copy)]
+enum StandIn {
+    Allowed,
+    Refused { verb: &'static str },
+}
+
+/// Run a command on a received selector, and when the store holds no row for
+/// a selector that names its mailbox, `message.fetch` the message from the
+/// server and run the command once more on the row the fetch settled on
+/// (PERSO-155).
+///
+/// `mp search` without `--local` lists what the server holds, so the
+/// selectors it prints include messages no sync stored (the reported case was
+/// a sent message eleven months old), and every command that takes a received
+/// selector refused exactly those with "no match". A miss is recognised by
+/// the daemon's own sentence for it, minted by the same [`selector::not_found`]
+/// the resolver raises, so any other refusal (an ambiguity, a malformed
+/// selector, a message that is no invitation) is reported unchanged and
+/// fetches nothing. A selector with no mailbox, or one the account does not
+/// have, fetches nothing either: the server has to be told which mailbox to
+/// search.
+///
+/// The retry names the selector the fetch settled on, which is a copy the
+/// store already held in another mailbox when there was one (`already_present`,
+/// found by `Message-ID` with no server session); [`StandIn`] says whether the
+/// command may act on that copy. The stderr notice says which of the two
+/// happened, a download from the server or a copy the store holds elsewhere.
+///
+/// [`selector::not_found`]: mailypoppins::selector::not_found
+async fn fetch_on_miss<T>(
+    account_config: &AccountConfig,
+    selector: &str,
+    mailbox: Option<&str>,
+    stand_in: StandIn,
+    mut run: impl AsyncFnMut(&str, Option<&str>) -> Result<T>,
+) -> Result<T> {
+    let refused = match run(selector, mailbox).await {
+        Ok(answer) => return Ok(answer),
         Err(refused) => refused,
     };
     let Some((mailbox_key, message_id)) =
-        missing_from_store(account_config, selector, mailbox, &refused)
+        missing_from_store(account_config, selector, mailbox, &refused.to_string())
     else {
-        return Err(refusal(account, refused));
+        return Err(refused);
     };
 
+    let account = account_config.name.as_str();
     let mut session = operation_session().await;
     let fetched = run_admin_operation(
         &mut session,
@@ -1694,18 +1730,21 @@ async fn message_get_or_fetch(
         account,
     )
     .await
-    .map_err(|e| {
-        anyhow!(
-            "{}, and fetching it from the server failed: {e:#}",
-            refused.message
-        )
-    })?;
+    .map_err(|e| anyhow!("{refused}, and fetching it from the server failed: {e:#}"))?;
+    let settled = wire_str(&fetched["selector"]).to_string();
     if fetched["already_present"].as_bool() == Some(true) {
+        let held_in = wire_str(&fetched["mailbox"]);
+        if let StandIn::Refused { verb } = stand_in {
+            bail!(
+                "{refused}; the store holds that message in {held_in} as {settled}, \
+                 so {verb} that selector to act on that copy"
+            );
+        }
         eprintln!(
             "{} {} is not in the local store under that mailbox; the store holds it in {}",
             "\u{2139}".blue(),
             selector,
-            wire_str(&fetched["mailbox"])
+            held_in
         );
     } else {
         eprintln!(
@@ -1714,13 +1753,7 @@ async fn message_get_or_fetch(
             selector
         );
     }
-    daemon_try_call(
-        connection,
-        "message.get",
-        params(wire_str(&fetched["selector"]), None),
-    )
-    .await
-    .map_err(|e| refusal(account, e))
+    run(&settled, None).await
 }
 
 /// The mailbox and the `Message-ID` to fetch when `refused` is the store's
@@ -1733,12 +1766,12 @@ fn missing_from_store(
     account: &AccountConfig,
     selector: &str,
     mailbox: Option<&str>,
-    refused: &mp_protocol::RpcError,
+    refused: &str,
 ) -> Option<(String, String)> {
     let query =
         mailypoppins::selector::parse_in(selector, Namespace::Received, &account.name, mailbox)
             .ok()?;
-    if refused.message != mailypoppins::selector::not_found(&query).to_string() {
+    if refused != mailypoppins::selector::not_found(&query).to_string() {
         return None;
     }
     let mailbox_key = resolve_mailbox_key(account, query.mailbox.as_deref()?).ok()?;
@@ -4194,14 +4227,23 @@ async fn main() -> Result<()> {
             mailbox,
         }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let created = routed_from_source(
-                &account_config.name,
-                "draft.reply",
+            let created = fetch_on_miss(
+                &account_config,
                 &selector,
                 mailbox.as_deref(),
-                all,
-                false,
-                draft_signature,
+                StandIn::Allowed,
+                async |selector: &str, mailbox: Option<&str>| {
+                    routed_from_source(
+                        &account_config.name,
+                        "draft.reply",
+                        selector,
+                        mailbox,
+                        all,
+                        false,
+                        draft_signature.clone(),
+                    )
+                    .await
+                },
             )
             .await?;
             hand_back(
@@ -4221,14 +4263,23 @@ async fn main() -> Result<()> {
             as_attachment,
         }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let created = routed_from_source(
-                &account_config.name,
-                "draft.forward",
+            let created = fetch_on_miss(
+                &account_config,
                 &selector,
                 mailbox.as_deref(),
-                false,
-                as_attachment,
-                draft_signature,
+                StandIn::Allowed,
+                async |selector: &str, mailbox: Option<&str>| {
+                    routed_from_source(
+                        &account_config.name,
+                        "draft.forward",
+                        selector,
+                        mailbox,
+                        false,
+                        as_attachment,
+                        draft_signature.clone(),
+                    )
+                    .await
+                },
             )
             .await?;
             hand_back(
@@ -4251,11 +4302,17 @@ async fn main() -> Result<()> {
                 InviteAction::Tentative { selector, mailbox } => (selector, mailbox, "tentative"),
                 InviteAction::Decline { selector, mailbox } => (selector, mailbox, "decline"),
             };
-            routed_rsvp(
-                &account_config.name,
+            // The invitation's own account answers, as for every other
+            // received selector: a cross-account selector names its account.
+            let account_config = account_for_selector(&selector, &account_config, &global_config)?;
+            fetch_on_miss(
+                &account_config,
                 &selector,
                 mailbox.as_deref(),
-                response,
+                StandIn::Allowed,
+                async |selector: &str, mailbox: Option<&str>| {
+                    routed_rsvp(&account_config.name, selector, mailbox, response).await
+                },
             )
             .await?;
         }
@@ -4338,11 +4395,20 @@ async fn main() -> Result<()> {
             // account: resolve it before asking the daemon, so a cross-account
             // selector is answered by its own account's store and credentials.
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
-            let moved = routed_received_mutation(
-                &account_config.name,
-                "message.archive",
+            let moved = fetch_on_miss(
+                &account_config,
                 &selector,
                 mailbox.as_deref(),
+                StandIn::Refused { verb: "archive" },
+                async |selector: &str, mailbox: Option<&str>| {
+                    routed_received_mutation(
+                        &account_config.name,
+                        "message.archive",
+                        selector,
+                        mailbox,
+                    )
+                    .await
+                },
             )
             .await?;
             hand_back(
@@ -4388,11 +4454,20 @@ async fn main() -> Result<()> {
                     // gone and the server still holds the message), so a
                     // refusal propagates verbatim and the next sync refetches
                     // the UID; the not-found message stays byte-identical.
-                    routed_received_mutation(
-                        &account_config.name,
-                        "message.delete",
+                    fetch_on_miss(
+                        &account_config,
                         &selector,
                         mailbox.as_deref(),
+                        StandIn::Refused { verb: "delete" },
+                        async |selector: &str, mailbox: Option<&str>| {
+                            routed_received_mutation(
+                                &account_config.name,
+                                "message.delete",
+                                selector,
+                                mailbox,
+                            )
+                            .await
+                        },
                     )
                     .await?
                 };

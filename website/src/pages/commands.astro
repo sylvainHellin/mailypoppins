@@ -223,6 +223,15 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
         command, and <code>mp path &lt;selector&gt;</code> is the one way back to a filesystem path.
       </p>
       <p>
+        A received selector that names its mailbox works even when no sync stored the message,
+        as for a server hit of <code>mp search</code>: <code>show</code>, <code>save</code>,
+        <code>open</code>, <code>export</code>, <code>reply</code>, <code>forward</code>,
+        <code>archive</code>, <code>delete</code> and <code>invite</code> fetch it from the server
+        first and say so on stderr. When the store holds the message in another mailbox, the reads,
+        replies and forwards use that copy; <code>archive</code> and <code>delete</code> refuse and
+        name its selector, since the Inbox and Sent copies of a message are two messages on the server.
+      </p>
+      <p>
         On a terminal, <code>mp new</code>, <code>mp edit</code>, <code>mp reply</code>,
         <code>mp forward</code>, <code>mp mark-approved</code> and <code>mp mark-draft</code> print
         <code>&#10003; &lt;selector&gt;</code>, <code>mp archive</code> prints the selector it moved

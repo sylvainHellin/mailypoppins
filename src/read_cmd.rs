@@ -492,6 +492,12 @@ impl ListedMessage {
 
     /// A hit of a server search, found in `mailbox`, the store's id for the
     /// mailbox the hit came from, when the account configures it.
+    ///
+    /// The selector is the daemon's when the hit resolved to a stored row,
+    /// which is the row the TUI and the desktop act on for the same hit, so it
+    /// resolves in `mp show` without a fetch even when the store holds the
+    /// message in another mailbox than the one the server found it in; a
+    /// server-only hit gets the one a fetch of it would land under (PERSO-155).
     pub fn from_server_hit(
         account: &str,
         mailbox: Option<&str>,
@@ -499,8 +505,11 @@ impl ListedMessage {
         full: bool,
     ) -> ListedMessage {
         let message_id = hit.message_id.clone().unwrap_or_default();
-        let selector = mailbox.filter(|_| !message_id.is_empty()).map(|mailbox| {
-            Selector::new(account, mailbox, crate::selector::message_key(&message_id)).to_string()
+        let selector = hit.selector.clone().or_else(|| {
+            mailbox.filter(|_| !message_id.is_empty()).map(|mailbox| {
+                Selector::new(account, mailbox, crate::selector::message_key(&message_id))
+                    .to_string()
+            })
         });
         let (body, preview) = if full {
             (Some(hit.body_text.clone()), None)
@@ -1111,6 +1120,18 @@ mod tests {
         assert_eq!(full.message_id, "<hit@example.com>");
         assert_eq!(full.body.as_ref().map(String::len), Some(400));
         assert_eq!(full.preview, None);
+
+        // A hit the store holds is listed under the daemon's selector for
+        // the row, which may name another mailbox than the one the server
+        // found it in (PERSO-155).
+        let mut stored = hit.clone();
+        stored.selector = Some("mp://acct/inbox/hit@example.com".to_string());
+        assert_eq!(
+            ListedMessage::from_server_hit("acct", Some("archive"), &stored, false)
+                .selector
+                .as_deref(),
+            Some("mp://acct/inbox/hit@example.com")
+        );
 
         let printed = fetched_from_hit(&hit);
         assert_eq!(printed.date, "Fri, 7 Aug 2026 10:00:00 +0000");

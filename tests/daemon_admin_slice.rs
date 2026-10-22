@@ -2113,17 +2113,31 @@ fn mp_cutover_matches_the_oracle() {
     });
 }
 
-/// `CAL-01` through the CLI: every refusal, byte for byte, including `ANO-4`.
+/// `CAL-01` through the CLI: every refusal, byte for byte, including `ANO-4`,
+/// but for the unknown selector, which is fetched first since PERSO-155.
 #[test]
 fn mp_invite_refusals_match_the_oracle() {
     let slice = Slice::start();
 
-    let unknown = slice.both(&[
-        "invite",
-        "accept",
-        &fixture::selector(fixture::ACCOUNT, fixture::UNKNOWN_SELECTOR),
-    ]);
+    // A selector that names its mailbox is fetched when the store lacks it
+    // (PERSO-155), which the oracle predates: the refusal is the oracle's
+    // sentence, then why the fetch failed, here an account with no server.
+    let selector = fixture::selector(fixture::ACCOUNT, fixture::UNKNOWN_SELECTOR);
+    let unknown = slice.routed(&["invite", "accept", &selector]);
     assert_eq!(unknown.status.code(), Some(1), "an unknown selector fails");
+    let oracle = slice.oracle(&["invite", "accept", &selector]);
+    let oracle_stderr = String::from_utf8_lossy(&oracle.stderr);
+    let refusal = oracle_stderr
+        .lines()
+        .find(|line| line.starts_with("Error: "))
+        .expect("the oracle refuses the unknown selector");
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "{refusal}, and fetching it from the server failed"
+        )),
+        "{stderr}"
+    );
 
     let no_invite = slice.both(&[
         "invite",

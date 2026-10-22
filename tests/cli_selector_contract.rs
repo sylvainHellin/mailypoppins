@@ -555,6 +555,82 @@ fn a_failed_fetch_names_the_miss_and_a_bare_key_fetches_nothing() {
     }
 }
 
+/// Every other command that takes a received selector resolves a selector
+/// the store lacks the same way: `mp reply`, `mp forward` and `mp invite`
+/// fetch it and act on the row the fetch settled on, which here is the copy
+/// the store holds in the Inbox (PERSO-155).
+#[test]
+fn reply_forward_and_invite_fetch_a_missing_selector_too() {
+    let fx = Fixture::new();
+    let key = "sent-to-self@example.com";
+    fx.ingest("inbox", 1, key, "Sent to myself");
+    let sent = format!("mp://{ACCOUNT}/sent/{}", selector::encode(key));
+    // A piped reply prints the new draft's selector alone, so the row it
+    // settled on is read off the notice and the draft's own frontmatter.
+    for command in ["reply", "forward"] {
+        let out = fx.run(&[command, &sent]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "mp {command} failed: {stderr}");
+        assert!(
+            stderr.contains("the store holds it in inbox"),
+            "mp {command}: {stderr}"
+        );
+        let draft = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let path = fx.ok(&["path", &draft]);
+        let written = fs::read_to_string(path.trim()).expect("the draft file");
+        assert!(
+            written.contains("Sent to myself"),
+            "mp {command}: {written}"
+        );
+    }
+
+    // The Inbox copy is no invitation, which is the refusal the RSVP reaches
+    // once the selector resolves; before the fix it never got past "no match".
+    let stderr = fx.err(&["invite", "accept", &sent]);
+    assert!(!stderr.contains("no match"), "{stderr}");
+    assert!(stderr.contains("the store holds it in inbox"), "{stderr}");
+}
+
+/// `mp archive` and `mp delete` fetch a missing selector too, but do not act
+/// on a copy the store holds in another mailbox: the Inbox and Sent copies of
+/// a message sent to oneself are two messages on the server, so the refusal
+/// names the stored copy's selector and leaves it where it is (PERSO-155).
+#[test]
+fn archive_and_delete_fetch_a_missing_selector_but_leave_another_mailboxs_copy() {
+    let fx = Fixture::new();
+    let key = "sent-to-self@example.com";
+    fx.ingest("inbox", 1, key, "Sent to myself");
+    let sent = format!("mp://{ACCOUNT}/sent/{}", selector::encode(key));
+    let inbox = format!("mp://{ACCOUNT}/inbox/{}", selector::encode(key));
+
+    for command in ["archive", "delete"] {
+        let stderr = fx.err(&[command, &sent]);
+        assert!(
+            stderr.contains(&format!("the store holds that message in inbox as {inbox}")),
+            "mp {command}: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("{command} that selector")),
+            "mp {command}: {stderr}"
+        );
+    }
+    let shown = fx.ok(&["show", &inbox]);
+    assert!(
+        shown.contains("Sent to myself"),
+        "the Inbox copy stayed: {shown}"
+    );
+
+    // A message the server cannot hand over either fails with both halves.
+    let unknown = format!("mp://{ACCOUNT}/sent/unknown@example.com");
+    for command in ["archive", "delete", "reply", "forward"] {
+        let stderr = fx.err(&[command, &unknown]);
+        assert!(
+            stderr.contains("and fetching it from the server failed"),
+            "mp {command}: {stderr}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cross-account selectors (#0073 follow-up)
 // ---------------------------------------------------------------------------
@@ -761,4 +837,23 @@ fn a_selector_naming_an_unconfigured_account_fails_with_that_account_named() {
     let stderr = fx.err(&["delete", "mp://ghost/drafts/whatever"]);
     assert!(stderr.contains("ghost"), "{stderr}");
     assert!(stderr.contains("not configured"), "{stderr}");
+}
+
+/// `mp invite` answers from the invitation's own account, as every other
+/// received selector does, rather than from the default account's store.
+#[test]
+fn a_cross_account_invitation_selector_reads_from_its_own_account() {
+    let fx = XAcctFixture::new();
+    fx.ingest(
+        XAcctFixture::OTHER,
+        "inbox",
+        "xacct@example.com",
+        "In tum inbox",
+    );
+
+    let stderr = fx.err(&["invite", "accept", "mp://tum/inbox/xacct@example.com"]);
+    assert!(
+        stderr.contains("mp://tum/inbox/xacct@example.com carries no invitation"),
+        "{stderr}"
+    );
 }
