@@ -1,31 +1,67 @@
 ---
 // The two reasons to use mailypoppins over an established client.
+const pillars = [
+  {
+    id: 'keyboard',
+    title: 'Keyboard-first email client',
+    lead: 'Read, triage and write without reaching for the mouse.',
+    points: [
+      {
+        title: 'Write in your editor',
+        body: 'Every draft is a Markdown file that opens in Vim, Neovim or any modal editor. The Mac app runs Neovim inside its window.',
+      },
+      {
+        title: 'Vim keys throughout',
+        body: 'j and k, gg, / and a Space leader work the same in the terminal and in the Mac app.',
+      },
+      {
+        title: 'Local and offline',
+        body: 'Mail from any IMAP provider or Microsoft 365 lands in a local store you can search without a connection.',
+      },
+    ],
+  },
+  {
+    id: 'agents',
+    title: 'Built for efficient human-AI collaboration',
+    lead: 'Your agent works with the same commands and files you do, on your Mac or on a Linux server.',
+    points: [
+      {
+        title: 'Context on demand',
+        body: 'It searches your mail for a contact or the history of a thread.',
+      },
+      {
+        title: 'A second pair of eyes',
+        body: 'It proofreads and reviews your drafts, or writes a first reply when you ask.',
+      },
+      {
+        title: 'Nothing slips',
+        body: 'It tells you what you missed and what still waits for your answer.',
+      },
+    ],
+    note: 'A draft leaves only once you mark it approved.',
+  },
+];
 ---
 
-<section class="why" aria-labelledby="why-heading">
+<section class="why" aria-label="Why mailypoppins">
   <div class="content-wide">
-    <h2 id="why-heading" class="visually-hidden">Why mailypoppins</h2>
-    <div class="why-grid">
-      <article class="why-card">
-        <h3>Keyboard-first email client</h3>
-        <ul>
-          <li>Every draft is a Markdown file that opens in Vim, Neovim or whatever <code>$EDITOR</code> you use.</li>
-          <li>The terminal client and the Mac app share one set of Vim keys: <code>j</code>/<code>k</code>, <code>gg</code>, <code>/</code>, visual mode and a <code>Space</code> leader.</li>
-          <li>The Mac app runs a real Neovim for each draft, inside its window.</li>
-          <li>Mail syncs from any IMAP provider or Microsoft 365 into a local store you can search offline.</li>
+    {pillars.map((p) => (
+      <div class="pillar" id={p.id}>
+        <header class="pillar-head">
+          <h2>{p.title}</h2>
+          <p class="lead">{p.lead}</p>
+        </header>
+        <ul class="points">
+          {p.points.map((pt) => (
+            <li>
+              <h3>{pt.title}</h3>
+              <p>{pt.body}</p>
+            </li>
+          ))}
         </ul>
-      </article>
-      <article class="why-card">
-        <h3>Built for efficient human-AI collaboration</h3>
-        <ul>
-          <li>Your AI agent runs the same <code>mp</code> commands you do, so it can search your mail for a contact or the history of a thread.</li>
-          <li>Ask it to proofread a draft, review it or write a first reply: it edits the same files you open.</li>
-          <li>It can tell you what you missed and what still waits for an answer.</li>
-          <li>A draft is sent only once it is marked approved, and that step stays yours.</li>
-          <li>The same <code>mp</code> runs on a Linux server, so an agent on your home server can work on your mail too.</li>
-        </ul>
-      </article>
-    </div>
+        {p.note && <p class="note">{p.note}</p>}
+      </div>
+    ))}
   </div>
 </section>
 
@@ -34,42 +70,80 @@
     padding: var(--space-8) 0 var(--space-16);
   }
 
-  .why-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--space-6);
+  .pillar + .pillar {
+    margin-top: var(--space-16);
+    padding-top: var(--space-16);
+    border-top: 1px solid var(--color-border-subtle);
   }
 
-  .why-card {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-top: 3px solid var(--color-frame);
-    border-radius: 10px;
-    padding: var(--space-6) var(--space-8);
+  .pillar-head {
+    max-width: 44rem;
+    margin-bottom: var(--space-8);
   }
 
-  .why-card h3 {
-    margin: 0 0 var(--space-4);
-    font-size: 1.25rem;
+  .pillar-head h2 {
+    margin: 0 0 var(--space-3);
+    font-size: 2rem;
   }
 
-  .why-card ul {
+  .lead {
     margin: 0;
-    padding-left: var(--space-5);
+    font-size: 1.125rem;
     color: var(--color-text-soft);
   }
 
-  .why-card li + li {
-    margin-top: var(--space-2);
+  .points {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-8);
+  }
+
+  .points li {
+    margin: 0;
+  }
+
+  .points li::before {
+    content: '';
+    display: block;
+    width: 2rem;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--color-cta);
+    margin-bottom: var(--space-4);
+  }
+
+  .points h3 {
+    margin: 0 0 var(--space-2);
+    font-size: 1.0625rem;
+  }
+
+  .points p {
+    margin: 0;
+    color: var(--color-text-soft);
+  }
+
+  .note {
+    margin: var(--space-8) 0 0;
+    font-size: 0.9375rem;
+    color: var(--color-text-faint);
   }
 
   @media (max-width: 768px) {
-    .why-grid {
+    .points {
       grid-template-columns: 1fr;
+      gap: var(--space-6);
     }
 
-    .why-card {
-      padding: var(--space-5);
+    .pillar + .pillar {
+      margin-top: var(--space-12);
+      padding-top: var(--space-12);
+    }
+
+    .pillar-head h2 {
+      font-size: 1.5rem;
     }
   }
 </style>
