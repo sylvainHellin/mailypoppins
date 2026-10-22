@@ -2923,3 +2923,18 @@ A server-search hit with no row has a `Message-ID` and a mailbox, which is all `
 
 Since Homebrew 6.0, `brew tap` followed by a short-name `brew install mailypoppins` fails with "Refusing to load formula ... from untrusted tap", because a third-party tap needs explicit trust before Homebrew evaluates its Ruby.
 The fully qualified name `sylvainHellin/mailypoppins/mailypoppins` taps the repository and trusts only that formula in one step, so every install instruction uses it; a user who tapped earlier runs `brew trust --formula` on that name once.
+
+## A release workflow rule is testable when it lives in a run: script (2026-10-22)
+
+`tests/release_workflow.rs` reads a step's `run:` script out of `release.yml` with `serde_yaml` and runs it under bash with a stub `gh` on `PATH` that records its arguments, so the test checks the shipped shell for a stable and a prerelease tag (#0139, PERSO-107).
+A job-level `if:` has no shell to run, so the test evaluates it with a small matcher for its one expression form, `!contains(github.ref_name, '-')`, which reads it whatever its whitespace and quoting and fails on any form it cannot read.
+
+## The desktop crate's Cargo.lock goes stale when a shared crate gains a dependency (2026-10-22)
+
+`clients/desktop/src-tauri` sits outside the workspace with its own `Cargo.lock`, so a dependency added to a shared crate such as `mp-core` leaves that lock stale until the next desktop build rewrites it.
+Build the desktop crate after changing a shared crate's dependencies and commit its lock in the same change.
+
+## A connect that restarts the daemon must probe mp --version again (2026-10-22)
+
+The connector caches `mp --version` by the binary's path, size and modification time, so a connect that restarts the daemon probes again afterwards instead of trusting the cached answer (#0139, PERSO-107).
+A test stands in for a second version with a wrapper script that switches the version it reports on `daemon restart` and touches itself, which changes the cache key.

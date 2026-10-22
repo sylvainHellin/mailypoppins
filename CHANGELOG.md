@@ -17,6 +17,7 @@ All notable changes to this project are documented in this file.
 - TUI: `te` saves the message as `<date>_<subject>.eml` into a directory picked like `ts`, and `cF` forwards it as attachment through the forward wizard; the search overlay has both keys for a hit (PERSO-174).
 - Desktop: `te`, the reader toolbar's Export .eml and the palette's "Export message as .eml" open an Export dialog (directory field, Browse, last directory); `cF`, the toolbar's Forward as attachment and "Forward as attachment (.eml)" open the forward wizard as "Forward as attachment" (PERSO-174).
 - Server search: a result the local store does not hold exports and forwards as attachment without a fetch first; the daemon downloads its `.eml` from the server and leaves it out of the store (PERSO-174).
+- Desktop: after an update installed with Later, the next launch restarts the old daemon by itself instead of showing the version-mismatch screen; any other version mismatch still shows it (#0139, PERSO-107).
 
 ### Changed
 - Server search: `mp search`, the TUI search overlay and the desktop search bar get the newest `--limit` results across every mailbox from one daemon search; each mailbox is asked for its newest N and only the N newest overall are downloaded (PERSO-175).
@@ -37,6 +38,8 @@ All notable changes to this project are documented in this file.
 - Desktop: in the outbox view the sidebar highlights the outbox line alone, no longer the selected mailbox of another account beside it.
 - Desktop: the screen-reader titles of the palette and of the move picker leave the page when the dialogs close.
 - A second warning in config.toml while one is already shown now reaches the TUI and the desktop, and the TUI no longer logs a held warning again after reconnecting.
+- Desktop: an update check after choosing Later says the installed update waits for a restart, instead of offering the same version again (#0139, PERSO-107).
+- Release: a prerelease tag such as v0.12.0-rc.1 is published as a GitHub prerelease, is never marked latest and skips the Homebrew tap, so installed apps and `brew upgrade` stay on the last release (#0139, PERSO-107).
 
 ## [0.12.0] - 2026-10-22
 
