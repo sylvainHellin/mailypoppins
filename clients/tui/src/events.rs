@@ -670,7 +670,16 @@ impl App {
 /// the snapshot's array through the same reading, and two copies of it would
 /// eventually be two readings. Both carriers are typed as [`HealthCheck`], so a
 /// payload that is not a check never reaches this.
+///
+/// It also keeps [`App::held_checks`]: a check that is not ok is held under its
+/// name, and an ok one lets go of it.
 pub(super) fn land_check(app: &mut App, check: &HealthCheck) {
+    if check.status == CheckStatus::Ok {
+        app.held_checks.remove(&check.name);
+    } else {
+        app.held_checks
+            .insert(check.name.clone(), (check.status, check.detail.clone()));
+    }
     let level = match check.status {
         CheckStatus::Warn => StatusLevel::Warning,
         CheckStatus::Fail => StatusLevel::Error,

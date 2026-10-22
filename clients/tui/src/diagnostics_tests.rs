@@ -246,6 +246,72 @@ fn the_bootstrap_seeds_the_ring_with_the_daemons_complaints() {
     );
 }
 
+/// A re-bootstrap against the same daemon (a reconnect, a resync) logs nothing
+/// for a check it already holds as it is: the warning was landed once, and a
+/// second identical line every reconnect is noise. The desktop's
+/// `health.test.ts` pins the same rule.
+#[test]
+fn a_same_instance_rebootstrap_does_not_log_a_held_check_again() {
+    let held = vec![
+        check("config_loaded", CheckStatus::Warn, "`a` is ignored"),
+        check("store_open", CheckStatus::Fail, "0 of 1 store(s) open"),
+    ];
+    let mut app = bootstrapped(held.clone());
+    assert_eq!(messages(&app).len(), 2);
+
+    app.apply_resync_bootstrap(&snapshot_bootstrap(held.clone()));
+    app.apply_bootstrap(&snapshot_bootstrap(held));
+
+    assert_eq!(
+        messages(&app),
+        vec![
+            "config_loaded: `a` is ignored".to_string(),
+            "store_open: 0 of 1 store(s) open".to_string(),
+        ],
+        "each held check is logged once"
+    );
+}
+
+/// The held map follows events and the snapshot: a detail that moved while the
+/// socket was down is one new line, a check that recovered by event and comes
+/// back in a later snapshot is logged again, and one the snapshot no longer
+/// carries is let go of without a line.
+#[test]
+fn a_rebootstrap_logs_only_what_moved() {
+    let mut app = bootstrapped(vec![check(
+        "config_loaded",
+        CheckStatus::Warn,
+        "`a` is ignored",
+    )]);
+    app.apply_event(&check_event("store_open", "fail", "no store"));
+    app.apply_event(&check_event("store_open", "ok", "stores open"));
+
+    app.apply_resync_bootstrap(&snapshot_bootstrap(vec![
+        check(
+            "config_loaded",
+            CheckStatus::Warn,
+            "`a` is ignored; `b` is ignored",
+        ),
+        check("store_open", CheckStatus::Fail, "no store"),
+    ]));
+    app.apply_resync_bootstrap(&snapshot_bootstrap(Vec::new()));
+
+    assert_eq!(
+        messages(&app),
+        vec![
+            "config_loaded: `a` is ignored".to_string(),
+            "store_open: no store".to_string(),
+            "store_open: stores open".to_string(),
+            "config_loaded: `a` is ignored; `b` is ignored".to_string(),
+            "store_open: no store".to_string(),
+        ]
+    );
+    assert!(
+        app.held_checks.is_empty(),
+        "the last snapshot holds nothing"
+    );
+}
+
 /// A healthy daemon leaves the ring exactly as it is, which is what keeps
 /// every golden frame on its `No activity yet` line.
 #[test]
@@ -289,7 +355,13 @@ fn a_check_changed_that_is_not_a_check_is_skipped() {
 /// carrying `diagnostics` in its snapshot.
 fn bootstrapped(diagnostics: Vec<HealthCheck>) -> App {
     let mut app = App::default_for_tests();
-    app.apply_bootstrap(&Bootstrap {
+    app.apply_bootstrap(&snapshot_bootstrap(diagnostics));
+    app
+}
+
+/// A bootstrap from [`INSTANCE`] at [`WATERMARK`] carrying `diagnostics`.
+fn snapshot_bootstrap(diagnostics: Vec<HealthCheck>) -> Bootstrap {
+    Bootstrap {
         instance_id: INSTANCE.to_string(),
         revision: WATERMARK,
         snapshot: Snapshot {
@@ -297,8 +369,7 @@ fn bootstrapped(diagnostics: Vec<HealthCheck>) -> App {
             ..Snapshot::default()
         },
         ..Bootstrap::default()
-    });
-    app
+    }
 }
 
 /// One snapshot diagnostic.

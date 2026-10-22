@@ -183,6 +183,17 @@ pub struct App {
     /// holds can be armed at once; each `send.hold_*` event updates or removes
     /// only its own entry, and [`App::hold`] is re-derived from the last one.
     pub holds: Vec<mp_protocol::send::HoldStatus>,
+    /// The daemon's checks that are not ok, by name, as last landed in the
+    /// activity log: the status and the sentence.
+    ///
+    /// What keeps a re-bootstrap from logging a held warning again: the
+    /// snapshot's array is the daemon's whole current list, so a check this
+    /// map already holds with the same status and detail is skipped, and the
+    /// map is then replaced by the snapshot. A `diagnostic.check_changed`
+    /// updates it, and an ok one removes its entry. The desktop's `knownCheck`
+    /// is the same rule.
+    pub held_checks:
+        std::collections::BTreeMap<String, (mp_protocol::diagnostic::CheckStatus, String)>,
     pub last_save_dir: Option<PathBuf>,
 
     pub status_log: VecDeque<StatusEntry>,
@@ -290,7 +301,8 @@ impl App {
         // A config warning (a key the load ignored, PERSO-118) is not pushed
         // here: the daemon's `config_loaded` check carries it into the
         // activity log through the bootstrap snapshot and, after an edit, a
-        // `diagnostic.check_changed`, so it lands once and follows reloads.
+        // `diagnostic.check_changed`. `App::held_checks` keeps a reconnect's
+        // snapshot from logging the same warning again.
         let global_config = mp_core::config::load_global_config().unwrap_or_default();
 
         // Select the TUI theme once, before the first frame. Unknown names
@@ -401,6 +413,7 @@ impl App {
             queued_action: None,
             hold: None,
             holds: Vec::new(),
+            held_checks: std::collections::BTreeMap::new(),
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,
@@ -486,6 +499,7 @@ impl App {
             queued_action: None,
             hold: None,
             holds: Vec::new(),
+            held_checks: std::collections::BTreeMap::new(),
             last_save_dir: None,
             status_log: VecDeque::new(),
             show_activity_log: true,

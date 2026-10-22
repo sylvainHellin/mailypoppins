@@ -164,10 +164,27 @@ impl App {
         // the activity overlay a second after starting finds them in it rather
         // than waiting for the next flip, which may never come. A healthy
         // daemon sends an empty array and writes nothing, which is what keeps
-        // every golden frame on its `No activity yet` line.
+        // every golden frame on its `No activity yet` line. A check already
+        // held as it is (a same-instance reconnect, a warning that did not
+        // move while the socket was down) is not logged again; the snapshot
+        // then replaces the held map whole, so a check that cleared while away
+        // is let go of without a line.
+        let held = std::mem::take(&mut self.held_checks);
         for diagnostic in &bootstrap.snapshot.diagnostics {
-            crate::events::land_check(self, diagnostic);
+            let known = held.get(&diagnostic.name).is_some_and(|(status, detail)| {
+                *status == diagnostic.status && *detail == diagnostic.detail
+            });
+            if !known {
+                crate::events::land_check(self, diagnostic);
+            }
         }
+        self.held_checks = bootstrap
+            .snapshot
+            .diagnostics
+            .iter()
+            .filter(|check| check.status != mp_protocol::diagnostic::CheckStatus::Ok)
+            .map(|check| (check.name.clone(), (check.status, check.detail.clone())))
+            .collect();
         for account in &bootstrap.snapshot.accounts {
             let Some(index) = self
                 .accounts
