@@ -2815,3 +2815,8 @@ An additive column needs its additive index created after it: `ensure_additive_c
 
 `cell_tags` compares a cell's colour with the active theme's `selection`, `surface` and `error`, so a slot that happens to carry the same RGB is tagged too: under `catppuccin-mocha` the success green equals the selection green, under `mailypoppins` the unread count and code share the selection Pumpkin.
 Changing the default theme therefore moves `fg:selection` runs in six golden frames with no UI change; read such a diff as a palette coincidence, check the text rows are untouched, and accept it.
+
+## The website deploy hung on a machine that had never reached the OVH host (2026-10-22)
+
+`scripts/deploy-website.sh` feeds sftp a password through `SSH_ASKPASS`, and the first connection from a new machine also asks to confirm the host key, which the askpass helper does not answer, so the upload sat silent until the tool timed out.
+The script now passes `StrictHostKeyChecking=accept-new`: a first connection records the key, and a changed key still fails.

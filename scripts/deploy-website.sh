@@ -28,9 +28,12 @@ chmod 700 "$askpass"
 
 echo ":: Uploading to ${OVH_USER}@${OVH_HOST}:${OVH_PATH}..."
 # BatchMode=no: `sftp -b` turns BatchMode on, which disables password auth.
+# accept-new: a machine that never reached the host would otherwise wait
+# forever on the host-key prompt, which the askpass cannot answer.
 printf 'lcd %s\ncd %s\nput -r *\n' "$root/website/dist" "$OVH_PATH" |
   SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY="${DISPLAY:-:0}" \
-    sftp -q -o BatchMode=no -o PreferredAuthentications=password -b - \
+    sftp -q -o BatchMode=no -o PreferredAuthentications=password \
+    -o StrictHostKeyChecking=accept-new -b - \
     "${OVH_USER}@${OVH_HOST}"
 
 echo ":: Done. Site deployed to https://mailypoppins.com"
