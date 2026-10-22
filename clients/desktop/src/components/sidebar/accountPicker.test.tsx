@@ -140,6 +140,20 @@ describe("the sidebar's collapsed accounts", () => {
     expect(toggle("home").querySelector('[data-slot="account-unread"]')).toBeNull();
   });
 
+  it("picking the current account in ga expands it again after a hand collapse", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.click(toggle("work"));
+    expect(toggle("work")).toHaveAttribute("aria-expanded", "false");
+    act(() => (document.activeElement as HTMLElement).blur());
+    await user.keyboard("ga");
+    await picker();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Switch account" })).toBeNull());
+    expect(toggle("work")).toHaveAttribute("aria-expanded", "true");
+    expect(nav().querySelector('[data-mailbox^="work/"]')).not.toBeNull();
+  });
+
   it("an account expanded by hand stays expanded after a switch away from it", async () => {
     const { user } = renderApp();
     await shellReady();

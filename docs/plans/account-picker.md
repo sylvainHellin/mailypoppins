@@ -19,7 +19,7 @@ The keybinding redesign already described `ga` as "Switch account (picker)" ([ke
 
 - `ga` opens a modal list of the configured accounts in `config.toml` order, titled "Switch account", the selected account preselected and marked as current.
 - `j`/`k` and the arrow keys move the cursor and clamp at the ends.
-- Enter switches to the cursor's account and closes the picker; Enter on the current account only closes it.
+- Enter switches to the cursor's account and closes the picker; Enter on the current account only closes it, and in the desktop also expands it if it was collapsed by hand.
 - `1` to `9` switch straight to the nth account and close the picker; a digit past the last account does nothing.
 - Esc and `q` close it with nothing changed.
 - Each row shows the digit, the name, the current marker and the new-mail indicator: the inbox unread count in the desktop, the `has_unseen` dot in the TUI.
@@ -54,6 +54,7 @@ The keybinding redesign already described `ga` as "Switch account (picker)" ([ke
 - `toggle_account_expanded { account }` stores the opposite of the current value.
 - `followExpansion` (`src/app/reducer.ts`), a post-step of the exported `reducer`, deletes a `false` override of a newly selected account, so a switch always opens it, and clears a `sidebarCursor` whose account is now collapsed, so the cursor falls back to the selection.
 - `sidebarEntries` skips collapsed accounts, so `j`/`k` walk only what is drawn.
+- `expand_account { account }` deletes a `false` override; the picker dispatches it when it picks the current account, the keyboard path back to a selected account collapsed by mouse, whose header takes no key.
 - `AccountGroup`'s label is a button with a chevron, `aria-expanded`, `aria-controls` and `tabindex="-1"`; a collapsed group draws its header with the inbox unread count and its `OutboxState` line, which renders only when something waits or failed.
 
 ## Decisions
@@ -70,8 +71,8 @@ The keybinding redesign already described `ga` as "Switch account (picker)" ([ke
 - TUI, `clients/tui/src/app/keys.rs`: `ga` opens the picker on the active account; `j`/`k` clamp and Enter switches; Esc and `q` change nothing; a digit switches and one past the end does nothing; Enter on the active account only closes; a switch clears the new account's dot; with one account `ga` and the palette open nothing and the popup omits `ga`; with two the palette opens the picker.
 - TUI render test `account_picker_lists_the_accounts_with_digit_current_and_new_mail_dot` in `clients/tui/src/ui/overlays.rs`: the rows, the current marker, the dot, the cursor style and the blank digit past the ninth account.
   It is a render test rather than a golden frame: every golden frame needs a daemon twin (`tests/phase5_parity_gate.rs`), whose fixture has one account.
-- Desktop, `src/app/reducer.test.ts`: the overlay with two accounts and a no-op with one; the expansion defaults, the toggle, a hand-expanded account kept after a switch away, a hand-collapsed account opened on selection, and the cursor walk over expanded accounts.
-- Desktop, `src/components/sidebar/accountPicker.test.tsx`: the picker's keys, click, Escape, `q`, digits, the search kept on the current account, the palette entry, one account; the collapsed headers, their unread count, the header toggle.
+- Desktop, `src/app/reducer.test.ts`: the overlay with two accounts and a no-op with one; the expansion defaults, the toggle, a hand-expanded account kept after a switch away, a hand-collapsed account opened on selection, `expand_account`, and the cursor walk over expanded accounts.
+- Desktop, `src/components/sidebar/accountPicker.test.tsx`: the picker's keys, click, Escape, `q`, digits, the search kept on the current account, the palette entry, one account; the collapsed headers, their unread count, the header toggle, the current account expanded again by `ga` Enter.
 - Desktop, `src/components/palette/prefixPopup.test.tsx`: `g` without `ga` with one account.
 
 ## Risks

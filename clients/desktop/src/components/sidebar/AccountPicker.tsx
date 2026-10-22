@@ -18,7 +18,8 @@ export type AccountPickerProps = { open: boolean; onOpenChange: (open: boolean) 
  * clamp at the ends; Enter or a click switches, 1 to 9 switch to the nth
  * account, q and Escape close. Enter picks the cursor's account itself, so
  * it works before the dialog has moved the focus onto the list. Picking the current account
- * only closes the picker, so an open search survives it.
+ * closes the picker and expands the account if it was collapsed by hand, so an
+ * open search survives it and the keyboard gets its mailboxes back.
  */
 export function AccountPicker({ open, onOpenChange }: AccountPickerProps) {
   const s = useAppState();
@@ -36,6 +37,7 @@ export function AccountPicker({ open, onOpenChange }: AccountPickerProps) {
     (account: string) => {
       onOpenChange(false);
       if (account !== current) dispatch({ type: "select_account", account });
+      else dispatch({ type: "expand_account", account });
     },
     [onOpenChange, current, dispatch],
   );

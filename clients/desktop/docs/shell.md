@@ -118,7 +118,7 @@ The sidebar draws the mailboxes of the selected account and of any account expan
 A click on an account's header (`toggle_account_expanded`) expands or collapses it without selecting it; selecting an account expands it even if it was collapsed by hand, and an account expanded by hand stays expanded after it is left (`followExpansion`, a post-step of the reducer).
 The sidebar cursor walks only the mailboxes drawn, so `j`/`k` skip a collapsed account and a cursor on an account that collapses falls back to the selection.
 The keyboard path to another account is `ga`, or the palette's "Switch account": the account picker (`components/sidebar/AccountPicker.tsx`, the `account_picker` overlay) lists every account in config order with its digit, its inbox's unread count and the current one marked.
-`j`/`k` and the arrows move and clamp, Enter or a click switches and opens the account's inbox, `1` to `9` switch to the nth account, Escape and `q` close it; picking the current account only closes it, so an open search survives.
+`j`/`k` and the arrows move and clamp, Enter or a click switches and opens the account's inbox, `1` to `9` switch to the nth account, Escape and `q` close it; picking the current account closes it and expands the account if it was collapsed by hand (`expand_account`), so an open search survives and a selected account collapsed by mouse gets its mailboxes back for `j`/`k`.
 With one account `ga` opens nothing and the which-key popup leaves it out.
 
 ## Search

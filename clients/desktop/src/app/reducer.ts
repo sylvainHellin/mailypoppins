@@ -285,6 +285,7 @@ export type Action =
   | { type: "jump_mailbox"; index: number }
   | { type: "open_account_picker" }
   | { type: "toggle_account_expanded"; account: string }
+  | { type: "expand_account"; account: string }
   | { type: "focus"; pane: Pane }
   | { type: "pane_focused"; pane: Pane }
   | { type: "cycle_focus"; dir: 1 | -1 }
@@ -1792,6 +1793,14 @@ function reduce(s: AppState, a: Action): AppState {
       return accountNames(s).length < 2 ? s : reduce(s, { type: "overlay", overlay: "account_picker" });
     case "toggle_account_expanded":
       return { ...s, sidebarExpanded: { ...s.sidebarExpanded, [a.account]: !accountExpanded(s, a.account) } };
+    // The picker on the current account: it drops a hand collapse, since the
+    // header takes no key and a collapsed selection leaves j/k no stop.
+    case "expand_account": {
+      if (s.sidebarExpanded[a.account] !== false) return s;
+      const sidebarExpanded = { ...s.sidebarExpanded };
+      delete sidebarExpanded[a.account];
+      return { ...s, sidebarExpanded };
+    }
 
     case "focus":
       return withFocus(s, a.pane);

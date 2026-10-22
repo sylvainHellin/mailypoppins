@@ -1210,6 +1210,16 @@ describe("the account picker and the sidebar's collapsed accounts (ticket 0147)"
     expect(accountExpanded(s, "work")).toBe(false);
   });
 
+  it("expand_account drops a hand collapse and leaves anything else alone", () => {
+    const collapsed = run(booted(), { type: "toggle_account_expanded", account: "work" });
+    expect(accountExpanded(collapsed, "work")).toBe(false);
+    const s = run(collapsed, { type: "expand_account", account: "work" });
+    expect(s.sidebarExpanded).toEqual({});
+    expect(accountExpanded(s, "work")).toBe(true);
+    const opened = run(booted(), { type: "toggle_account_expanded", account: "home" });
+    expect(run(opened, { type: "expand_account", account: "home" })).toBe(opened);
+  });
+
   it("walks the sidebar cursor over the expanded accounts only", () => {
     let s = run(booted(), { type: "focus", pane: "sidebar" });
     for (let i = 0; i < 10; i++) {
