@@ -27,6 +27,7 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/app/contacts.ts` | The contact lists, the Contacts view's query and cursor, the rebuilds this window awaits and their notices, and what the view's keys run |
 | `src/app/signatures.ts` | The signature listings, the Signatures dialog's opening, its changes and their notices |
 | `src/app/activity.ts` | The activity log: its ring, each line's level, the lines of the daemon events it records, and its filter |
+| `src/app/health.ts` | The daemon's health checks that are not ok: the snapshot's seed, `diagnostic.check_changed` by name, each check's log line and label, and which the banner shows |
 | `src/app/interop.ts` | `sc` and `sf` (config.toml and the daemon log in the editor), and the reader's copies |
 | `src/app/settings.ts` | The Settings view's configuration, the config.toml banner's problem, `config.changed`, the reload, and the password dialog's store |
 | `src/app/wizard.ts` | The account wizard's presets, per-step checks and the `AccountDraft` its review writes |
@@ -85,11 +86,12 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `disconnected` | the reconnecting banner |
 | `reconnected` | the banner turns to resync until the bootstrap lands |
 | `resync` | the resync banner |
-| `rebootstrapped` | the whole model, selection restored as above, every answer stale |
+| `rebootstrapped` | the whole model, selection restored as above, every answer stale, and the health banner set to the snapshot's `diagnostics` |
 | `event` `state.invalidate` / `state.remove` | the named account, mailbox, outbox or draft answers stale, a removed selection cleared, a removed draft's editing session ended unless its embedded editor still runs; an `outbox:<account>` invalidation creates that account's outbox listing when this window never read it; a `mailbox:` or `message:` change makes that account's agenda and invitation cards stale |
 | `event` `account.state_changed`, `sync.completed` | runtime state and sync health updated, that account's counts and list stale, and on `sync.completed` its agenda and invitation cards and a line in the activity log |
 | `event` `config.changed` | a line in the activity log, the config.toml banner cleared, the configuration and the account list stale, each added or updated account's counts and list stale, and a removed account the window still knows removed (see Settings) |
 | `event` `config.invalid` | a line in the activity log, and the config.toml banner |
+| `event` `diagnostic.check_changed` | a line in the activity log, and the check's health banner line replaced, added, or on `ok` removed (see Health checks) |
 | `event` `draft.*` | the account's counts and, when shown, its list stale; an editing session stays |
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
 | `event` `signature.changed` | every account's signature listing stale, read again while the Signatures dialog or a new-draft or forward wizard is open |
@@ -796,6 +798,7 @@ The lines come from:
 - every notice of the activity area (`pushNotice`), with the failed rows and their reasons after the text, at `error` for the failure kinds (`FAILURES`) and `info` for the rest;
 - `sync.completed`, at the daemon's `severity` (`error` for a tick with an error), in the TUI's words with the account named: "Synced <account>: N new, M existing" and its suffixes, or "Fetch failed (<account>): <error>";
 - `config.changed`, "Configuration reloaded: added ...; updated ...; removed ...", and `config.invalid`, "The configuration was refused (<path>, line N): <message>", at `error`;
+- each health check of the bootstrap snapshot this window does not already hold as it is, and each `diagnostic.check_changed`, as the TUI lands them: "<name>: <detail>", at `warning` for `warn`, `error` for `fail` and `info` for a recovery;
 - a hold that fires, "Hold over, sending <subject> from <account>", and one that is cancelled, through its own "Send of <subject> cancelled" notice, each once whichever of the event and this window's cancel answer lands first.
 
 These events arrive whichever client caused them, so another client's sync or reload is in this window's log too.
@@ -903,6 +906,17 @@ The window reads `config_get` with no account at all, so an answer to the curren
 The banner then says "config.toml did not load (<path>); the daemon serves no configuration until a reload loads it", with the line and the message of a later `config.invalid` when one comes.
 An answer in another state drops a startup banner, since the file has loaded since; an answer to a read that went stale leaves the banner alone.
 A re-bootstrap from another daemon instance clears the banner, since that daemon's startup is no swap and publishes no `config.changed`; its own `config_get` or `config.invalid` raises it again.
+
+### Health checks
+
+The daemon's checks that are not ok (`config_loaded`, `store_open`, `socket_owner`, `log_writable`, `account:<name>`) are `state.health`, in `src/app/health.ts`.
+A bootstrap sets it to the snapshot's `diagnostics`, the truth whichever instance answers; a `diagnostic.check_changed` replaces its check by name or joins the end, and one at `ok` leaves.
+A payload that is not a check is skipped, as the TUI skips it.
+
+Each check is a line under the connection banner, inside the same polite status region, so it is heard without interrupting: a `CircleAlert` in the warning colour for `warn` or the destructive one for `fail`, then the check's label and the daemon's sentence, wrapped rather than cut.
+The labels are "config.toml", "Account stores", "Daemon socket", "Daemon log" and "Account <name>".
+The `config_loaded` line has "Open config.toml", since a warning there, such as a key the load ignored (PERSO-118), is fixed in the file.
+While the config.toml banner shows, the `config_loaded` line does not: that banner says the same with the line and keeps its own button.
 
 ### config.changed
 

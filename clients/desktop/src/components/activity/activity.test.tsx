@@ -4,6 +4,9 @@ import { renderApp, shellReady } from "@/test/render";
 import { emitEnvelope, fixtures, mock, MOCK_CONFIG_PATH, MOCK_LOG_PATH, NO_CONFIG } from "@/test/tauri-mock";
 
 const seededHold = fixtures.bootstrap.snapshot.holds[0];
+/** The fixture daemon's one health warning, logged as the window bootstraps. */
+const seededCheck = fixtures.bootstrap.snapshot.diagnostics[0];
+const checkEntry = ["warning", `${seededCheck.name}: ${seededCheck.detail}`];
 const inboxRow = fixtures.messages.work.inbox[0] as { selector: string; subject: string };
 
 function stubClipboard() {
@@ -43,6 +46,7 @@ describe("the activity log dialog", () => {
     await user.keyboard("sl");
     const { log } = await openLog();
     expect(entries(log)).toEqual([
+      checkEntry,
       ["info", "Quick sync of work…"],
       ["error", "Sync of work did not start: no route"],
       ["error", "The configuration was refused (/c/config.toml, line 3): expected a table"],
@@ -76,7 +80,7 @@ describe("the activity log dialog", () => {
     expect(within(log).getByText("No line matches the filter")).toBeInTheDocument();
     await user.keyboard("{Escape}");
     expect(field).toHaveValue("");
-    expect(entries(log)).toHaveLength(2);
+    expect(entries(log)).toHaveLength(3);
     expect(screen.getByRole("dialog", { name: "Activity log" })).toBeInTheDocument();
     await user.keyboard("/{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Activity log" })).toBeNull());
@@ -118,7 +122,8 @@ describe("the activity log dialog", () => {
   });
 
   it("says so when nothing was reported, and the sidebar's Activity entry opens it too", async () => {
-    const { user } = renderApp();
+    // A healthy daemon: its snapshot carries no check to log.
+    const { user } = renderApp(undefined, () => void (mock.bootstrap.snapshot.diagnostics = []));
     await shellReady();
     await user.click(screen.getByRole("button", { name: "Activity log, key s l" }));
     const { log } = await openLog();
@@ -183,6 +188,7 @@ describe("config.toml and the daemon log in the editor", () => {
     await user.keyboard("sl");
     const { log } = await openLog();
     expect(entries(log)).toEqual([
+      checkEntry,
       ["warning", NO_CONFIG],
       ["warning", `No log file found at ${MOCK_LOG_PATH}`],
     ]);

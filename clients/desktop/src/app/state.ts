@@ -12,6 +12,7 @@ import type {
   EventFrontmatter,
   DraftEntry,
   DraftMessage,
+  HealthCheck,
   HoldStatus,
   MessageFlags,
   MessageListRow,
@@ -902,6 +903,12 @@ export type AppState = {
    * says a configuration loaded or another instance answers.
    */
   configProblem: ConfigProblem | null;
+  /**
+   * The daemon's health checks that are not ok, the health banner's lines:
+   * the bootstrap snapshot's `diagnostics`, then each
+   * `diagnostic.check_changed` by name, a recovered one dropped (src/app/health.ts).
+   */
+  health: HealthCheck[];
   /** What the `password` overlay shows; null whenever another overlay or none is open. */
   passwordDialog: PasswordDialog | null;
   /** What the `account_wizard` overlay shows; null whenever another overlay or none is open. */
@@ -997,6 +1004,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     signaturesDialog: null,
     config: emptyLoadable(),
     configProblem: null,
+    health: [],
     passwordDialog: null,
     accountWizard: null,
     signIn: null,

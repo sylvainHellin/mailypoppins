@@ -126,10 +126,9 @@ describe("the activity log", () => {
   });
 
   it("logs a hold's end once: fired by its event, cancelled by its notice", () => {
-    const booted = run(initialState(), {
-      type: "gui_event",
-      event: { type: "rebootstrapped", cause: "subscribed", bootstrap: fixtures.bootstrap },
-    });
+    // A healthy daemon, so the snapshot's checks add no line of their own.
+    const bootstrap = { ...fixtures.bootstrap, snapshot: { ...fixtures.bootstrap.snapshot, diagnostics: [] } };
+    const booted = run(initialState(), { type: "gui_event", event: { type: "rebootstrapped", cause: "subscribed", bootstrap } });
     const fired = run(booted, envelope("send.hold_fired", { ...hold, remaining_secs: 0 }), envelope("send.hold_fired", { ...hold, remaining_secs: 0 }));
     expect(lines(fired)).toEqual([["info", `Hold over, sending "${hold.subject}" from work`]]);
     const cancelled = run(

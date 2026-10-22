@@ -123,7 +123,8 @@ import {
   type View,
 } from "@/app/state";
 import { viewPanes } from "@/app/views";
-import { logEvent, withNotice } from "@/app/activity";
+import { logActivity, logEvent, withNotice } from "@/app/activity";
+import { checkLevel, checkLine, isHealthCheck, knownCheck, withCheck } from "@/app/health";
 import {
   closeOutbox,
   isOutboxOperation,
@@ -1166,11 +1167,19 @@ function bootstrapModel(s: AppState, bootstrap: Bootstrap): AppState {
     resync: null,
     disconnected: null,
     shuttingDown: false,
+    // The snapshot's checks are the daemon's current complaints: a window
+    // that opens finds them without waiting for a flip that may never come.
+    health: bootstrap.snapshot.diagnostics,
     mailboxes,
     accounts: s.accounts.data
       ? markStale({ ...s.accounts, data: s.accounts.data.filter((a) => names.includes(a.name)) })
       : markStale(s.accounts),
   };
+  // Each logs once, as the TUI lands the array: a re-bootstrap that finds a
+  // check as this window already holds it adds no line.
+  for (const check of bootstrap.snapshot.diagnostics) {
+    if (!knownCheck(s.health, check)) next = logActivity(next, checkLevel(check.status), checkLine(check));
+  }
 
   const prev = s.selection;
   const kept = prev.account !== null && names.includes(prev.account);
@@ -1250,7 +1259,8 @@ function endProgress(s: AppState, operationId: string): AppState {
 }
 
 function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
-  // `sync.completed`, `config.changed` and `config.invalid` get a line in the activity log.
+  // `sync.completed`, `config.changed`, `config.invalid` and
+  // `diagnostic.check_changed` get a line in the activity log.
   s = logEvent(s, kind, payload);
   switch (kind) {
     case "state.invalidate": {
@@ -1336,6 +1346,8 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       return staleAllSignatures(s);
     case "config.invalid":
       return configInvalid(s, payload as ConfigInvalid);
+    case "diagnostic.check_changed":
+      return isHealthCheck(payload) ? { ...s, health: withCheck(s.health, payload) } : s;
     case "config.changed":
       return configChanged(
         s,

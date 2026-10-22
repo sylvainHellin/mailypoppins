@@ -6,6 +6,7 @@
 
 import type { ConfigChanged, ConfigInvalid, HoldStatus, SyncCompleted } from "@/protocol/types";
 import type { ActivityKind, ActivityLevel, ActivityLogEntry, ActivityNotice, AppState } from "@/app/state";
+import { checkLevel, checkLine, isHealthCheck } from "@/app/health";
 
 /** How many lines the log keeps, the TUI's `STATUS_LOG_CAPACITY`; a newer one drops the oldest. */
 export const ACTIVITY_LOG_CAP = 100;
@@ -166,8 +167,9 @@ export function holdFiredLine(p: HoldStatus): string {
 }
 
 /**
- * The log line of a daemon event: `sync.completed`, `config.changed` and
- * `config.invalid`; null for any other kind (the two hold ends log through
+ * The log line of a daemon event: `sync.completed`, `config.changed`,
+ * `config.invalid` and `diagnostic.check_changed`, a recovery included, as
+ * the TUI lands it; null for any other kind (the two hold ends log through
  * the hold's transition, {@link holdFiredLine}). These arrive whoever caused
  * them: another client's sync or reload is in this window's log too.
  */
@@ -183,6 +185,8 @@ export function eventLine(kind: string, payload: unknown): { level: ActivityLeve
       return { level: "info", text: configChangedLine(payload as ConfigChanged) };
     case "config.invalid":
       return { level: "error", text: configInvalidLine(payload as ConfigInvalid) };
+    case "diagnostic.check_changed":
+      return isHealthCheck(payload) ? { level: checkLevel(payload.status), text: checkLine(payload) } : null;
     default:
       return null;
   }

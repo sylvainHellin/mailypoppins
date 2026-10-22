@@ -1415,8 +1415,8 @@ The source anchors below are the entry points the plan created; the daemon, the 
 - Classification: diagnostics and maintenance
 - Source anchor: none, new in this plan
 - Daemon surface: `diagnostic.health`, `diagnostic.logs`, `diagnostic.log_path` and `diagnostic.support_bundle`, fronted by `mp daemon health`, `mp daemon logs` and `mp daemon support-bundle` under the `daemon` subtree; the non-`ok` checks also fill `state.bootstrap`'s `diagnostics` array and travel as the `diagnostic.check_changed` event
-- GUI location: not required (diagnostics and maintenance)
-- Validation: `tests/daemon_diagnostics.rs` and `clients/tui/src/diagnostics_tests.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7)
+- GUI location: the desktop's health banner lines under the connection banner, one per check that is not `ok`, from the snapshot and `diagnostic.check_changed`, each also a line in the activity log (clients/desktop/docs/shell.md, "Health checks")
+- Validation: `tests/daemon_diagnostics.rs`, `clients/tui/src/diagnostics_tests.rs` and `clients/desktop/src/app/health.test.ts` with `src/components/shell/health.test.tsx`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7)
 - Status: routed (P6-U8)
 - Note: the support bundle is a directory of five files rather than an archive, because this tree links neither `tar` nor `flate2`, and every secret value the configuration carries is struck from every file in it.
 
