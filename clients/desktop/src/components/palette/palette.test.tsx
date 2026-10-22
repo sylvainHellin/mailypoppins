@@ -29,6 +29,22 @@ describe("the command palette", () => {
     expect(later).toHaveTextContent("soon");
   });
 
+  it("ranks the best match first across sections, so a typed name and Enter run it", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard(":");
+    const dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    // "Add account" (APP) also matches rows of MESSAGE, a section listed before it.
+    await user.keyboard("Add account");
+    await waitFor(() => {
+      const shown = [...dialog.querySelectorAll("[data-testid='palette-item']")];
+      expect(shown[0]).toHaveAttribute("data-label", "Add account");
+      expect(shown[0]).toHaveAttribute("data-selected", "true");
+    });
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("dialog", { name: "Add account" })).toBeInTheDocument();
+  });
+
   it("Add account runs: it opens the account wizard", async () => {
     const { user } = renderApp();
     await shellReady();

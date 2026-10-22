@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   CommandDialog,
   Command,
@@ -40,6 +40,11 @@ export function CommandPalette({ open, onOpenChange, onRun, extra = NO_EXTRA, hi
     () => groups([...paletteEntries(), ...GUI_ENTRIES, ...extra].filter((e) => e.id === null || !hidden.has(e.id))),
     [extra, hidden],
   );
+  const run = (id: ActionId) => {
+    onOpenChange(false);
+    // Run after the dialog closes, so focus moves where the action puts it.
+    setTimeout(() => onRun(id), 0);
+  };
   return (
     <CommandDialog
       open={open}
@@ -48,37 +53,52 @@ export function CommandPalette({ open, onOpenChange, onRun, extra = NO_EXTRA, hi
       description="Run an action by name"
       className="sm:max-w-xl"
     >
-      <Command loop>
-        <CommandInput placeholder="Run an action by name…" aria-label="Action name" />
-        <CommandList className="max-h-[60vh]">
-          <CommandEmpty>No action matches.</CommandEmpty>
-          {all.map(([section, entries]) => (
-            <CommandGroup key={section} heading={section}>
-              {entries.map((e) => (
-                <CommandItem
-                  key={`${section}:${e.label}`}
-                  value={`${section} ${e.label} ${e.keys.join(" ")}`}
-                  disabled={e.id === null}
-                  data-testid="palette-item"
-                  data-label={e.label}
-                  onSelect={() => {
-                    if (!e.id) return;
-                    const id = e.id;
-                    onOpenChange(false);
-                    // Run after the dialog closes, so focus moves where the action puts it.
-                    setTimeout(() => onRun(id), 0);
-                  }}
-                  className="data-[disabled=true]:opacity-100 data-[disabled=true]:text-disabled-foreground"
-                >
-                  <span className="min-w-0 flex-1 truncate">{e.label}</span>
-                  {e.badge ? <BadgeFor badge={e.badge} /> : null}
-                  <Keys keys={e.keys} />
-                </CommandItem>
-              ))}
-            </CommandGroup>
-          ))}
-        </CommandList>
-      </Command>
+      <PaletteBody all={all} onRun={run} />
     </CommandDialog>
+  );
+}
+
+/**
+ * The palette's input and rows, mounted with the dialog's popup, so each
+ * opening starts with an empty search. With no search the rows sit under
+ * their sections; while a search runs they are one list, which cmdk ranks
+ * best match first. cmdk 1.1 ranks the rows inside a group but not the
+ * groups themselves (it looks a group up by its React id where it stored its
+ * value), so grouped rows left the best match under a later section, and
+ * Enter ran the first row of an earlier one.
+ */
+function PaletteBody({ all, onRun }: { all: [string, PaletteEntry[]][]; onRun: (id: ActionId) => void }) {
+  const [search, setSearch] = useState("");
+  const row = (section: string, e: PaletteEntry) => (
+    <CommandItem
+      key={`${section}:${e.label}`}
+      value={`${section} ${e.label} ${e.keys.join(" ")}`}
+      disabled={e.id === null}
+      data-testid="palette-item"
+      data-label={e.label}
+      onSelect={() => {
+        if (e.id) onRun(e.id);
+      }}
+      className="data-[disabled=true]:opacity-100 data-[disabled=true]:text-disabled-foreground"
+    >
+      <span className="min-w-0 flex-1 truncate">{e.label}</span>
+      {e.badge ? <BadgeFor badge={e.badge} /> : null}
+      <Keys keys={e.keys} />
+    </CommandItem>
+  );
+  return (
+    <Command loop>
+      <CommandInput placeholder="Run an action by name…" aria-label="Action name" value={search} onValueChange={setSearch} />
+      <CommandList className="max-h-[60vh]">
+        <CommandEmpty>No action matches.</CommandEmpty>
+        {search.trim() === ""
+          ? all.map(([section, entries]) => (
+              <CommandGroup key={section} heading={section}>
+                {entries.map((e) => row(section, e))}
+              </CommandGroup>
+            ))
+          : all.flatMap(([section, entries]) => entries.map((e) => row(section, e)))}
+      </CommandList>
+    </Command>
   );
 }
