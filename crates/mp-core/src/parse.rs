@@ -847,6 +847,42 @@ pub fn sanitize_attachment_filename(name: &str) -> String {
     }
 }
 
+/// The file name of an export: `<YYYY-MM-DD>_<subject>.eml`.
+///
+/// The date is the `Date:` header's own calendar day, as a reader of the
+/// message sees it; a header that does not parse drops the prefix rather than
+/// inventing a day. The subject keeps its spaces and its case, since the file
+/// is usually attached to another mail and its name is what the recipient
+/// reads; the characters a file system or a mail client refuses in a name are
+/// dropped, and a separator becomes `-`. An empty subject is `message`, and a
+/// long one is cut as an attachment's name is ([`cut_name`]), by bytes
+/// on a char boundary.
+pub fn eml_name(subject: &str, date: Option<&str>) -> String {
+    let cleaned: String = subject
+        .chars()
+        .filter_map(|c| match c {
+            '/' | '\\' => Some('-'),
+            ':' | '*' | '?' | '"' | '<' | '>' | '|' => None,
+            c if c.is_control() => Some(' '),
+            c => Some(c),
+        })
+        .collect();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    let stem = if cleaned.is_empty() {
+        "message"
+    } else {
+        cut_name(cleaned).trim_end()
+    };
+    let day = date
+        .and_then(|d| chrono::DateTime::parse_from_rfc2822(d.trim()).ok())
+        .map(|d| d.format("%Y-%m-%d").to_string());
+    match day {
+        Some(day) => format!("{day}_{stem}.eml"),
+        None => format!("{stem}.eml"),
+    }
+}
+
 /// Sanitize a Message-ID for use as a directory name.
 /// Strips angle brackets, replaces path-unsafe characters with `_`, drops control
 /// chars, trims, and truncates to 200 bytes (UTF-8-safe). If the result is empty,
@@ -2686,5 +2722,56 @@ Content-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n--B--\r\n"
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn the_name_is_the_day_and_the_subject() {
+        assert_eq!(
+            eml_name(
+                "Re: Elsevier DEAL open access",
+                Some("Wed, 21 Oct 2026 09:12:00 +0200")
+            ),
+            "2026-10-21_Re Elsevier DEAL open access.eml"
+        );
+    }
+
+    #[test]
+    fn a_name_drops_what_a_file_system_refuses_and_keeps_the_rest() {
+        assert_eq!(
+            eml_name("a/b\\c: \"d\" <e>? *f* |g|\t\nh", None),
+            "a-b-c d e f g h.eml"
+        );
+        assert_eq!(
+            eml_name("Bericht über Anträge", None),
+            "Bericht über Anträge.eml"
+        );
+    }
+
+    #[test]
+    fn an_empty_subject_or_an_odd_date_still_names_a_file() {
+        assert_eq!(eml_name("", None), "message.eml");
+        assert_eq!(eml_name(" ... ", Some("(unknown date)")), "message.eml");
+        assert_eq!(eml_name("..", None), "message.eml");
+        let long = "x".repeat(300);
+        assert_eq!(eml_name(&long, None).len(), MAX_NAME_BYTES + ".eml".len());
+    }
+
+    /// A CJK or emoji subject is three or four bytes a character: the cut is
+    /// by bytes, on a char boundary, so the name fits a file system's 255 and
+    /// never splits a character.
+    #[test]
+    fn a_long_cjk_or_emoji_subject_is_cut_by_bytes_on_a_char_boundary() {
+        let date = Some("Wed, 21 Oct 2026 09:12:00 +0200");
+        for subject in ["会議の議事録".repeat(40), "📬🎉".repeat(80)] {
+            let name = eml_name(&subject, date);
+            let stem = name
+                .strip_prefix("2026-10-21_")
+                .and_then(|n| n.strip_suffix(".eml"))
+                .expect("the day and the extension frame the stem");
+            assert!(stem.len() <= MAX_NAME_BYTES, "{} bytes", stem.len());
+            assert!(stem.len() > MAX_NAME_BYTES - 4, "{} bytes", stem.len());
+            assert!(subject.starts_with(stem));
+            assert!(name.len() <= 255);
+        }
     }
 }

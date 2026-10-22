@@ -803,7 +803,7 @@ async fn forward_as_attachment(
         crate::parse::stable_attachments_dir(&crate::config::account_dir(&name), &row.message_id);
     crate::config::create_private_dir_all(&dir)
         .map_err(|e| internal(format!("creating {}: {e}", dir.display())))?;
-    let path = dir.join(super::message_eml::eml_name(
+    let path = dir.join(crate::parse::eml_name(
         row.subject.as_deref().unwrap_or_default(),
         row.date_display.as_deref(),
     ));
