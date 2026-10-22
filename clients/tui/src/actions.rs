@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::app::{
     mailbox_key, Action, App, BgResult, ComposeField, ComposeMode, ComposeWizard, Focus,
-    MailboxKind, MessageRef, Overlay, StatusLevel,
+    MailboxKind, MessageAddress, MessageRef, Overlay, StatusLevel,
 };
 use super::commands;
 use super::helpers::{edit_file, resume_terminal, suspend_terminal};
@@ -218,7 +218,7 @@ pub(super) fn row_attachment_files(
     row_id: i64,
 ) -> Option<crate::app::AttachmentFiles> {
     let account = app.account_config.name.clone();
-    match commands::attachment_files(&daemon_door(app), &account, row_id) {
+    match commands::attachment_files(&daemon_door(app), &account, &MessageAddress::Row(row_id)) {
         Ok(files) => Some(files),
         Err(e) => {
             app.set_status_level(format!("Attachments failed: {e}"), StatusLevel::Error);
@@ -227,49 +227,43 @@ pub(super) fn row_attachment_files(
     }
 }
 
-/// The attachments of a server-search hit that resolved to no local row: the
-/// bytes the overlay is already holding, written where the store-backed ones
-/// go so the picker sees files either way (#0052 scope item 11).
+/// The search overlay's selected hit as the address every daemon call takes,
+/// or `None` with the overlay's own line saying why (PERSO-155).
 ///
-/// Keyed by the hit's position in the result list rather than by a row id it
-/// does not have. The filename is sanitised the way ingest sanitises it, so a
-/// hostile `../` in a Content-Disposition cannot escape the temp directory.
-pub fn fetched_attachment_files(
-    app: &mut App,
-    fetched: &mp_core::parse::FetchedEmail,
-    index: usize,
-) -> Option<Vec<PathBuf>> {
-    let dest = match mp_core::parse::materialisation_dir(&format!("search-{index}")) {
-        Ok(dir) => dir,
-        Err(e) => {
-            app.set_status_level(format!("Attachments failed: {e:#}"), StatusLevel::Error);
-            return None;
-        }
-    };
-    match write_fetched_attachments(fetched, &dest) {
-        Ok(files) => Some(files),
-        Err(e) => {
-            app.set_status_level(format!("Attachments failed: {e:#}"), StatusLevel::Error);
+/// A hit that resolved is its row; a server-only one is addressed as `f`
+/// addresses it, by its `Message-ID` and the sidebar label it was found under,
+/// and the daemon reads it from the server's copy without ingesting it. A hit
+/// without a `Message-ID` cannot be asked for.
+pub fn selected_hit_address(app: &mut App) -> Option<MessageAddress> {
+    let hit = app.server_search_results.get(app.server_search_index)?;
+    match (hit.entry.msg, hit.fetched.message_id.clone()) {
+        (Some(msg), _) => Some(MessageAddress::Row(msg.row_id())),
+        (None, Some(message_id)) => Some(MessageAddress::Hit {
+            message_id,
+            mailbox: hit.source_label.clone(),
+        }),
+        (None, None) => {
+            app.server_search_status = Some(
+                "This hit carries no Message-ID; the server cannot be asked for it".to_string(),
+            );
             None
         }
     }
 }
 
-fn write_fetched_attachments(
-    fetched: &mp_core::parse::FetchedEmail,
-    dest: &Path,
-) -> Result<Vec<PathBuf>> {
-    if fetched.attachments.is_empty() {
-        return Ok(Vec::new());
+/// The attachments of the search overlay's selected hit, a row's or a
+/// server-only hit's through the same two calls (PERSO-155), or `None` with
+/// the overlay's line saying why: the overlay covers the status bar.
+pub fn search_hit_attachment_files(app: &mut App) -> Option<crate::app::AttachmentFiles> {
+    let address = selected_hit_address(app)?;
+    let account = app.account_config.name.clone();
+    match commands::attachment_files(&daemon_door(app), &account, &address) {
+        Ok(files) => Some(files),
+        Err(e) => {
+            app.server_search_status = Some(format!("Attachments failed: {e}"));
+            None
+        }
     }
-    std::fs::create_dir_all(dest)?;
-    let mut written = Vec::new();
-    for att in &fetched.attachments {
-        let out = dest.join(mp_core::parse::sanitize_attachment_filename(&att.filename));
-        std::fs::write(&out, &att.content)?;
-        written.push(out);
-    }
-    Ok(written)
 }
 
 /// The HTML rendition of a message, written to a file a browser can open
@@ -305,7 +299,11 @@ pub fn cursor_eml_file(app: &mut App) -> Option<PathBuf> {
         return None;
     };
     let account = app.account_config.name.clone();
-    match commands::eml_file(&daemon_door(app), &account, msg.row_id()) {
+    match commands::eml_file(
+        &daemon_door(app),
+        &account,
+        &MessageAddress::Row(msg.row_id()),
+    ) {
         Ok(path) => Some(path),
         Err(e) => {
             app.set_status_level(format!("Export failed: {e}"), StatusLevel::Error);
@@ -401,7 +399,8 @@ pub fn html_rendition(app: &mut App, html: &str, stem: &str) -> Option<PathBuf> 
 /// this seam, which is the reason `draft_path`'s two lines became one.
 pub fn readonly_view_for_row(app: &mut App, row_id: i64) -> Option<commands::Rendition> {
     let account = app.account_config.name.clone();
-    match commands::markdown_rendition(&daemon_door(app), &account, row_id) {
+    let address = MessageAddress::Row(row_id);
+    match commands::markdown_rendition(&daemon_door(app), &account, &address) {
         Ok(rendition) => Some(rendition),
         Err(e) => {
             log::warn!("[actions] no read-only view for row {row_id}: {e}");
@@ -410,6 +409,25 @@ pub fn readonly_view_for_row(app: &mut App, row_id: i64) -> Option<commands::Ren
                 StatusLevel::Error,
             );
             None
+        }
+    }
+}
+
+/// [`readonly_view_for_row`] of any address: a server-only hit's view is the
+/// daemon's rendering of the server's copy (PERSO-155), and its failure goes
+/// to the search overlay's own line, the only place a hit is shown.
+pub fn readonly_view(app: &mut App, address: &MessageAddress) -> Option<commands::Rendition> {
+    match address {
+        MessageAddress::Row(row_id) => readonly_view_for_row(app, *row_id),
+        MessageAddress::Hit { .. } => {
+            let account = app.account_config.name.clone();
+            match commands::markdown_rendition(&daemon_door(app), &account, address) {
+                Ok(rendition) => Some(rendition),
+                Err(e) => {
+                    app.server_search_status = Some(format!("Open failed: {e}"));
+                    None
+                }
+            }
         }
     }
 }
@@ -447,9 +465,9 @@ pub fn validate_then_approve(path: &Path) -> Result<mp_core::types::EmailDraft> 
 fn open_readonly_view(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    row_id: i64,
+    address: &MessageAddress,
 ) -> Result<bool> {
-    let Some(rendition) = readonly_view_for_row(app, row_id) else {
+    let Some(rendition) = readonly_view(app, address) else {
         return Ok(false);
     };
     // Neither half of the terminal dance may return before the rendition is
@@ -556,14 +574,13 @@ fn cursor_message(app: &mut App, what: &str) -> Option<MessageRef> {
 fn write_draft_and_edit(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    msg: MessageRef,
+    address: &MessageAddress,
     kind: DraftFromSource,
     headers: Option<&DraftRecipientEdit>,
     what: &str,
 ) -> Result<bool> {
     let account = app.account_config.name.clone();
-    let built =
-        commands::draft_from_source(&daemon_door(app), &account, msg.row_id(), kind, headers);
+    let built = commands::draft_from_source(&daemon_door(app), &account, address, kind, headers);
     let (path, selector) = match built {
         Ok(pair) => pair,
         Err(e) => {
@@ -579,29 +596,31 @@ fn write_draft_and_edit(
     )
 }
 
-/// [`write_draft_and_edit`] over a message the client already holds, which is
-/// the server-search hit that resolved to no local row.
+/// A reply to a message the client already holds, which is the server-search
+/// hit that resolved to no local row, written and handed to `$EDITOR` as
+/// [`write_draft_and_edit`] does.
 ///
-/// `draft.create_from_message` since P5-U10d (`DFT-08`, `DFT-09`, #0126): the
-/// message is not in the store, so there is no row to address and no `source`
-/// this family takes, and the content is the fetch the overlay is rendering.
-/// So the message travels instead of an address and the daemon runs the same
-/// `mp_core::draft` builder over it that the resolved hit's reply runs.
+/// `draft.create_from_message` since P5-U10d (`DFT-08`, #0126): the message is
+/// not in the store, so there is no row to address and `draft.reply` takes no
+/// hit, and the content is the fetch the overlay is rendering. So the message
+/// travels instead of an address and the daemon runs the same `mp_core::draft`
+/// builder over it that the resolved hit's reply runs. A forward of the same
+/// hit is `draft.forward`'s, whose `hit` source carries the server copy's parts
+/// (PERSO-155).
 ///
 /// Composing this out of `message.fetch` plus `draft.reply` is what P5-U10c-I2
 /// was briefed to do and refused: it would ingest the message, move the unread
 /// count and turn the hit into a resolved one, which is what the overlay's
 /// separate `f` key is for.
-fn write_fetched_draft_and_edit(
+fn write_fetched_reply_and_edit(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     fetched: &mp_core::parse::FetchedEmail,
-    mailbox: &str,
-    kind: DraftFromSource,
+    all: bool,
     what: &str,
 ) -> Result<()> {
     let account = app.account_config.name.clone();
-    let built = commands::draft_from_message(&daemon_door(app), &account, kind, fetched, mailbox);
+    let built = commands::draft_from_message(&daemon_door(app), &account, all, fetched);
     let (path, selector) = match built {
         Ok(pair) => pair,
         Err(e) => {
@@ -778,7 +797,7 @@ pub(super) fn handle_action(
                 // any reload can read the row back unread (see
                 // lessons-learned, the #0004 ordering trap).
                 commands::mark_open_read(app, &door, msg);
-                if open_readonly_view(app, terminal, msg.row_id())? {
+                if open_readonly_view(app, terminal, &MessageAddress::Row(msg.row_id()))? {
                     return_to_list_after_edit(app);
                 }
                 return Ok(());
@@ -814,7 +833,7 @@ pub(super) fn handle_action(
             let clean = write_draft_and_edit(
                 app,
                 terminal,
-                msg,
+                &MessageAddress::Row(msg.row_id()),
                 DraftFromSource::Reply { all: reply_all },
                 None,
                 what,
@@ -1127,9 +1146,7 @@ pub(super) fn handle_action(
             attach_file_to_draft(app, &path);
         }
         Action::ComposeWizardCancel => {
-            app.close_overlay();
-            app.focus = Focus::List;
-            app.set_status("Compose cancelled".to_string());
+            cancel_compose_wizard(app);
         }
 
         Action::ComposeEditSignature => {
@@ -1187,6 +1204,23 @@ pub(super) fn handle_action(
 // Compose wizard handlers
 // ---------------------------------------------------------------------------
 
+/// Close the compose wizard without writing anything.
+///
+/// A forward from the search overlay goes back to it, with the results as
+/// they were, as its reply does after the editor (PERSO-155).
+pub fn cancel_compose_wizard(app: &mut App) {
+    let from_search = matches!(
+        &app.overlay,
+        Overlay::Compose(wizard) if matches!(wizard.mode, ComposeMode::SearchForward(_))
+    );
+    app.close_overlay();
+    app.focus = Focus::List;
+    if from_search {
+        app.overlay = Overlay::Search;
+    }
+    app.set_status("Compose cancelled".to_string());
+}
+
 fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
     // Load contact cache (if any) for the active account.
     let contacts = {
@@ -1226,6 +1260,13 @@ fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
                 default_signature.clone(),
             )
         }
+        ComposeMode::SearchForward(forward) => (
+            String::new(),
+            String::new(),
+            String::new(),
+            forward.subject.clone(),
+            default_signature.clone(),
+        ),
         ComposeMode::EditDraft { id } => {
             let Some(path) = indexed_draft_path(app, id) else {
                 app.focus = Focus::List;
@@ -1651,7 +1692,7 @@ fn submit_compose_wizard(
         let clean = write_draft_and_edit(
             app,
             terminal,
-            msg,
+            &MessageAddress::Row(msg.row_id()),
             DraftFromSource::Forward { as_attachment },
             Some(&edit),
             "Forward",
@@ -1659,10 +1700,28 @@ fn submit_compose_wizard(
         land_after_draft_editor(app, clean);
         return Ok(());
     }
+    // A forward from the search overlay, of a stored hit or a server-only
+    // one, returns to the overlay as its reply does (PERSO-155).
+    if let ComposeMode::SearchForward(forward) = &wizard.mode {
+        write_draft_and_edit(
+            app,
+            terminal,
+            &forward.address,
+            DraftFromSource::Forward {
+                as_attachment: forward.as_attachment,
+            },
+            Some(&edit),
+            "Forward",
+        )?;
+        app.overlay = Overlay::Search;
+        return Ok(());
+    }
 
     let draft_result = match &wizard.mode {
         ComposeMode::New => write_new_draft_from_wizard(app, &wizard),
-        ComposeMode::Forward { .. } | ComposeMode::EditDraft { .. } => {
+        ComposeMode::Forward { .. }
+        | ComposeMode::SearchForward(_)
+        | ComposeMode::EditDraft { .. } => {
             unreachable!("handled above")
         }
     };
@@ -1849,12 +1908,12 @@ fn slugify_subject_for_filename(subject: &str) -> String {
 /// The overlay's own action set: a server-search hit is not a list row, so it
 /// has its own Open / Save / Reply / Forward / Archive.
 ///
-/// All of them run off the store for a hit that resolved to a row, and off the
-/// fetch the overlay is already rendering for one that did not, with two
-/// exceptions. Archive needs a local row to move and says so when there is
-/// none. Open needs a stored row to render, because the read-only view is a
-/// materialisation of the store (#0075) and a hit that never synced has no row
-/// to materialise.
+/// All of them run off the store for a hit that resolved to a row, and for one
+/// that did not through the same daemon calls with the hit's address, which
+/// the daemon answers from the server's copy without ingesting it (PERSO-155),
+/// or off the fetch the overlay is already rendering for a reply. Two keys need
+/// a local row and say so when there is none: Archive, which moves one, and
+/// Enter, which puts the list cursor on one.
 fn handle_search_result_action(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -1863,21 +1922,13 @@ fn handle_search_result_action(
     match action {
         Action::SearchResultOpen => {
             // A hit that resolved is opened exactly as the list opens it: the
-            // read-only Markdown rendition of its row. One that did not is a
-            // message on the server this account has never ingested, so there
-            // is nothing to render, and the overlay is already showing the
-            // headers and the body that editor window would hold.
-            let Some(hit) = app.server_search_results.get(app.server_search_index) else {
+            // read-only Markdown rendition of its row. One that did not is the
+            // same rendition of the server's copy, which the daemon renders
+            // without ingesting it (PERSO-155).
+            let Some(address) = selected_hit_address(app) else {
                 return Ok(());
             };
-            let Some(msg) = hit.entry.msg else {
-                // The overlay covers the status bar, so the decline goes to
-                // the overlay's own footer line (#0104).
-                app.server_search_status =
-                    Some("Not in the local store; press f to fetch it first".to_string());
-                return Ok(());
-            };
-            open_readonly_view(app, terminal, msg.row_id())?;
+            open_readonly_view(app, terminal, &address)?;
         }
 
         Action::SearchResultJump => {
@@ -1917,16 +1968,14 @@ fn handle_search_result_action(
             // Materialise the read-only Markdown rendition and copy its path
             // (#0104): the store keeps no per-message .md file, this scratch
             // rendition is the file-shaped answer.
-            let Some(hit) = app.server_search_results.get(app.server_search_index) else {
+            let Some(address) = selected_hit_address(app) else {
                 return Ok(());
             };
-            let Some(msg) = hit.entry.msg else {
-                app.server_search_status =
-                    Some("Not in the local store; press f to fetch it first".to_string());
-                return Ok(());
-            };
-            let Some(rendition) = readonly_view_for_row(app, msg.row_id()) else {
-                app.server_search_status = Some("Yank failed; see the activity log".to_string());
+            let Some(rendition) = readonly_view(app, &address) else {
+                if matches!(address, MessageAddress::Row(_)) {
+                    app.server_search_status =
+                        Some("Yank failed; see the activity log".to_string());
+                }
                 return Ok(());
             };
             let shown = rendition.path.display().to_string();
@@ -2013,17 +2062,9 @@ fn handle_search_result_action(
 /// `f` addresses it, and the daemon downloads the server's copy without
 /// ingesting it, so the hit stays a hit.
 pub fn search_result_eml_file(app: &mut App) -> Option<PathBuf> {
-    let hit = app.server_search_results.get(app.server_search_index)?;
+    let address = selected_hit_address(app)?;
     let account = app.account_config.name.clone();
-    let door = daemon_door(app);
-    let file = match (hit.entry.msg, hit.fetched.message_id.as_deref()) {
-        (Some(msg), _) => commands::eml_file(&door, &account, msg.row_id()),
-        (None, Some(message_id)) => {
-            commands::hit_eml_file(&door, &account, message_id, &hit.source_label)
-        }
-        (None, None) => Err("This hit carries no Message-ID; cannot export it".to_string()),
-    };
-    match file {
+    match commands::eml_file(&daemon_door(app), &account, &address) {
         Ok(path) => Some(path),
         Err(e) => {
             app.server_search_status = Some(format!("Export failed: {e}"));
@@ -2087,26 +2128,61 @@ fn search_result_draft(
     let Some(hit) = app.server_search_results.get(app.server_search_index) else {
         return Ok(());
     };
-    let msg = hit.entry.msg;
-    // Cloned only for the unresolved hit, which is the one case that needs the
-    // fetched payload (and, for a forward as attachment, the mailbox the
-    // daemon fetches its `.eml` from) while `app` is borrowed mutably for the
-    // status line.
-    let fetched = msg
-        .is_none()
-        .then(|| (hit.fetched.clone(), hit.source_label.clone()));
-
-    // A hit that resolved is the list flow exactly, addressed by the row id it
-    // resolved to; one that did not has no row for the daemon to read.
-    // The overlay's own `e` leaves the focus under it alone, and so do these.
-    if let Some(msg) = msg {
-        write_draft_and_edit(app, terminal, msg, kind, None, what)?;
-        return Ok(());
+    match kind {
+        DraftFromSource::Forward { as_attachment } => {
+            search_result_forward(app, as_attachment);
+            Ok(())
+        }
+        // A reply goes straight to the editor, as the list's does: a hit that
+        // resolved is addressed by its row, and one that did not travels as
+        // the message the overlay holds.
+        DraftFromSource::Reply { all } => {
+            let msg = hit.entry.msg;
+            // Cloned only for the unresolved hit, which is the one case that
+            // needs the fetched payload while `app` is borrowed mutably.
+            let fetched = msg.is_none().then(|| hit.fetched.clone());
+            match (msg, fetched) {
+                (Some(msg), _) => {
+                    write_draft_and_edit(
+                        app,
+                        terminal,
+                        &MessageAddress::Row(msg.row_id()),
+                        kind,
+                        None,
+                        what,
+                    )?;
+                    Ok(())
+                }
+                (None, Some(fetched)) => {
+                    write_fetched_reply_and_edit(app, terminal, &fetched, all, what)
+                }
+                (None, None) => Ok(()),
+            }
+        }
     }
-    let Some((fetched, mailbox)) = fetched else {
-        return Ok(());
+}
+
+/// The search overlay's `w` and `cF`: the forward wizard over the selected
+/// hit, which asks for the recipients first as the list's forward does, for a
+/// stored hit and a server-only one alike, as the desktop's forward of either
+/// does (PERSO-155). The subject is the hit's own, since a server-only hit has
+/// no row to read it from.
+pub fn search_result_forward(app: &mut App, as_attachment: bool) {
+    let Some(hit) = app.server_search_results.get(app.server_search_index) else {
+        return;
     };
-    write_fetched_draft_and_edit(app, terminal, &fetched, &mailbox, kind, what)
+    let subject = mp_core::draft::fwd_subject(&hit.fetched.subject);
+    let Some(address) = selected_hit_address(app) else {
+        return;
+    };
+    open_compose_wizard(
+        app,
+        ComposeMode::SearchForward(Box::new(crate::app::SearchForward {
+            address,
+            subject,
+            as_attachment,
+        })),
+    );
 }
 
 /// The `f` key of the search overlay (#0104): ingest a server-only hit.

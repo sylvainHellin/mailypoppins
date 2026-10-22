@@ -927,7 +927,7 @@ mod store_backed_mutations {
 mod store_backed_files {
     use super::store_backed_drafts::{fixture_email, signature_logo_message, Fixture};
     use super::*;
-    use crate::parse::{AttachmentData, FetchedEmail};
+    use crate::parse::AttachmentData;
     use crate::store::read::MessageRow;
     use crate::store::BlobStore;
     use crate::tui::app::EmailEntry;
@@ -1389,6 +1389,61 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         assert_eq!(std::fs::read(&path).unwrap(), raw);
     }
 
+    /// The search overlay's `w` and `cF` open the forward wizard over a
+    /// server-only hit, as the list's do over a row and the desktop's do over
+    /// either, with the hit's own `Fwd:` subject; cancelling it goes back to
+    /// the overlay with the results as they were (PERSO-155).
+    #[test]
+    fn the_search_overlays_forward_opens_the_wizard_and_cancel_returns_to_it() {
+        use crate::tui::app::{
+            ComposeMode, MessageAddress, Overlay, SearchOverlayFocus, SearchResultEntry,
+        };
+        let fx = Fixture::new();
+        let row = fx.ingest(&fixture_email("Report"));
+        let mut app = app_on_row(&fx, &row);
+        let mut entry = app.emails[0].clone();
+        entry.msg = None;
+        let mut fetched = fixture_email("Report");
+        fetched.message_id = Some("<server-only@example.com>".to_string());
+        app.server_search_results = vec![SearchResultEntry {
+            entry,
+            fetched,
+            source_label: "Sent".to_string(),
+        }];
+        app.server_search_index = 0;
+        app.overlay = Overlay::Search;
+        app.server_search_focus = SearchOverlayFocus::List;
+
+        for as_attachment in [false, true] {
+            crate::tui::actions::search_result_forward(&mut app, as_attachment);
+            match &app.overlay {
+                Overlay::Compose(wizard) => {
+                    assert_eq!(wizard.subject, "Fwd: Report");
+                    match &wizard.mode {
+                        ComposeMode::SearchForward(forward) => {
+                            assert_eq!(forward.as_attachment, as_attachment);
+                            assert_eq!(
+                                forward.address,
+                                MessageAddress::Hit {
+                                    message_id: "<server-only@example.com>".to_string(),
+                                    mailbox: "Sent".to_string(),
+                                }
+                            );
+                        }
+                        other => panic!("not the search forward: {other:?}"),
+                    }
+                }
+                _ => panic!("the forward wizard did not open"),
+            }
+            crate::tui::actions::cancel_compose_wizard(&mut app);
+            assert!(
+                matches!(app.overlay, Overlay::Search),
+                "back to the overlay"
+            );
+            assert_eq!(app.server_search_results.len(), 1, "the results stay");
+        }
+    }
+
     /// `cf` and `cF` open the one forward wizard; `cF`'s carries the message
     /// as its `.eml` (PERSO-174).
     #[test]
@@ -1537,35 +1592,72 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         assert!(status.starts_with("Draft preview failed: "), "{status}");
     }
 
-    /// The server-search hit that resolved to no local row: its attachments
-    /// and its markup are the bytes the overlay is already holding, written
-    /// out so the picker and the browser see files either way.
+    /// The server-search hit that resolved to no local row: its markup is the
+    /// bytes the overlay is already holding, written out so the browser sees a
+    /// file either way.
     #[test]
-    fn an_unresolved_search_hit_is_served_from_the_fetch() {
+    fn an_unresolved_search_hits_markup_is_served_from_the_fetch() {
         let _fx = Fixture::new();
         let mut app = App::default_for_tests();
         app.account_config.name = "alice".to_string();
-        let fetched = FetchedEmail {
-            attachments: vec![attachment("../escape.txt", b"payload")],
-            has_attachments: true,
-            server_has_attachments: None,
-            ..fixture_email("Never synced")
-        };
-
-        let files = fetched_attachment_files(&mut app, &fetched, 7).unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(
-            files[0].file_name().unwrap().to_string_lossy(),
-            ".._escape.txt",
-            "the filename is sanitised, so a hostile one cannot escape the temp dir"
-        );
-        assert_eq!(std::fs::read(&files[0]).unwrap(), b"payload");
-
+        let fetched = fixture_email("Never synced");
         let html = fetched.html_body.clone().unwrap();
         let page = html_rendition(&mut app, &html, "search-7").unwrap();
         let page_html = std::fs::read_to_string(&page).unwrap();
         assert!(page_html.ends_with("<p>Rich body</p>"), "{page_html}");
         assert!(page_html.contains("Content-Security-Policy"), "{page_html}");
+    }
+
+    /// `o`, `O`, `e` and `y` on a server-only hit ask the daemon with the
+    /// hit's address, as `te` does, where they used to decline or write the
+    /// attachments of the streamed hit, which carries none: the daemon answers
+    /// from the server's copy, here the row the store has caught up with since
+    /// the search (PERSO-155).
+    #[test]
+    fn a_server_only_hits_attachments_and_view_come_from_the_daemon() {
+        use crate::tui::app::{MessageAddress, Overlay, SearchOverlayFocus, SearchResultEntry};
+        let fx = Fixture::new();
+        let raw = b"From: Alice <alice@example.com>\r\nTo: me@example.com\r\n\
+            Subject: LOC Day\r\nDate: Wed, 12 Nov 2025 09:00:00 +0100\r\n\
+            Message-ID: <loc-day@example.com>\r\nMIME-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+            --b\r\nContent-Type: text/plain\r\n\r\nThe list.\r\n\
+            --b\r\nContent-Type: application/vnd.ms-excel\r\n\
+            Content-Disposition: attachment; filename=\"teilnehmer.xlsx\"\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nUEsDBA==\r\n--b--\r\n";
+        let row = fx.ingest_raw(raw);
+        let mut app = app_on_row(&fx, &row);
+        let mut entry = app.emails[0].clone();
+        entry.msg = None;
+        // The streamed hit carries no parts, as `message.server_hit` sends it.
+        let mut fetched = crate::parse::parse_rfc822_to_fetched_email(raw).unwrap();
+        fetched.attachments.clear();
+        app.server_search_results = vec![SearchResultEntry {
+            entry,
+            fetched,
+            source_label: "Sent".to_string(),
+        }];
+        app.server_search_index = 0;
+        app.overlay = Overlay::Search;
+        app.server_search_focus = SearchOverlayFocus::List;
+
+        let address = crate::tui::actions::selected_hit_address(&mut app).unwrap();
+        assert_eq!(
+            address,
+            MessageAddress::Hit {
+                message_id: "<loc-day@example.com>".to_string(),
+                mailbox: "Sent".to_string(),
+            }
+        );
+        let files = crate::tui::actions::search_hit_attachment_files(&mut app)
+            .unwrap_or_else(|| panic!("no files: {:?}", app.server_search_status));
+        assert_eq!(files.files.len(), 1, "{files:?}");
+        assert_eq!(files.files[0].file_name().unwrap(), "teilnehmer.xlsx");
+
+        let view = crate::tui::actions::readonly_view(&mut app, &address)
+            .unwrap_or_else(|| panic!("no view: {:?}", app.server_search_status));
+        let text = std::fs::read_to_string(&view.path).unwrap();
+        assert!(text.contains("LOC Day"), "{text}");
     }
 
     /// `e` on a received row writes the store's own rendition of the message

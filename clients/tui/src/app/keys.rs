@@ -2592,27 +2592,11 @@ impl App {
     /// Helper to open the attachment picker for a search result.
     ///
     /// A hit that resolved to a local row is [`Self::open_attachment_picker`]
-    /// exactly; one that did not has the attachment bytes of the fetch the
-    /// overlay is rendering, which are written out to the same temp area, so
-    /// neither half declines (#0052 scope item 11).
+    /// exactly; one that did not is listed and cut by the daemon from the
+    /// server's copy through the same calls (PERSO-155), so neither half
+    /// declines.
     fn open_search_result_attachment_picker(&mut self, mode: AttachmentPickerMode) {
-        let Some(hit) = self.server_search_results.get(self.server_search_index) else {
-            return;
-        };
-        let msg = hit.entry.msg;
-        let index = self.server_search_index;
-        // Cloned only for the unresolved hit, which is the one case that needs
-        // the fetched payload while `self` is borrowed mutably below.
-        let fetched = msg.is_none().then(|| hit.fetched.clone());
-        let files = match (msg, fetched) {
-            (Some(msg), _) => crate::actions::row_attachment_files(self, msg.row_id()),
-            (None, Some(fetched)) => {
-                crate::actions::fetched_attachment_files(self, &fetched, index)
-                    .map(crate::app::AttachmentFiles::real)
-            }
-            (None, None) => None,
-        };
-        let Some(files) = files else {
+        let Some(files) = crate::actions::search_hit_attachment_files(self) else {
             return;
         };
         self.present_attachments(files, mode);

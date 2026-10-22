@@ -1470,9 +1470,38 @@ pub enum ComposeMode {
         msg: MessageRef,
         as_attachment: bool,
     },
+    /// A forward from the search overlay's `w` or `cF`, of a hit the store
+    /// holds or of a server-only one, which asks for the recipients first as
+    /// the list's forward does and returns to the overlay afterwards
+    /// (PERSO-155). Boxed, since every overlay carries the wizard's size.
+    SearchForward(Box<SearchForward>),
     EditDraft {
         id: String,
     },
+}
+
+/// The source of [`ComposeMode::SearchForward`].
+#[derive(Debug, Clone)]
+pub struct SearchForward {
+    pub address: MessageAddress,
+    /// The `Fwd:` subject the hit's own subject makes, since a server-only
+    /// hit has no row to read it from.
+    pub subject: String,
+    /// `cF`: the forward carries the message as its `.eml`.
+    pub as_attachment: bool,
+}
+
+/// The message a key acts on: a stored row, or a server-search hit the store
+/// holds no row for, addressed as `message.fetch` addresses it, by its
+/// `Message-ID` and the sidebar label of the mailbox it was found in.
+///
+/// Every daemon call a key makes takes either (PERSO-155), so a server-only
+/// hit opens, saves, exports and forwards through the same calls as a row,
+/// and the daemon reads the hit from the server's copy without ingesting it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MessageAddress {
+    Row(i64),
+    Hit { message_id: String, mailbox: String },
 }
 
 /// A fuzzy-matched contact suggestion under the focused address field.

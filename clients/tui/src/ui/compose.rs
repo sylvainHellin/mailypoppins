@@ -51,10 +51,12 @@ pub(super) fn render_compose_wizard(app: &mut App, frame: &mut Frame, area: Rect
             as_attachment: false,
             ..
         } => " Forward ".to_string(),
+        ComposeMode::SearchForward(forward) if !forward.as_attachment => " Forward ".to_string(),
         ComposeMode::Forward {
             as_attachment: true,
             ..
-        } => " Forward as attachment ".to_string(),
+        }
+        | ComposeMode::SearchForward(_) => " Forward as attachment ".to_string(),
         ComposeMode::EditDraft { .. } => " Edit recipients ".to_string(),
     };
 

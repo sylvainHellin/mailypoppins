@@ -58,6 +58,7 @@ use serde_json::{json, Value};
 use mp_protocol::events::SyncCompleted;
 use mp_protocol::send::SendOutcome;
 
+pub use super::app::MessageAddress;
 use super::app::{
     mailbox_key, Action, App, BgResult, MailboxKind, MessageRef, RsvpChoice, SearchOverlayFocus,
     SearchTarget, StatusLevel,
@@ -873,7 +874,30 @@ fn rsvp_line(settled: &Value) -> Result<String, String> {
 // The renditions a key materialises
 // ---------------------------------------------------------------------------
 
-/// The attachments of one row, materialised into files a picker can name
+/// The daemon's spelling of a [`MessageAddress`] (PERSO-155).
+impl MessageAddress {
+    /// The address keys of a `message.*` call: `row_id`, or `hit`.
+    fn params(&self, account: &str) -> Value {
+        let mut params = json!({"account": account});
+        let (key, value) = self.source();
+        params[key] = value;
+        params
+    }
+
+    /// The address as one key and its value, which is also a draft's
+    /// `source` object.
+    fn source(&self) -> (&'static str, Value) {
+        match self {
+            MessageAddress::Row(row_id) => ("row_id", json!(row_id)),
+            MessageAddress::Hit {
+                message_id,
+                mailbox,
+            } => ("hit", json!({"message_id": message_id, "mailbox": mailbox})),
+        }
+    }
+}
+
+/// The attachments of one message, materialised into files a picker can name
 /// (`RD-06`'s neighbour, `#0052` scope item 8).
 ///
 /// Two calls rather than one: `message.get` for the part list the row carries,
@@ -887,18 +911,20 @@ fn rsvp_line(settled: &Value) -> Result<String, String> {
 /// (PERSO-165), each group in the row's own order; `part` stays the index in
 /// the daemon's full list, which is what addresses it.
 ///
+/// A server-only hit is listed and cut by the daemon from the server's copy,
+/// with the same two calls and the same `part` order (PERSO-155).
+///
 /// An empty list is a message with no attachments, which is the caller's
 /// status line to write; `Err` is a sentence for it to print.
 pub(super) fn attachment_files(
     commands: &dyn Queries,
     account: &str,
-    row_id: i64,
+    address: &MessageAddress,
 ) -> Result<crate::app::AttachmentFiles, String> {
+    let mut get = address.params(account);
+    get["body"] = json!(false);
     let shown = commands
-        .call(
-            "message.get",
-            json!({"account": account, "row_id": row_id, "body": false}),
-        )
+        .call("message.get", get)
         .map_err(|e| format!("{e:#}"))?;
     let parts = shown["attachments"].as_array().cloned().unwrap_or_default();
     let is_inline = |part: &Value| part["inline"].as_bool().unwrap_or(false);
@@ -911,11 +937,10 @@ pub(super) fn attachment_files(
         .chain((0..parts.len()).filter(|&p| is_inline(&parts[p])));
     let files = order
         .map(|part| {
+            let mut params = address.params(account);
+            params["part"] = json!(part);
             commands
-                .call(
-                    "message.materialise_attachment",
-                    json!({"account": account, "row_id": row_id, "part": part}),
-                )
+                .call("message.materialise_attachment", params)
                 .map_err(|e| format!("{e:#}"))
                 .and_then(|handle| {
                     handle["path"]
@@ -928,40 +953,21 @@ pub(super) fn attachment_files(
     Ok(crate::app::AttachmentFiles { files, inline_from })
 }
 
-/// One row as the RFC 822 file `mp export` writes, `<date>_<subject>.eml`,
+/// One message as the RFC 822 file `mp export` writes, `<date>_<subject>.eml`,
 /// materialised for the directory picker `te` opens (PERSO-174).
 ///
 /// `message.materialise_eml` answers the stored raw message, or the server's
-/// copy for a row stored without one (every Graph row), so this one can be a
-/// round trip. The handle is left to its lifetime, as the parts `ts` saves
-/// are: the copy into the picked directory reads the file after this returns.
+/// copy for a row stored without one (every Graph row) and for a server-only
+/// hit, which it ingests nothing for, so this one can be a round trip. The
+/// handle is left to its lifetime, as the parts `ts` saves are: the copy into
+/// the picked directory reads the file after this returns.
 pub(super) fn eml_file(
     commands: &dyn Queries,
     account: &str,
-    row_id: i64,
+    address: &MessageAddress,
 ) -> Result<PathBuf, String> {
-    materialised_eml(commands, json!({"account": account, "row_id": row_id}))
-}
-
-/// [`eml_file`] for a server-search hit the store holds no row for, the
-/// overlay's `te`: `message.materialise_eml`'s `hit` address, which the daemon
-/// answers from the server without ingesting anything, `mailbox` being the
-/// hit's sidebar label as `message.fetch` takes it (PERSO-174).
-pub(super) fn hit_eml_file(
-    commands: &dyn Queries,
-    account: &str,
-    message_id: &str,
-    mailbox: &str,
-) -> Result<PathBuf, String> {
-    materialised_eml(
-        commands,
-        json!({"account": account, "hit": {"message_id": message_id, "mailbox": mailbox}}),
-    )
-}
-
-fn materialised_eml(commands: &dyn Queries, address: serde_json::Value) -> Result<PathBuf, String> {
     let handle = commands
-        .call("message.materialise_eml", address)
+        .call("message.materialise_eml", address.params(account))
         .map_err(|e| format!("{e:#}"))?;
     handle["path"]
         .as_str()
@@ -1042,8 +1048,9 @@ pub struct Rendition {
     pub path: PathBuf,
 }
 
-/// The store's own Markdown view of one row, as a file `$EDITOR` can open
-/// (`RD-06`, #0126, #0075).
+/// The store's own Markdown view of one message, as a file `$EDITOR` can open
+/// (`RD-06`, #0126, #0075); a server-only hit's is rendered by the daemon from
+/// the server's copy in the same shape (PERSO-155).
 ///
 /// `message.materialise_markdown` is the third member of the handle family and
 /// writes exactly what the TUI used to build inline: `render_markdown` over
@@ -1054,13 +1061,10 @@ pub struct Rendition {
 pub(super) fn markdown_rendition(
     commands: &dyn Queries,
     account: &str,
-    row_id: i64,
+    address: &MessageAddress,
 ) -> Result<Rendition, String> {
     let handle = commands
-        .call(
-            "message.materialise_markdown",
-            json!({"account": account, "row_id": row_id}),
-        )
+        .call("message.materialise_markdown", address.params(account))
         .map_err(|e| format!("{e:#}"))?;
     match (handle["handle"].as_str(), handle["path"].as_str()) {
         (Some(id), Some(path)) => Ok(Rendition {
@@ -1105,7 +1109,7 @@ pub(super) fn draft_path(commands: &dyn Queries, account: &str, id: &str) -> Opt
     }
 }
 
-/// The draft a reply or a forward of `row_id` writes, as its path and its
+/// The draft a reply or a forward of `address` writes, as its path and its
 /// selector.
 ///
 /// `draft.reply` and `draft.forward` are the whole of what the client used to
@@ -1116,14 +1120,21 @@ pub(super) fn draft_path(commands: &dyn Queries, account: &str, id: &str) -> Opt
 /// recipients and the subject it asked for before the draft existed, and a
 /// forward as attachment (`cF`) is `draft.forward`'s `as_attachment`, the
 /// call `mp forward --as-attachment` makes (PERSO-174).
+///
+/// A forward takes a server-only hit as its source too, inline or as
+/// attachment, which the daemon builds from the server's copy (PERSO-155);
+/// a reply to one is [`draft_from_message`]'s.
 pub(super) fn draft_from_source(
     commands: &dyn Queries,
     account: &str,
-    row_id: i64,
+    address: &MessageAddress,
     kind: mp_core::draft::DraftFromSource,
     headers: Option<&mp_core::draft::DraftRecipientEdit>,
 ) -> Result<(PathBuf, String), String> {
-    let mut params = json!({"account": account, "source": {"row_id": row_id}});
+    let (key, value) = address.source();
+    let mut source = serde_json::Map::new();
+    source.insert(key.to_string(), value);
+    let mut params = json!({"account": account, "source": source});
     let method = match kind {
         mp_core::draft::DraftFromSource::Reply { all } => {
             params["all"] = json!(all);
@@ -1155,66 +1166,28 @@ pub(super) fn draft_from_source(
     Ok((path, selector))
 }
 
-/// The draft a reply, a reply-all or a forward of a message the client *holds*
-/// writes, as its path and its selector (`DFT-08`, `DFT-09`, #0126).
+/// The draft a reply or a reply-all to a message the client *holds* writes,
+/// as its path and its selector (`DFT-08`, #0126).
 ///
-/// `draft.create_from_message`, which is the one draft `draft.reply` and
-/// `draft.forward` cannot build: every form of their `source` is an address
-/// into the store, and this is the server-search hit that resolved to no local
-/// row. The message travels instead of the address, and the daemon runs the
-/// same `mp_core::draft` builder over it, so the file is the one the resolved
-/// hit's reply writes.
+/// `draft.create_from_message`, which is the one draft `draft.reply` cannot
+/// build: every form of its `source` is an address into the store, and this is
+/// the server-search hit that resolved to no local row. The message travels
+/// instead of the address, and the daemon runs the same `mp_core::draft`
+/// builder over it, so the file is the one the resolved hit's reply writes.
+/// A forward of the same hit is [`draft_from_source`]'s, whose `hit` source
+/// carries the server copy's parts (PERSO-155).
 ///
 /// The payload is the envelope and the two body renditions the overlay is
-/// already rendering, under the hit's own field names. It carries no
-/// attachments, because a hit streamed by `message.search_server` has none on
-/// this side.
-///
-/// A forward as attachment is the one kind the payload cannot build, since the
-/// `.eml` is the server's raw copy: it is `draft.forward` with the hit as its
-/// source, `{hit: {message_id, mailbox}}`, `mailbox` being the hit's sidebar
-/// label as `message.fetch` takes it.
+/// already rendering, under the hit's own field names.
 pub(super) fn draft_from_message(
     commands: &dyn Queries,
     account: &str,
-    kind: mp_core::draft::DraftFromSource,
+    all: bool,
     fetched: &mp_core::parse::FetchedEmail,
-    mailbox: &str,
 ) -> Result<(PathBuf, String), String> {
-    let kind = match kind {
-        mp_core::draft::DraftFromSource::Reply { all: false } => "reply",
-        mp_core::draft::DraftFromSource::Reply { all: true } => "reply_all",
-        mp_core::draft::DraftFromSource::Forward {
-            as_attachment: false,
-        } => "forward",
-        mp_core::draft::DraftFromSource::Forward {
-            as_attachment: true,
-        } => {
-            let message_id = fetched
-                .message_id
-                .as_deref()
-                .ok_or_else(|| "This hit carries no Message-ID; cannot get its .eml".to_string())?;
-            let created = commands
-                .call(
-                    "draft.forward",
-                    json!({
-                        "account": account,
-                        "source": {"hit": {"message_id": message_id, "mailbox": mailbox}},
-                        "as_attachment": true,
-                    }),
-                )
-                .map_err(|e| format!("{e:#}"))?;
-            let path = created["path"]
-                .as_str()
-                .map(PathBuf::from)
-                .ok_or_else(|| "draft.forward wrote a draft it did not name".to_string())?;
-            let selector = created["selector"].as_str().unwrap_or_default().to_string();
-            return Ok((path, selector));
-        }
-    };
     let params = json!({
         "account": account,
-        "kind": kind,
+        "kind": if all { "reply_all" } else { "reply" },
         "message": {
             "from": fetched.from,
             "to": fetched.to,
@@ -1878,7 +1851,10 @@ mod tests {
     use mp_core::draft::DraftFromSource;
     use serde_json::{json, Value};
 
-    use super::{draft_from_message, draft_from_source, eml_file, hit_eml_file};
+    use super::{
+        attachment_files, draft_from_message, draft_from_source, eml_file, markdown_rendition,
+        MessageAddress,
+    };
     use crate::queries::Queries;
 
     /// A door that records every call and answers each with `answer`.
@@ -1913,7 +1889,7 @@ mod tests {
             let (path, selector) = draft_from_source(
                 &door,
                 "alice",
-                7,
+                &MessageAddress::Row(7),
                 DraftFromSource::Forward { as_attachment },
                 None,
             )
@@ -1937,44 +1913,108 @@ mod tests {
         );
     }
 
-    /// A hit with no row forwards as attachment through `draft.forward` with
-    /// the hit as its source, which the daemon fetches the `.eml` for; one
-    /// without a `Message-ID` cannot be addressed and makes no call.
+    /// A hit with no row forwards through `draft.forward` with the hit as
+    /// its source, inline with the wizard's headers or as attachment, which
+    /// the daemon builds from the server's copy (PERSO-155).
     #[test]
-    fn a_hit_with_no_row_forwards_as_attachment_through_its_message_id() {
+    fn a_hit_with_no_row_forwards_through_its_message_id() {
         let door = Recorder::answering(json!({
             "path": "/d/fwd.md", "selector": "mp://alice/drafts/x",
+        }));
+        let hit = MessageAddress::Hit {
+            message_id: "<hit@example.com>".to_string(),
+            mailbox: "Archive".to_string(),
+        };
+        let headers = mp_core::draft::DraftRecipientEdit {
+            to: "bob@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "Fwd: x".to_string(),
+        };
+        for as_attachment in [false, true] {
+            let (path, _) = draft_from_source(
+                &door,
+                "alice",
+                &hit,
+                DraftFromSource::Forward { as_attachment },
+                Some(&headers),
+            )
+            .unwrap();
+            assert_eq!(path.to_str(), Some("/d/fwd.md"));
+        }
+        let source = json!({"hit": {"message_id": "<hit@example.com>", "mailbox": "Archive"}});
+        let headers = json!({"to": "bob@example.com", "cc": "", "bcc": "", "subject": "Fwd: x"});
+        assert_eq!(
+            *door.calls.borrow(),
+            vec![
+                (
+                    "draft.forward".to_string(),
+                    json!({"account": "alice", "source": source, "headers": headers}),
+                ),
+                (
+                    "draft.forward".to_string(),
+                    json!({
+                        "account": "alice", "source": source, "headers": headers,
+                        "as_attachment": true,
+                    }),
+                ),
+            ]
+        );
+    }
+
+    /// A reply to a hit with no row travels as the message the overlay holds.
+    #[test]
+    fn a_reply_to_a_hit_with_no_row_is_draft_create_from_message() {
+        let door = Recorder::answering(json!({
+            "path": "/d/re.md", "selector": "mp://alice/drafts/x",
         }));
         let fetched = mp_core::parse::parse_rfc822_to_fetched_email(
             b"Message-ID: <hit@example.com>\r\nSubject: x\r\n\r\nbody\r\n",
         )
         .expect("a message parses");
-        let as_attachment = DraftFromSource::Forward {
-            as_attachment: true,
+        draft_from_message(&door, "alice", true, &fetched).unwrap();
+        let calls = door.calls.borrow();
+        assert_eq!(calls[0].0, "draft.create_from_message");
+        assert_eq!(calls[0].1["kind"], json!("reply_all"));
+        assert_eq!(
+            calls[0].1["message"]["message_id"],
+            json!("<hit@example.com>")
+        );
+    }
+
+    /// `o`, `O`, `e` and `y` on a server-only hit make the calls they make on
+    /// a row, with the hit's address where the row id goes (PERSO-155).
+    #[test]
+    fn a_hits_attachments_and_view_are_the_rows_calls_with_its_address() {
+        let door = Recorder::answering(json!({
+            "handle": "h", "path": "/run/handles/h/x",
+            "attachments": [{"name": "a.pdf", "size": 3}],
+        }));
+        let hit = MessageAddress::Hit {
+            message_id: "<hit@example.com>".to_string(),
+            mailbox: "Sent".to_string(),
         };
-        let (path, selector) =
-            draft_from_message(&door, "alice", as_attachment, &fetched, "Archive").unwrap();
-        assert_eq!(path.to_str(), Some("/d/fwd.md"));
-        assert_eq!(selector, "mp://alice/drafts/x");
+        let files = attachment_files(&door, "alice", &hit).unwrap();
+        assert_eq!(files.files.len(), 1);
+        markdown_rendition(&door, "alice", &hit).unwrap();
+        let address = json!({"message_id": "<hit@example.com>", "mailbox": "Sent"});
         assert_eq!(
             *door.calls.borrow(),
-            vec![(
-                "draft.forward".to_string(),
-                json!({
-                    "account": "alice",
-                    "source": {"hit": {"message_id": "<hit@example.com>", "mailbox": "Archive"}},
-                    "as_attachment": true,
-                })
-            )]
+            vec![
+                (
+                    "message.get".to_string(),
+                    json!({"account": "alice", "hit": address, "body": false}),
+                ),
+                (
+                    "message.materialise_attachment".to_string(),
+                    json!({"account": "alice", "hit": address, "part": 0}),
+                ),
+                (
+                    "message.materialise_markdown".to_string(),
+                    json!({"account": "alice", "hit": address}),
+                ),
+            ]
         );
-
-        let silent = Recorder::answering(json!({}));
-        let no_id = mp_core::parse::parse_rfc822_to_fetched_email(b"Subject: x\r\n\r\nbody\r\n")
-            .expect("a message parses");
-        let refused =
-            draft_from_message(&silent, "alice", as_attachment, &no_id, "Archive").unwrap_err();
-        assert!(refused.contains("Message-ID"), "{refused}");
-        assert!(silent.calls.borrow().is_empty());
     }
 
     /// `te` reads the file `message.materialise_eml` wrote, as `mp export`.
@@ -1984,7 +2024,7 @@ mod tests {
             "handle": "h1", "path": "/run/handles/h1/2024-01-01_Report.eml",
             "name": "2024-01-01_Report.eml", "bytes": 10, "expires_at": "x",
         }));
-        let path = eml_file(&door, "alice", 7).unwrap();
+        let path = eml_file(&door, "alice", &MessageAddress::Row(7)).unwrap();
         assert_eq!(path.to_str(), Some("/run/handles/h1/2024-01-01_Report.eml"));
         assert_eq!(
             *door.calls.borrow(),
@@ -1994,7 +2034,7 @@ mod tests {
             )]
         );
         let pathless = Recorder::answering(json!({}));
-        assert!(eml_file(&pathless, "alice", 7).is_err());
+        assert!(eml_file(&pathless, "alice", &MessageAddress::Row(7)).is_err());
 
         // The overlay's `te` on a server-only hit addresses it as
         // `message.fetch` does (PERSO-174).
@@ -2002,7 +2042,11 @@ mod tests {
             "handle": "h2", "path": "/run/handles/h2/2025-03-03_Old.eml",
             "name": "2025-03-03_Old.eml", "bytes": 10, "expires_at": "x",
         }));
-        let path = hit_eml_file(&hit, "alice", "<old@example.com>", "Archive").unwrap();
+        let address = MessageAddress::Hit {
+            message_id: "<old@example.com>".to_string(),
+            mailbox: "Archive".to_string(),
+        };
+        let path = eml_file(&hit, "alice", &address).unwrap();
         assert_eq!(path.to_str(), Some("/run/handles/h2/2025-03-03_Old.eml"));
         assert_eq!(
             *hit.calls.borrow(),
