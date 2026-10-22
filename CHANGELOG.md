@@ -42,6 +42,7 @@ All notable changes to this project are documented in this file.
 - TUI: the Contacts view and the compose wizard's recipient completion read the contact index from the daemon (`contact.search`) instead of the cache file, refresh on `contact.changed`, and say on the status line when the index build a search ran was refused.
 - TUI: the compose wizard's new draft is the daemon's `draft.create`, `x` approves through `draft.validate` and `draft.approve`, and the attach prompt calls `draft.attach`, as in the desktop app; the wizard lists and opens signatures through `signature.*`.
 - Daemon: `contact.search` rows carry `first_seen` and `last_seen`, and `draft.create` records a signature it was asked for in the draft's `signature:` frontmatter, so a later header edit preselects it.
+- Desktop: the Contacts view details the cursor contact beside the list as the TUI's detail pane does, with its interactions and the dates a message first and last named it.
 - The hidden `--daemon` debug flag is `mp account list --daemon`, the one command it changed; anywhere else it is a usage error.
 - Server search: `mp search`, the TUI search overlay and the desktop search bar get the newest `--limit` results across every mailbox from one daemon search; each mailbox is asked for its newest N and only the N newest overall are downloaded (PERSO-175).
   A cut answer ends with "More results than the N shown", N being the results listed, and `mp search --json` carries `truncated`.

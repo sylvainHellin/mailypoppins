@@ -186,8 +186,11 @@ export const mock = {
   editorFailure: null as GuiError | null,
   /** Whether the editor commands answer as the Rust layer's fixture mode does: journaled, nothing launched. */
   editorFixture: false,
-  /** A draft's fields the listing does not carry, by `<account>/<id>`. */
-  draftExtra: {} as Record<string, { body: string }>,
+  /**
+   * A draft's fields the listing does not carry, by `<account>/<id>`: its body, and the
+   * `signature:` frontmatter `draft.create` writes for a signature the caller named.
+   */
+  draftExtra: {} as Record<string, { body: string; signature?: string }>,
   /** The next minted draft id's counter. */
   nextDraft: 1,
   /** `desktop.json`'s keys, as `setting_get|set` and `editor_setting_get|set` read and write them. */
@@ -1198,7 +1201,7 @@ function draftChanged(account: string, d: DraftEntry): void {
 /** Write a new draft at the top of the listing, as a rescan orders it (newest first). */
 function writeDraft(
   account: string,
-  fields: { id?: string; name?: string; to: string | null; cc: string | null; bcc?: string; subject: string; body?: string },
+  fields: { id?: string; name?: string; to: string | null; cc: string | null; bcc?: string; subject: string; body?: string; signature?: string },
   source: DraftCreated["source"],
 ): DraftCreated {
   const id = fields.id ?? `fixture-draft-${mock.nextDraft++}`;
@@ -1217,7 +1220,7 @@ function writeDraft(
     ready: Boolean(fields.to) && fields.subject !== "",
   };
   draftsOf(account).drafts.unshift(entry);
-  mock.draftExtra[`${account}/${id}`] = { body: fields.body ?? "" };
+  mock.draftExtra[`${account}/${id}`] = { body: fields.body ?? "", ...(fields.signature ? { signature: fields.signature } : {}) };
   draftChanged(account, entry);
   return { account, id, selector: entry.selector, path, source, subject: fields.subject };
 }
@@ -1484,13 +1487,23 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         throw refusedRow("draft.create", `A draft already exists at /fixture/${account}/drafts/${name}.md`);
       }
       const headers = (args.headers as { to: string; cc: string; bcc: string; subject: string } | null) ?? null;
+      // The daemon records a signature the caller named, never the account default, in `signature:`.
+      const named = args.no_signature ? null : ((args.signature as string | null)?.trim() ? (args.signature as string) : null);
       const sig = args.no_signature ? null : ((args.signature as string | null) ?? mock.signatures.defaults[account] ?? null);
       const typed = typeof args.body === "string" ? args.body.trim() : "";
       const block = sig ? `${mock.signatures.signatures[sig] ?? ""}\n` : "";
       const body = typed ? `${typed}\n${block ? `\n${block}` : ""}` : block ? `\n\n${block}` : "";
       return writeDraft(
         account,
-        { name, to: headers?.to ?? null, cc: headers?.cc ?? null, bcc: headers?.bcc ?? "", subject: headers?.subject ?? "", body },
+        {
+          name,
+          to: headers?.to ?? null,
+          cc: headers?.cc ?? null,
+          bcc: headers?.bcc ?? "",
+          subject: headers?.subject ?? "",
+          body,
+          ...(named ? { signature: named } : {}),
+        },
         null,
       );
     }

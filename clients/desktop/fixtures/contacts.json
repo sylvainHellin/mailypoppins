@@ -6,7 +6,9 @@
       "sent_to": 42,
       "sent_cc": 3,
       "received": 57,
-      "score": 1000
+      "score": 1000,
+      "first_seen": "2025-03-14T08:15:00+00:00",
+      "last_seen": "2026-09-25T16:40:00+00:00"
     },
     {
       "address": "jane.doe@example.com",
@@ -14,7 +16,9 @@
       "sent_to": 31,
       "sent_cc": 5,
       "received": 40,
-      "score": 967
+      "score": 967,
+      "first_seen": "2025-03-25T08:15:00+00:00",
+      "last_seen": "2026-09-20T16:40:00+00:00"
     },
     {
       "address": "kim@example.com",
@@ -22,7 +26,9 @@
       "sent_to": 27,
       "sent_cc": 9,
       "received": 33,
-      "score": 921
+      "score": 921,
+      "first_seen": "2025-04-05T08:15:00+00:00",
+      "last_seen": "2026-09-15T16:40:00+00:00"
     },
     {
       "address": "alex.berger@partner.example",
@@ -30,7 +36,9 @@
       "sent_to": 22,
       "sent_cc": 1,
       "received": 19,
-      "score": 888
+      "score": 888,
+      "first_seen": "2025-04-16T08:15:00+00:00",
+      "last_seen": "2026-09-10T16:40:00+00:00"
     },
     {
       "address": "sam@example.com",
@@ -38,7 +46,9 @@
       "sent_to": 18,
       "sent_cc": 6,
       "received": 25,
-      "score": 842
+      "score": 842,
+      "first_seen": "2025-04-27T08:15:00+00:00",
+      "last_seen": "2026-09-05T16:40:00+00:00"
     },
     {
       "address": "lena.schmidt@tum.example",
@@ -46,7 +56,9 @@
       "sent_to": 15,
       "sent_cc": 2,
       "received": 30,
-      "score": 809
+      "score": 809,
+      "first_seen": "2025-05-08T08:15:00+00:00",
+      "last_seen": "2026-08-31T16:40:00+00:00"
     },
     {
       "address": "finance@example.com",
@@ -54,7 +66,9 @@
       "sent_to": 12,
       "sent_cc": 14,
       "received": 8,
-      "score": 763
+      "score": 763,
+      "first_seen": "2025-05-19T08:15:00+00:00",
+      "last_seen": "2026-08-26T16:40:00+00:00"
     },
     {
       "address": "marco.rossi@supplier.example",
@@ -62,7 +76,9 @@
       "sent_to": 11,
       "sent_cc": 0,
       "received": 12,
-      "score": 730
+      "score": 730,
+      "first_seen": "2025-05-30T08:15:00+00:00",
+      "last_seen": "2026-08-21T16:40:00+00:00"
     },
     {
       "address": "priya@example.com",
@@ -70,7 +86,9 @@
       "sent_to": 9,
       "sent_cc": 4,
       "received": 21,
-      "score": 684
+      "score": 684,
+      "first_seen": "2025-06-10T08:15:00+00:00",
+      "last_seen": "2026-08-16T16:40:00+00:00"
     },
     {
       "address": "ops@example.com",
@@ -78,7 +96,9 @@
       "sent_to": 8,
       "sent_cc": 3,
       "received": 5,
-      "score": 651
+      "score": 651,
+      "first_seen": "2025-06-21T08:15:00+00:00",
+      "last_seen": "2026-08-11T16:40:00+00:00"
     },
     {
       "address": "chen.wei@example.com",
@@ -86,7 +106,9 @@
       "sent_to": 7,
       "sent_cc": 2,
       "received": 16,
-      "score": 605
+      "score": 605,
+      "first_seen": "2025-07-02T08:15:00+00:00",
+      "last_seen": "2026-08-06T16:40:00+00:00"
     },
     {
       "address": "anna.keller@partner.example",
@@ -94,7 +116,9 @@
       "sent_to": 6,
       "sent_cc": 5,
       "received": 9,
-      "score": 572
+      "score": 572,
+      "first_seen": "2025-07-13T08:15:00+00:00",
+      "last_seen": "2026-08-01T16:40:00+00:00"
     },
     {
       "address": "tom@example.com",
@@ -102,7 +126,9 @@
       "sent_to": 5,
       "sent_cc": 1,
       "received": 11,
-      "score": 526
+      "score": 526,
+      "first_seen": "2025-07-24T08:15:00+00:00",
+      "last_seen": "2026-07-27T16:40:00+00:00"
     },
     {
       "address": "sofia.garcia@example.com",
@@ -110,7 +136,9 @@
       "sent_to": 4,
       "sent_cc": 7,
       "received": 6,
-      "score": 480
+      "score": 480,
+      "first_seen": "2025-08-04T08:15:00+00:00",
+      "last_seen": "2026-07-22T16:40:00+00:00"
     },
     {
       "address": "legal@supplier.example",
@@ -118,7 +146,9 @@
       "sent_to": 3,
       "sent_cc": 2,
       "received": 4,
-      "score": 447
+      "score": 447,
+      "first_seen": "2025-08-15T08:15:00+00:00",
+      "last_seen": "2026-07-17T16:40:00+00:00"
     },
     {
       "address": "noah.fischer@example.com",
@@ -126,7 +156,9 @@
       "sent_to": 3,
       "sent_cc": 0,
       "received": 14,
-      "score": 401
+      "score": 401,
+      "first_seen": "2025-08-26T08:15:00+00:00",
+      "last_seen": "2026-07-12T16:40:00+00:00"
     },
     {
       "address": "eva@example.com",
@@ -134,7 +166,9 @@
       "sent_to": 2,
       "sent_cc": 3,
       "received": 7,
-      "score": 368
+      "score": 368,
+      "first_seen": "2025-09-06T08:15:00+00:00",
+      "last_seen": "2026-07-07T16:40:00+00:00"
     },
     {
       "address": "hr@example.com",
@@ -142,7 +176,9 @@
       "sent_to": 2,
       "sent_cc": 1,
       "received": 3,
-      "score": 322
+      "score": 322,
+      "first_seen": "2025-09-17T08:15:00+00:00",
+      "last_seen": "2026-07-02T16:40:00+00:00"
     },
     {
       "address": "lucas.martin@example.com",
@@ -150,7 +186,9 @@
       "sent_to": 1,
       "sent_cc": 4,
       "received": 10,
-      "score": 289
+      "score": 289,
+      "first_seen": "2025-09-28T08:15:00+00:00",
+      "last_seen": "2026-06-27T16:40:00+00:00"
     },
     {
       "address": "mia.wagner@tum.example",
@@ -158,7 +196,9 @@
       "sent_to": 1,
       "sent_cc": 1,
       "received": 5,
-      "score": 243
+      "score": 243,
+      "first_seen": "2025-10-09T08:15:00+00:00",
+      "last_seen": "2026-06-22T16:40:00+00:00"
     },
     {
       "address": "david.cohen@example.com",
@@ -166,7 +206,9 @@
       "sent_to": 1,
       "sent_cc": 0,
       "received": 8,
-      "score": 210
+      "score": 210,
+      "first_seen": "2025-10-20T08:15:00+00:00",
+      "last_seen": "2026-06-17T16:40:00+00:00"
     },
     {
       "address": "olivia@example.com",
@@ -174,7 +216,9 @@
       "sent_to": 0,
       "sent_cc": 2,
       "received": 12,
-      "score": 164
+      "score": 164,
+      "first_seen": "2025-10-31T08:15:00+00:00",
+      "last_seen": "2026-06-12T16:40:00+00:00"
     },
     {
       "address": "newsletter@vendor.example",
@@ -182,7 +226,9 @@
       "sent_to": 0,
       "sent_cc": 0,
       "received": 26,
-      "score": 131
+      "score": 131,
+      "first_seen": "2025-11-11T08:15:00+00:00",
+      "last_seen": "2026-06-07T16:40:00+00:00"
     },
     {
       "address": "ben.lee@example.com",
@@ -190,7 +236,9 @@
       "sent_to": 0,
       "sent_cc": 1,
       "received": 2,
-      "score": 85
+      "score": 85,
+      "first_seen": "2025-11-22T08:15:00+00:00",
+      "last_seen": "2026-06-02T16:40:00+00:00"
     },
     {
       "address": "zoe@example.com",
@@ -198,7 +246,9 @@
       "sent_to": 0,
       "sent_cc": 0,
       "received": 1,
-      "score": 52
+      "score": 52,
+      "first_seen": "2025-12-03T08:15:00+00:00",
+      "last_seen": "2026-05-28T16:40:00+00:00"
     }
   ],
   "home": [
@@ -208,7 +258,9 @@
       "sent_to": 12,
       "sent_cc": 0,
       "received": 20,
-      "score": 120
+      "score": 120,
+      "first_seen": "2025-03-14T08:15:00+00:00",
+      "last_seen": "2026-09-25T16:40:00+00:00"
     },
     {
       "address": "friend@example.com",
@@ -216,7 +268,9 @@
       "sent_to": 4,
       "sent_cc": 2,
       "received": 9,
-      "score": 87
+      "score": 87,
+      "first_seen": "2025-03-25T08:15:00+00:00",
+      "last_seen": "2026-09-20T16:40:00+00:00"
     },
     {
       "address": "club@example.org",
@@ -224,7 +278,9 @@
       "sent_to": 0,
       "sent_cc": 1,
       "received": 6,
-      "score": 41
+      "score": 41,
+      "first_seen": "2025-04-05T08:15:00+00:00",
+      "last_seen": "2026-09-15T16:40:00+00:00"
     }
   ]
 }

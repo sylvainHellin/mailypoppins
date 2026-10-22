@@ -620,6 +620,9 @@ Every search asks for 1000 rows, where the TUI lists its whole index.
 
 The list is a single-select `listbox` named "Contacts".
 A row (`ContactRow.tsx`, an `option` named "<name>, <address>, to N, cc N, received N") shows the display name with the address under it, or the address alone when no message named one, then how many sent messages had it in To and in Cc and how many received messages named it, and a query's match score; an empty query ranks without a score, so none is shown.
+Beside the list, the cursor contact's details (`ContactDetail.tsx`, a `complementary` region named "Contact details") are the TUI's detail pane: the name, or "(no name)", then Email, Interactions ("sent-to N, cc N, received N"), First seen and Last seen.
+The two dates are the date part of the row's RFC 3339 `first_seen` and `last_seen`, as the TUI prints them, and empty when the index does not know.
+Below the `md` breakpoint the details are hidden and the list takes the width.
 The header says "<account>: N contacts", with "matching <query>" while a query is set.
 An empty index says "No contacts yet; press r to build the index", and a query with no match "No matching contacts.".
 An account whose store is not ready (`-32006`) says that it has no local store yet and that its contacts appear after its first sync.

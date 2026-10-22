@@ -45,6 +45,25 @@ describe("the Contacts view", () => {
     expect(status()).toHaveTextContent("work: 25 contacts");
   });
 
+  it("details the cursor contact as the TUI's pane does, first and last seen as dates", async () => {
+    const { user } = await openContacts();
+    const detail = () => screen.getByRole("complementary", { name: "Contact details" });
+    const fields = () =>
+      Object.fromEntries([...detail().querySelectorAll("dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]));
+    expect(within(detail()).getByRole("heading")).toHaveTextContent("Robin Meyer");
+    expect(fields()).toEqual({
+      Email: "robin@example.com",
+      Interactions: "sent-to 42, cc 3, received 57",
+      "First seen": "2025-03-14",
+      "Last seen": "2026-09-25",
+    });
+    await user.keyboard("j");
+    expect(fields()["First seen"]).toBe("2025-03-25");
+    // A contact no message named reads "(no name)", as in the TUI.
+    await user.click(screen.getByRole("option", { name: "ops@example.com, to 8, cc 3, received 5" }));
+    expect(within(detail()).getByRole("heading")).toHaveTextContent("(no name)");
+  });
+
   it("j, k, G and gg move the cursor, and a contact.changed while hidden reads the list on the next open", async () => {
     const { user } = await openContacts();
     await user.keyboard("j");

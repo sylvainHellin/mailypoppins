@@ -53,6 +53,10 @@ struct WireContact {
     received: u32,
     #[serde(default)]
     score: u32,
+    #[serde(default)]
+    first_seen: String,
+    #[serde(default)]
+    last_seen: String,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +83,12 @@ pub struct ContactRow {
     pub sent_cc: u32,
     pub received: u32,
     pub score: u32,
+    /// When a message first named the contact, RFC 3339; empty when the
+    /// index does not know.
+    pub first_seen: String,
+    /// When a message last named the contact, RFC 3339; empty when the index
+    /// does not know.
+    pub last_seen: String,
     /// `Display Name <address>`, the name quoted when it needs it, or the
     /// bare address.
     pub recipient: String,
@@ -153,6 +163,8 @@ pub fn contact_search_on(
                 sent_cc: c.sent_cc,
                 received: c.received,
                 score: c.score,
+                first_seen: c.first_seen,
+                last_seen: c.last_seen,
             })
             .collect(),
         rebuild: wire.rebuild,
@@ -273,6 +285,8 @@ mod tests {
         assert_eq!(all.contacts.len(), 25);
         assert_eq!(all.contacts[0].address, "robin@example.com");
         assert_eq!(all.contacts[0].recipient, "Robin Meyer <robin@example.com>");
+        assert_eq!(all.contacts[0].first_seen, "2025-03-14T08:15:00+00:00");
+        assert_eq!(all.contacts[0].last_seen, "2026-09-25T16:40:00+00:00");
         assert!(all.contacts.windows(2).all(|w| w[0].score >= w[1].score));
         let jane = all
             .contacts

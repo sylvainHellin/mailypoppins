@@ -3,6 +3,7 @@ import { ArrowLeft, Contact, Copy, Paperclip, RotateCw, Search } from "lucide-re
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ContactDetail } from "@/components/contacts/ContactDetail";
 import { ContactList } from "@/components/contacts/ContactList";
 import { runAction } from "@/app/actions";
 import {
@@ -161,32 +162,35 @@ export function ContactsView() {
           {status}
         </p>
       </header>
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {!account ? (
-          <p className="p-4 text-sm text-muted-foreground">No account is selected.</p>
-        ) : l?.error && !search ? (
-          "code" in l.error && l.error.code === ACCOUNT_NOT_READY ? (
-            <p className="p-4 text-sm text-muted-foreground">
-              {account} has no local store yet, so it has no contacts; they appear after the account's first sync.
+      <div className="flex min-h-0 flex-1">
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+          {!account ? (
+            <p className="p-4 text-sm text-muted-foreground">No account is selected.</p>
+          ) : l?.error && !search ? (
+            "code" in l.error && l.error.code === ACCOUNT_NOT_READY ? (
+              <p className="p-4 text-sm text-muted-foreground">
+                {account} has no local store yet, so it has no contacts; they appear after the account's first sync.
+              </p>
+            ) : (
+              <p role="alert" className="p-4 text-sm text-destructive">
+                The contacts did not load: {l.error.message}
+              </p>
+            )
+          ) : !search ? (
+            <div aria-busy="true" aria-label="Loading the contacts" className="flex flex-col gap-2 p-3">
+              {[0, 1, 2].map((i) => (
+                <Skeleton key={i} className="h-9 w-full" />
+              ))}
+            </div>
+          ) : rows.length === 0 ? (
+            <p data-slot="contacts-empty" className="p-4 text-sm text-muted-foreground">
+              {search.query.trim() ? NO_MATCH : EMPTY_INDEX}
             </p>
           ) : (
-            <p role="alert" className="p-4 text-sm text-destructive">
-              The contacts did not load: {l.error.message}
-            </p>
-          )
-        ) : !search ? (
-          <div aria-busy="true" aria-label="Loading the contacts" className="flex flex-col gap-2 p-3">
-            {[0, 1, 2].map((i) => (
-              <Skeleton key={i} className="h-9 w-full" />
-            ))}
-          </div>
-        ) : rows.length === 0 ? (
-          <p data-slot="contacts-empty" className="p-4 text-sm text-muted-foreground">
-            {search.query.trim() ? NO_MATCH : EMPTY_INDEX}
-          </p>
-        ) : (
-          <ContactList rows={rows} cursor={current?.address ?? null} focusSeq={s.focusSeq} onSelect={select} onOpen={open} />
-        )}
+            <ContactList rows={rows} cursor={current?.address ?? null} focusSeq={s.focusSeq} onSelect={select} onOpen={open} />
+          )}
+        </div>
+        {current ? <ContactDetail contact={current} /> : null}
       </div>
     </section>
   );

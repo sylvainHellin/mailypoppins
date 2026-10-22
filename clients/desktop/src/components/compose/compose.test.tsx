@@ -66,6 +66,8 @@ describe("the compose wizard", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "New draft" })).toBeNull());
     expect(await screen.findByText(`Created: ${String(args.name)}.md`)).toBeInTheDocument();
     expect(mock.editorOpens).toEqual([]);
+    // The account default is spliced into the body, but only a named signature is recorded.
+    expect(Object.values(mock.draftExtra).filter((d) => d.signature)).toEqual([]);
   });
 
   it("Enter moves to the next field, and Cmd+Enter creates the draft and opens it in the editor", async () => {
@@ -88,6 +90,8 @@ describe("the compose wizard", () => {
       headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Hello there" },
     });
     expect(String(args.name)).toMatch(/^draft-\d{4}-\d{2}-\d{2}-\d{6}-hello-there$/);
+    // The fixture writes the `signature:` field the daemon writes for a named signature.
+    expect(Object.values(mock.draftExtra).filter((d) => d.signature).map((d) => d.signature)).toEqual(["short"]);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "New draft" })).toBeNull());
     await waitFor(() => expect(mock.editorOpens).toEqual([`/fixture/work/drafts/${String(args.name)}.md`]));
     await waitFor(() => expect(banner()).toHaveTextContent(`Editing ${String(args.name)}.md in code --wait`));
@@ -103,6 +107,7 @@ describe("the compose wizard", () => {
     await user.click(within(dialog).getByRole("button", { name: /Create and edit/ }));
     await waitFor(() => expect(callsOf("draft_create")).toHaveLength(1));
     expect(callsOf("draft_create")[0]).toMatchObject({ signature: null, no_signature: true });
+    expect(Object.values(mock.draftExtra).filter((d) => d.signature)).toEqual([]);
   });
 
   it("the forward wizard picks a signature too, and none forwards without one", async () => {

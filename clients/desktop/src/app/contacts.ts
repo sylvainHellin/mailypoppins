@@ -184,6 +184,14 @@ export function contactName(c: ContactRow): string {
   return c.display_name.trim() || c.address;
 }
 
+/**
+ * A contact's first or last seen as the TUI's detail pane prints it (`short_date`): the
+ * date of an RFC 3339 timestamp, anything else as it is, and nothing for an empty one.
+ */
+export function seenDate(ts: string): string {
+  return ts.split("T")[0];
+}
+
 /** The name a vCard draft's subject gives the contact (the TUI's `vcard_display_name`). */
 export function vcardName(c: Pick<ContactRow, "address" | "display_name">): string {
   return c.display_name.trim() || c.address.split("@")[0] || c.address;

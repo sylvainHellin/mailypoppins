@@ -11,6 +11,16 @@ export type ContactRow = { address: string,
  */
 display_name: string, sent_to: number, sent_cc: number, received: number, score: number,
 /**
+ * When a message first named the contact, RFC 3339; empty when the
+ * index does not know.
+ */
+first_seen: string,
+/**
+ * When a message last named the contact, RFC 3339; empty when the index
+ * does not know.
+ */
+last_seen: string,
+/**
  * `Display Name <address>`, the name quoted when it needs it, or the
  * bare address.
  */

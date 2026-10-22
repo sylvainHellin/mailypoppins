@@ -1889,6 +1889,14 @@ impl State {
                 if let Some(headers) = headers {
                     mp_core::draft::rewrite_draft_recipients(&path, &headers)?;
                 }
+                // The daemon records a signature the caller named, never the
+                // account default, in the draft's `signature:` frontmatter.
+                let named = params["signature"]
+                    .as_str()
+                    .filter(|name| params["no_signature"] != true && !name.trim().is_empty());
+                if let Some(name) = named {
+                    mp_core::draft::set_draft_signature_name(&path, name)?;
+                }
                 self.created(&account, &id, &path, None)
             }
             "draft.forward" if !params["source"]["hit"].is_null() => {
@@ -6721,6 +6729,28 @@ mod tests {
         assert_eq!(discarded["status"], "draft");
         assert!(!Path::new(&path).exists());
         assert_eq!(next_event(&rx).kind, "state.remove");
+    }
+
+    /// `draft.create` records a signature it was asked for in the draft's
+    /// `signature:` frontmatter, as the daemon does, and records none for the
+    /// account default or for `no_signature`.
+    #[test]
+    fn a_created_draft_records_the_signature_it_was_asked_for() {
+        let (f, _rx) = fixture();
+        let frontmatter = |name: &str, params: Value| {
+            let mut params = params;
+            params["account"] = json!("work");
+            params["name"] = json!(name);
+            let created = f.call("draft.create", params).expect("created");
+            let text = fs::read_to_string(created["path"].as_str().expect("path")).unwrap();
+            text.split("\n---").next().unwrap().to_string()
+        };
+        let named = frontmatter("named", json!({"signature": "short"}));
+        assert!(named.contains("signature: \"short\""), "{named}");
+        let default = frontmatter("default", json!({}));
+        assert!(!default.contains("signature:"), "{default}");
+        let none = frontmatter("none", json!({"signature": "short", "no_signature": true}));
+        assert!(!none.contains("signature:"), "{none}");
     }
 
     #[test]

@@ -254,7 +254,7 @@ type RsvpSettled = {
 type InviteRefusal = { account: string; refusal: string | null };
 type ContactRow = {
   address: string; display_name: string; sent_to: number; sent_cc: number; received: number;
-  score: number; recipient: string;
+  score: number; first_seen: string; last_seen: string; recipient: string;
 };
 type ContactSearch = { account: string; query: string; contacts: ContactRow[] };
 type ContactRebuilt = { account: string; contacts: number; kept: number; saved: string; cache_path: string };
