@@ -620,9 +620,9 @@ impl SearchResultsJson {
 }
 
 /// The stdout line under a search `--limit` cut, the text twin of `--json`'s
-/// `truncated`.
-pub fn more_results_line(limit: usize) -> String {
-    mp_client::format::more_results_line(limit, "raise -n to see them")
+/// `truncated`, naming the `shown` hits listed above it.
+pub fn more_results_line(shown: usize) -> String {
+    mp_client::format::more_results_line(shown, "raise -n to see them")
 }
 
 /// A server search's hits in the order `mp search` lists them, newest first
@@ -691,14 +691,18 @@ pub struct ServerSearchLines {
     pub after: Vec<String>,
 }
 
-/// [`ServerSearchLines`] of one settle, for a `--limit` of `limit`.
+/// [`ServerSearchLines`] of one settle, around the `hits` it lists.
+///
+/// The cut line names how many hits are listed, not the limit: the dedup,
+/// the attachment post-filter and a download that fell short all list fewer
+/// than the limit, down to none.
 ///
 /// A mailbox that failed is reported at the end, from the settle's
 /// `unreachable` (Sylvain, 2026-10-22): the search no longer prints as it
 /// goes, so the failure lines follow the answer rather than interleaving it.
 pub fn server_search_lines(
     settled: &mp_protocol::listing::ServerSearchSettled,
-    limit: usize,
+    hits: &[mp_protocol::listing::ServerSearchHit],
     json: bool,
 ) -> ServerSearchLines {
     let mut lines = ServerSearchLines::default();
@@ -712,7 +716,7 @@ pub fn server_search_lines(
     let cut = if settled.capped {
         Some(mp_client::format::graph_search_cap_line())
     } else if settled.truncated {
-        Some(more_results_line(limit))
+        Some(more_results_line(hits.len()))
     } else {
         None
     };
@@ -1159,7 +1163,8 @@ mod tests {
     /// both read off the daemon's settle (PERSO-175).
     #[test]
     fn the_store_coverage_warning_and_the_cut_come_from_the_settle() {
-        let lines = server_search_lines(&settle(true, true, false), 50, false);
+        let hits = vec![server_hit("a", "", ""); 50];
+        let lines = server_search_lines(&settle(true, true, false), &hits, false);
         assert_eq!(
             lines.before,
             [
@@ -1174,12 +1179,12 @@ mod tests {
         assert!(lines.after.is_empty());
 
         // `--json` carries `truncated` itself and prints no trailer.
-        let json = server_search_lines(&settle(true, true, false), 50, true);
+        let json = server_search_lines(&settle(true, true, false), &hits, true);
         assert_eq!(json.before.len(), 1);
         assert_eq!(json.trailer, None);
 
         assert_eq!(
-            server_search_lines(&settle(false, false, false), 50, false),
+            server_search_lines(&settle(false, false, false), &hits, false),
             ServerSearchLines::default(),
             "a search the server answered whole, and not cut, prints nothing around it"
         );
@@ -1191,10 +1196,11 @@ mod tests {
     fn graph_s_cap_is_named_where_raising_the_limit_cannot_help() {
         let cap = "Microsoft Graph stops a search at 1000 results: narrow the query \
                    (after:, before:, in:) to reach the rest.";
-        let text = server_search_lines(&settle(false, true, true), 2500, false);
+        let hits = vec![server_hit("a", "", ""); 1000];
+        let text = server_search_lines(&settle(false, true, true), &hits, false);
         assert_eq!(text.trailer.as_deref(), Some(cap));
         assert!(text.before.is_empty());
-        let json = server_search_lines(&settle(false, true, true), 2500, true);
+        let json = server_search_lines(&settle(false, true, true), &hits, true);
         assert_eq!(json.before, [cap]);
         assert_eq!(json.trailer, None);
     }
@@ -1208,13 +1214,31 @@ mod tests {
             mailbox: "Spesen".into(),
             error: "Failed to select mailbox 'Spesen': NO no such mailbox".into(),
         }];
-        let lines = server_search_lines(&settled, 50, false);
+        let lines = server_search_lines(&settled, &[], false);
         assert!(lines.before.is_empty());
         assert_eq!(
             lines.after,
             ["Search in Spesen failed: Failed to select mailbox 'Spesen': NO no such mailbox"]
         );
-        assert_eq!(server_search_lines(&settled, 50, true).after.len(), 1);
+        assert_eq!(server_search_lines(&settled, &[], true).after.len(), 1);
+    }
+
+    /// The cut line names the hits listed above it, which the dedup, the
+    /// attachment post-filter or a short download leave below the limit, down
+    /// to none: `mp search -n 50` that lists three says three (PERSO-175).
+    #[test]
+    fn the_cut_line_names_the_hits_listed_not_the_limit() {
+        let hits = vec![server_hit("a", "", ""); 3];
+        let lines = server_search_lines(&settle(true, true, false), &hits, false);
+        assert_eq!(
+            lines.trailer.as_deref(),
+            Some("More results than the 3 shown: raise -n to see them.")
+        );
+        let none = server_search_lines(&settle(true, true, false), &[], false);
+        assert_eq!(
+            none.trailer.as_deref(),
+            Some("More results than the 0 shown: raise -n to see them.")
+        );
     }
 
     /// An account with rows in no listed mailbox says so instead of printing an

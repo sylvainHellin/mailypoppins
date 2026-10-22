@@ -1900,7 +1900,7 @@ async fn routed_server_search(
     };
 
     let hits = mailypoppins::read_cmd::server_hits_newest_first(hits);
-    let lines = mailypoppins::read_cmd::server_search_lines(&settled, limit, json);
+    let lines = mailypoppins::read_cmd::server_search_lines(&settled, &hits, json);
     for line in &lines.before {
         eprintln!("{} {line}", "\u{26a0}".yellow());
     }
