@@ -37,3 +37,10 @@ Why: one request with the bytes the SMTP path already builds threads a reply for
 Rejected: createReply, PATCH and send (no control over the Message-ID, four round trips, a draft left in Drafts on failure, and it may mark the parent read); internetMessageHeaders on the JSON payload (Graph accepts only x- headers there).
 Source: .agents/research/2026-10-21-graph-reply-threading.md, chat of 2026-10-21 (PERSO-144).
 Status: accepted
+
+## 2026-10-22 - Graph rows thread by In-Reply-To and References first and by conversationId second
+
+Why: the headers are what IMAP rows and the outbox's own Sent rows thread by, so a conversation threads the same whichever backend brought each message; `conversationId` exists only on Graph rows and threads what the headers cannot, a parent stored after its reply or a reply whose parent the store never held. It is kept in a new nullable `messages.conversation_id` column added on open, `NULL` for never asked and empty for asked and none, so the one-shot re-thread of stored rows needs no schema bump and no re-download. The headers come from the MAPI properties `String 0x1042` and `String 0x1039` through `$expand`, about 0.4 KB a message, not from `internetMessageHeaders`, about 9 KB.
+Rejected: `conversationId` as the only signal (Graph and IMAP copies of one conversation would split); `conversationId` first (Exchange groups by its own rules, and a header match is exact); `internetMessageHeaders` (twenty times the payload for the same two values); a schema version bump (drops every store and re-downloads every body).
+Source: PERSO-147 brief from Vera's session, live probe of the EVOQS mailbox on 2026-10-22 (`examples/graph_thread_probe.rs`).
+Status: accepted

@@ -203,13 +203,14 @@ Before the old file is deleted its unfinished rows (`pending_send`, `sent_pendin
 A row that cannot be carried, because its bytes are gone from the blob store or its columns are unreadable, is named in a `store-rebuild-<timestamp>.txt` note written next to the store; nothing about a submitted message is discarded silently.
 The same pass then sweeps the blob tree, deleting every file the rebuilt store holds no refcount row for, so a rebuild cannot leave the blob directory full of orphans that nothing reclaims.
 
-Schema v6 lives in `src/store/schema.rs`, which carries the identity notes in full; the short version:
+Schema v8 lives in `src/store/schema.rs`, which carries the identity notes in full; the short version:
 
 - `messages` is one row per message per mailbox, with a synthetic `id` and `UNIQUE (account, mailbox, uid)` as the real identity.
 The same message in two mailboxes is two rows.
 Its `flags` column holds the IMAP flag string, which is where the second status axis lives (#TKT-0051): `\Seen`, `\Answered` and the `$Forwarded` keyword, parsed into `types::MessageFlags`.
 Three independent bits rather than one state, and no schema change, because the column was already there and every sync pass restates it for the whole window.
 The `messages_message_id` index is deliberately non-unique: it serves threading, idempotent re-ingest, cross-mailbox copy detection and selector resolution.
+`thread_id` and the additive `conversation_id` column are the conversation key and Graph's second threading signal ([Threading](#threading)).
 - `blobs` is the refcount index for the content-addressed blob store, and `message_blobs` is the per-message list of `body`, `html`, `raw` and `attachment` references.
 Refcounts live in the database so a reference can be taken in the same transaction as the row that carries the hash.
 - `messages_fts` is a contentless FTS5 index (`content=''`, `contentless_delete=1`) over subject, from and body text.
@@ -255,6 +256,20 @@ One transaction per message writes the `messages` row, its blob references and i
 Re-ingesting a UID is an UPSERT that keeps the row `id`, its thread assignment and the blob references whose content did not change.
 After a UIDVALIDITY reset the row is found by Message-ID and rebound to the new UID in place.
 A message with no `Message-ID` header gets a deterministic `sha256-<hex16>@local.invalid` synthetic id.
+
+### Threading
+
+Ingest gives a new row its `thread_id` once (`resolve_thread_id` in `src/ingest.rs`), and an existing row keeps the one it has.
+The headers are the primary signal: the thread of the nearest ancestor that `In-Reply-To` and then `References` (last entry first) name and the account holds.
+An IMAP row reads them from its raw bytes; a Graph row has none, so its download asks for the two MAPI properties behind them and for the message's `conversationId`, and hands them to ingest as `ingest::ThreadHints` (PERSO-147).
+The headers come first so one conversation threads the same whatever backend brought each message: a Graph inbox copy, an IMAP copy of the same mail elsewhere and the outbox's own Sent row agree on `Message-ID`s, and only Graph rows carry a `conversationId`.
+The secondary signal is `messages.conversation_id`: when the headers name nothing stored, the row joins the thread of the oldest row sharing its conversation, which is what threads a Graph parent stored after its reply.
+With neither, the row roots a thread at its own `Message-ID`.
+An IMAP parent that arrives after its reply still roots its own thread, since nothing scans stored replies for a newly arrived parent.
+
+`conversation_id` is an additive column: `NULL` means nobody asked the server (an IMAP row, an outbox row, or a Graph row an older build stored), the empty string means Graph was asked and named none.
+The Graph sync re-threads the `NULL` rows that have no raw message once (`GraphClient::rethread_stored`, then `ingest::rethread_rows`): it walks the folder listing with the two properties and `conversationId`, about 500 bytes per message and no body, writes the signals, resolves each row as ingest would, and moves the row's whole old thread into the new one, so a reply re-threaded before its parent lands where a parent re-threaded first would have put it.
+A row the complete listing does not name gets the empty string, so the candidates only shrink.
 
 ### Read
 
@@ -342,6 +357,7 @@ IMAP supports implicit TLS (port 993) and STARTTLS (any other port, for example 
 The client and its orchestrator are `src/graph.rs`.
 The folder enumeration returns every message's `internetMessageId`, read flag and received date; the messages the store does not hold are downloaded by id, twenty per `/$batch` call, newest first so a capped pass still takes the arrivals a user is waiting for.
 Graph never returns RFC822, so rows get `raw_blob` NULL and the HTML part is stored as an `html` blob instead.
+The download's `$select` adds `conversationId` and its `$expand` the two single-value extended properties `String 0x1042` (`In-Reply-To`) and `String 0x1039` (`References`), which thread the row as the [Threading](#threading) section describes; `internetMessageHeaders` would carry the same headers at about 9 KB per message against 0.4 KB, and `/messages/delta` refuses the `$expand`, which nothing needs since the download is by id.
 Graph has no UID, so the row's `uid` is a 63-bit hash of the Message-ID (`ingest::graph_uid`), which keeps the `(account, mailbox, uid)` identity meaningful.
 Since #0055 the orchestration mirrors the IMAP one line for line, prune pass included.
 The enumeration is keyed on the trimmed `internetMessageId`, walks the folder newest-first, and reports whether it saw all of it; #0065 turned that report into the prune's precondition.

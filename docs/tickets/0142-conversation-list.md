@@ -216,6 +216,11 @@ Until step 6 the clients default to the flat list, so `main` never ships a mode 
 6. The setting: `tc` in `KEYMAP` and both palettes, `tui.json`, `flatListAccounts` and the Settings switch, the default turned on, `keymap.json` and `website/src/data/tui-keys.json` regenerated.
 7. Later, in its own ticket: Graph's `conversationId` feeds `thread_id` for Graph rows, and Gmail's `X-GM-THRID` for Gmail rows that carry no usable headers.
    `thread_id` is assigned once at ingest (`src/ingest.rs:352`), so this step also owes a one-shot re-thread of the rows already stored.
+   Graph half shipped in PERSO-147 on 2026-10-22: the by-id download asks for `conversationId` and the MAPI properties behind `In-Reply-To` and `References`, ingest threads a Graph row by its headers first and by the new `messages.conversation_id` column second, and the Graph sync re-threads the rows an older build stored once per mailbox from a folder listing ([architecture.md](../architecture.md#threading), decision log 2026-10-22).
+   Gmail half not done: no fetch asks for `X-GM-THRID` (`src/imap_client/fetch.rs` fetches `(BODY.PEEK[] FLAGS)`), and a Gmail row always has raw bytes, so it already threads by its headers like any IMAP row; the gap is only a Gmail message with no usable headers.
+   Doing it means adding `X-GM-THRID` to the fetch items when the server advertises `X-GM-EXT-1` (`src/imap_client/pool.rs` parses the capability), reading it off the fetch response, and passing it as `ThreadHints::conversation_id` through `ingest::ingest_message_threaded`; stored rows would re-thread through a `UID FETCH 1:* (X-GM-THRID)` pass beside the Graph one.
+   `imap-proto` 0.16.7 parses the attribute (`AttributeValue::GmailThrId`), but `async-imap` 0.11.3's `Fetch` has accessors for `X-GM-LABELS` and `X-GM-MSGID` only, so reading it needs an upstream accessor or a patched dependency.
+   No Gmail account is configured, so it waits for one.
 
 ### Documents to update when shipping
 
@@ -283,4 +288,4 @@ The gaps the step 4 to 6 workers and reviewers left open, each small and none bl
 - A reply-depth tree inside a conversation, and inline reply, both already set aside by #0101.
 - Grouping in the Drafts view, in local search results and in the merged server search of `LST-08`, which stay flat.
 - Conversation-wide actions that reach members in other mailboxes.
-- Threading Graph and Gmail rows by their server ids, which is rollout step 7 and a ticket of its own.
+- Threading Graph and Gmail rows by their server ids, which is rollout step 7 and a ticket of its own (PERSO-147; the Graph half shipped).
