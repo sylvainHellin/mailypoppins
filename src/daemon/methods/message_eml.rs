@@ -115,32 +115,51 @@ async fn materialise_eml(
 }
 
 /// The addressed row, its RFC 822 bytes, and the blobs those were read from.
-///
-/// The store is opened, read and closed before any await: a server leg is
-/// seconds of network, and nothing about the row can change what it asks for.
-pub(super) async fn raw_message(
+async fn raw_message(
     account: &AccountConfig,
     params: &Value,
     secrets: crate::secrets::SecretsBackendKind,
 ) -> Result<(MessageRow, Vec<u8>, Vec<String>), RpcError> {
     let name = account.name.as_str();
-    let (row, stored) = {
-        let store = Store::open(crate::config::store_path(name))
-            .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+    let row = {
+        let store = open_store(name)?;
+        super::message::address(params, &store, name)?
+    };
+    let (bytes, pinned) = raw_of_row(account, &row, secrets).await?;
+    Ok((row, bytes, pinned))
+}
+
+/// The RFC 822 bytes of a resolved row, and the blobs they were read from:
+/// the stored `raw` blob, or the server's copy when the row has none.
+///
+/// The store is opened, read and closed before any await: a server leg is
+/// seconds of network, and nothing about the row can change what it asks for.
+/// Shared with `draft.forward`'s `as_attachment`, which attaches these bytes.
+pub(super) async fn raw_of_row(
+    account: &AccountConfig,
+    row: &MessageRow,
+    secrets: crate::secrets::SecretsBackendKind,
+) -> Result<(Vec<u8>, Vec<String>), RpcError> {
+    let name = account.name.as_str();
+    let stored = {
+        let store = open_store(name)?;
         let blobs = BlobStore::new(crate::config::blobs_dir(name));
-        let row = super::message::address(params, &store, name)?;
-        let stored = read::blob_hash_of_kind(&store, row.id, "raw")
-            .and_then(|hash| read::read_blob(&blobs, row.id, &hash).map(|bytes| (bytes, hash)));
-        (row, stored)
+        read::blob_hash_of_kind(&store, row.id, "raw")
+            .and_then(|hash| read::read_blob(&blobs, row.id, &hash).map(|bytes| (bytes, hash)))
     };
     if let Some((bytes, hash)) = stored {
-        return Ok((row, bytes, vec![hash]));
+        return Ok((bytes, vec![hash]));
     }
     super::open_secrets(name, secrets)?;
-    let bytes = fetch_raw(account, &row)
+    let bytes = fetch_raw(account, row)
         .await
         .map_err(|e| super::server_error(name, &e))?;
-    Ok((row, bytes, Vec::new()))
+    Ok((bytes, Vec::new()))
+}
+
+fn open_store(name: &str) -> Result<Store, RpcError> {
+    Store::open(crate::config::store_path(name))
+        .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))
 }
 
 /// The server's copy of a row with no stored raw message.

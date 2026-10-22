@@ -219,6 +219,9 @@ enum Commands {
         /// Mailbox to resolve the selector in
         #[arg(long)]
         mailbox: Option<String>,
+        /// Attach the original as an .eml (message/rfc822) instead of its attachments
+        #[arg(long)]
+        as_attachment: bool,
     },
     /// RSVP to a received calendar invitation (iMIP REPLY over SMTP)
     Invite {
@@ -2063,23 +2066,36 @@ async fn routed_mark(account: &str, selector: &str, approve: bool) -> Result<()>
 
 /// `mp reply` and `mp forward`: the draft the daemon built from a stored
 /// message, and the message it names.
+///
+/// `as_attachment` is `mp forward --as-attachment` (PERSO-174): the daemon
+/// attaches the source's `.eml`, which for a Graph row is a round trip to the
+/// server, so that call waits as long as a server query does.
 async fn routed_from_source(
     account: &str,
     method: &str,
     selector: &str,
     mailbox: Option<&str>,
     all: bool,
+    as_attachment: bool,
     signature: serde_json::Value,
 ) -> Result<mp_protocol::draft::DraftCreated> {
     let mut source = serde_json::json!({"selector": selector});
     if let Some(mailbox) = mailbox {
         source["mailbox"] = serde_json::json!(mailbox);
     }
-    let params = with_params(
+    let mut params = with_params(
         serde_json::json!({"account": account, "source": source, "all": all}),
         signature,
     );
-    draft_call(account, method, params).await
+    if !as_attachment {
+        return draft_call(account, method, params).await;
+    }
+    params["as_attachment"] = serde_json::json!(true);
+    let mut connection = daemon_connection().await;
+    let result = daemon_try_call_within(&mut connection, method, params, DAEMON_SERVER_TIMEOUT)
+        .await
+        .map_err(|e| refusal(account, e))?;
+    serde_json::from_value(result).with_context(|| format!("reading the daemon's {method} answer"))
 }
 
 // ---------------------------------------------------------------------------
@@ -4168,6 +4184,7 @@ async fn main() -> Result<()> {
                 &selector,
                 mailbox.as_deref(),
                 all,
+                false,
                 draft_signature,
             )
             .await?;
@@ -4182,7 +4199,11 @@ async fn main() -> Result<()> {
             );
         }
 
-        Some(Commands::Forward { selector, mailbox }) => {
+        Some(Commands::Forward {
+            selector,
+            mailbox,
+            as_attachment,
+        }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
             let created = routed_from_source(
                 &account_config.name,
@@ -4190,6 +4211,7 @@ async fn main() -> Result<()> {
                 &selector,
                 mailbox.as_deref(),
                 false,
+                as_attachment,
                 draft_signature,
             )
             .await?;

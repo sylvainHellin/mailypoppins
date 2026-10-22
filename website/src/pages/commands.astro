@@ -33,7 +33,7 @@ const draftCommands = [
   { command: 'mp outbox retry <id>', description: 'Send a failed submission again' },
   { command: 'mp outbox discard <id>', description: 'Drop a submission and release its bytes' },
   { command: 'mp reply <selector> [--all] [--mailbox <name>]', description: 'Create a reply draft and print its selector' },
-  { command: 'mp forward <selector> [--mailbox <name>]', description: 'Create a forward draft and print its selector' },
+  { command: 'mp forward <selector> [--mailbox <name>] [--as-attachment]', description: 'Create a forward draft and print its selector; --as-attachment attaches the original as an .eml (message/rfc822, quoted thread and attachments inside) instead of carrying its attachments' },
 ];
 
 const imapCommands = [

@@ -453,6 +453,18 @@ mod tests {
         assert_snapshot!(html);
     }
 
+    /// `mp forward --as-attachment` attaches the source as `<name>.eml`, and
+    /// the extension is what labels the part `message/rfc822` (PERSO-174).
+    #[test]
+    fn an_eml_attachment_is_sent_as_message_rfc822() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("2026-10-21_Re DEAL.eml");
+        fs::write(&path, b"Subject: x\r\n\r\nbody\r\n").unwrap();
+        let (name, _bytes, content_type) = read_attachment(&path).unwrap();
+        assert_eq!(name, "2026-10-21_Re DEAL.eml");
+        assert_eq!(content_type, "message/rfc822");
+    }
+
     #[test]
     fn test_resolve_attachment_paths_expands_folder() {
         let dir = tempfile::tempdir().unwrap();

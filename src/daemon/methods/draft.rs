@@ -42,7 +42,7 @@
 //! been sent, carrying `{account, id, status}` so a client can tell the case
 //! apart without reading English.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -189,12 +189,24 @@ impl Method for DraftMethod {
                 "draft.create_from_message" => create_from_message(&params, accounts, email),
                 "draft.demote" => self.set_status(&params, accounts, false),
                 "draft.discard" => discard(&params, accounts),
-                "draft.forward" => from_source(&params, accounts, email, false),
+                "draft.forward" => match flag(&params, "as_attachment") {
+                    Ok(true) => {
+                        forward_as_attachment(
+                            &params,
+                            accounts,
+                            email,
+                            snapshot.config.secrets_backend,
+                        )
+                        .await
+                    }
+                    Ok(false) => from_source(&params, accounts, email, false, None),
+                    Err(e) => Err(e),
+                },
                 "draft.html" => html(&params, accounts, email),
                 "draft.list" => list(&params, accounts),
                 "draft.path" => path(&params, accounts),
                 "draft.preview" => preview(&params, accounts, email),
-                "draft.reply" => from_source(&params, accounts, email, true),
+                "draft.reply" => from_source(&params, accounts, email, true, None),
                 _ => validate(&params, accounts),
             };
             let result = result.map_err(DomainError::from)?;
@@ -703,11 +715,16 @@ fn create_from_message(
 /// builder is [`crate::draft::create_draft_from_source`], so the file is the
 /// one the CLI wrote before this: the same subject prefixing, the same recorded
 /// `in_reply_to`, the same carried attachments.
+///
+/// `eml` is the forward-as-attachment case: the path of the source's own
+/// `.eml`, which the draft carries instead of the original's parts (they are
+/// inside it).
 fn from_source(
     params: &Value,
     accounts: &[AccountConfig],
     email: &EmailSettings,
     reply: bool,
+    eml: Option<PathBuf>,
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?;
@@ -719,9 +736,13 @@ fn from_source(
     let blobs = BlobStore::new(crate::config::blobs_dir(&name));
     // A forward carries the original attachments, which is the property #0006
     // exists for; a reply quotes and carries none.
-    let built = crate::draft::source_from_row(&store, &blobs, &row, !reply)
+    let carry = !reply && eml.is_none();
+    let mut built = crate::draft::source_from_row(&store, &blobs, &row, carry)
         .map_err(|e| internal(format!("reading {name}:{}/{}: {e:#}", row.mailbox, row.uid)))?;
     drop(store);
+    if let Some(eml) = eml {
+        built.attachments = vec![eml];
+    }
 
     let kind = if reply {
         crate::draft::DraftFromSource::Reply {
@@ -750,6 +771,44 @@ fn from_source(
             selector: selector.to_string(),
         }),
     )
+}
+
+/// `draft.forward` with `as_attachment: true` (PERSO-174): the forward draft
+/// [`from_source`] writes, carrying the source as one `message/rfc822` part
+/// (its `.eml`, quoted thread and attachments inside) instead of the
+/// original's parts.
+///
+/// The bytes are `message.materialise_eml`'s, so a Graph row, which is stored
+/// without a raw message, is fetched from the server first. They are written
+/// where a forward's carried parts already go, the source's stable
+/// attachments directory, under `<date>_<subject>.eml`, whose extension is
+/// what makes the send path label the part `message/rfc822`.
+async fn forward_as_attachment(
+    params: &Value,
+    accounts: &[AccountConfig],
+    email: &EmailSettings,
+    secrets: crate::secrets::SecretsBackendKind,
+) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    let account = super::account::ready_account(accounts, &name)?.clone();
+    let source = params.get("source").cloned().unwrap_or(Value::Null);
+    let row = {
+        let store = Store::open(crate::config::store_path(&name))
+            .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
+        address_received(&source, &store, &name)?.0
+    };
+    let (bytes, _pinned) = super::message_eml::raw_of_row(&account, &row, secrets).await?;
+    let dir =
+        crate::parse::stable_attachments_dir(&crate::config::account_dir(&name), &row.message_id);
+    crate::config::create_private_dir_all(&dir)
+        .map_err(|e| internal(format!("creating {}: {e}", dir.display())))?;
+    let path = dir.join(super::message_eml::eml_name(
+        row.subject.as_deref().unwrap_or_default(),
+        row.date_display.as_deref(),
+    ));
+    std::fs::write(&path, &bytes)
+        .map_err(|e| internal(format!("writing {}: {e}", path.display())))?;
+    from_source(params, accounts, email, false, Some(path))
 }
 
 /// The `headers` override of `draft.reply`, `draft.forward` (P5-U6) and

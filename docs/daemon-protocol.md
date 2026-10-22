@@ -697,7 +697,7 @@ The family is the fifteen methods below, all served from protocol 1 and all dura
 | `draft.demote` | command | `{account, id}` | `{account, id, status: "draft", path}` |
 | `draft.detach` | command | `{account, id\|selector, index}` | `DraftAttachments` |
 | `draft.discard` | command | `{account, id\|selector, force?}` or `{account, sent: true}` | `{account, id, selector, status}` or `{account, cleared, kept}` |
-| `draft.forward` | command | `{account, source, headers?, no_signature?, signature?}` | `DraftCreated` |
+| `draft.forward` | command | `{account, source, as_attachment?, headers?, no_signature?, signature?}` | `DraftCreated` |
 | `draft.html` | query | `{account, id\|selector}` | `DraftHtml` |
 | `draft.list` | query | `{account, status?}` | `DraftListing` |
 | `draft.path` | query | `{account, id\|selector}` | `DraftLocation` |
@@ -717,6 +717,11 @@ The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they ar
 **A reply or a forward addresses its source three ways and may override its headers.**
 `source` is `{id}`, `{row_id}` or `{selector, mailbox?}`, exactly one of the three: `id` is the store's `"<mailbox>/<uid>"` key, `row_id` is the `messages.id` a `message.list` row carries, and `selector` is the grammar `mp reply` takes from a user.
 `row_id` joined them in P5-U6 for the reason P5-U4 added it to `message.get`: a client holding a listed row has that id and nothing else, and re-deriving a `"<mailbox>/<uid>"` for it would make it carry a second identity per row.
+
+**`as_attachment: true` forwards the source as one `.eml` part** (`mp forward --as-attachment`, PERSO-174).
+The bytes are `message.materialise_eml`'s, so a Graph row is fetched from the server first, and they are written to `<account>/attachments/<message-id>/<date>_<subject>.eml`, where a forward's carried parts already go; the draft lists that one file instead of the original's parts, which are inside it, and the `.eml` extension is what makes the send label the part `message/rfc822`.
+The body is the usual forward's, quoted header block included.
+A source whose bytes cannot be had is `-32603` with `{account}` and writes no draft.
 
 **`draft.create_from_message` is the one draft built from a message rather than from a row.**
 A server-search hit that resolved to no local row has no `messages.id`, no uid and no selector, and its content is the fetch the client is already rendering; `draft.reply` and `draft.forward` cannot build that draft, because every form of their `source` is an address into the store.

@@ -218,6 +218,7 @@ Arguments:
 
 Options:
       --mailbox <MAILBOX>      Mailbox to resolve the selector in
+      --as-attachment          Attach the original as an .eml (message/rfc822) instead of its attachments
   -s, --signature <SIGNATURE>  Signature to use (overrides config default)
       --no-signature           Skip signature entirely
   -A, --account <ACCOUNT>      Account to use

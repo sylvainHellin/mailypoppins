@@ -1,5 +1,7 @@
 //! PERSO-174: a stored message as an `.eml` file, through the daemon
-//! (`message.materialise_eml`) and through the CLI (`mp export`).
+//! (`message.materialise_eml`) and through the CLI (`mp export`), and as the
+//! one attachment of a forward (`draft.forward` with `as_attachment`,
+//! `mp forward --as-attachment`).
 //!
 //! The fixture is the read slice's, plus one message ingested with its raw
 //! RFC 822 bytes, which is what an IMAP sync stores. The read fixture's own
@@ -196,6 +198,159 @@ async fn a_bad_address_is_invalid_params() {
             .expect_err("a bad address is refused");
         assert_eq!(error.code, -32602, "{params}: got {error:?}");
     }
+}
+
+/// The `attachments:` entries of a draft file, unquoted.
+///
+/// Line ends are normalised first: a draft built from a CRLF message is
+/// written with CRLF throughout.
+fn attachments_of(draft: &str) -> Vec<String> {
+    let draft = draft.replace("\r\n", "\n");
+    let frontmatter = draft
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split("\n---\n").next())
+        .expect("a draft opens with frontmatter");
+    let mut entries = Vec::new();
+    let mut inside = false;
+    for line in frontmatter.lines() {
+        if line == "attachments:" {
+            inside = true;
+        } else if inside {
+            match line.strip_prefix("  - ") {
+                Some(entry) => entries.push(entry.trim_matches('"').to_string()),
+                None => break,
+            }
+        }
+    }
+    entries
+}
+
+/// A forward with `as_attachment` is the usual forward draft carrying one
+/// part, the source's own `.eml`, byte for byte.
+#[tokio::test]
+async fn a_forward_as_attachment_carries_the_eml() {
+    let (tmp, _daemon) = seeded();
+    let (mut conn, _) = connect(tmp.path()).await;
+    let created = within(
+        "draft.forward",
+        conn.call(
+            "draft.forward",
+            json!({
+                "account": fixture::ACCOUNT,
+                "source": {"selector": "mp://alpha/inbox/deal@example.com"},
+                "as_attachment": true,
+            }),
+        ),
+    )
+    .await
+    .expect("the forward is written");
+    assert_eq!(
+        created["subject"],
+        json!("Fwd: Re: Elsevier DEAL open access")
+    );
+    let draft = fs::read_to_string(created["path"].as_str().expect("path")).expect("the draft");
+    assert!(
+        draft.contains("forwarded_from: \"<deal@example.com>\""),
+        "the send still flags the source as forwarded: {draft}"
+    );
+    let attachments = attachments_of(&draft);
+    assert_eq!(attachments.len(), 1, "one part, the .eml: {draft}");
+    let eml = Path::new(&attachments[0]);
+    assert_eq!(
+        eml.file_name().and_then(|n| n.to_str()),
+        Some(EXPECTED_NAME)
+    );
+    assert!(
+        eml.starts_with(fixture::account_dir(tmp.path(), fixture::ACCOUNT).join("attachments")),
+        "the .eml lives where a forward's carried parts live, got {}",
+        eml.display()
+    );
+    assert_eq!(fs::read(eml).expect("the attached .eml"), RAW);
+}
+
+/// Without the flag a forward still carries the original's own parts, and
+/// with it those parts are not carried twice: they are inside the `.eml`.
+#[tokio::test]
+async fn a_plain_forward_still_carries_the_original_parts() {
+    let (tmp, _daemon) = seeded();
+    let (mut conn, _) = connect(tmp.path()).await;
+    let created = within(
+        "draft.forward",
+        conn.call(
+            "draft.forward",
+            json!({
+                "account": fixture::ACCOUNT,
+                "source": {"selector": format!("mp://alpha/inbox/{}", fixture::BERICHT)},
+                "as_attachment": false,
+            }),
+        ),
+    )
+    .await
+    .expect("the forward is written");
+    let draft = fs::read_to_string(created["path"].as_str().expect("path")).expect("the draft");
+    let names: Vec<String> = attachments_of(&draft)
+        .iter()
+        .filter_map(|p| {
+            Path::new(p)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .collect();
+    assert_eq!(names, ["notes.pdf", "agenda.txt"], "{draft}");
+}
+
+/// A source with no raw message and no reachable server writes no draft: the
+/// refusal is the server leg's, and nothing half-built is left behind.
+#[tokio::test]
+async fn a_forward_as_attachment_that_cannot_get_the_eml_writes_no_draft() {
+    let (tmp, _daemon) = seeded();
+    let (mut conn, _) = connect(tmp.path()).await;
+    let drafts = fixture::account_dir(tmp.path(), fixture::ACCOUNT).join("drafts");
+    let before = fs::read_dir(&drafts).map(|d| d.count()).unwrap_or(0);
+    let error = match within(
+        "draft.forward",
+        conn.call(
+            "draft.forward",
+            json!({
+                "account": fixture::ACCOUNT,
+                "source": {"id": "inbox/1"},
+                "as_attachment": true,
+            }),
+        ),
+    )
+    .await
+    {
+        Err(ClientError::Rpc(error)) => error,
+        other => panic!("the forward is refused, got {other:?}"),
+    };
+    assert_eq!(error.code, -32603, "{error:?}");
+    let after = fs::read_dir(&drafts).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(before, after, "no draft was written");
+}
+
+/// `mp forward --as-attachment` prints the new draft's selector.
+#[test]
+fn mp_forward_as_attachment_prints_the_draft() {
+    let (_tmp, daemon) = seeded();
+    let out = daemon.mp(&[
+        "forward",
+        "--as-attachment",
+        "mp://alpha/inbox/deal@example.com",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let selector = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(selector.starts_with("mp://alpha/drafts/"), "{selector}");
+    let path = daemon.mp(&["path", &selector]);
+    let path = String::from_utf8_lossy(&path.stdout).trim().to_string();
+    let draft = fs::read_to_string(&path).expect("the draft");
+    let attachments = attachments_of(&draft);
+    assert_eq!(attachments.len(), 1, "{draft}");
+    assert!(attachments[0].ends_with(EXPECTED_NAME), "{draft}");
 }
 
 /// `mp export` writes the file into the directory it is given, and prints the
