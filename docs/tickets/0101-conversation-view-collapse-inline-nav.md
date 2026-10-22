@@ -3,9 +3,11 @@ id: 0101
 title: Conversation-view collapse and inline navigation on top of the thread view
 type: feature
 priority: later
-status: open
+status: dropped
 created: 2026-08-14
 ---
+
+Dropped 2026-10-22, covered by the conversation list of [#0142](0142-conversation-list.md): a conversation is one row of the message list, `l` and `h` expand and collapse it, `j` and `k` walk its messages and the preview follows.
 
 The thread view from [#0008](0008-threading-conversation-view.md) shipped as a flat, oldest-first inline list of a conversation, opened with `T`, read-only, with `j`/`k` to move and `Enter` to open a message (see #0008 "Shipped" and "Adaptations to the current tree").
 Modern clients have moved past a flat thread list to a conversation view with collapse: Thunderbird's 2025/2026 Conversation View shows the full thread in the message pane with collapsible/expandable messages and optional inline reply, and it is now table stakes across GUI clients (feature survey §a.2 Thunderbird, §b "Threading / conversation view" and "Inline reply in thread", §(c) shortlist item 2).

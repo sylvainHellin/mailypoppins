@@ -16,7 +16,7 @@ Today the desktop sidebar draws every account expanded; the TUI sidebar already 
 
 ## Plan
 
-[docs/plans/account-picker.md](../plans/account-picker.md) holds the design, six owner decisions (five with a recommendation, Decision 6 decided on 2026-10-22), four work units, the docs to change and the risks.
+[docs/plans/account-picker.md](../plans/account-picker.md) holds the design, six decisions, all settled by Sylvain on 2026-10-22, four work units, the docs to change and the risks.
 
 Research:
 
@@ -35,4 +35,4 @@ Research:
 ## Status
 
 Implementation has not started.
-The worker starts from the plan's first work unit, Unit 1 (the TUI picker), proceeding on the plan's recommendations unless Sylvain has overruled one in this ticket.
+The worker starts from the plan's first work unit, Unit 1 (the TUI picker), on the plan's decisions as settled.

@@ -75,11 +75,12 @@ The design is drawn in [figures/0141-mailbox-catalogue.tex](figures/0141-mailbox
    Add `drafts`, `trash` and `junk` roles beside `inbox`, `archive` and `sent`.
    Today `attribute_token` (`store_sync.rs:~243`) passes `\Sent` and friends through as `Extension`, and LIST is issued without `RETURN (SPECIAL-USE)`.
 3. Per-folder policy: `sync`, `status-only` or `ignore`.
-   - `sync`: the role folders, plus anything pinned in config; synced every tick as today.
+   - `sync`: the role folders, every user folder, and anything pinned in config; synced every tick like Inbox.
+     On TUM that adds `Spesen`, `INBOX/reimbursements`, `Read`, `Scheduled` and `Archive1`, five more folder visits per tick.
    - `status-only`: counts from STATUS, full fetch when the folder is opened or on a full tick with a small limit.
-     Default for user folders, `Deleted Items`, `Junk Email`, and `Labels/*`.
+     Default for the trash and junk folders (`Deleted Items`, `Junk Email`, `Trash`, `Spam`) and Proton's `Labels/*`.
    - `ignore`: never selected.
-     Default for `\Noselect` and `\NonExistent`, Exchange's non-mail folders and `Sync Issues/*`, Proton's `All Mail` and `Starred`.
+     Default for `\Noselect` and `\NonExistent`, Exchange's non-mail folders (`Calendar`, `Contacts`, `Tasks`, `Notes`, `Journal`, `RSS Feeds`, `Outbox`, `Conversation History`) and `Sync Issues/*`, Proton's `All Mail` and `Starred`.
    Defaults come from the role and a built-in exclude list; config holds only overrides (globs plus a policy).
    A folder that is a move destination is never `ignore` for pruning purposes (pitfall 2).
 4. Keys.
@@ -93,9 +94,16 @@ The design is drawn in [figures/0141-mailbox-catalogue.tex](figures/0141-mailbox
 7. Config.
    Keep `[accounts.mailboxes.*]` working unchanged as role overrides and pins, and add `deny_unknown_fields` or a warning for unknown keys (PERSO-118).
 
+## Decisions
+
+- A newly found user folder syncs every tick like Inbox; the trash and junk folders and Proton's label folders get counts only; Exchange's calendar and contact folders and Proton's `All Mail` and `Starred` are ignored (policy table above).
+- The catalogue and the folder roles land first, then the server drafts of [#0143](0143-server-drafts.md), which reuse the `drafts` role.
+
 ## To verify before building
 
-- Run `CAPABILITY` and `LIST "" "*" RETURN (SPECIAL-USE)` against `xmail.mwn.de` and Proton Bridge: whether Exchange advertises SPECIAL-USE, LIST-EXTENDED, LIST-STATUS and CONDSTORE, and which folders carry `\Noselect`.
+- Answered by the draft probe of 2026-10-20 ([#0143](0143-server-drafts.md), "Probe results"): neither server advertises `SPECIAL-USE`, `CONDSTORE` or `QRESYNC`, and both offer `UIDPLUS`, `MOVE` and `IDLE`.
+  Both mark `\Drafts`, `\Sent`, `\Trash` and `\Junk` in the plain LIST, which is all the role detection needs; Proton also marks `\Archive`, `\All` and `\Flagged`, and TUM's `Archive` carries no mark, so it stays a config entry.
+  Proton's `Folders` and `Labels` parents carry `\Noselect`; TUM has none.
 - Whether the store deduplicates Proton label copies by Message-ID or keeps one row per folder.
 - How the sweep, the archive mutation and the sent copy resolve their folders (`find_server_name_for_role` callers were not traced).
 

@@ -15,6 +15,9 @@ The client never edits a message body; it changes flags and mailbox membership, 
 - No migration paths until v1.0.
 When changing data formats, secret storage or wire protocols, drop the old code and prompt the user to reconfigure.
 Do not write v1 to v2 migrators.
+- Every mailbox operation goes through the daemon.
+The CLI, the TUI and the desktop app make the same daemon calls and offer the same capabilities; no client reaches the store, a server or a secret on its own.
+The `CLI_ENGINE_RESIDUE` rows of `tests/architecture_boundaries.rs` are the open exceptions, each a follow-up in `BACKLOG.md`.
 - The TUI implements no email logic.
 No SMTP, IMAP, MIME or Graph REST code belongs in `tui/app/` or `tui/ui/`; the TUI layering section below states what those two layers do and do not touch today.
 - Windows is targeted via WSL only.

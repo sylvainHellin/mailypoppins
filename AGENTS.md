@@ -3,6 +3,11 @@
 Rust CLI + TUI for managing emails as Markdown files with YAML frontmatter. Cargo workspace: the root crate (library + binary, which owns the engine and the daemon) plus `crates/mp-core` (the engine-free modules a client and the engine both read, re-exported from the root crate under their old paths), `crates/mp-protocol`, `crates/mp-client` and `clients/tui` (the terminal client, re-exported as `mailypoppins::tui`); every client crate lives under `clients/`. The CLI and the TUI are clients of the daemon over a Unix socket and spawn no subprocess; no crate under `crates/` or `clients/` depends on the root crate, which is what keeps the engine out of a client.
 A bug report that names no client may be about the desktop app as much as the TUI: check and fix the behaviour in both, or ask which one before fixing.
 
+## Principles
+
+- Keep the codebase clean to the highest standard: something sub-optimal noticed in passing is fixed, never parked or left as a leftover.
+- Every mailbox operation goes through the daemon, and the CLI, the TUI and the desktop app make the same daemon calls and offer the same capabilities ([docs/architecture.md](docs/architecture.md), "Project invariants").
+
 ## Repo layout
 
 - Rust crate at the root (`src/`, `Cargo.toml`, `tests/`), workspace members under `crates/`. All build / test commands run from the root.

@@ -17,7 +17,7 @@ The external facts are in `.agents/research/2026-10-04-tauri-updater-research.md
 
 - Install the app once from the DMG; every later version arrives through the app.
 - The app shows that an update is available, and the palette and the app menu install it.
-- An optional setting installs updates on its own, applied at the next launch.
+- After an update the app restarts its old daemon quietly instead of showing the version-mismatch screen.
 
 ## Constraints found in the repo
 
@@ -89,15 +89,16 @@ The install flow:
 
 This order differs from "stop the daemon, then install" in the brief: stopping first would leave the user without a daemon when the download fails.
 
-### Stage 2: install automatically
+### Stage 2: quiet daemon restart and the stage 1 fixes
 
-- A `desktop.json` key `auto_update`, `on` or `off`, unset is `off`, in the flat snake_case style of the four keys there (a dotted `updates.auto_install` would be the file's first nested name).
-- Settings, General, shows it as a toggle under the Updates line, and the palette gets "Updates: install automatically" and "Updates: ask first".
-- When on, the startup check downloads the update in the background and keeps the verified bytes, with no prompt.
-- The install (`Update::install(bytes)`) runs in the app's exit path, so the bundle never changes under a running session; the next launch is the new version.
-- If the bundle's parent directory is not writable, the automatic route stands down and falls back to the indicator, since the plugin's admin-password fallback has no place at quit.
-- After an install the new app's first connect meets the old daemon.
+Scope decided on 2026-10-22 (decision log, same date): the three items below, and no setting that installs updates at quit.
+
+- After an install the new app's first connect can meet the old daemon, after "Later" and a quit.
   The app records `{from, to}` in `update-state.json` at install, and a version mismatch whose daemon version is `from` restarts the daemon without the blocking screen; any other mismatch still shows it.
+- The release job stops marking a prerelease tag as the latest release.
+- A manual update check after "Later" says that a restart is pending.
+
+An install-at-quit setting (a `desktop.json` key, a Settings toggle, the download kept for the exit path) waits until a few manual updates have gone through cleanly, since it replaces the app unseen.
 
 ### Stage 3: after #0012
 
@@ -150,7 +151,7 @@ Self-update works without an Apple account; the first install from a browser dow
   The app does not use it while the sidecar exists (the sidecar comes before `PATH` in `resolve_mp_binary`), but a daemon that `mp` starts is refused by the app with the restart screen, and the restart screen's Restart replaces it with the bundled version; the "do not combine" rule of `docs/release-process.md` ("`mp` on PATH from the app") stays the answer, and the symlink route follows the app through every update.
 - After a swap, the old daemon goes on running the old binary, which was moved to the plugin's backup location.
 - Without the stop in step 5, the new app's first connect meets that daemon, the probe reads the new `mp --version` (the cache key changed with size and modification time), and the user gets the blocking restart screen; its Restart already fixes it.
-  Stopping the daemon before the relaunch avoids the screen; Stage 2's `{from, to}` record avoids it for the update applied at quit.
+  Stopping the daemon before the relaunch avoids the screen; Stage 2's `{from, to}` record avoids it after "Later" and a quit.
 - In the "Later" window the old app runs over the new bundle's files: a reconnect probes the new `mp` and shows the restart screen, and an embedded editor started then reads the new `nvim/` resources.
   Both are recoverable, and the indicator says a restart is pending.
 - A daemon run by `mp daemon install-service` has `KeepAlive` with `SuccessfulExit` false (`src/daemon/templates/dev.mailypoppins.daemon.plist`), so a clean `daemon.stop` is not restarted by launchd; through the documented symlink the service path follows the bundle.
@@ -162,7 +163,6 @@ Rust unit tests, no window and no network:
 - The cooldown and skip decision as a pure function of `last_check`, now, `skipped_version` and the manual flag.
 - The "should check at all" rule: debug build, fixture mode, not in a bundle.
 - `update-state.json` read and write, a missing or broken file reading as empty.
-- The `auto_update` key in `settings.rs` (`check` refuses anything but `on` and `off`), with the ts-rs type regenerated.
 - The Stage 2 mismatch rule: a daemon of the recorded `from` version restarts quietly, any other version still shows the screen.
 - A `latest.json` built by the workflow's `jq` command from a sample `.sig` file parses with the plugin's own manifest type.
 

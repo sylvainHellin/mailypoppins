@@ -101,7 +101,8 @@ Each dump also searches the account's Trash folder for the draft, the folder car
 A link ties a local draft file to its server copy across an edit made elsewhere.
 mp's own replace always keeps the link, because mp writes the same Message-ID and marker into every copy it APPENDs.
 The question is only what survives an edit in Outlook or Apple Mail.
-The rule is a chain tried in order, and the probe decides which links stay in the chain per server:
+The rule is a chain tried in order, and the probe decided which links stay in the chain ("Probe results", "Decisions"): Message-ID, then the fallback, on both servers; neither the UID nor the marker header survives a foreign edit anywhere.
+The four candidate links, for reference:
 
 1. UID.
    Selected if the edit keeps the UID.
@@ -118,12 +119,57 @@ The rule is a chain tried in order, and the probe decides which links stay in th
    Exactly one candidate is a link; none or several is no link.
 
 A broken link costs a duplicate and never a loss: the local file reads as "server copy gone" and is moved to `drafts/.retired/`, and the edited server copy is imported as a foreign draft (slice 2).
-The probe results also decide whether Proton gets the mirror at all: if Bridge rewrites the MIME so that no link survives and the HTML does not convert back, the account's switch below stays off for Proton.
+Bridge keeps the Message-ID and the attachment, so the link holds on Proton and its switch defaults to on.
 
 ### Probe results
 
-Not run yet.
-The findings go here when the probe has run, one subsection per account, with the dump files named by path.
+Sylvain ran the probe on 2026-10-20 against both accounts.
+The dumps are in `.sync/draft-probe/`, one `.txt` per draft holding every dump of it, with the appended bytes (`.eml`) and the append state (`.json`) beside it.
+On Proton the edits, the send and the delete came from the Proton Mail app, since neither Outlook nor Apple Mail holds the Proton account.
+
+#### Both servers
+
+- No foreign edit keeps the UID: Outlook, Apple Mail and the Proton Mail app each save a new message.
+- Outlook and the Proton Mail app keep the Message-ID; Apple Mail gives the edited draft a new one.
+- `X-Mailypoppins-Draft-Id` never survives: Outlook strips it, and Bridge drops it already at mp's APPEND.
+- The `mp:quote`, `mp:sig-start` and `mp:sig-end` comments disappear on every foreign edit; they survive mp's own APPEND on both servers.
+- Bcc survives every edit.
+- The attachment survives every edit.
+- Every copy carries `\Draft` and `\Seen`.
+- Both servers offer `UIDPLUS`, `MOVE` and `IDLE`, and neither offers `CONDSTORE`, `QRESYNC` or `SPECIAL-USE`.
+  Both still mark the role folders in their plain LIST: TUM `Drafts` `\Drafts`, `Sent Items` `\Sent`, `Deleted Items` `\Trash`, `Junk Email` `\Junk`; Proton `Drafts` `\Drafts`, `Sent` `\Sent`, `Trash` `\Trash`, `Spam` `\Junk`, `Archive` `\Archive`, `All Mail` `\All`, `Starred` `\Flagged`.
+  TUM's `Archive` carries no archive mark.
+
+#### tum (TUM Exchange, Outlook and Apple Mail)
+
+Dumps: `.sync/draft-probe/mp-draft-probe-tum-c09dc7f7d4f0d441.txt` (steps 1 to 3), `mp-draft-probe-tum-af4b6b4398f1bb5b.txt` (step 4), `mp-draft-probe-tum-a0a14d3abeebf223.txt` (steps 5 and 6).
+
+- mp's APPEND is stored as sent: `multipart/mixed` around `multipart/alternative` (`text/plain`, `text/html`) plus the PDF, the marker and every HTML comment intact.
+  The probe found no message to reply to on this account, so the TUM drafts carried no `In-Reply-To`, and its survival on Exchange is untested.
+- Outlook edit: new UID (18564 to 18566), Message-ID kept, marker gone, the body reduced to `text/html` plus the PDF, the comments gone, Bcc kept with Outlook's display name.
+- Apple Mail edit of that copy: new UID (18567), new Message-ID (`<0DC386F6-…@tum.de>`), the body `multipart/alternative` with a 2-byte `text/plain` and a `multipart/related` holding the HTML and the PDF as an inline part.
+- Sent from Outlook: the Drafts copy is gone within a minute and is not in Deleted Items.
+- Deleted in Apple Mail: the copy moves to `Deleted Items` with its Message-ID, marker, flags and MIME unchanged.
+- Foreign drafts: Apple Mail writes `multipart/alternative` with a near-empty `text/plain`; Outlook writes a single `text/html` part in `iso-8859-1`.
+
+#### proton (Proton Bridge, Proton Mail app)
+
+Dumps: `.sync/draft-probe/mp-draft-probe-proton-a66696b5145d0449.txt` (steps 1, 2 and the send of step 4), `mp-draft-probe-proton-b9399c52face5f2d.txt` (untouched snapshots, then a send), `mp-draft-probe-proton-df227efbf1256ee8.txt` (steps 5 and 6).
+
+- Bridge rewrites mp's APPEND: the marker and `In-Reply-To` are dropped, `References` becomes a single `@protonmail.internalid` id, and the body keeps only the `text/html` part beside the PDF; the Message-ID, Bcc and the HTML comments survive.
+- Proton Mail app edit: new UID (26 to 27), Message-ID kept, the comments gone, the PDF and Bcc kept.
+- Sent from the Proton Mail app: the Drafts copy is gone; for one of the two sent drafts a copy with the same Message-ID then sat in `Trash`.
+- Deleted in the Proton Mail app: the copy is gone from Drafts and is not in `Trash`.
+- A foreign draft from the Proton Mail app is a single `text/html` part with a Proton internal Message-ID, and it reached Bridge's Drafts only on the recheck a minute later.
+
+#### Leftovers to delete
+
+The probe's test drafts the last dumps show, to be re-listed from the server before anything is deleted:
+
+- tum `Drafts`: UID 18567 (the Apple Mail edit of probe `c09dc7f7d4f0d441`), UID 18576 (Apple Mail's foreign draft), UID 18577 (Outlook's foreign draft).
+- tum `Deleted Items`: UID 2394 (probe `a0a14d3abeebf223`, deleted in Apple Mail).
+- proton `Drafts`: UID 30 (the Proton Mail app's foreign draft).
+- proton `Trash`: UID 1530 (probe `b9399c52face5f2d`).
 
 ### Slice 1, mp-owned drafts two-way
 
@@ -230,7 +276,7 @@ Slice 1 splits its MIME assembly (`:2866-2947`: the HTML from `markdown_to_html`
 - stamps `server_message_id` and `X-Mailypoppins-Draft-Id: <id>`;
 - keeps Bcc with lettre's `keep_bcc()`, because a draft's Bcc is part of what the user wrote;
 - writes `In-Reply-To` and `References` from `in_reply_to:`, which Outlook and Apple Mail need to show a reply draft as a reply;
-- keeps the signature sentinels and `QUOTE_MARKER` as HTML comments in the HTML part, for a pull to restore, if the probe shows they survive.
+- keeps the signature sentinels and `QUOTE_MARKER` as HTML comments in the HTML part, for a pull of an unedited copy; the probe shows them surviving mp's own APPEND on both servers and disappearing on every foreign edit, where the pull falls back to the quote wrappers ("Pull").
 
 The send path emits no `In-Reply-To` today either: outside its tests, `src/send.rs` reads `in_reply_to:` only to flag the source after a send (`source_to_flag`, `:2309-2313`).
 That is a gap of its own and listed under "Out of scope".
@@ -343,7 +389,7 @@ A `DeleteDraft` whose copy is already gone is a not-found, which the drain treat
 #### The per-account switch
 
 `[accounts.drafts] mirror = true | false` in `config.toml`, read by the daemon at reload.
-It defaults to `true` once the probe has run, and `false` keeps today's local-only drafts for an account whose server mangles drafts.
+It defaults to `true` on every account, Proton included, and `false` keeps today's local-only drafts for an account whose server mangles drafts.
 The server folder is the account's `drafts` role from [#0141](0141-mailbox-auto-discovery.md) when that has landed, and otherwise the folder carrying the `\Drafts` SPECIAL-USE attribute, then the literal `Drafts`, which both accounts use.
 
 ### Slice 2, foreign drafts
@@ -417,20 +463,21 @@ No `state.invalidate` scope changes: drafts never travelled as invalidations, an
 
 ### Decisions
 
-Settled on 2026-10-14:
-
 - The frontmatter carries only `server_message_id` and `conflict_of`, and the state a push changes lives in the `draft_sync` table, re-derived by the reconcile when a rebuild drops it ("The `draft_sync` table").
 - The pull converts HTML to Markdown with `htmd`, and `html2text` stays the plain-text renderer ("Pull").
+- The link is the Message-ID, and when that changed, a single server draft with the same recipients, subject and reply target; a draft Apple Mail edited that matches nothing comes back as a second copy, and the old file moves to `drafts/.retired/`.
+- The mirror is on by default for Proton as for TUM.
+- `.retired/` is pruned after 30 days.
+- An agent may delete the probe's leftover drafts from the TUM and Proton Drafts and Deleted Items folders once they are listed under "Leftovers to delete".
 
 Open for Sylvain:
 
-- `approved` does not travel to the server or to the other machine: approval stays a local act on each machine.
-- `.retired/` is pruned after 30 days.
+- Whether `approved` travels to the server and the other machine.
 
 ## Rollout steps
 
-1. Probe: `examples/draft_probe.rs`, run against `tum` and `proton` from the Mac with Outlook and Apple Mail, and "Probe results" filled in.
-   The linking rule and the Proton switch default are settled here, before any production code.
+1. Probe: `examples/draft_probe.rs`, run against `tum` and `proton` on 2026-10-20, with "Probe results" and "Decisions" filled in.
+   Done.
 2. Contract: `server_message_id` and `conflict_of` in `EmailFrontmatter`, the `draft_sync` table in `src/store/schema.rs`, the `server` member of `DraftRow` and its fixture, `docs/daemon-protocol.md`.
 3. Push: `build_server_draft` and the shared MIME assembly, `ServerOp::PushDraft` and `DeleteDraft`, the drain's APPEND, UID read-back, UID delete and `draft_sync` write, the in-memory copy of `draft_sync` and the watcher hand-off in `src/daemon/watch.rs`, the switch in `config.toml`.
 4. Send and discard: `outbox.draft_copy`, the `DeleteDraft` in both transitions out of `pending_send`, `draft.discard` and `settle_sent_draft` moving into `.retired/`.
@@ -442,7 +489,7 @@ Each step lands on its own and leaves the tree green; until step 3 nothing reach
 
 ## Acceptance criteria
 
-- [ ] The probe has run on `tum` and `proton` with Outlook and Apple Mail, and "Probe results" records every item of the list above.
+- [x] The probe has run on `tum` and `proton` with Outlook and Apple Mail, and "Probe results" records every item of the list above.
 - [ ] A draft created with `mp new` on the Mac appears in Outlook's and Apple Mail's Drafts within one quick tick, with its recipients, Bcc included, its subject, its body and its attachments.
 - [ ] An edit saved in Neovim replaces the server copy, and the Drafts folder holds one copy of the draft afterwards.
 - [ ] After its first push, a push leaves the draft file's bytes unchanged, so Neovim shows no "file changed" prompt.

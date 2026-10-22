@@ -50,7 +50,7 @@ Status: accepted
 Why: the 1.2 s wait was too short, so a late second key fired its flat action (`a` after `c` archived instead of replying to all); 5 s leaves room for a slow second key while an accidental prefix still lapses on its own. Ticket [#0148](docs/tickets/0148-chord-timeout.md), plan `docs/plans/chord-timeout.md`.
 Rejected: no timeout by default (an accidental prefix keeps the which-key overlay up until Escape; it stays a choice in Settings); 3 s (less room for the second key).
 Source: chat with Sylvain, 2026-10-22.
-Status: accepted
+Status: superseded by the 2026-10-22 entry "The desktop prefix chord never times out"
 
 ## 2026-10-22 - The TUI sidebar keeps showing only the active account; collapsing the other accounts is desktop only
 
@@ -85,4 +85,74 @@ Status: accepted, amended by the 2026-10-22 entry "Inline images stay reachable"
 Why: an iPhone photo, an Outlook pasted screenshot and every other `cid:`-referenced image are sent the same way as a signature logo, so dropping inline references from `read::attachments_for` made them unreachable for `mp save`, `mp open`, the TUI and desktop lists, `message.materialise_attachment` and hooks, and a Graph image above the 8 MB inline cap was then neither rendered nor saved. `attachments_for` lists every reference with an `inline` flag, the `part` index is the position in that full stored-order list (stable before and after the backfill classifies a row), the readers show inline images after the real attachments, and only the forward and the paperclip skip them. On Graph the paperclip also keeps the server's own `hasAttachments`, which is false for inline-only mail, so an attached Outlook item or cloud link beside a logo keeps it.
 Rejected: excluding inline references from every listing (the first cut, unreachable photos); a `part` index over the real attachments only (it shifts when the backfill classifies a row a client holds); a new `mp save` flag for inline images (`mp save` already saves every part).
 Source: orchestrator review of PERSO-165, 2026-10-22.
+Status: accepted
+
+## 2026-10-22 - The account picker follows its plan's five recommendations
+
+Why: a plain list with the digits 1 to 9 and no filter field keeps `j` and `k` as navigation; each row shows new mail as the inbox unread count in the desktop and as a dot in the TUI, which keeps no per-account unread count; a desktop account expanded or collapsed by hand stays so until the app quits, and every start shows only the selected account expanded; in the desktop sidebar `j` and `k` skip collapsed accounts and `ga` is the keyboard path to another account; the unreachable `Ctrl+1..9` account jump leaves the TUI code. Ticket [#0147](docs/tickets/0147-account-picker.md), plan `docs/plans/account-picker.md`.
+Rejected: a type-to-filter field (it would swallow `j` and `k`); a TUI unread count per account (new state for a cosmetic gain); remembering the expand state across restarts; a cursor stop on every account header with Enter to toggle it (a second keyboard model for the picker's job).
+Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 1, answered 2026-10-22.
+Status: accepted
+
+## 2026-10-22 - The desktop prefix chord never times out, as in the TUI
+
+Why: a pending prefix waits for its second key with no timer and no setting, so `c`, a pause of any length, then `a` replies to all in both clients; Escape cancels the prefix and does nothing else, and the which-key popup appears at once. Ticket [#0148](docs/tickets/0148-chord-timeout.md), plan `docs/plans/chord-timeout.md`.
+Rejected: a 5 s default with four presets in Settings (the earlier entry of the same day; two behaviours between the clients and a setting changed once); a show delay before the popup.
+Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 1, answered 2026-10-22.
+Status: accepted
+
+## 2026-10-22 - Server drafts link by Message-ID, then by a single matching draft, and the mirror is on for Proton too
+
+Why: the probe of 2026-10-20 showed that no foreign edit keeps the UID, that Outlook and the Proton Mail app keep the Message-ID while Apple Mail mints a new one, and that `X-Mailypoppins-Draft-Id` never survives; Message-ID first, then a single draft with the same recipients, subject and reply target, is the only rule the probe supports that also catches an Apple Mail edit, and a wrong guess costs a duplicate, never a lost draft. A draft that links to nothing comes back as a second copy and the old file moves to `drafts/.retired/`, which the reconcile prunes after 30 days. Bridge keeps the Message-ID and the attachment, so the link holds on Proton and its switch defaults to on like TUM's; a reply draft sent from the Proton Mail app loses its threading because Bridge drops `In-Reply-To`, while mp's own sends keep it from the local file. An agent may delete the probe's leftover drafts from the TUM and Proton Drafts and Deleted Items folders once it has listed them in the ticket. Ticket [#0143](docs/tickets/0143-server-drafts.md).
+Rejected: Message-ID only (every Apple Mail edit would produce a second copy); the mirror off by default for Proton; keeping retired files for 7 days or for ever.
+Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 2, answered 2026-10-22; probe dumps in `.sync/draft-probe/`.
+Status: accepted
+
+## 2026-10-22 - A newly discovered user folder syncs every tick like Inbox, and discovery lands before the server drafts
+
+Why: a counts-only default would bring back the Spesen problem, local search missing every message of a folder never opened; the cost is five more folder visits per tick on TUM and some disk. Junk, Trash and Proton's label folders get counts only, since the labels repeat messages that live in real folders; Exchange's calendar and contact folders and Proton's All Mail and Starred are ignored. The catalogue and the folder roles come first, and the server drafts reuse the `drafts` role. Ticket [#0141](docs/tickets/0141-mailbox-auto-discovery.md).
+Rejected: counts only for user folders until pinned in the config (the ticket's first proposal); the server drafts first with the Drafts folder found by name.
+Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 3, answered 2026-10-22.
+Status: accepted
+
+## 2026-10-22 - Named profiles follow four design points and show the active profile in both clients
+
+Why: a profile together with an explicit config or data folder variable is refused with an error naming both; the login service stays for the default profile, and a profile's daemon starts on demand and stops once its last window closes; a profile name holds letters, digits, `-` and `_`, at most 12 characters, because the Mac's socket path limit leaves 12 characters beside the user name; the default profile keeps its folders with no migration. The active profile shows at the foot of the desktop sidebar, in the window title and in the TUI status line, which prevents archiving real mail while believing to be in the demo; the sidebar foot carries it on the Mac, where the title bar is hidden. Plane PERSO-176.
+Rejected: showing the profile nowhere (a demo video would show nothing unusual, at the cost of that mistake); a setting to hide it.
+Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 4, answered 2026-10-22.
+Status: accepted
+
+## 2026-10-22 - v0.12.0 is tagged now, and auto-update stage 2 is the quiet daemon restart plus two stage-1 fixes
+
+Why: the first in-app update needs a second release with the updater in it, and over 230 commits of features since v0.11.0 make a minor version. Stage 2 restarts the old daemon quietly after an update, stops the release job from marking a prerelease tag as the latest release, and has a manual check after Later say that a restart is pending. Ticket [#0139](docs/tickets/0139-desktop-auto-update.md), Plane PERSO-102 and PERSO-107.
+Rejected: v0.11.1 (the number follows the content); tagging after the account picker and the prefix wait land; the Settings toggle that installs updates silently at quit (it replaces the app unseen, so it waits until a few manual updates have gone through cleanly).
+Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 5, answered 2026-10-22.
+Status: accepted
+
+## 2026-10-22 - Checks that need a desktop window start with an agent's pre-check in a browser, then a checklist of native-only items for Sylvain
+
+Why: the desktop app runs in a browser preview on the fixture backend, where an agent can press keys and click, so it takes every check that does not need the native shell; what is left (native file pickers, the terminal editor, logging out for the login service, Gatekeeper, the release install) goes on a one-page checklist Sylvain works through, and each ticket closes as its items come back ticked.
+Rejected: Sylvain running every check from the checklist (the page's recommendation; it leaves work an agent can do); granting the terminal the macOS Accessibility permission for an unattended agent (it could control every app meanwhile).
+Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 6, answered 2026-10-22.
+Status: accepted
+
+## 2026-10-22 - The server half of `mp search` runs on the daemon's server search, which takes over the PERSO-175 semantics
+
+Why: it is the last command off the daemon path, and one server search serves the CLI, the TUI and the desktop. The CLI keeps its three visible behaviours, fed by the daemon: a failed mailbox prints the same `Search in <mailbox> failed` line, at the end of the search; `--mailbox` accepts any folder the server lists, the rule discovery brings; on plain IMAP the `has:attachment` notice stays on stderr, in the result header and in the JSON. The limit counts results across every mailbox and the answer says when it was cut (PERSO-175), and the CLI's own IMAP search path goes. Parity row LST-06.
+Rejected: the per-mailbox failure line printed as the search runs; refusing a folder the account does not declare; dropping the `has:attachment` notice.
+Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 9, answered 2026-10-22.
+Status: accepted
+
+## 2026-10-22 - The six daemon leftovers are all built or removed, none parked
+
+Why: `spikes/ipc-bench` is deleted, since the last phase re-ran its workloads through the product binaries; a daemon method answers whether each password and token is present, never the value, so `mp config show` stops reading the keychain in the CLI; `-s`, `--no-signature` and `-A` are scoped to the commands they mean something for; the CLI setup wizards move onto the daemon, as the desktop wizard already has; `mp fetch` is retired as a duplicate of `mp search --mailbox`; the five daemon gaps the desktop works around are built (a `signature.removed` event and the remaining signature methods, a vCard method, a contacts-changed event, a visible notice when contact search refuses a rebuild) and the desktop workarounds go.
+Rejected: leaving the CLI wizards in the client because they run once per account; keeping `mp fetch` because it already runs through the daemon; parking the five gaps until one causes a visible bug (all three were the page's recommendations).
+Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 10, answered 2026-10-22.
+Status: accepted
+
+## 2026-10-22 - The codebase is kept clean as it is worked on, and every mailbox operation goes through the daemon with one set of calls for all clients
+
+Why: something sub-optimal noticed in passing is fixed in the same pass instead of parked as a leftover, which is what grew the daemon follow-up lists; the CLI, the TUI and the desktop make the same daemon calls and offer the same capabilities, so a fix or a feature lands once. Both are stated in `AGENTS.md`, and the second also in `docs/architecture.md`, "Project invariants".
+Rejected: parking follow-ups in BACKLOG.md until one causes a visible bug.
+Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, comments, 2026-10-22.
 Status: accepted

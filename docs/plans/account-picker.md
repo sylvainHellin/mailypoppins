@@ -2,7 +2,7 @@
 
 > Status: proposed (2026-10-22), implementation not started.
 > The ticket is [#0147](../tickets/0147-account-picker.md).
-> The plan proceeds on the recommendation of every open decision under "Decisions for the owner", so a worker can start at Unit 1 without waiting; Decision 6 was decided on 2026-10-22.
+> Sylvain settled all six decisions under "Decisions" on 2026-10-22 (decision log, same date).
 > Citations name a symbol and its file; line numbers are hints from 2026-10-22 and move with the code.
 > Research: [account picker scouting](../../.agents/research/2026-10-22-account-picker-scouting.md), [chord timeout scouting](../../.agents/research/2026-10-22-chord-timeout-scouting.md), [prior art](../../.agents/research/2026-10-22-chord-timeout-and-account-picker-prior-art.md).
 
@@ -115,40 +115,40 @@ The keybinding redesign already described `ga` as "Switch account (picker)" ([ke
 The TUI already meets the collapse request, and more strictly: its sidebar draws only the active account and no row of any other account (`render_sidebar`).
 This plan changes nothing there (Decision 6).
 
-## Decisions for the owner
+## Decisions
 
 ### 1. A plain list or a filterable list
 
 The desktop already has a filterable picker (`MovePicker`, cmdk) and the TUI has a fuzzy one (`MailboxPicker`).
 A filter field takes `j` and `k` as text, so it would contradict the requested `j`/`k` navigation, and with four accounts typing saves nothing over a digit.
 A plain list matches the attachment picker the request names and stays one key per action.
-Recommendation: a plain list with digits, no filter; a filter can join later if the account count grows past nine.
+Decided on 2026-10-22: a plain list with digits, no filter; a filter can join later if the account count grows past nine.
 
 ### 2. What each picker row shows about new mail
 
 The desktop has every account's inbox unread count on the client already (`sidebarModel`), so it costs nothing to show.
 The TUI keeps only mailbox totals per account and a `has_unseen` flag that `MailboxChanged` sets for a background account.
 Showing unread counts in the TUI would mean keeping the `unread` of `mailbox.list` per account and refreshing it on background events, which is new state for a cosmetic gain.
-Recommendation: the inbox unread count in the desktop and the `has_unseen` dot in the TUI; a TUI count can follow if the dot proves too coarse.
+Decided on 2026-10-22: the inbox unread count in the desktop and the `has_unseen` dot in the TUI; a TUI count can follow if the dot proves too coarse.
 
 ### 3. Whether manual expand and collapse survive a restart
 
 Session-only state recomputes the default from the selection at every start, which is exactly "collapsed by default", and an override never outlives an account rename or removal.
 Persisting the overrides in `Prefs` (localStorage) would keep a two-account working set open across restarts, at the cost of a stale list after a rename and a sidebar that no longer starts collapsed.
 The prior-art research found no client that documents a remembered expand state.
-Recommendation: session-only, held in `AppState` and not in `Prefs`; persisting is a small follow-up if Sylvain finds himself re-expanding the same account each morning.
+Decided on 2026-10-22: session-only, held in `AppState` and not in `Prefs`; persisting is a small follow-up if Sylvain finds himself re-expanding the same account each morning.
 
 ### 4. How the keyboard reaches a collapsed account in the desktop sidebar
 
 Option one keeps the sidebar cursor on mailboxes only and skips collapsed accounts; `ga` is then the keyboard path to another account, and the cursor model (`sidebarCursor: { account, slug }`) does not change.
 Option two adds a cursor stop on every account header, with Enter expanding or collapsing it, which needs a nullable `slug` in the cursor and changes `sidebar_enter` and the cursor drawing.
-Recommendation: option one, because the picker is the requested way to change account and option two adds a second keyboard model for the same job.
+Decided on 2026-10-22: option one, because the picker is the requested way to change account and option two adds a second keyboard model for the same job.
 
 ### 5. The unreachable `Ctrl+1..9` account jump in the TUI
 
 `KeyAction::JumpAccount` and its executor arm survive from before the keybinding redesign, which dropped `Ctrl+1-9`; no `KEYMAP` row reaches them.
 Restoring a row would give two digit paths to an account; removing them leaves the picker's digits as the only one.
-Recommendation: remove the variant and the arm in Unit 1, since `ga` then a digit is the replacement and dead code invites a wrong reading of the keymap.
+Decided on 2026-10-22: remove the variant and the arm in Unit 1, since `ga` then a digit is the replacement and dead code invites a wrong reading of the keymap.
 
 ### 6. Whether the TUI sidebar should list other accounts as collapsed rows
 
