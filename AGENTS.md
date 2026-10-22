@@ -11,7 +11,7 @@ A bug report that names no client may be about the desktop app as much as the TU
 ## Repo layout
 
 - Rust crate at the root (`src/`, `Cargo.toml`, `tests/`), workspace members under `crates/`. All build / test commands run from the root.
-- `clients/desktop/` and any spike under `spikes/` are excluded from the workspace; a spike carries its own `Cargo.lock`.
+- `clients/desktop/` is excluded from the workspace and carries its own `Cargo.lock`.
 - Marketing + docs site under [website/](website/) (Astro + Svelte, pnpm). Published at <https://mailypoppins.com> (OVH free hosting, SFTP only, no SSH) by [scripts/deploy-website.sh](scripts/deploy-website.sh); its privacy page is the one the Entra app registration links to. Colocated so CLI changes and the docs that describe them ship in one commit.
 - `.gitignore` files are kept local-only by convention (the root `.gitignore` self-ignores). Edit them as needed but do not `git add -f` them.
 

@@ -1,8 +1,7 @@
 [workspace]
 members = [".", "crates/mp-core", "crates/mp-protocol", "crates/mp-client", "clients/tui"]
-# The Phase 1a spike carries its own `[workspace]` and its own lock file; the
-# desktop shell (Phase 6) will be a separate build system.
-exclude = ["spikes/*", "clients/desktop"]
+# The desktop app is a Tauri build with its own `[workspace]` and lock file.
+exclude = ["clients/desktop"]
 
 [package]
 name = "mailypoppins"
