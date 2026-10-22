@@ -536,6 +536,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Validation: `tests/draft_integration.rs`, `tests/daemon_mutation_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`v marks and steps, and d with Enter deletes the marked rows in list order`, `d on a draft discards it after the confirmation`), `clients/desktop/src/app/events.test.tsx` (`discards a draft, and the state.remove that follows reloads the list without it`), `clients/desktop/src-tauri/src/fixture.rs` (`a_discarded_draft_is_removed_and_an_approved_one_refused`)
 - Status: routed (P4-U8, TUI P5-U6); GUI shipped (M2, #0131)
 - Note: `--force` is required to delete an approved draft because that is a queued send, and `--sent` clears every sent draft of the account and takes no selector.
+  A discarded draft moves into `drafts/.retired/` and, on a mirrored account, its server copy is queued for deletion (#0143, `a_retired_draft_forgets_its_row_and_queues_the_delete` in `src/draft_mirror/tests.rs`).
   The desktop never forces, so an approved draft is refused and put back, and it has no `--sent` sweep.
 
 ### MSG-03 Toggle read and unread
@@ -762,7 +763,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: no method; the `server` member `{state, synced_at}` of a snapshot draft row, a `draft.changed` payload and a `draft.list` row, and the queued `push_draft` and `delete_draft` ops of the account's mutation drain
 - GUI location: clients/desktop: a Drafts row shows a `synced`, `pending`, `conflict` or `failed` badge and names it in the row's accessible name; a draft that is not mirrored shows none; TUI: the Drafts list leads a mirrored row with a cloud, upload, fork or bolt glyph, and the header pane's Date line reads `[draft, synced]`
 - Validation: `src/draft_mirror/tests.rs` (the push, the replace, the owed-push scan, the delete, the drain and its failure), `tests/daemon_draft_watch.rs` (`a_draft_is_described_again_with_its_server_state_once_the_mirror_is_read`, `conflicts_failures_and_a_switched_off_mirror_have_their_own_states`); `clients/tui/src/ui/list.rs` (`a_mirrored_draft_shows_its_server_state`), `clients/tui/src/ui/headers.rs` (`a_mirrored_drafts_date_line_names_its_server_state`), `clients/tui/src/app/types.rs` (`a_listed_drafts_server_state_reaches_its_row`); `clients/desktop/src/components/list/draftRow.test.tsx`
-- Status: daemon and both clients shipped (#0143 steps 2 and 3); the pull, the conflict copy and foreign drafts follow in steps 5 and 6
+- Status: daemon and both clients shipped (#0143 steps 2 to 4: the push, and the delete of the copy after a send to every recipient and after a discard); the pull, the conflict copy and foreign drafts follow in steps 5 and 6
 - Note: `[accounts.drafts] mirror = false` keeps an account's drafts local, and a Graph account is not mirrored until the Graph half is built.
 
 ### ATT-01 Open a received message's attachment in the default application

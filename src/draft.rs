@@ -12,7 +12,6 @@ pub use mp_core::draft::*;
 
 use anyhow::{Context, Result};
 use log::info;
-use std::fs;
 use std::path::PathBuf;
 
 use crate::parse::stable_attachments_dir;
@@ -197,20 +196,18 @@ pub fn settle_sent_draft(
         return Ok(());
     }
 
-    match fs::remove_file(&draft.path) {
-        Ok(()) => info!("Retired the fully sent draft: {}", draft.path.display()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::debug!(
-                "No draft file at {}; nothing to retire",
-                draft.path.display()
-            );
-        }
-        Err(e) => {
-            return Err(anyhow::Error::from(e))
-                .context(format!("retiring the sent draft {}", draft.path.display()))
-        }
+    // Into `drafts/.retired/` rather than deleted (#0143): the drafts mirror
+    // reads a retired draft as a tombstone, so a server copy of it that
+    // outlives the send is deleted rather than imported back.
+    match crate::draft::retire_draft_files(&draft.path)
+        .with_context(|| format!("retiring the sent draft {}", draft.path.display()))?
+    {
+        Some(_) => info!("Retired the fully sent draft: {}", draft.path.display()),
+        None => log::debug!(
+            "No draft file at {}; nothing to retire",
+            draft.path.display()
+        ),
     }
-
     Ok(())
 }
 
@@ -224,7 +221,9 @@ pub fn settle_sent_draft(
 /// an `approved` draft unless `force`, because approved is the queued-send state
 /// and dropping it silently loses a message `mp send-approved` would deliver.
 ///
-/// On success the file and its HTML companion are gone.
+/// On success the file and its HTML companion have left the drafts directory
+/// for `drafts/.retired/` (#0143), where the drafts mirror reads them as a
+/// tombstone.
 pub fn delete_indexed_draft(
     store: &crate::store::Store,
     account: &str,
@@ -254,7 +253,7 @@ pub fn delete_indexed_draft(
              Re-run with --force, or demote it first with `mp mark-draft`."
         );
     }
-    remove_draft_files(&row.path)
+    crate::draft::retire_draft_files(&row.path).map(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +372,7 @@ mod tests {
     use super::*;
     use crate::types::{EmailFrontmatter, EmailStatus};
     use gray_matter::{engine::YAML, Matter};
+    use std::fs;
     use std::path::Path;
 
     /// A draft carrying `date:` plus a field no struct models.
@@ -562,6 +562,17 @@ mod tests {
 
         assert!(!path.exists(), "the fully sent draft is gone");
         assert!(!companion.exists(), "and so is its companion HTML");
+        // Into `.retired/`, where the drafts mirror reads it as a tombstone
+        // (#0143), rather than deleted.
+        let retired = path
+            .parent()
+            .unwrap()
+            .join(mp_core::draft::RETIRED_DIR)
+            .join(path.file_name().unwrap());
+        assert!(retired.exists());
+        assert!(fs::read_to_string(&retired)
+            .unwrap()
+            .contains("status: sent"));
     }
 
     /// A send with no durable record keeps the file even when every recipient

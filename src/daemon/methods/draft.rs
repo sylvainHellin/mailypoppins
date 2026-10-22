@@ -155,6 +155,9 @@ pub struct DraftMethod {
     /// The server copies downloaded lately, which a forward of a hit shares
     /// with the reads before it.
     pub copies: Arc<crate::daemon::server_copies::ServerCopies>,
+    /// The account runtimes, which a discard of a mirrored draft asks for a
+    /// drain so the delete of its server copy goes out soon (#0143).
+    pub runtimes: Arc<crate::daemon::server::RuntimeTable>,
 }
 
 /// Register the family from the one array that declares it.
@@ -164,6 +167,7 @@ pub fn register(
     watch: Arc<DraftWatch>,
     canonical: Arc<crate::daemon::state::CanonicalState>,
     copies: Arc<crate::daemon::server_copies::ServerCopies>,
+    runtimes: Arc<crate::daemon::server::RuntimeTable>,
 ) {
     for spec in DRAFT_METHOD_SPECS
         .into_iter()
@@ -178,6 +182,7 @@ pub fn register(
             watch: Arc::clone(&watch),
             canonical: Arc::clone(&canonical),
             copies: Arc::clone(&copies),
+            runtimes: Arc::clone(&runtimes),
         }));
     }
 }
@@ -209,7 +214,7 @@ impl Method for DraftMethod {
                 "draft.create" => create(&params, accounts, email),
                 "draft.create_from_message" => create_from_message(&params, accounts, email),
                 "draft.demote" => self.set_status(&params, accounts, false),
-                "draft.discard" => discard(&params, accounts),
+                "draft.discard" => discard(&params, accounts, &self.runtimes),
                 "draft.forward" => match flag(&params, "as_attachment") {
                     Ok(true) => forward_as_attachment(&params, accounts, email, server).await,
                     Ok(false) if hit_source(&params) => {
@@ -1135,7 +1140,11 @@ fn created(
 /// send; a `sent` draft needs none, since retiring one is the whole point of
 /// the sweep. Both refusals are
 /// [`crate::draft::delete_indexed_draft`]'s own sentences, verbatim.
-fn discard(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+fn discard(
+    params: &Value,
+    accounts: &[AccountConfig],
+    runtimes: &crate::daemon::server::RuntimeTable,
+) -> Result<Value, RpcError> {
     let account = configured(accounts, &string_param(params, "account")?)?;
     let name = account.name.clone();
 
@@ -1151,14 +1160,16 @@ fn discard(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError
                 )));
             }
         }
-        return sweep(&name);
+        return sweep(account, runtimes);
     }
 
     let force = flag(params, "force")?;
     let row = resolve(&name, &addressed_one(params, &name)?)?;
     let store = drafts_store(&name)?;
+    let server_copy = server_copy_of(&row);
     crate::draft::delete_indexed_draft(&store, &name, &row, force)
         .map_err(|e| invalid_params(format!("{e:#}")))?;
+    forget_server_copy(&store, account, &row.id, server_copy.as_deref(), runtimes);
     reindex(&store, &name);
     Ok(json!({
         "account": name,
@@ -1177,7 +1188,11 @@ fn discard(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError
 /// draft is not a reason to leave the other nine behind; the survivors travel
 /// with their own error so the client can print one line each before its
 /// summary.
-fn sweep(account: &str) -> Result<Value, RpcError> {
+fn sweep(
+    config: &AccountConfig,
+    runtimes: &crate::daemon::server::RuntimeTable,
+) -> Result<Value, RpcError> {
+    let account = config.name.as_str();
     let store = drafts_store(account)?;
     // The scan first, so a draft written a millisecond ago is swept, and
     // through the index so the walk keeps the `mtime DESC, id ASC` order
@@ -1189,8 +1204,12 @@ fn sweep(account: &str) -> Result<Value, RpcError> {
     let mut cleared = 0u64;
     let mut kept = Vec::new();
     for row in &rows {
+        let server_copy = server_copy_of(row);
         match crate::draft::delete_indexed_draft(&store, account, row, false) {
-            Ok(()) => cleared += 1,
+            Ok(()) => {
+                forget_server_copy(&store, config, &row.id, server_copy.as_deref(), runtimes);
+                cleared += 1
+            }
             Err(e) => kept.push(json!({
                 "id": row.id,
                 "selector": Selector::for_draft(account, &row.id).to_string(),
@@ -1200,6 +1219,39 @@ fn sweep(account: &str) -> Result<Value, RpcError> {
     }
     reindex(&store, account);
     Ok(json!({"account": account, "cleared": cleared, "kept": kept}))
+}
+
+/// The `server_message_id` of the draft a row names, read before the file is
+/// retired (#0143).
+fn server_copy_of(row: &DraftRow) -> Option<String> {
+    crate::draft::parse_email_draft(&row.path)
+        .ok()
+        .and_then(|draft| draft.frontmatter.server_message_id)
+}
+
+/// The drafts mirror's half of a discard (#0143): the draft's row goes, and
+/// the delete of its server copy is queued and drained soon. Logged, never
+/// the discard's error: the file has already left, and a copy left behind is
+/// a draft whose file was retired, which the reconcile deletes.
+fn forget_server_copy(
+    store: &Store,
+    account: &AccountConfig,
+    id: &str,
+    server_copy: Option<&str>,
+    runtimes: &crate::daemon::server::RuntimeTable,
+) {
+    match crate::draft_mirror::push::forget_retired(store, account, id, server_copy) {
+        Ok(true) => {
+            if let Some(runtime) = runtimes.get(&account.name) {
+                runtime.request_drain();
+            }
+        }
+        Ok(false) => {}
+        Err(e) => log::warn!(
+            "[drafts] the server copy of {}/{id} was not queued for deletion: {e:#}",
+            account.name
+        ),
+    }
 }
 
 /// The account's store, for the two things a discard needs one for: the

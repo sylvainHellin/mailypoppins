@@ -839,7 +839,8 @@ The scan takes no engine lock and opens no store, exactly as the watcher's looku
 The two mutators fall back to that inventory when the scan finds nothing, because a file that will not parse has no `id:` and is announced under its stem, which is the id `draft.approve` refuses `draft_invalid` for.
 
 **`draft.discard` removes one draft, or sweeps the sent ones.**
-A draft is local, so there is no server op and no backend: just the file and the index row the next scan drops (#0073).
+The file and its HTML companion move into `drafts/.retired/`, where the drafts mirror reads them as a tombstone and prunes them after 30 days, and the index row goes with the next scan (#0073, [#0143](tickets/0143-server-drafts.md)).
+On an account that mirrors its drafts, a draft that was pushed also has the delete of its server copies queued (`delete_draft`) and its account's runtime asked for a drain, so the copy leaves Outlook's Drafts within seconds; the answer does not wait for it, and a delete the server refuses is retried by the queue.
 `force` is required for an `approved` draft and for nothing else, because an approved draft is a queued send and deleting it drops that send; a `sent` draft needs none, since retiring one is the whole point of the sweep.
 The refusal is `delete_indexed_draft`'s own sentence, verbatim, and so is the refusal of a draft an outbox row still holds mid-send.
 The answer's `status` is the status the draft was in, which is what was discarded.

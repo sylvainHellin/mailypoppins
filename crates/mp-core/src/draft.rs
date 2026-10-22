@@ -2067,29 +2067,67 @@ pub fn mark_draft_sent(draft: &EmailDraft, message_id: Option<&str>) -> Result<(
     Ok(())
 }
 
-/// Remove a draft from disk: its `.md` file and the HTML companion a reply
-/// carries beside it (the same companion [`settle_sent_draft`] retires on
-/// send). The caller reconciles the drafts index afterwards, the rescan
-/// `mp list` already runs, so no index bookkeeping lives here.
+/// The directory a draft file is moved into when it leaves the drafts
+/// directory (#0143): `drafts/.retired/` beside it.
 ///
-/// Tolerant of a missing file, like the sent-draft retirement: a draft the
-/// index still lists but whose file is already gone is a clean delete, not an
-/// error.
-pub fn remove_draft_files(path: &Path) -> Result<()> {
+/// The indexer and the watcher read only the top level of `drafts/`, so a
+/// retired file leaves every list; it is kept because the drafts mirror reads
+/// it as a tombstone (a server copy whose draft was retired is deleted, never
+/// imported back) and prunes it after [`RETIRED_KEEP_SECS`].
+pub const RETIRED_DIR: &str = ".retired";
+
+/// How long a retired draft is kept before the drafts mirror prunes it: 30
+/// days (Sylvain, #0143 decisions).
+pub const RETIRED_KEEP_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Retire the draft file at `path` and its HTML companion: move both into
+/// [`RETIRED_DIR`] beside them, deleting nothing (#0143).
+///
+/// A name the directory already holds gets the time appended, so a second
+/// draft of the same name never overwrites the first's tombstone. Tolerant of
+/// a missing file, like the removal it replaced: a draft the index still lists
+/// whose file is already gone retires cleanly. Returns where the draft went.
+pub fn retire_draft_files(path: &Path) -> Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let dir = path
+        .parent()
+        .map(|parent| parent.join(RETIRED_DIR))
+        .ok_or_else(|| anyhow!("{} has no directory to retire into", path.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "md".to_string());
+    let mut target = dir.join(format!("{stem}.{ext}"));
+    if target.exists() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        target = dir.join(format!("{stem}-{now}.{ext}"));
+    }
     let html_companion = path.with_extension("html");
     if html_companion.exists() {
-        fs::remove_file(&html_companion).ok();
+        fs::rename(&html_companion, target.with_extension("html")).ok();
     }
-    match fs::remove_file(path) {
-        Ok(()) => {
-            info!("Deleted the draft: {}", path.display());
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => {
-            Err(anyhow::Error::from(e)).context(format!("deleting the draft {}", path.display()))
-        }
+    fs::rename(path, &target).with_context(|| format!("retiring the draft {}", path.display()))?;
+    // The retirement's own time, which the 30-day prune counts from: a rename
+    // keeps the draft's last edit, which may already be older than that.
+    if let Ok(file) = fs::File::options().write(true).open(&target) {
+        file.set_modified(std::time::SystemTime::now()).ok();
     }
+    info!(
+        "Retired the draft {} to {}",
+        path.display(),
+        target.display()
+    );
+    Ok(Some(target))
 }
 
 /// Resolve the drafts directory using a fallback chain:
@@ -3175,13 +3213,35 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// A draft the index still lists but whose file is already gone deletes
+    /// A draft the index still lists but whose file is already gone retires
     /// cleanly rather than erroring (#0073), like the sent-draft retirement.
     #[test]
-    fn removing_an_already_gone_draft_is_not_an_error() {
+    fn retiring_an_already_gone_draft_is_not_an_error() {
         let tmp = tempfile::TempDir::new().unwrap();
         let missing = tmp.path().join("gone.md");
-        remove_draft_files(&missing).unwrap();
+        assert_eq!(retire_draft_files(&missing).unwrap(), None);
+    }
+
+    /// Retiring moves the draft and its HTML companion into `.retired/` and
+    /// deletes nothing; a second draft of the same name does not overwrite
+    /// the first's tombstone (#0143).
+    #[test]
+    fn retiring_moves_the_draft_and_its_companion_into_retired() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("reply.md");
+        fs::write(&path, "first").unwrap();
+        fs::write(path.with_extension("html"), "<p>q</p>").unwrap();
+        let first = retire_draft_files(&path).unwrap().unwrap();
+        assert!(!path.exists() && !path.with_extension("html").exists());
+        assert_eq!(first, tmp.path().join(RETIRED_DIR).join("reply.md"));
+        assert_eq!(fs::read_to_string(&first).unwrap(), "first");
+        assert!(first.with_extension("html").exists());
+
+        fs::write(&path, "second").unwrap();
+        let second = retire_draft_files(&path).unwrap().unwrap();
+        assert_ne!(second, first);
+        assert_eq!(fs::read_to_string(&first).unwrap(), "first");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "second");
     }
 
     #[test]

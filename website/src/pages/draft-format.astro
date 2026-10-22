@@ -156,9 +156,11 @@ Email body here.`;
       </p>
       <Code code={sentExample} lang="markdown" theme={codeTheme} />
       <p>
-        A send that reached every recipient and was recorded in the outbox then deletes
-        the draft file: the copy that matters lives on the server, where the outbox appends
-        it to Sent and sync reads it back into the local store.
+        A send that reached every recipient and was recorded in the outbox then moves the
+        draft file into <code>drafts/.retired/</code>, where it is kept for 30 days, and removes
+        the draft's copy from the server Drafts folder: the copy that matters lives on the
+        server, where the outbox appends it to Sent and sync reads it back into the local store.
+        Discarding a draft (<code>d</code>, <code>mp delete</code>) retires it the same way.
       </p>
       <p>
         A partial send, or one the outbox store could not record, keeps the file with

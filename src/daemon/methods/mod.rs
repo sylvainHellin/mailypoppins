@@ -156,6 +156,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         Arc::clone(&watch),
         Arc::clone(&canonical),
         Arc::clone(&copies),
+        Arc::clone(&runtimes),
     );
     self::send::register(
         dispatcher,

@@ -674,6 +674,7 @@ mod tests {
             ],
             from: "me@example.com".to_string(),
             draft_key: None,
+            server_copy: None,
         }
     }
 
@@ -2507,6 +2508,7 @@ pub fn build_reply_message(
         // An RSVP is built from an invitation, not from a draft file, and
         // there is no second copy of it to press send on.
         draft_key: None,
+        server_copy: None,
     })
 }
 
@@ -2712,6 +2714,19 @@ impl DurableSend {
                 from: built.from.clone(),
                 recipients: built.recipients.clone(),
                 draft_key: built.draft_key.clone(),
+                // The draft's server copy, which the row's transition out of
+                // `pending_send` queues the delete of once every recipient
+                // has the message (#0143).
+                draft_copy: built
+                    .server_copy
+                    .clone()
+                    .filter(|_| crate::draft_mirror::mirror_enabled(account))
+                    .map(|message_id| {
+                        (
+                            crate::draft_mirror::drafts_mailbox(&store, account),
+                            message_id,
+                        )
+                    }),
                 ..Default::default()
             },
         )?;
@@ -3115,14 +3130,14 @@ pub(crate) fn retire_draft_of_row(
     if !(finished && envelope.rejected.is_empty()) {
         return;
     }
-    match std::fs::remove_file(&draft.path) {
-        Ok(()) => info!(
+    match crate::draft::retire_draft_files(&draft.path) {
+        Ok(Some(_)) => info!(
             "[outbox] row {row_id} was sent on resume; retired its draft {}",
             draft.path.display()
         ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(None) => {}
         Err(e) => warn!(
-            "[outbox] row {row_id} was sent but {} could not be removed: {e:#}",
+            "[outbox] row {row_id} was sent but {} could not be retired: {e:#}",
             draft.path.display()
         ),
     }
@@ -4102,6 +4117,7 @@ async fn resubmit_row<S: SmtpSubmit>(
         recipients: outstanding,
         from: envelope.from,
         draft_key: envelope.draft_key,
+        server_copy: None,
     };
 
     info!(
@@ -4149,6 +4165,11 @@ pub struct BuiltMessage {
     /// The draft these bytes were built from, when they were built from one.
     /// The outbox admits one submission per draft at a time (#0063).
     pub draft_key: Option<String>,
+    /// The `server_message_id` of the draft this was built from (#0143): the
+    /// copies in the server's Drafts folder a send that reaches every
+    /// recipient removes. `None` for a draft never mirrored and for a message
+    /// built from no draft.
+    pub server_copy: Option<String>,
 }
 
 /// The `Message-ID` of a built message.
@@ -4555,6 +4576,7 @@ pub fn build_draft_message(
         recipients,
         from: normalized_from,
         draft_key: Some(draft_key(draft)),
+        server_copy: draft.frontmatter.server_message_id.clone(),
     })
 }
 
@@ -4839,6 +4861,7 @@ mod smtp_durability_tests {
                 recipients: vec![("bob@example.com".to_string(), RecipientRole::To)],
                 from: "me@example.com".to_string(),
                 draft_key: draft_key.map(str::to_string),
+                server_copy: None,
             }
         }
 

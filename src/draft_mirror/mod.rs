@@ -144,6 +144,35 @@ pub fn local_drafts(account: &str) -> Vec<LocalDraft> {
     paths.into_iter().filter_map(LocalDraft::read).collect()
 }
 
+/// Delete what `account`'s `drafts/.retired/` has held longer than
+/// [`RETIRED_KEEP_SECS`](crate::draft::RETIRED_KEEP_SECS), counted from the
+/// retirement (#0143, Sylvain's 30 days). Returns how many files went.
+pub fn prune_retired(account: &str, now: std::time::SystemTime) -> usize {
+    let dir = crate::config::drafts_dir(account).join(crate::draft::RETIRED_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let keep = std::time::Duration::from_secs(crate::draft::RETIRED_KEEP_SECS);
+    let mut pruned = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let expired = entry
+            .metadata()
+            .ok()
+            .filter(|meta| meta.is_file())
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > keep);
+        if expired && std::fs::remove_file(&path).is_ok() {
+            pruned += 1;
+        }
+    }
+    if pruned > 0 {
+        log::info!("[drafts] pruned {pruned} retired draft file(s) of {account}");
+    }
+    pruned
+}
+
 /// The draft `id` of `account`, if a file holds it.
 pub fn find_local(account: &str, id: &str) -> Option<LocalDraft> {
     local_drafts(account)

@@ -175,7 +175,11 @@ pub async fn delete<F: DraftsFolder>(
 /// Queue a push for every draft of `account` that owes one: pushable, and its
 /// file's hash differs from its row's or it has no row. A draft that already
 /// has a push queued is not queued twice. Returns how many were queued.
+///
+/// It also prunes the account's retired drafts past their 30 days, mirror or
+/// not, since every drain point passes here.
 pub fn enqueue_owed(store: &Store, account: &AccountConfig) -> Result<usize> {
+    super::prune_retired(&account.name, std::time::SystemTime::now());
     if !mirror_enabled(account) {
         return Ok(0);
     }
@@ -200,4 +204,32 @@ pub fn enqueue_owed(store: &Store, account: &AccountConfig) -> Result<usize> {
         }
     }
     Ok(queued)
+}
+
+/// After a draft left the drafts directory by a discard or a sweep (#0143):
+/// forget its `draft_sync` row and, on an account that mirrors, queue the
+/// delete of its server copies. `server_message_id` is the draft's, read
+/// before it was retired. Returns whether a delete was queued, which is when
+/// the caller asks for a drain.
+pub fn forget_retired(
+    store: &Store,
+    account: &AccountConfig,
+    draft_id: &str,
+    server_message_id: Option<&str>,
+) -> Result<bool> {
+    let row = draft_sync::get(store, &account.name, draft_id)?;
+    draft_sync::delete(store, &account.name, draft_id)?;
+    let Some(message_id) = server_message_id.filter(|_| mirror_enabled(account)) else {
+        return Ok(false);
+    };
+    let op = ServerOp::DeleteDraft {
+        mailbox: row
+            .as_ref()
+            .map(|row| row.mailbox.clone())
+            .unwrap_or_else(|| drafts_mailbox(store, account)),
+        message_id: message_id.to_string(),
+        uid: row.as_ref().map(|row| row.uid),
+        uidvalidity: row.as_ref().map(|row| row.uidvalidity),
+    };
+    Ok(crate::pending_ops::enqueue_draft_op(store, &account.name, &op)?.is_some())
 }

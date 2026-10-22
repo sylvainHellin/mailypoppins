@@ -2571,7 +2571,7 @@ impl State {
         } else {
             "sent + saved"
         };
-        let settle_error = mp_core::draft::remove_draft_files(Path::new(&entry.path))
+        let settle_error = mp_core::draft::retire_draft_files(Path::new(&entry.path))
             .err()
             .map(|e| format!("{e:#}"));
         self.rescan();
@@ -3738,7 +3738,7 @@ impl Fixture {
                         ),
                     ));
                 }
-                mp_core::draft::remove_draft_files(Path::new(&entry.path))
+                mp_core::draft::retire_draft_files(Path::new(&entry.path))
                     .with_context(|| format!("removing {}", entry.path))?;
                 s.rescan();
                 drop(s);

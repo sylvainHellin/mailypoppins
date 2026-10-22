@@ -1658,3 +1658,92 @@ fn active_submission_for_draft_finds_the_pending_row_and_only_it() {
         Some((path_id, OutboxState::PendingSend))
     );
 }
+
+// ---------------------------------------------------------------------------
+// The sent draft's server copy (#0143)
+// ---------------------------------------------------------------------------
+
+/// A row queued for a mirrored draft, which names the draft's copy in the
+/// server's Drafts folder on its envelope.
+fn enqueue_mirrored(account: &Account, message_id: &str, target: Option<&str>) -> i64 {
+    let (store, blobs) = account.open();
+    let mut envelope = envelope();
+    envelope.draft_copy = Some(("Drafts".to_string(), "<mp-draft.1@example.com>".to_string()));
+    outbox::enqueue(
+        &store,
+        &blobs,
+        ACCOUNT,
+        target,
+        message_id,
+        &raw(message_id),
+        &envelope,
+    )
+    .unwrap()
+}
+
+fn queued_draft_deletes(account: &Account) -> Vec<mailypoppins::ops::ServerOp> {
+    let (store, _) = account.open();
+    mailypoppins::pending_ops::queued_ops(&store, ACCOUNT)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.op)
+        .filter(|op| matches!(op, mailypoppins::ops::ServerOp::DeleteDraft { .. }))
+        .collect()
+}
+
+/// The draft copy rides the envelope through an encode and a decode, which is
+/// what carries it across a store rebuild with the row.
+#[test]
+fn the_draft_copy_round_trips_through_the_envelope() {
+    let mut envelope = envelope();
+    envelope.draft_copy = Some(("Entwürfe".to_string(), "<mp-draft.9@x>".to_string()));
+    assert_eq!(Envelope::decode(&envelope.encode()), envelope);
+}
+
+/// A send that reached every recipient queues the delete of the draft's
+/// server copy as it leaves `pending_send`, on both transitions out of it.
+#[test]
+fn a_send_to_every_recipient_queues_the_delete_of_the_draft_copy() {
+    for target in [Some(SENT), None] {
+        let account = Account::new();
+        let id = enqueue_mirrored(&account, "<all@example.com>", target);
+        let (store, blobs) = account.open();
+        outbox::mark_submission_started(&store, id).unwrap();
+        outbox::record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
+        assert_eq!(
+            queued_draft_deletes(&account),
+            vec![mailypoppins::ops::ServerOp::DeleteDraft {
+                mailbox: "Drafts".to_string(),
+                message_id: "<mp-draft.1@example.com>".to_string(),
+                uid: None,
+                uidvalidity: None,
+            }],
+            "target {target:?}"
+        );
+    }
+}
+
+/// A send one recipient refused keeps the draft copy, as it keeps the file,
+/// and a row with no draft copy queues nothing.
+#[test]
+fn a_partial_send_or_a_draft_never_mirrored_queues_no_delete() {
+    let account = Account::new();
+    let id = enqueue_mirrored(&account, "<partial@example.com>", Some(SENT));
+    let (store, blobs) = account.open();
+    outbox::mark_submission_started(&store, id).unwrap();
+    outbox::record_submission(
+        &store,
+        &blobs,
+        id,
+        &one_of_two("bob@example.com", "blind@example.com", "550 no"),
+    )
+    .unwrap();
+    assert!(queued_draft_deletes(&account).is_empty());
+
+    let plain = Account::new();
+    let id = enqueue(&plain, "<plain@example.com>", Some(SENT));
+    let (store, blobs) = plain.open();
+    outbox::mark_submission_started(&store, id).unwrap();
+    outbox::record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
+    assert!(queued_draft_deletes(&plain).is_empty());
+}

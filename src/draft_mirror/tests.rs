@@ -400,3 +400,87 @@ fn a_push_of_a_gone_draft_or_on_graph_does_nothing() {
     block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
     assert!(folder.log.is_empty());
 }
+
+/// A header edit (`draft.set_headers`, which rewrites the frontmatter in
+/// place) is a change like any other: a synced draft owes a push afterwards.
+#[test]
+fn a_header_edit_owes_a_push() {
+    let fx = Fixture::new();
+    let path = fx.write("a", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    assert_eq!(
+        push::enqueue_owed(&fx.store, &fx.account).unwrap(),
+        0,
+        "synced"
+    );
+    crate::draft::rewrite_draft_recipients(
+        &path,
+        &crate::draft::DraftRecipientEdit {
+            to: "neu@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "Angebot".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 1);
+}
+
+/// A discarded draft forgets its row and queues the delete of its server
+/// copy in the folder the row named; on an account that does not mirror, or
+/// for a draft never pushed, only the row goes.
+#[test]
+fn a_retired_draft_forgets_its_row_and_queues_the_delete() {
+    let mut fx = Fixture::new();
+    let path = fx.write("a", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let row = fx.row("d1").unwrap();
+    let mid = crate::draft::parse_email_draft(&path)
+        .unwrap()
+        .frontmatter
+        .server_message_id
+        .unwrap();
+
+    assert!(push::forget_retired(&fx.store, &fx.account, "d1", Some(&mid)).unwrap());
+    assert!(fx.row("d1").is_none());
+    let queued = pending_ops::queued_ops(&fx.store, "tum").unwrap();
+    assert_eq!(
+        queued[0].op,
+        ServerOp::DeleteDraft {
+            mailbox: "Drafts".to_string(),
+            message_id: mid.clone(),
+            uid: Some(row.uid),
+            uidvalidity: Some(7),
+        }
+    );
+    block_on(push::run(&fx.mirror(2), &mut folder, &queued[0].op)).unwrap();
+    assert!(folder.live().is_empty(), "the copy is gone");
+
+    assert!(!push::forget_retired(&fx.store, &fx.account, "d2", None).unwrap());
+    fx.account.drafts.mirror = false;
+    assert!(!push::forget_retired(&fx.store, &fx.account, "d3", Some("<x@y>")).unwrap());
+    assert_eq!(pending_ops::queued_ops(&fx.store, "tum").unwrap().len(), 1);
+}
+
+/// `drafts/.retired/` keeps a draft for 30 days from its retirement, not from
+/// its last edit, and then the prune deletes it.
+#[test]
+fn a_retired_draft_is_pruned_after_thirty_days_from_its_retirement() {
+    let fx = Fixture::new();
+    let path = fx.write("old", "d1", "", "alt");
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(long_ago)
+        .unwrap();
+    let retired = crate::draft::retire_draft_files(&path).unwrap().unwrap();
+    let now = std::time::SystemTime::now();
+    assert_eq!(prune_retired("tum", now), 0, "retired just now");
+    let later = now + std::time::Duration::from_secs(31 * 86_400);
+    assert_eq!(prune_retired("tum", later), 1);
+    assert!(!retired.exists());
+}

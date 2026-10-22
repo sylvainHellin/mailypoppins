@@ -776,6 +776,7 @@ async fn resubmit<A: GraphSendApi>(
         recipients: envelope.recipients.clone(),
         from: envelope.from.clone(),
         draft_key: envelope.draft_key.clone(),
+        server_copy: None,
     };
     let plan = match plan(&built) {
         Ok(plan) => plan,

@@ -276,6 +276,11 @@ pub struct Envelope {
     /// 3): the one item a resume may send in place of creating another, and
     /// the one it must discard before creating another.
     pub graph_draft: Option<String>,
+    /// The draft's copy in the server's Drafts folder (#0143), as
+    /// `(mailbox, server_message_id)`: what the row's transition out of
+    /// `pending_send` queues a delete of once every recipient holds the
+    /// message. Carried across a store rebuild with the rest of the envelope.
+    pub draft_copy: Option<(String, String)>,
 }
 
 /// Two recipient strings that name the same recipient.
@@ -334,6 +339,12 @@ impl Envelope {
             out.push_str("\ngraph-draft:");
             out.push_str(&one_line(id));
         }
+        if let Some((mailbox, message_id)) = &self.draft_copy {
+            out.push_str("\ndraft-copy:");
+            out.push_str(&one_line(message_id));
+            out.push('\t');
+            out.push_str(&one_line(mailbox));
+        }
         out
     }
 
@@ -359,6 +370,11 @@ impl Envelope {
                 }
                 "draft" => env.draft_key = Some(addr.to_string()),
                 "graph-draft" => env.graph_draft = Some(addr.to_string()),
+                "draft-copy" => {
+                    if let Some((message_id, mailbox)) = addr.split_once('\t') {
+                        env.draft_copy = Some((mailbox.to_string(), message_id.to_string()));
+                    }
+                }
                 _ => {}
             }
         }
@@ -960,16 +976,21 @@ pub fn record_submission(
                 // Nothing to APPEND: the server saves the copy itself, or the
                 // user asked for no local copy at all.
                 finish_done(store, blobs, &row, None, now)?;
+                owe_draft_copy_delete(store, &row);
                 Ok(OutboxState::Done)
             } else {
-                store
+                let tx = store
                     .conn()
-                    .execute(
-                        "UPDATE outbox SET state = 'sent_pending_append', last_error = NULL,
-                         updated = ?2 WHERE id = ?1",
-                        rusqlite::params![id, now],
-                    )
-                    .context("marking the outbox row sent_pending_append")?;
+                    .unchecked_transaction()
+                    .context("opening the sent transition")?;
+                tx.execute(
+                    "UPDATE outbox SET state = 'sent_pending_append', last_error = NULL,
+                     updated = ?2 WHERE id = ?1",
+                    rusqlite::params![id, now],
+                )
+                .context("marking the outbox row sent_pending_append")?;
+                owe_draft_copy_delete(store, &row);
+                tx.commit().context("committing the sent transition")?;
                 Ok(OutboxState::SentPendingAppend)
             }
         }
@@ -1107,19 +1128,62 @@ fn record_per_recipient(
     // the Sent copy is owed exactly as it is after a clean 250. What the
     // partial case adds is the note, which survives into `done` so the row
     // stays listed until a human has seen who did not get it.
+    // A draft copy goes only when every recipient has the message, the
+    // condition its file is retired under: a partly delivered draft keeps
+    // both (#0143).
+    let delivered_to_all = envelope.rejected.is_empty();
     if row.target_mailbox.is_none() {
         finish_done(store, blobs, &row, None, now)?;
+        if delivered_to_all {
+            owe_draft_copy_delete(store, &row);
+        }
         Ok(OutboxState::Done)
     } else {
-        store
+        let tx = store
             .conn()
-            .execute(
-                "UPDATE outbox SET state = 'sent_pending_append', last_error = ?2,
-                 updated = ?3 WHERE id = ?1",
-                rusqlite::params![row.id, envelope.partial_note(), now],
-            )
-            .context("marking the outbox row sent_pending_append")?;
+            .unchecked_transaction()
+            .context("opening the sent transition")?;
+        tx.execute(
+            "UPDATE outbox SET state = 'sent_pending_append', last_error = ?2,
+             updated = ?3 WHERE id = ?1",
+            rusqlite::params![row.id, envelope.partial_note(), now],
+        )
+        .context("marking the outbox row sent_pending_append")?;
+        if delivered_to_all {
+            owe_draft_copy_delete(store, &row);
+        }
+        tx.commit().context("committing the sent transition")?;
         Ok(OutboxState::SentPendingAppend)
+    }
+}
+
+/// Queue the removal of the sent draft's copies from the server's Drafts
+/// folder (#0143), on the transition out of `pending_send` of a row whose
+/// every recipient holds the message.
+///
+/// Best effort, like the post-send flag: the message went out, and a failure
+/// to queue the delete must not make the send look failed. A copy that
+/// outlives it is a draft whose file was retired, which the drafts mirror's
+/// reconcile deletes at its next pass.
+fn owe_draft_copy_delete(store: &Store, row: &OutboxRow) {
+    let Some((mailbox, message_id)) = row
+        .envelope
+        .as_ref()
+        .and_then(|envelope| envelope.draft_copy.clone())
+    else {
+        return;
+    };
+    let op = crate::ops::ServerOp::DeleteDraft {
+        mailbox,
+        message_id,
+        uid: None,
+        uidvalidity: None,
+    };
+    if let Err(e) = crate::pending_ops::enqueue_draft_op(store, &row.account, &op) {
+        warn!(
+            "[outbox] row {} was sent and the delete of its draft copy could not be queued: {e:#}",
+            row.id
+        );
     }
 }
 

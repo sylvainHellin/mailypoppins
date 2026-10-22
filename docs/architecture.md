@@ -335,7 +335,8 @@ The APPEND to the server's Sent mailbox is retried until acknowledged, and any a
 `attempts` is incremented immediately before the request goes out rather than after it comes back (#0116), which is what makes an attempt whose process died look like the retry it is.
 The drain itself runs under the per-account engine lock (`outbox::drain_guarded`), because every send drains the account to file its own copy and unguarded drains APPEND each other's rows; a drain refused the lock does nothing, and the holder sweeps again to file what it left.
 Accounts whose server files its own Sent copy (Gmail, Graph, Proton) skip the APPEND entirely.
-A fully sent draft with a durable record behind it is removed from `drafts/`; anything less keeps its file.
+A fully sent draft with a durable record behind it is moved from `drafts/` into `drafts/.retired/`, which the drafts mirror reads as a tombstone and prunes after 30 days; anything less keeps its file.
+On an account that mirrors its drafts (#0143) the envelope also names the draft's server copy (`draft-copy:`), and the transition out of `pending_send` that finds every recipient delivered queues its delete (`ServerOp::DeleteDraft`) beside the state change; the submission itself never waits on it.
 
 Because SMTP runs once per recipient, a submission has one verdict per recipient rather than one verdict (#0063).
 The verdicts are committed to the row's `envelope` column: `delivered` is what a retry skips, `rejected` is what the user is told about, and what is in neither is what the next pass attempts.
