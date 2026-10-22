@@ -187,20 +187,41 @@ fn row_text(email: &EmailEntry) -> &str {
 }
 
 /// The lead of a row's subject in the narrow layout, which has no contact
-/// column: a member names its mailbox and a conversation its count before the
-/// subject (#0142).
-fn narrow_subject_prefix(app: &App, email: &EmailEntry, place: Place) -> Vec<Span<'static>> {
+/// column: a member names its mailbox before its sender, and a conversation
+/// its count before the subject (#0142). `width` is the subject column's.
+fn narrow_subject_prefix(
+    app: &App,
+    email: &EmailEntry,
+    place: Place,
+    width: usize,
+) -> Vec<Span<'static>> {
     if let Some(mailbox) = email.member_mailbox() {
-        return vec![
-            Span::raw(place.branch()),
-            member_label_span(app.mailbox_label(mailbox), email.member_own()),
-            Span::raw(": "),
-        ];
+        return member_lead(place, &app.mailbox_label(mailbox), email, width);
     }
     match email.header() {
         Some(header) if header.count > 1 => vec![Span::raw(format!("({}) ", header.count))],
         _ => Vec::new(),
     }
+}
+
+/// A member's lead in the narrow layout: its branch, its mailbox label and
+/// `": "`, the label truncated with an ellipsis (PERSO-179) so the sender
+/// after it stays visible: the label takes what the sender leaves of the
+/// subject column, and never more than half of it while the sender needs it.
+fn member_lead(place: Place, label: &str, email: &EmailEntry, width: usize) -> Vec<Span<'static>> {
+    let flag = if email.flagged { 2 } else { 0 };
+    let sender = display_width(&format!(
+        "{}{}",
+        invite_and_attachment_prefix(email),
+        member_sender(email)
+    ));
+    let avail = width.saturating_sub(flag + display_width(place.branch()) + 2);
+    let room = avail.saturating_sub(sender).max(avail / 2);
+    vec![
+        Span::raw(place.branch()),
+        member_label_span(truncate(label, room), email.member_own()),
+        Span::raw(": "),
+    ]
 }
 
 /// The one marker the status column shows for a message.
@@ -605,7 +626,7 @@ fn list_row(
             cells.push(subject_cell(app, email, subject));
         }
         RowLayout::Narrow { subject } => {
-            let lead = narrow_subject_prefix(app, email, place);
+            let lead = narrow_subject_prefix(app, email, place, subject);
             cells.push(subject_cell_after(email, lead, subject));
         }
     }
@@ -749,6 +770,33 @@ mod badge_tests {
         assert_eq!(own.style.fg, Some(theme::active().accent));
         let other = member_label_span("Inbox".into(), false);
         assert_eq!(other.style, Style::default());
+    }
+
+    /// PERSO-179: in the narrow layout a long mailbox label is cut with an
+    /// ellipsis so the sender after it stays visible, the label keeping what a
+    /// short sender leaves and half the room against a long one.
+    #[test]
+    fn a_long_mailbox_label_gives_way_to_the_sender_in_the_narrow_layout() {
+        let label = "Archive/2024/Projects";
+        let lead_of = |email: &EmailEntry, width: usize| -> (String, usize) {
+            let lead = member_lead(Place::Member, label, email, width);
+            let width = lead.iter().map(|s| display_width(&s.content)).sum();
+            (lead[1].content.to_string(), width)
+        };
+        let short = member(false);
+        let (cut, lead) = lead_of(&short, 24);
+        assert!(cut.ends_with('\u{2026}'), "{cut}");
+        assert_eq!(lead + display_width("Ivana"), 24, "the sender fits whole");
+
+        let mut long = member(false);
+        long.from = "Ivana Petrova-Schmidt".into();
+        let (cut, lead) = lead_of(&long, 24);
+        assert!(cut.ends_with('\u{2026}'), "{cut}");
+        assert_eq!(display_width(&cut), 9, "half the room after the branch");
+        assert!(24 - lead >= 9, "the sender keeps the other half");
+
+        let (whole, _) = lead_of(&short, 60);
+        assert_eq!(whole, label, "a label that fits is not cut");
     }
 
     #[test]
