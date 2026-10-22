@@ -204,6 +204,7 @@ The integrity check walks the whole file, so it runs once per file per process r
 One table is not a cache and does not go with the file: `outbox` (#0066, `src/store/rebuild.rs`).
 Before the old file is deleted its unfinished rows (`pending_send`, `sent_pending_append`, `failed`) are read back defensively, by column name, so an outbox of an older shape still comes across, and are written into the new file with a reference on the raw RFC822 blob each one points at.
 `done` rows owe nothing and stay behind.
+The Graph server cleanups `mp outbox discard` leaves (`graph_cleanups`, #0063) are carried too, since each names drafts on the server nothing else does.
 A row that cannot be carried, because its bytes are gone from the blob store or its columns are unreadable, is named in a `store-rebuild-<timestamp>.txt` note written next to the store; nothing about a submitted message is discarded silently.
 The same pass then sweeps the blob tree, deleting every file the rebuilt store holds no refcount row for, so a rebuild cannot leave the blob directory full of orphans that nothing reclaims.
 
@@ -351,7 +352,10 @@ A JSON draft gets an Exchange `Message-ID`, so it carries ours in a `singleValue
 The resume (`graph_submit::resume_rows`) settles every Graph `pending_send` row instead of sweeping it: with no marker it discards whatever an interrupted attempt left in Drafts under our `Message-ID` or the recorded id and submits afresh; with a marker it asks the mailbox, records a copy in Sent Items as sent, reads the recorded draft by its id 600 s after its send and sends that same draft again if it is still in Drafts, waits while it sits in the Outbox, and parks the row in `failed` when nothing is there.
 Only a 4xx, or Graph's throttling (429, a 503 with `Retry-After`), proves a delivering request sent nothing: `sendMail` and `/send` answer 202 and finish later, so any other 5xx, a lost answer and a 404 on a draft's `/send` all leave the row `pending_send` with its marker for that same reconciliation, the draft kept.
 A resume leaves alone any row whose draft a send in this process still holds, on both transports, and a resume that records a row as sent retires the draft file it was built from (`send::retire_draft_of_row`), so `mp send-approved` cannot send it again; `send_draft` also refuses a draft whose newest row is `done` unless the file names that send's `Message-ID`.
-`mp outbox discard` on a Graph row removes the drafts the row left on the server first.
+A row with no marker whose recorded draft is no longer a plain draft in Drafts is given a marker and settled the same way, never resent, and a send whose marker does not commit does not go out.
+Every request of the staged send carries `Prefer: IdType="ImmutableId"`, so the recorded draft id follows the item into the Outbox and Sent Items.
+`mp outbox discard` on a Graph row deletes it at once, offline too, and commits a server cleanup (the `graph_cleanups` table, carried across a store rebuild like the outbox) that the next Graph resume carries out; it never deletes an item that has left Drafts.
+`send_draft` also refuses a draft whose newest row failed after its send started, pointing at `mp outbox retry` or `mp outbox discard` for that row.
 
 ## Sync backends
 

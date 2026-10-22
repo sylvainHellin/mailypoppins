@@ -2979,3 +2979,14 @@ A JSON draft is found again through a `singleValueExtendedProperty` carrying our
 `sendMail` and `/send` answer 202 and finish later, and a 5xx from the front end can arrive after Exchange took the message; only a 4xx, or Graph's throttling (429, a 503 with `Retry-After`), proves nothing went out.
 A 404 on a draft's `/send` proves nothing either: a draft whose earlier send was taken late has already left Drafts.
 A resume that finishes a send also has to retire the draft file the send came from, or the next `mp send-approved` sends it again under a fresh `Message-ID` (src/send.rs, `retire_draft_of_row`).
+A send marker that fails to commit has to stop the send: logging it and sending anyway leaves a row the resume reads as never sent, and one crash later the message goes out twice (`graph_submit::mark_started`, `DurableSend::mark_started`).
+A `failed` row whose send had started may still have arrived, so its draft file must not be sendable under a fresh `Message-ID` until the row is retried or discarded (`outbox::refuse_a_finished_draft`).
+A discard that has to reach the server cannot refuse when the server is unreachable without trapping the row; commit the delete and a cleanup record together, and let the next resume talk to the server (`outbox::discard_graph`, `graph_submit::clear_server_cleanups`).
+
+## A Graph item id changes when the item moves, unless you ask for immutable ids (#0063, 2026-10-22)
+
+By default an Outlook item's Graph id encodes its folder, so a draft's id stops resolving (404) once `/send` moves it to the Outbox and then to Sent Items, and so does any message id after a move between folders.
+Code that records an id to read the item back later (the outbox's `graph-draft:` line) then cannot tell "on its way" or "sent" from "deleted", which is the distinction the resume's never-twice rule rests on.
+Send `Prefer: IdType="ImmutableId"` on every request that returns or takes such an id, creation included, so the id is the immutable one from the start and keeps resolving through every move ([src/graph.rs](../src/graph.rs), `PREFER_IMMUTABLE_ID`).
+Keep it on all of them, folder lookups whose ids are compared with `parentFolderId` included: a mix of default and immutable ids for one item never compares equal.
+The sync path still records default ids; the two are kept apart rather than converted.

@@ -2,345 +2,14 @@
 //! crash window is a future dropped at a chosen request, and nothing here
 //! touches the network or a real account.
 
-use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::anyhow;
-use serde_json::Value;
-
+use super::fake::{FakeGraph, Fault, Item, Step};
 use super::*;
 use crate::outbox::{Envelope, OutboxState};
 use crate::send::tests::{build_with_ancestry, draft_with};
 
 const ACCOUNT: &str = "graph-acct";
-
-// ---------------------------------------------------------------------------
-// The fake mailbox
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Step {
-    Create,
-    Attach,
-    Send,
-    SendMime,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fault {
-    /// The process dies waiting, before the server acted.
-    HangBefore,
-    /// The server acted, then the process died waiting for the answer.
-    HangAfter,
-    /// An outright refusal, an HTTP 4xx.
-    Refuse,
-    /// The server acted and the answer timed out.
-    TimeoutAfter,
-    /// Graph took the delivering request and answered 504: the message is on
-    /// its way (a draft in the Outbox, not yet in Sent Items) until
-    /// [`FakeGraph::deliver`].
-    Gateway,
-    /// Before `send` acted, the draft left Drafts: an earlier send of it was
-    /// taken late and is on its way. The send answers 404.
-    Vanished,
-}
-
-#[derive(Debug, Clone, Default)]
-struct Item {
-    message_id: String,
-    /// Our `Message-ID` in [`crate::graph::MESSAGE_ID_PROPERTY`], on a JSON
-    /// draft.
-    property: Option<String>,
-    mime: Option<Vec<u8>>,
-    attachments: Vec<OutgoingAttachment>,
-}
-
-impl Item {
-    fn is(&self, message_id: &str) -> bool {
-        self.message_id == message_id || self.property.as_deref() == Some(message_id)
-    }
-}
-
-#[derive(Default)]
-struct Server {
-    next_id: u32,
-    drafts: BTreeMap<String, Item>,
-    /// Taken by Graph and not yet filed in Sent Items, with the draft id a
-    /// staged send had.
-    queued: Vec<(Option<String>, Item)>,
-    sent: Vec<Item>,
-    faults: Vec<(Step, Fault)>,
-    discarded: Vec<String>,
-    sent_drafts: Vec<String>,
-}
-
-impl Server {
-    /// Take one message: filed at once, or queued when Graph answered 504.
-    fn take(&mut self, draft: Option<String>, item: Item, queue: bool) {
-        if queue {
-            self.queued.push((draft, item));
-            return;
-        }
-        if let Some(id) = draft {
-            self.sent_drafts.push(id);
-        }
-        self.sent.push(item);
-    }
-}
-
-#[derive(Default)]
-struct FakeGraph(Mutex<Server>);
-
-fn message_id_of_mime(b64: &str) -> (String, Vec<u8>) {
-    use base64::Engine;
-    let mime = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .expect("standard base64");
-    (crate::send::message_id_of(&mime), mime)
-}
-
-impl FakeGraph {
-    fn with_fault(step: Step, fault: Fault) -> Self {
-        let fake = FakeGraph::default();
-        fake.0.lock().unwrap().faults.push((step, fault));
-        fake
-    }
-
-    fn take_fault(&self, step: Step) -> Option<Fault> {
-        let mut server = self.0.lock().unwrap();
-        let at = server.faults.iter().position(|(s, _)| *s == step)?;
-        Some(server.faults.remove(at).1)
-    }
-
-    /// Take the next fault of `step` only when it is `fault`.
-    fn take_this_fault(&self, step: Step, fault: Fault) -> bool {
-        let mut server = self.0.lock().unwrap();
-        match server.faults.iter().position(|(s, _)| *s == step) {
-            Some(at) if server.faults[at].1 == fault => {
-                server.faults.remove(at);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Run one request: the fault decides whether the server acts and what
-    /// the client hears. The action is told whether Graph only queues the
-    /// message ([`Fault::Gateway`]).
-    async fn act<T: Send>(
-        &self,
-        step: Step,
-        action: impl FnOnce(&mut Server, bool) -> Result<T> + Send,
-    ) -> Result<T> {
-        let fault = self.take_fault(step);
-        match fault {
-            Some(Fault::HangBefore) => std::future::pending::<()>().await,
-            Some(Fault::Refuse) => {
-                return Err(graph_status(400));
-            }
-            _ => {}
-        }
-        let value = action(&mut self.0.lock().unwrap(), fault == Some(Fault::Gateway))?;
-        match fault {
-            Some(Fault::HangAfter) => {
-                std::future::pending::<()>().await;
-                unreachable!()
-            }
-            Some(Fault::TimeoutAfter) => Err(anyhow!(outbox::AmbiguousSubmission(
-                "operation timed out".to_string()
-            ))),
-            Some(Fault::Gateway) => Err(graph_status(504)),
-            _ => Ok(value),
-        }
-    }
-
-    fn sent(&self) -> Vec<Item> {
-        self.0.lock().unwrap().sent.clone()
-    }
-
-    /// Graph finishes what it queued: the messages land in Sent Items.
-    fn deliver(&self) {
-        let mut server = self.0.lock().unwrap();
-        for (draft, item) in std::mem::take(&mut server.queued) {
-            server.take(draft, item, false);
-        }
-    }
-
-    fn drafts(&self) -> Vec<String> {
-        self.0.lock().unwrap().drafts.keys().cloned().collect()
-    }
-
-    /// A draft created out of band, as an earlier attempt left it.
-    fn plant_draft(&self, message_id: &str) -> String {
-        let mut server = self.0.lock().unwrap();
-        server.next_id += 1;
-        let id = format!("planted-{}", server.next_id);
-        server.drafts.insert(
-            id.clone(),
-            Item {
-                message_id: message_id.to_string(),
-                ..Item::default()
-            },
-        );
-        id
-    }
-}
-
-/// A delivering request answered with `status`, read the way the real client
-/// reads it ([`crate::graph::delivering_status_error`]).
-fn graph_status(status: u16) -> anyhow::Error {
-    crate::graph::delivering_status_error(
-        status,
-        false,
-        true,
-        format!("HTTP {status} from the fake"),
-    )
-}
-
-impl GraphSendApi for FakeGraph {
-    fn send_mime(&self, mime_base64: String) -> impl Future<Output = Result<()>> + Send {
-        self.act(Step::SendMime, move |server, queue| {
-            let (message_id, mime) = message_id_of_mime(&mime_base64);
-            let item = Item {
-                message_id,
-                mime: Some(mime),
-                ..Item::default()
-            };
-            server.take(None, item, queue);
-            Ok(())
-        })
-    }
-
-    fn create_draft_mime(
-        &self,
-        mime_base64: String,
-    ) -> impl Future<Output = Result<String>> + Send {
-        self.act(Step::Create, move |server, _| {
-            let (message_id, mime) = message_id_of_mime(&mime_base64);
-            server.next_id += 1;
-            let id = format!("draft-{}", server.next_id);
-            server.drafts.insert(
-                id.clone(),
-                Item {
-                    message_id,
-                    mime: Some(mime),
-                    ..Item::default()
-                },
-            );
-            Ok(id)
-        })
-    }
-
-    fn create_draft_json(&self, message: &Value) -> impl Future<Output = Result<String>> + Send {
-        let property = message["singleValueExtendedProperties"]
-            .as_array()
-            .and_then(|props| {
-                props
-                    .iter()
-                    .find(|p| p["id"] == crate::graph::MESSAGE_ID_PROPERTY)
-            })
-            .and_then(|p| p["value"].as_str())
-            .map(str::to_string);
-        self.act(Step::Create, move |server, _| {
-            server.next_id += 1;
-            let id = format!("draft-{}", server.next_id);
-            server.drafts.insert(
-                id.clone(),
-                Item {
-                    message_id: format!("<exchange-{}@fake>", server.next_id),
-                    property,
-                    ..Item::default()
-                },
-            );
-            Ok(id)
-        })
-    }
-
-    fn add_attachment(
-        &self,
-        draft_id: &str,
-        attachment: &OutgoingAttachment,
-    ) -> impl Future<Output = Result<()>> + Send {
-        let draft_id = draft_id.to_string();
-        let attachment = attachment.clone();
-        self.act(Step::Attach, move |server, _| {
-            server
-                .drafts
-                .get_mut(&draft_id)
-                .ok_or_else(|| anyhow!("HTTP 404"))?
-                .attachments
-                .push(attachment);
-            Ok(())
-        })
-    }
-
-    fn send_draft(&self, draft_id: &str) -> impl Future<Output = Result<()>> + Send {
-        let draft_id = draft_id.to_string();
-        if self.take_this_fault(Step::Send, Fault::Vanished) {
-            let mut server = self.0.lock().unwrap();
-            if let Some(item) = server.drafts.remove(&draft_id) {
-                server.queued.push((Some(draft_id.clone()), item));
-            }
-        }
-        self.act(Step::Send, move |server, queue| {
-            let item = server
-                .drafts
-                .remove(&draft_id)
-                .ok_or_else(|| graph_status(404))?;
-            server.take(Some(draft_id), item, queue);
-            Ok(())
-        })
-    }
-
-    fn discard_draft(&self, draft_id: &str) -> impl Future<Output = Result<()>> + Send {
-        let draft_id = draft_id.to_string();
-        async move {
-            let mut server = self.0.lock().unwrap();
-            server.drafts.remove(&draft_id);
-            server.discarded.push(draft_id);
-            Ok(())
-        }
-    }
-
-    fn server_copies(
-        &self,
-        internet_message_id: &str,
-    ) -> impl Future<Output = Result<ServerCopies>> + Send {
-        let wanted = internet_message_id.to_string();
-        async move {
-            let server = self.0.lock().unwrap();
-            Ok(ServerCopies {
-                sent: server.sent.iter().any(|i| i.is(&wanted)),
-                drafts: server
-                    .drafts
-                    .iter()
-                    .filter(|(_, i)| i.is(&wanted))
-                    .map(|(id, _)| id.clone())
-                    .collect(),
-            })
-        }
-    }
-
-    fn draft_state(&self, draft_id: &str) -> impl Future<Output = Result<DraftState>> + Send {
-        let draft_id = draft_id.to_string();
-        async move {
-            let server = self.0.lock().unwrap();
-            Ok(if server.drafts.contains_key(&draft_id) {
-                DraftState::InDrafts
-            } else if server
-                .queued
-                .iter()
-                .any(|(id, _)| id.as_deref() == Some(&draft_id))
-            {
-                DraftState::Sending
-            } else {
-                // Filed in Sent Items under a new id, or deleted.
-                DraftState::Gone
-            })
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -403,6 +72,19 @@ impl Outbox {
 
     fn row(&self, id: i64) -> OutboxRow {
         outbox::load(&self.store, id).unwrap().unwrap()
+    }
+
+    /// Make every write of the send marker fail, as a full disk or a store
+    /// another process holds would, while every other write still lands.
+    fn break_the_marker(&self) {
+        self.store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER no_marker BEFORE UPDATE OF submission_started_at ON outbox
+                 WHEN NEW.submission_started_at IS NOT NULL
+                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            )
+            .unwrap();
     }
 
     /// The live send's submission and record, without the account directory
@@ -988,10 +670,82 @@ async fn an_unconfirmed_send_found_in_sent_items_retires_its_draft_file() {
     assert!(!file.exists(), "the sent draft is retired");
 }
 
-/// Discarding a row removes the drafts it left on the server: the recorded
-/// one and any under its `Message-ID`, but never an item on its way out.
+// ---------------------------------------------------------------------------
+// The second review of b1952fc4: a marker that does not commit holds the send
+// back, and a discard leaves a cleanup the resume carries out
+// ---------------------------------------------------------------------------
+
+/// A send whose marker cannot be committed does not go out: on the MIME route
+/// nothing is sent, on the staged route the draft it made is discarded, and
+/// the row stays submittable with no marker for the resume.
 #[tokio::test]
-async fn discarding_a_row_removes_its_server_drafts_and_nothing_in_flight() {
+async fn a_send_whose_marker_did_not_commit_sends_nothing_and_leaves_no_draft() {
+    for built in [
+        small_message("unmarked-mime"),
+        large_reply("unmarked-draft"),
+    ] {
+        let outbox = Outbox::new();
+        let id = outbox.enqueue(&built);
+        outbox.break_the_marker();
+        let graph = FakeGraph::default();
+
+        let outcome = outbox.live(id, &built, &graph).await;
+
+        assert!(matches!(outcome, GraphOutcome::Clean(_)), "{outcome:?}");
+        assert!(graph.sent().is_empty(), "nothing was sent");
+        assert!(graph.0.lock().unwrap().queued.is_empty());
+        assert!(graph.drafts().is_empty(), "no orphan draft");
+        let row = outbox.row(id);
+        assert_eq!(row.state, OutboxState::PendingSend);
+        assert_eq!(row.submission_started_at, None);
+    }
+}
+
+/// A row with no marker whose recorded draft has left Drafts (a send that
+/// went out while its marker failed to commit) is not resent: the resume
+/// gives it a marker and settles it against the mailbox, so the one message
+/// on its way is recorded once it lands.
+#[tokio::test]
+async fn a_row_with_no_marker_whose_draft_is_on_its_way_is_not_sent_again() {
+    let outbox = Outbox::new();
+    let built = large_reply("unmarked-in-flight");
+    let id = outbox.enqueue(&built);
+    let graph = FakeGraph::with_fault(Step::Send, Fault::Gateway);
+    outbox.live(id, &built, &graph).await;
+    outbox
+        .store
+        .conn()
+        .execute(
+            "UPDATE outbox SET submission_started_at = NULL WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    let created = graph.0.lock().unwrap().next_id;
+
+    outbox.resume(after_backoff(), &graph).await;
+
+    assert_eq!(graph.0.lock().unwrap().next_id, created, "no new draft");
+    assert!(graph.sent().is_empty(), "nothing sent a second time");
+    assert!(graph.0.lock().unwrap().discarded.is_empty());
+    let row = outbox.row(id);
+    assert_eq!(row.state, OutboxState::PendingSend);
+    assert!(
+        row.submission_started_at.is_some(),
+        "handed to the settling"
+    );
+
+    graph.deliver();
+    outbox.resume(after_backoff(), &graph).await;
+    assert_eq!(graph.sent().len(), 1, "sent exactly once");
+    assert_eq!(outbox.row(id).state, OutboxState::Done);
+}
+
+/// A discarded Graph row goes at once, offline too, and leaves a cleanup: the
+/// next resume that reaches the mailbox removes the recorded draft and any
+/// under the row's `Message-ID`, and a cleanup whose lookup or delete fails
+/// stays for the pass after.
+#[tokio::test]
+async fn a_discarded_row_s_drafts_go_on_the_next_resume_that_reaches_the_mailbox() {
     let outbox = Outbox::new();
     let built = large_reply("discard-row");
     let id = outbox.enqueue(&built);
@@ -1005,14 +759,55 @@ async fn discarding_a_row_removes_its_server_drafts_and_nothing_in_flight() {
     graph.plant_draft(&built.message_id);
     assert_eq!(graph.drafts().len(), 2);
 
-    discard_row_drafts(&graph, &outbox.row(id)).await.unwrap();
-    assert!(graph.drafts().is_empty(), "no orphan draft");
+    outbox::discard_graph(&outbox.store, &outbox.blobs, id).unwrap();
+    assert!(outbox::load(&outbox.store, id).unwrap().is_none());
+    let cleanups = || {
+        outbox::server_cleanups(&outbox.store, ACCOUNT)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(cleanups(), 1);
 
-    // A recorded draft that left Drafts is the message itself.
+    graph
+        .0
+        .lock()
+        .unwrap()
+        .faults
+        .push((Step::Lookup, Fault::Refuse));
+    outbox.resume(outbox::unix_now(), &graph).await;
+    assert_eq!(graph.drafts().len(), 2, "offline: nothing touched");
+    assert_eq!(cleanups(), 1, "the cleanup waits");
+
+    {
+        let mut server = graph.0.lock().unwrap();
+        server.faults.clear();
+        server.faults.push((Step::Discard, Fault::Refuse));
+    }
+    outbox.resume(outbox::unix_now(), &graph).await;
+    assert_eq!(cleanups(), 1, "a draft that will not go keeps the cleanup");
+
+    outbox.resume(outbox::unix_now(), &graph).await;
+    assert!(graph.drafts().is_empty(), "no orphan draft");
+    assert_eq!(cleanups(), 0);
+}
+
+/// A cleanup never deletes an item that has left Drafts: the discarded row's
+/// message was already on its way, and it still arrives, once.
+#[tokio::test]
+async fn a_cleanup_never_deletes_a_draft_that_left_drafts() {
+    let outbox = Outbox::new();
     let built = large_reply("discard-in-flight");
     let id = outbox.enqueue(&built);
     let graph = FakeGraph::with_fault(Step::Send, Fault::Gateway);
     outbox.live(id, &built, &graph).await;
-    discard_row_drafts(&graph, &outbox.row(id)).await.unwrap();
+
+    outbox::discard_graph(&outbox.store, &outbox.blobs, id).unwrap();
+    outbox.resume(after_backoff(), &graph).await;
+
     assert!(graph.0.lock().unwrap().discarded.is_empty());
+    assert!(outbox::server_cleanups(&outbox.store, ACCOUNT)
+        .unwrap()
+        .is_empty());
+    graph.deliver();
+    assert_eq!(graph.sent().len(), 1);
 }

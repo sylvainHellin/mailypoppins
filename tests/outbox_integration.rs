@@ -1576,6 +1576,40 @@ fn a_draft_whose_newest_row_is_done_is_refused_unless_it_names_that_send() {
         .expect("the newest row failed: a human's call");
 }
 
+/// A draft whose newest row failed after its send started is refused (#0063
+/// review of b1952fc4): that send may have reached its recipients, and only
+/// the row can resend it under the same `Message-ID` or release the draft.
+/// Discarding the row is how the user frees it.
+#[test]
+fn a_draft_whose_last_send_may_have_arrived_is_refused_until_its_row_is_settled() {
+    let account = Account::new();
+    let mid = "<maybe-sent@example.com>";
+    let id = enqueue_draft(&account, mid, "id:note-3").unwrap();
+    let (store, blobs) = account.open();
+    outbox::mark_submission_started(&store, id).unwrap();
+    outbox::record_submission(
+        &store,
+        &blobs,
+        id,
+        &SubmitOutcome::Ambiguous("no verdict".into()),
+    )
+    .unwrap();
+    let row = outbox::load(&store, id).unwrap().unwrap();
+    assert_eq!(row.state, outbox::OutboxState::Failed);
+    assert!(row.submission_started_at.is_some());
+
+    let refused = outbox::refuse_a_finished_draft(&store, ACCOUNT, "id:note-3", None)
+        .expect_err("a send that may have arrived is not sent again under a new id");
+    assert!(outbox::is_already_in_flight(&refused), "{refused:#}");
+    let text = refused.to_string();
+    assert!(text.contains(&format!("mp outbox retry {id}")), "{text}");
+    assert!(text.contains(&format!("mp outbox discard {id}")), "{text}");
+
+    outbox::discard(&store, &blobs, id).unwrap();
+    outbox::refuse_a_finished_draft(&store, ACCOUNT, "id:note-3", None)
+        .expect("a discarded row releases the draft");
+}
+
 /// The gate compares a key that has been through the envelope encoding with
 /// one that has not, so both sides have to be flattened the same way. A draft
 /// with no frontmatter `id:` is keyed by its path, and a path may hold a tab,

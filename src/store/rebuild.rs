@@ -20,6 +20,10 @@
 //! 3. It writes a `store-rebuild-<timestamp>.txt` note next to the store when
 //!    outbox rows were involved, so a discarded submission is never silent.
 //!
+//! The Graph server cleanups `mp outbox discard` leaves (`graph_cleanups`,
+//! #0063) are carried the same way, for the same reason: each names drafts on
+//! the server that nothing else does ([`salvage_cleanups`]).
+//!
 //! `pending_ops` (#0039) is deliberately **not** carried, unlike the outbox it
 //! otherwise mirrors. A pending mutation is a flag, move or delete of a message
 //! the server still holds, so a queued-but-undrained row that a rebuild drops
@@ -124,11 +128,23 @@ impl SalvagedRow {
     }
 }
 
+/// One Graph server cleanup read out of the old file
+/// ([`super::schema::GRAPH_CLEANUPS_TABLE`]).
+#[derive(Debug, Clone)]
+pub(super) struct SalvagedCleanup {
+    account: String,
+    message_id: String,
+    graph_draft: Option<String>,
+    created: Option<i64>,
+}
+
 /// What the pre-drop read got out of the old file.
 #[derive(Debug, Default)]
 pub(super) struct Salvage {
     /// The unfinished rows, ready to be written into the fresh store.
     pub rows: Vec<SalvagedRow>,
+    /// The Graph server cleanups still owed ([`salvage_cleanups`]).
+    pub cleanups: Vec<SalvagedCleanup>,
     /// What the read itself could not get, in the shape
     /// [`RebuildReport::lost`] carries: a damaged page that ended the scan, a
     /// row that would not come back, a table too big to read in full. These
@@ -141,6 +157,8 @@ pub(super) struct Salvage {
 pub(super) struct RebuildReport {
     /// Outbox rows carried into the fresh store, as `describe` strings.
     pub carried: Vec<String>,
+    /// Graph server cleanups carried into the fresh store.
+    pub carried_cleanups: usize,
     /// Outbox rows that could not be carried, each with its reason.
     pub lost: Vec<(String, String)>,
     pub swept_files: u64,
@@ -260,6 +278,59 @@ pub(super) fn salvage_outbox(path: &Path) -> Salvage {
         }
     }
     salvage
+}
+
+/// Read the Graph server cleanups out of a store that failed validation
+/// (#0063 review).
+///
+/// They are carried for the reason the outbox is: each names drafts a
+/// discarded row left on the server, and a cleanup lost here leaves them
+/// there with nothing to name them. Best effort and small: a cleanup is
+/// cleared on the next Graph resume, so the table holds a handful of rows,
+/// and one that cannot be read is logged and stepped over.
+pub(super) fn salvage_cleanups(path: &Path) -> Vec<SalvagedCleanup> {
+    let Ok(conn) = Connection::open(path) else {
+        return Vec::new();
+    };
+    let table = super::schema::GRAPH_CLEANUPS_TABLE;
+    let mut stmt = match conn.prepare(&format!(
+        "SELECT account, message_id, graph_draft, created FROM {table} LIMIT {SALVAGE_LIMIT}"
+    )) {
+        Ok(stmt) => stmt,
+        // A file from before the table, or not one of ours.
+        Err(_) => return Vec::new(),
+    };
+    let rows = match stmt.query_map([], |r| {
+        Ok(SalvagedCleanup {
+            account: r.get(0)?,
+            message_id: r.get(1)?,
+            graph_draft: r.get(2)?,
+            created: r.get(3)?,
+        })
+    }) {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(
+                "[store] no Graph cleanups salvaged from {}: {e}",
+                path.display()
+            );
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        match row {
+            Ok(cleanup) => out.push(cleanup),
+            Err(e) => {
+                warn!(
+                    "[store] a Graph cleanup in {} could not be read: {e}",
+                    path.display()
+                );
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// The rowids of the old `outbox`, with the error that ended the listing early
@@ -639,6 +710,31 @@ pub(super) fn finish(conn: &Connection, path: &Path, salvaged: Salvage) -> Rebui
         lost: salvaged.lost,
         ..Default::default()
     };
+    // Before anything that needs the blob root: a cleanup holds no bytes.
+    for cleanup in &salvaged.cleanups {
+        match conn.execute(
+            &format!(
+                "INSERT INTO {} (account, message_id, graph_draft, created)
+                 VALUES (?1, ?2, ?3, ?4)",
+                super::schema::GRAPH_CLEANUPS_TABLE
+            ),
+            rusqlite::params![
+                cleanup.account,
+                cleanup.message_id,
+                cleanup.graph_draft,
+                cleanup.created
+            ],
+        ) {
+            Ok(_) => report.carried_cleanups += 1,
+            Err(e) => report.lost.push((
+                format!("the Graph draft cleanup of {}", clip(&cleanup.message_id)),
+                format!(
+                    "the rebuilt store refused it ({e}); delete any draft of that message \
+                     from the Drafts folder by hand"
+                ),
+            )),
+        }
+    }
     let Some(root) = blobs_root(path) else {
         // Unreachable for any real store path, and still not a place where a
         // submission may vanish without being named.
@@ -1113,6 +1209,40 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Carried into the rebuilt store"), "{text}");
+    }
+
+    /// A Graph cleanup `mp outbox discard` left is carried like an unfinished
+    /// row: losing it would leave the discarded row's draft on the server with
+    /// nothing to name it (#0063 review).
+    #[test]
+    fn a_rebuild_carries_the_graph_cleanups() {
+        let (_dir, path, _blobs) = account_dir();
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO graph_cleanups (account, message_id, graph_draft, created)
+                     VALUES ('alice', '<gone@example.com>', 'draft-7', 100)",
+                    [],
+                )
+                .unwrap();
+        }
+        stamp_a_wrong_version(&path);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.schema_version().unwrap(),
+            Some(schema::SCHEMA_VERSION)
+        );
+        assert_eq!(
+            crate::outbox::server_cleanups(&store, "alice").unwrap(),
+            vec![crate::outbox::ServerCleanup {
+                id: 1,
+                message_id: "<gone@example.com>".to_string(),
+                graph_draft: Some("draft-7".to_string()),
+            }]
+        );
     }
 
     #[test]

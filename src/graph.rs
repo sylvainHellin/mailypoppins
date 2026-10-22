@@ -3323,6 +3323,19 @@ pub fn message_id_property(internet_message_id: &str) -> serde_json::Value {
     serde_json::json!([{ "id": MESSAGE_ID_PROPERTY, "value": internet_message_id }])
 }
 
+/// The `Prefer` value every request of a staged send carries, so the draft id
+/// recorded on the outbox row is the item's immutable id (#0063 review).
+///
+/// A default Outlook id changes whenever the item moves between folders, so
+/// the id a draft was created under answers 404 once `/send` has moved it to
+/// the Outbox or Sent Items, and the resume could never tell a send under way
+/// from a draft deleted. An immutable id stays with the item through both
+/// moves. Sent on every request that returns or takes such an id (the
+/// creates, the attachments, `/send`, `permanentDelete`, the lookups and the
+/// Drafts folder id their `parentFolderId` is compared with), so the ids stay
+/// one kind.
+pub const PREFER_IMMUTABLE_ID: &str = "IdType=\"ImmutableId\"";
+
 /// What the mailbox holds under one RFC 5322 `Message-ID`, for the outbox's
 /// resume (#0063 item 3).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3548,26 +3561,43 @@ impl GraphClient {
     /// headers a MIME send keeps; the difference is that nothing goes out
     /// until [`GraphClient::send_draft`].
     pub async fn create_draft_mime(&self, mime_base64: String) -> Result<String> {
-        let request = self
-            .client
-            .post(format!("{GRAPH_BASE}/me/messages"))
+        self.create_draft(self.create_draft_mime_request(mime_base64))
+            .await
+    }
+
+    fn create_draft_mime_request(&self, mime_base64: String) -> reqwest::RequestBuilder {
+        self.item_request(reqwest::Method::POST, format!("{GRAPH_BASE}/me/messages"))
             .header(reqwest::header::CONTENT_TYPE, "text/plain")
-            .body(mime_base64);
-        self.create_draft(request).await
+            .body(mime_base64)
     }
 
     /// Create a draft from a JSON message resource and return its Graph id.
     pub async fn create_draft_json(&self, message: &serde_json::Value) -> Result<String> {
-        let request = self
-            .client
-            .post(format!("{GRAPH_BASE}/me/messages"))
-            .json(message);
-        self.create_draft(request).await
+        self.create_draft(self.create_draft_json_request(message))
+            .await
+    }
+
+    fn create_draft_json_request(&self, message: &serde_json::Value) -> reqwest::RequestBuilder {
+        self.item_request(reqwest::Method::POST, format!("{GRAPH_BASE}/me/messages"))
+            .json(message)
+    }
+
+    /// A request of the staged send: the bearer token and
+    /// [`PREFER_IMMUTABLE_ID`], so every draft id it answers with or names is
+    /// the immutable one.
+    fn item_request(
+        &self,
+        method: reqwest::Method,
+        url: impl reqwest::IntoUrl,
+    ) -> reqwest::RequestBuilder {
+        self.client
+            .request(method, url)
+            .bearer_auth(self.bearer())
+            .header("Prefer", PREFER_IMMUTABLE_ID)
     }
 
     async fn create_draft(&self, request: reqwest::RequestBuilder) -> Result<String> {
         let resp = request
-            .bearer_auth(self.bearer())
             .send()
             .await
             .context("Failed to create the Graph draft")?;
@@ -3594,10 +3624,7 @@ impl GraphClient {
     ) -> Result<()> {
         if attachment.bytes.len() <= ATTACHMENT_POST_MAX_BYTES {
             let resp = self
-                .client
-                .post(message_action_url(draft_id, "attachments"))
-                .bearer_auth(self.bearer())
-                .json(&attachment_post_body(attachment))
+                .attachment_post_request(draft_id, attachment)
                 .send()
                 .await
                 .with_context(|| format!("Failed to attach {}", attachment.name))?;
@@ -3613,13 +3640,7 @@ impl GraphClient {
         }
 
         let resp = self
-            .client
-            .post(message_action_url(
-                draft_id,
-                "attachments/createUploadSession",
-            ))
-            .bearer_auth(self.bearer())
-            .json(&upload_session_body(attachment))
+            .upload_session_request(draft_id, attachment)
             .send()
             .await
             .with_context(|| format!("Failed to open an upload session for {}", attachment.name))?;
@@ -3663,14 +3684,35 @@ impl GraphClient {
         Ok(())
     }
 
+    fn attachment_post_request(
+        &self,
+        draft_id: &str,
+        attachment: &OutgoingAttachment,
+    ) -> reqwest::RequestBuilder {
+        self.item_request(
+            reqwest::Method::POST,
+            message_action_url(draft_id, "attachments"),
+        )
+        .json(&attachment_post_body(attachment))
+    }
+
+    fn upload_session_request(
+        &self,
+        draft_id: &str,
+        attachment: &OutgoingAttachment,
+    ) -> reqwest::RequestBuilder {
+        self.item_request(
+            reqwest::Method::POST,
+            message_action_url(draft_id, "attachments/createUploadSession"),
+        )
+        .json(&upload_session_body(attachment))
+    }
+
     /// Send a draft, `POST /me/messages/{id}/send`. Exchange files it in Sent
-    /// Items and it stops being a draft.
+    /// Items and it stops being a draft, keeping its immutable id.
     pub async fn send_draft(&self, draft_id: &str) -> Result<()> {
         let resp = self
-            .client
-            .post(message_action_url(draft_id, "send"))
-            .header(reqwest::header::CONTENT_LENGTH, "0")
-            .bearer_auth(self.bearer())
+            .send_draft_request(draft_id)
             .send()
             .await
             .map_err(|e| delivering_request_error(e, "Failed to send the draft"))?;
@@ -3687,10 +3729,7 @@ impl GraphClient {
     /// is already gone counts as removed.
     pub async fn discard_draft(&self, draft_id: &str) -> Result<()> {
         let resp = self
-            .client
-            .post(message_action_url(draft_id, "permanentDelete"))
-            .header(reqwest::header::CONTENT_LENGTH, "0")
-            .bearer_auth(self.bearer())
+            .discard_draft_request(draft_id)
             .send()
             .await
             .context("Failed to discard the Graph draft")?;
@@ -3738,16 +3777,8 @@ impl GraphClient {
     /// [`DraftState::Gone`] (#0063 review).
     pub async fn draft_state(&self, draft_id: &str) -> Result<DraftState> {
         let drafts_folder = self.drafts_folder_id().await?;
-        let mut url = reqwest::Url::parse(&format!("{GRAPH_BASE}/me/messages"))
-            .context("parsing the Graph messages URL")?;
-        url.path_segments_mut()
-            .map_err(|()| anyhow!("the Graph messages URL cannot take a path"))?
-            .push(draft_id);
-        url.set_query(Some("$select=isDraft,parentFolderId"));
         let resp = self
-            .client
-            .get(url)
-            .bearer_auth(self.bearer())
+            .draft_state_request(draft_id)?
             .send()
             .await
             .context("Failed to look the draft up")?;
@@ -3775,11 +3806,33 @@ impl GraphClient {
         Ok(folder.id)
     }
 
+    fn send_draft_request(&self, draft_id: &str) -> reqwest::RequestBuilder {
+        self.item_request(reqwest::Method::POST, message_action_url(draft_id, "send"))
+            .header(reqwest::header::CONTENT_LENGTH, "0")
+    }
+
+    fn discard_draft_request(&self, draft_id: &str) -> reqwest::RequestBuilder {
+        self.item_request(
+            reqwest::Method::POST,
+            message_action_url(draft_id, "permanentDelete"),
+        )
+        .header(reqwest::header::CONTENT_LENGTH, "0")
+    }
+
+    fn draft_state_request(&self, draft_id: &str) -> Result<reqwest::RequestBuilder> {
+        let mut url = reqwest::Url::parse(&format!("{GRAPH_BASE}/me/messages"))
+            .context("parsing the Graph messages URL")?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("the Graph messages URL cannot take a path"))?
+            .push(draft_id);
+        url.set_query(Some("$select=isDraft,parentFolderId"));
+        Ok(self.item_request(reqwest::Method::GET, url))
+    }
+
+    /// The GET behind [`GraphClient::server_copies`] and the Drafts folder id.
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: reqwest::Url) -> Result<T> {
         let resp = self
-            .client
-            .get(url)
-            .bearer_auth(self.bearer())
+            .item_request(reqwest::Method::GET, url)
             .send()
             .await
             .context("Failed to look the message up")?;
@@ -6632,6 +6685,60 @@ mod tests {
             )
         );
         assert!(url.as_str().contains("%2B"));
+    }
+
+    /// Every request of the staged send asks for immutable ids, so the draft
+    /// id the outbox records is the one `/send`, `permanentDelete` and the
+    /// lookups name and answer with, wherever the item has moved since
+    /// (#0063 review).
+    #[test]
+    fn every_staged_send_request_asks_for_immutable_ids() {
+        let client = GraphClient {
+            client: http_client().unwrap(),
+            access_token: "token".to_string(),
+            username: "me@example.com".to_string(),
+            top_folders: std::sync::Mutex::new(None),
+        };
+        let attachment = OutgoingAttachment {
+            name: "a.pdf".to_string(),
+            content_type: "application/pdf".to_string(),
+            bytes: vec![1, 2, 3],
+        };
+        let lookup = internet_id_url("me/messages", "<a@x.com>", "id").unwrap();
+        let requests = [
+            (
+                "create (MIME)",
+                client.create_draft_mime_request("TUlNRQ==".to_string()),
+            ),
+            (
+                "create (JSON)",
+                client.create_draft_json_request(&serde_json::json!({})),
+            ),
+            ("attach", client.attachment_post_request("d1", &attachment)),
+            (
+                "upload session",
+                client.upload_session_request("d1", &attachment),
+            ),
+            ("send", client.send_draft_request("d1")),
+            ("discard", client.discard_draft_request("d1")),
+            ("state", client.draft_state_request("d1").unwrap()),
+            ("lookup", client.item_request(reqwest::Method::GET, lookup)),
+        ];
+        for (what, request) in requests {
+            let request = request.build().unwrap();
+            assert_eq!(
+                request.headers().get("Prefer").map(|v| v.to_str().unwrap()),
+                Some(PREFER_IMMUTABLE_ID),
+                "{what}"
+            );
+            assert!(
+                request
+                    .headers()
+                    .contains_key(reqwest::header::AUTHORIZATION),
+                "{what}"
+            );
+        }
+        assert_eq!(PREFER_IMMUTABLE_ID, r#"IdType="ImmutableId""#);
     }
 
     #[test]

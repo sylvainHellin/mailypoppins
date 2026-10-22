@@ -36,8 +36,10 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 - Sending over Microsoft Graph: a message too large for one sendMail (a reply with a big attachment) is sent as a draft built from its own MIME, with the attachments uploaded separately, so it stays in its Outlook conversation; an interrupted Graph send is resumed on the next start against Drafts and Sent Items, never sent twice and leaving no draft behind (#0063).
-- Sending: a draft whose message the outbox sent after a restart or an `mp outbox retry` is retired like one sent at once, on SMTP and Graph accounts, so `mp send-approved` no longer sends it a second time; a draft whose last send went out is refused unless its file names that send (#0063).
-- `mp outbox discard` on a Microsoft Graph row also deletes the draft the row left on the server, and keeps the row when the draft cannot be deleted (#0063).
+- Sending: a draft whose message the outbox sent after a restart or an `mp outbox retry` is retired like one sent at once, on SMTP and Graph accounts, so `mp send-approved` no longer sends it a second time; a draft whose last send went out is refused unless its file names that send, and so is one whose last send may have gone out before it failed, until `mp outbox retry` or `mp outbox discard` settles that row (#0063).
+- Sending: a send whose start the outbox cannot record is held back instead of going out unrecorded, where a crash would have had the resume send it again (#0063).
+- Sending over Microsoft Graph: the staged send asks for immutable ids, so the resume still recognises a draft that `/send` has moved to the Outbox or Sent Items (#0063).
+- `mp outbox discard` on a Microsoft Graph row answers at once, offline too, and the next sync deletes the draft the row left on the server, never one already on its way out (#0063).
 - Sending: a forwarded `.eml` is labelled `7bit` or `8bit` as RFC 2046 requires and is never re-encoded; one with a line over 998 octets goes as `application/octet-stream` under the same name, and so does any 8bit one to an SMTP server that does not offer 8BITMIME, where the send retries once without anything going out twice (PERSO-174).
 - Install: the README, the website and the release notes install with `brew install sylvainHellin/mailypoppins/mailypoppins`, since Homebrew 6 refuses a short-name install from an untrusted tap.
 - Desktop: a pressed toggle shows as pressed in the dark theme (Theme, Reader, Editor colours, the reader's HTML and Text), and the Calendar view's Past events toggle shows when it is on.

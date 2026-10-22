@@ -113,7 +113,8 @@ impl Store {
                         "[store] {} is unusable ({err:#}); dropping and rebuilding",
                         path.display()
                     );
-                    let salvaged = rebuild::salvage_outbox(&path);
+                    let mut salvaged = rebuild::salvage_outbox(&path);
+                    salvaged.cleanups = rebuild::salvage_cleanups(&path);
                     // The file about to be created is a different file, so the
                     // "already checked this incarnation" note must go with the
                     // one being deleted.
@@ -136,10 +137,11 @@ impl Store {
             let report = rebuild::finish(&conn, &path, salvaged);
             let notice = rebuild::write_notice(&path, &reason, &report);
             warn!(
-                "[store] rebuilt {}: {} outbox row(s) carried, {} discarded, {} orphaned blob \
-                 file(s) swept ({} bytes){}",
+                "[store] rebuilt {}: {} outbox row(s) and {} Graph cleanup(s) carried, {} \
+                 discarded, {} orphaned blob file(s) swept ({} bytes){}",
                 path.display(),
                 report.carried.len(),
+                report.carried_cleanups,
                 report.lost.len(),
                 report.swept_files,
                 report.swept_bytes,
@@ -354,8 +356,9 @@ fn open_validated(path: &Path) -> Result<Connection> {
             path.display()
         );
     }
-    // Not fatal either: without the table the Graph attachment repair logs
-    // and skips its pass, and the next open tries again.
+    // Not fatal either: without its table the Graph attachment repair logs
+    // and skips its pass, and `mp outbox discard` of a Graph row refuses
+    // rather than leave a draft nothing names; the next open tries again.
     if let Err(e) = schema::ensure_additive_tables(&conn) {
         warn!(
             "[store] could not add an additive table to {}: {e:#}",

@@ -745,9 +745,14 @@ fn refuse_a_second_submission(
 /// A deliberate re-send stays possible. The documented one, after a partial
 /// delivery, is a file the send marked with the row's `Message-ID` whose
 /// `status:` the user set back to `approved`; `sent_as` is that frontmatter
-/// `message_id:`, and a file carrying the done row's id is let through. A
-/// `failed` newest row does not block either: it is a human's call, as at
-/// enqueue.
+/// `message_id:`, and a file carrying the done row's id is let through.
+///
+/// A `failed` newest row blocks only when its send was started
+/// (`submission_started_at` set): an ambiguous send, which may have reached
+/// its recipients, and which only the row can resend under the same
+/// `Message-ID` (`mp outbox retry`, which on Graph checks Sent Items first)
+/// or release (`mp outbox discard`). A row that failed before its send
+/// started is a human's call, as at enqueue, and does not block.
 pub fn refuse_a_finished_draft(
     store: &Store,
     account: &str,
@@ -756,7 +761,7 @@ pub fn refuse_a_finished_draft(
 ) -> Result<()> {
     let key = one_line(key);
     let mut stmt = store.conn().prepare(
-        "SELECT id, state, message_id, envelope FROM outbox
+        "SELECT id, state, message_id, envelope, submission_started_at FROM outbox
          WHERE account = ?1 ORDER BY id DESC",
     )?;
     let rows = stmt.query_map([account], |row| {
@@ -765,10 +770,11 @@ pub fn refuse_a_finished_draft(
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<i64>>(4)?,
         ))
     })?;
     for row in rows {
-        let (id, state, message_id, encoded) = row?;
+        let (id, state, message_id, encoded, started) = row?;
         let holds_the_draft = encoded
             .as_deref()
             .map(Envelope::decode)
@@ -781,6 +787,13 @@ pub fn refuse_a_finished_draft(
             return Err(anyhow::Error::new(AlreadyInFlight(format!(
                 "this draft was already sent as {message_id} (outbox row {id}); it is sent \
                  once, not twice. To send it again on purpose, give it a new id: line"
+            ))));
+        }
+        if state == OutboxState::Failed.as_str() && started.is_some() {
+            return Err(anyhow::Error::new(AlreadyInFlight(format!(
+                "this draft's last send ({message_id}, outbox row {id}) may have reached its \
+                 recipients; resend it as the same message with `mp outbox retry {id}`, or \
+                 drop that row with `mp outbox discard {id}` to send the draft anew"
             ))));
         }
         return Ok(());
@@ -1216,6 +1229,20 @@ fn finish_done(
 /// The one way a `failed` row's bytes are released: while the row is parked for
 /// inspection the reference is deliberately held, so this has to be explicit.
 pub fn discard(store: &Store, blobs: &BlobStore, id: i64) -> Result<()> {
+    discard_row(store, blobs, id, false)
+}
+
+/// [`discard`] for a Microsoft Graph row: a row that is not `done` may have
+/// left a draft on the server, so a [`ServerCleanup`] naming its `Message-ID`
+/// and recorded draft is committed with the delete (#0063 review). The next
+/// Graph resume removes those drafts and the cleanup
+/// ([`crate::send::graph_submit::clear_server_cleanups`]), so the discard
+/// needs no network and leaves nothing on the server that nothing names.
+pub fn discard_graph(store: &Store, blobs: &BlobStore, id: i64) -> Result<()> {
+    discard_row(store, blobs, id, true)
+}
+
+fn discard_row(store: &Store, blobs: &BlobStore, id: i64, graph: bool) -> Result<()> {
     let Some(row) = load(store, id)? else {
         return Ok(());
     };
@@ -1228,8 +1255,66 @@ pub fn discard(store: &Store, blobs: &BlobStore, id: i64) -> Result<()> {
     if row.state != OutboxState::Done {
         // A `done` row already released its reference.
         blobs.release(&tx, &row.raw_blob)?;
+        if graph {
+            tx.execute(
+                &format!(
+                    "INSERT INTO {} (account, message_id, graph_draft, created)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    crate::store::schema::GRAPH_CLEANUPS_TABLE
+                ),
+                rusqlite::params![
+                    row.account,
+                    row.message_id,
+                    row.envelope.as_ref().and_then(|e| e.graph_draft.clone()),
+                    unix_now()
+                ],
+            )
+            .context("recording the Graph cleanup of a discarded row")?;
+        }
     }
     tx.commit().context("committing the outbox discard")?;
+    Ok(())
+}
+
+/// The server drafts a discarded Graph row may have left, still to be removed
+/// (#0063 review): its `Message-ID` and the draft id it had recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerCleanup {
+    pub id: i64,
+    pub message_id: String,
+    pub graph_draft: Option<String>,
+}
+
+/// Every server cleanup [`discard_graph`] recorded for one account, oldest
+/// first.
+pub fn server_cleanups(store: &Store, account: &str) -> Result<Vec<ServerCleanup>> {
+    let mut stmt = store.conn().prepare(&format!(
+        "SELECT id, message_id, graph_draft FROM {} WHERE account = ?1 ORDER BY id",
+        crate::store::schema::GRAPH_CLEANUPS_TABLE
+    ))?;
+    let rows = stmt.query_map([account], |row| {
+        Ok(ServerCleanup {
+            id: row.get(0)?,
+            message_id: row.get(1)?,
+            graph_draft: row.get(2)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("reading the Graph cleanups")
+}
+
+/// Forget one server cleanup once its drafts are gone.
+pub fn clear_server_cleanup(store: &Store, id: i64) -> Result<()> {
+    store
+        .conn()
+        .execute(
+            &format!(
+                "DELETE FROM {} WHERE id = ?1",
+                crate::store::schema::GRAPH_CLEANUPS_TABLE
+            ),
+            [id],
+        )
+        .context("clearing a Graph cleanup")?;
     Ok(())
 }
 

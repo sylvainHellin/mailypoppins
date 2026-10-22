@@ -2707,16 +2707,18 @@ impl DurableSend {
     /// Called immediately before the submission, and never batched with
     /// anything else: the marker is what tells a later resume whether a
     /// `pending_send` row it finds was ever attempted (see
-    /// [`crate::outbox::sweep_pending_sends`]). A failure to write it is
-    /// logged, not propagated, because refusing to send over a bookkeeping
-    /// error would be a worse outcome than the ambiguity it protects against.
-    pub fn mark_started(&self) {
-        if let Err(e) = crate::outbox::mark_submission_started(&self.store, self.row_id) {
+    /// [`crate::outbox::sweep_pending_sends`]). An error means the submission
+    /// must not run (#0063 review): a message sent without its marker looks
+    /// to the resume like one never sent, and a crash before its verdict is
+    /// recorded would have the resume send it a second time.
+    pub fn mark_started(&self) -> Result<()> {
+        crate::outbox::mark_submission_started(&self.store, self.row_id).map_err(|e| {
             error!(
                 "[outbox] could not mark row {} as entering submission: {e:#}",
                 self.row_id
             );
-        }
+            e
+        })
     }
 
     /// Record what the submission did, committing the transition immediately.
@@ -2748,30 +2750,85 @@ pub async fn send_durably(
     account: &crate::config::AccountConfig,
     smtp_config: &SmtpConfig,
 ) -> Result<SendReport> {
-    let durable = match DurableSend::begin(account, built) {
-        Ok(d) => Some(d),
+    let durable = begin_durably(account, built)?;
+    submit_durably(durable, built, smtp_config, &RealSmtp).await
+}
+
+/// The SMTP submission of one built message, behind a trait so the durable
+/// path and the resume are tested against a counting fake rather than a
+/// server or the env-armed fake transport, which would leak into every test
+/// running beside them.
+pub(crate) trait SmtpSubmit {
+    fn submit(
+        &self,
+        built: &BuiltMessage,
+        smtp_config: &SmtpConfig,
+    ) -> impl std::future::Future<Output = Result<SendResult>>;
+}
+
+/// The real SMTP submission, [`submit`].
+pub(crate) struct RealSmtp;
+
+impl SmtpSubmit for RealSmtp {
+    fn submit(
+        &self,
+        built: &BuiltMessage,
+        smtp_config: &SmtpConfig,
+    ) -> impl std::future::Future<Output = Result<SendResult>> {
+        submit(built, smtp_config)
+    }
+}
+
+/// Commit the row a send is about to make, or say why the send goes ahead
+/// without one (`Ok(None)`) or must not go at all (`Err`).
+fn begin_durably(
+    account: &crate::config::AccountConfig,
+    built: &BuiltMessage,
+) -> Result<Option<DurableSend>> {
+    match DurableSend::begin(account, built) {
+        Ok(d) => Ok(Some(d)),
         // The admission gate is the one queue refusal that must stop the send:
         // sending anyway is precisely the double delivery it exists to prevent.
-        Err(e) if crate::outbox::is_already_in_flight(&e) => return Err(e),
+        Err(e) if crate::outbox::is_already_in_flight(&e) => Err(e),
         // A busy store is the gate not having been consulted yet, not a gate
         // that cannot exist: another process is writing this very outbox, and
         // sending anyway would walk straight past its admission gate. Told to
         // the user as the retryable condition it is (#0063 review).
         Err(e) if crate::outbox::is_store_busy(&e) => {
-            return Err(e.context("the outbox is busy with another send; try again"));
+            Err(e.context("the outbox is busy with another send; try again"))
         }
         Err(e) => {
             // A store that will not open must not stop the user sending mail;
             // it only costs the durability of this one submission.
             error!("[outbox] could not queue the message durably: {e:#}");
-            None
+            Ok(None)
         }
-    };
-
-    if let Some(durable) = durable.as_ref() {
-        durable.mark_started();
     }
-    let send_result = match submit(built, smtp_config).await {
+}
+
+/// Submit over SMTP with the row committed, record what happened, append.
+async fn submit_durably<S: SmtpSubmit>(
+    durable: Option<DurableSend>,
+    built: &BuiltMessage,
+    smtp_config: &SmtpConfig,
+    smtp: &S,
+) -> Result<SendReport> {
+    if let Some(durable) = durable.as_ref() {
+        if let Err(e) = durable.mark_started() {
+            // Nothing entered the transport, so the failure is a clean one:
+            // the row stays submittable, under backoff, for the resume.
+            let clean = crate::outbox::SubmitOutcome::CleanPreSubmission(format!(
+                "the send start could not be recorded: {e:#}"
+            ));
+            if let Err(e) = durable.record(&clean) {
+                error!("[outbox] could not record a pre-submission failure: {e:#}");
+            }
+            return Err(e.context(
+                "nothing was sent: the outbox could not record that the send was starting",
+            ));
+        }
+    }
+    let send_result = match smtp.submit(built, smtp_config).await {
         Ok(result) => result,
         Err(e) => {
             // The marker is already committed and nothing entered the
@@ -2946,11 +3003,11 @@ static SENDING: std::sync::LazyLock<std::sync::Mutex<HashSet<(String, String)>>>
 
 /// One draft's slot in [`SENDING`], released when the send returns however it
 /// returns.
-struct SendAdmission((String, String));
+pub(crate) struct SendAdmission((String, String));
 
 impl SendAdmission {
     /// `None` when a send for this draft is already running on this account.
-    fn claim(account: &str, key: &str) -> Option<Self> {
+    pub(crate) fn claim(account: &str, key: &str) -> Option<Self> {
         let slot = (account.to_string(), key.to_string());
         let mut sending = SENDING.lock().unwrap_or_else(|e| e.into_inner());
         sending.insert(slot.clone()).then(|| SendAdmission(slot))
@@ -2959,7 +3016,7 @@ impl SendAdmission {
     /// The slot a resume of one outbox row takes: the draft's own, so a
     /// resume and a send of the same draft never run together, and a slot of
     /// the row's own when it came from no draft.
-    fn claim_row(account: &str, row: &crate::outbox::OutboxRow) -> Option<Self> {
+    pub(crate) fn claim_row(account: &str, row: &crate::outbox::OutboxRow) -> Option<Self> {
         let key = row
             .envelope
             .as_ref()
@@ -3869,7 +3926,33 @@ async fn resubmit_pending(
     };
 
     let drafts = crate::config::drafts_dir(&account.name);
-    for row in sweep.resubmittable {
+    resubmit_rows(
+        store,
+        blobs,
+        &account.name,
+        &drafts,
+        sweep.resubmittable,
+        now,
+        &smtp_config,
+        &RealSmtp,
+    )
+    .await;
+}
+
+/// Submit the rows the sweep found never attempted, each under its send slot,
+/// and retire the draft file of every row that went out.
+#[allow(clippy::too_many_arguments)]
+async fn resubmit_rows<S: SmtpSubmit>(
+    store: &crate::store::Store,
+    blobs: &crate::store::BlobStore,
+    account: &str,
+    drafts: &std::path::Path,
+    rows: Vec<crate::outbox::OutboxRow>,
+    now: i64,
+    smtp_config: &SmtpConfig,
+    smtp: &S,
+) {
+    for row in rows {
         if row.updated + crate::outbox::backoff_secs(row.attempts) > now {
             // A previous clean failure (no transport, a rejected address) bumped
             // the counter; wait it out rather than hammer the server.
@@ -3878,35 +3961,36 @@ async fn resubmit_pending(
         // The slot `send_draft` takes for the same draft, so a send of it
         // started in this process meanwhile and this resubmission cannot both
         // run, and the file is retired before that send could read it again.
-        let Some(_claim) = SendAdmission::claim_row(&account.name, &row) else {
+        let Some(_claim) = SendAdmission::claim_row(account, &row) else {
             log::debug!(
                 "[outbox] row {} is being sent right now; leaving it",
                 row.id
             );
             continue;
         };
-        if let Err(e) = resubmit_row(store, blobs, &row, &smtp_config).await {
+        if let Err(e) = resubmit_row(store, blobs, &row, smtp_config, smtp).await {
             log::warn!("[outbox] could not resubmit row {}: {e:#}", row.id);
         }
-        retire_draft_of_row(&drafts, store, row.id);
+        retire_draft_of_row(drafts, store, row.id);
     }
 }
 
 /// The Graph half of [`resubmit_pending`]: every `pending_send` row of the
 /// account, settled or resubmitted by [`graph_submit::resume_rows`].
 ///
-/// The client is built only when there is a row, so a clean account costs no
-/// token refresh on its tick. Without a client the rows stay as they are, for
-/// the next pass.
+/// The client is built only when there is a row or a server cleanup
+/// `mp outbox discard` left, so a clean account costs no token refresh on its
+/// tick. Without a client the rows and the cleanups stay as they are, for the
+/// next pass.
 async fn resubmit_pending_graph(
     store: &crate::store::Store,
     blobs: &crate::store::BlobStore,
     account: &crate::config::AccountConfig,
     now: i64,
 ) {
-    match crate::outbox::pending_send_rows(store, &account.name) {
-        Ok(rows) if rows.is_empty() => return,
-        Ok(_) => {}
+    match graph_resume_owed(store, &account.name) {
+        Ok(false) => return,
+        Ok(true) => {}
         Err(e) => {
             log::warn!(
                 "[outbox] could not read the pending sends for {}: {e:#}",
@@ -3931,12 +4015,22 @@ async fn resubmit_pending_graph(
     }
 }
 
+/// Whether a Graph account has anything for the resume: a `pending_send` row,
+/// or a server cleanup `mp outbox discard` left.
+fn graph_resume_owed(store: &crate::store::Store, account: &str) -> Result<bool> {
+    Ok(
+        !crate::outbox::pending_send_rows(store, account)?.is_empty()
+            || !crate::outbox::server_cleanups(store, account)?.is_empty(),
+    )
+}
+
 /// Submit one never-attempted row, marker first.
-async fn resubmit_row(
+async fn resubmit_row<S: SmtpSubmit>(
     store: &crate::store::Store,
     blobs: &crate::store::BlobStore,
     row: &crate::outbox::OutboxRow,
     smtp_config: &SmtpConfig,
+    smtp: &S,
 ) -> Result<crate::outbox::OutboxState> {
     let Some(envelope) = row.envelope.clone().filter(|e| e.is_submittable()) else {
         // Without an envelope there is no honest way to address the message,
@@ -3985,7 +4079,7 @@ async fn resubmit_row(
         built.recipients.len()
     );
     crate::outbox::mark_submission_started(store, row.id)?;
-    let result = match submit(&built, smtp_config).await {
+    let result = match smtp.submit(&built, smtp_config).await {
         Ok(result) => result,
         Err(e) => {
             // Provably before the transport, as in `send_durably`: record it
@@ -4425,4 +4519,224 @@ async fn submit_through(
 /// (`AsyncSmtpConnection::send`), so it is a client error and not a reply.
 fn is_8bitmime_refusal(err: &lettre::transport::smtp::Error) -> bool {
     err.is_client() && err.to_string().contains("8BITMIME")
+}
+
+/// The SMTP resume and the durable send against a counting fake transport
+/// (#0063 review of b1952fc4): no server, and no env-armed fake transport
+/// leaking into the tests beside them.
+#[cfg(test)]
+mod smtp_durability_tests {
+    use super::*;
+    use crate::outbox::{self, OutboxState};
+    use crate::store::{BlobStore, Store};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ACCOUNT: &str = "smtp-acct";
+
+    /// Takes every message: one 250 per recipient.
+    #[derive(Default)]
+    struct CountingSmtp(AtomicUsize);
+
+    impl SmtpSubmit for CountingSmtp {
+        fn submit(
+            &self,
+            built: &BuiltMessage,
+            _smtp_config: &SmtpConfig,
+        ) -> impl std::future::Future<Output = Result<SendResult>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let results = built
+                .recipients
+                .iter()
+                .map(|(address, role)| RecipientResult {
+                    address: address.clone(),
+                    role: *role,
+                    success: true,
+                    error: None,
+                    verdict: RecipientVerdict::Delivered,
+                })
+                .collect();
+            std::future::ready(Ok(SendResult { results }))
+        }
+    }
+
+    impl CountingSmtp {
+        fn calls(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    fn smtp_config() -> SmtpConfig {
+        SmtpConfig {
+            host: "smtp.invalid".to_string(),
+            port: 465,
+            username: String::new(),
+            password: String::new(),
+            default_from: "me@example.com".to_string(),
+            accept_invalid_certs: false,
+            auth_method: AuthMethod::Password,
+        }
+    }
+
+    struct Outbox {
+        dir: tempfile::TempDir,
+        store: Store,
+        blobs: BlobStore,
+    }
+
+    impl Outbox {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+            let blobs = BlobStore::new(dir.path().join("blobs"));
+            Self { dir, store, blobs }
+        }
+
+        fn built(message_id: &str, draft_key: Option<&str>) -> BuiltMessage {
+            BuiltMessage {
+                raw: format!("Message-ID: {message_id}\r\nSubject: x\r\n\r\nbody\r\n").into_bytes(),
+                message_id: message_id.to_string(),
+                recipients: vec![("bob@example.com".to_string(), RecipientRole::To)],
+                from: "me@example.com".to_string(),
+                draft_key: draft_key.map(str::to_string),
+            }
+        }
+
+        fn enqueue(&self, built: &BuiltMessage) -> i64 {
+            outbox::enqueue(
+                &self.store,
+                &self.blobs,
+                ACCOUNT,
+                None,
+                &built.message_id,
+                &built.raw,
+                &outbox::Envelope {
+                    from: built.from.clone(),
+                    recipients: built.recipients.clone(),
+                    draft_key: built.draft_key.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        }
+
+        fn row(&self, id: i64) -> outbox::OutboxRow {
+            outbox::load(&self.store, id).unwrap().unwrap()
+        }
+
+        async fn resume(&self, smtp: &CountingSmtp) {
+            let rows = outbox::pending_send_rows(&self.store, ACCOUNT).unwrap();
+            resubmit_rows(
+                &self.store,
+                &self.blobs,
+                ACCOUNT,
+                &self.dir.path().join("drafts"),
+                rows,
+                outbox::unix_now(),
+                &smtp_config(),
+                smtp,
+            )
+            .await;
+        }
+    }
+
+    /// The SMTP resume takes the slot `send_draft` holds for the same draft,
+    /// so a row whose draft a send in this process is still working on is
+    /// left alone, untouched, and submitted once the slot is free.
+    #[tokio::test]
+    async fn the_smtp_resume_leaves_a_row_whose_draft_is_being_sent() {
+        let outbox = Outbox::new();
+        let built = Outbox::built("<held@example.com>", Some("id:x"));
+        let id = outbox.enqueue(&built);
+        let before = outbox.row(id);
+        let smtp = CountingSmtp::default();
+
+        let held = SendAdmission::claim(ACCOUNT, "id:x").expect("free");
+        outbox.resume(&smtp).await;
+        assert_eq!(smtp.calls(), 0, "a draft being sent is not resubmitted");
+        let row = outbox.row(id);
+        assert_eq!(row.state, OutboxState::PendingSend);
+        assert_eq!(row.attempts, before.attempts);
+        assert_eq!(row.updated, before.updated);
+        assert_eq!(row.submission_started_at, None);
+
+        drop(held);
+        outbox.resume(&smtp).await;
+        assert_eq!(smtp.calls(), 1);
+        assert_eq!(outbox.row(id).state, OutboxState::Done);
+    }
+
+    /// A Graph account with nothing queued but a discarded row's cleanup still
+    /// builds its client on the tick, so the cleanup is carried out.
+    #[test]
+    fn a_graph_cleanup_alone_is_work_for_the_resume() {
+        let outbox = Outbox::new();
+        assert!(!graph_resume_owed(&outbox.store, ACCOUNT).unwrap());
+        let id = outbox.enqueue(&Outbox::built("<cleanup@example.com>", None));
+        assert!(graph_resume_owed(&outbox.store, ACCOUNT).unwrap());
+        outbox::discard_graph(&outbox.store, &outbox.blobs, id).unwrap();
+        assert!(
+            graph_resume_owed(&outbox.store, ACCOUNT).unwrap(),
+            "the cleanup is owed"
+        );
+    }
+
+    /// A row built from no draft is claimed under a slot of its own, `row:<id>`.
+    #[tokio::test]
+    async fn the_smtp_resume_claims_a_draftless_row_by_its_id() {
+        let outbox = Outbox::new();
+        let built = Outbox::built("<draftless@example.com>", None);
+        let id = outbox.enqueue(&built);
+        let smtp = CountingSmtp::default();
+
+        let held = SendAdmission::claim(ACCOUNT, &format!("row:{id}")).expect("free");
+        outbox.resume(&smtp).await;
+        assert_eq!(smtp.calls(), 0);
+
+        drop(held);
+        outbox.resume(&smtp).await;
+        assert_eq!(smtp.calls(), 1);
+    }
+
+    /// A live SMTP send whose marker cannot be committed does not go out: the
+    /// failure is a clean one, and the row stays submittable with no marker.
+    #[tokio::test]
+    async fn an_smtp_send_whose_marker_did_not_commit_sends_nothing() {
+        let outbox = Outbox::new();
+        let built = Outbox::built("<unmarked-smtp@example.com>", Some("id:y"));
+        let row_id = outbox.enqueue(&built);
+        outbox
+            .store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER no_marker BEFORE UPDATE OF submission_started_at ON outbox
+                 WHEN NEW.submission_started_at IS NOT NULL
+                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            )
+            .unwrap();
+        let durable = DurableSend {
+            store: Store::open(outbox.dir.path().join("store.sqlite3")).unwrap(),
+            blobs: BlobStore::new(outbox.dir.path().join("blobs")),
+            account: crate::config::AccountConfig {
+                name: ACCOUNT.to_string(),
+                ..Default::default()
+            },
+            row_id,
+        };
+        let smtp = CountingSmtp::default();
+
+        let refused = submit_durably(Some(durable), &built, &smtp_config(), &smtp)
+            .await
+            .err()
+            .expect("the send is held back");
+
+        assert!(
+            refused.to_string().contains("nothing was sent"),
+            "{refused:#}"
+        );
+        assert_eq!(smtp.calls(), 0);
+        let row = outbox.row(row_id);
+        assert_eq!(row.state, OutboxState::PendingSend);
+        assert_eq!(row.submission_started_at, None);
+        assert_eq!(row.attempts, 1, "a clean failure, under backoff");
+    }
 }

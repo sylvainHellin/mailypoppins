@@ -30,10 +30,10 @@
 //! re-arms one row and then submits it over SMTP and APPENDs it to the Sent
 //! mailbox, which is an unbounded network round trip whose progress a GUI wants
 //! to watch. A command that took thirty seconds and reported one revision would
-//! be a lie about what it did. `send.outbox_discard` is one committed
-//! transaction against the local store, preceded on a Graph account by the
-//! removal of any draft the row left on the server (a few short requests, so
-//! still a command), and `send.outbox_list` reads.
+//! be a lie about what it did. `send.outbox_discard` really is one committed
+//! transaction against the local store (on a Graph account it also records
+//! the server cleanup the next resume carries out), and `send.outbox_list`
+//! reads.
 //!
 //! ## What stays in the client
 //!
@@ -192,20 +192,19 @@ impl Method for SendMethod {
                 }
                 Request::Discard {
                     account,
+                    graph,
                     row_id,
-                    secrets,
                 } => {
                     let revision = self.canonical.revision().get();
                     // In the result as well as in the envelope: a command
                     // reports the revision it moved to, and a client that
                     // renders one row's disappearance reads it beside the row.
-                    let name = account.name.clone();
-                    let mut result = discard(*account, row_id, secrets).await?;
+                    let mut result = discard(&account, graph, row_id)?;
                     result["revision"] = json!(revision);
                     Ok(Outcome::command(
                         result,
                         revision,
-                        vec![ResourceId::new(format!("outbox:{name}"))],
+                        vec![ResourceId::new(format!("outbox:{account}"))],
                     ))
                 }
                 Request::Operation { work, hold } => {
@@ -283,11 +282,12 @@ impl SendMethod {
 enum Request {
     List(OutboxListing),
     Discard {
-        /// The account: its name for the store, and on a Graph account what
-        /// the server drafts are discarded through.
-        account: Box<AccountConfig>,
+        /// The account's name, which is all a discard reads it for.
+        account: String,
+        /// A Microsoft Graph account, whose discarded rows leave a server
+        /// cleanup behind ([`outbox::discard_graph`]).
+        graph: bool,
         row_id: i64,
-        secrets: crate::secrets::SecretsBackendKind,
     },
     Operation {
         /// What the operation performs, now or when the window elapses.
@@ -378,8 +378,8 @@ fn plan(
         "send.outbox_list" => Ok(Request::List(listing(&account.name)?)),
         "send.outbox_discard" => Ok(Request::Discard {
             row_id: existing_row(&account.name, params)?.id,
-            account: Box::new(account),
-            secrets,
+            graph: account.auth_method == AuthMethod::Graph,
+            account: account.name,
         }),
         "send.outbox_retry" => {
             let row = existing_row(&account.name, params)?;
@@ -662,42 +662,44 @@ fn listed_row(row: &crate::outbox::OutboxRow) -> OutboxRow {
 
 /// `send.outbox_discard`: one row, one transaction, and the message-id in the
 /// answer so the client can name what it dropped without having listed first.
+fn discard(account: &str, graph: bool, row_id: i64) -> Result<Value, RpcError> {
+    let store = crate::store::Store::open(crate::config::store_path(account))
+        .map_err(|e| server_error(account, &e))?;
+    let blobs = crate::store::BlobStore::for_account(account);
+    discard_in(&store, &blobs, account, graph, row_id)
+}
+
+/// [`discard`] against an open store.
 ///
 /// On a Graph account a row that is not `done` may have left a draft on the
-/// server (#0063 review); it is discarded first, and a draft that will not go
-/// keeps the row, so nothing is left behind that no row names.
-async fn discard(
-    account: AccountConfig,
+/// server (#0063 review). The same transaction records a server cleanup
+/// naming it ([`outbox::discard_graph`]), which the next Graph resume carries
+/// out, so the discard needs no network, works offline, and leaves nothing on
+/// the server that nothing names. A row a send or a resume in this process is
+/// working on is refused: that send may be about to create the draft the
+/// cleanup is meant to find.
+pub(crate) fn discard_in(
+    store: &crate::store::Store,
+    blobs: &crate::store::BlobStore,
+    account: &str,
+    graph: bool,
     row_id: i64,
-    secrets: crate::secrets::SecretsBackendKind,
 ) -> Result<Value, RpcError> {
-    let name = account.name.clone();
-    let store = crate::store::Store::open(crate::config::store_path(&name))
-        .map_err(|e| server_error(&name, &e))?;
-    let blobs = crate::store::BlobStore::for_account(&name);
-    let Some(row) = outbox::load(&store, row_id).map_err(|e| server_error(&name, &e))? else {
+    let Some(row) = outbox::load(store, row_id).map_err(|e| server_error(account, &e))? else {
         return Err(invalid_params(format!("no outbox row {row_id}")));
     };
-    if account.auth_method == AuthMethod::Graph && row.state != OutboxState::Done {
-        super::open_secrets(&name, secrets)?;
-        let held = row.clone();
-        off_thread("the Graph draft discard", move || async move {
-            let config = crate::config::GraphConfig::load(&account)?;
-            let client = crate::graph::GraphClient::new_async(&config).await?;
-            crate::send::graph_submit::discard_row_drafts(&client, &held).await
-        })
-        .await
-        .and_then(|inner| inner)
-        .map_err(|e| {
-            server_error(
-                &name,
-                &e.context(format!(
-                    "outbox row {row_id} is kept: its Graph draft could not be discarded"
-                )),
-            )
-        })?;
-    }
-    outbox::discard(&store, &blobs, row_id).map_err(|e| server_error(&name, &e))?;
+    let Some(_slot) = crate::send::SendAdmission::claim_row(account, &row) else {
+        return Err(invalid_params(format!(
+            "outbox row {row_id} is being sent right now; discard it once that send has \
+             finished"
+        )));
+    };
+    let discarded = if graph {
+        outbox::discard_graph(store, blobs, row_id)
+    } else {
+        outbox::discard(store, blobs, row_id)
+    };
+    discarded.map_err(|e| server_error(account, &e))?;
     Ok(json!({
         "discarded": true,
         "row_id": row_id,
@@ -1141,6 +1143,123 @@ mod tests {
     /// A retry admitted while another is running holds a ticket, so the second
     /// call is queued behind the first instead of being refused on a state it
     /// is watching change.
+    /// One account's outbox in a tempdir, and a row in it for `draft_key`.
+    fn outbox_with_row(
+        draft_key: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::store::Store,
+        crate::store::BlobStore,
+        i64,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(dir.path().join("blobs"));
+        let id = outbox::enqueue(
+            &store,
+            &blobs,
+            "acct",
+            None,
+            "<discarded@example.com>",
+            b"Message-ID: <discarded@example.com>\r\n\r\nbody\r\n",
+            &outbox::Envelope {
+                from: "me@example.com".to_string(),
+                recipients: vec![(
+                    "bob@example.com".to_string(),
+                    crate::send::RecipientRole::To,
+                )],
+                draft_key: Some(draft_key.to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        (dir, store, blobs, id)
+    }
+
+    /// A Graph discard answers at once with the mailbox unreachable, and
+    /// leaves a cleanup the next resume that reaches it carries out: the
+    /// recorded draft goes, and so does the cleanup (#0063 review of
+    /// b1952fc4).
+    #[tokio::test]
+    async fn a_graph_discard_answers_offline_and_the_resume_removes_its_draft() {
+        use crate::send::graph_submit::fake::{FakeGraph, Fault, Step};
+        let (_dir, store, blobs, id) = outbox_with_row("id:discard-graph");
+        let graph = FakeGraph::default();
+        let draft = graph.plant_draft("<exchange-own@fake>");
+        outbox::set_graph_draft(&store, id, Some(&draft)).unwrap();
+        graph
+            .0
+            .lock()
+            .unwrap()
+            .faults
+            .push((Step::Lookup, Fault::Refuse));
+
+        let answer = discard_in(&store, &blobs, "acct", true, id).unwrap();
+        assert_eq!(answer["discarded"], true);
+        assert_eq!(answer["message_id"], "<discarded@example.com>");
+        assert!(
+            outbox::load(&store, id).unwrap().is_none(),
+            "the row is gone"
+        );
+        assert_eq!(
+            outbox::server_cleanups(&store, "acct").unwrap(),
+            vec![outbox::ServerCleanup {
+                id: 1,
+                message_id: "<discarded@example.com>".to_string(),
+                graph_draft: Some(draft.clone()),
+            }]
+        );
+
+        crate::send::graph_submit::clear_server_cleanups(&store, "acct", &graph).await;
+        assert_eq!(
+            graph.drafts(),
+            std::slice::from_ref(&draft),
+            "offline: kept"
+        );
+        assert_eq!(outbox::server_cleanups(&store, "acct").unwrap().len(), 1);
+
+        graph.0.lock().unwrap().faults.clear();
+        crate::send::graph_submit::clear_server_cleanups(&store, "acct", &graph).await;
+        assert!(graph.drafts().is_empty(), "no orphan draft");
+        assert!(outbox::server_cleanups(&store, "acct").unwrap().is_empty());
+    }
+
+    /// Only a Graph row that is not `done` leaves a cleanup: an SMTP row has
+    /// no server draft, and a `done` row's draft was sent.
+    #[test]
+    fn a_done_or_smtp_discard_leaves_no_cleanup() {
+        let (_dir, store, blobs, id) = outbox_with_row("id:discard-smtp");
+        discard_in(&store, &blobs, "acct", false, id).unwrap();
+        assert!(outbox::load(&store, id).unwrap().is_none());
+        assert!(outbox::server_cleanups(&store, "acct").unwrap().is_empty());
+
+        let (_dir, store, blobs, id) = outbox_with_row("id:discard-done");
+        outbox::record_submission(&store, &blobs, id, &outbox::SubmitOutcome::Accepted).unwrap();
+        assert_eq!(
+            outbox::load(&store, id).unwrap().unwrap().state,
+            OutboxState::Done
+        );
+        discard_in(&store, &blobs, "acct", true, id).unwrap();
+        assert!(outbox::server_cleanups(&store, "acct").unwrap().is_empty());
+    }
+
+    /// A row a send in this process is working on is not discarded: that send
+    /// may be about to create the draft the cleanup is meant to find.
+    #[test]
+    fn a_row_being_sent_is_not_discarded() {
+        let (_dir, store, blobs, id) = outbox_with_row("id:discard-busy");
+        let held = crate::send::SendAdmission::claim("acct", "id:discard-busy").unwrap();
+        let refused = discard_in(&store, &blobs, "acct", true, id).unwrap_err();
+        assert!(
+            refused.message.contains("being sent right now"),
+            "{}",
+            refused.message
+        );
+        assert!(outbox::load(&store, id).unwrap().is_some());
+        drop(held);
+        discard_in(&store, &blobs, "acct", true, id).unwrap();
+    }
+
     #[test]
     fn a_ticket_is_what_says_a_retry_is_running() {
         assert!(!retry_running("ticket-test"));

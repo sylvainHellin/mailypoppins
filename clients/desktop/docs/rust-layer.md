@@ -349,7 +349,8 @@ The daemon admits a `failed` row, which it re-arms, and a `sent_pending_append` 
 Its `OutboxRetryOutcome` is `{row_id, state, completed}`: the row's state after the drain, `null` when it finished and is gone, and how many Sent copies were filed on the way.
 A transport that fails again still settles `succeeded`, with `state: "failed"`.
 
-`outbox_discard` is `mp outbox discard`: `send.outbox_discard {account, row_id}` is one committed command, answered at once.
+`outbox_discard` is `mp outbox discard`: `send.outbox_discard {account, row_id}` is one committed command, answered at once, offline too.
+On a Microsoft Graph account the same transaction records a cleanup of the drafts the row may have left on the server, which the next outbox resume (startup or sync tick) carries out; a row a send in the daemon is working on right now is refused with `-32602`.
 
 ```ts
 type OutboxDiscarded = { discarded: boolean; row_id: number; message_id: string; revision: number };
@@ -1021,7 +1022,7 @@ It re-arms a `failed` row to `pending_send`, publishes the invalidation, and 0.4
 - `send_pending_append` leaves it `sent_pending_append`.
 
 The fixture files no Sent copy for a retried row, and it refuses a second retry of a re-armed row while the first runs, where the daemon admits it and settles on what it finds.
-`send.outbox_discard` removes the row, publishes the invalidation, and answers `{discarded, row_id, message_id, revision}`; a row it does not have is `-32602`.
+`send.outbox_discard` removes the row (on a Graph account, recording the server cleanup the next resume carries out), publishes the invalidation, and answers `{discarded, row_id, message_id, revision}`; a row it does not have, or one a send is working on, is `-32602`.
 
 `message.materialise_attachment` writes a small file naming the part, `message.materialise_html` the fixture's rendition of the row's HTML body, `message.materialise_markdown` a frontmatter of subject, sender and date over the row's body, named after the subject, and `message.materialise_eml` the row's envelope over its body as `<date>_<subject>.eml`, under `handles/<handle>/` in the run directory; a part the row does not have, a row with no HTML body and a row that does not exist are `-32602`.
 `message.release_handle` removes the handle's directory.

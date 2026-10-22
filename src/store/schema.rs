@@ -4,9 +4,10 @@
 //! front of IMAP, so a version mismatch is answered by dropping the file and
 //! rebuilding it (see [`super::Store::open`]). That is why every statement
 //! below is a plain `CREATE`, and why the only stateful thing in the file is
-//! the `schema_version` row in `meta`. The one table that is not a cache,
-//! `outbox`, is carried across that rebuild rather than recreated from a
-//! server that never had it; [`super::rebuild`] owns that half.
+//! the `schema_version` row in `meta`. The tables that are not a cache,
+//! `outbox` and the Graph cleanups its discard leaves ([`GRAPH_CLEANUPS_TABLE`]),
+//! are carried across that rebuild rather than recreated from a server that
+//! never had them; [`super::rebuild`] owns that half.
 
 use crate::parse::CALENDAR_SIDECAR_NAME;
 use anyhow::{Context, Result};
@@ -540,23 +541,49 @@ pub fn ensure_additive_columns(conn: &Connection) -> Result<()> {
 /// with it, and losing the table in a rebuild only costs one more look.
 pub const ATTACHMENT_REPAIRS_TABLE: &str = "attachment_repairs";
 
+/// Name of the table of server cleanups a discarded Graph outbox row left
+/// (#0063 review).
+///
+/// `mp outbox discard` deletes a Graph row at once, with no network, and
+/// commits one row here in the same transaction: the discarded message's
+/// `Message-ID` and the draft id the outbox row had recorded. The next Graph
+/// resume removes those drafts from the server and the row with them
+/// ([`crate::send::graph_submit::clear_server_cleanups`]). Not a cache: like
+/// the `outbox`, it is carried across a rebuild ([`super::rebuild`]), since
+/// losing a row costs an orphan draft on the server that nothing names.
+pub const GRAPH_CLEANUPS_TABLE: &str = "graph_cleanups";
+
 /// Every table created after [`SCHEMA_VERSION`] was last bumped, as
 /// `(name, CREATE statement)`.
 ///
 /// Kept out of [`REQUIRED_TABLES`] on purpose: a store opened by a build that
 /// predates a table is still a valid store, it simply gains the table here.
-fn additive_tables() -> [(&'static str, String); 1] {
-    [(
-        ATTACHMENT_REPAIRS_TABLE,
-        format!(
-            "CREATE TABLE IF NOT EXISTS {ATTACHMENT_REPAIRS_TABLE} (
-                message_row INTEGER PRIMARY KEY REFERENCES messages (id) ON DELETE CASCADE,
-                attempts    INTEGER NOT NULL DEFAULT 0,
-                retry_at    INTEGER,
-                last_error  TEXT
-            )"
+fn additive_tables() -> [(&'static str, String); 2] {
+    [
+        (
+            ATTACHMENT_REPAIRS_TABLE,
+            format!(
+                "CREATE TABLE IF NOT EXISTS {ATTACHMENT_REPAIRS_TABLE} (
+                    message_row INTEGER PRIMARY KEY REFERENCES messages (id) ON DELETE CASCADE,
+                    attempts    INTEGER NOT NULL DEFAULT 0,
+                    retry_at    INTEGER,
+                    last_error  TEXT
+                )"
+            ),
         ),
-    )]
+        (
+            GRAPH_CLEANUPS_TABLE,
+            format!(
+                "CREATE TABLE IF NOT EXISTS {GRAPH_CLEANUPS_TABLE} (
+                    id          INTEGER PRIMARY KEY,
+                    account     TEXT NOT NULL,
+                    message_id  TEXT NOT NULL,
+                    graph_draft TEXT,
+                    created     INTEGER
+                )"
+            ),
+        ),
+    ]
 }
 
 /// Create the tables added after [`SCHEMA_VERSION`] was last bumped, on the

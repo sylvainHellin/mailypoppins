@@ -30,11 +30,13 @@
 //! Graph id is committed to the row's envelope as soon as it exists. A resume
 //! ([`resume_rows`]) therefore finds every row in one of two shapes:
 //!
-//! - no marker: nothing can have gone out. Whatever an interrupted attempt left
-//!   in Drafts under our `Message-ID`, or under the recorded id, is discarded,
-//!   and the message is submitted afresh from the row's bytes. A copy already
-//!   in Sent Items (an operator `retry` of a message that did arrive) is
-//!   recorded as sent instead.
+//! - no marker: nothing can have gone out, since a send whose marker does not
+//!   commit is held back. Whatever an interrupted attempt left in Drafts under
+//!   our `Message-ID`, or under the recorded id, is discarded, and the message
+//!   is submitted afresh from the row's bytes. A copy already in Sent Items (an
+//!   operator `retry` of a message that did arrive) is recorded as sent
+//!   instead, and a recorded draft that is no longer a plain draft in Drafts
+//!   gets the row a marker and the reconciliation below rather than a resend.
 //! - a marker: the delivering request went out and its answer was lost. The
 //!   mailbox settles it: a sent copy means delivered; the recorded draft,
 //!   read by its id, still in Drafts [`SEND_SETTLE_SECS`] later means the
@@ -49,6 +51,12 @@
 //!
 //! A JSON draft gets an Exchange `Message-ID`, so it carries ours in
 //! [`crate::graph::MESSAGE_ID_PROPERTY`], which the lookups read as well.
+//! Every request asks for immutable ids
+//! ([`crate::graph::PREFER_IMMUTABLE_ID`]), so the recorded draft id still
+//! names the item once `/send` has moved it to the Outbox or Sent Items.
+//!
+//! `mp outbox discard` deletes a row at once and leaves a server cleanup;
+//! [`resume_rows`] carries it out first ([`clear_server_cleanups`]).
 //!
 //! A resume that records the message as sent also retires the draft file it
 //! was built from, as the live send does, so `mp send-approved` cannot send
@@ -446,12 +454,27 @@ impl GraphOutcome {
 /// this one send and nothing else.
 pub type RowRef<'a> = Option<(&'a Store, i64)>;
 
-fn mark_started(row: RowRef<'_>) {
-    if let Some((store, id)) = row {
-        if let Err(e) = outbox::mark_submission_started(store, id) {
+/// Commit the marker before a delivering request (#0063 review).
+///
+/// An error means the request must not go out: a send whose marker never
+/// landed looks to the resume like one that never started, and the resume
+/// would send it a second time. With no row (the store would not open) there
+/// is no resume to mislead, and the send goes ahead as it always did.
+fn mark_started(row: RowRef<'_>) -> Result<()> {
+    match row {
+        Some((store, id)) => outbox::mark_submission_started(store, id).map_err(|e| {
             log::error!("[outbox] could not mark row {id} as entering submission: {e:#}");
-        }
+            e
+        }),
+        None => Ok(()),
     }
+}
+
+/// The clean failure of a send held back because its marker did not commit.
+fn unmarked(e: &anyhow::Error) -> GraphOutcome {
+    GraphOutcome::Clean(format!(
+        "nothing was sent: the outbox could not record that the send was starting ({e:#})"
+    ))
 }
 
 fn note_draft(row: RowRef<'_>, draft: Option<&str>) {
@@ -491,7 +514,9 @@ fn delivering(result: Result<()>) -> GraphOutcome {
 pub async fn submit<A: GraphSendApi>(row: RowRef<'_>, plan: GraphPlan, api: &A) -> GraphOutcome {
     let (body, attachments) = match plan {
         GraphPlan::Mime(body) => {
-            mark_started(row);
+            if let Err(e) = mark_started(row) {
+                return unmarked(&e);
+            }
             return delivering(api.send_mime(body).await);
         }
         GraphPlan::Draft { body, attachments } => (body, attachments),
@@ -518,7 +543,10 @@ pub async fn submit<A: GraphSendApi>(row: RowRef<'_>, plan: GraphPlan, api: &A) 
         }
     }
 
-    mark_started(row);
+    if let Err(e) = mark_started(row) {
+        discard(row, api, &draft_id).await;
+        return unmarked(&e);
+    }
     let outcome = delivering(api.send_draft(&draft_id).await);
     if let GraphOutcome::Clean(_) = outcome {
         // Refused outright, so the draft is still a draft and nobody got it.
@@ -548,7 +576,9 @@ fn record(store: &Store, blobs: &BlobStore, id: i64, outcome: &GraphOutcome) -> 
 /// while the draft is being filled, and resubmitting it would send it twice.
 ///
 /// A row this pass records as sent has its draft file in `drafts` retired
-/// while its send slot is still held ([`super::retire_draft_of_row`]).
+/// while its send slot is still held ([`super::retire_draft_of_row`]). The
+/// server cleanups `mp outbox discard` left run first
+/// ([`clear_server_cleanups`]).
 pub async fn resume_rows<A: GraphSendApi>(
     store: &Store,
     blobs: &BlobStore,
@@ -557,6 +587,7 @@ pub async fn resume_rows<A: GraphSendApi>(
     now: i64,
     api: &A,
 ) {
+    clear_server_cleanups(store, account, api).await;
     let rows = match outbox::pending_send_rows(store, account) {
         Ok(rows) => rows,
         Err(e) => {
@@ -588,19 +619,24 @@ pub async fn resume_rows<A: GraphSendApi>(
     }
 }
 
-/// Remove from the server the drafts an outbox row left behind, before the
-/// row is discarded (#0063 review): every draft in Drafts under the row's
-/// `Message-ID`, and the recorded draft when it is still a draft in Drafts.
+/// Remove from the server the drafts a discarded outbox row left behind
+/// (#0063 review): every draft in Drafts under the row's `Message-ID`, and
+/// the recorded draft when it is still a draft in Drafts. Returns how many
+/// went.
 ///
 /// The recorded id is read before it is deleted, because an item that has
-/// left Drafts may be the message itself on its way out or already sent.
-/// Fails on the first draft that will not go, so the caller keeps the row
-/// that names it.
-pub async fn discard_row_drafts<A: GraphSendApi>(api: &A, row: &OutboxRow) -> Result<()> {
-    let mut drafts = api.server_copies(&row.message_id).await?.drafts;
-    if let Some(id) = row.envelope.as_ref().and_then(|e| e.graph_draft.clone()) {
-        if !drafts.contains(&id) && api.draft_state(&id).await? == DraftState::InDrafts {
-            drafts.push(id);
+/// left Drafts may be the message itself on its way out or already sent, and
+/// is never deleted. Fails on the first lookup or draft that will not go, so
+/// the caller keeps the cleanup that names it.
+pub async fn discard_row_drafts<A: GraphSendApi>(
+    api: &A,
+    message_id: &str,
+    recorded: Option<&str>,
+) -> Result<usize> {
+    let mut drafts = api.server_copies(message_id).await?.drafts;
+    if let Some(id) = recorded {
+        if !drafts.iter().any(|d| d == id) && api.draft_state(id).await? == DraftState::InDrafts {
+            drafts.push(id.to_string());
         }
     }
     for id in &drafts {
@@ -608,14 +644,45 @@ pub async fn discard_row_drafts<A: GraphSendApi>(api: &A, row: &OutboxRow) -> Re
             .await
             .with_context(|| format!("discarding the Graph draft {id}"))?;
     }
-    if !drafts.is_empty() {
-        info!(
-            "[outbox] discarded {} Graph draft(s) of row {}",
-            drafts.len(),
-            row.id
-        );
+    Ok(drafts.len())
+}
+
+/// Clear the server cleanups `mp outbox discard` recorded for this account
+/// (#0063 review): the drafts each discarded row left are removed and the
+/// cleanup is forgotten, or it stays for the next pass when the mailbox
+/// cannot be reached or a draft will not go.
+///
+/// Never returns an error, like [`resume_rows`], which runs it first.
+pub async fn clear_server_cleanups<A: GraphSendApi>(store: &Store, account: &str, api: &A) {
+    let cleanups = match outbox::server_cleanups(store, account) {
+        Ok(cleanups) => cleanups,
+        Err(e) => {
+            warn!("[outbox] could not read the Graph cleanups of {account}: {e:#}");
+            return;
+        }
+    };
+    for cleanup in cleanups {
+        match discard_row_drafts(api, &cleanup.message_id, cleanup.graph_draft.as_deref()).await {
+            Ok(removed) => {
+                if removed > 0 {
+                    info!(
+                        "[outbox] discarded {removed} Graph draft(s) of the discarded {}",
+                        cleanup.message_id
+                    );
+                }
+                if let Err(e) = outbox::clear_server_cleanup(store, cleanup.id) {
+                    warn!(
+                        "[outbox] could not forget the Graph cleanup of {}: {e:#}",
+                        cleanup.message_id
+                    );
+                }
+            }
+            Err(e) => warn!(
+                "[outbox] the Graph drafts of the discarded {} stay for the next pass: {e:#}",
+                cleanup.message_id
+            ),
+        }
     }
-    Ok(())
 }
 
 /// Discard drafts, best effort, logging what will not go.
@@ -659,6 +726,23 @@ async fn resubmit<A: GraphSendApi>(
         discard_all(api, &copies.drafts).await;
         outbox::record_submission(store, blobs, row.id, &SubmitOutcome::Accepted)?;
         return Ok(());
+    }
+
+    // No marker says nothing was sent, unless the marker is what failed to
+    // commit. A recorded draft that is no longer a plain draft in Drafts may
+    // be on its way out, so the row is handed to the reconciliation a marked
+    // row gets instead of having that draft discarded and a new one sent.
+    if let Some(id) = &envelope.graph_draft {
+        let state = api.draft_state(id).await?;
+        if state != DraftState::InDrafts {
+            warn!(
+                "[outbox] row {} ({}) has no send marker, but its draft {id} is {state:?}; \
+                 settling it against the mailbox instead of sending it again",
+                row.id, row.message_id
+            );
+            outbox::mark_submission_started(store, row.id)?;
+            return Ok(());
+        }
     }
 
     let mut stale = copies.drafts;
@@ -811,5 +895,7 @@ async fn settle_unconfirmed<A: GraphSendApi>(
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) mod fake;
 #[cfg(test)]
 mod tests;

@@ -109,7 +109,12 @@ A Graph submission is made of more than one request once the message is large, s
 - A resume that records a row as sent retires the draft file it was built from, on both transports, as the live send does: marked `sent` once anyone has the message, removed once every recipient took it.
   Before the review of 2026-10-22 a file whose live send had failed stayed `approved` after the resume sent it, and `mp send-approved` sent it a second time under a fresh `Message-ID`.
   As a second guard, `send_draft` refuses a draft whose newest outbox row is `done`, unless the file carries that row's `Message-ID` (a re-send after a partial delivery, re-approved by hand).
-- `mp outbox discard` on a Graph row that is not `done` first removes the drafts it left on the server (`permanentDelete`), and keeps the row when one will not go.
+- `mp outbox discard` on a Graph row that is not `done` deletes the row at once, offline too, and commits in the same transaction a server cleanup naming the row's `Message-ID` and recorded draft (`graph_cleanups`, carried across a store rebuild); the next Graph resume removes those drafts (`permanentDelete`) and then the cleanup, and never deletes an item that has left Drafts.
+  A row a send in the daemon is working on is refused, since that send may be about to create the draft the cleanup looks for.
+- A send whose marker does not commit does not go out (both transports): a MIME send is held back, a staged send discards its draft, and the row stays submittable with no marker.
+  As a second guard, a Graph row with no marker whose recorded draft is no longer a plain draft in Drafts is given a marker and settled against the mailbox instead of being resent.
+- `send_draft` refuses a draft whose newest row failed after its send started (`submission_started_at` set): that send may have arrived, so only `mp outbox retry <id>` (same `Message-ID`, and on Graph a Sent Items check first) or `mp outbox discard <id>` releases it.
+- Every request of the staged send carries `Prefer: IdType="ImmutableId"`: a default Outlook id changes when the item moves, so without it the recorded draft answered 404 once `/send` moved it to the Outbox or Sent Items, and the resume's "on its way" and "sent" readings could never happen.
 
 The large-message threading fix rides on the same staged send: a message too large for one MIME `sendMail` is a draft created from its own MIME with the largest attachments taken out, the attachments added one request each (a POST under 2.5 MB, an upload session above), then `send`.
 Chosen over `createReply` on the parent because it keeps our `Message-ID` (which the outbox, the local Sent copy and the resume's lookup all key on), needs no Graph id of the parent, and serves forwards and new messages too; `internetMessageHeaders` was never an option, as Graph takes only `x-` names there.
@@ -124,4 +129,6 @@ That draft carries ours in a `singleValueExtendedProperty` (`MESSAGE_ID_PROPERTY
 - Kill the daemon during the attachment upload of a large send, restart it: one message arrives, and Drafts holds nothing of it.
 - A JSON draft (a body over 3.5 MB): `POST /me/messages` accepts the `singleValueExtendedProperties` entry, the `$filter` on it finds the draft, and finds the Sent Items copy after `send`.
 - `GET /me/messages/{id}?$select=isDraft,parentFolderId` on a draft that was sent answers 404 or `isDraft` false, never a draft in Drafts.
-- `mp outbox discard` on a parked Graph row whose draft is still in Drafts leaves nothing in Drafts or in Deleted Items.
+- `mp outbox discard` on a parked Graph row whose draft is still in Drafts answers at once; after the next sync tick nothing of it is in Drafts or in Deleted Items.
+- With `Prefer: IdType="ImmutableId"`: the id `POST /me/messages` answers for a draft still reads the item (`isDraft` true, `parentFolderId` the Outbox) while `/send` is under way, and reads the Sent Items copy (`isDraft` false) once it is sent; `GET /me/mailFolders/drafts?$select=id` and the items' `parentFolderId` come back in the same form, so the Drafts comparison holds.
+- A row recorded by an earlier build holds a default (mutable) draft id; `permanentDelete` and `GET /me/messages/{id}` still accept it with the `Prefer` header set.
