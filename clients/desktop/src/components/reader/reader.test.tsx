@@ -294,7 +294,8 @@ describe("the reader's attachments", () => {
     await user.keyboard("to");
     const picker = await screen.findByRole("dialog", { name: "Open attachment" });
     const rows = ["ledger-q3.pdf", "notes.txt", "scan.png"].map((n) => within(picker).getByRole("button", { name: `Open ${n}` }));
-    const marked = () => rows.map((r) => r.hasAttribute("data-selected"));
+    // "true", the value shadcn's `data-selected:` variant matches; a bare attribute paints nothing.
+    const marked = () => rows.map((r) => r.getAttribute("data-selected") === "true");
     await waitFor(() => expect(rows[0]).toHaveFocus());
     expect(marked()).toEqual([true, false, false]);
     expect(rows[0]).toHaveAttribute("aria-current", "true");

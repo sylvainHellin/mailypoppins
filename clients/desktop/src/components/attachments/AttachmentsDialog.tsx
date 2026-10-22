@@ -94,8 +94,9 @@ function Size({ item }: { item: AttachmentItem }) {
  * The `to` picker: one button per attachment; the dialog closes on an open.
  * j/k and the arrows move the cursor and the focus between the parts,
  * skipping a missing one; Enter opens the cursor's part, q closes.
- * The cursor row carries `data-selected`, painted like the palette's
- * selected item, since `:focus-visible` alone matches only when the webview's
+ * The cursor row carries `data-selected="true"`, the value shadcn's
+ * `data-selected:` variant matches, painted like the palette's selected
+ * item, since `:focus-visible` alone matches only when the webview's
  * heuristic says so and left most rows unmarked.
  */
 function OpenList({
@@ -155,7 +156,7 @@ function OpenList({
             variant="ghost"
             ref={item.part === first ? firstRef : undefined}
             data-attachment={item.part}
-            data-selected={item.part === cursor ? "" : undefined}
+            data-selected={item.part === cursor ? "true" : undefined}
             aria-current={item.part === cursor ? "true" : undefined}
             disabled={item.missing}
             className="w-full justify-start gap-2 focus-visible:border-transparent focus-visible:ring-0 data-selected:bg-selection data-selected:text-selection-foreground data-selected:hover:bg-selection data-selected:hover:text-selection-foreground dark:data-selected:hover:bg-selection data-selected:*:[svg]:text-selection-foreground"
