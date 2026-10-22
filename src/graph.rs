@@ -889,6 +889,30 @@ fn folder_batch_body(segments: &[String]) -> serde_json::Value {
     serde_json::json!({ "requests": requests })
 }
 
+/// The hit folders `configured` already names by id, labelled, and the ids
+/// left to ask Graph about.
+fn known_folder_labels(
+    configured: &[(String, String)],
+    ids: &[String],
+) -> (HashMap<String, String>, Vec<String>) {
+    let by_id: HashMap<&str, &str> = configured
+        .iter()
+        .filter(|(_, segment)| looks_like_folder_id(segment))
+        .map(|(label, id)| (id.as_str(), label.as_str()))
+        .collect();
+    let mut labelled = HashMap::new();
+    let mut unknown = Vec::new();
+    for id in ids {
+        match by_id.get(id.as_str()) {
+            Some(label) => {
+                labelled.insert(id.clone(), label.to_string());
+            }
+            None => unknown.push(id.clone()),
+        }
+    }
+    (labelled, unknown)
+}
+
 /// The label of every hit folder, from the answers to
 /// [`GraphClient::folder_labels`]'s batch: `asked[i]` is the `i`-th path
 /// segment asked for with its configured label, `None` for a hit's folder id,
@@ -4481,21 +4505,32 @@ impl GraphClient {
     /// else the folder's display name (PERSO-175). An id Graph does not
     /// answer for is left out.
     ///
-    /// `configured` is the account's mailboxes as `(label, server name)`.
-    /// Each server name is resolved to the path segment
-    /// [`Self::folder_path`] gives it (a well-known name, an id, or the id
-    /// its display name was found under) and every segment, configured or
-    /// hit, is asked for its canonical id and display name in one `/$batch`
-    /// per [`BATCH_MAX_REQUESTS`]: a well-known name and a `parentFolderId`
-    /// only compare once both are ids.
+    /// `configured` is the account's folders as `(label, server name or
+    /// folder id)`. A hit whose folder id is one of them is labelled with no
+    /// request at all ([`known_folder_labels`]): the listing stores every
+    /// folder's id (#0141), so on an account that has been listed only a
+    /// folder created since needs asking. For the rest, each configured
+    /// server name is resolved to the path segment [`Self::folder_path`]
+    /// gives it (a well-known name, an id, or the id its display name was
+    /// found under) and every segment, configured or hit, is asked for its
+    /// canonical id and display name in one `/$batch` per
+    /// [`BATCH_MAX_REQUESTS`]: a well-known name and a `parentFolderId` only
+    /// compare once both are ids.
     pub async fn folder_labels(
         &self,
         configured: &[(String, String)],
         ids: &[String],
     ) -> Result<HashMap<String, String>> {
+        let (mut labelled, unknown) = known_folder_labels(configured, ids);
+        if unknown.is_empty() {
+            return Ok(labelled);
+        }
         let mut labels: Vec<Option<&str>> = Vec::new();
         let mut segments: Vec<String> = Vec::new();
         for (label, server_name) in configured {
+            if looks_like_folder_id(server_name) {
+                continue;
+            }
             match self.folder_path(server_name).await {
                 Ok(segment) => {
                     labels.push(Some(label));
@@ -4504,7 +4539,7 @@ impl GraphClient {
                 Err(e) => debug!("Graph folder '{server_name}' did not resolve: {e:#}"),
             }
         }
-        for id in ids {
+        for id in &unknown {
             labels.push(None);
             segments.push(id.clone());
         }
@@ -4512,7 +4547,6 @@ impl GraphClient {
             .into_iter()
             .zip(segments.iter().map(String::as_str))
             .collect();
-
         let mut answers: Vec<Option<GraphFolderName>> = Vec::with_capacity(segments.len());
         for chunk in segments.chunks(BATCH_MAX_REQUESTS) {
             let resp = self
@@ -4552,7 +4586,8 @@ impl GraphClient {
             }
             answers.extend(found);
         }
-        Ok(label_folders(&asked, &answers))
+        labelled.extend(label_folders(&asked, &answers));
+        Ok(labelled)
     }
 
     /// The second pass of a server search (PERSO-175): the messages behind
@@ -6473,6 +6508,25 @@ mod tests {
         );
         assert!(!labels.contains_key("AAMkGone"));
         assert_eq!(labels.len(), 3);
+    }
+
+    /// #0141 follow-up: a hit from a folder the listing holds the id of is
+    /// labelled with no request, an ignored child folder included, which is
+    /// what lets the hit be fetched under the name the listing knows it by.
+    /// Only an id the listing does not have is left to ask Graph about.
+    #[test]
+    fn a_hit_folder_the_listing_knows_is_labelled_without_a_request() {
+        let id = |tail: &str| format!("AAMkAGI2{}{tail}", "x".repeat(64));
+        let configured = vec![
+            ("Inbox".to_string(), id("inbox")),
+            ("Archive/2023".to_string(), id("old")),
+            ("Spesen".to_string(), "Spesen".to_string()),
+        ];
+        let (labelled, unknown) =
+            known_folder_labels(&configured, &[id("inbox"), id("old"), id("new")]);
+        assert_eq!(labelled[&id("inbox")], "Inbox");
+        assert_eq!(labelled[&id("old")], "Archive/2023");
+        assert_eq!(unknown, vec![id("new")]);
     }
 
     /// A search page carries Graph's `@odata.nextLink`, which the search

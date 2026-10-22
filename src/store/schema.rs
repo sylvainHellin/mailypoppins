@@ -611,7 +611,7 @@ pub fn ensure_additive_tables(conn: &Connection) -> Result<()> {
                 .with_context(|| format!("creating the {name} table"))?;
         }
     }
-    Ok(())
+    crate::catalogue::listing::ensure_columns(conn)
 }
 
 /// Clear the arrival marks of `0` a pre-fix build persisted, once per file.

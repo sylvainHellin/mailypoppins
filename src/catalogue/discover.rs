@@ -54,6 +54,7 @@ pub async fn imap_listing(imap: &ImapConfig) -> Result<Vec<ListedFolder>> {
             missing: false,
             total: None,
             unread: None,
+            id: None,
         })
         .collect())
 }
@@ -85,6 +86,7 @@ pub async fn graph_listing(client: &crate::graph::GraphClient) -> Result<Vec<Lis
             missing: false,
             total: Some(folder.total_item_count.max(0) as u64),
             unread: Some(folder.unread_item_count.max(0) as u64),
+            id: Some(folder.id),
         })
         .collect())
 }
@@ -104,10 +106,136 @@ pub async fn server_listing(account: &AccountConfig) -> Result<Vec<ListedFolder>
 /// Answers whether the set of folders changed, which is what tells the daemon
 /// to re-seed the sidebar. Creates the store if the account has none, so it
 /// is for a caller that is about to sync anyway.
+///
+/// A folder the server renamed ([`listing::Rename`], Graph only) takes its
+/// rows, its sync cursor and its delta token to the key the new name gives
+/// it ([`follow_rename`]), so the next pass carries on where the old name
+/// left off instead of downloading the folder again beside its stale rows.
 pub async fn refresh(account: &AccountConfig) -> Result<bool> {
     let fresh = server_listing(account).await?;
     let store = Store::open_account(&account.name)?;
-    listing::replace(&store, &account.name, &fresh)
+    let blobs = crate::store::BlobStore::for_account(&account.name);
+    record(&store, &blobs, account, &fresh)
+}
+
+/// [`refresh`] once the server has answered: record `fresh` and follow its
+/// renames.
+fn record(
+    store: &Store,
+    blobs: &crate::store::BlobStore,
+    account: &AccountConfig,
+    fresh: &[ListedFolder],
+) -> Result<bool> {
+    let before = Catalogue::from_store(store, account);
+    let recorded = listing::replace(store, &account.name, fresh)?;
+    if !recorded.renames.is_empty() {
+        let after = Catalogue::from_store(store, account);
+        for rename in &recorded.renames {
+            follow_rename(store, blobs, &account.name, &before, &after, rename)?;
+        }
+    }
+    Ok(recorded.changed)
+}
+
+/// Move a renamed folder's rows from the key its old name gave it to the key
+/// its new name gives it (#0141).
+///
+/// Nothing moves when the key does not change (a role folder is keyed by its
+/// role), when config pins the old name (the pin still names it, and moving
+/// its rows away would leave the pin empty; the log says to edit the config),
+/// or when the new name would shadow a role or the local Drafts.
+fn follow_rename(
+    store: &Store,
+    blobs: &crate::store::BlobStore,
+    account: &str,
+    before: &Catalogue,
+    after: &Catalogue,
+    rename: &listing::Rename,
+) -> Result<()> {
+    let listed_as = |catalogue: &'_ Catalogue, name: &str| -> Option<super::Folder> {
+        catalogue
+            .folders
+            .iter()
+            .find(|f| f.listed_as.as_deref() == Some(name))
+            .cloned()
+    };
+    let (Some(old), Some(new)) = (
+        listed_as(before, &rename.from),
+        listed_as(after, &rename.to),
+    ) else {
+        return Ok(());
+    };
+    if old.pin.is_some() {
+        log::warn!(
+            "[catalogue] {account}: the server renamed '{}' to '{}', which config.toml \
+             still pins under the old name; its rows stay until the config names the new one",
+            rename.from,
+            rename.to
+        );
+        return Ok(());
+    }
+    if old.key == new.key || (!new.keyed_by_role() && super::shadows_reserved_key(&new.key)) {
+        return Ok(());
+    }
+    let moved = rekey(store, blobs, account, &old.key, &new.key)?;
+    log::info!(
+        "[catalogue] {account}: '{}' was renamed '{}' on the server; {moved} row(s) follow it",
+        rename.from,
+        rename.to
+    );
+    Ok(())
+}
+
+/// Re-key every row of mailbox `from` to `to`: the messages, the sync cursor
+/// (and with it the delta token, which stays valid since the folder id did not
+/// change), the mailbox record and the ingest failures. A message `to`
+/// already holds stays there and its old copy is deleted. Answers how many
+/// messages moved.
+fn rekey(
+    store: &Store,
+    blobs: &crate::store::BlobStore,
+    account: &str,
+    from: &str,
+    to: &str,
+) -> Result<usize> {
+    use anyhow::Context;
+    let tx = store.immediate_transaction()?;
+    let moved = tx
+        .execute(
+            "UPDATE OR IGNORE messages SET mailbox = ?3 WHERE account = ?1 AND mailbox = ?2",
+            rusqlite::params![account, from, to],
+        )
+        .context("moving the renamed folder's messages")?;
+    for (table, column) in [
+        ("sync_cursors", "mailbox"),
+        ("ingest_failures", "mailbox"),
+        ("mailboxes", "name"),
+    ] {
+        tx.execute(
+            &format!(
+                "UPDATE OR IGNORE {table} SET {column} = ?3 WHERE account = ?1 AND {column} = ?2"
+            ),
+            rusqlite::params![account, from, to],
+        )
+        .with_context(|| format!("moving the renamed folder's {table}"))?;
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE account = ?1 AND {column} = ?2"),
+            rusqlite::params![account, from],
+        )
+        .with_context(|| format!("dropping the renamed folder's old {table}"))?;
+    }
+    let leftovers: Vec<i64> = {
+        let mut stmt = tx.prepare("SELECT id FROM messages WHERE account = ?1 AND mailbox = ?2")?;
+        let ids = stmt
+            .query_map(rusqlite::params![account, from], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        ids
+    };
+    tx.commit().context("committing the rename")?;
+    for id in leftovers {
+        crate::store::write::delete_row(store, blobs, id)?;
+    }
+    Ok(moved)
 }
 
 /// Read the server's counts of every `status-only` folder and record them.
@@ -146,4 +274,136 @@ pub async fn refresh_counts(account: &AccountConfig) -> Result<bool> {
     };
     let store = Store::open_account(&account.name)?;
     listing::record_counts(&store, &account.name, &counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::FetchedEmail;
+
+    fn email(id: &str) -> FetchedEmail {
+        FetchedEmail {
+            from: "a@example.com".to_string(),
+            to: "me@example.com".to_string(),
+            cc: None,
+            reply_to: None,
+            bcc: None,
+            subject: id.to_string(),
+            date: "Mon, 01 Jan 2026 09:00:00 +0000".to_string(),
+            body_text: "body".to_string(),
+            html_body: None,
+            has_attachments: false,
+            server_has_attachments: None,
+            message_id: Some(format!("<{id}@example.com>")),
+            attachments: Vec::new(),
+            flags: Default::default(),
+            calendar_ics: None,
+            event: None,
+        }
+    }
+
+    fn folder(name: &str, id: &str) -> ListedFolder {
+        ListedFolder {
+            id: Some(id.to_string()),
+            ..ListedFolder::named(name)
+        }
+    }
+
+    fn mailbox_of(store: &Store, id: &str) -> Vec<String> {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT mailbox FROM messages WHERE message_id IN (?1, '<' || ?1 || '>') ORDER BY mailbox")
+            .unwrap();
+        stmt.query_map([format!("{id}@example.com")], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap()
+    }
+
+    /// #0141 follow-up: a Graph folder renamed on the server keeps its rows
+    /// and its cursor under the new name, and a row the new key already holds
+    /// is not duplicated. A pinned folder's rows stay with the pin.
+    #[test]
+    fn a_renamed_graph_folder_takes_its_rows_and_cursor_along() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(dir.path().join("blobs"));
+        let account = AccountConfig {
+            name: "work".to_string(),
+            auth_method: AuthMethod::Graph,
+            ..Default::default()
+        };
+        let ingest = |mailbox: &str, id: &str, uid: i64| {
+            crate::ingest::ingest_message(
+                &store,
+                &blobs,
+                &crate::ingest::IngestInput {
+                    account: "work",
+                    mailbox,
+                    uid,
+                    email: &email(id),
+                    raw: None,
+                },
+            )
+            .unwrap();
+        };
+        record(
+            &store,
+            &blobs,
+            &account,
+            &[folder("Inbox", "AAA"), folder("Projects", "BBB")],
+        )
+        .unwrap();
+        ingest("Projects", "one", 1);
+        ingest("Projects", "two", 2);
+        ingest("Projekte", "two", 2);
+        crate::ingest::record_mailbox_cursor(
+            &store,
+            "work",
+            "Projects",
+            &crate::ingest::MailboxCursor {
+                deltalink: Some("token".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(record(
+            &store,
+            &blobs,
+            &account,
+            &[folder("Inbox", "AAA"), folder("Projekte", "BBB")]
+        )
+        .unwrap());
+        assert_eq!(mailbox_of(&store, "one"), vec!["Projekte"]);
+        assert_eq!(mailbox_of(&store, "two"), vec!["Projekte"], "no duplicate");
+        let cursor = crate::ingest::load_mailbox_cursor(&store, "work", "Projekte")
+            .unwrap()
+            .expect("the cursor moved");
+        assert_eq!(cursor.deltalink.as_deref(), Some("token"));
+        assert!(
+            crate::ingest::load_mailbox_cursor(&store, "work", "Projects")
+                .unwrap()
+                .is_none()
+        );
+
+        // A pinned extra keeps its rows under the name config gives it.
+        let pinned = AccountConfig {
+            mailboxes: crate::config::MailboxesConfig {
+                extra: Some(vec![crate::config::MailboxMapping {
+                    server: "Projekte".to_string(),
+                }]),
+                ..Default::default()
+            },
+            ..account.clone()
+        };
+        record(
+            &store,
+            &blobs,
+            &pinned,
+            &[folder("Inbox", "AAA"), folder("Archiv 2026", "BBB")],
+        )
+        .unwrap();
+        assert_eq!(mailbox_of(&store, "one"), vec!["Projekte"]);
+    }
 }

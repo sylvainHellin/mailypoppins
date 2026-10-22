@@ -233,6 +233,9 @@ pub struct Folder {
     /// English well-known name (`Sent Items`) for a localized mailbox's folder
     /// (`Gesendete Elemente`).
     pub listed_as: Option<String>,
+    /// Graph's id of the folder, from the listing; `None` on IMAP and for a
+    /// pin the server never listed.
+    pub id: Option<String>,
     /// What a person reads: the role's label, or the decoded server name.
     pub label: String,
     /// The store key its rows carry and a selector names.
@@ -334,6 +337,7 @@ impl Catalogue {
             .map(|f| Folder {
                 server: f.name.clone(),
                 listed_as: Some(f.name.clone()),
+                id: f.id.clone(),
                 label: decode_label(account, &f.name),
                 key: f.name.clone(),
                 role: None,
@@ -356,6 +360,7 @@ impl Catalogue {
                 folders.push(Folder {
                     server: server.clone(),
                     listed_as: None,
+                    id: None,
                     label: decode_label(account, server),
                     key: server.clone(),
                     role: None,

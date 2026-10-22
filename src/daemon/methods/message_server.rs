@@ -189,6 +189,9 @@ struct FetchRequest {
     /// The server mailbox the round trip selects, which falls back to the
     /// mailbox key for an account that maps it to no other name.
     server_name: String,
+    /// The Graph folder id the listing holds for that folder, which the
+    /// lookup addresses it by instead of resolving its name (#0141).
+    folder_id: Option<String>,
     message_id: String,
     secrets: crate::secrets::SecretsBackendKind,
 }
@@ -213,6 +216,11 @@ fn fetch_request(
     let wanted = string_param(params, "mailbox")?;
     let catalogue = crate::catalogue::Catalogue::load(account);
     let (mailbox, server_name) = fetch_storage(account, &catalogue, &wanted)?;
+    let folder_id = catalogue
+        .folders
+        .iter()
+        .find(|f| f.key == mailbox && !f.missing)
+        .and_then(|f| f.id.clone());
     let message_id = string_param(params, "message_id")?;
     if message_id.trim().is_empty() {
         return Err(invalid_params(
@@ -223,6 +231,7 @@ fn fetch_request(
         account: account.clone(),
         mailbox,
         server_name,
+        folder_id,
         message_id,
         secrets: snapshot.config.secrets_backend,
     })
@@ -403,7 +412,10 @@ async fn imap_fetch(request: &FetchRequest) -> anyhow::Result<Fetched> {
 /// it would root its own thread and the next sync's re-thread would list its
 /// whole folder to settle this one row.
 async fn graph_fetch(request: &FetchRequest) -> anyhow::Result<Fetched> {
-    let server_name = request.server_name.clone();
+    let folder = request
+        .folder_id
+        .clone()
+        .unwrap_or_else(|| request.server_name.clone());
     let config = crate::config::GraphConfig::load(&request.account)?;
     let client = crate::graph::GraphClient::new_async(&config).await?;
     let query = crate::search::Query {
@@ -411,7 +423,7 @@ async fn graph_fetch(request: &FetchRequest) -> anyhow::Result<Fetched> {
         ..Default::default()
     };
     let found = client
-        .search_messages_threaded(&query, Some(&server_name), 1)
+        .search_messages_threaded(&query, Some(&folder), 1)
         .await?;
     let hit = found
         .into_iter()
@@ -499,13 +511,15 @@ fn ingest_into(
 // ---------------------------------------------------------------------------
 
 /// One mailbox a search runs against: the store key a caller may name it by,
-/// the sidebar label the hits are reported under, and the server name the
-/// session selects.
+/// the sidebar label the hits are reported under, the server name the
+/// session selects, and on Graph the folder id the listing holds, which a
+/// search addresses the folder by without looking its name up (#0141).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchTarget {
     slug: String,
     label: String,
     server_name: String,
+    folder_id: Option<String>,
 }
 
 impl SearchTarget {
@@ -541,9 +555,9 @@ struct SearchRequest {
     query: String,
     parsed: crate::search::Query,
     targets: Targets,
-    /// The account's mailboxes that have a server name, as `(label, server
-    /// name)`: what a hit found across every folder is listed under when its
-    /// folder is one of them.
+    /// Every folder a hit found across every folder may come from, as
+    /// `(label, folder id or server name)`: the sidebar's under their labels,
+    /// the ignored ones under their server names ([`hit_labels`]).
     configured: Vec<(String, String)>,
     /// The number of hits the whole search answers with (PERSO-175).
     limit: usize,
@@ -592,6 +606,11 @@ fn search_request(
                     slug: row.slug.clone(),
                     label: row.label.clone(),
                     server_name,
+                    folder_id: catalogue
+                        .folders
+                        .iter()
+                        .find(|f| f.key == row.slug && !f.missing)
+                        .and_then(|f| f.id.clone()),
                 })
             })
             .collect()
@@ -637,14 +656,46 @@ fn search_request(
         query,
         parsed,
         targets,
-        configured: configured
-            .into_iter()
-            .map(|target| (target.label, target.server_name))
-            .collect(),
+        configured: hit_labels(&catalogue, &configured),
         limit,
         excluded,
         secrets: snapshot.config.secrets_backend,
     })
+}
+
+/// What a hit of a search across every folder is listed under, per folder:
+/// a sidebar mailbox under its label, any other folder the listing holds
+/// (an ignored one, such as an Exchange child folder an override drops)
+/// under its server name, which is what [`fetch_storage`] finds it by. Each
+/// is keyed by its Graph folder id when the listing has one, so labelling a
+/// hit costs no request ([`crate::graph::GraphClient::folder_labels`]).
+fn hit_labels(
+    catalogue: &crate::catalogue::Catalogue,
+    sidebar: &[SearchTarget],
+) -> Vec<(String, String)> {
+    let mut labels: Vec<(String, String)> = sidebar
+        .iter()
+        .map(|target| {
+            (
+                target.label.clone(),
+                target
+                    .folder_id
+                    .clone()
+                    .unwrap_or_else(|| target.server_name.clone()),
+            )
+        })
+        .collect();
+    labels.extend(
+        catalogue
+            .folders
+            .iter()
+            .filter(|f| !f.listed() && !f.missing)
+            .filter_map(|f| {
+                let id = f.id.clone()?;
+                Some((f.listed_as.clone().unwrap_or_else(|| f.server.clone()), id))
+            }),
+    );
+    labels
 }
 
 /// What a search runs against, from its `mailboxes` param, the query's own
@@ -708,6 +759,7 @@ fn pick_target(configured: &[SearchTarget], wanted: &str) -> Result<SearchTarget
                 slug: wanted.to_string(),
                 label: wanted.to_string(),
                 server_name: wanted.to_string(),
+                folder_id: None,
             }),
     )
 }
@@ -743,7 +795,14 @@ fn scopes(request: &SearchRequest) -> Vec<Scope> {
     match &request.targets {
         Targets::Mailboxes(targets) => targets
             .iter()
-            .map(|target| Scope::Mailbox(target.server_name.clone()))
+            .map(|target| {
+                Scope::Mailbox(
+                    target
+                        .folder_id
+                        .clone()
+                        .unwrap_or_else(|| target.server_name.clone()),
+                )
+            })
             .collect(),
         Targets::EveryFolder => vec![Scope::EveryFolder],
     }
@@ -1125,11 +1184,13 @@ mod tests {
                 slug: "inbox".to_string(),
                 label: "Inbox".to_string(),
                 server_name: "INBOX".to_string(),
+                folder_id: None,
             },
             SearchTarget {
                 slug: "Team/Reports".to_string(),
                 label: "Extra".to_string(),
                 server_name: "Team/Reports".to_string(),
+                folder_id: None,
             },
         ];
         assert_eq!(
@@ -1146,10 +1207,55 @@ mod tests {
                 slug: "Spesen".to_string(),
                 label: "Spesen".to_string(),
                 server_name: "Spesen".to_string(),
+                folder_id: None,
             }
         );
         let refused = pick_target(&configured, " ").expect_err("an empty name");
         assert_eq!(refused.code, -32602);
+    }
+
+    /// #0141 follow-up: a hit across every folder is labelled from the
+    /// listing's folder ids, the ignored folders included under their server
+    /// names, which is what `message.fetch` resolves a hit's mailbox by.
+    #[test]
+    fn every_listed_graph_folder_labels_its_hits_by_id() {
+        use crate::catalogue::{Catalogue, ListedFolder};
+        let account = AccountConfig {
+            auth_method: AuthMethod::Graph,
+            ..Default::default()
+        };
+        let with_id = |name: &str, id: &str, attributes: &[&str]| ListedFolder {
+            id: Some(id.to_string()),
+            ..ListedFolder::named(name).with_attributes(attributes)
+        };
+        let catalogue = Catalogue::resolve(
+            &account,
+            &[
+                with_id("Posteingang", "ID-INBOX", &["\\Inbox"]),
+                with_id("Calendar", "ID-CAL", &[]),
+                with_id("Calendar/Birthdays", "ID-BDAY", &[]),
+            ],
+        );
+        let sidebar = vec![SearchTarget {
+            slug: "inbox".to_string(),
+            label: "Inbox".to_string(),
+            server_name: "Posteingang".to_string(),
+            folder_id: Some("ID-INBOX".to_string()),
+        }];
+        let labels = hit_labels(&catalogue, &sidebar);
+        assert_eq!(
+            labels,
+            vec![
+                ("Inbox".to_string(), "ID-INBOX".to_string()),
+                ("Calendar".to_string(), "ID-CAL".to_string()),
+                ("Calendar/Birthdays".to_string(), "ID-BDAY".to_string()),
+            ]
+        );
+        let (key, server) = fetch_storage(&account, &catalogue, "Calendar/Birthdays").unwrap();
+        assert_eq!(
+            (key.as_str(), server.as_str()),
+            ("Calendar/Birthdays", "Calendar/Birthdays")
+        );
     }
 
     /// #0141: a pinned extra called `Trash` is searched when it is named, not
@@ -1162,11 +1268,13 @@ mod tests {
                 slug: "Deleted Items".to_string(),
                 label: "Trash".to_string(),
                 server_name: "Deleted Items".to_string(),
+                folder_id: None,
             },
             SearchTarget {
                 slug: "Trash".to_string(),
                 label: "Trash".to_string(),
                 server_name: "Trash".to_string(),
+                folder_id: None,
             },
         ];
         assert_eq!(
@@ -1192,6 +1300,7 @@ mod tests {
             slug: name.to_string(),
             label: name.to_string(),
             server_name: name.to_string(),
+            folder_id: None,
         };
         let configured = vec![target("Inbox"), target("Archive"), target("Labels/AI")];
         let default_targets = configured[..2].to_vec();

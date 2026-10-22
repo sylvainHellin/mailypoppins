@@ -3,14 +3,16 @@
 //!
 //! Raw facts only: the name `SELECT` takes, the hierarchy delimiter, the
 //! `LIST` attributes, the counts a `STATUS` or Graph's folder list reported,
-//! and whether the last listing still had the folder. Role and policy are
+//! Graph's folder id, and whether the last listing still had the folder. Role and policy are
 //! derived at read time by [`super::Catalogue::resolve`], so a config edit
 //! takes effect without asking the server again.
 //!
 //! A folder the server stops listing is not deleted: it is marked `missing`,
 //! its rows stay in the store, and it is neither synced nor shown until the
-//! server lists it again (pitfall 9). The table is additive, a cache like the
-//! rest of the store: a rebuild loses it and the next tick lists again.
+//! server lists it again (pitfall 9). A Graph folder that comes back under
+//! another name with the same id is a rename ([`Rename`]): its row moves to
+//! the new name instead. The table is additive, a cache like the rest of the
+//! store: a rebuild loses it and the next tick lists again.
 
 use anyhow::{Context, Result};
 use rusqlite::params;
@@ -32,9 +34,27 @@ pub fn create_sql() -> String {
             missing    INTEGER NOT NULL DEFAULT 0,
             total      INTEGER,
             unread     INTEGER,
+            folder_id  TEXT,
             PRIMARY KEY (account, name)
         )"
     )
+}
+
+/// Add the columns a table created by an earlier build of this table lacks.
+/// A read when nothing is missing, as [`create_sql`]'s caller requires.
+pub fn ensure_columns(conn: &rusqlite::Connection) -> Result<()> {
+    let has_folder_id: bool = conn
+        .query_row(
+            &format!("SELECT EXISTS (SELECT 1 FROM pragma_table_info('{TABLE}') WHERE name = 'folder_id')"),
+            [],
+            |row| row.get(0),
+        )
+        .context("reading the folder list's columns")?;
+    if !has_folder_id {
+        conn.execute_batch(&format!("ALTER TABLE {TABLE} ADD COLUMN folder_id TEXT"))
+            .context("adding the folder id column")?;
+    }
+    Ok(())
 }
 
 /// One folder as the server listed it.
@@ -53,6 +73,18 @@ pub struct ListedFolder {
     pub total: Option<u64>,
     /// The server's unread count, when one was asked for.
     pub unread: Option<u64>,
+    /// Graph's id of the folder, which a search and a fetch address it by
+    /// without looking its name up, and which tells a rename from a new
+    /// folder; `None` on IMAP.
+    pub id: Option<String>,
+}
+
+/// A folder the server renamed: listed before as `from`, now as `to`, with
+/// the same Graph folder id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rename {
+    pub from: String,
+    pub to: String,
 }
 
 impl ListedFolder {
@@ -79,7 +111,7 @@ pub fn load(store: &Store, account: &str) -> Result<Vec<ListedFolder>> {
     let mut stmt = store
         .conn()
         .prepare(&format!(
-            "SELECT name, delimiter, attributes, missing, total, unread FROM {TABLE}
+            "SELECT name, delimiter, attributes, missing, total, unread, folder_id FROM {TABLE}
              WHERE account = ?1 ORDER BY missing, position"
         ))
         .context("reading the folder list")?;
@@ -92,31 +124,59 @@ pub fn load(store: &Store, account: &str) -> Result<Vec<ListedFolder>> {
             missing: row.get::<_, i64>(3)? != 0,
             total: row.get::<_, Option<i64>>(4)?.map(|n| n.max(0) as u64),
             unread: row.get::<_, Option<i64>>(5)?.map(|n| n.max(0) as u64),
+            id: row.get(6)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .context("reading the folder list")
 }
 
+/// What recording a listing changed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Recorded {
+    /// Whether the set of present folders changed, which is what tells the
+    /// daemon the sidebar hierarchy has to be re-seeded.
+    pub changed: bool,
+    /// The folders the server renamed since the last listing.
+    pub renames: Vec<Rename>,
+}
+
 /// Record a fresh listing, keeping the counts a folder had unless the listing
 /// carries its own, and marking every folder it no longer has as missing.
 ///
-/// Answers whether the set of present folders changed, which is what tells
-/// the daemon the sidebar hierarchy has to be re-seeded.
-pub fn replace(store: &Store, account: &str, fresh: &[ListedFolder]) -> Result<bool> {
+/// A folder listed under a new name with the Graph id a folder the listing no
+/// longer has carried is that folder renamed: its row takes the new name,
+/// and the rename is answered so the caller can move the folder's messages
+/// with it ([`super::discover::refresh`]).
+pub fn replace(store: &Store, account: &str, fresh: &[ListedFolder]) -> Result<Recorded> {
     let previous = load(store, account)?;
+    let renames = renames(&previous, fresh);
     let tx = store.immediate_transaction()?;
+    for rename in &renames {
+        tx.execute(
+            &format!("UPDATE {TABLE} SET name = ?3 WHERE account = ?1 AND name = ?2"),
+            params![account, rename.from, rename.to],
+        )
+        .with_context(|| format!("renaming the folder {} to {}", rename.from, rename.to))?;
+    }
     for (position, folder) in fresh.iter().enumerate() {
-        let before = previous.iter().find(|p| p.name == folder.name);
+        let before = previous.iter().find(|p| {
+            p.name == folder.name
+                || renames
+                    .iter()
+                    .any(|r| r.from == p.name && r.to == folder.name)
+        });
         tx.execute(
             &format!(
                 "INSERT INTO {TABLE}
-                     (account, name, delimiter, attributes, position, missing, total, unread)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)
+                     (account, name, delimiter, attributes, position, missing, total, unread,
+                      folder_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)
                  ON CONFLICT (account, name) DO UPDATE SET
                      delimiter = excluded.delimiter, attributes = excluded.attributes,
                      position = excluded.position, missing = 0,
-                     total = excluded.total, unread = excluded.unread"
+                     total = excluded.total, unread = excluded.unread,
+                     folder_id = excluded.folder_id"
             ),
             params![
                 account,
@@ -132,13 +192,16 @@ pub fn replace(store: &Store, account: &str, fresh: &[ListedFolder]) -> Result<b
                     .unread
                     .or(before.and_then(|b| b.unread))
                     .map(|n| n as i64),
+                folder.id,
             ],
         )
         .with_context(|| format!("recording the folder {}", folder.name))?;
     }
     let mut gone = 0usize;
     for folder in &previous {
-        if fresh.iter().any(|f| f.name == folder.name) {
+        if fresh.iter().any(|f| f.name == folder.name)
+            || renames.iter().any(|r| r.from == folder.name)
+        {
             continue;
         }
         tx.execute(
@@ -161,7 +224,32 @@ pub fn replace(store: &Store, account: &str, fresh: &[ListedFolder]) -> Result<b
         names.sort();
         names
     };
-    Ok(present(&previous) != present(fresh))
+    Ok(Recorded {
+        changed: present(&previous) != present(fresh),
+        renames,
+    })
+}
+
+/// The folders of `fresh` that are a folder of `previous` under a new name:
+/// a name the store does not hold, carrying the Graph id of a folder `fresh`
+/// no longer lists. IMAP has no folder id, so it never renames here.
+fn renames(previous: &[ListedFolder], fresh: &[ListedFolder]) -> Vec<Rename> {
+    fresh
+        .iter()
+        .filter_map(|folder| {
+            let id = folder.id.as_deref()?;
+            if previous.iter().any(|p| p.name == folder.name) {
+                return None;
+            }
+            let old = previous
+                .iter()
+                .find(|p| p.id.as_deref() == Some(id) && !fresh.iter().any(|f| f.name == p.name))?;
+            Some(Rename {
+                from: old.name.clone(),
+                to: folder.name.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Record the server's counts for the folders a `STATUS` (or a Graph folder
@@ -205,12 +293,12 @@ mod tests {
             ListedFolder::named("Junk Email").with_attributes(&["\\Junk"]),
         ];
         assert!(
-            replace(&store, "tum", &first).unwrap(),
+            replace(&store, "tum", &first).unwrap().changed,
             "a first listing is a change"
         );
         assert_eq!(load(&store, "tum").unwrap(), first);
         assert!(
-            !replace(&store, "tum", &first).unwrap(),
+            !replace(&store, "tum", &first).unwrap().changed,
             "the same listing is not"
         );
 
@@ -221,7 +309,7 @@ mod tests {
             ListedFolder::named("INBOX"),
             ListedFolder::named("Junk Email").with_attributes(&["\\Junk"]),
         ];
-        assert!(replace(&store, "tum", &second).unwrap());
+        assert!(replace(&store, "tum", &second).unwrap().changed);
         let listed = load(&store, "tum").unwrap();
         assert_eq!(listed.len(), 3, "nothing is deleted");
         let spesen = listed.iter().find(|f| f.name == "Spesen").unwrap();
@@ -234,9 +322,66 @@ mod tests {
         );
 
         assert!(
-            replace(&store, "tum", &first).unwrap(),
+            replace(&store, "tum", &first).unwrap().changed,
             "a folder that came back"
         );
         assert!(!load(&store, "tum").unwrap().iter().any(|f| f.missing));
+    }
+
+    /// A Graph folder listed under a new name with the id of one the listing
+    /// lost is that folder renamed: one row, under the new name, with its
+    /// counts, and no missing leftover.
+    #[test]
+    fn a_graph_folder_with_a_known_id_under_a_new_name_is_a_rename() {
+        let (_dir, store) = store();
+        let with_id = |name: &str, id: &str| ListedFolder {
+            id: Some(id.to_string()),
+            total: Some(4),
+            unread: Some(1),
+            ..ListedFolder::named(name)
+        };
+        replace(
+            &store,
+            "work",
+            &[with_id("Inbox", "AAA"), with_id("Projects", "BBB")],
+        )
+        .unwrap();
+        let renamed = [
+            with_id("Inbox", "AAA"),
+            ListedFolder {
+                total: None,
+                unread: None,
+                ..with_id("Projekte", "BBB")
+            },
+            with_id("New", "CCC"),
+        ];
+        let recorded = replace(&store, "work", &renamed).unwrap();
+        assert_eq!(
+            recorded.renames,
+            vec![Rename {
+                from: "Projects".to_string(),
+                to: "Projekte".to_string()
+            }]
+        );
+        assert!(recorded.changed);
+        let listed = load(&store, "work").unwrap();
+        assert_eq!(listed.len(), 3, "no missing Projects row");
+        let projekte = listed.iter().find(|f| f.name == "Projekte").unwrap();
+        assert_eq!(
+            (projekte.total, projekte.id.as_deref()),
+            (Some(4), Some("BBB"))
+        );
+
+        assert!(
+            replace(&store, "work", &renamed)
+                .unwrap()
+                .renames
+                .is_empty(),
+            "a second listing renames nothing"
+        );
+        assert!(
+            renames(&[ListedFolder::named("Old")], &[ListedFolder::named("New")]).is_empty(),
+            "an IMAP folder carries no id to tell a rename by"
+        );
     }
 }
