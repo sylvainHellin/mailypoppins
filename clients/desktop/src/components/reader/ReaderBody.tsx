@@ -27,6 +27,7 @@ import { cachedText, isQuoted, rememberText } from "@/app/readerMode";
 import { readerKey } from "@/app/state";
 import * as cmd from "@/lib/commands";
 import { asGuiError, type GuiError } from "@/lib/gui-types";
+import { readerSrc } from "@/lib/tauri";
 
 /** The exact sandbox the reader frame runs in; a test pins it, and that it never holds `allow-same-origin`. */
 export const READER_SANDBOX = "allow-popups allow-scripts";
@@ -137,7 +138,7 @@ function ReaderFrame({ htmlUrl, subject, label = "Message body" }: ReaderBodyPro
       )}
       <iframe
         data-slot="reader-frame"
-        src={htmlUrl}
+        src={readerSrc(htmlUrl)}
         sandbox={READER_SANDBOX}
         referrerPolicy="no-referrer"
         title={`${label}: ${subject ?? "(no subject)"}`}

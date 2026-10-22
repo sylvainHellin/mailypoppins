@@ -57,11 +57,18 @@ The `fixture_simulate` command, answered only in fixture mode, takes these:
 
 [docs/rust-layer.md](docs/rust-layer.md), "Fixture mode", has the details.
 
+```sh
+pnpm preview:browser                    # the frontend in a browser at http://localhost:1430, on the tests' fixture backend
+```
+
+The browser preview needs no Rust build and serves the same fixtures through the TypeScript backend the tests use; `window.mpFixture` drives it.
+[docs/browser-preview.md](docs/browser-preview.md) has what it covers, how it stays out of the bundle, and how to drive it.
+
 ## Test and build
 
 ```sh
 pnpm test                               # vitest under jsdom, the Tauri API mocked from the fixtures
-pnpm build                              # type-check and bundle the frontend
+pnpm build                              # type-check and bundle the frontend, then check that no fixture code is in it
 pnpm gen:keymap                         # regenerate src/keymap/keymap.json from `mp dump-keys --json` (MP_BIN or `mp` on PATH)
 pnpm gen:types                          # regenerate src/protocol/generated/ from the Rust types with ts-rs (runs cargo)
 pnpm contrast                           # rewrite the contrast table in docs/design-tokens.md
@@ -117,3 +124,4 @@ The daemon's own variables (`MAILYPOPPINS_DATA_DIR`, `MAILYPOPPINS_CONFIG_DIR`, 
 - [docs/shell.md](docs/shell.md): the frontend modules, the model, mutations and pending state, the dialogs and the activity area, compose and send, the outbox, the views, contacts, the calendar, signatures, the activity log, settings, updates, the account wizard, first run, the layouts, focus order and keys.
 - [docs/reader.md](docs/reader.md): the reader frame, the toolbar and its Copy menu, invitations, the attachments, the browser rendition, the draft preview and server-only hits, refused links, and the navigation guard's verification with its manual steps.
 - [docs/design-tokens.md](docs/design-tokens.md): the semantic tokens and their contrast table.
+- [docs/browser-preview.md](docs/browser-preview.md): the frontend in a browser on the fixture backend, for checks before a real window.

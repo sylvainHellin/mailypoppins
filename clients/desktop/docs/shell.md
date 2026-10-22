@@ -414,7 +414,7 @@ Every editor's child also gets `MP_DESKTOP_THEME=dark` or `light`, so a user's o
 The embedded editor of M5 (#0130) runs a terminal editor such as `nvim` on a PTY of the Rust layer and draws it with xterm.js in `components/compose/TerminalPane.tsx`.
 `TerminalHost.tsx` mounts one for each embedded session (see "The embedded editor").
 
-`src/lib/terminal.ts` puts the four commands and the output Channel behind a `TerminalBridge` (`spawn`, `write`, `resize`, `kill`), so the pane and its tests never touch Tauri; `src/test/terminal-fake.ts` is the fake.
+`src/lib/terminal.ts` puts the four commands and the output Channel behind a `TerminalBridge` (`spawn`, `write`, `resize`, `kill`), so the pane and its tests never touch Tauri; `src/fixture/terminal-bridge.ts` is the fixture backend's.
 The Channel carries output as raw bytes (an `ArrayBuffer` per frame) that go to `term.write` undecoded, and its last frame is `{ "exit": { "code", "signal" } }`.
 
 - On mount the pane fits the terminal to its container, spawns the editor at that size, and focuses it once the spawn answers.
@@ -1132,6 +1132,7 @@ An open dialog hides it, and a prefix re-renders the popup alone (`src/keymap/pe
 
 ## Tests
 
-`pnpm test` runs vitest under jsdom with `src/lib/tauri.ts` replaced by `src/test/tauri-mock.ts`, which answers every command from `fixtures/*.json` and lets a test push GuiEvents and menu items.
-`pnpm build` type-checks and bundles; `pnpm contrast` rewrites the contrast table.
+`pnpm test` runs vitest under jsdom with `src/lib/tauri.ts` replaced by `src/test/tauri-mock.ts`, the fixture backend (`src/fixture/backend.ts`) with its entry points wrapped in `vi.fn`, which answers every command from `fixtures/*.json` and lets a test push GuiEvents and menu items.
+`pnpm preview:browser` runs the same backend behind the frontend in a browser ([browser-preview.md](browser-preview.md)).
+`pnpm build` type-checks, bundles and checks that the bundle holds no fixture code; `pnpm contrast` rewrites the contrast table.
 A fixture run of the real app is `MP_DESKTOP_FIXTURE=1 pnpm tauri dev`, and `MP_DESKTOP_WINDOW_SIZE=950x800` or `600x820` opens it in the medium or narrow layout.

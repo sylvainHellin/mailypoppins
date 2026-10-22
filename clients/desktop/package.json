@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "preview:browser": "vite --mode browser",
+    "build": "tsc && vite build && node scripts/check-bundle.ts",
     "prebuild": "node scripts/gen-keymap.ts --if-bin",
     "preview": "vite preview",
     "tauri": "tauri",

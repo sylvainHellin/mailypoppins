@@ -90,7 +90,7 @@ Recommendation: the four presets, with 5 s pressed by default; today's 1.2 s is 
 ### 3. Where the setting is stored
 
 Option one is `Prefs` in localStorage: `useKeymap` reads it synchronously from `state.prefs`, the whole change is TypeScript that `pnpm test` covers on either machine, and the account card's Conversation view switch is already a Settings control stored there; it is lost if the webview's storage is cleared, and it cannot be edited by hand.
-Option two is a `desktop.json` key through `setting_get|set`, the home of the Theme, Reader and Editor colours rows; it survives a storage reset and is readable on disk, but it needs a new `SettingKey` variant and its `check` in `src-tauri/src/settings.rs`, a regenerated `SettingKey.ts` (`pnpm gen:types`, Mac only), the `tauri-mock.ts` key, and an asynchronous load during which the default applies.
+Option two is a `desktop.json` key through `setting_get|set`, the home of the Theme, Reader and Editor colours rows; it survives a storage reset and is readable on disk, but it needs a new `SettingKey` variant and its `check` in `src-tauri/src/settings.rs`, a regenerated `SettingKey.ts` (`pnpm gen:types`, Mac only), the fixture backend's key (`src/fixture/backend.ts`), and an asynchronous load during which the default applies.
 Option three is a `config.toml` key served through `config.get`; it would configure a timeout the TUI does not have, a client does not write `config.toml` (the rule stated in `clients/tui/src/prefs.rs`), and the Settings view shows `config.toml` read-only.
 Recommendation: option one, `Prefs`; moving it to `desktop.json` later is a contained change if the storage reset ever bites.
 

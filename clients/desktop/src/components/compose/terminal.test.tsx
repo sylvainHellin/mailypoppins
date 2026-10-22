@@ -7,7 +7,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RESIZE_DEBOUNCE_MS, TerminalPane, terminalKeyFilter, type TerminalPaneProps } from "@/components/compose/TerminalPane";
 import { inTerminal, isEditable } from "@/keymap/useKeymap";
-import { FakeBridge } from "@/test/terminal-fake";
+import { FakeBridge } from "@/fixture/terminal-bridge";
 import { renderApp, shellReady } from "@/test/render";
 
 const xt = vi.hoisted(() => {

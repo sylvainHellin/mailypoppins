@@ -1,9 +1,10 @@
-// A TerminalBridge for tests (src/lib/terminal.ts): it records every call,
-// answers `spawn` with a fresh session id, and lets a test push output and the
-// exit frame through the same router the real Channel uses.
+// The fixture backend's TerminalBridge (src/lib/terminal.ts): it records every
+// call, answers `spawn` with a fresh session id, and lets its driver push
+// output and the exit frame through the same router the real Channel uses.
 
-// Only types from `@/lib/terminal`, which imports `@/lib/tauri`: the mock of
-// that module holds a FakeBridge, and a value import here would be a cycle.
+// Only types from `@/lib/terminal`, which imports `@/lib/tauri`: the fixture
+// backend that stands in for that module holds a FakeBridge, and a value
+// import here would be a cycle.
 import type { TerminalBridge, TerminalSpawn, TerminalStarted } from "@/lib/terminal";
 import { frameRouter, type TerminalExit, type TerminalSink } from "@/lib/terminal-frames";
 

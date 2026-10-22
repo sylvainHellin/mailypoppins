@@ -1,7 +1,7 @@
 // The embedded editor's PTY, as the webview sees it (ticket 0130, U2): the four
 // Tauri commands of `src-tauri/src/terminal.rs` and the output Channel,
 // behind `TerminalBridge`, so `TerminalPane.tsx` and its tests never touch
-// Tauri. `tauriBridge` is the real one; `src/test/terminal-fake.ts` the fake.
+// Tauri. `tauriBridge` is the real one; `src/fixture/terminal-bridge.ts` the fixture backend's.
 //
 // The Channel carries raw output frames as `ArrayBuffer` (the Rust layer's
 // `InvokeResponseBody::Raw`), and its last frame is the JSON object
