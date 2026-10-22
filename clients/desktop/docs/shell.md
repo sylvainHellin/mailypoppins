@@ -957,6 +957,7 @@ The app updates itself from GitHub Releases (#0139, stage 1); the Rust layer che
 ### The check
 
 A manual check says how it went on the notice line: "mailypoppins 0.11.0 is up to date", "Update 0.12.0 available" (and the card and the sidebar entry appear), the gate's sentence for a build that never checks ("Updates are off in a development build.", logged as a warning), or "The update check failed: <why>", logged as an error.
+After an install and Later it says "mailypoppins 0.12.0 is installed; restart to finish the update" (`restart_pending`), and the update stays `installed` without a card, or becomes so in a window that had lost it.
 A silent check says nothing, and its failure is only in the Rust layer's log; Settings runs none, it reads `update_status`.
 A check that answers `up_to_date` forgets an update that is available or failed, as the Rust layer drops the one it held; a download or an installed update stays.
 

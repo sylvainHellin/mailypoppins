@@ -56,6 +56,8 @@ export function checkNotice(check: UpdateCheck): { text: string; level: "info" |
       return { text: check.reason ?? "Updates are off in this build.", level: "warning" };
     case "failed":
       return { text: `The update check failed: ${check.reason ?? "no reason given"}`, level: "error" };
+    case "restart_pending":
+      return { text: `mailypoppins ${check.version ?? ""} is installed; restart to finish the update`, level: "info" };
   }
 }
 
@@ -75,8 +77,10 @@ export function updateFound(s: AppState, found: UpdateAvailable): AppState {
 
 /**
  * A check answered. It records the running version and the last check for
- * Settings; `available` makes the update known and `up_to_date` forgets one
- * that is not downloading or installed, since the Rust layer dropped it too.
+ * Settings; `available` makes the update known, `restart_pending` (an
+ * update this run installed, after Later) keeps or seeds it as installed
+ * without a card, and `up_to_date` forgets one that is not downloading or
+ * installed, since the Rust layer dropped it too.
  * A manual check says how it went on the notice line; a silent one says
  * nothing, and its failure is only in the Rust layer's log.
  */
@@ -90,6 +94,8 @@ export function updateChecked(s: AppState, check: UpdateCheck, manual: boolean):
       const { version, notes, date } = next.update;
       next = { ...next, update: { kind: "available", version, notes, date } };
     }
+  } else if (check.state === "restart_pending" && check.version) {
+    if (next.update.kind !== "installed") next = { ...next, update: { kind: "installed", version: check.version, asking: false } };
   } else if (check.state === "up_to_date" && installable(next.update)) {
     next = { ...next, update: { kind: "idle" } };
   }

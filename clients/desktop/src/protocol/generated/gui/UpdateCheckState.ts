@@ -3,4 +3,4 @@
 /**
  * How a check went.
  */
-export type UpdateCheckState = "up_to_date" | "available" | "disabled" | "failed";
+export type UpdateCheckState = "up_to_date" | "available" | "disabled" | "failed" | "restart_pending";

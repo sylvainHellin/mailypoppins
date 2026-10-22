@@ -10,7 +10,8 @@ export type UpdateCheck = { state: UpdateCheckState,
  */
 current: string,
 /**
- * The newer version, when `available`.
+ * The newer version, when `available`; the installed one, when
+ * `restart_pending`.
  */
 version?: string,
 /**

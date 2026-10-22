@@ -84,6 +84,9 @@ pub enum UpdateCheckState {
     Disabled,
     /// The check did not complete; `reason` says why.
     Failed,
+    /// This run installed `version`, and a restart runs it; nothing is
+    /// fetched until then.
+    RestartPending,
 }
 
 /// What `update_check` answers.
@@ -94,7 +97,8 @@ pub struct UpdateCheck {
     pub state: UpdateCheckState,
     /// The running app's version, the one the updater compares against.
     pub current: String,
-    /// The newer version, when `available`.
+    /// The newer version, when `available`; the installed one, when
+    /// `restart_pending`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub version: Option<String>,
@@ -221,6 +225,18 @@ impl UpdateCheck {
         }
     }
 
+    fn restart_pending(
+        current: String,
+        installed: String,
+        last_check: Option<String>,
+    ) -> UpdateCheck {
+        UpdateCheck {
+            version: Some(installed),
+            last_check,
+            ..UpdateCheck::bare(UpdateCheckState::RestartPending, current)
+        }
+    }
+
     fn available(current: String, found: &Update, last_check: Option<String>) -> UpdateCheck {
         UpdateCheck {
             version: Some(found.version.clone()),
@@ -250,6 +266,17 @@ pub fn should_check(now: OffsetDateTime, last_check: Option<OffsetDateTime>, man
             elapsed.is_negative() || elapsed >= COOLDOWN
         }
     }
+}
+
+/// What a check answers without reaching the endpoint once this run has
+/// installed an update: the restart is what is left to do, since the bundle
+/// on disk is already the new one (a manual check after Later).
+pub fn answer_before_fetch(
+    current: &str,
+    installed: Option<String>,
+    last_check: Option<String>,
+) -> Option<UpdateCheck> {
+    installed.map(|v| UpdateCheck::restart_pending(current.to_string(), v, last_check))
 }
 
 /// Whether a found version is shown: always on `manual`, else unless it is
@@ -499,6 +526,11 @@ async fn run_check(app: &AppHandle, manual: bool) -> UpdateCheck {
     let updates = app.state::<Updates>().inner().clone();
     let file = record_file(app);
     let record = file.as_deref().map(read_record).unwrap_or_default();
+    if let Some(pending) =
+        answer_before_fetch(&current, updates.installed(), record.last_check.clone())
+    {
+        return pending;
+    }
     let skipped = record.skipped_version.as_deref();
     let now = OffsetDateTime::now_utc();
     let last = record.last_check.as_deref().and_then(parse_time);
@@ -815,6 +847,23 @@ mod tests {
         assert!(!should_offer("0.12.0", Some("v0.12.0"), false));
         assert!(should_offer("0.12.0", Some("0.12.0"), true));
         assert!(should_offer("0.13.0", Some("0.12.0"), false));
+    }
+
+    /// After an install and Later, a manual check says the restart is
+    /// pending instead of offering the installed version again.
+    #[test]
+    fn a_check_after_an_install_answers_restart_pending_without_fetching() {
+        let last = Some("2026-10-05T12:00:00Z".to_string());
+        assert_eq!(answer_before_fetch("0.11.0", None, last.clone()), None);
+        let pending = answer_before_fetch("0.11.0", Some("0.12.0".into()), last)
+            .expect("a restart is pending");
+        assert_eq!(
+            serde_json::to_value(&pending).unwrap(),
+            json!({
+                "state": "restart_pending", "current": "0.11.0", "version": "0.12.0",
+                "last_check": "2026-10-05T12:00:00Z",
+            })
+        );
     }
 
     #[test]

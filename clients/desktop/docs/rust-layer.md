@@ -871,10 +871,11 @@ A write goes to a temporary file in the same directory and is renamed over the o
 ### Commands and events
 
 ```ts
-type UpdateCheckState = "up_to_date" | "available" | "disabled" | "failed";
+type UpdateCheckState = "up_to_date" | "available" | "disabled" | "failed" | "restart_pending";
 type UpdateCheck = {
   state: UpdateCheckState; current: string;
-  version?: string; notes?: string; date?: string; // when available; date is RFC 3339
+  version?: string;                                // the newer version when available, the installed one when restart_pending
+  notes?: string; date?: string;                   // when available; date is RFC 3339
   reason?: string;                                 // when disabled or failed, a sentence to show
   last_check?: string;                             // RFC 3339, absent before the first successful check
 };
@@ -896,6 +897,7 @@ type UpdateProgress =
 With `manual: true` it always asks the endpoint and offers a skipped version too.
 With `manual: false` it keeps the cooldown, answering inside it from memory (`available` when this run already found a version the user did not skip, else `up_to_date`), and a skipped version answers `up_to_date`.
 A check that cannot run answers `disabled` with the gate's sentence ("Updates are off in a development build."), and one that fails answers `failed` with the plugin's error.
+Once this run installed an update, a check answers `restart_pending` with that version and does not reach the endpoint: the bundle on disk is already the new one, and the restart is what is left (`answer_before_fetch`).
 Every check that reaches the endpoint replaces the held update, or clears it when there is none.
 
 `update_status` answers an `UpdateStatus` from what this run already knows: `package_info().version`, the gate, the state file's `last_check` and `skipped_version`, the update the last check holds and the version this run installed.

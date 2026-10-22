@@ -94,6 +94,18 @@ describe("the update state", () => {
     expect(s.update).toEqual({ kind: "installed", version: "0.12.0", asking: false });
   });
 
+  it("a manual check after Later says a restart is pending and keeps the update installed", () => {
+    const later = run(downloading(), { type: "update_installed" }, { type: "update_later" });
+    const s = run(later, checked({ state: "restart_pending", version: "0.12.0" }));
+    expect(s.notice).toBe("mailypoppins 0.12.0 is installed; restart to finish the update");
+    expect(s.update).toEqual({ kind: "installed", version: "0.12.0", asking: false });
+    expect(lastLine(s)).toMatchObject({ level: "info", text: "mailypoppins 0.12.0 is installed; restart to finish the update" });
+    // A window that lost its state (a webview reload) learns the installed update from the answer.
+    const fresh = run(initialState(), checked({ state: "restart_pending", version: "0.12.0" }));
+    expect(fresh.update).toEqual({ kind: "installed", version: "0.12.0", asking: false });
+    expect(updateEntryLabel(fresh.update)).toBe("Restart to finish the update");
+  });
+
   it("a failed install keeps the reason, and Dismiss makes the update available again", () => {
     let s = run(downloading(), { type: "update_install_failed", reason: "signature mismatch" });
     expect(s.update).toEqual({ kind: "failed", version: "0.12.0", reason: "signature mismatch" });
