@@ -12,6 +12,11 @@ All notable changes to this project are documented in this file.
 - Conversations: your own messages stand apart in an expanded conversation, with a tinted mailbox label and "Me" as the sender, and a draft reads "Draft" in both clients (PERSO-179).
   A message counts as yours when it comes from the account's address, so a note to self in the Inbox counts, or when it sits in Sent, so a message sent from an alias counts too.
 - Conversations: an expanded conversation reads as one block with a visible end, its members tinted and indented, closed by a rule in the desktop and by a corner branch in the TUI (PERSO-179).
+- `mp export <selector> [-o <dir>]` writes a received message's raw RFC 822 bytes to `<date>_<subject>.eml`; a Graph message, stored without its raw form, is downloaded through Graph's `$value` export (PERSO-174).
+- `mp forward --as-attachment` creates a forward draft carrying the original as one `.eml` (`message/rfc822`) attachment instead of its parts (PERSO-174).
+- TUI: `te` saves the message as `<date>_<subject>.eml` into a directory picked like `ts`, and `cF` forwards it as attachment through the forward wizard; the search overlay has both keys for a hit (PERSO-174).
+- Desktop: `te`, the reader toolbar's Export .eml and the palette's "Export message as .eml" open an Export dialog (directory field, Browse, last directory); `cF`, the toolbar's Forward as attachment and "Forward as attachment (.eml)" open the forward wizard as "Forward as attachment" (PERSO-174).
+- Server search: a result the local store does not hold exports and forwards as attachment without a fetch first; the daemon downloads its `.eml` from the server and leaves it out of the store (PERSO-174).
 
 ### Changed
 - Server search: `mp search`, the TUI search overlay and the desktop search bar get the newest `--limit` results across every mailbox from one daemon search; each mailbox is asked for its newest N and only the N newest overall are downloaded (PERSO-175).
@@ -24,6 +29,7 @@ All notable changes to this project are documented in this file.
 - Desktop: prefix keys wait for the second key, as in the TUI (#0148). After g, f, c, t, s or Space the which-key list stays until the next key; Escape cancels it and does nothing else, and a click drops it.
 
 ### Fixed
+- Sending: a forwarded `.eml` is labelled `7bit` or `8bit` as RFC 2046 requires and is never re-encoded; one with a line over 998 octets goes as `application/octet-stream` under the same name, and so does any 8bit one to an SMTP server that does not offer 8BITMIME, where the send retries once without anything going out twice (PERSO-174).
 - Desktop: a pressed toggle shows as pressed in the dark theme (Theme, Reader, Editor colours, the reader's HTML and Text), and the Calendar view's Past events toggle shows when it is on.
 - Desktop: the attachment picker highlights its cursor row (PERSO-159).
 - Desktop and TUI: the palette lists the best match first, scored the same way in both clients, so a typed name and Enter run it; while a search runs, each desktop row names its section.

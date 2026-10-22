@@ -2905,3 +2905,16 @@ The server search now asks each mailbox for its newest N as stubs (key, `Date`, 
 
 `a_reading_client_receives_the_whole_burst_in_revision_order` expected only burst events after its bootstrap, but the account runtime starts off the startup path, so its `account.state_changed` and the `diagnostic.check_changed` of the health check it flips can land after `daemon.status` first answers.
 On a loaded run they fell between two burst revisions and failed the kind assertion; the test now receives them beside the burst and keeps the no-gap revision check over every event.
+
+## A Graph row has no raw message to export (2026-10-22)
+
+A Graph row is stored with no `raw` blob, so anything that needs the original MIME goes through `message_eml::raw_of_row`, which falls back to Graph's `/me/messages/{id}/$value` and finds the Graph id by `internetMessageId` (PERSO-174).
+
+## lettre refuses 8bit bytes without 8BITMIME before MAIL FROM (2026-10-22)
+
+A forwarded `.eml` goes as an `8bit` `message/rfc822` part, and lettre's `AsyncSmtpConnection::send` refuses a non-ASCII message to a server whose EHLO lacks `8BITMIME` with a client error, before it writes `MAIL FROM`.
+The transport exposes no EHLO answer to check first, so `send::submit_through` catches that refusal, swaps the part for base64 `application/octet-stream` (`seven_bit_fallback`, which works on the committed bytes so a resumed outbox row gets it too) and sends again; nothing reached the server, so the retry is the recipient's first submission (PERSO-174).
+
+## A server-only hit's .eml comes from fetch_raw, not from the store (2026-10-22)
+
+A server-search hit with no row has a `Message-ID` and a mailbox, which is all `message_eml::fetch_raw` needs: `message.materialise_eml`'s `hit` address and `draft.forward`'s `source.hit` download the raw copy without ingesting it, so the hit stays a hit and no unread count moves (PERSO-174).
