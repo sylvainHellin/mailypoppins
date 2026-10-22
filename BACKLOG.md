@@ -174,5 +174,4 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 - Gmail rows without usable headers do not thread by `X-GM-THRID` -- feature _(the Graph half of PERSO-147 shipped; the Gmail half needs an `async-imap` accessor for the attribute and waits for a Gmail account; see step 7 of [#0142](docs/tickets/0142-conversation-list.md))_
 - The scheduler's first tick after a daemon start logs but runs no sync -- bug _(PERSO-178; on 2026-10-22 every account logged "ticking after 900s without a sync" at 12:54 and evoqs first synced at 13:09; IMAP covers the gap through IDLE, a Graph account waits a full interval after each restart)_
 - Graph search returns at most 1000 hits with no notice -- bug _(`search_messages` reads one page and clamps `$top` to 1000, so `--limit 2500` quietly returns 1000; page through `@odata.nextLink` or print a note; PERSO-173 review)_
-
-The parity half of [#0059](docs/tickets/0059-syncbackend-trait.md) is parked with it: the trait and the engine shipped, but `graph.rs` still runs its own loop rather than being a second `SyncBackend`.
+- Graph as a second `SyncBackend`, the parity half of [#0059](docs/tickets/0059-syncbackend-trait.md) -- chore _(the trait and the engine shipped with the IMAP backend; `graph.rs` still runs its own loop, and is picked up with the rest of this section)_
