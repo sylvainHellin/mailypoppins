@@ -287,16 +287,7 @@ fn command(family: &ConfigFamily, result: Value, affected: Vec<ResourceId>) -> O
 fn validate(family: &ConfigFamily, params: &Value) -> Result<Value, DomainError> {
     let text = string_param(params, "toml")?;
     match validate_document(&text, family.store.path()) {
-        Ok(_) => {
-            // Present only when there is something to say, so a clean
-            // document still answers exactly `{ok: true}` (PERSO-118).
-            let warnings = crate::config::config_warnings(&text);
-            if warnings.is_empty() {
-                Ok(json!({"ok": true}))
-            } else {
-                Ok(json!({"ok": true, "warnings": warnings}))
-            }
-        }
+        Ok(_) => Ok(json!({"ok": true})),
         Err(diagnostic) => Ok(json!({
             "ok": false,
             "errors": [{"line": diagnostic.line, "message": diagnostic.message}],

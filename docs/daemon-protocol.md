@@ -620,7 +620,7 @@ Nine methods, all of them `durable`, because a configuration swap undone by a di
 | `config.reload` | command | `{}` | `{added, updated, removed}` |
 | `config.reset_secrets` | command | `{}` | `{removed: [path]}` |
 | `config.set_password` | command | `{account, kind, value}` | `{stored, account, kind, key}` |
-| `config.validate` | query | `{toml}` | `{ok}`, `{ok, warnings: [message]}` or `{ok: false, errors: [{line, message}]}` |
+| `config.validate` | query | `{toml}` | `{ok}` or `{ok: false, errors: [{line, message}]}` |
 
 `config.oauth2_login` is the one method whose progress a user has to read: it publishes one `operation.progress` with `phase: "device_code"` and `message: "<url> <code>"`, which is the verification URL and the code, and the client renders the block from it. Nothing else about the login travels, the access token least of all.
 
@@ -645,7 +645,6 @@ Present, because their absence would say "no password is stored", which is a fac
 **`config.validate` is a pure function of the string it is given.**
 It reads no file, writes no file, swaps nothing and moves no revision: it is the "would this load?" a GUI asks while the user is still typing, running the same three checks the loader runs (legacy keys, the TOML parse, retention) against the parameter.
 A `line` is the 1-based line of the offending token, and `null` when the diagnostic has no position: a TOML syntax error carries a span, a semantic refusal does not, and inventing a position would send a user to an innocent line.
-`warnings` appears only on a document that loads and names something the load ignores, today a key under `[accounts.mailboxes]` other than `inbox`, `archive`, `sent` and `extra`: it loads, and the folder it meant is never synced.
 
 **A swap is stop-removed, then update, then start-added, and the announcement comes last.**
 A removed account publishes `state.remove` of `account:<name>`; an updated or added one publishes `account.state_changed` when its runtime settles; `config.changed` is published after every per-account event of that swap, so everything the reload did is in front of the event that announces it.
