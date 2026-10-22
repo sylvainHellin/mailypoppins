@@ -2795,3 +2795,10 @@ KQL `from:` matches a display name or any token of the address by prefix (`from:
 A phrase goes inside the double-quoted `$search` string as `\"two words\"`; `$search` results come back newest first, at most 1000, and need no `ConsistencyLevel: eventual` header, which is for directory objects ([$search](https://learn.microsoft.com/en-us/graph/search-query-parameter)).
 The fallback this replaced retried a refused `$search` as `$filter` only, which for a subject or free-text query meant no filter at all, and showed the folder's newest messages as the hits with no error; a refused search is now an error that names the request.
 A throwaway cargo example that takes the account's token from `oauth2::load_or_refresh_token` and sends raw GETs is the quickest way to try a parameter shape against a live mailbox before changing the renderer.
+
+## A reply's quote header exists twice, and only the Markdown one goes through a renderer (PERSO-169, 2026-10-22)
+
+A reply or forward draft writes its quote header into the Markdown body and, when the original has HTML, a second time into the companion `.html` file that the send path splices in after the quote marker ([crates/mp-core/src/draft.rs](../crates/mp-core/src/draft.rs), `create_reply_draft_from` and `create_forward_draft_from`).
+The Markdown copy is safe by accident: pulldown-cmark reads `<addr@x.com>` as an email autolink and escapes `&`.
+The HTML copy is a `format!` straight into markup, so a raw `Name <addr>` became an unknown `<addr>` tag that every client dropped, and the sent attribution read "Name wrote:" while the plain part and a draft without HTML looked right.
+Every value interpolated into that HTML goes through `escape_html_text`; a test that reads a sent message should render its HTML part to text (`parse::html_to_plain`) and assert on what a reader sees, since the raw HTML contains the address even when no client will show it.
