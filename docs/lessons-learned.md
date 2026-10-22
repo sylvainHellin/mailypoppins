@@ -2836,3 +2836,10 @@ An integer property's value goes in and comes back as a JSON string (`"102"`), a
 The folder listing accepts `$expand=singleValueExtendedProperties($filter=id eq 'Integer 0x1081')` beside `$orderby`, for 1.2 KB more on a 200-message page of 74 KB, and one `$filter` may mix `String` and `Integer` property ids.
 `/messages/delta` refuses this `$expand` with the same HTTP 400 as the threading properties, so a delta pass cannot see a reply made in Outlook; only a full enumeration or a download can.
 The property holds the last verb alone, so a forward after a reply reads 104, and a sync that let it clear `\Answered` would erase a true reply: the merge only ever adds a history bit.
+
+## A scheduler that measures from the runtime's start never syncs at startup, and its spawn line read like a tick (PERSO-178, 2026-10-22)
+
+The scheduler's spawn line said `[scheduler] ticking <account> after 900s without a sync`, which read in the log as a tick that ran and produced no `daemon_tick`; it was only the announcement, and the first real tick came at start plus 900 s by design (`completed_ticks` starts at the runtime's start).
+Both watchers deliberately record only on their first look, so nothing synced at daemon start unless a client asked; IMAP hid it behind IDLE events, a Graph account showed it.
+The scheduler now fires `STARTUP_TICK` (10 s) after start while no tick has finished, and logs `ticking` only right before a tick that runs.
+"No tick has finished yet" cannot be read from the `watch` value alone: a client's tick that finishes before the scheduler task is first polled makes the record look like the start, which a unit test hit at once, so the runtime keeps its start `Instant` (`AccountRuntime::started`) to compare against.
