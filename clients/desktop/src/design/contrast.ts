@@ -93,6 +93,7 @@ export const PAIRS: Pair[] = [
   { fg: "muted-foreground", bg: "background", need: "text", use: "Secondary text (dates, counts)" },
   { fg: "muted-foreground", bg: "sidebar", need: "text", use: "Secondary text on the canvas" },
   { fg: "muted-foreground", bg: "muted", need: "text", use: "Secondary text on a muted surface" },
+  { fg: "foreground", bg: "muted", need: "text", use: "An expanded conversation's header and members" },
   { fg: "muted-foreground", bg: "card", need: "text", use: "Secondary text on a card" },
   { fg: "card-foreground", bg: "card", need: "text", use: "Card text" },
   { fg: "popover-foreground", bg: "popover", need: "text", use: "Palette, menus, dialogs" },

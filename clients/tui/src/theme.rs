@@ -51,8 +51,10 @@ pub struct Theme {
     /// Focused pane border (and the attachment-picker accent).
     pub border_focused: Color,
     /// Background of modal/overlay panels, distinct from `bg` so a modal
-    /// reads as raised above the dimmed main view (#0032). Usually equal to
-    /// `bg` for opaque themes; `Reset` for the terminal-adaptive theme.
+    /// reads as raised above the dimmed main view (#0032); `Reset` for the
+    /// terminal-adaptive theme, which has no tone of its own to spare.
+    /// Also the tint of an expanded conversation's rows in the mail list
+    /// (PERSO-179), the quieter of the two fills a list row can take.
     pub panel_bg: Color,
 
     // Selection / activity states

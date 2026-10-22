@@ -39,8 +39,68 @@ const SKIP_GLYPH: &str = "\u{f071}";
 const DRAFT_GLYPH: &str = "\u{f03eb}";
 
 /// What an expanded member's contact cell starts with: the indent and the
-/// branch that hang it under its header (#0142).
-const MEMBER_INDENT: &str = " \u{2514} ";
+/// branch that hang it under its header (#0142), a tee for every member but
+/// the last, which closes the tree with a corner so the group visibly ends
+/// (PERSO-179).
+const MEMBER_BRANCH: &str = "  \u{251c} ";
+
+/// [`MEMBER_BRANCH`] of the last member of an expanded conversation.
+const MEMBER_LAST: &str = "  \u{2514} ";
+
+/// Where a row sits against an expanded conversation (#0142, PERSO-179),
+/// which is what draws the conversation as one block with a visible end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Place {
+    /// A flat row, or a collapsed conversation.
+    Alone,
+    /// The header of an expanded conversation.
+    OpenHeader,
+    /// A member of an expanded conversation with another member below it.
+    Member,
+    /// The last member of an expanded conversation.
+    LastMember,
+}
+
+impl Place {
+    /// Whether the row belongs to an expanded conversation, header or member.
+    fn grouped(self) -> bool {
+        self != Place::Alone
+    }
+
+    /// The branch an expanded member hangs from.
+    fn branch(self) -> &'static str {
+        if self == Place::LastMember {
+            MEMBER_LAST
+        } else {
+            MEMBER_BRANCH
+        }
+    }
+}
+
+/// The [`Place`] of every row of `rows`, in order: a member is the last one
+/// when the row below it is not a member of the same conversation.
+fn places(rows: &[&EmailEntry]) -> Vec<Place> {
+    rows.iter()
+        .enumerate()
+        .map(|(i, email)| {
+            if email.member_mailbox().is_some() {
+                let next = rows.get(i + 1);
+                let continues = next.is_some_and(|next| {
+                    next.member_mailbox().is_some() && next.thread_id() == email.thread_id()
+                });
+                if continues {
+                    Place::Member
+                } else {
+                    Place::LastMember
+                }
+            } else if email.header().is_some_and(|h| h.expanded && h.expandable()) {
+                Place::OpenHeader
+            } else {
+                Place::Alone
+            }
+        })
+        .collect()
+}
 
 /// What an expanded member from one of the user's own addresses names its
 /// sender as (PERSO-179), where another member names the sender's display name.
@@ -53,12 +113,12 @@ const OWN_SENDER: &str = "Me";
 /// `(n)` count, the count kept whole and the names truncated before it. An
 /// expanded member shows the mailbox its copy lives in, hung under its header
 /// (#0142), the label tinted when the member is the user's own (PERSO-179).
-fn contact_cell(app: &App, email: &EmailEntry, width: usize) -> Cell<'static> {
+fn contact_cell(app: &App, email: &EmailEntry, place: Place, width: usize) -> Cell<'static> {
     if let Some(mailbox) = email.member_mailbox() {
-        let room = width.saturating_sub(display_width(MEMBER_INDENT));
+        let room = width.saturating_sub(display_width(place.branch()));
         let label = truncate(&app.mailbox_label(mailbox), room);
         return Cell::from(Line::from(vec![
-            Span::raw(MEMBER_INDENT),
+            Span::raw(place.branch()),
             member_label_span(label, email.member_own()),
         ]));
     }
@@ -112,10 +172,10 @@ fn row_text(email: &EmailEntry) -> &str {
 /// The lead of a row's subject in the narrow layout, which has no contact
 /// column: a member names its mailbox and a conversation its count before the
 /// subject (#0142).
-fn narrow_subject_prefix(app: &App, email: &EmailEntry) -> Vec<Span<'static>> {
+fn narrow_subject_prefix(app: &App, email: &EmailEntry, place: Place) -> Vec<Span<'static>> {
     if let Some(mailbox) = email.member_mailbox() {
         return vec![
-            Span::raw(MEMBER_INDENT),
+            Span::raw(place.branch()),
             member_label_span(app.mailbox_label(mailbox), email.member_own()),
             Span::raw(": "),
         ];
@@ -222,17 +282,33 @@ fn invite_and_attachment_prefix(email: &EmailEntry) -> String {
 /// reads as the broken file it is; the cursor fill still wins on the selected
 /// row, applied by the table's `row_highlight_style`, so the user can see
 /// which row the keys act on. Every other row defers to [`row_style`].
-fn list_row_style(email: &EmailEntry, is_cursor: bool, is_in_selection: bool) -> Style {
+///
+/// The rows of an expanded conversation, its header and its members, sit on
+/// the theme's `panel_bg` (PERSO-179), a quieter tone than the cursor's
+/// `surface`, so the conversation reads as one block that ends where the tint
+/// does; the cursor's fill still wins on its own row.
+fn list_row_style(
+    email: &EmailEntry,
+    place: Place,
+    is_cursor: bool,
+    is_in_selection: bool,
+) -> Style {
     if email.skip.is_some() {
         return Style::default().fg(theme::active().error);
     }
-    row_style(is_cursor, is_in_selection, email.read)
+    let style = row_style(is_cursor, is_in_selection, email.read);
+    if place.grouped() && !is_cursor {
+        style.bg(theme::active().panel_bg)
+    } else {
+        style
+    }
 }
 
 /// Style for one list row.
 ///
-/// The background fill is the cursor's alone: it is the only way to tell
-/// which email the next keystroke acts on. Toggle-selected rows carry the
+/// The `surface` fill is the cursor's alone: it is the only way to tell
+/// which email the next keystroke acts on (an expanded conversation's quieter
+/// `panel_bg` tint is [`list_row_style`]'s). Toggle-selected rows carry the
 /// checked checkbox in the marker column plus the selection foreground, so a
 /// multi-select stays visible without a second full-row highlight competing
 /// with the cursor (a selected row the cursor had left used to keep its
@@ -361,6 +437,8 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let spacing = 3;
 
     let has_selection = !app.selection.is_empty();
+    let visible: Vec<&EmailEntry> = app.visible_emails().collect();
+    let places = places(&visible);
 
     // Status marker column is always present (2 chars): unread, answered or
     // forwarded, one glyph at a time (#TKT-0051).
@@ -386,15 +464,16 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
             .push(Cell::from("SUBJECT").style(Style::default().fg(theme::active().text_muted)));
         let header = Row::new(header_cells).height(1);
 
-        let rows: Vec<Row> = app
-            .visible_emails()
+        let rows: Vec<Row> = visible
+            .iter()
+            .zip(&places)
             .enumerate()
-            .map(|(i, email)| {
+            .map(|(i, (&email, &place))| {
                 let is_cursor = i == app.list_index;
                 let is_in_selection = has_selection && app.is_selected(email);
-                let contact = contact_cell(app, email, contact_width);
+                let contact = contact_cell(app, email, place, contact_width);
 
-                let style = list_row_style(email, is_cursor, is_in_selection);
+                let style = list_row_style(email, place, is_cursor, is_in_selection);
 
                 let mut cells = Vec::new();
                 if has_selection {
@@ -455,14 +534,15 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
             .push(Cell::from("SUBJECT").style(Style::default().fg(theme::active().text_muted)));
         let header = Row::new(header_cells).height(1);
 
-        let rows: Vec<Row> = app
-            .visible_emails()
+        let rows: Vec<Row> = visible
+            .iter()
+            .zip(&places)
             .enumerate()
-            .map(|(i, email)| {
+            .map(|(i, (&email, &place))| {
                 let is_cursor = i == app.list_index;
                 let is_in_selection = has_selection && app.is_selected(email);
 
-                let style = list_row_style(email, is_cursor, is_in_selection);
+                let style = list_row_style(email, place, is_cursor, is_in_selection);
 
                 let mut cells = Vec::new();
                 if has_selection {
@@ -477,7 +557,7 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
                 cells.push(Cell::from(status_marker(email)));
                 cells.push(Cell::from(email.list_date_display().to_string()));
                 // Subject with badges and the flag star (#0007).
-                let lead = narrow_subject_prefix(app, email);
+                let lead = narrow_subject_prefix(app, email, place);
                 cells.push(subject_cell_after(email, lead, subject_width));
 
                 Row::new(cells).style(style)
@@ -550,6 +630,74 @@ mod badge_tests {
         e
     }
 
+    /// A conversation header of three messages, expanded or not.
+    fn header(expanded: bool) -> EmailEntry {
+        let mut e = entry(false, false);
+        e.conv = Some(crate::app::ConvRole::Header(crate::app::ConvHeader {
+            thread_id: "<t@example.com>".into(),
+            count: 3,
+            expanded,
+            ..Default::default()
+        }));
+        e
+    }
+
+    /// PERSO-179: an expanded conversation is one block, its header and
+    /// members on the quieter panel tone, its members hung on tees and the
+    /// last one on a corner; the row after it, and a collapsed conversation,
+    /// stand alone on the pane's own background.
+    #[test]
+    fn an_expanded_conversation_is_one_block_that_ends_on_its_last_member() {
+        crate::theme::init(crate::theme::DEFAULT_THEME_NAME);
+        let (open, first, last, after) = (
+            header(true),
+            member(true),
+            member(false),
+            entry(false, false),
+        );
+        let rows = [&open, &first, &last, &after];
+        assert_eq!(
+            places(&rows),
+            [
+                Place::OpenHeader,
+                Place::Member,
+                Place::LastMember,
+                Place::Alone
+            ]
+        );
+        let closed = header(false);
+        assert_eq!(places(&[&closed, &after]), [Place::Alone, Place::Alone]);
+        assert_eq!(
+            places(&[&open, &first, &header(true)])[1],
+            Place::LastMember
+        );
+
+        assert_eq!(Place::Member.branch(), MEMBER_BRANCH);
+        assert_eq!(Place::LastMember.branch(), MEMBER_LAST);
+        assert!(MEMBER_BRANCH.contains('\u{251c}') && MEMBER_LAST.contains('\u{2514}'));
+
+        let panel = Some(theme::active().panel_bg);
+        for place in [Place::OpenHeader, Place::Member, Place::LastMember] {
+            assert_eq!(
+                list_row_style(&first, place, false, false).bg,
+                panel,
+                "{place:?}"
+            );
+        }
+        assert_eq!(list_row_style(&after, Place::Alone, false, false).bg, None);
+        assert_eq!(
+            list_row_style(&first, Place::Member, true, false).bg,
+            Some(theme::active().surface),
+            "the cursor's fill wins on its own row"
+        );
+        assert_ne!(
+            theme::active().panel_bg,
+            theme::active().bg,
+            "a visible tint"
+        );
+        assert_ne!(theme::active().panel_bg, theme::active().surface);
+    }
+
     /// PERSO-179: a member prints its sender where other rows print the
     /// subject, "Me" for the user's own; any other row keeps its subject.
     #[test]
@@ -615,7 +763,7 @@ mod badge_tests {
         );
         assert!(!prefix.contains('\u{f0c6}'), "no paperclip on an error row");
 
-        let off_cursor = list_row_style(&e, false, false);
+        let off_cursor = list_row_style(&e, Place::Alone, false, false);
         assert_eq!(off_cursor.fg, Some(theme::active().error));
     }
 

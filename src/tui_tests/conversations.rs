@@ -516,7 +516,7 @@ fn golden_conversation_expanded() {
         Some(DRAFT_ID.to_string())
     );
     let frame = frame_snapshot(&mut fx.app, WIDTH, HEIGHT);
-    for label in ["\u{2514} Inbox", "\u{2514} Sent", "\u{2514} Drafts"] {
+    for label in ["\u{2514} Inbox", "\u{251c} Sent", "\u{251c} Drafts"] {
         assert!(frame.contains(label), "{label} is missing:\n{frame}");
     }
     assert!(
@@ -530,9 +530,12 @@ fn golden_conversation_expanded() {
     assert_snapshot!("golden_conversation_expanded_wide", wide);
 }
 
-/// The foreground of the first cell of the first run of cells that spells
-/// `needle`, `None` when no row holds it.
-fn fg_of(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<ratatui::style::Color> {
+/// The first cell of the first run of cells that spells `needle`, `None`
+/// when no row holds it.
+fn cell_of<'b>(
+    buffer: &'b ratatui::buffer::Buffer,
+    needle: &str,
+) -> Option<&'b ratatui::buffer::Cell> {
     let area = *buffer.area();
     let wanted: Vec<String> = needle.chars().map(String::from).collect();
     for y in 0..area.height {
@@ -542,11 +545,57 @@ fn fg_of(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<ratatui::styl
                 .enumerate()
                 .all(|(i, c)| buffer[(x + i as u16, y)].symbol() == c);
             if spells {
-                return Some(buffer[(x, y)].fg);
+                return Some(&buffer[(x, y)]);
             }
         }
     }
     None
+}
+
+/// The foreground of [`cell_of`].
+fn fg_of(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<ratatui::style::Color> {
+    cell_of(buffer, needle).map(|cell| cell.fg)
+}
+
+/// The background of [`cell_of`].
+fn bg_of(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<ratatui::style::Color> {
+    cell_of(buffer, needle).map(|cell| cell.bg)
+}
+
+/// PERSO-179: an expanded conversation reads as one block with a visible end:
+/// its header and members on the theme's panel tone, the members hung on tees
+/// and the last on a corner, and the next conversation on the pane's own
+/// background.
+#[test]
+fn an_expanded_conversation_reads_as_one_block_with_a_visible_end() {
+    let mut fx = Fixture::new();
+    fx.key(crossterm::event::KeyCode::Enter);
+    fx.char('j');
+    fx.char('j');
+
+    let buffer = crate::tui::ui::golden_frames::render_buffer(&mut fx.app, WIDTH, HEIGHT);
+    let text = text_rows(&buffer);
+    assert_eq!(text.matches("\u{251c} ").count(), 4, "{text}");
+    assert_eq!(text.matches("\u{2514} ").count(), 1, "{text}");
+    assert!(text.contains("\u{2514} Inbox: Ivana Petrova"), "{text}");
+    let theme = crate::tui::theme::active();
+    assert_eq!(bg_of(&buffer, "(4)"), Some(theme.panel_bg), "the header");
+    assert_eq!(bg_of(&buffer, "Drafts:"), Some(theme.panel_bg));
+    assert_eq!(
+        bg_of(&buffer, "Inbox: Ivana"),
+        Some(theme.panel_bg),
+        "the last member"
+    );
+    assert_eq!(
+        bg_of(&buffer, "Sent: Me"),
+        Some(theme.surface),
+        "the cursor row"
+    );
+    assert_eq!(
+        bg_of(&buffer, "Wochenbericht"),
+        Some(theme.bg),
+        "after the block"
+    );
 }
 
 /// PERSO-179: the members from the account's own address (Alice's two
@@ -566,7 +615,7 @@ fn the_users_own_members_read_me_with_a_tinted_label() {
 
     let buffer = crate::tui::ui::golden_frames::render_buffer(&mut fx.app, WIDTH, HEIGHT);
     let text = text_rows(&buffer);
-    assert!(text.contains("\u{2514} Sent: Me"), "{text}");
+    assert!(text.contains("\u{251c} Sent: Me"), "{text}");
     assert!(text.contains("\u{2514} Inbox: Ivana Petrova"), "{text}");
     assert!(!text.contains("Sent: Alice"), "{text}");
     let accent = crate::tui::theme::active().accent;

@@ -41,6 +41,10 @@ export function participantNames(row: Conversation): string {
  * participants, the count, the unread count, the badges a message row draws
  * and a draft marker, then the subject of its newest message here. A
  * conversation of one message reads as a message row does. Pure.
+ *
+ * Expanded, it heads a block (PERSO-179): it takes the full muted tint, its
+ * members a lighter one, and an ocean rail runs down the left edge of the
+ * header and every member, so the rows of the conversation read as one group.
  */
 export const ConversationRow = memo(function ConversationRow({
   row,
@@ -62,6 +66,7 @@ export const ConversationRow = memo(function ConversationRow({
 }: ConversationRowProps) {
   const latest = row.latest;
   const unread = row.unread > 0;
+  const open = expandable && expanded;
   const subject = latest.subject || "(no subject)";
   const who = participantNames(row);
   const date = shortDate(row.date_sort);
@@ -97,14 +102,15 @@ export const ConversationRow = memo(function ConversationRow({
       data-cursor={cursor || undefined}
       data-marked={marked || undefined}
       data-pending={pending || undefined}
+      data-open={open || undefined}
       data-thread-id={row.thread_id}
       data-row-id={latest.id}
       style={{ height: ROW_HEIGHT }}
       onClick={onClick}
       onDoubleClick={() => onOpen(row.thread_id)}
       className={`group flex cursor-default flex-col justify-center gap-0.5 border-b border-border px-3 text-sm outline-none select-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring ${
-        cursor ? "bg-selection text-selection-foreground" : marked ? "bg-accent text-accent-foreground" : "hover:bg-accent/60"
-      }`}
+        open ? "shadow-[inset_2px_0_0_var(--color-framing)]" : ""
+      } ${cursor ? "bg-selection text-selection-foreground" : marked ? "bg-accent text-accent-foreground" : open ? "bg-muted hover:bg-accent/60" : "hover:bg-accent/60"}`}
     >
       <div className="flex min-w-0 items-center gap-2">
         <MarkBox marked={marked} anyMarked={anyMarked} onToggle={(range) => onMark(row.thread_id, range)} />

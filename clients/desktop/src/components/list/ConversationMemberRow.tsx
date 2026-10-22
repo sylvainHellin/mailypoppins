@@ -12,6 +12,8 @@ export type ConversationMemberRowProps = {
   memberKey: string;
   /** The sidebar label of the mailbox it lives in, `Drafts` for a draft. */
   mailboxLabel: string;
+  /** Whether it is the last member of its conversation, where the group ends. */
+  last: boolean;
   cursor: boolean;
   marked: boolean;
   anyMarked: boolean;
@@ -34,12 +36,18 @@ export type ConversationMemberRowProps = {
  * whatever mailbox it is in, reads apart from the others: its mailbox chip
  * takes the ocean tint and its sender reads "Me", with the address it went out
  * from on the second line.
+ *
+ * The members sit indented on a muted tint, lighter than their open header's,
+ * with the ocean rail the header starts down their left edge; the last one
+ * closes the group with a framing-tinted bottom rule (PERSO-179), so the
+ * conversation reads as one block and the row after it as the next one.
  */
 export const ConversationMemberRow = memo(function ConversationMemberRow({
   threadId,
   member,
   memberKey,
   mailboxLabel,
+  last,
   cursor,
   marked,
   anyMarked,
@@ -85,14 +93,15 @@ export const ConversationMemberRow = memo(function ConversationMemberRow({
       data-marked={marked || undefined}
       data-member={memberKey}
       data-own={own || undefined}
+      data-last={last || undefined}
       data-row-id={draft === null ? member.id : undefined}
       data-draft-id={draft ?? undefined}
       style={{ height: ROW_HEIGHT }}
       onClick={onClick}
       onDoubleClick={() => onOpen(threadId, memberKey)}
-      className={`group flex cursor-default flex-col justify-center gap-0.5 border-b border-border py-0 pr-3 pl-9 text-sm outline-none select-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring ${
-        cursor ? "bg-selection text-selection-foreground" : marked ? "bg-accent text-accent-foreground" : "bg-muted/30 hover:bg-accent/60"
-      }`}
+      className={`group flex cursor-default flex-col justify-center gap-0.5 border-b py-0 pr-3 pl-12 text-sm shadow-[inset_2px_0_0_var(--color-framing)] outline-none select-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring ${
+        last ? "border-framing/40" : "border-border"
+      } ${cursor ? "bg-selection text-selection-foreground" : marked ? "bg-accent text-accent-foreground" : "bg-muted/50 hover:bg-accent/60"}`}
     >
       <div className="flex min-w-0 items-center gap-2">
         <MarkBox marked={marked} anyMarked={anyMarked} onToggle={(range) => onMark(member, range)} />

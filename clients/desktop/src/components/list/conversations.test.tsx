@@ -91,6 +91,39 @@ describe("the conversation list", () => {
     expect(chip(sentLater)).not.toHaveClass("text-link");
   });
 
+  it("draws an expanded conversation as one block: a tinted header, indented members on a lighter tint, a rule after the last", async () => {
+    const { user } = renderGrouped();
+    await shellReady();
+    await waitFor(() => expect(offsite()).not.toBeNull());
+    expect(offsite()).not.toHaveAttribute("data-open");
+    expect(offsite()).not.toHaveClass("bg-muted");
+    await user.click(offsite());
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(members()).toHaveLength(4));
+    // The cursor sits on the header; move it off so the tint shows there.
+    await user.click(members()[1]);
+    expect(offsite()).toHaveAttribute("data-open", "true");
+    expect(offsite()).toHaveClass("bg-muted", "shadow-[inset_2px_0_0_var(--color-framing)]");
+    for (const m of members().filter((m) => m !== cursorRow())) {
+      expect(m).toHaveClass("pl-12", "bg-muted/50", "shadow-[inset_2px_0_0_var(--color-framing)]");
+    }
+    // Only the last member closes the group, with the framing-tinted rule.
+    expect(members().map((m) => m.hasAttribute("data-last"))).toEqual([false, false, false, true]);
+    expect(members()[3]).toHaveClass("border-framing/40");
+    expect(members()[2]).toHaveClass("border-border");
+    // The row after the block stands alone on the pane's background.
+    const rows = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const after = rows[rows.indexOf(members()[3]) + 1];
+    expect(after).toHaveAttribute("data-thread-id");
+    expect(after).not.toHaveAttribute("data-open");
+    expect(after).not.toHaveClass("bg-muted");
+    expect(after.className).not.toContain("shadow-[inset");
+
+    await user.keyboard("h");
+    await waitFor(() => expect(members()).toHaveLength(0));
+    expect(offsite()).not.toHaveAttribute("data-open");
+  });
+
   it("h collapses from a member back to its header, l expands again, and a member in Sent opens in place", async () => {
     const { user } = renderGrouped();
     await shellReady();

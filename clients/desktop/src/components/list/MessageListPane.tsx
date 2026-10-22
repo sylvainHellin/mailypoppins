@@ -335,6 +335,7 @@ export function MessageListPane() {
                     }
                     const m = e.member;
                     const key = m.draft_id ? draftKey(m.draft_id) : rowKey(m.id);
+                    const next = entries[at + 1];
                     return (
                       <ConversationMemberRow
                         key={`m:${e.thread_id}:${memberKey(m)}`}
@@ -342,6 +343,7 @@ export function MessageListPane() {
                         member={m}
                         memberKey={memberKey(m)}
                         mailboxLabel={mailboxLabel(m.mailbox)}
+                        last={next?.kind !== "member" || next.thread_id !== e.thread_id}
                         cursor={at === selectedIndex}
                         marked={s.marked.keys.has(key)}
                         anyMarked={anyMarked}
