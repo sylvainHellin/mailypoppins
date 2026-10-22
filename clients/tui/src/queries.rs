@@ -257,6 +257,7 @@ fn search_hit(hit: wire::SearchHit) -> crate::app::SearchResultEntry {
         body_text: body.unwrap_or_default(),
         html_body: None,
         has_attachments: row.has_attachments,
+        server_has_attachments: None,
         message_id: Some(row.message_id.clone()),
         attachments: Vec::new(),
         flags: mp_core::types::MessageFlags {

@@ -417,7 +417,17 @@ pub struct FetchedEmail {
     pub date: String,
     pub body_text: String,
     pub html_body: Option<String>,
+    /// Whether the attachment list is worth storing: the parsed MIME tree has
+    /// a named part, or (Graph) the server claims an attachment or the HTML
+    /// references an inline part by `cid:` URL.
     pub has_attachments: bool,
+    /// What the server itself says about attachments, verbatim, for a backend
+    /// that says something: Graph's `hasAttachments`, which is false for a
+    /// message whose only attachments are inline images and true for one with
+    /// an attached Outlook item or cloud link the store never holds
+    /// (PERSO-165). `None` for IMAP and a parsed raw message, which carry no
+    /// such claim.
+    pub server_has_attachments: Option<bool>,
     pub message_id: Option<String>,
     pub attachments: Vec<AttachmentData>,
     /// What the server says has happened to this message: read, answered,
@@ -1091,6 +1101,7 @@ pub fn parse_rfc822_to_fetched_email(rfc822_body: &[u8]) -> Option<FetchedEmail>
         body_text,
         html_body,
         has_attachments: has_att,
+        server_has_attachments: None,
         message_id,
         attachments: att_data,
         flags: crate::types::MessageFlags::default(),

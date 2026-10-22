@@ -332,6 +332,7 @@ fn message(rng: &mut Lcg, plan: &Plan, n: usize) -> FetchedEmail {
         body_text: body,
         html_body: None,
         has_attachments: attach,
+        server_has_attachments: None,
         message_id: Some(format!(
             "<{}-{}-{seq}@fixture.invalid>",
             plan.account,
@@ -380,6 +381,7 @@ fn sent_reply(n: usize) -> FetchedEmail {
         body_text: "noted, thanks\n".to_string(),
         html_body: None,
         has_attachments: false,
+        server_has_attachments: None,
         message_id: Some(format!("<alpha-sent-reply-{seq}@fixture.invalid>")),
         attachments: Vec::new(),
         flags: MessageFlags::seen(true),
@@ -410,6 +412,7 @@ fn big_message(mb: usize) -> FetchedEmail {
         body_text: body,
         html_body: None,
         has_attachments: false,
+        server_has_attachments: None,
         message_id: Some("<big-body@fixture.invalid>".into()),
         attachments: Vec::new(),
         flags: MessageFlags::seen(true),

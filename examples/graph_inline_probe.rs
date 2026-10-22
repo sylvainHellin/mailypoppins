@@ -309,20 +309,18 @@ fn check_row(store_path: &str, blobs_dir: &str, row: i64) -> Result<()> {
     Ok(())
 }
 
-/// The file attachments of a metadata listing, as the sync pass reads them.
+/// The entries of a metadata listing, as the sync pass reads them.
 fn server_attachments(json: &serde_json::Value) -> Vec<mailypoppins::ingest::ServerAttachment> {
     json["value"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|a| {
-            a["@odata.type"]
-                .as_str()
-                .is_none_or(|t| t.eq_ignore_ascii_case("#microsoft.graph.fileAttachment"))
-        })
         .map(|a| mailypoppins::ingest::ServerAttachment {
             name: a["name"].as_str().unwrap_or("attachment").to_string(),
             content_id: a["contentId"].as_str().map(str::to_string),
+            is_file: a["@odata.type"]
+                .as_str()
+                .is_none_or(|t| t.eq_ignore_ascii_case("#microsoft.graph.fileAttachment")),
         })
         .collect()
 }

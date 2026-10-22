@@ -224,6 +224,7 @@ mod tests {
             body_text: "body".into(),
             html_body: None,
             has_attachments: false,
+            server_has_attachments: None,
             message_id: Some("<seed@example.com>".into()),
             attachments: Vec::new(),
             flags: Default::default(),

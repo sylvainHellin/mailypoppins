@@ -435,6 +435,7 @@ mod mkfixture {
             body_text: body,
             html_body: None,
             has_attachments: attach,
+            server_has_attachments: None,
             message_id: Some(format!(
                 "<{}-{}-{seq}@fixture.invalid>",
                 plan.account,
@@ -477,6 +478,7 @@ mod mkfixture {
             body_text: body,
             html_body: None,
             has_attachments: false,
+            server_has_attachments: None,
             message_id: Some("<big-body@fixture.invalid>".into()),
             attachments: Vec::new(),
             flags: MessageFlags::seen(true),

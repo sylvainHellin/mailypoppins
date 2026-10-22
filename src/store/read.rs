@@ -1523,6 +1523,7 @@ mod tests {
             body_text: format!("body of {subject}"),
             html_body: None,
             has_attachments: false,
+            server_has_attachments: None,
             message_id: Some(format!("<{subject}@example.com>")),
             attachments: Vec::new(),
             flags: Default::default(),

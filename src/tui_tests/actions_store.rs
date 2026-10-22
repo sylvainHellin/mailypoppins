@@ -146,6 +146,7 @@ mod store_backed_drafts {
             body_text: "Original body".into(),
             html_body: Some("<p>Rich body</p>".into()),
             has_attachments: false,
+            server_has_attachments: None,
             message_id: Some(format!("<{subject}@example.com>")),
             attachments: Vec::new(),
             flags: crate::types::MessageFlags::seen(true),
@@ -1408,6 +1409,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         let fetched = FetchedEmail {
             attachments: vec![attachment("../escape.txt", b"payload")],
             has_attachments: true,
+            server_has_attachments: None,
             ..fixture_email("Never synced")
         };
 

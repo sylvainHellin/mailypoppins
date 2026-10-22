@@ -2630,6 +2630,7 @@ fn fetched_from_wire(message: &serde_json::Value) -> FetchedEmail {
         body_text: text("body").unwrap_or_default(),
         html_body: None,
         has_attachments: message["has_attachments"].as_bool().unwrap_or(false),
+        server_has_attachments: None,
         message_id: None,
         attachments: Vec::new(),
         flags: Default::default(),

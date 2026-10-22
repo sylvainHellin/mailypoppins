@@ -328,6 +328,7 @@ fn message(id: &str, from: &str, subject: &str, date: &str, seen: bool) -> Fetch
         body_text: format!("Text von {subject} ({id})\n"),
         html_body: None,
         has_attachments: false,
+        server_has_attachments: None,
         message_id: Some(id.to_string()),
         attachments: Vec::new(),
         flags: crate::types::MessageFlags::seen(seen),

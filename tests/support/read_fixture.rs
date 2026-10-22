@@ -281,6 +281,7 @@ pub fn email(from: &str, to: &str, subject: &str, date: &str, body: &str) -> Fet
         body_text: body.to_string(),
         html_body: None,
         has_attachments: false,
+        server_has_attachments: None,
         message_id: None,
         attachments: Vec::new(),
         flags: MessageFlags::default(),

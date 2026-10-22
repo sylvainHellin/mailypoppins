@@ -470,6 +470,7 @@ fn email(from: &str, subject: &str, date: &str, body: &str) -> FetchedEmail {
         body_text: body.to_string(),
         html_body: None,
         has_attachments: false,
+        server_has_attachments: None,
         message_id: Some(format!("<{subject}@example.com>")),
         attachments: Vec::new(),
         flags: Default::default(),

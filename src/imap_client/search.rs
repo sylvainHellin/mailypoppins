@@ -244,6 +244,7 @@ mod tests {
             body_text: String::new(),
             html_body: None,
             has_attachments: false,
+            server_has_attachments: None,
             message_id: id.map(|s| s.to_string()),
             attachments: Vec::new(),
             flags: Default::default(),

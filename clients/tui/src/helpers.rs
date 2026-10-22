@@ -432,6 +432,7 @@ mod tests {
             body_text: "body text".to_string(),
             html_body: Some("<p>body text</p>".to_string()),
             has_attachments: true,
+            server_has_attachments: None,
             message_id: Some("<m1@example.de>".to_string()),
             attachments: Vec::new(),
             flags: mp_core::types::MessageFlags::seen(true),

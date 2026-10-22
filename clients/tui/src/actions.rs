@@ -2150,6 +2150,7 @@ mod tests {
             body_text: String::new(),
             html_body: None,
             has_attachments: false,
+            server_has_attachments: None,
             message_id: Some(format!("<{row_id}@example.com>")),
             attachments: Vec::new(),
             flags: Default::default(),

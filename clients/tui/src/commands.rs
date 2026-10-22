@@ -1171,6 +1171,7 @@ pub(super) fn hit_entry(
         body_text: hit.body_text.clone(),
         html_body: hit.html_body.clone(),
         has_attachments: hit.has_attachments,
+        server_has_attachments: None,
         message_id: hit.message_id.clone(),
         attachments: Vec::new(),
         flags: mp_core::types::MessageFlags {

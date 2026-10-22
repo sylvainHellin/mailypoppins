@@ -1041,20 +1041,20 @@ fn attachment_metadata_url(message_id: &str) -> String {
     )
 }
 
-/// The file attachments of a metadata listing, in order, as the inline
-/// backfill pairs them with the stored references: an item or reference
-/// attachment was never stored, so it is skipped as
-/// [`attachments_from_list`] skips it.
+/// The entries of a metadata listing, in order, as the inline backfill pairs
+/// them with the stored references: an item or reference attachment was
+/// never stored ([`attachments_from_list`] skips it), so it is flagged not a
+/// file, which the backfill skips when pairing and counts as a real
+/// attachment for the paperclip.
 fn server_attachments(att_list: GraphAttachmentList) -> Vec<crate::ingest::ServerAttachment> {
     att_list
         .value
         .into_iter()
-        .filter(|att| {
-            att.odata_type
-                .as_deref()
-                .is_none_or(|t| t.eq_ignore_ascii_case("#microsoft.graph.fileAttachment"))
-        })
         .map(|att| crate::ingest::ServerAttachment {
+            is_file: att
+                .odata_type
+                .as_deref()
+                .is_none_or(|t| t.eq_ignore_ascii_case("#microsoft.graph.fileAttachment")),
             name: att.name.unwrap_or_else(|| "attachment".to_string()),
             content_id: att.content_id,
         })
@@ -1217,6 +1217,10 @@ fn graph_message_to_fetched_email(msg: &GraphMessage) -> FetchedEmail {
         // candidate; one the repair finds nothing storable for is settled
         // once, never retried.
         has_attachments: lists_attachments(msg),
+        // The server's own claim, apart: true for an attached Outlook item
+        // or cloud link the store never holds, false for an inline-only
+        // message, which is what the paperclip needs (PERSO-165).
+        server_has_attachments: Some(msg.has_attachments),
         message_id,
         attachments: Vec::new(), // filled by caller if has_attachments
         // Graph answers `isRead` and nothing else: the other two bits of the
@@ -3548,6 +3552,7 @@ mod tests {
             body_text: String::new(),
             html_body: None,
             has_attachments: true,
+            server_has_attachments: None,
             message_id: None,
             attachments,
             flags: Default::default(),
@@ -4546,7 +4551,8 @@ mod tests {
 
     /// The inline backfill's listing (PERSO-165): `contentId` qualified with
     /// its derived type, which Graph accepts where the bare name is a 400, no
-    /// content; and only file attachments, in order, as ingest stored them.
+    /// content; every entry in order, the file attachments ingest stored
+    /// flagged as such.
     #[test]
     fn the_metadata_listing_names_file_attachments_and_their_ids() {
         let url = attachment_metadata_url("AAA");
@@ -4571,10 +4577,17 @@ mod tests {
                 crate::ingest::ServerAttachment {
                     name: "image001.png".into(),
                     content_id: Some("image001.png@01DA".into()),
+                    is_file: true,
+                },
+                crate::ingest::ServerAttachment {
+                    name: "Forwarded".into(),
+                    content_id: None,
+                    is_file: false,
                 },
                 crate::ingest::ServerAttachment {
                     name: "a/report.pdf".into(),
                     content_id: None,
+                    is_file: true,
                 },
             ]
         );

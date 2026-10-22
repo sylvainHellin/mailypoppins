@@ -97,6 +97,7 @@ fn email(message_id: &str, from: &str, subject: &str, body: &str) -> FetchedEmai
         body_text: body.into(),
         html_body: None,
         has_attachments: false,
+        server_has_attachments: None,
         message_id: Some(format!("<{message_id}@example.com>")),
         attachments: Vec::new(),
         flags: Default::default(),

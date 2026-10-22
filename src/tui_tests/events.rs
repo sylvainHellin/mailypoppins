@@ -1261,6 +1261,7 @@ fn fixture_email(subject: &str, date: &str, read: bool) -> FetchedEmail {
         body_text: format!("body of {subject}"),
         html_body: None,
         has_attachments: false,
+        server_has_attachments: None,
         message_id: Some(format!("<{subject}@example.com>")),
         attachments: Vec::new(),
         flags: crate::types::MessageFlags::seen(read),

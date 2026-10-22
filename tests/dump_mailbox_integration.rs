@@ -52,6 +52,7 @@ fn email(from: &str, to: &str, subject: &str, date: &str) -> FetchedEmail {
         body_text: format!("Body of {subject}.\n"),
         html_body: None,
         has_attachments: false,
+        server_has_attachments: None,
         message_id: None,
         attachments: Vec::new(),
         flags: Default::default(),

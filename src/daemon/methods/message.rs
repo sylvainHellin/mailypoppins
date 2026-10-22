@@ -2643,6 +2643,7 @@ mod tests {
                 body_text: format!("body {index}"),
                 html_body: None,
                 has_attachments: index == 2,
+                server_has_attachments: None,
                 message_id: Some(format!("<odd {index}/%?#@example.com>")),
                 attachments: Vec::new(),
                 flags: MessageFlags {

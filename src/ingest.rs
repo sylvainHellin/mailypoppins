@@ -241,20 +241,25 @@ fn insert_blob_ref(tx: &Transaction<'_>, row_id: i64, r: &BlobRef) -> Result<()>
 }
 
 /// Whether a message whose attachment references are `refs` has an
-/// attachment the user would call one, `claimed` being what the backend said
-/// before any attachment was stored.
+/// attachment the user would call one, `claimed` being whether its attachment
+/// list was worth storing ([`FetchedEmail::has_attachments`]) and `server`
+/// what the server itself said ([`FetchedEmail::server_has_attachments`]).
 ///
 /// An inline image is part of the body, so a message whose only parts are
 /// signature logos has none (PERSO-165). With no attachment reference at all
-/// the backend's claim stands: on the Graph path that is a fetch that failed
-/// or listed nothing storable, and the claim is what keeps the row an
-/// attachment repair candidate.
-fn has_real_attachments(claimed: bool, refs: &[BlobRef]) -> bool {
+/// `claimed` stands: on the Graph path that is a fetch that failed or listed
+/// nothing storable, and the claim is what keeps the row an attachment repair
+/// candidate. With references, the server's own claim counts beside them:
+/// Graph's `hasAttachments` is already false for an inline-only message, so
+/// a true one means a real attachment exists even when it is an attached
+/// Outlook item or a cloud link the store never holds and the only stored
+/// part is an inline logo.
+fn has_real_attachments(claimed: bool, server: Option<bool>, refs: &[BlobRef]) -> bool {
     let mut attachments = refs.iter().filter(|r| r.kind == KIND_ATTACHMENT).peekable();
     if attachments.peek().is_none() {
         return claimed;
     }
-    attachments.any(|r| !r.inline.as_ref().is_some_and(|m| m.is_inline))
+    server == Some(true) || attachments.any(|r| !r.inline.as_ref().is_some_and(|m| m.is_inline))
 }
 
 /// Ingest one message into the store.
@@ -534,7 +539,8 @@ fn ingest_in_tx(
         .raw
         .map(|r| r.len() as i64)
         .unwrap_or_else(|| refs.iter().map(|r| r.size as i64).sum());
-    let has_attachments = has_real_attachments(email.has_attachments, refs);
+    let has_attachments =
+        has_real_attachments(email.has_attachments, email.server_has_attachments, refs);
 
     // 3. Write the row.
     let row_id = match existing.as_ref() {
@@ -1685,7 +1691,11 @@ pub fn attach_missing_attachments(
     let added: i64 = refs.iter().map(|r| r.size as i64).sum();
     tx.execute(
         "UPDATE messages SET has_attachments = ?3, size = IFNULL(size, 0) + ?2 WHERE id = ?1",
-        rusqlite::params![row_id, added, has_real_attachments(true, &refs) as i64],
+        rusqlite::params![
+            row_id,
+            added,
+            has_real_attachments(true, None, &refs) as i64
+        ],
     )
     .context("updating the repaired row")?;
     tx.execute(
@@ -1805,11 +1815,13 @@ fn is_sidecar(att: &StoredAttachment) -> bool {
 /// that rewrote the row keeps what it wrote. `has_attachments` is what
 /// [`has_real_attachments`] answers for the row's references as they now
 /// stand: a reference still unclassified counts as a real attachment, the
-/// listing it had before.
+/// listing it had before, and `server_claim` (an attachment the server lists
+/// that the store never holds, on Graph) counts as one too.
 fn write_inline_marks(
     tx: &Transaction<'_>,
     row_id: i64,
     marks: &[(i64, InlineMark)],
+    server_claim: bool,
 ) -> Result<()> {
     for (ordinal, mark) in marks {
         tx.execute(
@@ -1821,13 +1833,13 @@ fn write_inline_marks(
         .context("recording an attachment's inline mark")?;
     }
     tx.execute(
-        "UPDATE messages SET has_attachments = EXISTS (
+        "UPDATE messages SET has_attachments = ?2 OR EXISTS (
             SELECT 1 FROM message_blobs
             WHERE message_row = ?1 AND kind = 'attachment' AND IFNULL(is_inline, 0) = 0)
          WHERE id = ?1
            AND EXISTS (SELECT 1 FROM message_blobs
                        WHERE message_row = ?1 AND kind = 'attachment')",
-        [row_id],
+        rusqlite::params![row_id, server_claim],
     )
     .context("recomputing a row's attachment flag")?;
     Ok(())
@@ -1899,7 +1911,7 @@ pub fn classify_inline_from_raw(
         .unchecked_transaction()
         .context("opening the inline classification transaction")?;
     for (row_id, marks) in &classified {
-        write_inline_marks(&tx, *row_id, marks)?;
+        write_inline_marks(&tx, *row_id, marks, false)?;
     }
     tx.commit()
         .context("committing the inline classification")?;
@@ -1959,12 +1971,17 @@ pub fn inline_lookup_candidates(
         .context("reading the inline lookup candidates")
 }
 
-/// One file attachment of a Graph attachment metadata listing: its name as
-/// the server sends it and its `contentId`, in the server's order.
+/// One entry of a Graph attachment metadata listing: its name as the server
+/// sends it, its `contentId`, and whether it is a `fileAttachment`, in the
+/// server's order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerAttachment {
     pub name: String,
     pub content_id: Option<String>,
+    /// A `fileAttachment`, the only kind ingest stores. An attached Outlook
+    /// item or a cloud link is never stored, so it pairs with no reference,
+    /// but it is a real attachment and keeps the row's paperclip.
+    pub is_file: bool,
 }
 
 /// Classify the unclassified attachment references of `row_id` from the
@@ -1977,7 +1994,9 @@ pub struct ServerAttachment {
 /// blob's bytes are read only for a reference whose id the HTML body
 /// references. `server` `None` says the server no longer lists the message:
 /// every reference is then marked not inline, which is how it was listed
-/// before, so the row leaves the candidate set either way.
+/// before, so the row leaves the candidate set either way. An entry that is
+/// no file attachment pairs with nothing and keeps the paperclip, as Graph's
+/// `hasAttachments` keeps it at ingest.
 pub fn apply_inline_metadata(
     store: &Store,
     blobs: &BlobStore,
@@ -1987,7 +2006,12 @@ pub fn apply_inline_metadata(
     let stored = unclassified_attachments(store, row_id)?;
     let html_lower =
         crate::store::read::load_html(store, blobs, row_id).map(|html| html.to_ascii_lowercase());
-    let server = server.unwrap_or_default();
+    let server_claim = server.is_some_and(|s| s.iter().any(|entry| !entry.is_file));
+    let server: Vec<&ServerAttachment> = server
+        .unwrap_or_default()
+        .iter()
+        .filter(|entry| entry.is_file)
+        .collect();
     let mut next = 0usize;
     let mut marks = Vec::with_capacity(stored.len());
     for att in &stored {
@@ -2000,7 +2024,7 @@ pub fn apply_inline_metadata(
                 .position(|s| crate::parse::sanitize_attachment_filename(&s.name) == filename)
                 .map(|at| {
                     next += at + 1;
-                    &server[next - 1]
+                    server[next - 1]
                 })
         };
         let mark = match matched {
@@ -2031,7 +2055,7 @@ pub fn apply_inline_metadata(
         .conn()
         .unchecked_transaction()
         .context("opening the inline metadata transaction")?;
-    write_inline_marks(&tx, row_id, &marks)?;
+    write_inline_marks(&tx, row_id, &marks, server_claim)?;
     tx.commit().context("committing the inline metadata")?;
     Ok(())
 }
@@ -2513,6 +2537,7 @@ mod tests {
             body_text: "body".into(),
             html_body: None,
             has_attachments: false,
+            server_has_attachments: None,
             message_id: None,
             attachments: Vec::new(),
             flags: MessageFlags::default(),
@@ -2954,12 +2979,16 @@ Content-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n\
         }
 
         /// The same message as Graph hands it over: no raw, the HTML body,
-        /// and the file attachments with their `contentId`.
+        /// and the file attachments with their `contentId`. Graph's own
+        /// `hasAttachments` is what it says for these files: true when one
+        /// of them is not an image the HTML references.
         fn graph_email(subject: &str, attachments: Vec<AttachmentData>) -> FetchedEmail {
             let mut e = email(subject);
             e.message_id = Some(format!("<{subject}@example.com>"));
             e.html_body = Some(HTML.to_string());
             e.has_attachments = true;
+            e.server_has_attachments =
+                Some(attachments.iter().any(|a| !a.filename.ends_with(".png")));
             e.attachments = attachments;
             e
         }
@@ -3077,6 +3106,72 @@ Content-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n\
             assert_eq!(marks(&fx, row), expected_marks());
             assert_eq!(listed(&fx, row), vec!["report.pdf", "doc.pdf"]);
             assert!(has_attachments(&fx, row));
+        }
+
+        /// A Graph message whose real attachment is an attached Outlook item
+        /// or a cloud link (never stored) beside an inline logo keeps its
+        /// paperclip: Graph's `hasAttachments` is false for an inline-only
+        /// message, so a true one names a real attachment.
+        #[test]
+        fn a_graph_item_attachment_beside_an_inline_logo_keeps_the_paperclip() {
+            let fx = fixture();
+            let mut e = graph_email(
+                "item",
+                vec![att("image001.png", LOGO, "image001.png@01DA.0000")],
+            );
+            e.server_has_attachments = Some(true);
+            let row = ingest_graph(&fx, &e);
+            assert!(
+                listed(&fx, row).is_empty(),
+                "the logo is no real attachment"
+            );
+            assert!(has_attachments(&fx, row));
+        }
+
+        /// The same message stored by an older build: the metadata backfill
+        /// sees the item attachment in the listing and keeps the paperclip.
+        #[test]
+        fn the_metadata_backfill_counts_an_item_attachment_for_the_paperclip() {
+            let fx = fixture();
+            let e = graph_email(
+                "item-old",
+                vec![att("image001.png", LOGO, "image001.png@01DA.0000")],
+            );
+            let row = ingest_graph(&fx, &e);
+            unmark(&fx, row);
+            let listing = vec![
+                ServerAttachment {
+                    name: "image001.png".into(),
+                    content_id: Some("image001.png@01DA.0000".into()),
+                    is_file: true,
+                },
+                ServerAttachment {
+                    name: "Forwarded message".into(),
+                    content_id: None,
+                    is_file: false,
+                },
+            ];
+            apply_inline_metadata(&fx.store, &fx.blobs, row, Some(&listing)).unwrap();
+            assert_eq!(
+                marks(&fx, row),
+                vec![(
+                    "image001.png".into(),
+                    Some("image001.png@01da.0000".into()),
+                    Some(true)
+                )]
+            );
+            assert!(has_attachments(&fx, row));
+
+            let logo_only = ingest_graph(
+                &fx,
+                &graph_email(
+                    "logo-old",
+                    vec![att("image001.png", LOGO, "image001.png@01DA.0000")],
+                ),
+            );
+            unmark(&fx, logo_only);
+            apply_inline_metadata(&fx.store, &fx.blobs, logo_only, Some(&listing[..1])).unwrap();
+            assert!(!has_attachments(&fx, logo_only));
         }
 
         /// A message whose only parts are inline images has no attachment.
@@ -3210,6 +3305,7 @@ Content-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n\
             let server = |name: &str, cid: &str| ServerAttachment {
                 name: name.into(),
                 content_id: Some(cid.into()),
+                is_file: true,
             };
             let listing = vec![
                 server("image001.png", "<image001.png@01DA.0000>"),
