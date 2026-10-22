@@ -6,70 +6,136 @@ import CodeBlock from './CodeBlock.astro';
 const latest = 'https://github.com/sylvainHellin/mailypoppins/releases/latest/download';
 ---
 
-<section id="download" class="download" aria-labelledby="download-heading">
+<section id="download" class="start" aria-labelledby="start-heading">
   <div class="content-wide">
-    <h2 id="download-heading">Download</h2>
-    <div class="download-grid">
-      <article class="download-card">
-        <h3>Mac app</h3>
-        <p>For Apple silicon. It brings its own <code>mp</code> and updates itself.</p>
-        <a class="btn btn-primary" href={`${latest}/mailypoppins-desktop-aarch64-apple-darwin.dmg`}>Download .dmg</a>
-        <p class="note">Not signed yet: allow it once under System Settings, Privacy &amp; Security. <a href="/getting-started/#mac-app">Details</a></p>
-      </article>
-      <article class="download-card">
-        <h3>Terminal and command line</h3>
-        <p>macOS and Linux, through Homebrew:</p>
-        <CodeBlock lang="bash" code={`brew tap sylvainHellin/mailypoppins\nbrew install mailypoppins`} />
-        <p class="note">
-          Or a binary for
-          <a href={`${latest}/mailypoppins-aarch64-apple-darwin.tar.gz`}>macOS arm64</a>,
-          <a href={`${latest}/mailypoppins-x86_64-unknown-linux-gnu.tar.gz`}>Linux x86_64</a> or
-          <a href={`${latest}/mailypoppins-x86_64-unknown-linux-musl.tar.gz`}>Linux x86_64 static</a>.
-        </p>
-      </article>
-    </div>
-    <p class="next">Then set up an account in the <a href="/getting-started/">guide</a>.</p>
+    <header class="start-head">
+      <h2 id="start-heading">Get started</h2>
+      <p class="lead">Three steps from download to your inbox.</p>
+    </header>
+
+    <ol class="steps">
+      <li class="step">
+        <span class="step-num" aria-hidden="true">1</span>
+        <div class="step-body">
+          <h3>Install</h3>
+          <div class="options">
+            <div class="option">
+              <p>The Mac app, for Apple silicon. It brings its own <code>mp</code> and updates itself.</p>
+              <a class="btn btn-primary" href={`${latest}/mailypoppins-desktop-aarch64-apple-darwin.dmg`}>Download .dmg</a>
+              <p class="note">Not signed yet: allow it once under System Settings, Privacy &amp; Security (<a href="/getting-started/#mac-app">how</a>).</p>
+            </div>
+            <div class="option">
+              <p>The terminal app and the command line, on macOS and Linux:</p>
+              <CodeBlock lang="bash" code={`brew tap sylvainHellin/mailypoppins\nbrew install mailypoppins`} />
+              <p class="note">
+                Or a binary for
+                <a href={`${latest}/mailypoppins-aarch64-apple-darwin.tar.gz`}>macOS arm64</a>,
+                <a href={`${latest}/mailypoppins-x86_64-unknown-linux-gnu.tar.gz`}>Linux x86_64</a> or
+                <a href={`${latest}/mailypoppins-x86_64-unknown-linux-musl.tar.gz`}>Linux x86_64 static</a>.
+              </p>
+            </div>
+          </div>
+        </div>
+      </li>
+
+      <li class="step">
+        <span class="step-num" aria-hidden="true">2</span>
+        <div class="step-body">
+          <h3>Add an account</h3>
+          <p>The Mac app asks for one on first launch. In a terminal, run <code>mp config init</code>. Any IMAP provider works, and so does Microsoft 365.</p>
+        </div>
+      </li>
+
+      <li class="step">
+        <span class="step-num" aria-hidden="true">3</span>
+        <div class="step-body">
+          <h3>Open your mail</h3>
+          <p>Open the Mac app, or run <code>mp</code> for the terminal app. The first sync starts on its own.</p>
+        </div>
+      </li>
+    </ol>
+
+    <p class="more"><a href="/getting-started/">Read the full guide</a> for signatures, drafts and sending.</p>
   </div>
 </section>
 
 <style>
-  .download {
+  .start {
     padding: var(--space-16) 0 var(--space-20);
+    border-top: 1px solid var(--color-border-subtle);
   }
 
-  .download h2 {
-    text-align: center;
-    margin: 0 0 var(--space-8);
+  .start-head {
+    margin-bottom: var(--space-8);
   }
 
-  .download-grid {
+  .start-head h2 {
+    margin: 0 0 var(--space-3);
+    font-size: 2rem;
+  }
+
+  .lead {
+    margin: 0;
+    font-size: 1.125rem;
+    color: var(--color-text-soft);
+  }
+
+  .steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .step {
+    display: grid;
+    grid-template-columns: 3rem 1fr;
+    gap: var(--space-4);
+    margin: 0;
+    padding: var(--space-6) 0;
+  }
+
+  .step + .step {
+    border-top: 1px solid var(--color-border-subtle);
+  }
+
+  .step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 999px;
+    border: 2px solid var(--color-cta);
+    color: var(--color-text);
+    font-weight: 600;
+  }
+
+  .step-body h3 {
+    margin: 0.35rem 0 var(--space-2);
+    font-size: 1.125rem;
+  }
+
+  .step-body p {
+    margin: 0;
+    color: var(--color-text-soft);
+    max-width: 44rem;
+  }
+
+  .options {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: var(--space-6);
+    gap: var(--space-10);
+    margin-top: var(--space-3);
   }
 
-  .download-card {
+  .option {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: var(--space-3);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 10px;
-    padding: var(--space-6) var(--space-8);
   }
 
-  .download-card h3 {
-    margin: 0;
-    font-size: 1.25rem;
-  }
-
-  .download-card p {
-    margin: 0;
-    color: var(--color-text-soft);
-  }
-
-  .download-card :global(.code-block) {
+  .option :global(.code-block) {
     width: 100%;
     margin: 0;
   }
@@ -79,19 +145,24 @@ const latest = 'https://github.com/sylvainHellin/mailypoppins/releases/latest/do
     color: var(--color-text-muted) !important;
   }
 
-  .next {
-    text-align: center;
-    margin: var(--space-8) 0 0;
-    color: var(--color-text-muted);
+  .more {
+    margin: var(--space-6) 0 0;
+    color: var(--color-text-soft);
   }
 
   @media (max-width: 768px) {
-    .download-grid {
+    .options {
       grid-template-columns: 1fr;
+      gap: var(--space-6);
     }
 
-    .download-card {
-      padding: var(--space-5);
+    .step {
+      grid-template-columns: 2.5rem 1fr;
+      gap: var(--space-3);
+    }
+
+    .start-head h2 {
+      font-size: 1.5rem;
     }
   }
 </style>
