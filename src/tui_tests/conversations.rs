@@ -599,8 +599,9 @@ fn an_expanded_conversation_reads_as_one_block_with_a_visible_end() {
 }
 
 /// PERSO-179: the members from the account's own address (Alice's two
-/// replies and her draft) name her "Me" where the others name their sender,
-/// and their mailbox label takes the theme's accent off the cursor row.
+/// replies and her draft) name her "Me", the draft "Draft" as the desktop
+/// names it, where the others name their sender, and their mailbox label
+/// takes the theme's accent off the cursor row.
 #[test]
 fn the_users_own_members_read_me_with_a_tinted_label() {
     let mut fx = Fixture::new();
@@ -618,6 +619,8 @@ fn the_users_own_members_read_me_with_a_tinted_label() {
     assert!(text.contains("\u{251c} Sent: Me"), "{text}");
     assert!(text.contains("\u{2514} Inbox: Ivana Petrova"), "{text}");
     assert!(!text.contains("Sent: Alice"), "{text}");
+    assert!(text.contains("Drafts: Draft"), "{text}");
+    assert!(!text.contains("Drafts: Me"), "{text}");
     let accent = crate::tui::theme::active().accent;
     assert_eq!(fg_of(&buffer, "Sent:"), Some(accent));
     assert_ne!(fg_of(&buffer, "Inbox:"), Some(accent));

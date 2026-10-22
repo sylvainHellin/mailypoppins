@@ -106,6 +106,10 @@ fn places(rows: &[&EmailEntry]) -> Vec<Place> {
 /// (PERSO-179), where another member names the sender's display name.
 const OWN_SENDER: &str = "Me";
 
+/// What a draft member names its sender as (PERSO-179): the desktop's word,
+/// which says more than [`OWN_SENDER`] about a message not sent yet.
+const DRAFT_SENDER: &str = "Draft";
+
 /// The contact cell of one row.
 ///
 /// A flat row, and a conversation of one message, shows the mailbox's contact
@@ -155,13 +159,16 @@ fn member_label_span(label: String, own: bool) -> Span<'static> {
 
 /// What the subject column of a row prints after its badges.
 ///
-/// An expanded member prints its sender there (PERSO-179), [`OWN_SENDER`] for
-/// the user's own: the header above it already prints the conversation's
-/// subject, and a member carries no subject of its own, so repeating it on
-/// every member told the rows apart by nothing but their mailbox.
+/// An expanded member prints its sender there (PERSO-179), [`DRAFT_SENDER`]
+/// for a draft and [`OWN_SENDER`] for the user's own: the header above it
+/// already prints the conversation's subject, and a member carries no subject
+/// of its own, so repeating it on every member told the rows apart by nothing
+/// but their mailbox.
 fn row_text(email: &EmailEntry) -> &str {
     if email.member_mailbox().is_none() {
         &email.subject
+    } else if email.draft_id.is_some() {
+        DRAFT_SENDER
     } else if email.member_own() {
         OWN_SENDER
     } else {
@@ -699,10 +706,15 @@ mod badge_tests {
     }
 
     /// PERSO-179: a member prints its sender where other rows print the
-    /// subject, "Me" for the user's own; any other row keeps its subject.
+    /// subject, "Me" for the user's own and "Draft" for a draft, as the
+    /// desktop does; any other row keeps its subject.
     #[test]
     fn a_member_names_its_sender_and_the_users_own_reads_me() {
         assert_eq!(row_text(&member(true)), OWN_SENDER);
+        let mut draft = member(true);
+        draft.msg = None;
+        draft.draft_id = Some("d1".into());
+        assert_eq!(row_text(&draft), "Draft");
         assert_eq!(row_text(&member(false)), "Ivana");
         assert_eq!(row_text(&entry(false, false)), "S");
         assert!(member(true).member_own());
