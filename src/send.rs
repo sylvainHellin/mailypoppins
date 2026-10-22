@@ -6,7 +6,7 @@ use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 use log::{debug, error, info, warn};
-use pulldown_cmark::{html, Options, Parser as MdParser};
+use pulldown_cmark::{html, Event, Options, Parser as MdParser};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs;
@@ -195,7 +195,22 @@ pub fn markdown_to_html(
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
 
-    let parser = MdParser::new_ext(markdown, options);
+    // Below the quote marker the draft holds the quoted original: its plain
+    // text and the attribution or forward header built from its headers, all
+    // text that was never meant as markup. Raw HTML there is tag-shaped text
+    // (a subject `Q&A <draft>`, a display name `"Ops <team>"`) that clients
+    // would drop as unknown tags, so it renders escaped (PERSO-169). The
+    // `<addr@x>` form is an autolink, not raw HTML, and keeps its link; the
+    // marker itself stays raw so the split below finds it.
+    let mut in_quote = false;
+    let parser = MdParser::new_ext(markdown, options).map(|event| match event {
+        Event::Html(raw) if raw.contains(crate::draft::QUOTE_MARKER) => {
+            in_quote = true;
+            Event::Html(raw)
+        }
+        Event::Html(raw) if in_quote => Event::Text(raw),
+        other => other,
+    });
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
 
@@ -1540,6 +1555,98 @@ mod tests {
                         assert!(html[0].contains(&escaped), "{case}: {}", html[0]);
                     }
                 }
+            }
+        }
+    }
+
+    /// Without a companion HTML original the send renders the Markdown quote
+    /// header itself (PERSO-169). The HTML part of a forward shows each header
+    /// field on its own line, and tag-shaped text in the subject, the
+    /// recipients and the sender's display name (`Q&A <draft>`, `Ops <team>`)
+    /// shows as text instead of being passed through as an unknown tag that
+    /// clients drop; the reply attribution keeps the name the same way. The
+    /// addresses still render (as autolinks) and the plain part carries every
+    /// value as written, with no Markdown escape in it.
+    #[test]
+    fn a_markdown_quote_header_keeps_its_lines_and_tag_shaped_text() {
+        use crate::draft::{create_forward_draft_from, create_reply_draft_from, SourceMessage};
+        let from = "\"Ops <team>\" <ops@example.com>";
+        let source = SourceMessage {
+            from: from.into(),
+            to: "Desk <desk> <me@example.com>, carol@example.com".into(),
+            subject: "Q&A <draft>".into(),
+            date: Some("Tue, 21 Oct 2026 20:12:00 +0200".into()),
+            body: "Original text".into(),
+            html: None,
+            ..Default::default()
+        };
+        for kind in ["forward", "reply"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = match kind {
+                "forward" => {
+                    create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None)
+                }
+                _ => create_reply_draft_from(
+                    &source,
+                    false,
+                    "me@example.com",
+                    Some(tmp.path()),
+                    None,
+                ),
+            }
+            .unwrap();
+            let mut draft = crate::draft::parse_email_draft(&path).unwrap();
+            draft.frontmatter.status = EmailStatus::Approved;
+            draft.frontmatter.to = Some("dave@example.com".into());
+            let built = build_draft_message(
+                &draft,
+                "me@example.com",
+                &EmailSettings::default(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let (plain, html) = text_parts(&built.raw);
+            let shown = crate::parse::html_to_plain(&html[0]);
+            let lines: Vec<&str> = shown.lines().map(str::trim).collect();
+            assert!(
+                shown.contains("\"Ops <team>\""),
+                "{kind}: {shown}\n{}",
+                html[0]
+            );
+            assert!(shown.contains("ops@example.com"), "{kind}: {shown}");
+            assert!(plain[0].contains(from), "{kind}: {}", plain[0]);
+            assert!(!plain[0].contains('\\'), "{kind}: {}", plain[0]);
+            if kind == "forward" {
+                for prefix in ["From: ", "Date: ", "Subject: ", "To: "] {
+                    assert!(
+                        lines.iter().any(|l| l.starts_with(prefix)),
+                        "{prefix} does not start a line: {shown}\n{}",
+                        html[0]
+                    );
+                }
+                assert!(
+                    lines.contains(&"Subject: Q&A <draft>"),
+                    "{shown}\n{}",
+                    html[0]
+                );
+                assert!(shown.contains("Desk <desk>"), "{shown}");
+                // The hard break's two trailing spaces survive transfer
+                // encoding (the decoded part has CRLF line ends).
+                let plain_lf = plain[0].replace("\r\n", "\n");
+                assert!(
+                    plain_lf.contains("Subject: Q&A <draft>  \n"),
+                    "{plain_lf:?}"
+                );
+            } else {
+                assert!(
+                    lines.iter().any(|l| l.starts_with("On Tue, 21 Oct 2026")
+                        && l.contains("\"Ops <team>\"")
+                        && l.ends_with("wrote:")),
+                    "{shown}\n{}",
+                    html[0]
+                );
             }
         }
     }

@@ -803,12 +803,19 @@ pub fn create_forward_draft_from(
     }
     fm.push_str("---\n");
 
-    // Build forwarded message header block
+    // Build forwarded message header block. Each line but the last ends in a
+    // Markdown hard break (two trailing spaces): without a companion HTML the
+    // send renders this block itself, and consecutive lines would otherwise
+    // join into one paragraph that clients show as one long line (PERSO-169).
+    // Not a trailing backslash: the plain part is this Markdown as written,
+    // so a backslash would show there, while trailing spaces are invisible.
+    // The values stay as written; `markdown_to_html` shows tag-shaped text in
+    // them as text.
     let fwd_header = format!(
-        "---------- Forwarded message ----------\n\
-         From: {}\n\
-         Date: {}\n\
-         Subject: {}\n\
+        "---------- Forwarded message ----------  \n\
+         From: {}  \n\
+         Date: {}  \n\
+         Subject: {}  \n\
          To: {}",
         inbox.from,
         inbox.date.as_deref().unwrap_or("(unknown date)"),
@@ -3705,8 +3712,8 @@ mod tests {
         assert!(html.contains("<p>Original <b>body</b></p>"), "{html}");
         let md = fs::read_to_string(&path).unwrap();
         for line in [
-            "From: Zoë & Co <zoe@example.de>\n",
-            "Subject: Q&A <draft> \"v2\"\n",
+            "From: Zoë & Co <zoe@example.de>  \n",
+            "Subject: Q&A <draft> \"v2\"  \n",
             "To: Me <me@example.com>, Ops & Co <ops@x.com>\n",
         ] {
             assert!(md.contains(line), "{line} missing: {md}");
@@ -3716,5 +3723,31 @@ mod tests {
         let path =
             create_forward_draft_from(&bare, "me@example.com", Some(tmp.path()), None).unwrap();
         assert!(companion_html(&path).contains("From: bare@example.com<br/>"));
+    }
+
+    /// The Markdown forward header ends each of its first four lines with a
+    /// hard break (two trailing spaces), so the Markdown-rendered HTML part of
+    /// a forward without a companion shows one header field per line instead
+    /// of one long paragraph (PERSO-169). Two spaces rather than a trailing
+    /// backslash: the plain part is the Markdown as written, and a backslash
+    /// would show there. The values themselves stay as written.
+    #[test]
+    fn markdown_forward_header_puts_each_field_on_its_own_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = SourceMessage {
+            html: None,
+            ..html_source("Zoë & Co <zoe@example.de>")
+        };
+        let path =
+            create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None).unwrap();
+        assert!(!path.with_extension("html").exists());
+        let md = fs::read_to_string(&path).unwrap();
+        let header = "---------- Forwarded message ----------  \n\
+             From: Zoë & Co <zoe@example.de>  \n\
+             Date: Tue, 21 Oct 2026 20:12:00 +0200  \n\
+             Subject: Q&A <draft> \"v2\"  \n\
+             To: Me <me@example.com>, Ops & Co <ops@x.com>\n\n\
+             Original body\n";
+        assert!(md.ends_with(header), "{md}");
     }
 }
