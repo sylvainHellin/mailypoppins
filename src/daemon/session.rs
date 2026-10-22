@@ -543,6 +543,7 @@ mod tests {
                 "message.list_server".to_string(),
                 "message.list_stream".to_string(),
                 "message.materialise_attachment".to_string(),
+                "message.materialise_eml".to_string(),
                 "message.materialise_html".to_string(),
                 "message.materialise_markdown".to_string(),
                 "message.move".to_string(),

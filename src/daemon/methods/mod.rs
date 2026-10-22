@@ -29,6 +29,7 @@ pub mod draft;
 pub mod hook;
 pub mod mailbox;
 pub mod message;
+pub mod message_eml;
 pub mod message_server;
 pub mod send;
 pub mod signature;
@@ -117,7 +118,8 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         Arc::clone(&canonical),
         Arc::clone(&runtimes),
     );
-    message::register_handles(dispatcher, Arc::clone(&config), handles);
+    message::register_handles(dispatcher, Arc::clone(&config), Arc::clone(&handles));
+    message_eml::register(dispatcher, Arc::clone(&config), handles);
     dispatcher.register(Arc::new(message::MessageListServer {
         config: Arc::clone(&config),
     }));

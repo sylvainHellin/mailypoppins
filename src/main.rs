@@ -346,6 +346,19 @@ enum Commands {
         #[arg(long)]
         mailbox: Option<String>,
     },
+    /// Write a received email's raw RFC 822 message to <date>_<subject>.eml
+    Export {
+        /// Received selector: mp://<account>/<mailbox>/<message-id>,
+        /// <mailbox>/<message-id> or <message-id>
+        #[arg(value_name = "SELECTOR")]
+        selector: String,
+        /// Output directory (default: current directory)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Mailbox to resolve the selector in
+        #[arg(long)]
+        mailbox: Option<String>,
+    },
     /// Print one received message from the local store, fetched first if missing
     Show {
         /// Received selector: mp://<account>/<mailbox>/<message-id>,
@@ -2151,7 +2164,7 @@ async fn routed_sweep(account: &str) -> Result<()> {
     Ok(())
 }
 
-/// The message `mp open` and `mp save` were pointed at.
+/// The message `mp open`, `mp save` and `mp export` were pointed at.
 ///
 /// One `message.get` with no body: it resolves the selector, so the client
 /// learns the canonical selector its refusals and its materialisation calls are
@@ -2184,6 +2197,31 @@ async fn routed_materialise(
         connection,
         "message.materialise_attachment",
         serde_json::json!({"account": account, "selector": selector, "part": part}),
+    )
+    .await
+    .map_err(|e| refusal(account, e))?;
+    Ok((
+        wire_str(&result["handle"]).to_string(),
+        PathBuf::from(wire_str(&result["path"])),
+        wire_str(&result["name"]).to_string(),
+    ))
+}
+
+/// The message's raw RFC 822 bytes, materialised by the daemon as
+/// `<date>_<subject>.eml` (PERSO-174): the handle, the file and its name.
+///
+/// The server timeout rather than the store one, because a row with no stored
+/// raw message (every Graph row) is answered by a round trip to the server.
+async fn routed_export(
+    connection: &mut mp_client::Connection,
+    account: &str,
+    selector: &str,
+) -> Result<(String, PathBuf, String)> {
+    let result = daemon_try_call_within(
+        connection,
+        "message.materialise_eml",
+        serde_json::json!({"account": account, "selector": selector}),
+        DAEMON_SERVER_TIMEOUT,
     )
     .await
     .map_err(|e| refusal(account, e))?;
@@ -4419,6 +4457,41 @@ async fn main() -> Result<()> {
                 let path = spelled.join(name).display().to_string();
                 hand_back(&format!("{} {path}", "\u{2713}".green()), &path);
             }
+        }
+
+        // The `.eml` export (PERSO-174): `mp save`'s shape with one file, the
+        // message itself. The daemon reads the stored raw message, or asks
+        // the server for it when the row has none (every Graph row), and the
+        // copy into the user's directory is this process's, for the reason
+        // `mp save` gives.
+        Some(Commands::Export {
+            selector,
+            output,
+            mailbox,
+        }) => {
+            let account_config = account_for_selector(&selector, &account_config, &global_config)?;
+            let spelled = output.unwrap_or_else(|| PathBuf::from("."));
+            let dest = mailypoppins::daemon::client::absolutise(&spelled);
+
+            let mut connection = daemon_connection().await;
+            let message = routed_attachment_target(
+                &mut connection,
+                &account_config,
+                &selector,
+                mailbox.as_deref(),
+            )
+            .await?;
+            let (handle, path, name) =
+                routed_export(&mut connection, &account_config.name, &message.selector).await?;
+            std::fs::create_dir_all(&dest)
+                .with_context(|| format!("creating {}", dest.display()))?;
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            let out = dest.join(&name);
+            std::fs::write(&out, &bytes).with_context(|| format!("writing {}", out.display()))?;
+            release_handle(&mut connection, &handle).await;
+            let shown = spelled.join(&name).display().to_string();
+            hand_back(&format!("{} {shown}", "\u{2713}".green()), &shown);
         }
 
         // The read surface over the store (#0062): both offline, both reusing

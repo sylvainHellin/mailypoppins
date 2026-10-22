@@ -2111,6 +2111,9 @@ fn materialise(
         HandleKind::Attachment => attachment_file(params, &store, &blobs, row.id)?,
         HandleKind::Html => html_file(&store, &blobs, row.id)?,
         HandleKind::Markdown => markdown_file(&store, &blobs, &row),
+        // `message.materialise_eml` has a server leg and its own method
+        // (`super::message_eml`); no instance of this one is registered for it.
+        HandleKind::Eml => return Err(internal("the .eml export is message.materialise_eml's")),
     };
     let mode = match kind {
         // #0075's rule, moved to the daemon with the bytes: `$EDITOR` opens
@@ -2399,7 +2402,7 @@ fn safe_filename(name: &str) -> String {
 ///
 /// The id is minted before the write because it names the directory; a write
 /// that fails leaves no entry in the table and no directory on disk.
-fn write_handle(
+pub(super) fn write_handle(
     handles: &HandleTable,
     kind: HandleKind,
     account: &str,

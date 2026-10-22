@@ -72,6 +72,8 @@ pub enum HandleKind {
     /// The store's own Markdown view of a message, as `<subject>.md`
     /// (`RD-06`, #0126, #0075).
     Markdown,
+    /// The raw RFC 822 message, as `<date>_<subject>.eml` (PERSO-174).
+    Eml,
 }
 
 impl HandleKind {
@@ -81,6 +83,7 @@ impl HandleKind {
             HandleKind::Attachment => "attachment",
             HandleKind::Html => "html",
             HandleKind::Markdown => "markdown",
+            HandleKind::Eml => "raw",
         }
     }
 }

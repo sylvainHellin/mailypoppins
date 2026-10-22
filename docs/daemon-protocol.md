@@ -527,6 +527,7 @@ A client cannot read an account's blob store, so the daemon writes the bytes it 
 | `message.materialise_attachment` | client_integration | `{account, row_id\|id\|selector, mailbox?, part}` | `{handle, path, name, bytes, expires_at}` |
 | `message.materialise_html` | client_integration | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
 | `message.materialise_markdown` | client_integration | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
+| `message.materialise_eml` | client_integration | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
 | `message.release_handle` | query | `{handle}` | `{}` |
 
 Like the read-only methods, all four open the store by path and take no engine lock: materialising is a read plus a write into the daemon's own directory, and neither makes the daemon an account's engine.
@@ -561,6 +562,12 @@ The file is written **mode 0444**, so `$EDITOR` opens the buffer read-only and s
 That is #0075's rule, and it moves to the daemon with the bytes.
 `name` is the message's subject slugified, or `message-<row_id>.md` for a message with no subject, so a user reading three open buffers can tell them apart.
 The rendition pins the row's body blob for the life of the handle, exactly as the html rendition pins the `html` blob (`ANO-6`).
+
+**`message.materialise_eml` writes the message's raw RFC 822 bytes**, the file `mp export` copies out and a forward attaches (PERSO-174).
+The bytes are the row's stored `raw` blob when it has one, which every IMAP ingest writes and the retention sweep never evicts, and the handle pins it.
+A row without one (every Graph row) is answered from the server: Graph's `/me/messages/{id}/$value` export, the id found by the row's `Message-ID`, or an IMAP `BODY.PEEK[]` by `Message-ID` in the row's mailbox; nothing is written back to the store.
+That server leg is why it is a method of its own in the code (`methods::message_eml`) and the one materialiser with an await in it; a failure there is `-32603` with `{account}`, as the other server legs answer.
+`name` is `<YYYY-MM-DD>_<subject>.eml`, the day taken from the `Date:` header and dropped when it does not parse, the subject kept readable with the characters a file system refuses removed, and `message.eml` for a message with no subject.
 
 All four address a message as `message.get` does: exactly one of `row_id`, `id` and `selector`, with `mailbox` narrowing a selector.
 `row_id` is documented here because this is the method whose call site holds one, and the other two accept it because the whole family resolves an address through one helper; widening them was additive and free (P5-U10c).

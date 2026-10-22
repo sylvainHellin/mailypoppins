@@ -46,6 +46,7 @@ const imapCommands = [
   { command: 'mp search <query> [--json]', description: 'Search emails on the server with one grammar (fields, has:attachment, dates, OR groups); --local searches the store offline; --json prints the hits as JSON on stdout' },
   { command: 'mp open <selector> [--mailbox <name>]', description: 'Open the attachments in the default app; a message whose only parts are inline images opens those' },
   { command: 'mp save <selector> [--output <dir>] [--mailbox <name>]', description: 'Save the attachments and the inline images to a directory, fetching the message from the server first when the store lacks it and the selector names its mailbox' },
+  { command: 'mp export <selector> [--output <dir>] [--mailbox <name>]', description: 'Write the raw message (RFC 822, quoted thread included) to <date>_<subject>.eml in a directory, ready to attach to another mail; a message stored without its raw form (every Graph message) is downloaded from the server' },
 ];
 
 const storeCommands = [

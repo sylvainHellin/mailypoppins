@@ -3480,6 +3480,33 @@ impl GraphClient {
         Ok(result.value.into_iter().map(|e| e.id).collect())
     }
 
+    /// The RFC 822 bytes of one message, as Graph exports it through
+    /// `/messages/{id}/$value` (PERSO-174).
+    ///
+    /// A Graph row is stored without a raw message, so this is the only place
+    /// the `.eml` of `mp export` can come from for one.
+    pub async fn fetch_mime(&self, message_id: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .client
+            .get(mime_url(message_id))
+            .bearer_auth(self.bearer())
+            .send()
+            .await
+            .context("Failed to fetch the message's MIME content")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Fetching the message's MIME content failed (HTTP {status}): {body}"
+            ));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .context("Failed to read the message's MIME content")?;
+        Ok(bytes.to_vec())
+    }
+
     /// Record a reply or a forward on a message the way Outlook does, through
     /// its MAPI history properties (PERSO-171).
     pub async fn set_last_verb(&self, message_id: &str, verb: LastVerb) -> Result<()> {
@@ -3856,6 +3883,12 @@ fn search_url(
 /// doubled, and the whole `$filter` value is percent-encoded: a raw `+` would
 /// read as a space, a `&` would end the parameter and a `#` the query, and the
 /// lookup would quietly find nothing.
+/// The `$value` URL of one Graph message: its MIME export. The id goes into
+/// the path as the move, delete and patch URLs put it.
+fn mime_url(graph_id: &str) -> String {
+    format!("{GRAPH_BASE}/me/messages/{graph_id}/$value")
+}
+
 fn message_lookup_url(internet_message_id: &str) -> Result<reqwest::Url> {
     let clean_id = internet_message_id.trim_matches(|c| c == '<' || c == '>');
     let filter = format!("internetMessageId eq '<{}>'", clean_id.replace('\'', "''"));
@@ -6050,6 +6083,14 @@ mod tests {
         let bare = message_lookup_url("plain@x.com").unwrap();
         let pairs: Vec<(String, String)> = bare.query_pairs().into_owned().collect();
         assert_eq!(pairs[0].1, "internetMessageId eq '<plain@x.com>'");
+    }
+
+    #[test]
+    fn the_mime_url_is_the_message_s_value_endpoint() {
+        assert_eq!(
+            mime_url("AAMkAD-x_y="),
+            "https://graph.microsoft.com/v1.0/me/messages/AAMkAD-x_y=/$value"
+        );
     }
 
     #[test]
