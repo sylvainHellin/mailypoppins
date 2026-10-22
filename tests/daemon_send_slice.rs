@@ -2681,6 +2681,91 @@ fn a_routed_send_of_a_draft_already_sent_is_refused() {
     );
 }
 
+/// A send every recipient refused delivered nothing, so a corrected draft goes
+/// out (#0063 final review): the refusal clears the submission marker, and the
+/// gate's "may have reached its recipients" check does not hold the draft.
+///
+/// Routed side only (fake transport). The server refuses both recipients of
+/// the approved draft with a 550; the file is then readdressed to one it
+/// accepts, still `approved`, and sent again.
+#[test]
+fn a_routed_send_refused_by_every_recipient_can_be_corrected_and_sent() {
+    let slice = Slice::with_transport(|log| {
+        fixture::fake_transport_rejecting(
+            log,
+            &[
+                ("ivana@example.com", fixture::REJECTION),
+                (fixture::REJECTED, fixture::REJECTION),
+            ],
+        )
+    });
+    let selector = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
+    let seeded = [
+        fixture::QUEUED_MID,
+        fixture::FAILED_MID,
+        fixture::PARTIAL_MID,
+        fixture::APPENDING_MID,
+    ];
+    let submits = |log: &Path| -> Vec<(String, String, bool)> {
+        fixture::transport_events(log)
+            .into_iter()
+            .filter_map(|event| match event {
+                fixture::TransportEvent::Submit {
+                    message_id,
+                    address,
+                    accepted,
+                } if !seeded.contains(&message_id.as_str()) => {
+                    Some((message_id, address, accepted))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    let first = slice.routed(&["send", &selector, "-y"]);
+    let refused = submits(&slice.log());
+    assert!(
+        !refused.is_empty() && refused.iter().all(|(_, _, accepted)| !accepted),
+        "every recipient refused the first send: {refused:?}\nstdout: {}\nstderr: {}",
+        stdout(&first),
+        stderr(&first)
+    );
+    let first_mid = refused[0].0.clone();
+
+    let path = fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join(fixture::APPROVED_FILE);
+    std::fs::write(
+        &path,
+        support::draft_fixture::document(
+            fixture::APPROVED,
+            fixture::TO,
+            "Freigabe",
+            "approved",
+            "Bereit.\n",
+        ),
+    )
+    .unwrap();
+
+    let second = slice.routed(&["send", &selector, "-y"]);
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "a corrected draft whose last send reached nobody is sent:\nstdout: {}\nstderr: {}",
+        stdout(&second),
+        stderr(&second)
+    );
+    let resent: Vec<_> = submits(&slice.log())
+        .into_iter()
+        .filter(|(mid, _, _)| *mid != first_mid)
+        .collect();
+    assert_eq!(
+        resent.len(),
+        1,
+        "the corrected draft went out once, to its one recipient: {resent:?}"
+    );
+    assert_eq!(resent[0].1, fixture::TO);
+    assert!(resent[0].2, "and the server took it: {resent:?}");
+}
+
 /// `tests/outbox_integration.rs::two_racing_drains_append_each_row_exactly_once`,
 /// twinned through the daemon.
 ///

@@ -356,6 +356,7 @@ A row with no marker whose recorded draft is no longer a plain draft in Drafts i
 Every request of the staged send carries `Prefer: IdType="ImmutableId"`, so the recorded draft id follows the item into the Outbox and Sent Items.
 `mp outbox discard` on a Graph row deletes it at once, offline too, and commits a server cleanup (the `graph_cleanups` table, carried across a store rebuild like the outbox) that the next Graph resume carries out; it never deletes an item that has left Drafts.
 `send_draft` also refuses a draft whose newest row failed after its send started, pointing at `mp outbox retry` or `mp outbox discard` for that row.
+A row that fails with proof that nothing went out (a clean pre-submission failure, a refusal from every SMTP recipient, a 4xx from Graph) has its marker cleared, so it does not hold a corrected resend; only the ambiguous failures keep it.
 
 ## Sync backends
 

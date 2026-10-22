@@ -2981,6 +2981,7 @@ A 404 on a draft's `/send` proves nothing either: a draft whose earlier send was
 A resume that finishes a send also has to retire the draft file the send came from, or the next `mp send-approved` sends it again under a fresh `Message-ID` (src/send.rs, `retire_draft_of_row`).
 A send marker that fails to commit has to stop the send: logging it and sending anyway leaves a row the resume reads as never sent, and one crash later the message goes out twice (`graph_submit::mark_started`, `DurableSend::mark_started`).
 A `failed` row whose send had started may still have arrived, so its draft file must not be sendable under a fresh `Message-ID` until the row is retried or discarded (`outbox::refuse_a_finished_draft`).
+A guard that reads the marker as "may have arrived" makes every write of `failed` a second decision: a path that fails a row with proof that nothing went out (a clean failure, an SMTP refusal from every recipient) has to clear `submission_started_at` in the same UPDATE, or the corrected resend is refused with a false warning (`outbox::record_per_recipient`).
 A discard that has to reach the server cannot refuse when the server is unreachable without trapping the row; commit the delete and a cleanup record together, and let the next resume talk to the server (`outbox::discard_graph`, `graph_submit::clear_server_cleanups`).
 
 ## A Graph item id changes when the item moves, unless you ask for immutable ids (#0063, 2026-10-22)

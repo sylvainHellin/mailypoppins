@@ -10,7 +10,7 @@ created: 2026-08-06
 From the architecture review synthesis, Tier 3: [2026-08-06_architecture-review-synthesis](../../.agents/handoff/2026-08-06_architecture-review-synthesis.md).
 Effort: M each.
 Shipped 2026-08-07: scope items 1, 2 and 4 and the double-submit admission gate, on the SMTP path.
-Shipped offline 2026-10-22: scope item 3, the Graph half, with the staged send that keeps a large Graph reply threaded (PERSO-144 follow-up); see [The Graph half](#the-graph-half-2026-10-22).
+Shipped offline 2026-10-22: scope item 3, the Graph half, with the staged send that keeps a large Graph reply threaded (PERSO-144 follow-up), merged to main after three review rounds; see [The Graph half](#the-graph-half-2026-10-22).
 The ticket stays open for the live checks listed there, under the Graph backend section of the [BACKLOG](../../BACKLOG.md).
 
 Two holes the durable outbox of [#0037](0037-sqlite-store-engine-skeleton.md) left open.
@@ -50,6 +50,7 @@ Both lose a delivery quietly, which is the failure mode the outbox exists to pre
 
 The verdicts are per recipient, and they are durable.
 `Envelope` (the row's `envelope` column, no schema change) now carries `delivered:` and `rejected:` lines beside the addresses, `SubmitOutcome::PerRecipient` carries one verdict per recipient from the SMTP loop, and `record_submission` folds the set into the row: a recipient with no verdict parks it in `failed`, a recipient that can still be tried keeps it in `pending_send` under the existing backoff, and once nothing is outstanding it goes on to `done` if anybody took it and to `failed` if the server refused them all.
+A refusal from every recipient proves nothing went out, so that `failed` row has its marker cleared, like a clean pre-submission failure.
 A resubmission attempts `Envelope::outstanding()` rather than the whole address list, so a recipient that answered 250 is never spoken to twice, including across an operator `mp outbox retry`.
 A 5xx is now a rejection of that recipient rather than an ambiguous whole-row failure, which is what makes the partial case reach a terminal state on its own.
 
@@ -59,7 +60,7 @@ Discarding the row is how a human closes it.
 
 The admission gate is two halves, as the evidence above describes.
 The envelope carries the draft key (frontmatter `id`, or the path for a draft that has none), `outbox::enqueue` refuses a draft that already has a `pending_send` or `sent_pending_append` row with `AlreadyInFlight`, and `send_draft` holds a process-wide slot per draft for the length of the send, so the TUI's cursor send and the approved batch it is also in cannot both submit it.
-A `failed` or `done` row does not hold the gate: a deliberate re-send after a human has looked is the user's business.
+A `failed` or `done` row does not hold this gate; `send_draft`'s check of finished rows (`outbox::refuse_a_finished_draft`, described under the Graph half) is what refuses a draft whose last send went out or may have.
 
 One related hole closed on the way: `send_durably` marked the row as entering submission and then let a pre-transport error out of `submit` (an unparseable envelope sender, a transport that would not build) propagate with the marker still set, so the next resume read that marker as "died inside the SMTP session" and parked a message that had never been sent.
 Both send paths now record such a failure as the clean pre-submission one it is, which puts the marker back to NULL.
@@ -114,6 +115,8 @@ A Graph submission is made of more than one request once the message is large, s
 - A send whose marker does not commit does not go out (both transports): a MIME send is held back, a staged send discards its draft, and the row stays submittable with no marker.
   As a second guard, a Graph row with no marker whose recorded draft is no longer a plain draft in Drafts is given a marker and settled against the mailbox instead of being resent.
 - `send_draft` refuses a draft whose newest row failed after its send started (`submission_started_at` set): that send may have arrived, so only `mp outbox retry <id>` (same `Message-ID`, and on Graph a Sent Items check first) or `mp outbox discard <id>` releases it.
+  Every path that fails a row with proof that nothing went out clears the marker, so only the ambiguous failures block: a clean pre-submission failure, a Graph 4xx and an SMTP refusal from every recipient release the draft for a corrected resend.
+  The final review of 2026-10-22 found the last of these keeping its marker, which refused a corrected resend of a draft every recipient had refused with a false "may have reached its recipients".
 - Every request of the staged send carries `Prefer: IdType="ImmutableId"`: a default Outlook id changes when the item moves, so without it the recorded draft answered 404 once `/send` moved it to the Outbox or Sent Items, and the resume's "on its way" and "sent" readings could never happen.
 
 The large-message threading fix rides on the same staged send: a message too large for one MIME `sendMail` is a draft created from its own MIME with the largest attachments taken out, the attachments added one request each (a POST under 2.5 MB, an upload session above), then `send`.

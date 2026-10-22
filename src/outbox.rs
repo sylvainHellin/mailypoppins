@@ -751,8 +751,10 @@ fn refuse_a_second_submission(
 /// (`submission_started_at` set): an ambiguous send, which may have reached
 /// its recipients, and which only the row can resend under the same
 /// `Message-ID` (`mp outbox retry`, which on Graph checks Sent Items first)
-/// or release (`mp outbox discard`). A row that failed before its send
-/// started is a human's call, as at enqueue, and does not block.
+/// or release (`mp outbox discard`). A row that failed with proof that
+/// nothing went out (before its send started, or refused by every recipient)
+/// has its marker cleared, is a human's call as at enqueue, and does not
+/// block.
 pub fn refuse_a_finished_draft(
     store: &Store,
     account: &str,
@@ -1080,11 +1082,15 @@ fn record_per_recipient(
     }
 
     if envelope.delivered.is_empty() {
+        // A refusal from every recipient proves nothing went out, so the
+        // marker goes back to NULL as it does after a clean failure: a
+        // corrected resend of the same draft must not read this row as one
+        // that may have reached its recipients.
         store
             .conn()
             .execute(
-                "UPDATE outbox SET state = 'failed', last_error = ?2, updated = ?3
-                 WHERE id = ?1",
+                "UPDATE outbox SET state = 'failed', last_error = ?2, updated = ?3,
+                 submission_started_at = NULL WHERE id = ?1",
                 rusqlite::params![row.id, summary, now],
             )
             .context("marking the outbox row failed")?;
