@@ -25,8 +25,9 @@ function Column({ rows }: { rows: PrefixRow[] }) {
  * The which-key popup for an armed family prefix, the TUI's
  * `render_prefix_popup`: titled by the family, one row per continuation the
  * keymap would carry out in this view and focus. It follows the keymap's
- * pending prefix (src/keymap/pendingPrefix.ts), so the next key, the
- * timeout and leaving the window all close it; an open dialog hides it.
+ * pending prefix (src/keymap/pendingPrefix.ts), which has no timeout: it
+ * shows at once and stays until the next key, Escape, a click or leaving
+ * the window; an open dialog hides it.
  * The live region stays mounted, so a screen reader hears each family.
  */
 export function PrefixPopup({ state }: { state: AppState }) {

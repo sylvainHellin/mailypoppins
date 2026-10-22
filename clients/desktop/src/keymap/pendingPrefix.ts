@@ -5,7 +5,7 @@
 
 import { useSyncExternalStore } from "react";
 
-export type PendingPrefix = { key: string; at: number };
+export type PendingPrefix = { key: string };
 
 let current: PendingPrefix | null = null;
 const listeners = new Set<() => void>();
@@ -20,7 +20,7 @@ export function getPendingPrefix(): PendingPrefix | null {
   return current;
 }
 
-/** Publish the armed prefix (or null once it resolves, expires or is dropped). */
+/** Publish the armed prefix (or null once the next key consumes it or it is dropped). */
 export function setPendingPrefix(p: PendingPrefix | null): void {
   if (p === current) return;
   current = p;

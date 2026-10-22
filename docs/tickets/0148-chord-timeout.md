@@ -1,24 +1,23 @@
 ---
 id: 0148
-title: Configurable prefix wait in the desktop app, 5 s by default
+title: Prefix keys in the desktop app wait for the second key, as in the TUI
 type: feature
 priority: next
-status: open
+status: done
 created: 2026-10-22
 ---
 
 ## Problem
 
-In the desktop app a prefix such as `c` expires after 1.2 s (`PREFIX_TIMEOUT_MS` in `clients/desktop/src/keymap/useKeymap.ts`).
-One timer hides the which-key popup and drops the prefix, so a second key pressed late runs its flat action: `c`, a pause, then `a` archives instead of replying to all.
-Sylvain asked (2026-10-22) for the wait to be tunable in Settings and for a longer default.
-The TUI never times out a prefix and is not affected.
+In the desktop app a prefix such as `c` expired after 1.2 s (`PREFIX_TIMEOUT_MS` in `clients/desktop/src/keymap/useKeymap.ts`).
+One timer hid the which-key popup and dropped the prefix, so a second key pressed late ran its flat action: `c`, a pause, then `a` archived instead of replying to all.
+The TUI never times out a prefix and was not affected.
 
-## Plan
+## Decision
 
-[docs/plans/chord-timeout.md](../plans/chord-timeout.md) holds the design, six owner decisions, three work units, the docs to change and the risks.
-Sylvain settled its Decision 1 on 2026-10-22: the prefix waits 5 s by default for its second key.
-Settings offers "Wait for the next key", 5 s, 3 s and 1.5 s, stored in the desktop's localStorage `Prefs`.
+Sylvain decided on 2026-10-22 that the desktop behaves as the TUI: a pending prefix never times out, and there is no setting for it.
+This replaces the earlier decision of the same day for a 5 s default configurable in Settings.
+[docs/plans/chord-timeout.md](../plans/chord-timeout.md) holds the design.
 
 Research:
 
@@ -28,14 +27,13 @@ Research:
 
 ## Acceptance criteria, in short
 
-- The prefix wait is configurable in Settings and defaults to 5 s.
-- With the default, `c`, a pause of 4 s, then `a` replies to all; after 5 s without a key the popup closes and the prefix lapses.
-- Settings has a "Prefix keys" row with four choices, 5 s pressed by default, that applies at once and survives a restart; a timed choice ends the popup and the prefix together.
-- Escape over a pending prefix cancels it and does nothing else; a click cancels it.
-- The activity log's `gg` and the TUI are unchanged.
+- A pending prefix in the desktop never times out: `c`, a pause of any length, then `a` replies to all.
+- The which-key popup appears at once and stays until the prefix ends.
+- Escape over a pending prefix cancels it and does nothing else; a click, leaving the window or focusing a field cancels it.
+- Settings has no row for it and nothing is stored.
+- The activity log's `gg` waits for its second `g` the same way; the TUI is unchanged.
 - `pnpm test` and `pnpm build` pass.
 
 ## Status
 
-Implementation has not started.
-The worker starts from the plan's first work unit, Unit 1 (the wait in `Prefs` and the keymap), proceeding on Decision 1 as settled and on the plan's recommendations for the others.
+Done: `PREFIX_TIMEOUT_MS` and its timer are gone from `useKeymap.ts` and `ActivityLogDialog.tsx`, a `pointerdown` drops a pending prefix, and `prefixPopup.test.tsx` pins the no-timeout, Escape and click cases.

@@ -16,11 +16,9 @@ import { FILTER_INPUT_ID, HALF_PAGE, PAGE, READER_SCROLL_ID, runAction } from "@
 import { CONTACTS_SEARCH_ID } from "@/app/contacts";
 import { describeKey, paletteEntries, type ActionId, type Badge } from "@/keymap/catalog";
 import { VIEW_AGNOSTIC_COMBOS, VIEW_SHARED_KEYS, viewKeyTable } from "@/keymap/viewKeys";
-import { setPendingPrefix } from "@/keymap/pendingPrefix";
+import { setPendingPrefix, type PendingPrefix } from "@/keymap/pendingPrefix";
 import { forwardedKey, scrollReaderFrame, scrollReaderFrameTo } from "@/components/reader/ReaderBody";
 
-/** How long an armed prefix waits for its continuation; a timer then drops it. */
-export const PREFIX_TIMEOUT_MS = 1200;
 const PREFIXES = new Set(["g", "f", "c", "t", "s"]);
 /** One `j`/`k` step of the reader, in pixels. */
 export const LINE_PX = 48;
@@ -184,30 +182,27 @@ function tabIsOurs(target: EventTarget | null): boolean {
 export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
   const ref = useRef(state);
   ref.current = state;
-  const prefix = useRef<{ key: string; at: number } | null>(null);
+  const prefix = useRef<PendingPrefix | null>(null);
 
   useEffect(() => {
     // The armed prefix lives in the ref for the hot path and is published
-    // for the which-key popup; a timer drops it once it expires, so a stale
-    // prefix never resolves.
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    // for the which-key popup. As in the TUI it waits for the next key with
+    // no timer: that key, Escape included, consumes it; a click, leaving the
+    // window or focusing a field drops it.
     const disarm = () => {
-      clearTimeout(timer);
       prefix.current = null;
       setPendingPrefix(null);
     };
     const arm = (key: string) => {
-      clearTimeout(timer);
-      const p = { key, at: Date.now() };
+      const p = { key };
       prefix.current = p;
       setPendingPrefix(p);
-      timer = setTimeout(disarm, PREFIX_TIMEOUT_MS);
     };
-    /** The armed prefix, if still live, and disarmed: any next key consumes it. */
+    /** The armed prefix, disarmed: any next key consumes it. */
     const take = () => {
       const p = prefix.current;
       if (p) disarm();
-      return p && Date.now() - p.at < PREFIX_TIMEOUT_MS ? p : null;
+      return p;
     };
 
     // Over a full-pane view or the outbox view, a key for an action on the
@@ -273,7 +268,8 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
       // A full-pane view's table (Contacts, Calendar, Settings); null in Mail.
       const view = viewKeyTable(s.view);
 
-      // A pending family prefix (`g`, `f`, `c`, `t`, `s`, Space).
+      // A pending family prefix (`g`, `f`, `c`, `t`, `s`, Space). Escape, as
+      // any key the family does not bind, only cancels it.
       if (pending) {
         handled();
         const combo = pending.key === " " ? `Space ${e.key}` : `${pending.key}${e.key}`;
@@ -436,10 +432,15 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
     };
 
     // Leaving the window, or moving the focus into a field or the embedded
-    // editor, drops the prefix: the next key would never reach it.
+    // editor, drops the prefix: the next key would never reach it. A click
+    // anywhere drops it too, so a chord abandoned for the pointer never waits
+    // for a later key.
     const onBlur = () => disarm();
     const onFocusIn = (e: FocusEvent) => {
       if (prefix.current && isEditable(e.target)) disarm();
+    };
+    const onPointerDown = () => {
+      if (prefix.current) disarm();
     };
 
     // A key the reader frame's bridge forwarded. It is dispatched on the
@@ -460,11 +461,13 @@ export function useKeymap(state: AppState, dispatch: Dispatch<Action>): void {
     window.addEventListener("keydown", onKey);
     window.addEventListener("blur", onBlur);
     window.addEventListener("focusin", onFocusIn);
+    window.addEventListener("pointerdown", onPointerDown, true);
     window.addEventListener("message", onMessage);
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("focusin", onFocusIn);
+      window.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("message", onMessage);
       disarm();
     };

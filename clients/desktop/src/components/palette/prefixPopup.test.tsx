@@ -1,12 +1,13 @@
 // The which-key popup for an armed prefix (ticket 0137, U3): its rows follow
-// the keymap's own resolution, and it leaves with the next key, the timeout
-// and the window's blur.
+// the keymap's own resolution, and it leaves with the next key, a click and
+// the window's blur, never on a timer (ticket 0148).
 
-import { act, fireEvent, screen } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
+import { mock } from "@/test/tauri-mock";
 import { getPendingPrefix } from "@/keymap/pendingPrefix";
-import { isEditable, PREFIX_TIMEOUT_MS } from "@/keymap/useKeymap";
+import { isEditable } from "@/keymap/useKeymap";
 
 const popup = () => document.querySelector('[data-slot="prefix-popup"]') as HTMLElement;
 const title = () => popup().querySelector('[data-testid="prefix-title"]')?.textContent ?? null;
@@ -16,6 +17,7 @@ const rows = () =>
     r.querySelector("span")?.textContent,
   ]);
 const pane = () => document.activeElement?.closest("[data-pane]")?.getAttribute("data-pane");
+const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
 /** A key as the keymap sees it, without user-event's own timers. */
 const press = (key: string) => act(() => void fireEvent.keyDown(document.activeElement ?? document.body, { key }));
 
@@ -106,22 +108,56 @@ describe("the prefix popup", () => {
     expect(rows()).toEqual([]);
   });
 
-  it("the timeout hides it, and a continuation after the timeout does not resolve", async () => {
+  it("has no timeout: after a minute the popup is up and the continuation resolves", async () => {
     renderApp();
     await shellReady();
+    press("j");
     vi.useFakeTimers();
-    press("g");
-    expect(title()).toBe("go");
-    act(() => vi.advanceTimersByTime(PREFIX_TIMEOUT_MS - 1));
-    expect(rows()).not.toEqual([]);
-    act(() => vi.advanceTimersByTime(1));
+    press("c");
+    expect(title()).toBe("compose");
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(rows()).toEqual(COMPOSE);
+    vi.useRealTimers();
+    press("a");
     expect(rows()).toEqual([]);
-    press("m");
+    // `ca` replies to all, and nothing is archived.
+    await waitFor(() => expect(callsOf("draft_reply")).toEqual([{ account: "work", row_id: 1001, all: true, headers: null }]));
+    expect(callsOf("message_archive")).toEqual([]);
+  });
+
+  it("Escape cancels the prefix and does nothing else", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    const selected = () => screen.getByRole("listbox", { name: /messages/ }).querySelector('[aria-selected="true"]');
+    const before = selected()?.textContent;
+    expect(before).toBeTruthy();
+    await user.keyboard("c");
+    expect(rows()).toEqual(COMPOSE);
+    await user.keyboard("{Escape}");
+    expect(rows()).toEqual([]);
+    expect(getPendingPrefix()).toBeNull();
+    // The selection stays, no dialog opens, and the reader still shows it.
+    expect(selected()?.textContent).toBe(before);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("complementary", { name: "Reader" })).toBeInTheDocument();
+    // The next `a` is the flat key again: the prefix is gone.
+    await user.keyboard("g");
+    await user.keyboard("{Escape}");
+    await user.keyboard("m");
     expect(pane()).not.toBe("sidebar");
-    // Within the timeout the same keys resolve.
-    press("g");
-    press("m");
-    expect(pane()).toBe("sidebar");
+  });
+
+  it("a click drops the prefix, and the next key is a flat key", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("g");
+    expect(rows()).not.toEqual([]);
+    act(() => void fireEvent.pointerDown(document.body));
+    expect(rows()).toEqual([]);
+    expect(getPendingPrefix()).toBeNull();
+    await user.keyboard("m");
+    expect(pane()).not.toBe("sidebar");
   });
 
   it("leaving the window hides it, and the continuation then does nothing", async () => {
@@ -176,7 +212,8 @@ describe("the prefix popup", () => {
     await shellReady();
     await user.keyboard("g");
     expect(rows()).not.toEqual([]);
-    // A click opens the dialog, so no key resolves or drops the prefix.
+    // A bare click event, with no pointerdown, opens the dialog as one that
+    // opens on its own would: no key and no pointer drops the prefix.
     act(() => void fireEvent.click(screen.getByRole("button", { name: "Activity log, key s l" })));
     await screen.findByRole("dialog", { name: "Activity log" });
     expect(getPendingPrefix()?.key).toBe("g");

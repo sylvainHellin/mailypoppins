@@ -4,7 +4,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { ACTIVITY_LOG_CAP, entryTime, filterLog } from "@/app/activity";
 import type { ActivityLevel } from "@/app/state";
 import { useAppState } from "@/app/store";
-import { isEditable, PREFIX_TIMEOUT_MS } from "@/keymap/useKeymap";
+import { isEditable } from "@/keymap/useKeymap";
 
 export type ActivityLogDialogProps = { open: boolean; onOpenChange: (open: boolean) => void };
 
@@ -68,7 +68,8 @@ export function ActivityLogDialog({ open, onOpenChange }: ActivityLogDialogProps
   // the capture phase, since the popup stops the arrow keys on their way up.
   useEffect(() => {
     if (!open) return;
-    let g = 0;
+    // A `g` waits for the next key with no timeout, as the keymap's prefixes do.
+    let g = false;
     const scroll = (to: number | "top" | "end") => {
       const el = logRef.current;
       if (!el) return;
@@ -80,8 +81,8 @@ export function ActivityLogDialog({ open, onOpenChange }: ActivityLogDialogProps
     const half = () => Math.max(LINE_PX, Math.floor((logRef.current?.clientHeight ?? 0) / 2));
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || isEditable(e.target)) return;
-      const pendingG = g > 0 && Date.now() - g < PREFIX_TIMEOUT_MS;
-      g = 0;
+      const pendingG = g;
+      g = false;
       switch (e.key) {
         case "j":
         case "ArrowDown":
@@ -100,7 +101,7 @@ export function ActivityLogDialog({ open, onOpenChange }: ActivityLogDialogProps
         case "g":
           e.preventDefault();
           if (pendingG) return scroll("top");
-          g = Date.now();
+          g = true;
           return;
         case "G":
           e.preventDefault();
