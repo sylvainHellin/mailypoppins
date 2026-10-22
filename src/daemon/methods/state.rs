@@ -31,6 +31,25 @@ use super::super::dispatch::{
     CancelToken, ClientCtx, DomainError, Method, MethodKind, MethodSpec, Outcome,
 };
 
+/// Run `capture` on this thread, after handing this worker's other tasks to
+/// another one when the runtime has another.
+///
+/// A bootstrap blocks: the capture waits its turn at the state gate behind
+/// every commit queued ahead of it, and evaluates the health checks, which
+/// read `config.toml` and the stores from disk. A worker parked on either is a
+/// worker no other connection can use. `block_in_place` rather than
+/// `spawn_blocking`, because the hop to a pool thread and back doubled the
+/// bootstrap's median latency under load (`tests/daemon_events.rs`, the
+/// stalled-reader latency test). A current-thread runtime, which the
+/// in-process daemon of the TUI's tests runs on, has no other worker to
+/// protect and refuses `block_in_place`, so there the capture runs as is.
+fn blocking_in_place<T>(capture: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(capture),
+        _ => capture(),
+    }
+}
+
 /// `state.bootstrap` as the dispatcher serves it.
 pub struct StateBootstrap {
     /// The one canonical state of this daemon process.
@@ -175,8 +194,8 @@ impl Method for StateBootstrap {
         _cancel: CancelToken,
     ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
         Box::pin(async move {
-            let (snapshot, revision, instance) =
-                self.state.bootstrap(ConnectionId(ctx.connection_id));
+            let conn = ConnectionId(ctx.connection_id);
+            let (snapshot, revision, instance) = blocking_in_place(|| self.state.bootstrap(conn));
             self.arm_fake_readiness();
             self.arm_fake_burst();
             self.arm_fake_outcomes();
