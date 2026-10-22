@@ -72,7 +72,7 @@ pub fn pin_theme() {
     let _ = theme::init(theme::DEFAULT_THEME_NAME);
     assert_eq!(
         *theme::active(),
-        Theme::catppuccin_mocha(),
+        Theme::mailypoppins(),
         "golden frames require the default theme; the process theme was pinned elsewhere"
     );
 }

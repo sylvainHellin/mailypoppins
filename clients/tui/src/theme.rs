@@ -4,23 +4,24 @@
 //! Colors are grouped into semantic slots (`Theme` fields) rather than raw
 //! palette names, so a theme only has to answer "what color is an unread
 //! marker / a focused border / an error" and the UI code never hardcodes a
-//! palette. The default theme (`catppuccin-mocha`) reproduces the original
-//! hardcoded Catppuccin Mocha appearance exactly.
+//! palette. The default theme (`mailypoppins`) carries the Mac app's dark
+//! palette, so the TUI and the app look like one product; `catppuccin-mocha`
+//! keeps the TUI's original hardcoded appearance.
 
 use std::sync::OnceLock;
 
 use ratatui::style::Color;
 
 /// Name of the theme used when none is configured (or the configured name is
-/// unknown). Preserves the original appearance of the TUI.
-pub const DEFAULT_THEME_NAME: &str = "catppuccin-mocha";
+/// unknown): the Mac app's dark palette.
+pub const DEFAULT_THEME_NAME: &str = "mailypoppins";
 
 /// Canonical names of all built-in themes, for error messages and docs.
 pub const THEME_NAMES: &[&str] = &[
-    "catppuccin-mocha",
-    "catppuccin-latte",
     "mailypoppins",
     "mailypoppins-light",
+    "catppuccin-mocha",
+    "catppuccin-latte",
     "tokyo-night",
     "terminal",
 ];
@@ -278,9 +279,9 @@ impl Theme {
     pub fn by_name(name: &str) -> Option<Self> {
         match name.trim().to_lowercase().as_str() {
             // Empty = unset (e.g. GlobalConfig::default()) -> default theme.
-            "" | "default" | "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin_mocha()),
+            "" | "default" | "mailypoppins" | "mailypoppins-dark" => Some(Self::mailypoppins()),
+            "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin_mocha()),
             "latte" | "catppuccin-latte" => Some(Self::catppuccin_latte()),
-            "mailypoppins" | "mailypoppins-dark" => Some(Self::mailypoppins()),
             "mailypoppins-light" => Some(Self::mailypoppins_light()),
             "tokyo-night" | "tokyonight" => Some(Self::tokyo_night()),
             "terminal" | "transparent" | "ansi" => Some(Self::terminal()),
@@ -291,7 +292,7 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::catppuccin_mocha()
+        Self::mailypoppins()
     }
 }
 
@@ -308,7 +309,7 @@ pub fn init(name: &str) -> Option<String> {
             None
         }
         None => {
-            let _ = ACTIVE.set(Theme::catppuccin_mocha());
+            let _ = ACTIVE.set(Theme::default());
             Some(format!(
                 "Unknown theme '{}' in config.toml; using '{}'. Available: {}",
                 name,
@@ -322,7 +323,7 @@ pub fn init(name: &str) -> Option<String> {
 /// The active theme. Falls back to the default theme when `init` was never
 /// called (e.g. in tests).
 pub fn active() -> &'static Theme {
-    ACTIVE.get_or_init(Theme::catppuccin_mocha)
+    ACTIVE.get_or_init(Theme::default)
 }
 
 #[cfg(test)]
@@ -337,11 +338,16 @@ mod tests {
     }
 
     #[test]
-    fn default_theme_preserves_original_palette() {
-        // The default must keep today's exact appearance: base bg and text of
-        // the original hardcoded Catppuccin Mocha palette.
+    fn default_theme_is_the_app_palette() {
         let theme = Theme::by_name(DEFAULT_THEME_NAME).unwrap();
         assert_eq!(theme, Theme::default());
+        assert_eq!(theme, Theme::mailypoppins());
+    }
+
+    #[test]
+    fn catppuccin_mocha_keeps_the_original_palette() {
+        // The TUI's original hardcoded Catppuccin Mocha: base bg, text, accent.
+        let theme = Theme::catppuccin_mocha();
         assert_eq!(theme.bg, Color::Rgb(30, 30, 46));
         assert_eq!(theme.text, Color::Rgb(205, 214, 244));
         assert_eq!(theme.accent, Color::Rgb(137, 180, 250));
@@ -354,8 +360,8 @@ mod tests {
             Theme::by_name("catppuccin"),
             Some(Theme::catppuccin_mocha())
         );
-        assert_eq!(Theme::by_name("default"), Some(Theme::catppuccin_mocha()));
-        assert_eq!(Theme::by_name(""), Some(Theme::catppuccin_mocha()));
+        assert_eq!(Theme::by_name("default"), Some(Theme::mailypoppins()));
+        assert_eq!(Theme::by_name(""), Some(Theme::mailypoppins()));
     }
 
     #[test]

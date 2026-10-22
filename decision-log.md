@@ -65,3 +65,10 @@ Why: a profile (its own config, data, store and daemon) is useful beyond demos, 
 Rejected: a local fake IMAP/SMTP server (mp needs CONDSTORE, QRESYNC, IDLE, MOVE and UIDPLUS, so it means installing Stalwart or Dovecot, against a real mailbox that needs nothing); a store seeded without a server (archive, send and sync would fail on camera); a `demo/` folder in this repo (fake data in the public repo for no gain).
 Source: chat with Sylvain, 2026-10-22.
 Status: accepted
+
+## 2026-10-22 - The TUI's default theme is `mailypoppins`, the Mac app's dark palette
+
+Why: the TUI, the Mac app and the website should read as one product, and there are hardly any outside users whose colours an update would change; `theme = "catppuccin-mocha"` brings the old look back.
+Rejected: keeping `catppuccin-mocha` as the default with `mailypoppins` as an opt-in (every new user would start on a look the rest of the product dropped).
+Source: chat with Sylvain, 2026-10-22.
+Status: accepted

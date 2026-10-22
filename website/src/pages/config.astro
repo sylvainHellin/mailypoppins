@@ -32,7 +32,7 @@ import { codeTheme } from '../styles/code-theme';
     <section>
       <h2>Full Example</h2>
       <p>A complete single-account configuration with comments explaining each section.</p>
-      <ConfigExample code={`theme = "catppuccin-mocha"  # TUI color theme (see Theme section)
+      <ConfigExample code={`theme = "mailypoppins"  # TUI color theme (see Theme section)
 notifications = false       # Desktop notifications for new mail (see Notifications section)
 
 [email]
@@ -87,10 +87,10 @@ server = "Projects"`} />
         it must appear before the first <code>[section]</code> header. Available themes:
       </p>
       <ul>
-        <li><code>catppuccin-mocha</code>: the default, used when the key is omitted (aliases: <code>catppuccin</code>, <code>default</code>)</li>
-        <li><code>catppuccin-latte</code>: light variant (alias: <code>latte</code>)</li>
-        <li><code>mailypoppins</code>: the Mac app's dark palette (alias: <code>mailypoppins-dark</code>)</li>
+        <li><code>mailypoppins</code>: the default, used when the key is omitted; the Mac app's dark palette (aliases: <code>mailypoppins-dark</code>, <code>default</code>)</li>
         <li><code>mailypoppins-light</code>: the Mac app's light palette</li>
+        <li><code>catppuccin-mocha</code>: the TUI's original look (alias: <code>catppuccin</code>)</li>
+        <li><code>catppuccin-latte</code>: its light variant (alias: <code>latte</code>)</li>
         <li><code>tokyo-night</code> (alias: <code>tokyonight</code>)</li>
         <li><code>terminal</code>: adapts to the terminal's own ANSI palette: the background shows through and colors follow your terminal theme (aliases: <code>transparent</code>, <code>ansi</code>)</li>
       </ul>
@@ -98,7 +98,7 @@ server = "Projects"`} />
         Names are case-insensitive. An unknown name does not fail: the TUI starts
         with the default theme and logs a warning to the activity log.
       </p>
-      <ConfigExample code={`theme = "mailypoppins"`} />
+      <ConfigExample code={`theme = "catppuccin-mocha"`} />
 
       <!-- notifications -->
       <h3 id="notifications-section">notifications</h3>

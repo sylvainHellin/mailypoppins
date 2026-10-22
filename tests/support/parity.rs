@@ -566,6 +566,22 @@ pub fn pin_font_size(root: &Path) {
     .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
+/// Name the top-level `theme` in `root`'s `config.toml`, as today's default.
+///
+/// The default moved from `catppuccin-mocha` to `mailypoppins` after the
+/// `pre-daemon` tag, and `mp config show` prints the default's name when the
+/// key is omitted, so the two binaries cannot agree on a configuration without
+/// it; this takes that deliberate change out of a parity row the way
+/// [`pin_font_size`] does for #0127. The key is prepended because a top-level
+/// key must come before the first table.
+pub fn pin_theme(root: &Path) {
+    let path = root.join("config.toml");
+    let existing =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    fs::write(&path, format!("theme = \"mailypoppins\"\n\n{existing}"))
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+}
+
 /// Run the pre-daemon binary against `tmp` and collect its output.
 pub fn oracle(args: &[&str], tmp: &Path) -> Output {
     fs::create_dir_all(tmp).unwrap_or_else(|e| panic!("create {}: {e}", tmp.display()));

@@ -15,9 +15,9 @@ use crate::types::MailboxRole;
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct GlobalConfig {
-    /// TUI color theme name. Built-ins: "catppuccin-mocha" (the default,
-    /// today's exact appearance), "catppuccin-latte", "mailypoppins" and
-    /// "mailypoppins-light" (the Mac app's palettes), "tokyo-night",
+    /// TUI color theme name. Built-ins: "mailypoppins" (the default) and
+    /// "mailypoppins-light" (the Mac app's palettes), "catppuccin-mocha"
+    /// (the TUI's original look), "catppuccin-latte", "tokyo-night",
     /// "terminal" (adapts to the terminal's own ANSI palette).
     /// Unknown names warn and fall back to the default.
     #[serde(default)]

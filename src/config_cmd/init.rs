@@ -1087,9 +1087,9 @@ fn graph_init_flow(path: &std::path::Path) -> Result<()> {
     // -- Build config TOML
     let mut toml_content = String::new();
     toml_content.push_str(
-        "# TUI theme: catppuccin-mocha (default), catppuccin-latte, mailypoppins, mailypoppins-light, tokyo-night, terminal\n",
+        "# TUI theme: mailypoppins (default), mailypoppins-light, catppuccin-mocha, catppuccin-latte, tokyo-night, terminal\n",
     );
-    toml_content.push_str("theme = \"catppuccin-mocha\"\n\n");
+    toml_content.push_str("theme = \"mailypoppins\"\n\n");
     toml_content
         .push_str("# Desktop notifications for new mail while the TUI runs (default: false)\n");
     toml_content.push_str("notifications = false\n\n");
@@ -1357,9 +1357,9 @@ pub(crate) fn build_init_toml(
 ) -> String {
     let mut out = String::new();
     out.push_str(
-        "# TUI theme: catppuccin-mocha (default), catppuccin-latte, mailypoppins, mailypoppins-light, tokyo-night, terminal\n",
+        "# TUI theme: mailypoppins (default), mailypoppins-light, catppuccin-mocha, catppuccin-latte, tokyo-night, terminal\n",
     );
-    out.push_str("theme = \"catppuccin-mocha\"\n\n");
+    out.push_str("theme = \"mailypoppins\"\n\n");
     out.push_str("# Desktop notifications for new mail while the TUI runs (default: false)\n");
     out.push_str("notifications = false\n\n");
     out.push_str("[email]\n");

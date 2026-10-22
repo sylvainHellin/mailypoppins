@@ -314,8 +314,8 @@ use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
 use support::admin_fixture as fixture;
 use support::parity::{
     assert_byte_identical, daemon_is_listening, graph_without_smtp_warning, mp_command,
-    mp_no_daemon, oracle_command, pin_font_size, socket_path, DaemonFixture, EXIT_UNAVAILABLE,
-    REQUIRE_ENV,
+    mp_no_daemon, oracle_command, pin_font_size, pin_theme, socket_path, DaemonFixture,
+    EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
 use support::send_fixture::{all_rows, await_commit_marker, commit_hold_dir};
 
@@ -424,6 +424,7 @@ impl Slice {
         let tmp = TempDir::new().expect("a temporary admin-slice root");
         fixture::seed(tmp.path());
         pin_font_size(tmp.path());
+        pin_theme(tmp.path());
         let owned: Vec<(String, String)> = env
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -445,6 +446,7 @@ impl Slice {
         let tmp = TempDir::new().expect("a temporary admin-slice root");
         fixture::seed(tmp.path());
         pin_font_size(tmp.path());
+        pin_theme(tmp.path());
         let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
         let daemon =
             DaemonFixture::start_with(tmp.path(), None, &[(fixture::FAKE_TRANSPORT_ENV, &hook)]);
@@ -461,6 +463,7 @@ impl Slice {
         let tmp = TempDir::new().expect("a temporary admin-slice root");
         fixture::seed(tmp.path());
         pin_font_size(tmp.path());
+        pin_theme(tmp.path());
         let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
         let hold = commit_hold_dir(tmp.path()).to_string_lossy().into_owned();
         let env = [

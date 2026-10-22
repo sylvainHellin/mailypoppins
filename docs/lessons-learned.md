@@ -2810,3 +2810,8 @@ Every value interpolated into that HTML goes through `escape_html_text`; a test 
 The two values threading needs are the MAPI properties `PidTagInReplyToId` and `PidTagInternetReferences`, which Graph returns through `$expand=singleValueExtendedProperties($filter=id eq 'String 0x1042' or id eq 'String 0x1039')` for about 90 bytes more than the bare listing; a message without either header comes back with no `singleValueExtendedProperties` key at all, not an empty array.
 `/messages/delta` answers that `$expand` with HTTP 400 ("Parsing OData Select and Expand failed: Value cannot be null. (Parameter 'initialState')"), so it goes on the by-id download and the plain folder listing only; `$search` and the `internetMessageId` `$filter` both accept it (measured the same day).
 An additive column needs its additive index created after it: `ensure_additive_columns` now runs before `ensure_additive_indexes` in both `schema::create` and `Store::open`, where an index on `messages.conversation_id` would otherwise fail on every older store.
+
+## The golden frames' `fg:selection` tags also catch any slot that shares the selection colour (2026-10-22)
+
+`cell_tags` compares a cell's colour with the active theme's `selection`, `surface` and `error`, so a slot that happens to carry the same RGB is tagged too: under `catppuccin-mocha` the success green equals the selection green, under `mailypoppins` the unread count and code share the selection Pumpkin.
+Changing the default theme therefore moves `fg:selection` runs in six golden frames with no UI change; read such a diff as a palette coincidence, check the text rows are untouched, and accept it.

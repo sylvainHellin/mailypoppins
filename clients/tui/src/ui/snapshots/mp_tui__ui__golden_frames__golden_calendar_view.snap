@@ -48,6 +48,6 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 02 |strike@1..17 strike@18..26 fg:error@29..38 bold@43..49
 03 |bold@43..50
 04 |bold@43..54
-05 |bold@43..54 fg:selection@54..62
+05 |bold@43..54
 35 |bold@27..37
 38 |bold@1..11 bold@13..16 bold@34..43 bold@63..64 bold@71..72 bold@90..91
