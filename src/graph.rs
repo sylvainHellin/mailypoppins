@@ -1755,14 +1755,19 @@ impl GraphClient {
     /// with (#0065 follow-up): a throttled-out archive target returned an empty
     /// vector, reported a complete download, and opened the prune gate on inbox
     /// rows whose archive copies had never landed.
+    ///
+    /// `window` is a `status-only` target's recency window (#0141): only the
+    /// folder's newest `window` messages are candidates, and what lies below
+    /// them is never a backlog ([`backlog_owed`]).
     pub async fn fetch_new_messages(
         &self,
         folder: &str,
         limit: usize,
+        window: Option<usize>,
         known_ids: &HashSet<String>,
     ) -> Result<FolderFetch> {
         let enumeration = self.enumerate_folder(folder).await?;
-        let (new, found) = select_for_download(&enumeration.entries, known_ids, limit);
+        let (new, found) = select_for_download(&enumeration.entries, known_ids, limit, window);
         let capped = found > new.len();
         let skipped = enumeration.entries.len() - found;
 
@@ -1779,7 +1784,7 @@ impl GraphClient {
         let graph_ids: Vec<&str> = new.iter().map(|entry| entry.graph_id.as_str()).collect();
         let batch = self.fetch_messages_by_ids(&graph_ids).await?;
         let download_incomplete = capped || batch.fell_short();
-        let backlog = backlog_owed(found, graph_ids.len(), batch.fell_short());
+        let backlog = backlog_owed(window, found, graph_ids.len(), batch.fell_short());
 
         Ok(FolderFetch {
             new_emails: batch.emails,
@@ -2192,6 +2197,7 @@ impl GraphClient {
         &self,
         folder: &str,
         limit: usize,
+        window: Option<usize>,
         known_ids: &HashSet<String>,
         link: &str,
     ) -> Result<Option<DeltaFetch>, DeltaDiscard> {
@@ -2206,7 +2212,7 @@ impl GraphClient {
             return Ok(None);
         }
 
-        let (new, found) = select_for_download(&delta.changed, known_ids, limit);
+        let (new, found) = select_for_download(&delta.changed, known_ids, limit, window);
         let capped = found > new.len();
         if new.is_empty() {
             return Ok(Some(DeltaFetch {
@@ -2226,7 +2232,7 @@ impl GraphClient {
             }
         };
         let download_incomplete = capped || batch.fell_short();
-        let backlog = backlog_owed(found, graph_ids.len(), batch.fell_short());
+        let backlog = backlog_owed(window, found, graph_ids.len(), batch.fell_short());
         Ok(Some(DeltaFetch {
             new_emails: batch.emails,
             changed: delta.changed,
@@ -2271,8 +2277,12 @@ struct DeltaFetch {
 /// regular interval. A stored delta token cannot hide the backlog: a capped
 /// pass never mints one ([`may_record_delta_token`]), so the next pass
 /// enumerates again or replays the same change set from the older token.
-fn backlog_owed(found: usize, asked: usize, fell_short: bool) -> bool {
-    found > asked && asked > 0 && !fell_short
+///
+/// A windowed (`status-only`) target never owes one (#0141): what it leaves
+/// below its newest `window` messages is its policy, and draining it pass
+/// after pass would download the whole trash or junk folder.
+fn backlog_owed(window: Option<usize>, found: usize, asked: usize, fell_short: bool) -> bool {
+    window.is_none() && found > asked && asked > 0 && !fell_short
 }
 
 /// What one folder's ingest loop left behind, for the decisions taken after it.
@@ -2448,18 +2458,35 @@ fn server_flags(entry: &FolderEntry) -> crate::types::MessageFlags {
 /// The two differ exactly when `limit` left some behind, and that difference is
 /// what suspends the prune: a pass that could not fetch everything it found
 /// cannot also be trusted to say what has been deleted (see [`pass_may_prune`]).
+///
+/// A windowed target (#0141) selects among the folder's newest `window`
+/// messages, held or not, the way the IMAP window takes the newest UIDs of the
+/// listing. Capping the new ones instead would take the next older 50 on every
+/// pass, since the store lacks them by id, and download the whole folder over
+/// a run of passes. `found` still counts every new message of the folder, so a
+/// windowed pass that left history on the server reports itself capped and
+/// mints no delta token ([`may_record_delta_token`]).
 fn select_for_download<'a>(
     server: &'a HashMap<String, FolderEntry>,
     known_ids: &HashSet<String>,
     limit: usize,
+    window: Option<usize>,
 ) -> (Vec<&'a FolderEntry>, usize) {
-    let mut new = new_ids_newest_first(server, known_ids);
-    let found = new.len();
-    new.truncate(limit);
+    let found = server
+        .keys()
+        .filter(|mid| !known_ids.contains(mid.as_str()))
+        .count();
+    let new = newest_first(server)
+        .into_iter()
+        .take(window.unwrap_or(usize::MAX))
+        .filter(|(mid, _)| !known_ids.contains(*mid))
+        .map(|(_, entry)| entry)
+        .take(limit)
+        .collect();
     (new, found)
 }
 
-/// The folder's messages the store does not hold, newest first.
+/// Every message of the listing, newest first.
 ///
 /// Newest first is what makes a capped sync useful (the quick sync passes
 /// `limit = 100`): the pass downloads the most recent arrivals, and because it
@@ -2467,19 +2494,15 @@ fn select_for_download<'a>(
 /// drains one window at a time instead of the same window repeating. Ties and
 /// missing dates fall back to the message id so the order is total and a
 /// truncated pass is reproducible.
-fn new_ids_newest_first<'a>(
-    server: &'a HashMap<String, FolderEntry>,
-    known_ids: &HashSet<String>,
-) -> Vec<&'a FolderEntry> {
-    let mut new: Vec<(&str, &FolderEntry)> = server
+fn newest_first(server: &HashMap<String, FolderEntry>) -> Vec<(&str, &FolderEntry)> {
+    let mut all: Vec<(&str, &FolderEntry)> = server
         .iter()
-        .filter(|(mid, _)| !known_ids.contains(mid.as_str()))
         .map(|(mid, entry)| (mid.as_str(), entry))
         .collect();
-    new.sort_by(|(a_mid, a), (b_mid, b)| {
+    all.sort_by(|(a_mid, a), (b_mid, b)| {
         b.received.cmp(&a.received).then_with(|| a_mid.cmp(b_mid))
     });
-    new.into_iter().map(|(_, entry)| entry).collect()
+    all
 }
 
 /// The rows the store holds for a mailbox that the folder no longer lists, as
@@ -2974,8 +2997,6 @@ pub async fn sync_mailboxes_graph(
             );
             return Ok(result);
         }
-        // A `status-only` folder's own window (#0141), below the pass's limit.
-        let limit = target.limit(limit);
         let known = crate::ingest::known_message_ids(&store, account_name, target.role.as_str())?;
         let mailbox = target.role.as_str();
         let stored = crate::ingest::load_mailbox_cursor(&store, account_name, mailbox)?;
@@ -3027,7 +3048,7 @@ pub async fn sync_mailboxes_graph(
         if verdict == DeltaVerdict::Use {
             let link = stored_token.clone().unwrap_or_default();
             match client
-                .fetch_delta(&target.server_name, limit, &known, &link)
+                .fetch_delta(&target.server_name, limit, target.window, &known, &link)
                 .await
             {
                 Ok(Some(d)) => delta_fetch = Some(d),
@@ -3075,7 +3096,7 @@ pub async fn sync_mailboxes_graph(
                         client.mint_delta_token(&target.server_name).await
                     };
                     let fetch = match client
-                        .fetch_new_messages(&target.server_name, limit, &known)
+                        .fetch_new_messages(&target.server_name, limit, target.window, &known)
                         .await
                     {
                         Ok(v) => v,
@@ -4966,7 +4987,7 @@ mod tests {
             ("<recent@x>", "AAA", Some("2026-08-06T10:00:00Z")),
             ("<moved-in@x>", "BBB", Some("2024-01-01T09:00:00Z")),
         ]);
-        let selected = new_ids_newest_first(&server, &known(&["<recent@x>"]));
+        let selected = select_for_download(&server, &known(&["<recent@x>"]), usize::MAX, None).0;
         assert_eq!(
             selected
                 .iter()
@@ -4985,7 +5006,7 @@ mod tests {
             ("<new@x>", "NEW", Some("2026-08-06T00:00:00Z")),
             ("<undated@x>", "UND", None),
         ]);
-        let selected = new_ids_newest_first(&server, &HashSet::new());
+        let selected = select_for_download(&server, &HashSet::new(), usize::MAX, None).0;
         assert_eq!(
             selected
                 .iter()
@@ -5003,8 +5024,8 @@ mod tests {
             ("<b@x>", "B", Some("2026-08-06T00:00:00Z")),
             ("<a@x>", "A", Some("2026-08-06T00:00:00Z")),
         ]);
-        let first = new_ids_newest_first(&server, &HashSet::new());
-        let second = new_ids_newest_first(&server, &HashSet::new());
+        let first = select_for_download(&server, &HashSet::new(), usize::MAX, None).0;
+        let second = select_for_download(&server, &HashSet::new(), usize::MAX, None).0;
         assert_eq!(
             first
                 .iter()
@@ -5054,7 +5075,9 @@ mod tests {
         // is the same trim.
         let stored = known(&["<padded@x>"]);
         assert!(
-            select_for_download(&map, &stored, usize::MAX).0.is_empty(),
+            select_for_download(&map, &stored, usize::MAX, None)
+                .0
+                .is_empty(),
             "a message the store holds must not be downloaded again",
         );
         assert!(
@@ -5103,7 +5126,7 @@ mod tests {
             ("<b@x>", "B", Some("2026-08-06T02:00:00Z")),
             ("<c@x>", "C", Some("2026-08-06T01:00:00Z")),
         ]);
-        let (selected, found) = select_for_download(&server, &HashSet::new(), 2);
+        let (selected, found) = select_for_download(&server, &HashSet::new(), 2, None);
         assert_eq!(found, 3);
         assert_eq!(
             selected
@@ -5112,7 +5135,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["A", "B"],
         );
-        let (all, found) = select_for_download(&server, &HashSet::new(), usize::MAX);
+        let (all, found) = select_for_download(&server, &HashSet::new(), usize::MAX, None);
         assert_eq!((all.len(), found), (3, 3), "a full sync never truncates");
     }
 
@@ -5148,12 +5171,12 @@ mod tests {
                 delta_verdict(QUICK, token.as_deref(), true),
                 DeltaVerdict::NoToken
             );
-            let (new, found) = select_for_download(&server, &known, QUICK);
+            let (new, found) = select_for_download(&server, &known, QUICK, None);
             if found == 0 {
                 break;
             }
             let capped = found > new.len();
-            owed.push(backlog_owed(found, new.len(), false));
+            owed.push(backlog_owed(None, found, new.len(), false));
             if may_record_delta_token(true, capped, false) {
                 token = Some(format!("{GRAPH_BASE}/me/mailFolders('A')/messages/delta?t"));
             }
@@ -5169,16 +5192,68 @@ mod tests {
         assert!(token.is_some(), "the pass that finished mints the token");
     }
 
+    /// #0141: a windowed (`status-only`) target takes the folder's newest
+    /// `window` messages and stops there. Capping the *new* ones instead took
+    /// the next older 50 on every pass and owed a follow-up each time, so back
+    /// to back passes downloaded the whole trash.
+    #[test]
+    fn a_windowed_target_takes_the_newest_window_and_owes_no_backlog() {
+        const QUICK: usize = crate::daemon::runtime::account::QUICK_TICK_LIMIT;
+        const WINDOW: usize = crate::catalogue::STATUS_ONLY_WINDOW;
+        let rows: Vec<(String, String, String)> = (0..250)
+            .map(|i| {
+                (
+                    format!("<m{i:03}@x>"),
+                    format!("G{i:03}"),
+                    format!("2026-08-06T{:02}:{:02}:00Z", i / 60, i % 60),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str, Option<&str>)> = rows
+            .iter()
+            .map(|(mid, id, date)| (mid.as_str(), id.as_str(), Some(date.as_str())))
+            .collect();
+        let server = folder(&borrowed);
+
+        let mut known = HashSet::new();
+        for pass in 0..4 {
+            let (new, found) = select_for_download(&server, &known, QUICK, Some(WINDOW));
+            assert!(
+                !backlog_owed(Some(WINDOW), found, new.len(), false),
+                "pass {pass} owes no follow-up"
+            );
+            for entry in new {
+                known.insert(format!("<m{}@x>", &entry.graph_id[1..]));
+            }
+        }
+        let expected: HashSet<String> = (250 - WINDOW..250)
+            .map(|i| format!("<m{i:03}@x>"))
+            .collect();
+        assert_eq!(known, expected, "the newest {WINDOW} and nothing older");
+
+        // A message moved into the trash lands at the top of the window.
+        let (new, found) = select_for_download(&server, &HashSet::new(), 10, Some(WINDOW));
+        assert_eq!(found, 250, "the history below the window is still reported");
+        assert_eq!(new.len(), 10, "the pass's own limit still applies");
+        assert_eq!(new[0].graph_id, "G249");
+    }
+
     /// Only the cap owes an immediate pass: a short batch (a throttle, a
     /// failed sub-response) and a pass that asked for nothing wait for the
     /// regular interval, and a pass that took everything owes nothing.
     #[test]
     fn only_a_window_that_landed_whole_owes_an_immediate_pass() {
-        assert!(backlog_owed(250, 100, false));
-        assert!(!backlog_owed(250, 100, true), "a throttled batch backs off");
-        assert!(!backlog_owed(250, 0, false), "`-n 0` makes no progress");
-        assert!(!backlog_owed(100, 100, false), "nothing left behind");
-        assert!(!backlog_owed(0, 0, false));
+        assert!(backlog_owed(None, 250, 100, false));
+        assert!(
+            !backlog_owed(None, 250, 100, true),
+            "a throttled batch backs off"
+        );
+        assert!(
+            !backlog_owed(None, 250, 0, false),
+            "`-n 0` makes no progress"
+        );
+        assert!(!backlog_owed(None, 100, 100, false), "nothing left behind");
+        assert!(!backlog_owed(None, 0, 0, false));
     }
 
     fn sync_target(role: MailboxRole, server_name: &str) -> SyncTarget {
