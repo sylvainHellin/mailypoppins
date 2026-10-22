@@ -1250,10 +1250,6 @@ mod tests {
         state_from(super::super::config::ConfigState::Ok, &[name])
     }
 
-    /// Two refreshes either side of a status flip publish the two statuses in
-    /// the order they were evaluated. Sequential rather than raced: the
-    /// runtime table cannot be made to flip mid-evaluation from a test, so this
-    /// pins the order the serialised refresh guarantees, not the race itself.
     #[test]
     fn take_failure_lets_exactly_one_caller_restart_a_failed_start() {
         let table = RuntimeTable::default();
@@ -1275,6 +1271,10 @@ mod tests {
         );
     }
 
+    /// Two refreshes either side of a status flip publish the two statuses in
+    /// the order they were evaluated. Sequential rather than raced: the
+    /// runtime table cannot be made to flip mid-evaluation from a test, so this
+    /// pins the order the serialised refresh guarantees, not the race itself.
     #[test]
     fn refreshes_publish_an_account_check_in_evaluation_order() {
         let state = state_with_one_account("alpha");
