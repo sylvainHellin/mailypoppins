@@ -393,6 +393,26 @@ pub struct EmailFrontmatter {
     pub signature: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<EventFrontmatter>,
+    /// The `Message-ID` every server copy of this draft carries (#0143).
+    ///
+    /// Minted once by the daemon when the draft is first pushed to the
+    /// account's server Drafts folder, and kept for the draft's life: it is
+    /// what links the file to its copy across a replace by mp and across an
+    /// edit in Outlook or the Proton app, which keep it. It differs from the
+    /// `message_id:` a send records, so a sent message and its draft are
+    /// never confused by a `Message-ID` search. Absent on a draft that was
+    /// never mirrored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_message_id: Option<String>,
+    /// The `id:` of the draft this file is a conflict copy of (#0143).
+    ///
+    /// Written when the same draft changed both here and on the server since
+    /// the last convergence: the draft takes the server's version and the
+    /// local text is kept beside it under a fresh `id:` and this key. A file
+    /// carrying it is never pushed; removing the key keeps it as a draft of
+    /// its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_of: Option<String>,
 }
 
 #[derive(Debug)]
@@ -562,6 +582,8 @@ mod tests {
             forwarded_from: None,
             signature: None,
             event: None,
+            server_message_id: None,
+            conflict_of: None,
         };
         let yaml = serde_yaml::to_string(&fm).unwrap();
         let back: EmailFrontmatter = serde_yaml::from_str(&yaml).unwrap();

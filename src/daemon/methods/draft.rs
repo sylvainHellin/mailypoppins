@@ -386,6 +386,7 @@ fn entry(account: &str, row: &DraftRow) -> DraftEntry {
         ready: draft
             .as_ref()
             .is_ok_and(|draft| crate::draft::validate_draft(draft).is_ok()),
+        server: None,
     }
 }
 

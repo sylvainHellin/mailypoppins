@@ -215,6 +215,8 @@ A draft row carries `{id, path, to, subject, status, valid, ready}`, the same fi
 `id` is the `id:` frontmatter field, or the file stem when the file has none; `path` is absolute, because a GUI opens a draft by path; `to` is `null` for a draft with no recipient yet.
 `valid` is "the file parsed" and `ready` is "it would send", which are two axes: a draft with no subject parses perfectly and is not sendable.
 A draft that does not parse stays a row with `valid: false`, `status: "invalid"`, `to: null`, `subject: ""` and `ready: false` (#0080): `"invalid"` is not a draft status a file can spell, and that is the point, since nothing read a status out of a file that would not parse.
+A row may also carry `server`, `{state, synced_at}`, where the draft stands against its copy in the account's server Drafts folder ([#0143](tickets/0143-server-drafts.md)): `state` is `local` (never pushed, or the account's mirror is off), `pending` (the file changed since its copy was written), `synced`, `conflict` (the draft and the server both changed and a conflict copy holds the local text, or this row is that copy) or `failed` (the push was refused past its retry budget), and `synced_at` is the RFC 3339 time the two last agreed, `null` when they never did.
+The member is absent until the account's runtime has read its mirror state, and absent from every row of a daemon that predates it, so a client reads its absence as "nothing known" rather than as `local`.
 
 An account's `state` is one of `opening`, `ready` or `blocked`, and it reports the runtime rather than the store: it answers "has this account's runtime come up", where `account.list`'s `state` answers "can I read this account's store on disk".
 The two are deliberately different questions.
@@ -760,7 +762,7 @@ The family is the sixteen methods below, all served from protocol 1 and all dura
 
 The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they are wire shapes, so they live in the crate a client links rather than in the daemon crate a client must never link.
 `DraftCreated` is `{account, id, selector, path, source, subject}`, whose `source` is `{id, selector}` for a reply or a forward and absent for a draft made from nothing, and whose `subject` is the one the file was written with, read back from it: the builder's `Re:` or `Fwd:`, a `headers` override, or `""` for a skeleton.
-`DraftListing` is `{account, drafts, skipped, collisions}`, whose rows are `{id, selector, path, status, to, cc, bcc, subject, date, valid, ready}` in the index's order (`mtime DESC, id ASC`); `to`, `cc`, `bcc`, `subject` and `date` stay nullable, which is where the row differs from the snapshot's, and `skipped` names a file that will not parse by path because such a file has no id to be named by (#0080).
+`DraftListing` is `{account, drafts, skipped, collisions}`, whose rows are `{id, selector, path, status, to, cc, bcc, subject, date, valid, ready, server?}` in the index's order (`mtime DESC, id ASC`); `to`, `cc`, `bcc`, `subject` and `date` stay nullable, which is where the row differs from the snapshot's, and `skipped` names a file that will not parse by path because such a file has no id to be named by (#0080).
 `cc` and `date` are the index's own columns and joined the row in P5-U4, for a client that lists drafts beside received mail: such a list prints the Cc line and sorts a draft by its `date:` field, falling back to the `YYYY-MM-DD-…` stem of `path` when the file has none.
 `mp list` reads neither.
 `bcc` is the file's `bcc:` field and joined the row in #0131, for a recipients dialog that edits all three recipient fields from the row it lists.
@@ -1228,7 +1230,7 @@ An event either replaces a small resource whole or names one whose cached answer
 
 `account.state_changed` is the kind an account's readiness travels as, with a payload of `{account, state}` where `state` is the `opening`/`ready`/`blocked` the snapshot uses, plus a `reason` when it is `blocked`.
 It is what converges a snapshot taken while an account was still `opening`, and it needs no second bootstrap.
-`draft.changed` replaces one draft whole, with a payload of `{account, id, path, to, subject, status, valid, ready}`, the snapshot row plus its account.
+`draft.changed` replaces one draft whole, with a payload of `{account, id, path, to, subject, status, valid, ready, server?}`, the snapshot row plus its account.
 `draft.invalid` replaces the *same* resource, `draft:<account>/<id>`, with a payload of `{account, id, path, diagnostics}`, where a diagnostic is `{line, message}` and `line` is 1-based, file-relative and `null` for a refusal by value rather than by syntax.
 It is a replacement rather than a lifecycle event because a broken draft is a fact about a resource that stays true until somebody fixes the file: it reduces into the snapshot, so a client that connects after the breakage still learns about it, and fixing the file replaces the row rather than adding a second one.
 All three are replacements because they are small and a client that re-queried them would learn nothing the payload did not already carry.
@@ -1632,3 +1634,8 @@ A `contact.search` and `contact.stats` row carries `first_seen` and `last_seen`,
 The header edit (2026-10-23) added `draft.set_headers`, one command, additively; no field was renamed, none was dropped, and no command's output moved.
 `draft.set_headers` `{account, id|selector, headers?, splice_signature?, no_signature?, signature?}` -> `DraftLocation` rewrites the fields of `{to?, cc?, bcc?, subject?}` it names and re-splices the signature block when asked; its shape is in [the family's section](#the-draft-family).
 It replaces the TUI's `ce` and the desktop's recipients dialog writing the file in the client; the constant is `mp_protocol::draft::METHOD_DRAFT_SET_HEADERS`, the desktop asks for it at the handshake, and the capability list grew by its name.
+
+#0143 (the server drafts mirror) added two optional frontmatter keys and one optional member, additively; no field was renamed, none was dropped, and no method was added.
+A draft row of the snapshot, a `draft.changed` payload and a `draft.list` row gained `server`, `mp_protocol::state::DraftServer` `{state, synced_at}` with `state` a `DraftSyncState` (`local`, `pending`, `synced`, `conflict`, `failed`); it is absent until the account's runtime has read its mirror state, so a row from an older daemon, or from an account whose runtime has not come up, decodes as before.
+A draft file may carry `server_message_id`, the `Message-ID` of its server copies, and `conflict_of`, the id of the draft a conflict copy was split from; both are optional, and a draft without them parses unchanged.
+The bootstrap fixture's round-trip snapshot carries a `server` member; the committed fixture's draft row still predates it and decodes with none.

@@ -1,0 +1,196 @@
+//! The `draft_sync` table: where each mirrored draft's server copy is, and
+//! the bytes of the file it last converged with (#0143).
+//!
+//! One row per `(account, draft_id)`. The draft file is the truth and the
+//! server copy is its mirror; this table only says which copy the mirror is
+//! (`mailbox`, `uid`, `uidvalidity`) and what the file looked like when the
+//! two last agreed (`synced_hash`, `synced_at`). A file whose hash differs
+//! from its row changed locally since; a copy whose UID differs from its row
+//! changed on the server since.
+//!
+//! It is a cache table like `pending_ops`: a store rebuild drops it, and the
+//! reconcile re-derives each row from the server copy the draft's
+//! `server_message_id` names and the file ([`crate::draft_mirror`]). Nothing
+//! in it is the only copy of anything the user typed.
+//!
+//! The volatile state lives here rather than in the frontmatter because every
+//! push replaces the server copy and changes its UID: written into the file,
+//! it would rewrite a draft an editor holds open a few seconds after every
+//! save.
+
+use anyhow::{Context, Result};
+use rusqlite::OptionalExtension;
+
+use super::Store;
+
+/// The table's name.
+pub const TABLE: &str = "draft_sync";
+
+/// Its `CREATE` statement, run by
+/// [`ensure_additive_tables`](super::schema::ensure_additive_tables).
+pub fn create_sql() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {TABLE} (
+            account     TEXT NOT NULL,
+            draft_id    TEXT NOT NULL,
+            mailbox     TEXT NOT NULL,
+            uid         INTEGER NOT NULL,
+            uidvalidity INTEGER NOT NULL,
+            synced_at   INTEGER NOT NULL,
+            synced_hash TEXT NOT NULL,
+            PRIMARY KEY (account, draft_id)
+        )"
+    )
+}
+
+/// One draft's server copy and the convergence it was recorded at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftSyncRow {
+    pub account: String,
+    /// The draft's `id:`.
+    pub draft_id: String,
+    /// The server folder the copy lives in.
+    pub mailbox: String,
+    /// The copy's UID, meaningful only beside `uidvalidity`.
+    pub uid: u32,
+    /// The folder's UIDVALIDITY when `uid` was recorded.
+    pub uidvalidity: u32,
+    /// Unix seconds of the push or pull that converged.
+    pub synced_at: i64,
+    /// [`crate::draft_mirror::file_hash`] of the file's bytes at that moment.
+    pub synced_hash: String,
+}
+
+fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<DraftSyncRow> {
+    Ok(DraftSyncRow {
+        account: row.get(0)?,
+        draft_id: row.get(1)?,
+        mailbox: row.get(2)?,
+        uid: row.get::<_, i64>(3)? as u32,
+        uidvalidity: row.get::<_, i64>(4)? as u32,
+        synced_at: row.get(5)?,
+        synced_hash: row.get(6)?,
+    })
+}
+
+const COLUMNS: &str = "account, draft_id, mailbox, uid, uidvalidity, synced_at, synced_hash";
+
+/// Every row of `account`, by draft id.
+pub fn load(store: &Store, account: &str) -> Result<Vec<DraftSyncRow>> {
+    let mut stmt = store.conn().prepare(&format!(
+        "SELECT {COLUMNS} FROM {TABLE} WHERE account = ?1 ORDER BY draft_id"
+    ))?;
+    let rows = stmt
+        .query_map([account], row_from_sql)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("reading the draft_sync rows")?;
+    Ok(rows)
+}
+
+/// The row of one draft, if it has one.
+pub fn get(store: &Store, account: &str, draft_id: &str) -> Result<Option<DraftSyncRow>> {
+    store
+        .conn()
+        .query_row(
+            &format!("SELECT {COLUMNS} FROM {TABLE} WHERE account = ?1 AND draft_id = ?2"),
+            [account, draft_id],
+            row_from_sql,
+        )
+        .optional()
+        .context("reading a draft_sync row")
+}
+
+/// Write one draft's row, replacing the one it had.
+pub fn upsert(store: &Store, row: &DraftSyncRow) -> Result<()> {
+    store
+        .conn()
+        .execute(
+            &format!(
+                "INSERT INTO {TABLE} ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (account, draft_id) DO UPDATE SET
+                    mailbox = excluded.mailbox, uid = excluded.uid,
+                    uidvalidity = excluded.uidvalidity, synced_at = excluded.synced_at,
+                    synced_hash = excluded.synced_hash"
+            ),
+            rusqlite::params![
+                row.account,
+                row.draft_id,
+                row.mailbox,
+                i64::from(row.uid),
+                i64::from(row.uidvalidity),
+                row.synced_at,
+                row.synced_hash,
+            ],
+        )
+        .context("writing a draft_sync row")?;
+    Ok(())
+}
+
+/// Forget one draft's row: it was retired, or its copy is gone.
+pub fn delete(store: &Store, account: &str, draft_id: &str) -> Result<()> {
+    store
+        .conn()
+        .execute(
+            &format!("DELETE FROM {TABLE} WHERE account = ?1 AND draft_id = ?2"),
+            [account, draft_id],
+        )
+        .context("deleting a draft_sync row")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        (dir, store)
+    }
+
+    fn row(id: &str, uid: u32) -> DraftSyncRow {
+        DraftSyncRow {
+            account: "tum".to_string(),
+            draft_id: id.to_string(),
+            mailbox: "Drafts".to_string(),
+            uid,
+            uidvalidity: 7,
+            synced_at: 1_700_000_000,
+            synced_hash: format!("hash-{uid}"),
+        }
+    }
+
+    /// A fresh store has the table, a row round-trips, a second write
+    /// replaces it, and a delete forgets it, per account.
+    #[test]
+    fn a_row_round_trips_is_replaced_and_is_deleted() {
+        let (_dir, store) = store();
+        assert!(load(&store, "tum").unwrap().is_empty());
+        upsert(&store, &row("a", 10)).unwrap();
+        upsert(&store, &row("b", 11)).unwrap();
+        upsert(&store, &row("a", 12)).unwrap();
+        let mut other = row("a", 1);
+        other.account = "proton".to_string();
+        upsert(&store, &other).unwrap();
+
+        assert_eq!(
+            load(&store, "tum").unwrap(),
+            vec![row("a", 12), row("b", 11)]
+        );
+        assert_eq!(get(&store, "tum", "a").unwrap(), Some(row("a", 12)));
+        delete(&store, "tum", "a").unwrap();
+        assert_eq!(get(&store, "tum", "a").unwrap(), None);
+        assert_eq!(load(&store, "proton").unwrap(), vec![other]);
+    }
+
+    /// A UID or UIDVALIDITY above `i32::MAX` survives the round trip, since
+    /// both are unsigned 32-bit on the wire.
+    #[test]
+    fn a_large_uid_round_trips() {
+        let (_dir, store) = store();
+        let mut big = row("a", u32::MAX);
+        big.uidvalidity = u32::MAX - 1;
+        upsert(&store, &big).unwrap();
+        assert_eq!(get(&store, "tum", "a").unwrap(), Some(big));
+    }
+}

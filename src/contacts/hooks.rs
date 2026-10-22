@@ -285,6 +285,8 @@ mod tests {
                 forwarded_from: None,
                 signature: None,
                 event: None,
+                server_message_id: None,
+                conflict_of: None,
             },
             body_markdown: String::new(),
         }

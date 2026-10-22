@@ -96,6 +96,12 @@ pub struct DraftEntry {
     pub valid: bool,
     /// Whether it would send, which is a different question.
     pub ready: bool,
+    /// Where the draft stands against its server copy (#0143), the snapshot
+    /// row's member of the same name; absent until the account's runtime has
+    /// read its mirror state, and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub server: Option<crate::state::DraftServer>,
 }
 
 /// A file the refresh could not parse, named by path because a file with no

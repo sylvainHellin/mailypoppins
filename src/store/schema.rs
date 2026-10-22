@@ -562,7 +562,11 @@ pub const GRAPH_CLEANUPS_TABLE: &str = "graph_cleanups";
 /// `mailbox_listing` is the server's folder list as the last discovery saw it
 /// (#0141, [`crate::catalogue::listing`]); losing it in a rebuild costs one
 /// `LIST` at the next tick.
-fn additive_tables() -> [(&'static str, String); 3] {
+///
+/// `draft_sync` is where each mirrored draft's server copy is (#0143,
+/// [`super::draft_sync`]); losing it in a rebuild costs one reconcile, which
+/// re-derives every row from the server copy and the file.
+fn additive_tables() -> [(&'static str, String); 4] {
     [
         (
             ATTACHMENT_REPAIRS_TABLE,
@@ -591,6 +595,7 @@ fn additive_tables() -> [(&'static str, String); 3] {
             crate::catalogue::listing::TABLE,
             crate::catalogue::listing::create_sql(),
         ),
+        (super::draft_sync::TABLE, super::draft_sync::create_sql()),
     ]
 }
 

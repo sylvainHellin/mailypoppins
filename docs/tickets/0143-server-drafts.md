@@ -479,6 +479,7 @@ Open for Sylvain:
 1. Probe: `examples/draft_probe.rs`, run against `tum` and `proton` on 2026-10-20, with "Probe results" and "Decisions" filled in.
    Done.
 2. Contract: `server_message_id` and `conflict_of` in `EmailFrontmatter`, the `draft_sync` table in `src/store/schema.rs`, the `server` member of `DraftRow` and its fixture, `docs/daemon-protocol.md`.
+   Done: the table is `src/store/draft_sync.rs`, created additively at open; the `server` member is `mp_protocol::state::DraftServer` on the snapshot row, `draft.changed` and the `draft.list` row.
 3. Push: `build_server_draft` and the shared MIME assembly, `ServerOp::PushDraft` and `DeleteDraft`, the drain's APPEND, UID read-back, UID delete and `draft_sync` write, the in-memory copy of `draft_sync` and the watcher hand-off in `src/daemon/watch.rs`, the switch in `config.toml`.
 4. Send and discard: `outbox.draft_copy`, the `DeleteDraft` in both transitions out of `pending_send`, `draft.discard` and `settle_sent_draft` moving into `.retired/`.
 5. Reconcile and pull: `messages.draft_marker`, the eviction exemption, the reconcile pass and its recovery of a lost `draft_sync` row, the HTML-to-Markdown step with the `htmd` dependency, conflict copies, the marker import from the other machine.

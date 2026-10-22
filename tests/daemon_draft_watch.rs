@@ -592,6 +592,7 @@ fn the_three_payload_types_round_trip_through_json() {
         status: "draft".to_string(),
         valid: true,
         ready: false,
+        server: None,
     };
     let json = serde_json::to_value(&changed).expect("a draft.changed payload serialises");
     assert_keys(&json, &DRAFT_CHANGED_KEYS, "DraftChanged");

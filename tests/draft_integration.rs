@@ -944,6 +944,8 @@ fn test_validate_draft_missing_attachment_warning() {
             forwarded_from: None,
             signature: None,
             event: None,
+            server_message_id: None,
+            conflict_of: None,
         },
         body_markdown: "Body".to_string(),
     };
@@ -979,6 +981,8 @@ fn test_validate_draft_existing_attachment_no_warning() {
             forwarded_from: None,
             signature: None,
             event: None,
+            server_message_id: None,
+            conflict_of: None,
         },
         body_markdown: "Body".to_string(),
     };

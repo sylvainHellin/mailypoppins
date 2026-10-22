@@ -16,6 +16,7 @@ pub mod contacts_cmd;
 pub mod cutover;
 pub mod draft;
 pub mod draft_cmd;
+pub mod draft_mirror;
 pub mod dump;
 pub mod engine_lock;
 pub mod graph;

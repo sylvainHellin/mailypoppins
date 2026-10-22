@@ -299,6 +299,11 @@ pub struct DraftChanged {
     pub valid: bool,
     /// Whether the draft would send.
     pub ready: bool,
+    /// Where the draft stands against its server copy (#0143), absent until
+    /// the account's runtime has read its mirror state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub server: Option<crate::state::DraftServer>,
 }
 
 /// One draft the daemon could not parse, as `draft.invalid` carries it and as

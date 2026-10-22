@@ -5507,6 +5507,7 @@ fn scan_drafts(account: &str, dir: &Path) -> (Vec<DraftEntry>, Vec<DraftSkip>) {
                         date: fm.date.clone(),
                         valid: true,
                         ready: mp_core::draft::validate_draft(&draft).is_ok(),
+                        server: None,
                     },
                 ));
             }

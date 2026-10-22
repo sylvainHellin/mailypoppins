@@ -284,6 +284,46 @@ pub struct DraftRow {
     /// parses perfectly and is not sendable.
     #[serde(default)]
     pub ready: bool,
+    /// Where the draft stands against its copy in the server's Drafts folder
+    /// (#0143), absent until the account's runtime has read its mirror state
+    /// and on a daemon that predates the mirror.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub server: Option<DraftServer>,
+}
+
+/// Where a draft stands against its copy in the server's Drafts folder
+/// (#0143): the `server` member of a draft row, a `draft.changed` payload and
+/// a `draft.list` row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct DraftServer {
+    /// What the mirror owes this draft, if anything.
+    pub state: DraftSyncState,
+    /// When the file and its server copy last agreed, RFC 3339; `null` for a
+    /// draft that never converged.
+    #[serde(default)]
+    pub synced_at: Option<String>,
+}
+
+/// The mirror's word for one draft (#0143).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum DraftSyncState {
+    /// Not mirrored: the draft was never pushed, or the account's mirror is
+    /// off.
+    Local,
+    /// The file changed since its copy was written, and a push is owed.
+    Pending,
+    /// The file and its server copy agree.
+    Synced,
+    /// The draft changed here and on the server since they last agreed: the
+    /// draft took the server's version and the local text is a conflict copy
+    /// beside it, or this is that conflict copy.
+    Conflict,
+    /// The push was refused past its retry budget; the next edit tries again.
+    Failed,
 }
 
 /// One account's outbox counts.
@@ -457,7 +497,39 @@ mod tests {
         );
         assert_eq!(drafts[0].path, "");
         assert_eq!(drafts[0].to, None);
+        assert_eq!(drafts[0].server, None, "it predates the mirror too");
         assert!(bootstrap.snapshot.drafts_of("perso").is_empty());
+    }
+
+    /// The `server` member (#0143) travels as `{state, synced_at}` with the
+    /// state in snake case, and a row without it serialises no key at all,
+    /// so a payload from an account that does not mirror is the one it was.
+    #[test]
+    fn a_draft_rows_server_member_is_absent_or_typed() {
+        let mut row = DraftRow {
+            id: "d".to_string(),
+            ..Default::default()
+        };
+        let bare = serde_json::to_value(&row).expect("serialises");
+        assert!(bare.get("server").is_none(), "{bare}");
+        row.server = Some(DraftServer {
+            state: DraftSyncState::Pending,
+            synced_at: None,
+        });
+        let json = serde_json::to_value(&row).expect("serialises");
+        assert_eq!(
+            json["server"],
+            serde_json::json!({"state": "pending", "synced_at": null})
+        );
+        assert_eq!(serde_json::from_value::<DraftRow>(json).unwrap(), row);
+        for (state, word) in [
+            (DraftSyncState::Local, "local"),
+            (DraftSyncState::Synced, "synced"),
+            (DraftSyncState::Conflict, "conflict"),
+            (DraftSyncState::Failed, "failed"),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), word);
+        }
     }
 
     /// The second fixture pins a snapshot whose `diagnostics` carries one
@@ -533,6 +605,10 @@ mod tests {
                         status: "draft".to_string(),
                         valid: true,
                         ready: true,
+                        server: Some(DraftServer {
+                            state: DraftSyncState::Synced,
+                            synced_at: Some("2026-09-11T08:00:00Z".to_string()),
+                        }),
                     }],
                 )]),
                 outbox: BTreeMap::from([(

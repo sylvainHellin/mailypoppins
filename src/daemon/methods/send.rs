@@ -1081,6 +1081,8 @@ async fn send_invite(
             forwarded_from: None,
             signature: None,
             event,
+            server_message_id: None,
+            conflict_of: None,
         },
         body_markdown: plan.body.clone(),
     };
