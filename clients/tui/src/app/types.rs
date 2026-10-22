@@ -941,7 +941,9 @@ pub struct AccountState {
     /// store) used to sum serially before the first paint. It starts `true`,
     /// with `mailbox_counts` all-zero, and is cleared by
     /// `BgResult::AccountOpened` once the background open has read the real
-    /// counts. The sidebar shows a loading marker while it is set.
+    /// counts. A bootstrap that reports the runtime opening or blocked sets it
+    /// again, and the `account.state_changed` to `ready` that follows clears
+    /// it and recounts. The sidebar shows a loading marker while it is set.
     pub opening: bool,
     /// Whether the daemon reports this account's runtime as `blocked`: it
     /// cannot serve, for instance because another engine holds its lock.

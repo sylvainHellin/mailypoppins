@@ -586,11 +586,16 @@ impl App {
     /// An account's runtime moved: `blocked` marks it for the account picker
     /// and `ready` clears the mark, the desktop's `runtime_state` patch.
     ///
-    /// [`Applied::Ignored`] for the reason [`Self::apply_shutting_down`]
-    /// gives: nothing is reloaded and nothing is refetched, and the drain
-    /// repaints for any event it handled. The counts are not touched: a
-    /// runtime that becomes ready announces what it ingests through the
-    /// counts invalidations that follow.
+    /// `ready` also ends the account's `opening` and reads its counts again,
+    /// the desktop's `staleMailboxes`, and the active account reloads its open
+    /// mailbox, the desktop's `staleListIf`. A resync bootstrap that caught
+    /// the runtime opening (a daemon restart) sets `opening`, and the startup
+    /// open that would clear it ran long ago, so this event is the only thing
+    /// left that tells the client the account serves.
+    ///
+    /// Any other state is [`Applied::Ignored`] for the reason
+    /// [`Self::apply_shutting_down`] gives: nothing is reloaded and nothing is
+    /// refetched, and the drain repaints for any event it handled.
     fn apply_account_state(&mut self, event: &EventEnvelope) -> Applied {
         let change: AccountStateChanged = match serde_json::from_value(event.payload.clone()) {
             Ok(change) => change,
@@ -599,11 +604,37 @@ impl App {
                 return Applied::Ignored;
             }
         };
-        if let Some(index) = self.account_index(&change.account) {
-            self.accounts[index].blocked =
-                change.state == mp_protocol::state::AccountState::Blocked;
+        let Some(index) = self.account_index(&change.account) else {
+            return Applied::Ignored;
+        };
+        self.accounts[index].blocked = change.state == mp_protocol::state::AccountState::Blocked;
+        if !change.state.is_ready() {
+            return Applied::Ignored;
         }
-        Applied::Ignored
+        self.accounts[index].opening = false;
+        if index == self.active_account {
+            self.recount_all_mailboxes();
+            self.accounts[index].mailbox_counts = self.mailbox_counts.clone();
+            self.reload_current_mailbox();
+            return Applied::Rows;
+        }
+        let account = &self.accounts[index];
+        let counts = match self.queries() {
+            Some(queries) => super::queries::mailbox_counts(
+                queries,
+                &account.account_config.name,
+                &account.mailboxes,
+            ),
+            None => Err(anyhow::anyhow!("no daemon session")),
+        };
+        match counts {
+            Ok(counts) => self.accounts[index].mailbox_counts = counts,
+            Err(e) => log::warn!(
+                "[queries] recounting the mailboxes of {}: {e:#}",
+                change.account
+            ),
+        }
+        Applied::Counts
     }
 
     /// A draft of `account` was written, rewritten or removed, so the Drafts

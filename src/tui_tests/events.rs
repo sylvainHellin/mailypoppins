@@ -816,14 +816,16 @@ fn a_reconnect_re_bootstraps_before_it_accepts_the_new_instance() {
 
 /// `account.state_changed` marks an account blocked and a later `ready` clears
 /// it, which is what the account picker reads to say `blocked` rather than
-/// `opening`; nothing is called and nothing is reloaded.
+/// `opening`. `blocked` calls nothing; `ready` reads the counts again, as the
+/// desktop's `staleMailboxes` does.
 #[test]
 fn an_account_state_change_marks_the_runtime_blocked_and_ready_clears_it() {
     let fixture = Fixture::new();
     seed_inbox();
     let mut app = app_on_inbox(&fixture);
+    let log = super::daemon::CallLog::default();
+    app.session = Some(TestDaemon::new(&[ACCOUNT]).recording_session(log.clone()));
     watermarked(&mut app);
-    fixture.forget();
 
     let applied = app.apply_event(&envelope(
         INSTANCE,
@@ -833,6 +835,10 @@ fn an_account_state_change_marks_the_runtime_blocked_and_ready_clears_it() {
     ));
     assert_eq!(applied, Applied::Ignored, "nothing to reload");
     assert!(app.accounts[0].blocked);
+    assert!(
+        log.lock().expect("the call log").is_empty(),
+        "the payload is the whole answer to a block; no call follows it"
+    );
 
     app.apply_event(&envelope(
         INSTANCE,
@@ -841,9 +847,75 @@ fn an_account_state_change_marks_the_runtime_blocked_and_ready_clears_it() {
         json!({"account": ACCOUNT, "state": "ready"}),
     ));
     assert!(!app.accounts[0].blocked);
+    assert_eq!(called(&log), vec!["mailbox.list".to_string()]);
+}
+
+/// The methods a recording session forwarded, in order.
+fn called(log: &super::daemon::CallLog) -> Vec<String> {
+    log.lock()
+        .expect("the call log")
+        .iter()
+        .map(|(method, _)| method.clone())
+        .collect()
+}
+
+/// A resync bootstrap that caught the runtime opening (a daemon restart) puts
+/// the account back to `opening`, and the `ready` that follows ends it: the
+/// marker clears, the counts are the daemon's, and the open mailbox reloads.
+///
+/// Before the fix the `ready` event only wrote `blocked`, and the startup open
+/// that clears `opening` had run long before, so the picker said `opening` and
+/// the sidebar kept its loading column for the rest of the session.
+#[test]
+fn a_ready_after_an_opening_resync_ends_the_opening_and_recounts() {
+    let fixture = Fixture::new();
+    seed_inbox();
+    let mut app = app_on_inbox(&fixture);
+    let log = super::daemon::CallLog::default();
+    app.session = Some(TestDaemon::new(&[ACCOUNT]).recording_session(log.clone()));
+    app.accounts[0].mailboxes = app.mailboxes.clone();
+    watermarked(&mut app);
+
+    let mut restarted = bootstrap_at(INSTANCE, WATERMARK + 1);
+    restarted.snapshot.accounts = vec![mp_protocol::state::AccountSnapshot {
+        name: ACCOUNT.to_string(),
+        state: mp_protocol::state::AccountState::Opening,
+        ..Default::default()
+    }];
+    app.apply_resync_bootstrap(&restarted);
     assert!(
-        fixture.methods().is_empty(),
-        "the payload is the whole answer; no call follows it"
+        app.accounts[0].opening,
+        "the resync caught the runtime opening"
+    );
+    app.mailbox_counts = vec![0; app.mailboxes.len()];
+    app.accounts[0].mailbox_counts = app.mailbox_counts.clone();
+    app.pending_actions.clear();
+    log.lock().expect("the call log").clear();
+
+    let applied = app.apply_event(&envelope(
+        INSTANCE,
+        WATERMARK + 2,
+        "account.state_changed",
+        json!({"account": ACCOUNT, "state": "ready"}),
+    ));
+
+    assert_eq!(applied, Applied::Rows);
+    assert!(!app.accounts[0].opening, "ready ends the opening");
+    assert!(!app.accounts[0].blocked);
+    assert_eq!(called(&log), vec!["mailbox.list".to_string()]);
+    let inbox = app
+        .find_mailbox_by_kind(MailboxKind::Inbox)
+        .expect("the Inbox mailbox is one of the four roles");
+    assert_eq!(
+        app.mailbox_counts[inbox], 3,
+        "the daemon's count of the inbox"
+    );
+    assert_eq!(app.accounts[0].mailbox_counts, app.mailbox_counts);
+    assert!(
+        app.pending_actions
+            .iter()
+            .any(|action| matches!(action, Action::LoadMailbox { .. })),
+        "the open mailbox reloads, as the desktop's staleListIf does"
     );
 }
 
