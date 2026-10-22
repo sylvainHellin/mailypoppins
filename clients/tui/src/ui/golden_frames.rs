@@ -231,6 +231,7 @@ pub fn email(
     is_invite: bool,
 ) -> EmailEntry {
     EmailEntry {
+        draft_sync: None,
         msg: Some(MessageRef::new(row)),
         draft_id: None,
         skip: None,
@@ -484,6 +485,7 @@ pub fn drafts_fixture() -> App {
     app.sidebar_index = 1;
 
     let skip = EmailEntry {
+        draft_sync: None,
         msg: None,
         draft_id: None,
         skip: Some(mp_protocol::draft::DraftSkip {
@@ -511,6 +513,7 @@ pub fn drafts_fixture() -> App {
         conv: None,
     };
     let draft = EmailEntry {
+        draft_sync: None,
         msg: None,
         draft_id: Some("draft-1".to_string()),
         skip: None,

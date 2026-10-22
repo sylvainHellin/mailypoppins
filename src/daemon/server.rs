@@ -114,6 +114,11 @@ pub struct RuntimeTable {
     /// pending start instead, and the first sync starts the runtime with the
     /// configuration as it is when it finishes.
     first_syncs: Mutex<BTreeSet<String>>,
+    /// The daemon's draft watcher, which every runtime this table takes in is
+    /// handed so it can pass on its drafts mirror state (#0143). Unset in a
+    /// table built without one, whose runtimes then mirror without telling
+    /// the watcher.
+    draft_watch: std::sync::OnceLock<Arc<super::watch::DraftWatch>>,
 }
 
 /// How an account's runtime is doing, as the diagnostics read it.
@@ -167,9 +172,18 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl RuntimeTable {
-    /// Record a runtime that came up, ready or blocked.
+    /// Record a runtime that came up, ready or blocked, and hand it the draft
+    /// watcher when the table has one.
     pub fn insert(&self, runtime: Arc<AccountRuntime>) {
+        if let Some(watch) = self.draft_watch.get() {
+            runtime.attach_draft_watch(Arc::clone(watch));
+        }
         lock(&self.entries).insert(runtime.account().to_string(), RuntimeEntry::Live(runtime));
+    }
+
+    /// The draft watcher every runtime inserted from now on is handed.
+    pub fn set_draft_watch(&self, watch: Arc<super::watch::DraftWatch>) {
+        let _ = self.draft_watch.set(watch);
     }
 
     /// Record a start that failed outright.
@@ -367,6 +381,7 @@ impl DaemonState {
             super::watch::roots_from(&configured),
             super::watch::WatchConfig::from_env(),
         ));
+        runtimes.set_draft_watch(Arc::clone(&watch));
         let operations = Arc::new(OperationRegistry::new());
         canonical.attach_operations(Arc::clone(&operations));
         // The registry emits events and stamps none: a revision belongs to the

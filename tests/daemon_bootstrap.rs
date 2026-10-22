@@ -356,11 +356,15 @@ fn reduce(snapshot: &mut Value, change: &Change) {
             status,
             valid,
             ready,
+            server,
         } => {
-            let draft = json!({
+            let mut draft = json!({
                 "id": id, "path": path, "to": to, "subject": subject,
                 "status": status, "valid": valid, "ready": ready,
             });
+            if let Some(server) = server {
+                draft["server"] = json!(server);
+            }
             let list = snapshot["drafts"][account]
                 .as_array_mut()
                 .unwrap_or_else(|| panic!("drafts has an array for {account}"));
@@ -916,6 +920,7 @@ fn a_reconstructed_client_state_equals_a_snapshot_taken_now() {
             status: "draft".to_string(),
             valid: true,
             ready: true,
+            server: None,
         });
 
         let mut tracker = StateTracker::new(revision.get(), instance.as_str());

@@ -305,9 +305,9 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
         It never deletes anything itself, and there is no migration on startup: it runs only
         when you run it. Its one write is the <code>id:</code> frontmatter field, which is how a
         draft written by the old build becomes addressable by selector; running it again writes
-        nothing, and <code>--dry-run</code> writes nothing at all. Drafts are the only local-only
-        data in the product, so they are the only thing the old directories hold that the server
-        cannot give back, and they were never in those directories to begin with.
+        nothing, and <code>--dry-run</code> writes nothing at all. Drafts are the one thing
+        whose truth is a local file (the server's Drafts folder holds a mirror of each, not the
+        original), and they were never in the old directories to begin with.
       </p>
     </section>
 

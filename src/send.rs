@@ -4210,6 +4210,187 @@ pub fn draft_html_body(
     )
 }
 
+/// What [`draft_mime_body`] does with an `attachments:` entry that names no
+/// file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MissingAttachment {
+    /// Fail the build: a send never goes out without a file the user listed.
+    Refuse,
+    /// Leave it out with a warning: a draft's server copy (#0143) is written
+    /// while the draft is unfinished, and a path typed half way must not stop
+    /// the rest of it reaching the server.
+    Skip,
+}
+
+/// The MIME body a draft is sent with, and its server copy is written with:
+/// `multipart/alternative` of the plain text and the HTML part, wrapped in
+/// `multipart/mixed` with one part per attachment when it lists any.
+///
+/// The one assembly [`build_draft_message`] and [`build_server_draft`] share,
+/// so a draft in Outlook's Drafts looks like the message it would send.
+pub fn draft_mime_body(
+    draft: &EmailDraft,
+    email_config: &EmailSettings,
+    signature: Option<&str>,
+    missing: MissingAttachment,
+) -> Result<MultiPart> {
+    let body_html = draft_html_body(draft, email_config, signature);
+    let alternative = MultiPart::alternative()
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_PLAIN)
+                .body(plain_text_body(&draft.body_markdown)),
+        )
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_HTML)
+                .body(body_html),
+        );
+    let entries = draft.frontmatter.attachments.as_deref().unwrap_or_default();
+    let files = match missing {
+        MissingAttachment::Refuse => resolve_attachment_paths(entries, attachment_anchor(draft))?,
+        MissingAttachment::Skip => entries
+            .iter()
+            .filter_map(|entry| {
+                match resolve_attachment_paths(
+                    std::slice::from_ref(entry),
+                    attachment_anchor(draft),
+                ) {
+                    Ok(paths) => Some(paths),
+                    Err(e) => {
+                        warn!("[drafts] leaving {entry} out of the server copy: {e:#}");
+                        None
+                    }
+                }
+            })
+            .flatten()
+            .collect(),
+    };
+    if files.is_empty() {
+        return Ok(alternative);
+    }
+    let mut mixed = MultiPart::mixed().multipart(alternative);
+    for path in files {
+        match read_attachment(&path) {
+            Ok((filename, bytes, content_type)) => {
+                mixed = mixed.singlepart(attachment_part(filename, bytes, &content_type));
+            }
+            Err(e) if missing == MissingAttachment::Skip => {
+                warn!(
+                    "[drafts] leaving {} out of the server copy: {e:#}",
+                    path.display()
+                );
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(mixed)
+}
+
+/// The header that carries a draft's `id:` on its server copy (#0143), so mp
+/// on another machine recognises a copy it did not write. Outlook strips it on
+/// an edit and Proton Bridge drops it at the APPEND, so it is a hint and never
+/// the link; the link is the `Message-ID`.
+pub const DRAFT_ID_HEADER: &str = "X-Mailypoppins-Draft-Id";
+
+/// The header that carries a draft's approval on its server copy, written
+/// only while [`crate::draft_mirror::approval_travels`] says approval travels.
+pub const DRAFT_STATUS_HEADER: &str = "X-Mailypoppins-Draft-Status";
+
+/// The message a draft's copy in the server's Drafts folder is (#0143).
+///
+/// [`build_draft_message`]'s body, with what a draft may still lack allowed:
+/// any status, no recipient, no subject, an attachment that is not there yet.
+/// It carries `message_id` (the draft's `server_message_id`, the same on every
+/// copy) rather than a fresh one, `X-Mailypoppins-Draft-Id`, the Bcc the user
+/// typed (lettre drops it from a sent message, and a draft's Bcc is part of
+/// the draft), and `In-Reply-To` and `References` for a reply, which Outlook
+/// and Apple Mail need to show the draft as one. An address that does not
+/// parse yet is left out of its header with a warning.
+pub fn build_server_draft(
+    draft: &EmailDraft,
+    default_from: &str,
+    email_config: &EmailSettings,
+    message_id: &str,
+) -> Result<Vec<u8>> {
+    let from_address = draft.frontmatter.from.as_deref().unwrap_or(default_from);
+    let from_mailbox: Mailbox = normalize_address_for_smtp(from_address)
+        .parse()
+        .context("Invalid 'from' email address")?;
+    let bare_id = message_id
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>');
+    // A draft may have no recipient yet, and lettre derives an envelope from
+    // the headers and refuses an empty one. The copy is never submitted, so
+    // its envelope is the sender alone; the formatted bytes carry none.
+    let envelope = lettre::address::Envelope::new(
+        Some(from_mailbox.email.clone()),
+        vec![from_mailbox.email.clone()],
+    )
+    .context("building the draft copy's envelope")?;
+    let mut builder = Message::builder()
+        .envelope(envelope)
+        .from(from_mailbox)
+        .subject(&draft.frontmatter.subject)
+        .message_id(Some(format!("<{bare_id}>")))
+        .keep_bcc();
+    if let Some(parent) = reply_parent_id(draft) {
+        let references = references_for_reply(&parent, None);
+        builder = builder.in_reply_to(parent).references(references);
+    }
+    let mailboxes = |field: &Option<String>, name: &str| -> Vec<Mailbox> {
+        field
+            .as_deref()
+            .map(split_addresses)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(
+                |addr| match normalize_address_for_smtp(&addr).parse::<Mailbox>() {
+                    Ok(mailbox) => Some(mailbox),
+                    Err(e) => {
+                        warn!("[drafts] leaving {name} '{addr}' out of the server copy: {e}");
+                        None
+                    }
+                },
+            )
+            .collect()
+    };
+    for mailbox in mailboxes(&draft.frontmatter.to, "to") {
+        builder = builder.to(mailbox);
+    }
+    for mailbox in mailboxes(&draft.frontmatter.cc, "cc") {
+        builder = builder.cc(mailbox);
+    }
+    for mailbox in mailboxes(&draft.frontmatter.bcc, "bcc") {
+        builder = builder.bcc(mailbox);
+    }
+    if let Some(mailbox) = mailboxes(&draft.frontmatter.reply_to, "reply_to")
+        .into_iter()
+        .next()
+    {
+        builder = builder.reply_to(mailbox);
+    }
+    let body = draft_mime_body(draft, email_config, None, MissingAttachment::Skip)?;
+    let message = builder
+        .multipart(body)
+        .context("Failed to build the draft's server copy")?;
+
+    // The two headers of our own lead the message; lettre has no typed
+    // header for either, and a header's place in the block carries no meaning.
+    let mut raw = Vec::new();
+    if let Some(id) = draft.frontmatter.id.as_deref() {
+        raw.extend_from_slice(format!("{DRAFT_ID_HEADER}: {id}\r\n").as_bytes());
+    }
+    if crate::draft_mirror::approval_travels() {
+        raw.extend_from_slice(
+            format!("{DRAFT_STATUS_HEADER}: {}\r\n", draft.frontmatter.status).as_bytes(),
+        );
+    }
+    raw.extend_from_slice(&message.formatted());
+    Ok(raw)
+}
+
 /// Build the message a draft describes, without touching the network.
 ///
 /// `default_from` is the account's address, used when the draft names no
@@ -4338,23 +4519,9 @@ pub fn build_draft_message(
         builder = builder.reply_to(reply_mailbox);
     }
 
-    let body_html = draft_html_body(draft, email_config, signature);
-
-    // Build the plain/html alternative part (non-invite path).
-    let body_multipart = MultiPart::alternative()
-        .singlepart(
-            SinglePart::builder()
-                .header(ContentType::TEXT_PLAIN)
-                .body(plain_text_body(&draft.body_markdown)),
-        )
-        .singlepart(
-            SinglePart::builder()
-                .header(ContentType::TEXT_HTML)
-                .body(body_html.clone()),
-        );
-
     // Build message with or without attachments
     let message = if let Some(ics) = invite_ics {
+        let body_html = draft_html_body(draft, email_config, signature);
         // Invite path: multipart/mixed [ alternative(plain, html, calendar),
         // application/ics ]; regular file attachments (if any) follow.
         let mut mixed =
@@ -4368,27 +4535,14 @@ pub fn build_draft_message(
         builder
             .multipart(mixed)
             .context("Failed to build invite message")?
-    } else if let Some(attachments) = &draft.frontmatter.attachments {
-        let files = resolve_attachment_paths(attachments, attachment_anchor(draft))?;
-        if !files.is_empty() {
-            let mut mixed = MultiPart::mixed().multipart(body_multipart);
-
-            for path in files {
-                let (filename, file_content, content_type) = read_attachment(&path)?;
-                mixed = mixed.singlepart(attachment_part(filename, file_content, &content_type));
-            }
-
-            builder
-                .multipart(mixed)
-                .context("Failed to build email message")?
-        } else {
-            builder
-                .multipart(body_multipart)
-                .context("Failed to build email message")?
-        }
     } else {
         builder
-            .multipart(body_multipart)
+            .multipart(draft_mime_body(
+                draft,
+                email_config,
+                signature,
+                MissingAttachment::Refuse,
+            )?)
             .context("Failed to build email message")?
     };
 

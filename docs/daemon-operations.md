@@ -325,6 +325,10 @@ A draft that parses travels as `draft.changed`, one that does not as `draft.inva
 A signature travels as the lifecycle event `signature.changed`.
 
 The watcher never opens a draft for writing: not to mint an `id:`, not to normalise, not to restore a file it saw disappear.
+
+On an account that mirrors its drafts to the server ([#0143](tickets/0143-server-drafts.md)), the watcher also gives each draft its `server` member, from the mirror state the account's runtime hands it after every drain and at start (`MirrorState`: the `draft_sync` rows and the drafts whose push was parked `failed`), so it still opens no store.
+A settled draft whose bytes are not the ones its server copy was written from owes a push, and the watcher asks the account's runtime for a drain (`AccountRuntime::request_drain`); the drain queues the push (`ServerOp::PushDraft`) and runs it like a queued archive, `DRAIN_DEBOUNCE` after the save.
+A new mirror state describes again only the drafts whose row or failure moved, and every draft of the account the first time or when the switch flips; a conflict copy appearing or going describes the draft beside it again.
 That is why a draft with no `id:` is announced under its file stem, where the explicit index refresh would mint one: minting inside a watcher means writing to a file an editor is holding open, which is the exact burst the debounce exists to survive.
 A file that will not parse is left byte-identical, mtime included, which is also what keeps it from republishing the same diagnostic on every poll.
 

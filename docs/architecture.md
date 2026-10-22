@@ -10,6 +10,7 @@ Received mail lives in a per-account SQLite file plus a content-addressed blob s
 Nothing in the store may be the only copy of anything the user typed.
 - Drafts are the only local truth.
 They are Markdown files with YAML frontmatter under `<account_dir>/drafts/`, written by `mp new` and by `$EDITOR`, and the `drafts` table is a derived index over them.
+Each draft is mirrored to the account's server Drafts folder ([#0143](tickets/0143-server-drafts.md), `src/draft_mirror/`): the copy there is a rendering of the file, and a change made on the server reaches mp only by rewriting the file.
 - Received mail is read-only locally.
 The client never edits a message body; it changes flags and mailbox membership, and the server is told immediately.
 - No migration paths until v1.0.
@@ -234,7 +235,7 @@ A successful ingest deletes the row, so transient failures never accumulate towa
 - `outbox` carries the durable send state machine described below.
 - `drafts` is the derived index over the drafts directory. The daemon watches that directory itself instead of reading the index (`src/daemon/watch.rs`): a debounced one-second `stat` poll that reparses what settled and takes no engine lock.
 - `draft_sync` (#0143, `src/store/draft_sync.rs`) says where each mirrored draft's server copy is: one row per `(account, draft_id)` with the folder, the copy's UID and the folder's UIDVALIDITY, and the time and the file hash of the last convergence. It is a cache table created additively at open, dropped by a rebuild like `pending_ops`, and re-derived by the reconcile from the copy the draft's `server_message_id` names and the file.
-- `pending_ops` carries the durable mutation queue (#0039): one row per owed server op, with `kind`, the `messages` row id in `target_message_id`, the full `ServerOp` plus its rollback in the JSON `payload`, and a `queued` / `failed` state. `src/pending_ops.rs` owns it, the mutation twin of `outbox`. Like `outbox` its live paths are not the schema's concern, but unlike `outbox` it is a plain cache table: a lost queue row loses a flag change or delays a move, never a message, so it is dropped and rebuilt with the file.
+- `pending_ops` carries the durable mutation queue (#0039), and the drafts mirror's `push_draft` and `delete_draft` ops (#0143), which name a draft or a `Message-ID` rather than a `messages` row and roll nothing back: one row per owed server op, with `kind`, the `messages` row id in `target_message_id`, the full `ServerOp` plus its rollback in the JSON `payload`, and a `queued` / `failed` state. `src/pending_ops.rs` owns it, the mutation twin of `outbox`. Like `outbox` its live paths are not the schema's concern, but unlike `outbox` it is a plain cache table: a lost queue row loses a flag change or delays a move, never a message, so it is dropped and rebuilt with the file.
 - Every table carries `account`, although one file holds one account.
 The redundancy keeps a future shared database a schema change rather than a rewrite of every query.
 
@@ -444,6 +445,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `src/send.rs` | `markdown_to_html`, message building, `send_draft` + `SendContext`, per-recipient submission, `DurableSend`, `resume_outbox` |
 | `src/send/graph_submit.rs` | The Graph submission: the plan (one MIME `sendMail`, or a draft with attachments added separately), the staged send behind the `GraphSendApi` seam, and the resume that settles a Graph `pending_send` row against the mailbox |
 | `src/outbox.rs` | The durable send state machine and its blob refcounting |
+| `src/draft_mirror/` | The server drafts mirror (#0143): the policy (`mirror_enabled`, `approval_travels`, `file_hash`, the Drafts folder from the catalogue), `folder.rs` (the `DraftsFolder` seam, its IMAP implementation over the pool and the test fake), `push.rs` (the queued push and delete, and `enqueue_owed`, which every drain point runs) |
 | `src/ops.rs` | `ServerOp` (the remote half of a mutation) and its IMAP/Graph execution seam `run_op`, at library layer so the durable queue and the CLI can drive it without depending on `tui/` |
 | `src/pending_ops.rs` | The durable mutation queue (#0039): atomic local-write-plus-enqueue, the drain with backoff and per-kind rollback, crash-replay, `resume_account` (sync-tick drain) and `run_and_settle` (the CLI's synchronous single-op path) |
 | `src/engine_lock.rs` | One engine per account across processes (#0061): a non-blocking `flock` on `<account_dir>/store.lock`, released on exit or crash; taken by the `pending_ops` drain, by the outbox drain (#0116) and by the IMAP sync ingest (#0122) |

@@ -448,6 +448,55 @@ pub fn counts(store: &Store, account: &str) -> Result<(usize, usize)> {
     Ok((queued, failed))
 }
 
+/// Queue one drafts-mirror op (#0143) in a transaction of its own.
+///
+/// A draft op has no local half to commit with it: the draft file is the
+/// truth and is already written, so its rollback is [`Rollback::None`] and
+/// `target_message_id` is `NULL`, since it addresses a file and no `messages`
+/// row. A push for a draft that already has one queued, and a delete of a
+/// `Message-ID` that already has one queued, are not queued twice: the drain
+/// reads the file when it runs, so one queued push carries every save before
+/// it. `Ok(None)` when nothing was queued.
+pub fn enqueue_draft_op(store: &Store, account: &str, op: &ServerOp) -> Result<Option<i64>> {
+    let duplicate = queued_ops(store, account)?
+        .iter()
+        .any(|row| match (&row.op, op) {
+            (ServerOp::PushDraft { draft_id: a }, ServerOp::PushDraft { draft_id: b }) => a == b,
+            (
+                ServerOp::DeleteDraft { message_id: a, .. },
+                ServerOp::DeleteDraft { message_id: b, .. },
+            ) => a == b,
+            _ => false,
+        });
+    if duplicate {
+        return Ok(None);
+    }
+    enqueue(store.conn(), account, None, op, &Rollback::None).map(Some)
+}
+
+/// The drafts whose push was parked `failed` (#0143), which their rows show as
+/// `failed` until a later push of the same draft succeeds.
+pub fn failed_draft_pushes(store: &Store, account: &str) -> Result<Vec<String>> {
+    Ok(failed_ops(store, account)?
+        .into_iter()
+        .filter_map(|row| match row.op {
+            ServerOp::PushDraft { draft_id } => Some(draft_id),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Forget the failed pushes of one draft, which a push that succeeded has
+/// made moot.
+pub fn forget_failed_pushes(store: &Store, account: &str, draft_id: &str) -> Result<()> {
+    for row in failed_ops(store, account)? {
+        if matches!(&row.op, ServerOp::PushDraft { draft_id: id } if id == draft_id) {
+            retire(store, row.id)?;
+        }
+    }
+    Ok(())
+}
+
 fn rows_in_state(store: &Store, account: &str, state: &str) -> Result<Vec<PendingOp>> {
     let mut stmt = store.conn().prepare(
         "SELECT id, account, kind, target_message_id, payload, state, attempts,
@@ -502,6 +551,69 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingOp> {
 /// policy of treating that as a converged replay rather than a failure.
 pub trait OpExecutor {
     fn execute(&mut self, op: &ServerOp) -> impl Future<Output = Result<()>> + Send;
+
+    /// Run one drafts-mirror op (#0143), which reads the draft file and writes
+    /// the store's `draft_sync` row and so needs the store the drain holds.
+    /// An executor that runs no draft op refuses it, which the drain retries
+    /// and parks like any refusal.
+    fn execute_draft(&mut self, store: &Store, op: &ServerOp) -> impl Future<Output = Result<()>> {
+        let _ = store;
+        let kind = op.kind();
+        async move {
+            Err(anyhow::anyhow!(
+                "this executor runs no drafts-mirror op ({kind})"
+            ))
+        }
+    }
+}
+
+/// The executor an account's queue drains with: its backend for the message
+/// ops, and the account's configuration for the drafts mirror, which renders
+/// the draft and resolves the Drafts folder.
+pub struct AccountExecutor {
+    backend: Backend,
+    account: AccountConfig,
+}
+
+impl AccountExecutor {
+    /// The backend `account`'s owed ops run against ([`Backend::resolve`]).
+    pub fn resolve(account: &AccountConfig) -> Result<AccountExecutor> {
+        Ok(AccountExecutor {
+            backend: Backend::resolve(account)?,
+            account: account.clone(),
+        })
+    }
+}
+
+impl OpExecutor for AccountExecutor {
+    async fn execute(&mut self, op: &ServerOp) -> Result<()> {
+        run_op(&self.backend, op).await
+    }
+
+    async fn execute_draft(&mut self, store: &Store, op: &ServerOp) -> Result<()> {
+        match &self.backend {
+            Backend::Imap(config) => {
+                let email = crate::config::load_global_config()
+                    .map(|config| config.email)
+                    .unwrap_or_default();
+                let mirror = crate::draft_mirror::push::Mirror {
+                    store,
+                    account: &self.account,
+                    email: &email,
+                    now: unix_now(),
+                };
+                let mut folder =
+                    crate::draft_mirror::folder::ImapDraftsFolder::new((**config).clone());
+                crate::draft_mirror::push::run(&mirror, &mut folder, op).await
+            }
+            // Not built: a Graph account mirrors nothing, so nothing queues
+            // one of these for it, and a row that predates the switch is
+            // refused into `failed` rather than run against the wrong folder.
+            Backend::Graph(_) => Err(anyhow::anyhow!(
+                "the drafts mirror is not built for Graph accounts"
+            )),
+        }
+    }
 }
 
 impl OpExecutor for Backend {
@@ -557,7 +669,12 @@ pub(crate) async fn drain<E: OpExecutor>(
         }
         // One row's bookkeeping error is logged and the drain moves on: a `?`
         // here would stop every later row from ever being drained.
-        match exec.execute(&row.op).await {
+        let outcome = if row.op.is_draft_op() {
+            exec.execute_draft(store, &row.op).await
+        } else {
+            exec.execute(&row.op).await
+        };
+        match outcome {
             Ok(()) => {
                 if let Err(e) = retire(store, row.id) {
                     warn!("[pending_ops] could not retire op {}: {e:#}", row.id);
@@ -606,11 +723,11 @@ pub(crate) async fn drain<E: OpExecutor>(
 /// twice or racing a row's transitions (#0061). `Ok(None)` means another
 /// process is the engine and is draining this account; the work still happens,
 /// there.
-pub async fn drain_account(
+pub async fn drain_account<E: OpExecutor>(
     store: &Store,
     blobs: &BlobStore,
     account: &str,
-    backend: &mut Backend,
+    backend: &mut E,
 ) -> Result<Option<DrainResult>> {
     drain_account_or_busy(store, blobs, account, backend)
         .await
@@ -648,11 +765,11 @@ impl Resume {
 }
 
 /// [`drain_account`], telling a refused turn apart from a drain that ran.
-pub async fn drain_account_or_busy(
+pub async fn drain_account_or_busy<E: OpExecutor>(
     store: &Store,
     blobs: &BlobStore,
     account: &str,
-    backend: &mut Backend,
+    backend: &mut E,
 ) -> Result<Resume> {
     match crate::engine_lock::EngineLock::take_turn(account) {
         Ok(Some(_lock)) => {
@@ -689,13 +806,22 @@ pub async fn resume_account_or_busy(account: &AccountConfig) -> Result<Resume> {
         return Ok(Resume::NothingQueued);
     }
     let store = Store::open(&path)?;
+    // The drafts mirror's owed pushes join the queue here, so every drain
+    // point carries a save the watcher saw, or one nobody saw while no daemon
+    // ran (#0143).
+    if let Err(e) = crate::draft_mirror::push::enqueue_owed(&store, account) {
+        warn!(
+            "[drafts] could not queue the owed pushes of {}: {e:#}",
+            account.name
+        );
+    }
     let (queued, _failed) = counts(&store, &account.name)?;
     if queued == 0 {
         return Ok(Resume::NothingQueued);
     }
     let blobs = BlobStore::for_account(&account.name);
-    let mut backend = Backend::resolve(account)?;
-    drain_account_or_busy(&store, &blobs, &account.name, &mut backend).await
+    let mut executor = AccountExecutor::resolve(account)?;
+    drain_account_or_busy(&store, &blobs, &account.name, &mut executor).await
 }
 
 /// Run one just-enqueued op synchronously and settle its row, for a caller that

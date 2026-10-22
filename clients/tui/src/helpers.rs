@@ -152,6 +152,7 @@ pub(super) fn fetched_to_email_entry(
         };
 
     EmailEntry {
+        draft_sync: None,
         msg,
         draft_id: None,
         skip: None,

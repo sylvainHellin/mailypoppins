@@ -792,6 +792,7 @@ impl Inner {
                 status,
                 valid,
                 ready,
+                server,
                 ..
             } => self.upsert_draft(
                 &account,
@@ -803,6 +804,7 @@ impl Inner {
                     status: status.clone(),
                     valid: *valid,
                     ready: *ready,
+                    server: server.clone(),
                 },
             ),
             // A file that would not parse is still a row, with nothing read
@@ -818,6 +820,7 @@ impl Inner {
                     status: "invalid".to_string(),
                     valid: false,
                     ready: false,
+                    server: None,
                 },
             ),
             Change::DraftRemoved { id, .. } => {

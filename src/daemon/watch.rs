@@ -36,13 +36,14 @@
 //! debounce exists to survive. That is why the id falls back to the file stem,
 //! and why id minting stays on the explicit index refresh.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use log::debug;
 use mp_protocol::events::{Diagnostic, KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED};
+use mp_protocol::state::{DraftServer, DraftSyncState};
 use serde_json::json;
 
 use super::state::events::Event;
@@ -175,6 +176,91 @@ pub struct DraftSummary {
     pub status: String,
     /// Whether [`crate::draft::validate_draft`] would let it send.
     pub ready: bool,
+    /// Where it stands against its server copy (#0143), `None` until the
+    /// account's runtime has handed the watcher its mirror state.
+    pub server: Option<DraftServer>,
+    /// Whether the mirror owes it a push: the account mirrors, the draft is
+    /// pushable, and its bytes are not the ones its copy was written from.
+    /// What makes the daemon ask the account's runtime for a drain.
+    pub owes_push: bool,
+}
+
+/// One account's drafts mirror as its runtime last read it from the store
+/// (#0143): what the watcher derives each draft's `server` member from
+/// without opening a store itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MirrorState {
+    /// `[accounts.drafts] mirror`, resolved ([`crate::draft_mirror::mirror_enabled`]).
+    pub enabled: bool,
+    /// Each draft's `draft_sync` row, as `(synced_hash, synced_at)`.
+    pub rows: BTreeMap<String, (String, i64)>,
+    /// The drafts whose push was parked `failed`.
+    pub failed: BTreeSet<String>,
+}
+
+impl MirrorState {
+    /// The `server` member of a draft whose file hashes to `hash`.
+    ///
+    /// `local` on an account that does not mirror and for a draft that was
+    /// never pushed; `conflict` for a conflict copy and for a draft one names;
+    /// `failed` for a draft whose push was parked; `synced` when the bytes are
+    /// the ones the copy was written from, `pending` otherwise.
+    pub fn server_of(
+        &self,
+        id: &str,
+        hash: &str,
+        frontmatter: &crate::types::EmailFrontmatter,
+        has_conflict_copy: bool,
+    ) -> DraftServer {
+        let row = self.rows.get(id);
+        let synced_at = row
+            .and_then(|(_, at)| chrono::DateTime::from_timestamp(*at, 0).map(|at| at.to_rfc3339()));
+        let state = if !self.enabled {
+            DraftSyncState::Local
+        } else if frontmatter.conflict_of.is_some() || has_conflict_copy {
+            DraftSyncState::Conflict
+        } else if self.failed.contains(id) {
+            DraftSyncState::Failed
+        } else {
+            match row {
+                Some((synced, _)) if synced == hash => DraftSyncState::Synced,
+                Some(_) => DraftSyncState::Pending,
+                None if frontmatter.server_message_id.is_some() => DraftSyncState::Pending,
+                None => DraftSyncState::Local,
+            }
+        };
+        DraftServer {
+            state,
+            synced_at: if self.enabled { synced_at } else { None },
+        }
+    }
+
+    /// Whether a draft whose file hashes to `hash` owes a push.
+    fn owes_push(&self, id: Option<&str>, hash: &str, draft: &crate::types::EmailDraft) -> bool {
+        let Some(id) = id else { return false };
+        self.enabled
+            && draft.frontmatter.conflict_of.is_none()
+            && draft.frontmatter.status != crate::types::EmailStatus::Sent
+            && self.rows.get(id).is_none_or(|(synced, _)| synced != hash)
+    }
+}
+
+/// The conflict copy the reconcile writes beside `path` (#0143), whose
+/// existence is what marks the draft at `path` as in conflict.
+pub fn conflict_copy_of(path: &Path) -> Option<PathBuf> {
+    let stem = path.file_stem()?.to_string_lossy();
+    if stem.ends_with(".conflict") {
+        return None;
+    }
+    Some(path.with_file_name(format!("{stem}.conflict.md")))
+}
+
+/// The draft a conflict copy at `path` stands beside, `None` for a file that
+/// is not one.
+fn original_of_conflict(path: &Path) -> Option<PathBuf> {
+    let stem = path.file_stem()?.to_string_lossy();
+    let base = stem.strip_suffix(".conflict")?;
+    Some(path.with_file_name(format!("{base}.md")))
 }
 
 /// One thing a poll settled.
@@ -213,6 +299,7 @@ impl WatchEvent {
                 status: summary.status.clone(),
                 valid: true,
                 ready: summary.ready,
+                server: summary.server.clone(),
             }),
             WatchEvent::DraftInvalid {
                 account,
@@ -275,6 +362,10 @@ pub struct DraftWatcher {
     /// One map per root, in root order, each keyed by path: iterating them
     /// yields a poll's events ordered by root and then by file name.
     files: Vec<BTreeMap<PathBuf, FileState>>,
+    /// Each account's drafts mirror, as its runtime last handed it over
+    /// (#0143); an account absent here has not been read yet, and its drafts
+    /// carry no `server` member.
+    mirror: BTreeMap<String, MirrorState>,
 }
 
 impl DraftWatcher {
@@ -286,6 +377,7 @@ impl DraftWatcher {
             roots,
             config,
             files,
+            mirror: BTreeMap::new(),
         }
     }
 
@@ -318,6 +410,9 @@ impl DraftWatcher {
     /// it has to sort first.
     pub fn poll_once(&mut self, now: Instant) -> Vec<WatchEvent> {
         let mut events = Vec::new();
+        // Conflict copies that appeared or went this poll: the draft beside
+        // each is described again, since its `server` state moved with it.
+        let mut conflicts_moved: Vec<(usize, PathBuf)> = Vec::new();
         for (index, root) in self.roots.iter().enumerate() {
             let seen = scan(&root.dir);
             let states = &mut self.files[index];
@@ -356,9 +451,13 @@ impl DraftWatcher {
                         }
                         state.settled = current;
                         state.pending = None;
+                        if original_of_conflict(&path).is_some() {
+                            conflicts_moved.push((index, path.clone()));
+                        }
                         match current {
                             Some(_) => {
-                                let event = describe(root, &path);
+                                let mirror = root.account.as_ref().and_then(|a| self.mirror.get(a));
+                                let event = describe(root, &path, mirror);
                                 let name = announced_name(&event);
                                 // The file kept its path and changed its name:
                                 // a draft that gained an `id:` was announced
@@ -397,7 +496,89 @@ impl DraftWatcher {
                 state.settled.is_some() || state.pending.is_some() || state.announced.is_some()
             });
         }
+        for (index, copy) in conflicts_moved {
+            if let Some(original) = original_of_conflict(&copy) {
+                self.recommit_path(index, &original);
+            }
+        }
         events
+    }
+
+    /// Hand over `account`'s mirror state, as its runtime read it from the
+    /// store (#0143), and describe again every draft whose `server` member
+    /// may have moved with it: all of the account's on the first hand-over or
+    /// when the switch flips, otherwise those whose row or failure changed.
+    pub fn set_mirror(&mut self, account: &str, state: MirrorState) {
+        let previous = self.mirror.insert(account.to_string(), state.clone());
+        let moved: Option<BTreeSet<String>> = match &previous {
+            Some(old) if old.enabled == state.enabled => {
+                let ids: BTreeSet<&String> = old
+                    .rows
+                    .keys()
+                    .chain(state.rows.keys())
+                    .chain(old.failed.iter())
+                    .chain(state.failed.iter())
+                    .collect();
+                Some(
+                    ids.into_iter()
+                        .filter(|id| {
+                            old.rows.get(*id) != state.rows.get(*id)
+                                || old.failed.contains(*id) != state.failed.contains(*id)
+                        })
+                        .cloned()
+                        .collect(),
+                )
+            }
+            _ => None,
+        };
+        let indices: Vec<usize> = self
+            .roots
+            .iter()
+            .enumerate()
+            .filter(|(_, root)| root.account.as_deref() == Some(account))
+            .map(|(index, _)| index)
+            .collect();
+        for index in indices {
+            let paths: Vec<PathBuf> = self.files[index]
+                .iter()
+                .filter(|(_, state)| {
+                    state.settled.is_some()
+                        && moved.as_ref().is_none_or(|ids| {
+                            state.announced.as_ref().is_some_and(|id| ids.contains(id))
+                        })
+                })
+                .map(|(path, _)| path.clone())
+                .collect();
+            for path in paths {
+                self.recommit_path(index, &path);
+            }
+        }
+    }
+
+    /// The `server` member of `account`'s draft `id` at `path`, read from the
+    /// file now: what `draft.list` answers, which scans fresh.
+    pub fn server_of(&self, account: &str, id: &str, path: &Path) -> Option<DraftServer> {
+        let mirror = self.mirror.get(account)?;
+        let bytes = std::fs::read(path).ok()?;
+        let draft = crate::draft::parse_email_draft(path).ok()?;
+        Some(mirror.server_of(
+            id,
+            &crate::draft_mirror::file_hash(&bytes),
+            &draft.frontmatter,
+            conflict_copy_of(path).is_some_and(|copy| copy.exists()),
+        ))
+    }
+
+    /// Describe the file at `path` again at the next poll that finds it
+    /// still, without a removal: its settled observation is forgotten, so the
+    /// poll reads it as moved, and the name it was announced under stays.
+    fn recommit_path(&mut self, index: usize, path: &Path) {
+        if let Some(state) = self.files[index].get_mut(path) {
+            if state.settled.is_some() {
+                state.settled = None;
+                state.pending = None;
+            }
+        }
     }
 
     /// The file the account's draft `id` was announced from, or `None`.
@@ -451,8 +632,9 @@ fn scan(dir: &Path) -> BTreeMap<PathBuf, Observation> {
     seen
 }
 
-/// Read one settled file and say what it is.
-fn describe(root: &Root, path: &Path) -> WatchEvent {
+/// Read one settled file and say what it is, with its mirror state when the
+/// account's runtime has handed one over.
+fn describe(root: &Root, path: &Path, mirror: Option<&MirrorState>) -> WatchEvent {
     let Some(account) = root.account.clone() else {
         return WatchEvent::SignatureChanged {
             name: stem(path),
@@ -460,15 +642,32 @@ fn describe(root: &Root, path: &Path) -> WatchEvent {
         };
     };
     match crate::draft::parse_email_draft(path) {
-        Ok(draft) => WatchEvent::DraftChanged(DraftSummary {
-            account,
-            id: field(draft.frontmatter.id.as_deref()).unwrap_or_else(|| stem(path)),
-            to: field(draft.frontmatter.to.as_deref()),
-            subject: draft.frontmatter.subject.clone(),
-            status: draft.frontmatter.status.to_string(),
-            ready: crate::draft::validate_draft(&draft).is_ok(),
-            path: path.to_path_buf(),
-        }),
+        Ok(draft) => {
+            let id = field(draft.frontmatter.id.as_deref());
+            let hash = std::fs::read(path)
+                .map(|bytes| crate::draft_mirror::file_hash(&bytes))
+                .unwrap_or_default();
+            let announced = id.clone().unwrap_or_else(|| stem(path));
+            WatchEvent::DraftChanged(DraftSummary {
+                account,
+                server: mirror.map(|mirror| {
+                    mirror.server_of(
+                        &announced,
+                        &hash,
+                        &draft.frontmatter,
+                        conflict_copy_of(path).is_some_and(|copy| copy.exists()),
+                    )
+                }),
+                owes_push: mirror
+                    .is_some_and(|mirror| mirror.owes_push(id.as_deref(), &hash, &draft)),
+                id: announced,
+                to: field(draft.frontmatter.to.as_deref()),
+                subject: draft.frontmatter.subject.clone(),
+                status: draft.frontmatter.status.to_string(),
+                ready: crate::draft::validate_draft(&draft).is_ok(),
+                path: path.to_path_buf(),
+            })
+        }
         Err(e) => WatchEvent::DraftInvalid {
             account,
             // The stem, because the `id:` field is inside the block that would
@@ -596,6 +795,16 @@ impl DraftWatch {
         self.watcher().resolve(account, id)
     }
 
+    /// Hand over `account`'s mirror state ([`DraftWatcher::set_mirror`]).
+    pub fn set_mirror(&self, account: &str, state: MirrorState) {
+        self.watcher().set_mirror(account, state);
+    }
+
+    /// The `server` member `draft.list` answers ([`DraftWatcher::server_of`]).
+    pub fn server_of(&self, account: &str, id: &str, path: &Path) -> Option<DraftServer> {
+        self.watcher().server_of(account, id, path)
+    }
+
     fn watcher(&self) -> MutexGuard<'_, DraftWatcher> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -623,9 +832,14 @@ pub fn roots_from(accounts: &[crate::config::AccountConfig]) -> WatchRoots {
 /// rather than at process exit, so "closes watchers" is a step of the sequence
 /// and a draft written while the daemon is leaving is not committed into a
 /// state nobody will read.
+///
+/// A settled draft that owes the mirror a push (#0143) asks its account's
+/// runtime in `runtimes` for a drain, which queues the push and runs it; the
+/// watcher itself writes nothing and opens no store.
 pub fn spawn(
     watch: Arc<DraftWatch>,
     canonical: Arc<CanonicalState>,
+    runtimes: Arc<super::server::RuntimeTable>,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
     let interval = watch.config().poll_interval;
@@ -652,6 +866,13 @@ pub fn spawn(
                 }
             };
             for event in events {
+                if let WatchEvent::DraftChanged(summary) = &event {
+                    if summary.owes_push {
+                        if let Some(runtime) = runtimes.get(&summary.account) {
+                            runtime.request_drain();
+                        }
+                    }
+                }
                 if let Some(change) = event.as_change() {
                     canonical.apply(change);
                 } else if let Some(lifecycle) = event.as_lifecycle() {

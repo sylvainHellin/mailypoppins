@@ -135,6 +135,10 @@ pub struct EmailEntry {
     /// draft's canonical selector is `mp://<account>/drafts/<id>` and never
     /// goes through the store.
     pub draft_id: Option<String>,
+    /// Where a draft stands against its copy in the server's Drafts folder
+    /// (#0143), as `draft.list` answers it; `None` for received mail and for
+    /// a draft the daemon has no mirror state for yet.
+    pub draft_sync: Option<mp_protocol::state::DraftSyncState>,
     /// Set when this row is a draft file the index could not parse (#0080).
     ///
     /// Such a file has no `id:` to index under, so `msg` and `draft_id` are
@@ -261,6 +265,19 @@ impl ConvHeader {
     /// or a draft that answers it.
     pub fn expandable(&self) -> bool {
         self.count > 1 || self.has_draft
+    }
+}
+
+/// The word a draft's server state reads as in the TUI (#0143), `None` for
+/// a draft that is not mirrored, whose state says nothing worth a column.
+pub fn draft_sync_word(state: mp_protocol::state::DraftSyncState) -> Option<&'static str> {
+    use mp_protocol::state::DraftSyncState;
+    match state {
+        DraftSyncState::Local => None,
+        DraftSyncState::Pending => Some("pending"),
+        DraftSyncState::Synced => Some("synced"),
+        DraftSyncState::Conflict => Some("conflict"),
+        DraftSyncState::Failed => Some("failed"),
     }
 }
 
@@ -398,6 +415,7 @@ pub fn entry_from_member(member: &ThreadMessage, thread_id: &str, subject: &str)
     );
     let draft = member.draft_id.clone();
     EmailEntry {
+        draft_sync: None,
         msg: draft.is_none().then(|| MessageRef::new(member.id)),
         selector: Some(member.selector.clone()).filter(|s| !s.is_empty()),
         skip: None,
@@ -566,6 +584,7 @@ pub fn entry_from_row(row: MessageListRow, status: &str) -> EmailEntry {
         Path::new(""),
     );
     EmailEntry {
+        draft_sync: None,
         msg: Some(MessageRef::new(row.id)),
         draft_id: None,
         skip: None,
@@ -606,6 +625,7 @@ pub fn entry_from_row(row: MessageListRow, status: &str) -> EmailEntry {
 pub fn entry_from_draft(row: DraftEntry) -> EmailEntry {
     let (date_display, date_sort) = resolve_date(&row.date, &None, Path::new(&row.path));
     EmailEntry {
+        draft_sync: row.server.as_ref().map(|server| server.state),
         msg: None,
         draft_id: Some(row.id),
         skip: None,
@@ -653,6 +673,7 @@ pub fn entry_from_skip(skip: DraftSkip) -> EmailEntry {
         .to_string_lossy()
         .into_owned();
     EmailEntry {
+        draft_sync: None,
         msg: None,
         draft_id: None,
         skip: Some(skip),
@@ -2708,6 +2729,38 @@ pub fn build_mailboxes(config: &mp_core::config::AccountConfig) -> Vec<MailboxIn
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// A listed draft's `server` member reaches its row as its sync state
+    /// (#0143), and a row without one carries none.
+    #[test]
+    fn a_listed_drafts_server_state_reaches_its_row() {
+        use mp_protocol::state::{DraftServer, DraftSyncState};
+        let row = |server: Option<DraftServer>| DraftEntry {
+            id: "d1".to_string(),
+            selector: "mp://work/drafts/d1".to_string(),
+            path: "/x/drafts/d1.md".to_string(),
+            status: "draft".to_string(),
+            to: None,
+            cc: None,
+            bcc: None,
+            subject: Some("A".to_string()),
+            date: None,
+            valid: true,
+            ready: false,
+            server,
+        };
+        assert_eq!(entry_from_draft(row(None)).draft_sync, None);
+        let synced = row(Some(DraftServer {
+            state: DraftSyncState::Synced,
+            synced_at: None,
+        }));
+        assert_eq!(
+            entry_from_draft(synced).draft_sync,
+            Some(DraftSyncState::Synced)
+        );
+        assert_eq!(draft_sync_word(DraftSyncState::Pending), Some("pending"));
+        assert_eq!(draft_sync_word(DraftSyncState::Local), None);
+    }
 
     #[test]
     fn resolve_date_survives_multibyte_draft_filenames() {

@@ -22,7 +22,7 @@ use mp_protocol::operation::OperationStatus;
 use mp_protocol::send::HoldStatus;
 use serde_json::{json, Value};
 
-use mp_protocol::state::SyncHealth;
+use mp_protocol::state::{DraftServer, SyncHealth};
 
 use crate::config::AccountConfig;
 
@@ -116,6 +116,8 @@ pub enum Change {
         status: String,
         valid: bool,
         ready: bool,
+        /// Where it stands against its server copy (#0143), when known.
+        server: Option<DraftServer>,
     },
     /// A draft is on disk and would not parse (P3b-U10).
     ///
@@ -208,10 +210,17 @@ impl Change {
                 status,
                 valid,
                 ready,
-            } => json!({
-                "account": account, "id": id, "path": path, "to": to,
-                "subject": subject, "status": status, "valid": valid, "ready": ready,
-            }),
+                server,
+            } => {
+                let mut payload = json!({
+                    "account": account, "id": id, "path": path, "to": to,
+                    "subject": subject, "status": status, "valid": valid, "ready": ready,
+                });
+                if let Some(server) = server {
+                    payload["server"] = json!(server);
+                }
+                payload
+            }
             Change::DraftInvalid {
                 account,
                 id,
@@ -297,6 +306,7 @@ pub struct DraftView {
     pub(super) status: String,
     pub(super) valid: bool,
     pub(super) ready: bool,
+    pub(super) server: Option<DraftServer>,
 }
 
 /// One account's outbox counts.
@@ -395,7 +405,7 @@ impl Snapshot {
         let drafts = per_account(&self.drafts, |list| {
             list.iter()
                 .map(|draft| {
-                    json!({
+                    let mut row = json!({
                         "id": draft.id,
                         "path": draft.path,
                         "to": draft.to,
@@ -403,7 +413,11 @@ impl Snapshot {
                         "status": draft.status,
                         "valid": draft.valid,
                         "ready": draft.ready,
-                    })
+                    });
+                    if let Some(server) = &draft.server {
+                        row["server"] = json!(server);
+                    }
+                    row
                 })
                 .collect()
         });

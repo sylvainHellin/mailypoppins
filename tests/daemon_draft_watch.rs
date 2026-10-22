@@ -307,7 +307,7 @@ use mailypoppins::daemon::methods::draft::DRAFT_METHOD_SPECS;
 use mailypoppins::daemon::state::events::{Event, KIND_REMOVE};
 use mailypoppins::daemon::state::Change;
 use mailypoppins::daemon::watch::{
-    DraftSummary, DraftWatcher, WatchConfig, WatchEvent, WatchRoots, DEFAULT_DEBOUNCE,
+    DraftSummary, DraftWatcher, MirrorState, WatchConfig, WatchEvent, WatchRoots, DEFAULT_DEBOUNCE,
     DEFAULT_POLL_INTERVAL, WATCH_DEBOUNCE_ENV, WATCH_POLL_ENV,
 };
 
@@ -481,6 +481,8 @@ fn a_draft_change_commits_a_draft_upsert_keyed_by_account_and_id() {
         subject: "Angebot".to_string(),
         status: "draft".to_string(),
         ready: true,
+        server: None,
+        owes_push: false,
     };
     let event = WatchEvent::DraftChanged(summary.clone());
 
@@ -498,6 +500,7 @@ fn a_draft_change_commits_a_draft_upsert_keyed_by_account_and_id() {
             status: "draft".to_string(),
             valid: true,
             ready: true,
+            server: None,
         },
         "a parsed draft is valid by construction; `ready` is the second axis"
     );
@@ -1504,6 +1507,7 @@ fn two_accounts_are_two_inventories() {
             status: "draft".to_string(),
             valid: true,
             ready: true,
+            server: None,
         })
         .resource(),
         "the same id under two accounts is two resources"
@@ -2516,4 +2520,177 @@ async fn a_deleted_draft_leaves_the_snapshot() {
         "the removal reduced into the snapshot, so a client that bootstraps now never sees the \
          row at all: {list:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The drafts mirror's state (#0143)
+// ---------------------------------------------------------------------------
+
+/// Settle what is on disk, then hand over a mirror state and settle again:
+/// what the second settle described.
+fn described_with(
+    watcher: &mut DraftWatcher,
+    state: MirrorState,
+    at: Instant,
+) -> (Vec<WatchEvent>, Instant) {
+    watcher.set_mirror("alpha", state);
+    let debounce = unit_config().debounce;
+    settle(watcher, at + debounce, debounce)
+}
+
+fn mirror(rows: &[(&str, String)], failed: &[&str]) -> MirrorState {
+    MirrorState {
+        enabled: true,
+        rows: rows
+            .iter()
+            .map(|(id, hash)| (id.to_string(), (hash.clone(), 1_700_000_000)))
+            .collect(),
+        failed: failed.iter().map(|id| id.to_string()).collect(),
+    }
+}
+
+/// Until its runtime hands the watcher a mirror state, a draft carries no
+/// `server` member; once it does, every draft of the account is described
+/// again: never pushed is `local` and owes a push, a file whose bytes are the
+/// row's is `synced`, and an edit after that is `pending` and owes one.
+#[test]
+fn a_draft_is_described_again_with_its_server_state_once_the_mirror_is_read() {
+    use mp_protocol::state::DraftSyncState;
+    let root = TempDir::new().expect("tempdir");
+    let dir = drafts_dir_of(&root, "alpha");
+    let path = dir.join("angebot.md");
+    fs::write(
+        &path,
+        draft_document("d-one", "r@example.com", "A", "draft", "Body."),
+    )
+    .unwrap();
+    let mut watcher = DraftWatcher::new(roots(&root, "alpha"), unit_config());
+    let (events, t1) = settle(&mut watcher, Instant::now(), unit_config().debounce);
+    assert_eq!(changed(&events[0]).server, None);
+    assert!(!changed(&events[0]).owes_push, "nothing is known yet");
+
+    let (events, t2) = described_with(&mut watcher, mirror(&[], &[]), t1);
+    assert_eq!(events.len(), 1, "described again, not removed: {events:?}");
+    let summary = changed(&events[0]);
+    assert_eq!(
+        summary.server.as_ref().unwrap().state,
+        DraftSyncState::Local
+    );
+    assert!(summary.owes_push, "never pushed");
+
+    let hash = mailypoppins::draft_mirror::file_hash(&fs::read(&path).unwrap());
+    let (events, t3) = described_with(&mut watcher, mirror(&[("d-one", hash)], &[]), t2);
+    let server = changed(&events[0]).server.clone().unwrap();
+    assert_eq!(server.state, DraftSyncState::Synced);
+    assert!(server.synced_at.is_some());
+    assert!(!changed(&events[0]).owes_push);
+
+    // The same state again moves nothing, so nothing is described again.
+    let (events, t4) = described_with(
+        &mut watcher,
+        mirror(
+            &[(
+                "d-one",
+                mailypoppins::draft_mirror::file_hash(&fs::read(&path).unwrap()),
+            )],
+            &[],
+        ),
+        t3,
+    );
+    assert!(events.is_empty(), "{events:?}");
+
+    fs::write(
+        &path,
+        draft_document("d-one", "r@example.com", "A", "draft", "Edited."),
+    )
+    .unwrap();
+    let (events, _) = settle(
+        &mut watcher,
+        t4 + unit_config().debounce,
+        unit_config().debounce,
+    );
+    assert_eq!(
+        changed(&events[0]).server.as_ref().unwrap().state,
+        DraftSyncState::Pending
+    );
+    assert!(changed(&events[0]).owes_push);
+}
+
+/// A conflict copy is `conflict` and is never pushed, and the draft beside it
+/// is described again as `conflict` when it appears; a parked push is
+/// `failed`; an account whose switch is off is `local` and owes nothing.
+#[test]
+fn conflicts_failures_and_a_switched_off_mirror_have_their_own_states() {
+    use mp_protocol::state::DraftSyncState;
+    let root = TempDir::new().expect("tempdir");
+    let dir = drafts_dir_of(&root, "alpha");
+    fs::write(
+        dir.join("angebot.md"),
+        draft_document("d-one", "r@example.com", "A", "draft", "Server text."),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("other.md"),
+        draft_document("d-two", "r@example.com", "B", "draft", "Two."),
+    )
+    .unwrap();
+    let mut watcher = DraftWatcher::new(roots(&root, "alpha"), unit_config());
+    let (_, t1) = settle(&mut watcher, Instant::now(), unit_config().debounce);
+    let (_, t2) = described_with(&mut watcher, mirror(&[], &["d-two"]), t1);
+
+    let copy = draft_document("d-copy", "r@example.com", "A", "draft", "Local text.")
+        .replace("status: draft", "status: draft\nconflict_of: d-one");
+    fs::write(dir.join("angebot.conflict.md"), copy).unwrap();
+    let debounce = unit_config().debounce;
+    let (events, t3) = settle(&mut watcher, t2 + debounce, debounce);
+    let copy = events
+        .iter()
+        .map(changed)
+        .find(|s| s.id == "d-copy")
+        .expect("the copy is announced");
+    assert_eq!(
+        copy.server.as_ref().unwrap().state,
+        DraftSyncState::Conflict
+    );
+    assert!(!copy.owes_push, "a conflict copy is never pushed");
+    let (events, t4) = settle(&mut watcher, t3 + debounce, debounce);
+    let original = events
+        .iter()
+        .map(changed)
+        .find(|s| s.id == "d-one")
+        .expect("the draft beside it is described again");
+    assert_eq!(
+        original.server.as_ref().unwrap().state,
+        DraftSyncState::Conflict
+    );
+
+    let (events, _) = described_with(&mut watcher, mirror(&[], &["d-two"]), t4);
+    assert!(events.is_empty(), "nothing moved: {events:?}");
+    assert_eq!(
+        watcher
+            .server_of("alpha", "d-two", &dir.join("other.md"))
+            .unwrap()
+            .state,
+        DraftSyncState::Failed
+    );
+
+    let (events, _) = described_with(
+        &mut watcher,
+        MirrorState {
+            enabled: false,
+            ..mirror(&[], &["d-two"])
+        },
+        t4 + debounce * 4,
+    );
+    assert!(
+        !events.is_empty(),
+        "a flipped switch describes everything again"
+    );
+    for summary in events.iter().map(changed) {
+        assert_eq!(
+            summary.server.as_ref().unwrap().state,
+            DraftSyncState::Local
+        );
+        assert!(!summary.owes_push);
+    }
 }

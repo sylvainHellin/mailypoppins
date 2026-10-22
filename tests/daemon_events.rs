@@ -1090,6 +1090,7 @@ fn every_change_maps_onto_the_event_the_contract_names() {
             status: "draft".to_string(),
             valid: true,
             ready: true,
+            server: None,
         }),
         Event::Replace {
             kind: KIND_DRAFT_CHANGED,
@@ -1132,6 +1133,7 @@ fn an_event_names_the_resource_it_addresses() {
             status: "draft".to_string(),
             valid: true,
             ready: false,
+            server: None,
         })
         .resource(),
         Some(ResourceId::new("draft:alpha/d1")),

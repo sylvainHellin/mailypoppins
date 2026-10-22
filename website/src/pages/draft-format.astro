@@ -19,6 +19,8 @@ const frontmatterFields = [
   { command: 'attachments', description: 'List of file paths to attach; a folder path attaches every file inside it. Optional.' },
   { command: 'in_reply_to', description: 'Message-ID of the message this draft answers. Written by mp reply; on send, the source is marked answered.' },
   { command: 'forwarded_from', description: 'Message-ID of the message this draft forwards. Written by mp forward; on send, the source is marked forwarded.' },
+  { command: 'server_message_id', description: 'Message-ID of the draft\'s copies in the server Drafts folder. Written once by the daemon at the first push; leave it alone.' },
+  { command: 'conflict_of', description: 'Id of the draft this file is a conflict copy of. Written by the daemon; such a file is never pushed, and removing the line keeps it as a draft of its own.' },
 ];
 
 const basicDraft = `---
@@ -170,6 +172,28 @@ Email body here.`;
         The raw RFC 822 message is also appended to the server-side Sent folder
         via IMAP APPEND with the <code>\Seen</code> flag. This is best effort: a failed
         APPEND is logged but does not fail the send.
+      </p>
+    </section>
+
+    <section>
+      <h2 id="server-drafts">Drafts on the Server</h2>
+      <p>
+        The daemon keeps a copy of every draft in the account's Drafts folder on the server,
+        which is where Outlook, Apple Mail, the Proton app and mp on another machine see it.
+        A save in your editor replaces that copy a couple of seconds later; the draft file
+        itself is written once, at the first push, to record the copy's
+        <code>server_message_id</code>, and never again by a push, so an editor holding it
+        open is not interrupted.
+      </p>
+      <p>
+        The Drafts list shows where each draft stands: synced, pending (a push is owed),
+        conflict, or failed (the server refused the push; the next save tries again).
+        A conflict copy (<code>conflict_of</code>) is never pushed, and neither is a sent draft.
+        Approval stays local: a copy on the server carries no <code>status</code>.
+      </p>
+      <p>
+        <code>[accounts.drafts] mirror = false</code> in <code>config.toml</code> keeps an
+        account's drafts local only. Graph accounts are not mirrored yet.
       </p>
     </section>
 

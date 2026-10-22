@@ -755,6 +755,16 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 ## Attachments
 
+### DFT-13 Mirror drafts to the server Drafts folder
+
+- Classification: daemon behaviour, shown in both clients
+- Source anchor: `src/draft_mirror/` (push, delete, the owed-push scan), `src/store/draft_sync.rs`, the watcher's `MirrorState` in `src/daemon/watch.rs`; [#0143](tickets/0143-server-drafts.md)
+- Daemon surface: no method; the `server` member `{state, synced_at}` of a snapshot draft row, a `draft.changed` payload and a `draft.list` row, and the queued `push_draft` and `delete_draft` ops of the account's mutation drain
+- GUI location: clients/desktop: a Drafts row shows a `synced`, `pending`, `conflict` or `failed` badge and names it in the row's accessible name; a draft that is not mirrored shows none; TUI: the Drafts list leads a mirrored row with a cloud, upload, fork or bolt glyph, and the header pane's Date line reads `[draft, synced]`
+- Validation: `src/draft_mirror/tests.rs` (the push, the replace, the owed-push scan, the delete, the drain and its failure), `tests/daemon_draft_watch.rs` (`a_draft_is_described_again_with_its_server_state_once_the_mirror_is_read`, `conflicts_failures_and_a_switched_off_mirror_have_their_own_states`); `clients/tui/src/ui/list.rs` (`a_mirrored_draft_shows_its_server_state`), `clients/tui/src/ui/headers.rs` (`a_mirrored_drafts_date_line_names_its_server_state`), `clients/tui/src/app/types.rs` (`a_listed_drafts_server_state_reaches_its_row`); `clients/desktop/src/components/list/draftRow.test.tsx`
+- Status: daemon and both clients shipped (#0143 steps 2 and 3); the pull, the conflict copy and foreign drafts follow in steps 5 and 6
+- Note: `[accounts.drafts] mirror = false` keeps an account's drafts local, and a Graph account is not mirrored until the Graph half is built.
+
 ### ATT-01 Open a received message's attachment in the default application
 
 - Classification: GUI parity

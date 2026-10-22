@@ -373,6 +373,23 @@ pub fn set_draft_signature_name(path: &Path, name: &str) -> Result<()> {
     )
 }
 
+/// Record the `Message-ID` of a draft's server copies in its
+/// `server_message_id:` frontmatter (#0143), in place, leaving every other
+/// byte of the file as it was.
+///
+/// The mirror's one write to a draft it pushes, made once, at the first push:
+/// every later push replaces the copy and leaves the file alone, so an editor
+/// holding it open is not interrupted.
+pub fn set_draft_server_message_id(path: &Path, message_id: &str) -> Result<()> {
+    rewrite_frontmatter_scalars_at(
+        path,
+        &[(
+            "server_message_id",
+            FieldWrite::Set(yaml_dq_escape(message_id)),
+        )],
+    )
+}
+
 /// Which draft a [`SourceMessage`] is turned into.
 ///
 /// It lives beside the source rather than beside the builder that consumes it
@@ -3932,5 +3949,44 @@ second\r\n\
             .map(|p| fs::read_to_string(p).unwrap().trim().to_string())
             .collect();
         assert_eq!(contents, ["first", "second"]);
+    }
+
+    /// The mirror's one write to a draft (#0143) adds `server_message_id:`
+    /// and leaves the body and every other line as they were; the parse reads
+    /// it back, and `conflict_of:` reads too.
+    #[test]
+    fn the_server_message_id_is_written_once_and_read_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("draft.md");
+        let original =
+            "---\nid: \"d1\"\nto: a@example.com\nsubject: Hi\nstatus: draft\n---\n\nBody line.\n";
+        fs::write(&path, original).unwrap();
+        set_draft_server_message_id(&path, "<mp.1@example.com>").unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.ends_with("---\n\nBody line.\n"), "{written}");
+        assert!(
+            written.starts_with("---\nid: \"d1\"\nto: a@example.com\n"),
+            "{written}"
+        );
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(
+            draft.frontmatter.server_message_id.as_deref(),
+            Some("<mp.1@example.com>")
+        );
+        assert_eq!(draft.frontmatter.conflict_of, None);
+
+        fs::write(
+            &path,
+            original.replace("status: draft", "status: draft\nconflict_of: d0"),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_email_draft(&path)
+                .unwrap()
+                .frontmatter
+                .conflict_of
+                .as_deref(),
+            Some("d0")
+        );
     }
 }

@@ -3506,6 +3506,7 @@ mod tests {
 
     fn entry(subject: &str, from: &str) -> EmailEntry {
         EmailEntry {
+            draft_sync: None,
             msg: Some(ref_for(subject)),
             draft_id: None,
             skip: None,
@@ -3740,6 +3741,7 @@ mod tests {
     /// (what `entry_from_draft` builds).
     fn draft_entry(id: &str, subject: &str) -> EmailEntry {
         EmailEntry {
+            draft_sync: None,
             msg: None,
             draft_id: Some(id.to_string()),
             skip: None,

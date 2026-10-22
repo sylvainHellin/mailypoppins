@@ -219,7 +219,7 @@ impl Method for DraftMethod {
                     Err(e) => Err(e),
                 },
                 "draft.html" => html(&params, accounts, email),
-                "draft.list" => list(&params, accounts),
+                "draft.list" => list(&params, accounts, &self.watch),
                 "draft.path" => path(&params, accounts),
                 "draft.preview" => preview(&params, accounts, email),
                 "draft.reply" => from_source(&params, accounts, email, true, None),
@@ -313,7 +313,11 @@ impl DraftMethod {
 ///
 /// A broken file is a warning about the directory rather than a failure of the
 /// command, so it travels beside the rows instead of replacing them (#0080).
-fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+///
+/// Each row carries the `server` member the watcher would publish for the
+/// file as it is now (#0143), once the account's runtime has handed the
+/// watcher its mirror state.
+fn list(params: &Value, accounts: &[AccountConfig], watch: &DraftWatch) -> Result<Value, RpcError> {
     let account = configured(accounts, &string_param(params, "account")?)?;
     let status = match params.get("status") {
         None | Some(Value::Null) => None,
@@ -334,7 +338,10 @@ fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
         drafts: rows
             .iter()
             .filter(|row| status.as_deref().is_none_or(|status| row.status == status))
-            .map(|row| entry(&account.name, row))
+            .map(|row| DraftEntry {
+                server: watch.server_of(&account.name, &row.id, &row.path),
+                ..entry(&account.name, row)
+            })
             .collect(),
         skipped: skipped
             .iter()

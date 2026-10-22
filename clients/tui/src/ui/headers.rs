@@ -127,7 +127,10 @@ impl HeaderFields {
             cc: email.cc.clone(),
             bcc: email.bcc.clone(),
             subject: email.subject.clone(),
-            date_status: format!("{}  [{}]", email.date_display, email.status),
+            date_status: match email.draft_sync.and_then(crate::app::draft_sync_word) {
+                Some(sync) => format!("{}  [{}, {sync}]", email.date_display, email.status),
+                None => format!("{}  [{}]", email.date_display, email.status),
+            },
             attach: email
                 .has_attachments
                 .then(|| format!("{ATTACHMENT_GLYPH} yes")),
@@ -174,6 +177,7 @@ mod tests {
 
     fn entry(reply_to: Option<&str>, bcc: Option<&str>, has_attachments: bool) -> EmailEntry {
         EmailEntry {
+            draft_sync: None,
             msg: Some(MessageRef::new(1)),
             draft_id: None,
             skip: None,
@@ -250,6 +254,23 @@ mod tests {
         assert!(
             !text.contains("Bcc:"),
             "blank Bcc must not draw a row:\n{text}"
+        );
+    }
+
+    /// A mirrored draft's Date line names its server state beside its status
+    /// (#0143); a draft that is not mirrored reads as before.
+    #[test]
+    fn a_mirrored_drafts_date_line_names_its_server_state() {
+        let mut draft = entry(None, None, false);
+        draft.status = "draft".to_string();
+        draft.draft_sync = Some(mp_protocol::state::DraftSyncState::Conflict);
+        let text = render_text(&mut app_showing(draft.clone()), 60, 14);
+        assert!(text.contains("[draft, conflict]"), "{text}");
+        draft.draft_sync = Some(mp_protocol::state::DraftSyncState::Local);
+        let text = render_text(&mut app_showing(draft), 60, 14);
+        assert!(
+            text.contains("[draft]") && !text.contains("local"),
+            "{text}"
         );
     }
 

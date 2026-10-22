@@ -348,7 +348,15 @@ pub struct AccountRuntime {
     /// Where the production hooks leave the engine's result. Empty for a
     /// runtime built with injected hooks, which report zeros.
     report: TickReport,
+    /// The daemon's draft watcher, once the runtime table has handed it over:
+    /// where the production hooks pass on the account's drafts mirror state
+    /// after a drain or a tick that may have moved it (#0143).
+    draft_watch: DraftWatchCell,
 }
+
+/// The draft watcher a runtime and its production hooks share (#0143), set
+/// once by [`AccountRuntime::attach_draft_watch`].
+pub(super) type DraftWatchCell = Arc<std::sync::OnceLock<Arc<crate::daemon::watch::DraftWatch>>>;
 
 /// Which side of the join a [`AccountRuntime::tick`] call is on, decided under
 /// the lock and acted on outside it.
@@ -381,9 +389,15 @@ impl AccountRuntime {
     /// [`EngineLock::try_acquire_at`] is.
     pub fn start_at(dir: &Path, cfg: AccountConfig, pool_size: usize) -> Result<Self> {
         let report = TickReport::default();
-        let hooks = production_hooks(Arc::new(cfg.clone()), report.clone());
+        let draft_watch = DraftWatchCell::default();
+        let hooks = production_hooks(
+            Arc::new(cfg.clone()),
+            report.clone(),
+            Arc::clone(&draft_watch),
+        );
         let mut runtime = Self::start_at_with_hooks(dir, cfg, pool_size, hooks)?;
         runtime.report = report;
+        runtime.draft_watch = draft_watch;
         Ok(runtime)
     }
 
@@ -444,6 +458,7 @@ impl AccountRuntime {
             backlog: AtomicBool::new(false),
             drain_requests: watch::channel(0).0,
             report: TickReport::default(),
+            draft_watch: DraftWatchCell::default(),
         })
     }
 
@@ -500,6 +515,23 @@ impl AccountRuntime {
     pub fn note_backlog(&self) {
         self.backlog.store(true, Ordering::SeqCst);
         self.ticked.send_replace(tokio::time::Instant::now());
+    }
+
+    /// Hand the runtime the daemon's draft watcher (#0143) and pass it the
+    /// account's drafts mirror state as the store holds it now, which is what
+    /// gives the account's drafts their `server` member. Off the reactor,
+    /// since it opens the store; a second call keeps the first watcher.
+    pub fn attach_draft_watch(&self, watch: Arc<crate::daemon::watch::DraftWatch>) {
+        if self.draft_watch.set(watch).is_err() {
+            return;
+        }
+        let cfg = Arc::clone(&self.config);
+        let cell = Arc::clone(&self.draft_watch);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(move || publish_mirror_state(&cfg, &cell));
+        } else {
+            publish_mirror_state(&cfg, &cell);
+        }
     }
 
     /// Ask for a drain of the outbox and the mutation queue soon (#0133).
@@ -840,11 +872,54 @@ impl std::fmt::Debug for AccountRuntime {
 
 /// The real drains and the real sync, which is what [`AccountRuntime::start`]
 /// and [`AccountRuntime::start_at`] install.
-fn production_hooks(cfg: Arc<AccountConfig>, report: TickReport) -> TickHooks {
+fn production_hooks(
+    cfg: Arc<AccountConfig>,
+    report: TickReport,
+    watch: DraftWatchCell,
+) -> TickHooks {
     TickHooks {
         outbox: outbox_hook(Arc::clone(&cfg)),
-        mutations: mutations_hook(Arc::clone(&cfg), report.clone()),
-        body: body_hook(cfg, report),
+        mutations: mutations_hook(Arc::clone(&cfg), report.clone(), Arc::clone(&watch)),
+        body: body_hook(cfg, report, watch),
+    }
+}
+
+/// The account's drafts mirror state as its store holds it (#0143): whether
+/// it mirrors, each draft's `draft_sync` row, and the drafts whose push was
+/// parked `failed`. An account with no store yet mirrors nothing so far.
+pub(crate) fn mirror_state(cfg: &AccountConfig) -> Result<crate::daemon::watch::MirrorState> {
+    let mut state = crate::daemon::watch::MirrorState {
+        enabled: crate::draft_mirror::mirror_enabled(cfg),
+        ..Default::default()
+    };
+    let path = crate::config::store_path(&cfg.name);
+    if !state.enabled || !path.exists() {
+        return Ok(state);
+    }
+    let store = crate::store::Store::open(&path)?;
+    state.rows = crate::store::draft_sync::load(&store, &cfg.name)?
+        .into_iter()
+        .map(|row| (row.draft_id, (row.synced_hash, row.synced_at)))
+        .collect();
+    state.failed = crate::pending_ops::failed_draft_pushes(&store, &cfg.name)?
+        .into_iter()
+        .collect();
+    Ok(state)
+}
+
+/// Read the account's drafts mirror state and pass it to the draft watcher,
+/// when the runtime has one. Logged and skipped on failure: the watcher then
+/// keeps the state it had, and the next drain tries again.
+fn publish_mirror_state(cfg: &AccountConfig, cell: &DraftWatchCell) {
+    let Some(watch) = cell.get() else {
+        return;
+    };
+    match mirror_state(cfg) {
+        Ok(state) => watch.set_mirror(&cfg.name, state),
+        Err(e) => warn!(
+            "[drafts] reading the mirror state of {} failed: {e:#}",
+            cfg.name
+        ),
     }
 }
 
@@ -879,13 +954,20 @@ fn outbox_hook(cfg: Arc<AccountConfig>) -> DrainHook {
 /// A drained op is silent; a failed one has already been rolled back, so the
 /// suffix points at the log rather than repeating the per-op error. The wording
 /// is the TUI's, so the same tick reads the same way in both clients.
-fn mutations_hook(cfg: Arc<AccountConfig>, report: TickReport) -> DrainHook {
+fn mutations_hook(cfg: Arc<AccountConfig>, report: TickReport, watch: DraftWatchCell) -> DrainHook {
     Arc::new(move |ctx: TickContext| {
         let cfg = Arc::clone(&cfg);
         let report = report.clone();
+        let watch = Arc::clone(&watch);
         async move {
             let drained = off_thread("the mutation-queue drain", move || async move {
-                crate::pending_ops::resume_account_or_busy(&cfg).await
+                let drained = crate::pending_ops::resume_account_or_busy(&cfg).await;
+                // A push or a delete of a draft moves the mirror state the
+                // watcher shows (#0143).
+                if matches!(drained, Ok(crate::pending_ops::Resume::Drained(_))) {
+                    publish_mirror_state(&cfg, &watch);
+                }
+                drained
             })
             .await
             .and_then(|inner| inner);
@@ -934,7 +1016,7 @@ fn mutations_hook(cfg: Arc<AccountConfig>, report: TickReport) -> DrainHook {
 /// whose credentials are missing must still be a runtime that serves reads and
 /// drains queues. A failed load is the body's `Err`, which the tail drain runs
 /// after and the outcome carries.
-fn body_hook(cfg: Arc<AccountConfig>, report: TickReport) -> BodyHook {
+fn body_hook(cfg: Arc<AccountConfig>, report: TickReport, _watch: DraftWatchCell) -> BodyHook {
     // Whether this runtime has listed the server's folders yet: the first tick
     // lists, and so does every full one (#0141).
     let listed = Arc::new(AtomicBool::new(false));

@@ -127,6 +127,28 @@ pub enum ServerOp {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reply_all: bool,
     },
+    /// Replace a draft's copy in the server's Drafts folder with the file as
+    /// it is when the drain runs (#0143).
+    ///
+    /// It names the draft and carries no bytes: the drain reads the file, so a
+    /// burst of saves is one APPEND of the last state, and there is no blob to
+    /// write before the queue row. The run is [`crate::draft_mirror`]'s, not
+    /// [`run_op`]'s, because it reads the file and writes the store's
+    /// `draft_sync` row.
+    PushDraft { draft_id: String },
+    /// Remove every copy of one draft from a server folder (#0143): after a
+    /// send that reached every recipient, after `draft.discard`, and for a
+    /// copy whose draft was retired. `uid` and `uidvalidity` are the copy the
+    /// draft's `draft_sync` row named, kept for the log; the delete finds the
+    /// copies by `message_id`, which every copy of the draft carries.
+    DeleteDraft {
+        mailbox: String,
+        message_id: String,
+        #[serde(default)]
+        uid: Option<u32>,
+        #[serde(default)]
+        uidvalidity: Option<u32>,
+    },
 }
 
 impl ServerOp {
@@ -141,17 +163,31 @@ impl ServerOp {
             ServerOp::SetRead { .. } => "set_read",
             ServerOp::SetFlagged { .. } => "set_flagged",
             ServerOp::SetAnswered { .. } => "set_answered",
+            ServerOp::PushDraft { .. } => "push_draft",
+            ServerOp::DeleteDraft { .. } => "delete_draft",
         }
     }
 
-    /// The message this op names.
+    /// Whether the op is the drafts mirror's (#0143), which the drain runs
+    /// through [`crate::draft_mirror`] rather than [`run_op`].
+    pub fn is_draft_op(&self) -> bool {
+        matches!(
+            self,
+            ServerOp::PushDraft { .. } | ServerOp::DeleteDraft { .. }
+        )
+    }
+
+    /// The message this op names: a draft push names its draft's id, since
+    /// its copy has no `Message-ID` before the first push.
     pub fn message_id(&self) -> &str {
         match self {
             ServerOp::Move { message_id, .. }
             | ServerOp::Delete { message_id, .. }
             | ServerOp::SetRead { message_id, .. }
             | ServerOp::SetFlagged { message_id, .. }
-            | ServerOp::SetAnswered { message_id, .. } => message_id,
+            | ServerOp::SetAnswered { message_id, .. }
+            | ServerOp::DeleteDraft { message_id, .. } => message_id,
+            ServerOp::PushDraft { draft_id } => draft_id,
         }
     }
 }
@@ -245,7 +281,18 @@ async fn run_imap(config: &ImapConfig, op: &ServerOp) -> Result<()> {
             };
             crate::imap_client::add_flag_in_mailboxes(config, message_id, mailboxes, flag).await
         }
+        ServerOp::PushDraft { .. } | ServerOp::DeleteDraft { .. } => Err(draft_op_refusal(op)),
     }
+}
+
+/// A draft op handed to [`run_op`], which cannot run one: it needs the draft
+/// file and the store, and the queue's drain routes it to
+/// [`crate::draft_mirror`] instead.
+fn draft_op_refusal(op: &ServerOp) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} is the drafts mirror's op and runs through the queue's drain",
+        op.kind()
+    )
 }
 
 async fn run_graph(config: &GraphConfig, op: &ServerOp) -> Result<()> {
@@ -281,6 +328,7 @@ async fn run_graph(config: &GraphConfig, op: &ServerOp) -> Result<()> {
             let verb = crate::graph::LastVerb::of_send(*answered, *reply_all);
             crate::graph::mark_last_verb_graph(config, message_id, verb).await
         }
+        ServerOp::PushDraft { .. } | ServerOp::DeleteDraft { .. } => Err(draft_op_refusal(op)),
     }
 }
 
@@ -329,6 +377,11 @@ mod tests {
             "set_answered"
         );
         assert_eq!(mv("<abc@x>", "INBOX", "Archive").message_id(), "<abc@x>");
+        let push = ServerOp::PushDraft {
+            draft_id: "d1".to_string(),
+        };
+        assert_eq!((push.kind(), push.message_id()), ("push_draft", "d1"));
+        assert!(push.is_draft_op() && !mv("<1@x>", "INBOX", "Archive").is_draft_op());
         assert_eq!(
             ServerOp::SetAnswered {
                 message_id: "<abc@x>".to_string(),
@@ -369,6 +422,15 @@ mod tests {
                 mailboxes: vec!["inbox".to_string()],
                 answered: true,
                 reply_all: true,
+            },
+            ServerOp::PushDraft {
+                draft_id: "d1".to_string(),
+            },
+            ServerOp::DeleteDraft {
+                mailbox: "Drafts".to_string(),
+                message_id: "<mp.1@x>".to_string(),
+                uid: Some(18564),
+                uidvalidity: Some(7),
             },
         ] {
             let json = serde_json::to_string(&op).unwrap();

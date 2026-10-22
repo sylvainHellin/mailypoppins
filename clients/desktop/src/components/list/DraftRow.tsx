@@ -1,8 +1,9 @@
 import { memo, type MouseEvent } from "react";
-import { CircleAlert, CircleCheck, Pencil, Send } from "lucide-react";
+import { CircleAlert, CircleCheck, CloudAlert, CloudCheck, CloudUpload, GitFork, Pencil, Send } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { StatusPill } from "@/components/compose/DraftPreview";
 import type { DraftItem } from "@/app/state";
+import type { DraftSyncState } from "@/protocol/generated";
 import { shortDate } from "@/components/list/format";
 import { MarkBox, PendingMark } from "@/components/list/RowControls";
 import { ROW_HEIGHT } from "@/components/list/useWindow";
@@ -28,6 +29,27 @@ export type DraftRowProps = {
 };
 
 /**
+ * The words and the icon of a draft's server state (ticket 0143): its copy in the
+ * server's Drafts folder is up to date, a push is owed, the draft and the
+ * server both changed, or the push was refused. A draft that is not mirrored
+ * (`local`, or no state yet) shows nothing, as in the TUI.
+ */
+export function draftSyncLabel(state: DraftSyncState | undefined): { word: string; Icon: typeof CloudCheck } | null {
+  switch (state) {
+    case "synced":
+      return { word: "synced", Icon: CloudCheck };
+    case "pending":
+      return { word: "pending", Icon: CloudUpload };
+    case "conflict":
+      return { word: "conflict", Icon: GitFork };
+    case "failed":
+      return { word: "failed", Icon: CloudAlert };
+    default:
+      return null;
+  }
+}
+
+/**
  * One draft in the Drafts listing, with its status (draft, approved), an
  * `invalid` badge for a file that does not parse (why in its title and its
  * name), whether the editor has it open, and whether it is being sent. Pure.
@@ -36,9 +58,10 @@ export const DraftRow = memo(function DraftRow({ draft, editing, cursor, marked,
   const invalid = draft.diagnostic !== null || !draft.valid;
   const subject = draft.subject || (invalid ? draft.id : "(no subject)");
   const to = draft.to || "(no recipient)";
+  const sync = draftSyncLabel(draft.server?.state);
   const state = invalid
     ? `invalid: ${draft.diagnostic ?? "does not parse"}`
-    : `${draft.status}, ${draft.ready ? "ready to send" : "not ready"}`;
+    : `${draft.status}, ${draft.ready ? "ready to send" : "not ready"}${sync ? `, server copy ${sync.word}` : ""}`;
   const onClick = (e: MouseEvent) => {
     if (e.shiftKey) onMark(draft.id, true);
     else if (e.metaKey || e.ctrlKey) onMark(draft.id, false);
@@ -84,6 +107,18 @@ export const DraftRow = memo(function DraftRow({ draft, editing, cursor, marked,
           <Badge variant="secondary" data-slot="draft-editing" aria-hidden="true">
             <Pencil />
             editing
+          </Badge>
+        ) : null}
+        {sync ? (
+          <Badge
+            variant={sync.word === "conflict" || sync.word === "failed" ? "destructive" : "secondary"}
+            data-slot="draft-sync"
+            data-sync={sync.word}
+            aria-hidden="true"
+            title={`Server copy ${sync.word}`}
+          >
+            <sync.Icon />
+            {sync.word}
           </Badge>
         ) : null}
         <StatusPill status={invalid ? "invalid" : draft.status} hidden />

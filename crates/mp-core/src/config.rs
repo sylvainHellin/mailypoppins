@@ -102,6 +102,29 @@ pub struct AccountConfig {
     /// [`HookConfig`].
     #[serde(default)]
     pub hooks: Vec<HookConfig>,
+    /// The drafts mirror (`[accounts.drafts]`, #0143). See [`DraftsConfig`].
+    #[serde(default)]
+    pub drafts: DraftsConfig,
+}
+
+/// `[accounts.drafts]` (#0143): whether this account's drafts are mirrored to
+/// its server Drafts folder, where Outlook, Apple Mail, the Proton app and mp
+/// on another machine see them and edit them.
+///
+/// On by default. `mirror = false` keeps the account's drafts local-only,
+/// which is what an account whose server mangles drafts wants. A Graph
+/// account is not mirrored yet whatever this says, since the Graph half is not
+/// built.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct DraftsConfig {
+    #[serde(default = "default_true")]
+    pub mirror: bool,
+}
+
+impl Default for DraftsConfig {
+    fn default() -> Self {
+        DraftsConfig { mirror: true }
+    }
 }
 
 /// One `[[accounts.hooks]]` entry (#0135): run `exec` once for every message
@@ -1948,6 +1971,27 @@ username = "user"
         assert_eq!(config.accounts.len(), 1);
         assert_eq!(config.accounts[0].name, "test");
         assert_eq!(config.accounts[0].default_from, "user@example.com");
+    }
+
+    /// `[accounts.drafts] mirror` (#0143) is on for an account that does not
+    /// say, off for one that says `false`, and a known key: no warning.
+    #[test]
+    fn the_drafts_mirror_is_on_unless_an_account_turns_it_off() {
+        let toml_str = r#"
+[[accounts]]
+name = "tum"
+
+[[accounts]]
+name = "proton"
+
+[accounts.drafts]
+mirror = false
+"#;
+        let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.accounts[0].drafts.mirror);
+        assert!(!config.accounts[1].drafts.mirror);
+        assert!(AccountConfig::default().drafts.mirror);
+        assert!(config_warnings(toml_str).is_empty());
     }
 
     #[test]

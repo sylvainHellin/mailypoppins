@@ -733,6 +733,7 @@ mod store_backed_mutations {
     /// `entry_from_row` builds.
     fn received_entry() -> EmailEntry {
         EmailEntry {
+            draft_sync: None,
             msg: Some(MessageRef::new(1)),
             draft_id: None,
             ..draft_entry("unused")
@@ -743,6 +744,7 @@ mod store_backed_mutations {
     /// `entry_from_draft` builds.
     fn draft_entry(id: &str) -> EmailEntry {
         EmailEntry {
+            draft_sync: None,
             msg: None,
             draft_id: Some(id.to_string()),
             skip: None,
@@ -1028,6 +1030,7 @@ mod store_backed_files {
         app.account_config.name = "alice".to_string();
         app.session = Some(fx.session());
         app.emails = std::sync::Arc::new(vec![EmailEntry {
+            draft_sync: None,
             msg: Some(MessageRef::new(row.id)),
             draft_id: None,
             skip: None,
@@ -1169,6 +1172,7 @@ mod store_backed_files {
     /// identity at all.
     fn draft_entry(draft_id: Option<&str>) -> EmailEntry {
         EmailEntry {
+            draft_sync: None,
             msg: None,
             draft_id: draft_id.map(str::to_string),
             skip: None,

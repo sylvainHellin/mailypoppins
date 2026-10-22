@@ -357,6 +357,22 @@ policy = "status-only"`} />
       </p>
     </section>
 
+    <!-- Drafts mirror -->
+    <section>
+      <h2 id="drafts-mirror">Drafts on the Server</h2>
+      <p>
+        Every account keeps a copy of each draft in its server Drafts folder, so Outlook,
+        Apple Mail, the Proton app and mp on another machine see the same drafts
+        (<a href="/draft-format/#server-drafts">how it works</a>). It is on by default; turn it
+        off for an account whose server mangles drafts. Graph accounts are not mirrored yet.
+      </p>
+      <ConfigExample title="Keep one account's drafts local" code={`[[accounts]]
+name = "personal"
+
+[accounts.drafts]
+mirror = false`} />
+    </section>
+
     <!-- Multi-Account Setup -->
     <section>
       <h2>Multi-Account Setup</h2>

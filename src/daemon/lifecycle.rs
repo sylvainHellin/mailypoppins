@@ -404,6 +404,7 @@ async fn run(foreground_logs: bool) -> Result<()> {
     super::watch::spawn(
         Arc::clone(&state.watch),
         Arc::clone(&state.canonical),
+        Arc::clone(&state.runtimes),
         state.shutdown.watchers_stopped(),
     );
     spawn_diagnostic_sweep(Arc::clone(&state));

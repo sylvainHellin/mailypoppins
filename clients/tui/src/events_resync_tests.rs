@@ -275,6 +275,7 @@ fn a_restart_resync_drops_the_old_daemons_hold_and_frees_u() {
     assert!(app.holds.is_empty());
 
     let entry = crate::app::EmailEntry {
+        draft_sync: None,
         msg: Some(crate::app::MessageRef::new(1)),
         draft_id: None,
         skip: None,

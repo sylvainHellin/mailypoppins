@@ -907,8 +907,17 @@ async fn draft_list_carries_every_row_the_listing_prints() {
         "the listing carries its rows and the two things the refresh reported"
     );
     for row in result["drafts"].as_array().expect("drafts is an array") {
+        // `server` (#0143) is there once the account's runtime has handed the
+        // watcher its mirror state, which races the first call, and is
+        // `{state, synced_at}` when it is.
+        if let Some(server) = row.get("server") {
+            assert_eq!(sorted_keys(server), vec!["state", "synced_at"]);
+        }
         assert_eq!(
-            sorted_keys(row),
+            sorted_keys(row)
+                .into_iter()
+                .filter(|key| key != "server")
+                .collect::<Vec<_>>(),
             ENTRY_FIELDS
                 .iter()
                 .map(|k| k.to_string())

@@ -639,6 +639,7 @@ mod tests {
                 status: "draft".to_string(),
                 valid: true,
                 ready: false,
+                server: None,
             },
             Change::DraftInvalid {
                 account: account(),

@@ -49,6 +49,7 @@ impl Queries for Daemon {
 /// One list row, everything about it derived from `subject`.
 fn entry(subject: &str, id: i64, is_invite: bool) -> EmailEntry {
     EmailEntry {
+        draft_sync: None,
         msg: Some(MessageRef::new(id)),
         draft_id: None,
         skip: None,
@@ -75,6 +76,7 @@ fn entry(subject: &str, id: i64, is_invite: bool) -> EmailEntry {
 /// One drafts row under the cursor, in the state the file is in.
 fn draft_entry(id: &str, status: &str) -> EmailEntry {
     EmailEntry {
+        draft_sync: None,
         msg: None,
         draft_id: Some(id.to_string()),
         skip: None,

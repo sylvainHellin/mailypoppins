@@ -38,6 +38,27 @@ const SKIP_GLYPH: &str = "\u{f071}";
 /// draft answers or forwards (#0142).
 const DRAFT_GLYPH: &str = "\u{f03eb}";
 
+/// The glyphs a mirrored draft's row leads with (#0143): its copy in the
+/// server's Drafts folder is up to date, a push is owed, the draft and the
+/// server both changed, or the push was refused. A draft that is not mirrored
+/// shows none.
+const DRAFT_SYNCED_GLYPH: &str = "\u{f0c2}";
+const DRAFT_PENDING_GLYPH: &str = "\u{f0ee}";
+const DRAFT_CONFLICT_GLYPH: &str = "\u{f126}";
+const DRAFT_FAILED_GLYPH: &str = "\u{f0e7}";
+
+/// The glyph of a draft's server state, `None` for one that is not mirrored.
+fn draft_sync_glyph(state: mp_protocol::state::DraftSyncState) -> Option<&'static str> {
+    use mp_protocol::state::DraftSyncState;
+    match state {
+        DraftSyncState::Local => None,
+        DraftSyncState::Synced => Some(DRAFT_SYNCED_GLYPH),
+        DraftSyncState::Pending => Some(DRAFT_PENDING_GLYPH),
+        DraftSyncState::Conflict => Some(DRAFT_CONFLICT_GLYPH),
+        DraftSyncState::Failed => Some(DRAFT_FAILED_GLYPH),
+    }
+}
+
 /// What an expanded member's contact cell starts with: the indent and the
 /// branch that hang it under its header (#0142), a tee for every member but
 /// the last, which closes the tree with a corner so the group visibly ends
@@ -337,6 +358,10 @@ fn invite_and_attachment_prefix(email: &EmailEntry) -> String {
     }
     if email.header().is_some_and(|h| h.has_draft) {
         prefix.push_str(DRAFT_GLYPH);
+        prefix.push(' ');
+    }
+    if let Some(glyph) = email.draft_sync.and_then(draft_sync_glyph) {
+        prefix.push_str(glyph);
         prefix.push(' ');
     }
     prefix
@@ -639,6 +664,7 @@ mod badge_tests {
 
     fn entry(is_invite: bool, has_att: bool) -> EmailEntry {
         EmailEntry {
+            draft_sync: None,
             msg: Some(crate::app::MessageRef::new(1)),
             draft_id: None,
             skip: None,
@@ -804,6 +830,25 @@ mod badge_tests {
         let p = invite_and_attachment_prefix(&entry(true, true));
         assert!(p.starts_with(INVITE_GLYPH), "prefix={p:?}");
         assert!(p.contains('\u{f0c6}'), "paperclip missing: {p:?}");
+    }
+
+    /// A mirrored draft leads with the glyph of its server state (#0143); one
+    /// that is not mirrored, and received mail, show none.
+    #[test]
+    fn a_mirrored_draft_shows_its_server_state() {
+        use mp_protocol::state::DraftSyncState;
+        let mut e = entry(false, false);
+        for (state, glyph) in [
+            (DraftSyncState::Synced, DRAFT_SYNCED_GLYPH),
+            (DraftSyncState::Pending, DRAFT_PENDING_GLYPH),
+            (DraftSyncState::Conflict, DRAFT_CONFLICT_GLYPH),
+            (DraftSyncState::Failed, DRAFT_FAILED_GLYPH),
+        ] {
+            e.draft_sync = Some(state);
+            assert_eq!(invite_and_attachment_prefix(&e), format!("{glyph} "));
+        }
+        e.draft_sync = Some(DraftSyncState::Local);
+        assert_eq!(invite_and_attachment_prefix(&e), "");
     }
 
     #[test]
