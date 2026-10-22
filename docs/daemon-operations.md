@@ -376,7 +376,7 @@ The first scheduled tick runs ten seconds after the runtime comes up (`STARTUP_T
 It is what catches everything the watcher cannot hear: a change in any mailbox other than INBOX, a queued op or an outbox Sent copy waiting out its backoff, a body fetch the deadline cut short, an IDLE connection the server dropped silently, and an account with no client open at all.
 The scheduled tick goes through the same `tick_and_publish` as the watcher's, so it publishes `sync.completed` and the counts that moved exactly as a watcher tick does; it joins a tick already running, and it waits for a drain in flight through the runtime's turn.
 A blocked runtime, a local-only account and an interval of `0` get no scheduler.
-A Graph account is scheduled like an IMAP one and reads the same `[accounts.imap] sync_interval_secs` (the default when it has no `[accounts.imap]` table); its tick runs the Graph orchestrator over every configured mailbox, so `mp sync -A <graph account>` without `--mailbox` goes through the runtime too.
+A Graph account is scheduled like an IMAP one and reads the same `[accounts.imap] sync_interval_secs` (the default when it has no `[accounts.imap]` table); its tick runs the Graph orchestrator over every folder the account's catalogue syncs (#0141), so `mp sync -A <graph account>` without `--mailbox` goes through the runtime too.
 Changing `sync_interval_secs` changes the effective account, so `config.reload` restarts that account's runtime and the scheduler comes back with the new interval.
 Accounts are not staggered: each runtime's clock starts when it comes up and ticks run on independent runtimes, so two accounts ticking in the same second contend for nothing.
 

@@ -334,9 +334,9 @@ pub struct LocalSearchHit {
 pub struct ServerSearchParams {
     pub account: String,
     pub query: String,
-    /// Sidebar labels or server names; when absent, every mailbox with a
-    /// server name, or on Graph every folder, each hit labelled with its
-    /// mailbox or its folder's display name.
+    /// Sidebar labels or server names; when absent, every folder the
+    /// account syncs (#0141), or on Graph every folder, each hit labelled
+    /// with its mailbox or its folder's display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mailboxes: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

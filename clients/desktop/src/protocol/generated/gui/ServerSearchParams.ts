@@ -5,9 +5,9 @@
  */
 export type ServerSearchParams = { account: string, query: string,
 /**
- * Sidebar labels or server names; when absent, every mailbox with a
- * server name, or on Graph every folder, each hit labelled with its
- * mailbox or its folder's display name.
+ * Sidebar labels or server names; when absent, every folder the
+ * account syncs (#0141), or on Graph every folder, each hit labelled
+ * with its mailbox or its folder's display name.
  */
 mailboxes?: Array<string> | null, limit?: number | null,
 /**
