@@ -817,6 +817,7 @@ impl App {
             Overlay::Confirm(_)
             | Overlay::Compose(_)
             | Overlay::Attachment(_)
+            | Overlay::Account(_)
             | Overlay::Dir(_)
             | Overlay::Mailbox(_)
             | Overlay::Signatures(_)
@@ -874,7 +875,9 @@ impl App {
     /// The continuations to show in the which-key popup for the pending prefix,
     /// gathered from the Global, focused-pane and shared Message contexts and
     /// deduped by their display key, in table order (#0092). Empty when no
-    /// prefix is pending.
+    /// prefix is pending. A row guarded to several accounts (`ga`) is left
+    /// out with one account, since the resolver would not run it; the other
+    /// guards stay advisory here.
     pub fn prefix_popup_rows(&self) -> Vec<(&'static str, &'static str)> {
         let Some(p) = self.pending_prefix else {
             return Vec::new();
@@ -894,6 +897,9 @@ impl App {
         for ctx in ctxs {
             for kb in prefix_continuations(ctx, p) {
                 if kb.keys.is_empty() || rows.iter().any(|(k, _)| *k == kb.keys) {
+                    continue;
+                }
+                if kb.guard == Guard::MultiAccount && self.accounts.len() < 2 {
                     continue;
                 }
                 rows.push((kb.keys, kb.desc));

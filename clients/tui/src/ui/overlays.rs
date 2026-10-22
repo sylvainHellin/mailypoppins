@@ -5,9 +5,9 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::super::app::{
-    App, AttachmentPicker, AttachmentPickerMode, CommandPalette, ConfirmDialog, DirPicker,
-    DirPickerMode, MailboxPicker, PersistentError, RsvpOverlay, SignaturesMode, SignaturesOverlay,
-    ThreadEntry, ThreadOverlay,
+    AccountPicker, AccountState, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
+    ConfirmDialog, DirPicker, DirPickerMode, MailboxPicker, PersistentError, RsvpOverlay,
+    SignaturesMode, SignaturesOverlay, ThreadEntry, ThreadOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
@@ -228,6 +228,117 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
         frame.render_widget(
             Paragraph::new(Span::styled(
                 footer,
+                Style::default().fg(theme::active().text_muted),
+            )),
+            footer_area,
+        );
+    }
+}
+
+/// The account picker (`ga`, #0147), in the attachment picker's shape: one
+/// line per account in config order with its digit, the name, `current` on
+/// the active account and a dot when a background account has new mail.
+pub(super) fn render_account_picker(
+    picker: &AccountPicker,
+    accounts: &[AccountState],
+    active: usize,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let Some((_, inner)) = render_modal_shell(
+        frame,
+        area,
+        50,
+        accounts.len() as u16 + 4,
+        theme::active().border_focused,
+        theme::active().panel_bg,
+    ) else {
+        return;
+    };
+
+    let stack = modal_stack_areas(inner, 1, 1);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "Switch account",
+            Style::default()
+                .fg(theme::active().border_focused)
+                .add_modifier(Modifier::BOLD),
+        )),
+        stack.header,
+    );
+    let chip_w = 10u16.min(stack.header.width);
+    let chip = Rect {
+        x: stack.header.x + stack.header.width.saturating_sub(chip_w),
+        y: stack.header.y,
+        width: chip_w,
+        height: 1,
+    };
+    render_action_button(
+        frame,
+        chip,
+        Some("esc"),
+        "close",
+        theme::active().border_focused,
+    );
+
+    const CURRENT_TAG: &str = "  current";
+    const UNSEEN_TAG: &str = "  \u{25cf}";
+    // The digit column: `1` to `9`, blank past the ninth account.
+    const DIGIT_W: usize = 3;
+    let inner_width = inner.width as usize;
+    let selected = picker.selected.min(accounts.len().saturating_sub(1));
+    let lines: Vec<Line> = accounts
+        .iter()
+        .enumerate()
+        .map(|(i, acct)| {
+            let digit = if i < 9 {
+                format!("{:<DIGIT_W$}", i + 1)
+            } else {
+                " ".repeat(DIGIT_W)
+            };
+            let current = i == active;
+            let tags = if current { CURRENT_TAG.len() } else { 0 }
+                + if acct.has_unseen {
+                    UNSEEN_TAG.chars().count()
+                } else {
+                    0
+                };
+            let name = truncate(
+                &acct.account_config.name,
+                inner_width.saturating_sub(DIGIT_W + tags),
+            );
+            let name_style = if i == selected {
+                Style::default()
+                    .fg(theme::active().heading)
+                    .bg(theme::active().surface)
+            } else {
+                Style::default().fg(theme::active().text)
+            };
+            let mut spans = vec![
+                Span::styled(digit, Style::default().fg(theme::active().text_faint)),
+                Span::styled(name, name_style),
+            ];
+            if current {
+                spans.push(Span::styled(
+                    CURRENT_TAG,
+                    Style::default().fg(theme::active().text_muted),
+                ));
+            }
+            if acct.has_unseen {
+                spans.push(Span::styled(
+                    UNSEEN_TAG,
+                    Style::default().fg(theme::active().unread),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), stack.content);
+
+    if let Some(footer_area) = stack.footer {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "j/k nav  1-9 jump  Enter switch  Esc cancel",
                 Style::default().fg(theme::active().text_muted),
             )),
             footer_area,

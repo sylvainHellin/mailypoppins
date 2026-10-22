@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    Action, App, AttachmentPicker, AttachmentPickerMode, CommandPalette, ComposeField, ComposeMode,
-    ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog, DirPicker, DirPickerMode,
-    EmailEntry, EntryKey, Focus, MailboxKind, MailboxPicker, Message, MessageRef, Overlay,
-    RsvpChoice, RsvpOverlay, SearchField, SearchOverlayFocus, SearchScope, SignaturesMode,
-    SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
+    AccountPicker, Action, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
+    ComposeField, ComposeMode, ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog,
+    DirPicker, DirPickerMode, EmailEntry, EntryKey, Focus, MailboxKind, MailboxPicker, Message,
+    MessageRef, Overlay, RsvpChoice, RsvpOverlay, SearchField, SearchOverlayFocus, SearchScope,
+    SignaturesMode, SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
 };
 
 impl App {
@@ -29,6 +29,7 @@ impl App {
             Overlay::Thread(_) => return self.handle_thread_overlay_key(key),
             Overlay::Palette(_) => return self.handle_command_palette_key(key),
             Overlay::Attachment(_) => return self.handle_attachment_picker_key(key),
+            Overlay::Account(_) => return self.handle_account_picker_key(key),
             Overlay::Help => return self.handle_help_key(key),
             Overlay::Activity => return self.handle_activity_overlay_key(key),
             Overlay::Search => return self.handle_search_overlay_key(key),
@@ -65,8 +66,8 @@ impl App {
         // bindings are always tried first, then the focused pane's context
         // (mirroring the old "global keys before pane dispatch" precedence).
         // Guards are evaluated against live state so context-sensitive rules
-        // (`c` only in Drafts, most list keys only when non-empty, multi-account
-        // account jumps) stay in the data model.
+        // (`c` only in Drafts, most list keys only when non-empty, the account
+        // picker only with two accounts) stay in the data model.
         self.dispatch_normal_mode(key)
     }
 
@@ -264,18 +265,14 @@ impl App {
                 self.reload_from_cache();
             }
             A::SwitchAccount => {
+                // `ga` (#0147): the account picker, on the active account.
+                // The key's guard needs two accounts; the palette runs this
+                // arm without it, so it checks again.
                 self.pending_prefix = None;
-                let next = (self.active_account + 1) % self.accounts.len();
-                self.switch_account(next);
-            }
-            A::JumpAccount => {
-                // Ctrl+1..9 -> direct account jump (guarded to multi-account).
-                self.pending_prefix = None;
-                if let KeyCode::Char(c @ '1'..='9') = key.code {
-                    let idx = (c as usize) - ('1' as usize);
-                    if idx < self.accounts.len() {
-                        self.switch_account(idx);
-                    }
+                if self.accounts.len() > 1 {
+                    self.overlay = Overlay::Account(AccountPicker {
+                        selected: self.active_account,
+                    });
                 }
             }
             A::JumpMailbox => {
@@ -1858,6 +1855,48 @@ impl App {
             }
             _ => {}
         }
+        None
+    }
+
+    /// The account picker's keys (#0147): `j`/`k` and the arrows move and
+    /// clamp, Enter switches to the cursor's account, `1` to `9` switch to
+    /// the nth, Esc and `q` close it unchanged. The picker leaves before the
+    /// switch, so the new account is drawn with no overlay over it.
+    fn handle_account_picker_key(&mut self, key: KeyEvent) -> Option<Message> {
+        let count = self.accounts.len();
+        let Overlay::Account(picker) = &mut self.overlay else {
+            return None;
+        };
+        // A config reload may have removed accounts while the picker was up.
+        picker.selected = picker.selected.min(count.saturating_sub(1));
+        let target = match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if picker.selected + 1 < count {
+                    picker.selected += 1;
+                }
+                return None;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                picker.selected = picker.selected.saturating_sub(1);
+                return None;
+            }
+            KeyCode::Enter => picker.selected,
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx >= count {
+                    return None;
+                }
+                idx
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.close_overlay();
+                return None;
+            }
+            _ => return None,
+        };
+        self.overlay = Overlay::None;
+        self.switch_account(target);
+        self.promote_pending_error();
         None
     }
 
@@ -4654,35 +4693,11 @@ mod tests {
     }
 
     /// A minimal `AccountState` for `name`, carrying `content` as its cached
-    /// signature. A struct literal rather than `AccountState::new`, which
-    /// reads the user's config and keyring (mirrors `helpers::tests::account`).
+    /// signature.
     fn account_state(name: &str, content: Option<&str>) -> crate::app::AccountState {
         crate::app::AccountState {
-            account_config: mp_core::config::AccountConfig {
-                name: name.to_string(),
-                ..Default::default()
-            },
-            imap_config: None,
-            smtp_config: None,
-            graph_config: None,
             signature_content: content.map(str::to_string),
-            archive_server_name: "Archive".to_string(),
-            drafts_dir: None,
-            mailboxes: Vec::new(),
-            mailbox_counts: Vec::new(),
-            email_cache: Vec::new(),
-            sidebar_index: 0,
-            active_mailbox: 0,
-            list_index: 0,
-            cursor_ref: None,
-            headers_scroll: 0,
-            preview_scroll: 0,
-            selection: std::collections::HashSet::new(),
-            search_query: String::new(),
-            watcher_active: false,
-            opening: false,
-            has_unseen: false,
-            sync_health: mp_core::sync_health::SyncHealth::default(),
+            ..crate::app::AccountState::for_tests(name)
         }
     }
 
@@ -4940,6 +4955,145 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Enter));
         assert!(matches!(app.overlay, Overlay::Palette(_)), "stays open");
         assert!(app.pending_actions.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Account picker (`ga`, #0147)
+    // -----------------------------------------------------------------------
+
+    /// An app on `work`, the first of `names`, with every name an account.
+    fn app_with_accounts(names: &[&str]) -> App {
+        let mut app = app_with_emails(sample());
+        app.account_config.name = names[0].to_string();
+        app.accounts = names
+            .iter()
+            .map(|n| crate::app::AccountState::for_tests(n))
+            .collect();
+        app.active_account = 0;
+        app
+    }
+
+    fn picker_cursor(app: &App) -> usize {
+        let Overlay::Account(picker) = &app.overlay else {
+            panic!("the account picker should be open");
+        };
+        picker.selected
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        app.handle_key(KeyEvent::from(code));
+    }
+
+    #[test]
+    fn ga_opens_the_account_picker_on_the_active_account() {
+        let mut app = app_with_accounts(&["work", "home", "club"]);
+        app.active_account = 1;
+        type_text(&mut app, "ga");
+        assert_eq!(picker_cursor(&app), 1);
+        assert_eq!(app.active_account, 1, "opening the picker switches nothing");
+        assert!(app.pending_prefix.is_none());
+    }
+
+    #[test]
+    fn account_picker_j_and_enter_switch_and_k_clamps_at_the_top() {
+        let mut app = app_with_accounts(&["work", "home", "club"]);
+        type_text(&mut app, "ga");
+        press(&mut app, 'k');
+        assert_eq!(picker_cursor(&app), 0, "k at the top stays at the top");
+        press(&mut app, 'j');
+        key(&mut app, KeyCode::Down);
+        press(&mut app, 'j');
+        assert_eq!(
+            picker_cursor(&app),
+            2,
+            "j at the bottom stays at the bottom"
+        );
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.active_account, 1);
+        assert_eq!(app.account_config.name, "home");
+    }
+
+    #[test]
+    fn account_picker_esc_and_q_close_it_unchanged() {
+        let mut app = app_with_accounts(&["work", "home", "club"]);
+        for close in [KeyCode::Esc, KeyCode::Char('q')] {
+            type_text(&mut app, "ga");
+            press(&mut app, 'j');
+            key(&mut app, close);
+            assert!(matches!(app.overlay, Overlay::None), "{close:?} closes it");
+            assert_eq!(app.active_account, 0, "{close:?} switches nothing");
+        }
+    }
+
+    #[test]
+    fn account_picker_digits_jump_and_a_digit_past_the_end_does_nothing() {
+        let mut app = app_with_accounts(&["work", "home", "club"]);
+        type_text(&mut app, "ga");
+        press(&mut app, '9');
+        assert_eq!(picker_cursor(&app), 0, "the picker stays open");
+        assert_eq!(app.active_account, 0);
+        press(&mut app, '3');
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.active_account, 2);
+        assert_eq!(app.account_config.name, "club");
+    }
+
+    #[test]
+    fn account_picker_enter_on_the_active_account_only_closes_it() {
+        let mut app = app_with_accounts(&["work", "home"]);
+        app.search_query = "invoice".to_string();
+        type_text(&mut app, "ga");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.active_account, 0);
+        assert_eq!(app.search_query, "invoice", "no switch ran");
+    }
+
+    #[test]
+    fn account_picker_clears_the_new_accounts_unseen_dot() {
+        let mut app = app_with_accounts(&["work", "home"]);
+        app.accounts[1].has_unseen = true;
+        type_text(&mut app, "ga");
+        press(&mut app, '2');
+        assert!(!app.accounts[1].has_unseen);
+    }
+
+    #[test]
+    fn with_one_account_ga_and_the_palette_open_nothing_and_the_popup_omits_ga() {
+        let mut app = app_with_accounts(&["work"]);
+        press(&mut app, 'g');
+        let rows = app.prefix_popup_rows();
+        assert!(!rows.is_empty(), "the g family still shows");
+        assert!(rows.iter().all(|(k, _)| *k != "ga"), "{rows:?}");
+        press(&mut app, 'a');
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.pending_prefix.is_none());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(':')));
+        type_text(&mut app, "switch account");
+        let Overlay::Palette(palette) = &app.overlay else {
+            panic!("palette should be open");
+        };
+        assert_eq!(
+            palette.selected_action(),
+            Some(crate::app::KeyAction::SwitchAccount)
+        );
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.overlay, Overlay::None), "nothing opened");
+    }
+
+    #[test]
+    fn with_two_accounts_the_popup_lists_ga_and_the_palette_opens_the_picker() {
+        let mut app = app_with_accounts(&["work", "home"]);
+        press(&mut app, 'g');
+        assert!(app.prefix_popup_rows().iter().any(|(k, _)| *k == "ga"));
+        key(&mut app, KeyCode::Esc);
+        app.handle_key(KeyEvent::from(KeyCode::Char(':')));
+        type_text(&mut app, "switch account");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(picker_cursor(&app), 0);
     }
 
     // -----------------------------------------------------------------------

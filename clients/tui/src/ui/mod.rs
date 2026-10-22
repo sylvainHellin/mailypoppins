@@ -248,6 +248,9 @@ fn render_overlays(app: &mut App, frame: &mut Frame, area: ratatui::layout::Rect
         | Overlay::Compose(_) => {}
         Overlay::Confirm(dialog) => overlays::render_confirm_dialog(dialog, frame, area),
         Overlay::Attachment(picker) => overlays::render_attachment_picker(picker, frame, area),
+        Overlay::Account(picker) => {
+            overlays::render_account_picker(picker, &app.accounts, app.active_account, frame, area)
+        }
         Overlay::Dir(picker) => overlays::render_dir_picker(picker, frame, area),
         Overlay::Mailbox(picker) => overlays::render_mailbox_picker(picker, frame, area),
         Overlay::Signatures(overlay) => overlays::render_signatures_overlay(overlay, frame, area),

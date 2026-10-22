@@ -152,8 +152,6 @@ pub enum Chord {
     CtrlChar(char),
     /// A bare special key.
     Code(SpecialCode),
-    /// The Control modifier plus a digit `1..=9` (account jump).
-    CtrlDigit,
     /// A bare digit `1..=9` (mailbox jump).
     Digit,
     /// The prefix key itself pressed bare (starts / continues a leader chord).
@@ -215,7 +213,6 @@ impl Chord {
             }
             Chord::CtrlChar(c) => ctrl && key.code == KeyCode::Char(c),
             Chord::Code(code) => code.matches(key.code),
-            Chord::CtrlDigit => ctrl && matches!(key.code, KeyCode::Char('1'..='9')),
             Chord::Digit => !ctrl && matches!(key.code, KeyCode::Char('1'..='9')),
             Chord::PrefixLeader(p) => {
                 prefix_pending.is_none() && !ctrl && key.code == KeyCode::Char(p)
@@ -247,8 +244,8 @@ pub enum KeyAction {
     OpenLogFile,
     OpenConfigFile,
     FilterMetadata,
+    /// `ga`: open the account picker (#0147).
     SwitchAccount,
-    JumpAccount,
     JumpMailbox,
     /// `gm`: focus the mailbox sidebar (go to mailboxes).
     GoMailbox,
@@ -371,7 +368,7 @@ impl KeyAction {
     ///
     /// The non-Mail views only expose the view-agnostic Global surface: view
     /// switching (the Space leader + `Space m/c/a`), quit, help, and the
-    /// activity log. Mail-specific Global actions (mailbox/account jump,
+    /// activity log. Mail-specific Global actions (mailbox jump, account picker,
     /// metadata/content search, focus cycling) are gated off so they cannot
     /// fire outside Mail — unless the active view's pane context rebinds that
     /// key, in which case the pane binding wins (see `dispatch_normal_mode`).
@@ -400,9 +397,9 @@ impl KeyAction {
     /// - [`KeyAction::Manual`] is hand-dispatched overlay-internal input, not a
     ///   runnable Normal-mode action at all.
     /// - [`KeyAction::ArmPrefix`] only arms a leader; there is nothing to run.
-    /// - [`KeyAction::SwitchView`], [`KeyAction::JumpMailbox`] and
-    ///   [`KeyAction::JumpAccount`] read the continuation / digit key off the
-    ///   live event, which the palette cannot supply.
+    /// - [`KeyAction::SwitchView`] and [`KeyAction::JumpMailbox`] read the
+    ///   continuation / digit key off the live event, which the palette
+    ///   cannot supply.
     /// - [`KeyAction::OpenPalette`] would just reopen the palette.
     pub fn palette_runnable(self) -> bool {
         !matches!(
@@ -411,7 +408,6 @@ impl KeyAction {
                 | KeyAction::ArmPrefix
                 | KeyAction::SwitchView
                 | KeyAction::JumpMailbox
-                | KeyAction::JumpAccount
                 | KeyAction::OpenPalette
         )
     }
@@ -2278,7 +2274,6 @@ mod tests {
             KeyAction::ArmPrefix,
             KeyAction::SwitchView,
             KeyAction::JumpMailbox,
-            KeyAction::JumpAccount,
             KeyAction::OpenPalette,
         ] {
             assert!(

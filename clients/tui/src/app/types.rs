@@ -1012,6 +1012,40 @@ impl AccountState {
         }
     }
 
+    /// A minimal account named `name` for tests: no backend, no mailboxes,
+    /// already open. A struct literal rather than [`AccountState::new`], which
+    /// reads the user's config and keyring.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests(name: &str) -> Self {
+        Self {
+            account_config: mp_core::config::AccountConfig {
+                name: name.to_string(),
+                ..Default::default()
+            },
+            imap_config: None,
+            smtp_config: None,
+            graph_config: None,
+            signature_content: None,
+            archive_server_name: "Archive".to_string(),
+            drafts_dir: None,
+            mailboxes: Vec::new(),
+            mailbox_counts: Vec::new(),
+            email_cache: Vec::new(),
+            sidebar_index: 0,
+            active_mailbox: 0,
+            list_index: 0,
+            cursor_ref: None,
+            headers_scroll: 0,
+            preview_scroll: 0,
+            selection: std::collections::HashSet::new(),
+            search_query: String::new(),
+            watcher_active: false,
+            has_unseen: false,
+            opening: false,
+            sync_health: mp_core::sync_health::SyncHealth::default(),
+        }
+    }
+
     pub fn is_graph(&self) -> bool {
         self.account_config.auth_method == mp_core::config::AuthMethod::Graph
     }
@@ -2215,6 +2249,8 @@ pub enum Overlay {
     Compose(ComposeWizard),
     /// Attachment picker (`o` open / `O` save).
     Attachment(AttachmentPicker),
+    /// Account picker (`ga`, #0147): the configured accounts, to switch to one.
+    Account(AccountPicker),
     /// Directory picker for saving attachments.
     Dir(DirPicker),
     /// Fuzzy mailbox picker for quick-move (`M`).
@@ -2280,6 +2316,13 @@ pub struct AttachmentPicker {
     pub mode: AttachmentPickerMode,
     /// Set of selected indices (used in Save mode for multi-select).
     pub selected_set: HashSet<usize>,
+}
+
+/// Overlay state for the account picker (`ga`, #0147): every configured
+/// account in `App::accounts` order (the `config.toml` order), with the cursor
+/// on `selected`. A plain list with digits, no filter: `j` and `k` move.
+pub struct AccountPicker {
+    pub selected: usize,
 }
 
 /// Overlay state for the quick-move mailbox picker (#0018): a fuzzy
