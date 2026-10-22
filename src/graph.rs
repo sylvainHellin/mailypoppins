@@ -26,6 +26,25 @@ const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 const MESSAGE_SELECT: &str =
     "id,internetMessageId,subject,from,toRecipients,ccRecipients,body,receivedDateTime,hasAttachments,isRead";
 
+/// The MAPI property behind `In-Reply-To`, `PidTagInReplyToId`, as Graph
+/// names a single-value extended property.
+const IN_REPLY_TO_PROPERTY: &str = "String 0x1042";
+
+/// The MAPI property behind `References`, `PidTagInternetReferences`.
+const REFERENCES_PROPERTY: &str = "String 0x1039";
+
+/// The `$expand` that brings a message's `In-Reply-To` and `References`
+/// (PERSO-147), percent-encoded for a URL and for a `/$batch` sub-request.
+///
+/// The two MAPI properties rather than `internetMessageHeaders`: measured on
+/// the EVOQS inbox on 2026-10-22, the whole header block costs about 9.3 KB per
+/// message on a listing page and 5.9 KB on a single GET, the two properties
+/// about 90 and 390 bytes. A message without either header carries no
+/// `singleValueExtendedProperties` at all. `/messages/delta` refuses this
+/// `$expand` (HTTP 400), which costs nothing: the sync downloads by id and the
+/// re-thread walks the folder listing, and both accept it.
+const THREADING_EXPAND: &str = "$expand=singleValueExtendedProperties($filter=id%20eq%20'String%200x1042'%20or%20id%20eq%20'String%200x1039')";
+
 /// Graph's hard ceiling on the number of requests in one `/$batch` call.
 const BATCH_MAX_REQUESTS: usize = 20;
 
@@ -234,6 +253,70 @@ struct GraphMessage {
     has_attachments: bool,
     #[serde(default)]
     is_read: bool,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    /// The two threading properties [`THREADING_EXPAND`] asks for, absent
+    /// when the message carries neither header.
+    #[serde(default)]
+    single_value_extended_properties: Vec<GraphExtendedProperty>,
+}
+
+/// One single-value extended property: a MAPI property id and its value.
+#[derive(Debug, Clone, Deserialize)]
+struct GraphExtendedProperty {
+    id: String,
+    #[serde(default)]
+    value: Option<String>,
+}
+
+/// The threading signals of one message as Graph answered them.
+///
+/// `conversationId` is always written, the empty string when Graph named none,
+/// so the row reads as asked (see `messages.conversation_id` in the schema).
+fn thread_hints(
+    conversation_id: Option<&str>,
+    properties: &[GraphExtendedProperty],
+) -> crate::ingest::ThreadHints {
+    let property = |id: &str| {
+        properties
+            .iter()
+            .find(|p| p.id.eq_ignore_ascii_case(id))
+            .and_then(|p| p.value.as_deref())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    crate::ingest::ThreadHints {
+        in_reply_to: property(IN_REPLY_TO_PROPERTY),
+        references: property(REFERENCES_PROPERTY),
+        conversation_id: Some(conversation_id.unwrap_or_default().trim().to_string()),
+    }
+}
+
+/// A downloaded Graph message and the threading signals ingest needs beside
+/// it, which a [`FetchedEmail`] has no field for.
+pub struct GraphFetched {
+    pub email: FetchedEmail,
+    pub threading: crate::ingest::ThreadHints,
+}
+
+/// One entry of the re-thread's folder listing (PERSO-147).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphThreadingEntry {
+    #[serde(default)]
+    internet_message_id: Option<String>,
+    #[serde(default)]
+    conversation_id: Option<String>,
+    #[serde(default)]
+    single_value_extended_properties: Vec<GraphExtendedProperty>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphThreadingList {
+    value: Vec<GraphThreadingEntry>,
+    #[serde(rename = "@odata.nextLink")]
+    next_link: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -358,7 +441,7 @@ pub struct FolderEnumeration {
 /// it skipped as already known, the folder as enumerated, and whether the
 /// download covered everything the enumeration found.
 pub struct FolderFetch {
-    pub new_emails: Vec<FetchedEmail>,
+    pub new_emails: Vec<GraphFetched>,
     pub skipped: usize,
     pub enumeration: FolderEnumeration,
     /// True when this pass did not download every new message it found, so the
@@ -381,7 +464,7 @@ pub struct FolderFetch {
 pub struct BatchFetch {
     /// How many ids the run was asked for.
     pub requested: usize,
-    pub emails: Vec<FetchedEmail>,
+    pub emails: Vec<GraphFetched>,
     /// True when [`BATCH_FAILURE_BUDGET`] stopped the run before it had issued
     /// every chunk.
     pub gave_up: bool,
@@ -522,7 +605,10 @@ fn batch_request_body(ids: &[&str]) -> serde_json::Value {
             serde_json::json!({
                 "id": i.to_string(),
                 "method": "GET",
-                "url": format!("/me/messages/{}?$select={}", encoded, MESSAGE_SELECT),
+                "url": format!(
+                    "/me/messages/{}?$select={},conversationId&{}",
+                    encoded, MESSAGE_SELECT, THREADING_EXPAND
+                ),
             })
         })
         .collect();
@@ -848,7 +934,13 @@ impl GraphClient {
                     continue;
                 };
                 match serde_json::from_value::<GraphMessage>(body) {
-                    Ok(msg) => emails.push(self.hydrate(&msg).await),
+                    Ok(msg) => emails.push(GraphFetched {
+                        threading: thread_hints(
+                            msg.conversation_id.as_deref(),
+                            &msg.single_value_extended_properties,
+                        ),
+                        email: self.hydrate(&msg).await,
+                    }),
                     Err(e) => {
                         failures += 1;
                         if failures <= BATCH_FAILURE_WARN_LIMIT {
@@ -1737,7 +1829,7 @@ impl GraphClient {
 /// diff against it, and no `skipped`, because a delta does not walk past the
 /// messages it already holds.
 struct DeltaFetch {
-    new_emails: Vec<FetchedEmail>,
+    new_emails: Vec<GraphFetched>,
     /// The changed messages, for the read-flag pass.
     changed: HashMap<String, FolderEntry>,
     /// The resume point, stored only if this pass covered and wrote
@@ -1813,15 +1905,16 @@ fn ingest_window(
     blobs: &crate::store::BlobStore,
     account_name: &str,
     target: &SyncTarget,
-    new_emails: &[FetchedEmail],
+    new_emails: &[GraphFetched],
     newest_held: Option<i64>,
     result: &mut SyncResult,
 ) -> WindowIngest {
     let mut window = WindowIngest::default();
-    for email in new_emails {
+    for fetched in new_emails {
+        let email = &fetched.email;
         let message_id = crate::ingest::resolve_message_id(email, None);
         let uid = crate::ingest::graph_uid(&message_id);
-        match crate::ingest::ingest_message(
+        match crate::ingest::ingest_message_threaded(
             store,
             blobs,
             &crate::ingest::IngestInput {
@@ -1831,6 +1924,8 @@ fn ingest_window(
                 email,
                 raw: None,
             },
+            &crate::ingest::RebindPolicy::Always,
+            Some(&fetched.threading),
         ) {
             Ok(outcome) => {
                 window.written += 1;
@@ -2114,6 +2209,136 @@ impl GraphClient {
         };
         let attachments = self.fetch_attachments(&graph_id).await?;
         Ok(repair_verdict(attachments))
+    }
+
+    /// Every message of `folder` with the threading signals the sync download
+    /// now asks for, keyed by trimmed `internetMessageId`, and whether the walk
+    /// reached the last page (PERSO-147).
+    ///
+    /// The listing carries `conversationId` and the two MAPI threading
+    /// properties ([`THREADING_EXPAND`]) and nothing else, about 510 bytes a
+    /// message, so a folder of a few thousand messages is a few requests and
+    /// about a megabyte, and no body is downloaded again.
+    async fn list_folder_threading(
+        &self,
+        folder: &str,
+    ) -> Result<(HashMap<String, crate::ingest::ThreadHints>, bool)> {
+        let folder_path = self.folder_path(folder).await?;
+        let mut url = threading_listing_url(&folder_path);
+        let mut hints = HashMap::new();
+        for _ in 0..MAX_ENUMERATION_PAGES {
+            let resp = self
+                .client
+                .get(&url)
+                .bearer_auth(self.bearer())
+                .send()
+                .await
+                .context("Failed to list the folder's threading signals")?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(anyhow!(
+                    "Listing the threading signals of '{folder}' failed (HTTP {status}): {body}"
+                ));
+            }
+            let page: GraphThreadingList = resp
+                .json()
+                .await
+                .context("Failed to parse the threading listing")?;
+            absorb_threading_page(&mut hints, page.value);
+            match page.next_link {
+                Some(next) => url = next,
+                None => return Ok((hints, true)),
+            }
+        }
+        warn!(
+            "The threading listing of '{folder}' stopped at {MAX_ENUMERATION_PAGES} pages; \
+             the rows it did not reach stay owed a re-thread"
+        );
+        Ok((hints, false))
+    }
+
+    /// Give the rows of `mailbox` an older build ingested without threading
+    /// signals the ones the server holds, and re-thread them (PERSO-147).
+    ///
+    /// A no-op once every row of the mailbox has been asked: ingest writes the
+    /// signals of every new message, so the candidates are only ever the rows
+    /// stored before the fix, and the walk runs once per mailbox. A failure is
+    /// logged and leaves the candidates for the next pass.
+    async fn rethread_stored(
+        &self,
+        store: &crate::store::Store,
+        account: &str,
+        target: &SyncTarget,
+    ) -> crate::ingest::RethreadTally {
+        let mailbox = target.role.as_str();
+        let candidates = match crate::ingest::rethread_candidates(store, account, mailbox) {
+            Ok(c) if c.is_empty() => return crate::ingest::RethreadTally::default(),
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Could not list the rows of '{mailbox}' owed a re-thread: {e:#}");
+                return crate::ingest::RethreadTally::default();
+            }
+        };
+        let (hints, complete) = match self.list_folder_threading(&target.server_name).await {
+            Ok(listing) => listing,
+            Err(e) => {
+                warn!(
+                    "Graph re-thread of '{mailbox}' skipped this pass, {} row(s) still owed: {e:#}",
+                    candidates.len()
+                );
+                return crate::ingest::RethreadTally::default();
+            }
+        };
+        match crate::ingest::rethread_rows(store, account, &candidates, &hints, complete) {
+            Ok(tally) => {
+                info!(
+                    "Graph re-thread of '{mailbox}': {} of {} row(s) given their threading \
+                     signals, {} moved to another conversation, {} not on the server",
+                    tally.updated,
+                    candidates.len(),
+                    tally.merged,
+                    tally.settled,
+                );
+                tally
+            }
+            Err(e) => {
+                warn!("Graph re-thread of '{mailbox}' failed: {e:#}");
+                crate::ingest::RethreadTally::default()
+            }
+        }
+    }
+}
+
+/// The first-page URL of the re-thread's folder listing.
+fn threading_listing_url(folder_path: &str) -> String {
+    format!(
+        "{GRAPH_BASE}/me/mailFolders/{folder_path}/messages?\
+         $select=internetMessageId,conversationId&{THREADING_EXPAND}&$top=200"
+    )
+}
+
+/// Fold one page of the threading listing into `hints`, keyed by the trimmed
+/// `internetMessageId` the store keys rows by ([`absorb_page`] says why).
+fn absorb_threading_page(
+    hints: &mut HashMap<String, crate::ingest::ThreadHints>,
+    page: Vec<GraphThreadingEntry>,
+) {
+    for entry in page {
+        let Some(mid) = entry.internet_message_id else {
+            continue;
+        };
+        let mid = mid.trim();
+        if mid.is_empty() {
+            continue;
+        }
+        hints.insert(
+            mid.to_string(),
+            thread_hints(
+                entry.conversation_id.as_deref(),
+                &entry.single_value_extended_properties,
+            ),
+        );
     }
 }
 
@@ -2400,6 +2625,10 @@ pub async fn sync_mailboxes_graph(
             )
             .await;
         span.mark(&format!("attachment_repair:{}", target.role));
+
+        // Rows an older build stored without threading signals, once.
+        client.rethread_stored(&store, account_name, target).await;
+        span.mark(&format!("rethread:{}", target.role));
 
         // The other half of the same diff: what the store holds here and the
         // server does not. Held back until every target has been ingested (see
@@ -3450,14 +3679,212 @@ mod tests {
 
     /// A message as the Graph download hands it over, dated by its
     /// `receivedDateTime`.
-    fn received(mid: &str, iso: &str) -> FetchedEmail {
+    fn received(mid: &str, iso: &str) -> GraphFetched {
         let mut email = email_with(Vec::new());
         email.has_attachments = false;
         email.message_id = Some(mid.into());
         email.subject = mid.into();
         email.body_text = format!("body of {mid}");
         email.date = iso_to_rfc2822(iso);
-        email
+        GraphFetched {
+            email,
+            threading: thread_hints(None, &[]),
+        }
+    }
+
+    /// One message as the batch download answers it with the PERSO-147
+    /// `$select` and `$expand`: the two MAPI properties come back as
+    /// single-value extended properties, absent when the message has neither.
+    fn graph_message(json: serde_json::Value) -> GraphMessage {
+        serde_json::from_value(json).expect("a Graph message")
+    }
+
+    #[test]
+    fn the_threading_properties_become_the_ingest_hints() {
+        let reply = graph_message(serde_json::json!({
+            "id": "AAMk1",
+            "internetMessageId": "<reply@x>",
+            "conversationId": "AAQkConv=",
+            "singleValueExtendedProperties": [
+                {"id": "String 0x1042", "value": "<parent@x>"},
+                {"id": "String 0x1039", "value": "<root@x> <parent@x>"}
+            ]
+        }));
+        assert_eq!(
+            thread_hints(
+                reply.conversation_id.as_deref(),
+                &reply.single_value_extended_properties
+            ),
+            crate::ingest::ThreadHints {
+                in_reply_to: Some("<parent@x>".into()),
+                references: Some("<root@x> <parent@x>".into()),
+                conversation_id: Some("AAQkConv=".into()),
+            }
+        );
+
+        // A root message: no properties at all, and the conversation alone.
+        let root = graph_message(serde_json::json!({
+            "id": "AAMk2",
+            "internetMessageId": "<root@x>",
+            "conversationId": "AAQkConv="
+        }));
+        assert_eq!(
+            thread_hints(
+                root.conversation_id.as_deref(),
+                &root.single_value_extended_properties
+            ),
+            crate::ingest::ThreadHints {
+                in_reply_to: None,
+                references: None,
+                conversation_id: Some("AAQkConv=".into()),
+            }
+        );
+
+        // No conversation named: written as asked, the empty string.
+        assert_eq!(thread_hints(None, &[]).conversation_id.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn the_threading_listing_keys_by_the_trimmed_message_id() {
+        let page: GraphThreadingList = serde_json::from_value(serde_json::json!({
+            "value": [
+                {"internetMessageId": " <a@x> ", "conversationId": "C1"},
+                {"conversationId": "C2"},
+                {"internetMessageId": "<b@x>", "conversationId": "C1",
+                 "singleValueExtendedProperties": [{"id": "String 0x1042", "value": "<a@x>"}]}
+            ]
+        }))
+        .unwrap();
+        assert!(page.next_link.is_none());
+        let mut hints = HashMap::new();
+        absorb_threading_page(&mut hints, page.value);
+        assert_eq!(hints.len(), 2, "an entry with no Message-ID is dropped");
+        assert_eq!(hints["<a@x>"].conversation_id.as_deref(), Some("C1"));
+        assert_eq!(hints["<b@x>"].in_reply_to.as_deref(), Some("<a@x>"));
+        assert_eq!(hints["<b@x>"].references, None);
+    }
+
+    #[test]
+    fn the_download_and_the_listing_ask_for_the_threading_signals() {
+        let body = batch_request_body(&["AAA"]);
+        let url = body["requests"][0]["url"].as_str().unwrap();
+        assert!(url.contains(",conversationId&"), "got {url}");
+        assert!(url.contains(THREADING_EXPAND), "got {url}");
+        let listing = threading_listing_url("inbox");
+        assert!(
+            listing.contains("$select=internetMessageId,conversationId&"),
+            "got {listing}"
+        );
+        assert!(listing.contains(THREADING_EXPAND), "got {listing}");
+        assert!(
+            !THREADING_EXPAND.contains(' '),
+            "a batch sub-request URL carries no raw space"
+        );
+    }
+
+    /// PERSO-147: a Graph reply and its parent, downloaded in two windows in
+    /// either order, land in one conversation; the headers thread the reply
+    /// to a stored parent, the conversation threads a parent stored after it.
+    #[test]
+    fn graph_windows_thread_by_headers_and_by_conversation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        let with = |mid: &str, iso: &str, irt: Option<&str>, conversation: &str| {
+            let mut fetched = received(mid, iso);
+            fetched.threading = crate::ingest::ThreadHints {
+                in_reply_to: irt.map(str::to_string),
+                references: irt.map(str::to_string),
+                conversation_id: Some(conversation.to_string()),
+            };
+            fetched
+        };
+        let thread_of = |mid: &str| -> String {
+            store
+                .conn()
+                .query_row(
+                    "SELECT thread_id FROM messages WHERE message_id = ?1",
+                    [mid],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let mut result = SyncResult::default();
+
+        // Parent first, reply after: the headers.
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &[with("<p1@x>", "2026-10-21T20:12:00Z", None, "C1")],
+            None,
+            &mut result,
+        );
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &[with(
+                "<r1@x>",
+                "2026-10-21T20:13:00Z",
+                Some("<p1@x>"),
+                "other",
+            )],
+            None,
+            &mut result,
+        );
+        assert_eq!(thread_of("<r1@x>"), "<p1@x>", "the headers win");
+
+        // Reply first, parent after: the conversation.
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &[with("<r2@x>", "2026-10-21T20:13:00Z", Some("<p2@x>"), "C2")],
+            None,
+            &mut result,
+        );
+        assert_eq!(thread_of("<r2@x>"), "<r2@x>", "no parent stored yet");
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &[with("<p2@x>", "2026-10-21T20:12:00Z", None, "C2")],
+            None,
+            &mut result,
+        );
+        assert_eq!(thread_of("<p2@x>"), "<r2@x>");
+
+        // The stored signals, and an unrelated message that shares nothing.
+        let (irt, conversation): (Option<String>, Option<String>) = store
+            .conn()
+            .query_row(
+                "SELECT in_reply_to, conversation_id FROM messages WHERE message_id = '<r1@x>'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(irt.as_deref(), Some("<p1@x>"));
+        assert_eq!(conversation.as_deref(), Some("other"));
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &[with("<lone@x>", "2026-10-21T20:14:00Z", None, "")],
+            None,
+            &mut result,
+        );
+        assert_eq!(
+            thread_of("<lone@x>"),
+            "<lone@x>",
+            "an empty conversation matches nothing"
+        );
     }
 
     /// PERSO-172 review: a message given up on after three attempts never
@@ -3473,7 +3900,7 @@ mod tests {
         std::fs::write(&not_a_dir, b"").unwrap();
         let blobs = crate::store::BlobStore::new(&not_a_dir);
         let inbox = sync_target(MailboxRole::Inbox, "Inbox");
-        let emails: Vec<FetchedEmail> = (0..3)
+        let emails: Vec<GraphFetched> = (0..3)
             .map(|i| received(&format!("<poison{i}@x>"), "2026-08-06T10:00:00Z"))
             .collect();
 

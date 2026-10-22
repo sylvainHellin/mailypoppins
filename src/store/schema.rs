@@ -347,8 +347,9 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 pub fn create(conn: &Connection) -> Result<()> {
     conn.execute_batch(&format!("BEGIN;{SCHEMA_SQL}COMMIT;"))
         .with_context(|| format!("creating store schema v{SCHEMA_VERSION}"))?;
-    ensure_additive_indexes(conn)?;
+    // Columns before indexes: an additive index may cover an additive column.
     ensure_additive_columns(conn)?;
+    ensure_additive_indexes(conn)?;
     ensure_additive_tables(conn)?;
     set_meta(conn, META_SCHEMA_VERSION, &SCHEMA_VERSION.to_string())?;
     set_meta(conn, META_APP_VERSION, env!("CARGO_PKG_VERSION"))?;
@@ -384,9 +385,18 @@ pub const THREAD_INDEX: &str = "messages_thread";
 /// them (#0142).
 pub const THREAD_MAILBOX_INDEX: &str = "messages_thread_mailbox";
 
+/// Name of the index that finds the rows of one Graph conversation.
+///
+/// Ingest asks it for the thread of a Graph message whose `In-Reply-To` and
+/// `References` resolve to no stored row (PERSO-147): the rows that share its
+/// `conversationId` already have one. It covers
+/// `messages.conversation_id`, an additive column, so it is created after
+/// [`ensure_additive_columns`] has run.
+pub const CONVERSATION_INDEX: &str = "messages_conversation";
+
 /// Every index created after [`SCHEMA_VERSION`] was last bumped, as
 /// `(name, CREATE statement)`, each looked up and created on its own.
-fn additive_indexes() -> [(&'static str, String); 3] {
+fn additive_indexes() -> [(&'static str, String); 4] {
     [
         (
             INVITE_INDEX,
@@ -407,6 +417,13 @@ fn additive_indexes() -> [(&'static str, String); 3] {
             format!(
                 "CREATE INDEX IF NOT EXISTS {THREAD_MAILBOX_INDEX} \
                  ON messages (account, thread_id, mailbox)"
+            ),
+        ),
+        (
+            CONVERSATION_INDEX,
+            format!(
+                "CREATE INDEX IF NOT EXISTS {CONVERSATION_INDEX} \
+                 ON messages (account, conversation_id)"
             ),
         ),
     ]
@@ -446,9 +463,19 @@ pub fn ensure_additive_indexes(conn: &Connection) -> Result<()> {
 /// on every refresh, so the columns fill at the next one with nothing to
 /// migrate, and a version bump, which makes an existing store unusable until
 /// it is rebuilt from the server, would buy nothing.
-const ADDITIVE_COLUMNS: [(&str, &str, &str); 2] = [
+///
+/// `messages.conversation_id` is Graph's `conversationId` (PERSO-147), the
+/// second threading signal after `In-Reply-To` and `References`. `NULL` means
+/// nobody asked the server: an IMAP row, a row the outbox wrote, or a Graph
+/// row an older build ingested. The empty string means the server was asked
+/// and named no conversation. The Graph re-thread
+/// ([`crate::ingest::rethread_candidates`]) reads that distinction, so a Graph
+/// row an older build wrote is re-threaded once and never again; a bump would
+/// instead have dropped every store and re-downloaded every body.
+const ADDITIVE_COLUMNS: [(&str, &str, &str); 3] = [
     ("drafts", "in_reply_to", "TEXT"),
     ("drafts", "forwarded_from", "TEXT"),
+    ("messages", "conversation_id", "TEXT"),
 ];
 
 /// Add the columns created after [`SCHEMA_VERSION`] was last bumped, beside

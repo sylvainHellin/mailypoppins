@@ -99,6 +99,25 @@ pub struct IngestInput<'a> {
     pub raw: Option<&'a [u8]>,
 }
 
+/// The threading signals a backend without RFC822 bytes hands ingest itself
+/// (PERSO-147).
+///
+/// An IMAP message carries `In-Reply-To` and `References` in its raw bytes and
+/// ingest reads them from there; Graph returns no raw message, so its download
+/// asks for the two headers (as the MAPI properties behind them) and for the
+/// message's `conversationId`, and passes them here. The headers stay the
+/// primary signal, so a Graph row and an IMAP row of one conversation thread
+/// alike; `conversation_id` is the fallback for a message whose headers name
+/// no stored row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThreadHints {
+    pub in_reply_to: Option<String>,
+    pub references: Option<String>,
+    /// Graph's `conversationId`, the empty string when the server was asked
+    /// and named none (see `messages.conversation_id` in the schema).
+    pub conversation_id: Option<String>,
+}
+
 /// What ingest did with one message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestOutcome {
@@ -183,6 +202,24 @@ pub fn ingest_message_with_policy(
     input: &IngestInput<'_>,
     rebind: &RebindPolicy<'_>,
 ) -> Result<IngestOutcome> {
+    ingest_message_threaded(store, blobs, input, rebind, None)
+}
+
+/// [`ingest_message_with_policy`], with the threading signals of a backend
+/// that has no raw message to read them from (PERSO-147).
+///
+/// The raw bytes win when there are any: `hints` supplies `In-Reply-To` and
+/// `References` only to a message ingested without them, and its
+/// `conversation_id` to every message. A third entry point rather than a
+/// field on [`IngestInput`], for the reason the second one is: the Graph pull
+/// is the one caller that has the signals.
+pub fn ingest_message_threaded(
+    store: &Store,
+    blobs: &BlobStore,
+    input: &IngestInput<'_>,
+    rebind: &RebindPolicy<'_>,
+    hints: Option<&ThreadHints>,
+) -> Result<IngestOutcome> {
     let mut span = TimingSpan::with_context(
         "store_ingest",
         format!("{}/{}#{}", input.account, input.mailbox, input.uid),
@@ -234,7 +271,13 @@ pub fn ingest_message_with_policy(
     )?);
     span.mark("blobs_written");
 
-    let (in_reply_to, references) = input.raw.map(threading_headers).unwrap_or((None, None));
+    let (in_reply_to, references) = match input.raw {
+        Some(raw) => threading_headers(raw),
+        None => hints
+            .map(|h| (h.in_reply_to.clone(), h.references.clone()))
+            .unwrap_or((None, None)),
+    };
+    let conversation_id = hints.and_then(|h| h.conversation_id.as_deref());
 
     let tx = store
         .conn()
@@ -245,8 +288,11 @@ pub fn ingest_message_with_policy(
         blobs,
         input,
         &message_id,
-        &in_reply_to,
-        &references,
+        &Threading {
+            in_reply_to: &in_reply_to,
+            references: &references,
+            conversation_id,
+        },
         &refs,
         rebind,
     )?;
@@ -293,20 +339,31 @@ fn attachment_refs(
     Ok(refs)
 }
 
+/// The threading signals of one message, as [`ingest_in_tx`] writes them.
+struct Threading<'a> {
+    in_reply_to: &'a Option<String>,
+    references: &'a Option<String>,
+    /// `None` leaves the column as it is on an update and `NULL` on an insert.
+    conversation_id: Option<&'a str>,
+}
+
 /// The database half of [`ingest_message`], so the transaction boundary stays
 /// visible in one place.
-#[allow(clippy::too_many_arguments)]
 fn ingest_in_tx(
     tx: &Transaction<'_>,
     blobs: &BlobStore,
     input: &IngestInput<'_>,
     message_id: &str,
-    in_reply_to: &Option<String>,
-    references: &Option<String>,
+    threading: &Threading<'_>,
     refs: &[BlobRef],
     rebind: &RebindPolicy<'_>,
 ) -> Result<IngestOutcome> {
     let email = input.email;
+    let Threading {
+        in_reply_to,
+        references,
+        conversation_id,
+    } = *threading;
 
     // 1. Find the row this message belongs in: by identity first, then
     //    through the message_id index (UIDVALIDITY reset). Its id and its
@@ -369,7 +426,8 @@ fn ingest_in_tx(
     //    a new one inherits from its parent and otherwise starts its own.
     let thread_id = match existing.as_ref().and_then(|(_, thread)| thread.clone()) {
         Some(thread) => thread,
-        None => resolve_thread_id(tx, input.account, message_id, in_reply_to, references)?,
+        None => resolve_thread_id(tx, input.account, in_reply_to, references, conversation_id)?
+            .unwrap_or_else(|| message_id.to_string()),
     };
 
     let date_sort = date_sort_for(&email.date);
@@ -397,7 +455,8 @@ fn ingest_in_tx(
                     uid = ?2, message_id = ?3, from_ = ?4, to_ = ?5, cc = ?6, subject = ?7,
                     date_sort = ?8, date_display = ?9, flags = ?10, in_reply_to = ?11,
                     references_ = ?12, thread_id = ?13, snippet = ?14, has_attachments = ?15,
-                    body_blob = ?16, raw_blob = ?17, size = ?18, reply_to = ?19, bcc = ?20
+                    body_blob = ?16, raw_blob = ?17, size = ?18, reply_to = ?19, bcc = ?20,
+                    conversation_id = COALESCE(?21, conversation_id)
                  WHERE id = ?1",
                 rusqlite::params![
                     id,
@@ -420,6 +479,7 @@ fn ingest_in_tx(
                     size,
                     email.reply_to,
                     email.bcc,
+                    conversation_id,
                 ],
             )
             .context("updating the message row")?;
@@ -430,10 +490,11 @@ fn ingest_in_tx(
                 "INSERT INTO messages (
                     account, mailbox, uid, message_id, from_, to_, cc, subject,
                     date_sort, date_display, flags, in_reply_to, references_, thread_id,
-                    snippet, has_attachments, body_blob, raw_blob, size, reply_to, bcc
+                    snippet, has_attachments, body_blob, raw_blob, size, reply_to, bcc,
+                    conversation_id
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                    ?17, ?18, ?19, ?20, ?21
+                    ?17, ?18, ?19, ?20, ?21, ?22
                  )",
                 rusqlite::params![
                     input.account,
@@ -457,6 +518,7 @@ fn ingest_in_tx(
                     size,
                     email.reply_to,
                     email.bcc,
+                    conversation_id,
                 ],
             )
             .context("inserting the message row")?;
@@ -588,15 +650,37 @@ fn load_blob_refs(tx: &Transaction<'_>, row_id: i64) -> Result<Vec<BlobHash>> {
 }
 
 /// The thread a new message joins: its parent's thread when `In-Reply-To` or
-/// the last `References` entry resolves to a row in this account, else a new
-/// thread rooted at its own Message-ID.
+/// a `References` entry (nearest ancestor first) resolves to a row in this
+/// account, else the thread of a row that shares its Graph `conversationId`,
+/// else `None`, which [`ingest_in_tx`] answers with a new thread rooted at
+/// the message's own Message-ID.
+///
+/// The headers come first so that one conversation threads the same whatever
+/// backend brought each of its messages: a Graph row, an IMAP row and the
+/// outbox's own Sent row all agree on `Message-ID`s, and only Graph rows carry
+/// a `conversationId` (PERSO-147). The conversation is what threads a Graph
+/// parent that arrives after its reply: the parent's headers name nothing
+/// stored, the reply already sits in a thread, and they share a conversation.
 fn resolve_thread_id(
     tx: &Transaction<'_>,
     account: &str,
-    message_id: &str,
     in_reply_to: &Option<String>,
     references: &Option<String>,
-) -> Result<String> {
+    conversation_id: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(thread) = thread_from_headers(tx, account, in_reply_to, references)? {
+        return Ok(Some(thread));
+    }
+    thread_from_conversation(tx, account, conversation_id, None)
+}
+
+/// The thread of the nearest ancestor the headers name and the store holds.
+fn thread_from_headers(
+    tx: &Transaction<'_>,
+    account: &str,
+    in_reply_to: &Option<String>,
+    references: &Option<String>,
+) -> Result<Option<String>> {
     let mut candidates: Vec<String> = Vec::new();
     if let Some(irt) = in_reply_to {
         candidates.extend(split_message_ids(irt));
@@ -619,10 +703,35 @@ fn resolve_thread_id(
             .optional()
             .context("resolving a parent message for threading")?;
         if let Some(Some(thread)) = thread {
-            return Ok(thread);
+            return Ok(Some(thread));
         }
     }
-    Ok(message_id.to_string())
+    Ok(None)
+}
+
+/// The thread of the oldest row that shares `conversation_id`, leaving out
+/// the row `except` (the one being re-threaded).
+///
+/// The empty string names no conversation, so it matches nothing.
+fn thread_from_conversation(
+    tx: &Transaction<'_>,
+    account: &str,
+    conversation_id: Option<&str>,
+    except: Option<i64>,
+) -> Result<Option<String>> {
+    let Some(conversation) = conversation_id.filter(|c| !c.is_empty()) else {
+        return Ok(None);
+    };
+    tx.query_row(
+        "SELECT thread_id FROM messages
+         WHERE account = ?1 AND conversation_id = ?2 AND thread_id IS NOT NULL
+           AND id <> ?3
+         ORDER BY id LIMIT 1",
+        rusqlite::params![account, conversation, except.unwrap_or(0)],
+        |row| row.get(0),
+    )
+    .optional()
+    .context("resolving a Graph conversation for threading")
 }
 
 /// Split a `References` / `In-Reply-To` header value into bracketed ids.
@@ -1569,6 +1678,158 @@ pub fn note_attachment_repair_failure(
     Ok(attempts)
 }
 
+/// A Graph row an older build ingested without its threading signals
+/// (PERSO-147): `id`, `Message-ID` and the thread ingest gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RethreadCandidate {
+    pub row_id: i64,
+    pub message_id: String,
+}
+
+/// The rows of `(account, mailbox)` the Graph re-thread owes a look, oldest
+/// first.
+///
+/// A row with no raw message came from Graph (IMAP and the outbox both keep
+/// the bytes), and a `NULL` `conversation_id` says no build has asked the
+/// server for its signals yet: every Graph ingest since PERSO-147 writes the
+/// column, the empty string when the server named no conversation. The
+/// re-thread writes it too, so the set only shrinks and the repair is a
+/// one-shot per row. Oldest first, so a parent is usually re-threaded before
+/// its reply; the merge in [`rethread_rows`] makes the order a matter of
+/// fewer writes, not of the result.
+pub fn rethread_candidates(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+) -> Result<Vec<RethreadCandidate>> {
+    let mut stmt = store.conn().prepare(
+        "SELECT id, message_id FROM messages
+         WHERE account = ?1 AND mailbox = ?2 AND raw_blob IS NULL AND conversation_id IS NULL
+         ORDER BY date_sort, id",
+    )?;
+    let rows = stmt.query_map((account, mailbox), |row| {
+        Ok(RethreadCandidate {
+            row_id: row.get(0)?,
+            message_id: row.get(1)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("reading the re-thread candidates")
+}
+
+/// What one re-thread pass did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RethreadTally {
+    /// Rows that received their signals from the server.
+    pub updated: usize,
+    /// Of those, rows whose thread changed, with every row of their old thread.
+    pub merged: usize,
+    /// Rows the server listing did not name, settled with an empty
+    /// `conversation_id` so they are not asked about again.
+    pub settled: usize,
+}
+
+/// Give the `candidates` the threading signals the server answered in
+/// `hints` (keyed by trimmed `Message-ID`) and re-thread them, in one
+/// transaction (PERSO-147).
+///
+/// A row's thread is resolved as ingest resolves a new one: its headers
+/// first, then its conversation, and when both name nothing it keeps the
+/// thread it has. When that thread differs from the one the row holds, every
+/// row of the old thread moves with it: the old thread is the row's own
+/// conversation of one, its other copies and the replies already threaded
+/// onto it, and all of them belong where the row goes. That merge is what
+/// makes the order of the rows irrelevant: a reply re-threaded before its
+/// parent moves to the parent's thread, and a parent re-threaded before its
+/// reply pulls nothing, so the reply joins it on its own turn.
+///
+/// `listing_complete` says the server listing behind `hints` covered the
+/// whole folder; only then is a candidate it does not name settled with an
+/// empty `conversation_id`, since a cut-short listing proves nothing about
+/// the rest. Bodies, blobs, flags and the FTS index are not touched.
+pub fn rethread_rows(
+    store: &Store,
+    account: &str,
+    candidates: &[RethreadCandidate],
+    hints: &std::collections::HashMap<String, ThreadHints>,
+    listing_complete: bool,
+) -> Result<RethreadTally> {
+    let mut tally = RethreadTally::default();
+    let tx = store
+        .conn()
+        .unchecked_transaction()
+        .context("opening the re-thread transaction")?;
+    for candidate in candidates {
+        let Some(hint) = hints.get(candidate.message_id.trim()) else {
+            if listing_complete {
+                tx.execute(
+                    "UPDATE messages SET conversation_id = '' WHERE id = ?1
+                     AND conversation_id IS NULL",
+                    [candidate.row_id],
+                )
+                .context("settling a re-thread candidate")?;
+                tally.settled += 1;
+            }
+            continue;
+        };
+        let conversation = hint.conversation_id.clone().unwrap_or_default();
+        // The row as it is now: an earlier candidate's merge may have moved it.
+        let (old_thread, in_reply_to, references): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = tx
+            .query_row(
+                "SELECT thread_id, in_reply_to, references_ FROM messages WHERE id = ?1",
+                [candidate.row_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .context("reading a re-thread candidate")?;
+        // A header the row already holds is the one its own bytes carried.
+        let in_reply_to = in_reply_to.or_else(|| hint.in_reply_to.clone());
+        let references = references.or_else(|| hint.references.clone());
+        tx.execute(
+            "UPDATE messages SET in_reply_to = ?2, references_ = ?3, conversation_id = ?4
+             WHERE id = ?1",
+            rusqlite::params![candidate.row_id, in_reply_to, references, conversation],
+        )
+        .context("recording a row's threading signals")?;
+        tally.updated += 1;
+
+        let resolved = match thread_from_headers(&tx, account, &in_reply_to, &references)? {
+            Some(thread) => Some(thread),
+            None => {
+                thread_from_conversation(&tx, account, Some(&conversation), Some(candidate.row_id))?
+            }
+        };
+        let Some(new_thread) = resolved else {
+            continue;
+        };
+        match old_thread {
+            Some(old) if old == new_thread => {}
+            Some(old) => {
+                tx.execute(
+                    "UPDATE messages SET thread_id = ?3 WHERE account = ?1 AND thread_id = ?2",
+                    rusqlite::params![account, old, new_thread],
+                )
+                .context("merging a re-threaded conversation")?;
+                tally.merged += 1;
+            }
+            None => {
+                tx.execute(
+                    "UPDATE messages SET thread_id = ?2 WHERE id = ?1",
+                    rusqlite::params![candidate.row_id, new_thread],
+                )
+                .context("threading a re-threaded row")?;
+                tally.merged += 1;
+            }
+        }
+    }
+    tx.commit()
+        .context("committing the re-thread transaction")?;
+    Ok(tally)
+}
+
 /// Of `vanished`, the UIDs whose rows are old enough for the prune to delete.
 ///
 /// This is the answer to a row the server has never listed under the identity
@@ -2188,6 +2449,297 @@ mod tests {
             assert!(attachment_repair_candidates(&store, "acct", "inbox", 0, 10)
                 .unwrap()
                 .is_empty());
+        }
+    }
+
+    /// PERSO-147: the conversation fallback at ingest and the one-shot
+    /// re-thread of the Graph rows an older build stored without signals.
+    mod rethread {
+        use super::*;
+        use std::collections::HashMap;
+        use tempfile::TempDir;
+
+        struct Fixture {
+            _dir: TempDir,
+            store: Store,
+            blobs: BlobStore,
+        }
+
+        fn fixture() -> Fixture {
+            let dir = TempDir::new().unwrap();
+            let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+            let blobs = BlobStore::new(dir.path().join("blobs"));
+            Fixture {
+                _dir: dir,
+                store,
+                blobs,
+            }
+        }
+
+        /// A Graph row as a pre-PERSO-147 build stored it: no raw message, no
+        /// headers, no conversation, so it roots its own thread.
+        fn old_graph_row(fx: &Fixture, mailbox: &str, mid: &str, date: &str) -> i64 {
+            let mut e = email(mid);
+            e.message_id = Some(mid.into());
+            e.date = date.into();
+            ingest_message(
+                &fx.store,
+                &fx.blobs,
+                &IngestInput {
+                    account: "acct",
+                    mailbox,
+                    uid: graph_uid(mid),
+                    email: &e,
+                    raw: None,
+                },
+            )
+            .unwrap()
+            .row_id
+        }
+
+        /// An IMAP row, threaded from its raw bytes.
+        fn imap_row(fx: &Fixture, mailbox: &str, uid: i64, mid: &str, irt: Option<&str>) -> i64 {
+            let mut e = email(mid);
+            e.message_id = Some(mid.into());
+            let raw = match irt {
+                Some(p) => format!(
+                    "Message-ID: {mid}\r\nIn-Reply-To: {p}\r\nReferences: {p}\r\n\r\nbody\r\n"
+                ),
+                None => format!("Message-ID: {mid}\r\n\r\nbody\r\n"),
+            };
+            ingest_message(
+                &fx.store,
+                &fx.blobs,
+                &IngestInput {
+                    account: "acct",
+                    mailbox,
+                    uid,
+                    email: &e,
+                    raw: Some(raw.as_bytes()),
+                },
+            )
+            .unwrap()
+            .row_id
+        }
+
+        fn thread_of(fx: &Fixture, row: i64) -> String {
+            fx.store
+                .conn()
+                .query_row("SELECT thread_id FROM messages WHERE id = ?1", [row], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        }
+
+        fn conversation_of(fx: &Fixture, row: i64) -> Option<String> {
+            fx.store
+                .conn()
+                .query_row(
+                    "SELECT conversation_id FROM messages WHERE id = ?1",
+                    [row],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        }
+
+        fn hint(irt: Option<&str>, conversation: &str) -> ThreadHints {
+            ThreadHints {
+                in_reply_to: irt.map(str::to_string),
+                references: irt.map(str::to_string),
+                conversation_id: Some(conversation.to_string()),
+            }
+        }
+
+        fn rethread(
+            fx: &Fixture,
+            mailbox: &str,
+            hints: &HashMap<String, ThreadHints>,
+        ) -> RethreadTally {
+            let candidates = rethread_candidates(&fx.store, "acct", mailbox).unwrap();
+            rethread_rows(&fx.store, "acct", &candidates, hints, true).unwrap()
+        }
+
+        #[test]
+        fn hints_thread_a_rawless_row_by_its_headers() {
+            let fx = fixture();
+            let parent = imap_row(&fx, "sent", 1, "<p@x>", None);
+            let mut e = email("reply");
+            e.message_id = Some("<r@x>".into());
+            let outcome = ingest_message_threaded(
+                &fx.store,
+                &fx.blobs,
+                &IngestInput {
+                    account: "acct",
+                    mailbox: "inbox",
+                    uid: graph_uid("<r@x>"),
+                    email: &e,
+                    raw: None,
+                },
+                &RebindPolicy::Always,
+                Some(&hint(Some("<p@x>"), "C")),
+            )
+            .unwrap();
+            assert_eq!(outcome.thread_id, thread_of(&fx, parent));
+            assert_eq!(conversation_of(&fx, outcome.row_id).as_deref(), Some("C"));
+        }
+
+        /// The raw bytes win over hints, and a row without hints stays `NULL`.
+        #[test]
+        fn raw_headers_win_over_hints() {
+            let fx = fixture();
+            let a = imap_row(&fx, "inbox", 1, "<a@x>", None);
+            let b = imap_row(&fx, "inbox", 2, "<b@x>", None);
+            let mut e = email("c");
+            e.message_id = Some("<c@x>".into());
+            let raw = b"Message-ID: <c@x>\r\nIn-Reply-To: <a@x>\r\n\r\nbody\r\n";
+            let outcome = ingest_message_threaded(
+                &fx.store,
+                &fx.blobs,
+                &IngestInput {
+                    account: "acct",
+                    mailbox: "inbox",
+                    uid: 3,
+                    email: &e,
+                    raw: Some(raw),
+                },
+                &RebindPolicy::Always,
+                Some(&hint(Some("<b@x>"), "")),
+            )
+            .unwrap();
+            assert_eq!(outcome.thread_id, thread_of(&fx, a));
+            assert_ne!(outcome.thread_id, thread_of(&fx, b));
+            assert_eq!(conversation_of(&fx, a), None, "an IMAP row was never asked");
+        }
+
+        /// The child is stored before its parent, both by an older build; the
+        /// re-thread puts them in one conversation in either processing order.
+        #[test]
+        fn a_parent_stored_after_its_reply_joins_it() {
+            for (parent_date, reply_date) in [
+                // Dated in order: the parent is re-threaded first.
+                (
+                    "Mon, 21 Oct 2026 20:12:00 +0000",
+                    "Mon, 21 Oct 2026 20:13:00 +0000",
+                ),
+                // Dated out of order: the reply is re-threaded first.
+                (
+                    "Mon, 21 Oct 2026 20:14:00 +0000",
+                    "Mon, 21 Oct 2026 20:13:00 +0000",
+                ),
+            ] {
+                let fx = fixture();
+                let reply = old_graph_row(&fx, "inbox", "<r@x>", reply_date);
+                let parent = old_graph_row(&fx, "inbox", "<p@x>", parent_date);
+                assert_ne!(thread_of(&fx, reply), thread_of(&fx, parent));
+
+                let hints = HashMap::from([
+                    ("<p@x>".to_string(), hint(None, "C")),
+                    ("<r@x>".to_string(), hint(Some("<p@x>"), "C")),
+                ]);
+                let tally = rethread(&fx, "inbox", &hints);
+                assert_eq!(tally.updated, 2);
+                assert_eq!(thread_of(&fx, reply), thread_of(&fx, parent));
+                assert_eq!(conversation_of(&fx, reply).as_deref(), Some("C"));
+
+                // Idempotent: nothing is owed a second look.
+                assert!(rethread_candidates(&fx.store, "acct", "inbox")
+                    .unwrap()
+                    .is_empty());
+                assert_eq!(rethread(&fx, "inbox", &hints), RethreadTally::default());
+            }
+        }
+
+        /// A message held in the inbox and in Archive, and a local Sent reply
+        /// threaded onto the inbox copy: re-threading the inbox copy into its
+        /// parent's conversation moves the Archive copy and the Sent reply too.
+        #[test]
+        fn copies_across_mailboxes_move_together() {
+            let fx = fixture();
+            let root = imap_row(&fx, "sent", 1, "<root@x>", None);
+            let inbox = old_graph_row(&fx, "inbox", "<m@x>", "Mon, 21 Oct 2026 20:12:00 +0000");
+            let archive = old_graph_row(&fx, "archive", "<m@x>", "Mon, 21 Oct 2026 20:12:00 +0000");
+            let answer = imap_row(&fx, "sent", 2, "<s@x>", Some("<m@x>"));
+            assert_eq!(thread_of(&fx, inbox), "<m@x>");
+            assert_eq!(thread_of(&fx, answer), "<m@x>");
+
+            let hints = HashMap::from([("<m@x>".to_string(), hint(Some("<root@x>"), "C"))]);
+            let tally = rethread(&fx, "inbox", &hints);
+            assert_eq!((tally.updated, tally.merged), (1, 1));
+            let root_thread = thread_of(&fx, root);
+            for row in [inbox, archive, answer] {
+                assert_eq!(thread_of(&fx, row), root_thread, "row {row}");
+            }
+            // The Archive copy is re-threaded on its own pass and stays put.
+            let tally = rethread(&fx, "archive", &hints);
+            assert_eq!((tally.updated, tally.merged), (1, 0));
+            assert_eq!(thread_of(&fx, archive), root_thread);
+            // The local Sent rows carry their bytes and are never candidates.
+            assert!(rethread_candidates(&fx.store, "acct", "sent")
+                .unwrap()
+                .is_empty());
+        }
+
+        /// Headers that name nothing stored fall back to the conversation; a
+        /// row the complete listing does not name is settled, and one an
+        /// incomplete listing does not name stays owed.
+        #[test]
+        fn the_conversation_threads_what_the_headers_cannot_and_absent_rows_settle() {
+            let fx = fixture();
+            let first = old_graph_row(&fx, "inbox", "<a@x>", "Mon, 21 Oct 2026 10:00:00 +0000");
+            let second = old_graph_row(&fx, "inbox", "<b@x>", "Mon, 21 Oct 2026 11:00:00 +0000");
+            let gone = old_graph_row(&fx, "inbox", "<gone@x>", "Mon, 21 Oct 2026 12:00:00 +0000");
+            let hints = HashMap::from([
+                ("<a@x>".to_string(), hint(None, "C")),
+                ("<b@x>".to_string(), hint(Some("<elsewhere@x>"), "C")),
+            ]);
+
+            let candidates = rethread_candidates(&fx.store, "acct", "inbox").unwrap();
+            let tally = rethread_rows(&fx.store, "acct", &candidates, &hints, false).unwrap();
+            assert_eq!((tally.updated, tally.settled), (2, 0));
+            assert_eq!(thread_of(&fx, second), thread_of(&fx, first));
+            assert_eq!(
+                conversation_of(&fx, gone),
+                None,
+                "a short listing proves nothing"
+            );
+
+            let tally = rethread(&fx, "inbox", &hints);
+            assert_eq!((tally.updated, tally.settled), (0, 1));
+            assert_eq!(conversation_of(&fx, gone).as_deref(), Some(""));
+            assert_eq!(thread_of(&fx, gone), "<gone@x>", "its thread is left alone");
+            assert!(rethread_candidates(&fx.store, "acct", "inbox")
+                .unwrap()
+                .is_empty());
+        }
+
+        /// A store written before the column gains it on its next open.
+        #[test]
+        fn an_older_store_gains_the_conversation_column_on_open() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("store.sqlite3");
+            {
+                let store = Store::open(&path).unwrap();
+                store
+                    .conn()
+                    .execute_batch(
+                        "DROP INDEX messages_conversation;
+                         ALTER TABLE messages DROP COLUMN conversation_id;",
+                    )
+                    .unwrap();
+            }
+            let store = Store::open(&path).unwrap();
+            assert!(rethread_candidates(&store, "acct", "inbox")
+                .unwrap()
+                .is_empty());
+            let indexed: bool = store
+                .conn()
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'messages_conversation')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(indexed);
         }
     }
 

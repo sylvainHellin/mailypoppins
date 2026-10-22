@@ -337,19 +337,20 @@ fn open_validated(path: &Path) -> Result<Connection> {
         return Err(anyhow!("schema v{SCHEMA_VERSION} is incomplete"));
     }
 
+    // Unlike a missing index, a missing column fails the drafts refresh and
+    // every ingest, so the warning is the one place it is reported; the next
+    // open tries again. Columns first, since an additive index may cover one.
+    if let Err(e) = schema::ensure_additive_columns(&conn) {
+        warn!(
+            "[store] could not add an additive column to {}: {e:#}",
+            path.display()
+        );
+    }
     // Not a reason to reject the file either: without the index a listing is
     // slower, not wrong, and the next open tries again.
     if let Err(e) = schema::ensure_additive_indexes(&conn) {
         warn!(
             "[store] could not add an additive index to {}: {e:#}",
-            path.display()
-        );
-    }
-    // Unlike a missing index, a missing column fails the drafts refresh, so
-    // the warning is the one place it is reported; the next open tries again.
-    if let Err(e) = schema::ensure_additive_columns(&conn) {
-        warn!(
-            "[store] could not add an additive column to {}: {e:#}",
             path.display()
         );
     }
