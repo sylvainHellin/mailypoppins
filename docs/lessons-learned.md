@@ -3097,3 +3097,20 @@ Nothing compares the table with the calls an action makes, so a change of method
 
 `cargo test --workspace` turns `mp-client/test-support` on for `mp-tui` through the root crate's dev-dependencies, so `Session::serving` compiled in the TUI's unit tests there and nowhere else.
 `cargo test -p mp-tui` alone would not have it, so `clients/tui/Cargo.toml` names `mp-client` with the feature under `[dev-dependencies]` too.
+
+## The daemon's own startup events land in every daemon test's stream (2026-10-22)
+
+The daemon answers on its socket before its account runtimes start, and each start commits an `account.state_changed` and then refreshes the health checks, whose `diagnostic.check_changed` follows.
+With two accounts the first start's refresh finds the second still opening and announces a warning, and the second announces the recovery, so a two-account startup always publishes check events.
+Polling `daemon.status` until no account is `opening` does not settle this: the runtime table reads `ready` before the report is committed and before the refresh runs.
+A test that waits for its own events reads past the startup kinds with `tests/support/events.rs`, which classifies domain and lifecycle by `mp_protocol::events::DOMAIN_KINDS`; the daemon pins that list with a unit test over every `Change` variant and a debug assertion in `CanonicalState::publish`.
+A test that needs a quiet stream takes its bootstrap with the owed reports read (`bootstrap_settled` in `tests/daemon_config.rs`) or leaves the checks a start moves out of its silence.
+The race needs a moderately loaded machine: under very heavy load the startup finishes before the slow test client bootstraps, and the unfixed `daemon_operations` binary that failed 12 times in 320 runs at load 18 passed 320 of 320 at load 120.
+
+`a_client_that_re_bootstraps_after_a_resync_receives_events_again` allowed three resyncs after the first, but every bootstrap arms another 20 000-commit burst, and when it commits more than the queue holds before the connection task writes the first event behind the reply, the client is resynced again with nothing delivered.
+A second resync proves the poison was cleared, since a poisoned queue drops every domain event and never overflows into a second marker, so the loop is now bounded by its deadline alone; over 640 loaded runs it needed no extra round 563 times, one 73 times and two 4 times.
+
+`mp daemon stop` used to return once the socket was gone, but the daemon unlinks its socket before its process ends, so `pgrep` could still list the pid; the stop now also waits for the process to exit, counting a zombie as exited because a daemon started in the foreground stays one until its parent reaps it.
+
+`tokio::task::spawn_blocking` around the bootstrap's capture doubled its median latency under load (1.6 to 3.4 ms, p99 206 to 410 ms in the whole `daemon_events` binary), because the hop to a pool thread and back needs two more threads scheduled on a saturated machine.
+`block_in_place` kept the latency at the baseline, but it panics on a current-thread runtime, which the TUI tests' in-process daemon runs on, so the bootstrap checks the runtime flavour first.

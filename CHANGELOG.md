@@ -94,6 +94,9 @@ All notable changes to this project are documented in this file.
 - `mp list-mailboxes` printed the special-use attributes without their backslash (`Sent` for `\Sent`) (#0141).
 - TUI: the sidebar scrolls to keep the open mailbox on screen when there are more mailboxes than rows (#0141).
 - Microsoft Graph: an English config (`Inbox`, `Sent Items`) on a mailbox in another language syncs each role folder once, and a folder name with `&` such as `Q&A-2024` shows as it is (#0141).
+- `mp daemon stop` returns only once the daemon's process has exited, so a `mp daemon start` straight after it no longer races the old daemon's last moments.
+- Daemon: a `state.bootstrap` waiting at the state gate or reading the health checks from disk no longer holds a worker thread other connections need.
+- The daemon tests that failed now and then under load pass reliably: they no longer mistake the daemon's own startup events for theirs, and they wait for the log, the connection count and the event stream to settle instead of reading them once.
 
 ### Removed
 - The obsolete `spikes/ipc-bench` benchmark.
