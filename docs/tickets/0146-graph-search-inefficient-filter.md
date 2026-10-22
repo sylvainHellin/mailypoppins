@@ -3,7 +3,7 @@ id: 0146
 title: Graph server search fails or returns unfiltered results (InefficientFilter, the $search fallback, in:sent)
 type: bug
 priority: next
-status: open
+status: done
 created: 2026-10-21
 ---
 
@@ -63,6 +63,39 @@ The live test on the EVOQS account (`.agents/research/2026-10-21-perso-144-live-
   The CLI's server leg passes the `in:` value to `GraphClient::search_messages` unresolved (`src/main.rs`, `mailbox_name` around line 4383).
   `folder_path` then finds `sent` neither in `well_known_folder` (`src/graph.rs`, line 549, which knows `sentitems` and `sent items` but none of mp's role names) nor among the top-level folders, and sends it as a folder id.
   The daemon's `message.search_server` resolves names against the configured mailboxes (`pick_target`), so the fix is to resolve a role name to the account's configured server folder in the CLI leg as well, or to teach `well_known_folder` the role names `sent`, `trash` and `junk`.
+
+## Root cause, confirmed live (2026-10-22)
+
+Raw requests against the evoqs mailbox gave Graph's own error codes for each defect.
+
+- `$orderby` beside `$search`: HTTP 400 `SearchWithOrderBy`, so `$search` never succeeded, whatever the query.
+- `$filter` beside `$search`: HTTP 400 `SearchWithFilter`, so a query cannot be split into a KQL half and an OData half on `/me/messages`.
+- `$orderby=receivedDateTime desc` beside a `$filter` that does not start with `receivedDateTime`: `InefficientFilter`, the documented rule in [list messages](https://learn.microsoft.com/en-us/graph/api/user-list-messages) ("Using filter and orderby in the same query").
+- The same filters without `$orderby` answered 200, and so did `internetMessageId eq '<...>'`.
+- KQL ORs adjacent restrictions on one property: `received>=2026-10-14 received<2026-10-15` matched mail from 2026-10-21, and the same terms joined by `AND` matched the one day.
+- KQL `from:` matches a name or any address token by prefix: `from:amaz` and `from:update` find `order-update@amazon.de`. `from:ovh` finds nothing on evoqs because the mailbox holds no OVH mail (free text `ovh` finds one unrelated message).
+- `$search` on messages needs no `ConsistencyLevel` header; the [$search page](https://learn.microsoft.com/en-us/graph/search-query-parameter) lists the KQL properties (`from`, `to`, `cc`, `subject`, `body`, `attachment`, `hasAttachments`, `received`).
+
+## Fix
+
+- `to_graph` (`crates/mp-core/src/search.rs`) returns one `GraphQuery`: `Search` with every match term as KQL joined by explicit `AND` (`from:`, `to:`, `cc:`, `subject:`, `body:`, `attachment:`, `hasAttachments:true`, `received>=`, `received<`, OR groups in parentheses), `Filter` for `message-id:` alone, or `All` for a query with no term.
+  A phrase goes in as `\"two words\"`; an OR group may now mix fields, since everything is KQL.
+  `message-id:` beside another term is refused with an error, as Graph cannot run both halves in one request.
+- `search_url` (`src/graph.rs`) sends one of `$search` or `$filter`, `$orderby` only for the term-less listing, and `$top` clamped to 1 to 1000; the `ConsistencyLevel` header is gone.
+- The `$filter`-only fallback is gone: a refused search is an error naming the parameter it sent and Graph's body.
+- `in:sent` resolves to the configured server folder in the CLI leg (`find_server_name_for_role`, as the daemon's `pick_target` does), and `well_known_folder` maps the role name `sent` to `sentitems`.
+
+## Live check on evoqs (2026-10-22, read-only)
+
+- `from:amazon`: 10 of 10 hits from `@amazon.de` senders.
+- `in:sent`: 10 hits, all sent by the account, from Sent Items.
+- `mailypoppins` (free text): the 2 messages carrying the word.
+- `subject:"threading 1"` and `subject:PERSO-144`: 4 hits each, all `[mp test PERSO-144] threading 1`.
+- `message-id:<diu6d8VaoAfzFtBEcYS38wCCWcAGEejRsK8C@sylvains-MacBook-Pro-TUM.local>`: the one message, in its two copies (Inbox and Sent Items, sent to self).
+- `from:amazon after:2026-10-14 before:2026-10-15`: 4 hits, all from 2026-10-14.
+- `has:attachment subject:PERSO-144`: the 2 copies of the reply with an attachment; `filename:pdf after:2026-10-01`: 2 invoices with PDFs.
+- `from:ovh mailypoppins after:2026-10-01`: 0 hits and no error, which is right for this mailbox.
+- `message-id:<x@y> from:bob`: refused with an error naming the combination.
 
 ## Context
 

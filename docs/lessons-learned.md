@@ -189,7 +189,7 @@ Reserving `display_width(text).div_ceil(width)` rows for a wrapped `Paragraph` i
 RFC 3501 defines `HEADER <field> <string>` as "contains the specified string in the text of the header", not equality, so `HEADER "Message-ID" "abc@x"` also returns `<prefix-abc@x>` and `<abc@x.evil.net>`.
 Two things make the `message-id:` search prefix (TECHLEV-6) exact.
 First, the query always goes out angle-bracketed (`bracketed_message_id`), because the brackets are what pin both ends of the identifier inside the header text.
-Second, `retain_exact_message_id` re-checks equality on the parsed results, which is also what catches the Graph backend falling back from `$filter` to a fuzzy `$search` when `internetMessageId eq` is rejected.
+Second, `retain_exact_message_id` re-checks equality on the parsed results; the Graph backend runs the same pass (`retain_exact_message_id_graph`) over its `internetMessageId eq` filter.
 The filter lives in `fetch_emails_on_session`, the single seam every IMAP search path goes through (CLI, TUI `f` overlay), rather than at the call sites.
 Comparison is `eq_ignore_ascii_case` on the bracket-stripped value: servers are inconsistent about the domain part's casing, and this is still equality, never a substring.
 
@@ -2784,3 +2784,14 @@ A background task that needs process-wide state must not rely on a request path 
 A Graph quick sync downloads the newest missing messages by id, so a backlog drains one window per pass, and a capped pass never mints a delta token, so the delta cannot hide the backlog.
 When a new account shows only the newest few hundred messages, count the ingests per tick in the log before blaming the delta path: the drain was slow (one window per 900 s interval), not stuck.
 A message given up on after `MAX_INGEST_ATTEMPTS` never enters `known_message_ids`, so Graph lists it as new on every pass; the fast follow-up therefore requires that the pass stored at least one message, or a window of given-up messages re-downloads forever.
+
+## Graph message search takes one of `$search` or `$filter`, and KQL needs an explicit `AND` (PERSO-173, 2026-10-22)
+
+On `/me/messages` Graph answers `SearchWithOrderBy` to `$orderby` beside `$search` and `SearchWithFilter` to `$filter` beside `$search`, both HTTP 400, so a query cannot be split into a KQL half and an OData half.
+A `$filter` beside `$orderby=receivedDateTime desc` must start with `receivedDateTime`, or Graph answers `InefficientFilter` ("The restriction or sort order is too complex"); `from/emailAddress/address eq 'x'` with that sort failed on every call ([list messages](https://learn.microsoft.com/en-us/graph/api/user-list-messages), "Using filter and orderby in the same query").
+`mp search` therefore sends every match term as one KQL `$search` and keeps `$filter` for the Message-ID lookup alone, which KQL cannot express ([crates/mp-core/src/search.rs](../crates/mp-core/src/search.rs), `to_graph`; [src/graph.rs](../src/graph.rs), `search_url`).
+KQL ORs two adjacent restrictions on the same property: `received>=2026-10-14 received<2026-10-15` matched mail from 2026-10-21, while the same terms joined by `AND` matched the one day, so the clauses are always joined with an explicit `AND`.
+KQL `from:` matches a display name or any token of the address by prefix (`from:amaz` and `from:update` both find `order-update@amazon.de`), which is closer to the IMAP substring match than OData `eq`, which wants the whole address.
+A phrase goes inside the double-quoted `$search` string as `\"two words\"`; `$search` results come back newest first, at most 1000, and need no `ConsistencyLevel: eventual` header, which is for directory objects ([$search](https://learn.microsoft.com/en-us/graph/search-query-parameter)).
+The fallback this replaced retried a refused `$search` as `$filter` only, which for a subject or free-text query meant no filter at all, and showed the folder's newest messages as the hits with no error; a refused search is now an error that names the request.
+A throwaway cargo example that takes the account's token from `oauth2::load_or_refresh_token` and sends raw GETs is the quickest way to try a parameter shape against a live mailbox before changing the renderer.
