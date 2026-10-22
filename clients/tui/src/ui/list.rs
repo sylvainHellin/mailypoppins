@@ -115,15 +115,15 @@ const DRAFT_SENDER: &str = "Draft";
 /// A flat row, and a conversation of one message, shows the mailbox's contact
 /// as it always did. A conversation of several shows its participants and the
 /// `(n)` count, the count kept whole and the names truncated before it. An
-/// expanded member shows the mailbox its copy lives in, hung under its header
-/// (#0142), the label tinted when the member is the user's own (PERSO-179).
+/// expanded member shows its sender (PERSO-179), hung under its header
+/// (#0142), so the column holds a contact on every row and the member's
+/// mailbox goes to the subject cell, where the desktop puts its chip.
 fn contact_cell(app: &App, email: &EmailEntry, place: Place, width: usize) -> Cell<'static> {
-    if let Some(mailbox) = email.member_mailbox() {
+    if email.member_mailbox().is_some() {
         let room = width.saturating_sub(display_width(place.branch()));
-        let label = truncate(&app.mailbox_label(mailbox), room);
         return Cell::from(Line::from(vec![
             Span::raw(place.branch()),
-            member_label_span(label, email.member_own()),
+            Span::raw(truncate(member_sender(email), room)),
         ]));
     }
     Cell::from(contact_text(app, email, width))
@@ -157,22 +157,32 @@ fn member_label_span(label: String, own: bool) -> Span<'static> {
     }
 }
 
-/// What the subject column of a row prints after its badges.
-///
-/// An expanded member prints its sender there (PERSO-179), [`DRAFT_SENDER`]
-/// for a draft and [`OWN_SENDER`] for the user's own: the header above it
-/// already prints the conversation's subject, and a member carries no subject
-/// of its own, so repeating it on every member told the rows apart by nothing
-/// but their mailbox.
-fn row_text(email: &EmailEntry) -> &str {
-    if email.member_mailbox().is_none() {
-        &email.subject
-    } else if email.draft_id.is_some() {
+/// What an expanded member names as its sender (PERSO-179): [`DRAFT_SENDER`]
+/// for a draft, [`OWN_SENDER`] for the user's own, the sender's display name
+/// otherwise.
+fn member_sender(email: &EmailEntry) -> &str {
+    if email.draft_id.is_some() {
         DRAFT_SENDER
     } else if email.member_own() {
         OWN_SENDER
     } else {
         &email.from
+    }
+}
+
+/// What the subject column of a row prints after its badges in the narrow
+/// layout, which has no contact column.
+///
+/// An expanded member prints its sender there (PERSO-179), after the mailbox
+/// label [`narrow_subject_prefix`] leads with: the header above it already
+/// prints the conversation's subject, and a member carries no subject of its
+/// own, so repeating it on every member told the rows apart by nothing but
+/// their mailbox.
+fn row_text(email: &EmailEntry) -> &str {
+    if email.member_mailbox().is_none() {
+        &email.subject
+    } else {
+        member_sender(email)
     }
 }
 
@@ -220,23 +230,51 @@ fn status_marker(email: &EmailEntry) -> Span<'static> {
     }
 }
 
-/// The subject cell: the invite/attachment badges plus the truncated subject,
-/// with a coloured flag glyph prepended when the message is starred (#0007).
+/// The subject cell of the wide layout: the invite/attachment badges plus the
+/// truncated subject, with a coloured flag glyph prepended when the message is
+/// starred (#0007).
 ///
 /// The flag rides its own [`Span`] in the `warning` colour, the way the status
 /// marker has its own; the badges and subject stay in the row's own style, and
 /// on the cursor row the table's highlight style paints over every span. When
 /// flagged, the glyph plus its space costs two columns, so the subject is
 /// truncated to what is left.
-fn subject_cell(email: &EmailEntry, width: usize) -> Cell<'static> {
-    subject_cell_after(email, Vec::new(), width)
+///
+/// An expanded member has no subject of its own (the header prints the
+/// conversation's), so its cell names the mailbox it lives in (#0142), tinted
+/// when it is the user's own (PERSO-179), with its sender in the contact
+/// column: the desktop's chip in the subject's place.
+fn subject_cell(app: &App, email: &EmailEntry, width: usize) -> Cell<'static> {
+    match email.member_mailbox() {
+        Some(mailbox) => subject_cell_with(
+            email,
+            Vec::new(),
+            &app.mailbox_label(mailbox),
+            email.member_own(),
+            width,
+        ),
+        None => subject_cell_after(email, Vec::new(), width),
+    }
 }
 
-/// [`subject_cell`] with `lead` before the badges, which the narrow layout
+/// The subject cell with `lead` before the badges, which the narrow layout
 /// fills for a conversation row; the text after the badges is [`row_text`]'s,
 /// truncated to what the flag and the lead leave.
 fn subject_cell_after(email: &EmailEntry, lead: Vec<Span<'static>>, width: usize) -> Cell<'static> {
-    let text = format!("{}{}", invite_and_attachment_prefix(email), row_text(email));
+    subject_cell_with(email, lead, row_text(email), false, width)
+}
+
+/// The subject cell with `lead` and then `body` after the badges, the badges
+/// and `body` in the theme's `accent` when `tinted` (a member label of the
+/// user's own, [`member_label_span`]).
+fn subject_cell_with(
+    email: &EmailEntry,
+    lead: Vec<Span<'static>>,
+    body: &str,
+    tinted: bool,
+    width: usize,
+) -> Cell<'static> {
+    let text = format!("{}{body}", invite_and_attachment_prefix(email));
     let lead_width: usize = lead.iter().map(|span| display_width(&span.content)).sum();
     let mut spans = Vec::new();
     let mut room = width.saturating_sub(lead_width);
@@ -246,7 +284,7 @@ fn subject_cell_after(email: &EmailEntry, lead: Vec<Span<'static>>, width: usize
         room = room.saturating_sub(2);
     }
     spans.extend(lead);
-    spans.push(Span::raw(truncate(&text, room)));
+    spans.push(member_label_span(truncate(&text, room), tinted));
     Cell::from(Line::from(spans))
 }
 
@@ -564,7 +602,7 @@ fn list_row(
     match layout {
         RowLayout::Wide { contact, subject } => {
             cells.push(contact_cell(app, email, place, contact));
-            cells.push(subject_cell(email, subject));
+            cells.push(subject_cell(app, email, subject));
         }
         RowLayout::Narrow { subject } => {
             let lead = narrow_subject_prefix(app, email, place);

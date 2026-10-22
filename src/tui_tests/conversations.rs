@@ -631,6 +631,47 @@ fn the_users_own_members_read_me_with_a_tinted_label() {
     );
 }
 
+/// PERSO-179: in the wide layout every column holds what its header names: a
+/// member's sender, hung on its branch, under CONTACT, and its mailbox under
+/// SUBJECT, where the desktop puts its chip, tinted for the user's own.
+#[test]
+fn a_wide_member_puts_its_sender_under_contact_and_its_mailbox_under_subject() {
+    let mut fx = Fixture::new();
+    fx.key(crossterm::event::KeyCode::Enter);
+    let lines = zoomed_list_lines(&mut fx.app);
+    let col = |line: &str, needle: &str| line.find(needle).map(|at| line[..at].chars().count());
+    let row = |needle: &str| -> String {
+        lines
+            .iter()
+            .find(|line| line.contains(needle))
+            .cloned()
+            .unwrap_or_else(|| panic!("no row holds {needle}:\n{}", lines.join("\n")))
+    };
+    let header = row("CONTACT");
+    let contact = col(&header, "CONTACT").expect("the contact column");
+    let subject = col(&header, "SUBJECT").expect("the subject column");
+    for (sender, mailbox) in [
+        ("\u{251c} Draft ", "Drafts"),
+        ("\u{251c} Me ", "Sent"),
+        ("\u{2514} Ivana", "Inbox"),
+    ] {
+        let line = row(sender);
+        assert_eq!(col(&line, sender), Some(contact + 2), "{line}");
+        assert_eq!(col(&line, mailbox), Some(subject), "{line}");
+    }
+
+    fx.app.zoomed = true;
+    let buffer = crate::tui::ui::golden_frames::render_buffer(&mut fx.app, WIDTH, HEIGHT);
+    fx.app.zoomed = false;
+    let accent = crate::tui::theme::active().accent;
+    assert_eq!(fg_of(&buffer, "Sent"), Some(accent), "the user's own");
+    assert_ne!(
+        fg_of(&buffer, "Inbox    "),
+        Some(accent),
+        "a member label, not the pane title"
+    );
+}
+
 /// The conversation overlay's rows as `(row id, mailbox, current)`, oldest
 /// first, and its cursor.
 fn thread_overlay(app: &App) -> (Vec<(i64, String, bool)>, usize) {
