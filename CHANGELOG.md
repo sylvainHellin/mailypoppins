@@ -6,7 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Added
 - Config: any key config.toml does not know, anywhere in the file (a typo like `sync_intervall_secs`, a stray `[accounts.mailboxes.spesen]` table that belongs in `[[accounts.mailboxes.extra]]`), now warns, naming the key and its account: on stderr, in the TUI activity log, in the daemon log and as a `config_loaded` health warning, instead of being dropped silently; the config still loads (PERSO-118).
-- Desktop: the daemon's health checks that are not ok now show as calm, dismissible lines under the connection banner and in the activity log, from startup and live as they change; each line clears when its check recovers, and the config.toml line offers Open config.toml.
+- Desktop: the daemon's health checks that are not ok now show as calm, dismissible lines under the connection banner and in the activity log, from startup and live as they change; each line clears when its check recovers, a dismissed line comes back when its check changes status (a warning that becomes a failure with the same sentence shows again), and the config.toml line offers Open config.toml.
 - Desktop: `pnpm preview:browser` in clients/desktop runs the frontend in a browser on the tests' fixture backend, and `pnpm build` fails when an app module loads any part of that backend.
 - TUI and desktop: `ga` opens an account picker (#0147); j/k and Enter, or a digit, switch account, Esc and q cancel, and each row shows new mail (the inbox unread count in the app, a dot in the TUI) and whether the account is opening, blocked or failed its last sync. In the desktop sidebar only the selected account starts expanded, a header click expands another for the session, and `ga` Enter on the current account expands it again.
 - Conversations: your own messages stand apart in an expanded conversation, with a tinted mailbox label and "Me" as the sender, and a draft reads "Draft" in both clients (PERSO-179).
@@ -18,6 +18,7 @@ All notable changes to this project are documented in this file.
 - Desktop: `te`, the reader toolbar's Export .eml and the palette's "Export message as .eml" open an Export dialog (directory field, Browse, last directory); `cF`, the toolbar's Forward as attachment and "Forward as attachment (.eml)" open the forward wizard as "Forward as attachment" (PERSO-174).
 - Server search: a result the local store does not hold exports and forwards as attachment without a fetch first; the daemon downloads its `.eml` from the server and leaves it out of the store (PERSO-174).
 - Desktop: after an update installed with Later, the next launch restarts the old daemon by itself instead of showing the version-mismatch screen; any other version mismatch still shows it (#0139, PERSO-107).
+- TUI and desktop: the g pane jumps are the same in both, `gm` the sidebar, `gl` the message list and `gr` the reader. `gl` is new in both, and `gr` is new in the TUI, where it marks the message read as Tab into the body pane does.
 
 ### Changed
 - Server search: `mp search`, the TUI search overlay and the desktop search bar get the newest `--limit` results across every mailbox from one daemon search; each mailbox is asked for its newest N and only the N newest overall are downloaded (PERSO-175).
@@ -26,7 +27,10 @@ All notable changes to this project are documented in this file.
 - Server search on Microsoft Graph pages through results up to the limit, and when Microsoft's 1000-result cap stops a search every client names the cap instead of suggesting a larger limit (PERSO-175).
   `mp search --mailbox` accepts any folder the server lists, and a mailbox that fails, or a result the server matched but did not hand over after three tries, is reported after the results.
 - TUI: in the wide list an expanded member shows its sender under CONTACT and its mailbox under SUBJECT, and in the narrow list a long mailbox label is cut short so the sender stays visible (PERSO-179).
-- TUI themes: every text colour of the list reaches 4.5:1 on both list backgrounds; mailypoppins-light's orange is a step darker, and catppuccin-latte's muted text, green, blue and yellow are darker than the upstream palette (PERSO-179).
+- TUI themes: every text colour of the list reaches 4.5:1 on both list backgrounds (PERSO-179).
+  In catppuccin-latte and mailypoppins-light every text colour reaches 4.5:1 on each ground the TUI draws it on, the cursor row and the pickers' cursor included, and borders and faint text reach 3:1; most of catppuccin-latte's text colours are darker than upstream, and mailypoppins-light's cursor orange, cyan and green are a step darker than the app's.
+- Desktop, TUI and the Neovim colorscheme: the warning colour clears 4.5:1 on the muted surface (light #B24600, dark #FF7212), and the desktop's contrast check covers that pair.
+- `state.bootstrap`: an account's `sync_health` carries `reason`, the error of a failed last pass, and `at`, when that pass finished.
 - Desktop: prefix keys wait for the second key, as in the TUI (#0148). After g, f, c, t, s or Space the which-key list stays until the next key; Escape cancels it and does nothing else, and a click drops it.
 
 ### Fixed
@@ -40,6 +44,12 @@ All notable changes to this project are documented in this file.
 - A second warning in config.toml while one is already shown now reaches the TUI and the desktop, and the TUI no longer logs a held warning again after reconnecting.
 - Desktop: an update check after choosing Later says the installed update waits for a restart, instead of offering the same version again (#0139, PERSO-107).
 - Release: a prerelease tag such as v0.12.0-rc.1 is published as a GitHub prerelease, is never marked latest and skips the Homebrew tap, so installed apps and `brew upgrade` stay on the last release (#0139, PERSO-107).
+- TUI: after a daemon restart an account no longer stays `opening` in the account picker and the sidebar; the daemon's word that it is ready ends it and reloads the account's counts, as in the desktop.
+- TUI: an account whose last sync failed before the TUI started is marked in the account picker and the sidebar, with the daemon's reason and time, as the desktop's picker marks it.
+- The test suite no longer posts real desktop notifications.
+
+### Removed
+- The obsolete `spikes/ipc-bench` benchmark.
 
 ## [0.12.0] - 2026-10-22
 
