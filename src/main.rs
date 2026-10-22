@@ -1853,6 +1853,25 @@ fn search_params(
     params
 }
 
+/// `message.search_server`'s parameters: [`search_params`], and the one
+/// mailbox `--mailbox` names. Without it no `mailboxes` key travels, so the
+/// daemon runs its account-wide search (one query across every folder on
+/// Graph), the request the TUI overlay and the desktop search bar send for
+/// the same scope.
+fn server_search_params(
+    account: &str,
+    query: &str,
+    mailbox: Option<&str>,
+    flags: &mailypoppins::search::Flags,
+    limit: usize,
+) -> serde_json::Value {
+    let mut params = search_params(account, query, flags, limit);
+    if let Some(mailbox) = mailbox {
+        params["mailboxes"] = serde_json::json!([mailbox]);
+    }
+    params
+}
+
 /// The event kind one hit of a `message.search_server` streams as.
 const KIND_SERVER_SEARCH_HIT: &str = "message.server_hit";
 
@@ -1880,10 +1899,7 @@ async fn routed_server_search(
     json: bool,
 ) -> Result<()> {
     let account = account_config.name.as_str();
-    let mut params = search_params(account, query, flags, limit);
-    if let Some(mailbox) = mailbox {
-        params["mailboxes"] = serde_json::json!([mailbox]);
-    }
+    let params = server_search_params(account, query, mailbox, flags, limit);
 
     let mut connection = daemon_connection().await;
     // A client that follows its own operation has to be a subscriber first:
@@ -4857,7 +4873,21 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{handed_back, is_drafts_selector, search_params};
+    use super::{handed_back, is_drafts_selector, search_params, server_search_params};
+
+    /// A server search over every mailbox names none, so the daemon runs its
+    /// account-wide search, as the TUI and the desktop ask for it; `--mailbox`
+    /// names its one mailbox.
+    #[test]
+    fn a_server_search_over_every_mailbox_names_none() {
+        let every = server_search_params("tum", "invoice", None, &Default::default(), 50);
+        assert_eq!(
+            every,
+            serde_json::json!({"account": "tum", "query": "invoice", "limit": 50})
+        );
+        let one = server_search_params("tum", "invoice", Some("Sent"), &Default::default(), 50);
+        assert_eq!(one["mailboxes"], serde_json::json!(["Sent"]));
+    }
 
     /// A search with no filter sends only the three keys every daemon
     /// accepts, so one that predates the field filters does not refuse it;

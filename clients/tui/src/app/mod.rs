@@ -968,17 +968,6 @@ impl App {
             .map(mailbox_key)
     }
 
-    pub fn all_search_targets(&self) -> Vec<SearchTarget> {
-        self.mailboxes
-            .iter()
-            .filter(|m| m.server_name.is_some())
-            .map(|m| SearchTarget {
-                server_name: m.server_name.clone().expect("filtered for is_some"),
-                label: m.label.clone(),
-            })
-            .collect()
-    }
-
     /// The focused mailbox as a single [`SearchTarget`] for the form's
     /// "Current Mailbox" scope (#0086b). `None` when the focused mailbox is a
     /// local-only view with no server name.

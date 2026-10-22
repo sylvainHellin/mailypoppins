@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::app::{
     mailbox_key, Action, App, BgResult, ComposeField, ComposeMode, ComposeWizard, Focus,
-    MailboxKind, MessageRef, Overlay, SearchOverlayFocus, StatusLevel,
+    MailboxKind, MessageRef, Overlay, StatusLevel,
 };
 use super::commands;
 use super::helpers::{edit_file, resume_terminal, suspend_terminal};
@@ -20,10 +20,6 @@ use mp_core::selector::Selector;
 // ---------------------------------------------------------------------------
 // Parking a sync behind the background work it cannot run alongside
 // ---------------------------------------------------------------------------
-
-/// How many local hits the immediate FTS pass of the search overlay shows
-/// before the server leg answers (#0105).
-const LOCAL_SEARCH_LIMIT: usize = 50;
 
 /// Whether a fetch or a sync must wait. One gate, named once, because the
 /// release condition in the event loop has to be the *same* condition: they
@@ -1039,67 +1035,13 @@ pub(super) fn handle_action(
             targets,
             local_mailbox,
         } => {
-            // The account name travels with the search so each hit can be
-            // resolved against that account's store (#0038).
-            let account = app.account_config.name.clone();
-            let generation = app.server_search_generation;
-
-            // Local-first pass (#0105): the FTS index answers in milliseconds,
-            // so its hits render before the server round trip starts. A query
-            // the local grammar cannot lower (to:/cc:, mixed OR groups)
-            // skips the pass silently; the server covers those terms.
-            app.server_search_results.clear();
-            app.server_search_index = 0;
-            app.server_search_scroll = 0;
-            app.server_search_headers_scroll = 0;
-            app.server_search_results = commands::local_search(
+            commands::start_search(
+                app,
                 &daemon_door(app),
-                &account,
                 &query,
+                targets.as_deref(),
                 local_mailbox.as_deref(),
-                LOCAL_SEARCH_LIMIT,
             );
-            let local_count = app.server_search_results.len();
-            app.server_search_status = Some(if local_count > 0 {
-                format!(
-                    "{local_count} local hit{}; searching server...",
-                    if local_count == 1 { "" } else { "s" }
-                )
-            } else {
-                "Searching server...".to_string()
-            });
-            if local_count > 0 {
-                app.server_search_focus = SearchOverlayFocus::List;
-            }
-
-            // The server leg is `message.search_server` since P5-U10c
-            // (`LST-08`, #0126): one durable operation on the daemon, which
-            // opens the session, keeps the newest hits across the mailboxes
-            // (PERSO-175) and streams one `message.server_hit` per hit, where
-            // this spawned a thread and painted the whole batch when the last
-            // mailbox answered. The Message-IDs the local pass is already showing
-            // travel as `exclude_message_ids`, so the dedup is the daemon's
-            // and the count it settles with is a fact any client reproduces.
-            app.server_search_loading = true;
-            let excluded: Vec<String> = app
-                .server_search_results
-                .iter()
-                .filter_map(|hit| hit.fetched.message_id.clone())
-                .collect();
-            let mailboxes: Vec<String> = targets
-                .iter()
-                .map(|target| target.server_name.clone())
-                .collect();
-            let params = json!({
-                "account": account,
-                "query": mp_core::search::to_query_string(&query),
-                "mailboxes": mailboxes,
-                "exclude_message_ids": excluded,
-            });
-            let started = commands::start_server_search(app, &daemon_door(app), params, generation);
-            if !started {
-                app.server_search_loading = false;
-            }
         }
 
         Action::SearchResultOpen

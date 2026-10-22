@@ -1200,12 +1200,13 @@ impl App {
 
         // `in:` inside the Advanced line still resolves a mailbox; otherwise the
         // scope toggle decides the targets (Q3: mailbox or account, never all
-        // accounts).
+        // accounts). The account names no mailbox at all, so the daemon runs
+        // its account-wide search, the call the desktop and `mp search` make.
         let (targets, scope_label) = if let Some(ref name) = query.in_mailbox {
             match self.search_target_by_name(name) {
                 Some(target) => {
                     let label = target.label.clone();
-                    (vec![target], label)
+                    (Some(vec![target]), label)
                 }
                 None => {
                     self.server_search_status = Some(format!("Unknown mailbox: {name}"));
@@ -1217,7 +1218,7 @@ impl App {
                 SearchScope::CurrentMailbox => match self.current_mailbox_target() {
                     Some(target) => {
                         let label = target.label.clone();
-                        (vec![target], label)
+                        (Some(vec![target]), label)
                     }
                     None => {
                         self.server_search_status =
@@ -1225,7 +1226,7 @@ impl App {
                         return;
                     }
                 },
-                SearchScope::CurrentAccount => (self.all_search_targets(), "All".to_string()),
+                SearchScope::CurrentAccount => (None, "All".to_string()),
             }
         };
 

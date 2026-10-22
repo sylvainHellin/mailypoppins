@@ -1892,7 +1892,11 @@ pub enum Action {
         /// The already-parsed AST the form (or the overlay's raw line) built,
         /// so the lowering path renders it without re-parsing (#0086b).
         query: mp_core::search::Query,
-        targets: Vec<SearchTarget>,
+        /// The mailboxes the server leg names, or `None` for the whole
+        /// account: the daemon then runs its own account-wide search, one
+        /// query across every folder on Graph, which is the call the desktop
+        /// and `mp search` make for the same scope.
+        targets: Option<Vec<SearchTarget>>,
         /// Scope for the immediate local FTS pass (#0105): a `messages.mailbox`
         /// key to restrict to, or `None` for the whole account.
         local_mailbox: Option<String>,

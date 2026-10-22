@@ -59,7 +59,8 @@ use mp_protocol::events::SyncCompleted;
 use mp_protocol::send::SendOutcome;
 
 use super::app::{
-    mailbox_key, Action, App, BgResult, MailboxKind, MessageRef, RsvpChoice, StatusLevel,
+    mailbox_key, Action, App, BgResult, MailboxKind, MessageRef, RsvpChoice, SearchOverlayFocus,
+    SearchTarget, StatusLevel,
 };
 use super::events::Awaited;
 use super::helpers::SYNC_SKIPPED_MARKER;
@@ -1288,6 +1289,81 @@ pub(super) fn hit_entry(
         entry,
         fetched,
         source_label: hit.mailbox.clone(),
+    }
+}
+
+/// How many local hits the immediate FTS pass of the search overlay shows
+/// before the server leg answers (#0105).
+const LOCAL_SEARCH_LIMIT: usize = 50;
+
+/// The overlay's search: the local pass, painted at once, then the server leg.
+///
+/// The server leg is `message.search_server` since P5-U10c (`LST-08`,
+/// #0126): one durable operation on the daemon, which opens the session, keeps
+/// the newest hits across the mailboxes (PERSO-175) and streams one
+/// `message.server_hit` per hit. Its parameters are the desktop's for the same
+/// search: `targets` of `None` names no mailbox, so the daemon runs its
+/// account-wide search (one query across every folder on Graph) instead of a
+/// query per mailbox the TUI happens to list, and the Message-IDs the local
+/// pass is already showing travel as `exclude_message_ids` only when there
+/// are some, so the dedup is the daemon's and the count it settles with is a
+/// fact any client reproduces.
+pub fn start_search(
+    app: &mut App,
+    commands: &dyn Queries,
+    query: &mp_core::search::Query,
+    targets: Option<&[SearchTarget]>,
+    local_mailbox: Option<&str>,
+) {
+    // The account name travels with the search so each hit can be resolved
+    // against that account's store (#0038).
+    let account = app.account_config.name.clone();
+    let generation = app.server_search_generation;
+
+    // Local-first pass (#0105): the FTS index answers in milliseconds, so its
+    // hits render before the server round trip starts. A query the local
+    // grammar cannot lower (to:/cc:, mixed OR groups) skips the pass
+    // silently; the server covers those terms.
+    app.server_search_index = 0;
+    app.server_search_scroll = 0;
+    app.server_search_headers_scroll = 0;
+    app.server_search_results =
+        local_search(commands, &account, query, local_mailbox, LOCAL_SEARCH_LIMIT);
+    let local_count = app.server_search_results.len();
+    app.server_search_status = Some(if local_count > 0 {
+        format!(
+            "{local_count} local hit{}; searching server...",
+            if local_count == 1 { "" } else { "s" }
+        )
+    } else {
+        "Searching server...".to_string()
+    });
+    if local_count > 0 {
+        app.server_search_focus = SearchOverlayFocus::List;
+    }
+
+    app.server_search_loading = true;
+    let excluded: Vec<String> = app
+        .server_search_results
+        .iter()
+        .filter_map(|hit| hit.fetched.message_id.clone())
+        .collect();
+    let mut params = json!({
+        "account": account,
+        "query": mp_core::search::to_query_string(query),
+    });
+    if let Some(targets) = targets {
+        let mailboxes: Vec<&str> = targets
+            .iter()
+            .map(|target| target.server_name.as_str())
+            .collect();
+        params["mailboxes"] = json!(mailboxes);
+    }
+    if !excluded.is_empty() {
+        params["exclude_message_ids"] = json!(excluded);
+    }
+    if !start_server_search(app, commands, params, generation) {
+        app.server_search_loading = false;
     }
 }
 

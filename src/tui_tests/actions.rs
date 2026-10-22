@@ -151,7 +151,8 @@ use crate::daemon::server::DaemonState;
 use crate::parse::FetchedEmail;
 use crate::selector::DRAFTS_MAILBOX;
 use crate::tui::app::{
-    build_mailboxes, Action, App, ComposeMode, MailboxKind, MessageRef, RsvpChoice, SearchTarget,
+    build_mailboxes, Action, App, ComposeMode, MailboxKind, MessageRef, Overlay, RsvpChoice,
+    SearchField, SearchOverlayFocus,
 };
 use crate::tui::commands::{dispatch, route, settled, ActionRoute};
 use crate::tui::events::Awaited;
@@ -484,7 +485,7 @@ fn one_of_each_action() -> Vec<Action> {
         Action::Sync,
         Action::ServerSearch {
             query: crate::search::Query::default(),
-            targets: Vec::<SearchTarget>::new(),
+            targets: None,
             local_mailbox: None,
         },
         Action::SearchResultOpen,
@@ -1187,6 +1188,57 @@ fn a_settled_server_search_names_the_terms_the_store_answered() {
         app.server_search_status.as_deref(),
         Some("0 results (local store only: has:attachment)"),
         "an empty answer must not read as \"no such mail\" when the store answered the term"
+    );
+}
+
+/// An account-wide search from the overlay's form names no mailbox, so the
+/// daemon runs its own account-wide search (one query across every folder on
+/// Graph): the request is the desktop's `{account, query}` for the same
+/// search, where the TUI used to list every mailbox it knew and so made the
+/// daemon search folder by folder. A local pass with no hits sends no
+/// `exclude_message_ids`, as the desktop sends none.
+#[test]
+fn an_account_wide_search_sends_the_desktops_request() {
+    use crossterm::event::{KeyCode, KeyEvent};
+    let fixture = Fixture::new();
+    let mut app = app_on_inbox(&fixture);
+    app.overlay = Overlay::Search;
+    app.server_search_focus = SearchOverlayFocus::Field(SearchField::Keywords);
+    for c in "ledger".chars() {
+        app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+    app.handle_key(KeyEvent::from(KeyCode::Enter));
+    let Some(Action::ServerSearch {
+        query,
+        targets,
+        local_mailbox,
+    }) = app.pending_actions.pop_front()
+    else {
+        panic!("Enter on the form queues the search");
+    };
+    fixture.forget();
+
+    crate::tui::commands::start_search(
+        &mut app,
+        &fixture,
+        &query,
+        targets.as_deref(),
+        local_mailbox.as_deref(),
+    );
+
+    // The query the desktop's `search_plan` builds from the same form.
+    let desktop_query = mp_core::search::SearchFields {
+        keywords: "ledger".to_string(),
+        ..Default::default()
+    }
+    .build_query()
+    .expect("the form parses")
+    .map(|query| mp_core::search::to_query_string(&query))
+    .expect("the form is not blank");
+    assert_eq!(
+        fixture.calls_to("message.search_server"),
+        vec![json!({"account": ACCOUNT, "query": desktop_query})],
+        "the TUI's account-wide search is not the desktop's request"
     );
 }
 
