@@ -1775,7 +1775,10 @@ fn an_unknown_mailbox_table_turns_config_loaded_into_a_warning() {
     let entry = check(&health, "config_loaded");
     assert_eq!(text(&entry, "status"), "warn", "{entry}");
     let detail = text(&entry, "detail");
-    assert!(detail.contains("loaded, 2 account(s)"), "{detail}");
+    assert!(
+        !detail.contains("loaded"),
+        "the amber detail is the warnings alone, not the ok sentence: {detail}"
+    );
     assert!(detail.contains("accounts.mailboxes.spesen"), "{detail}");
     assert!(detail.contains("[[accounts.mailboxes.extra]]"), "{detail}");
     diag.stop();

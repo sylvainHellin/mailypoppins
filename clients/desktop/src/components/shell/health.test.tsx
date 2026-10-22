@@ -6,7 +6,7 @@ import { emitEnvelope, fixtures, mock, MOCK_CONFIG_PATH } from "@/test/tauri-moc
 const seeded = fixtures.bootstrap.snapshot.diagnostics[0];
 const line = (name: string) => document.querySelector<HTMLElement>(`[data-health="${name}"]`);
 const MAILBOX_WARNING =
-  '/fixture/config.toml loaded, 2 account(s); account "home": unknown mailbox key `accounts.mailboxes.spesen` is ignored';
+  'account "home": unknown mailbox key `accounts.mailboxes.spesen` is ignored';
 
 describe("the health banner", () => {
   it("shows the snapshot's checks from the start, in the polite status region", async () => {

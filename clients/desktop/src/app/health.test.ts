@@ -24,7 +24,7 @@ const boot = (diagnostics: HealthCheck[], instance_id = "fixture-instance-1"): A
 const mailboxWarn: HealthCheck = {
   name: "config_loaded",
   status: "warn",
-  detail: '/c/config.toml loaded, 1 account(s); account "tum": unknown mailbox key `accounts.mailboxes.spesen` is ignored',
+  detail: 'account "tum": unknown mailbox key `accounts.mailboxes.spesen` is ignored',
 };
 const storeFail: HealthCheck = { name: "store_open", status: "fail", detail: "0 of 1 account store(s) are open under /a" };
 const lines = (s: AppState) => s.activityLog.map((e) => [e.level, e.text]);
@@ -37,7 +37,7 @@ describe("health checks", () => {
   });
 
   it("a check_changed replaces, adds, and on ok drops by name, with a line each, the recovery included", () => {
-    const edited = { ...mailboxWarn, detail: "/c/config.toml loaded, 2 account(s); account \"tum\": another key" };
+    const edited = { ...mailboxWarn, detail: "account \"tum\": another key" };
     const s0 = run(initialState(), boot([mailboxWarn]));
     const s1 = run(s0, envelope("diagnostic.check_changed", storeFail), envelope("diagnostic.check_changed", edited));
     expect(s1.health).toEqual([edited, storeFail]);
