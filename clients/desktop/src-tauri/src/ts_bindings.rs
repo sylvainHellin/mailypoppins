@@ -116,6 +116,8 @@ fn export_into(dir: &Path) -> usize {
         configuration::AccountDraftOverride,
         configuration::ConfigInitialised,
         configuration::OAuth2Stored,
+        configuration::ProbeCheck,
+        configuration::ProbeAnswer,
         editor::EditorSource,
         editor::EditorLaunch,
         editor::EditorSetting,

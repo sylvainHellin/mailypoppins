@@ -1,7 +1,7 @@
 //! The Settings view's reads and writes of the daemon's configuration
 //! (ACC-01, ACC-02, ACC-05, ACC-06, #0131): `config.get`, `config.reload`,
-//! `config.set_password`, the account wizard's `config.init` and
-//! `config.add_account`, and the device-code sign-in `config.oauth2_login`.
+//! `config.set_password`, the account wizard's `config.probe`, `config.init`
+//! and `config.add_account`, and the device-code sign-in `config.oauth2_login`.
 //!
 //! There is no per-key writer (a tenth `config.*` method is pinned shut):
 //! settings are edited in `config.toml` through the editor, then reloaded.
@@ -24,6 +24,15 @@
 //! (src/daemon/methods/config.rs), and a password follows as a second call
 //! to `config.set_password` once the account exists, as the daemon's own
 //! design asks (one path into the secrets backend).
+//!
+//! Before it writes, the wizard tests the candidate as the CLI wizard does
+//! (src/config_cmd/init.rs): `config.probe` dials the draft's servers with
+//! the password the user typed, or with the token the candidate's own
+//! sign-in staged (`config.oauth2_login` with the draft as `candidate`), and
+//! lists the server's mailboxes for the mailbox step. The probe's password is
+//! a [`ProbeRequest`], whose `Debug` redacts it as [`SetPassword`]'s does; a
+//! server that refuses is an answer ([`ProbeAnswer`] with `ok: false`), not
+//! an error.
 //!
 //! A sign-in is an operation the GUI awaits as `oauth2_login`. Its one
 //! `operation.progress` has phase `device_code` and a message of two tokens,
@@ -66,6 +75,10 @@ const WRITE_BUDGET: Duration = Duration::from_secs(60);
 /// Starting a device-code sign-in: the answer is the operation id, before
 /// the provider is asked anything.
 const LOGIN_START_BUDGET: Duration = Duration::from_secs(10);
+
+/// One probe: the daemon connects, authenticates and, for `mailboxes`, lists
+/// the server's mailboxes, under the transport's own timeouts.
+const PROBE_BUDGET: Duration = Duration::from_secs(90);
 
 /// The phase of the one `operation.progress` a sign-in reports, the daemon's
 /// `DEVICE_CODE_PHASE`.
@@ -326,6 +339,77 @@ pub struct ConfigInitialised {
     pub swap: ConfigSwap,
 }
 
+/// What `config.probe` checks of a candidate account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeCheck {
+    /// Connect to the SMTP server, authenticate, hang up, send nothing.
+    Smtp,
+    /// Log in to the IMAP server and log out.
+    Imap,
+    /// Acquire the Graph client with the staged token.
+    Graph,
+    /// The server's mailbox (IMAP) or folder (Graph) names.
+    Mailboxes,
+}
+
+impl ProbeCheck {
+    /// The word it travels as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProbeCheck::Smtp => "smtp",
+            ProbeCheck::Imap => "imap",
+            ProbeCheck::Graph => "graph",
+            ProbeCheck::Mailboxes => "mailboxes",
+        }
+    }
+}
+
+/// `config.probe`'s answer: whether the server accepted the session, the
+/// server's or the transport's sentence when it did not, and the names a
+/// `mailboxes` probe listed, in the server's order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+#[serde(default)]
+pub struct ProbeAnswer {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub mailboxes: Vec<String>,
+}
+
+/// One probe on its way to the daemon: the candidate, the check, and the
+/// password of a password account. `Debug` is hand-written and prints
+/// [`REDACTED`] where the password is.
+#[derive(Clone)]
+pub struct ProbeRequest {
+    pub account: AccountDraft,
+    pub check: ProbeCheck,
+    password: Option<String>,
+}
+
+impl ProbeRequest {
+    pub fn new(account: AccountDraft, check: ProbeCheck, password: Option<String>) -> Self {
+        ProbeRequest {
+            account,
+            check,
+            password,
+        }
+    }
+}
+
+impl std::fmt::Debug for ProbeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProbeRequest")
+            .field("account", &self.account.name)
+            .field("check", &self.check)
+            .field("password", &self.password.as_ref().map(|_| REDACTED))
+            .finish()
+    }
+}
+
 /// What a finished sign-in settles with: where the token went, never what
 /// it is. `kind` is `oauth2` (IMAP/SMTP) or `graph`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,6 +422,9 @@ pub struct OAuth2Stored {
     pub kind: String,
     /// The token cache's key, `oauth2-token-<account>`.
     pub key: String,
+    /// A candidate's sign-in, kept aside until `config.init` or
+    /// `config.add_account` writes the account and promotes it.
+    pub staged: bool,
 }
 
 /// One password on its way to the daemon.
@@ -484,24 +571,72 @@ pub fn config_init_on(door: &Door, account: &AccountDraft) -> Result<ConfigIniti
     Ok(written)
 }
 
+/// Test a candidate account before it is written: one `config.probe`. A
+/// server that refuses is `ok: false` with its sentence; the daemon's
+/// refusals of the call (a candidate named like a configured account with no
+/// staged sign-in, a password account with no password) are protocol errors
+/// carrying its sentence. Neither the password nor the answer's error is
+/// logged here: the daemon logs the failure, and the line here names only
+/// the account, the check and the verdict.
+pub fn config_probe_on(door: &Door, probe: &ProbeRequest) -> Result<ProbeAnswer, GuiError> {
+    let wire = serde_json::to_value(&probe.account).map_err(GuiError::internal)?;
+    let mut params = json!({"account": wire, "check": probe.check.as_str()});
+    if let Some(password) = &probe.password {
+        params["password"] = json!(password);
+    }
+    let name = probe.account.name.as_str();
+    let check = probe.check.as_str();
+    let answer = call(
+        door,
+        "config.probe",
+        params,
+        PROBE_BUDGET,
+        Addressing::Params,
+    )
+    .map_err(daemon_sentence);
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(e) => {
+            tracing::warn!("[config] the {check} probe of the candidate {name} was refused: {e}");
+            return Err(e);
+        }
+    };
+    let answer: ProbeAnswer = decode("config.probe", answer)?;
+    let verdict = if answer.ok { "passed" } else { "failed" };
+    tracing::info!("[config] the {check} probe of the candidate {name} {verdict}");
+    Ok(answer)
+}
+
 /// Start the device-code sign-in of `account`, awaited as `oauth2_login`.
 /// The daemon refuses an unknown account, a password account and one with
-/// no client or tenant, each with its own sentence.
+/// no client or tenant, each with its own sentence. With a `candidate` the
+/// account need not be configured: the wizard signs its draft in, and the
+/// daemon stages the token until the write promotes it.
 pub fn config_oauth2_login_on(
     session: &SessionHandle,
     door: &Door,
     account: &str,
+    candidate: Option<&AccountDraft>,
 ) -> Result<OperationStarted, GuiError> {
+    let mut params = json!({"account": account});
+    if let Some(candidate) = candidate {
+        params["candidate"] = serde_json::to_value(candidate).map_err(GuiError::internal)?;
+    }
     let operation_id = session
         .start_operation(
             door,
             "config.oauth2_login",
-            json!({"account": account}),
+            params,
             PendingKind::OAuth2Login,
             LOGIN_START_BUDGET,
         )
         .map_err(daemon_sentence)?;
-    tracing::info!("[config] sign-in of {account} started as {operation_id}");
+    let what = if candidate.is_some() {
+        "the candidate "
+    } else {
+        ""
+    };
+    tracing::info!("[config] sign-in of {what}{account} started as {operation_id}");
     Ok(OperationStarted { operation_id })
 }
 
@@ -530,16 +665,30 @@ pub async fn config_init(
     with_door(&session, move |_, door| config_init_on(door, &account)).await
 }
 
-/// Start a device-code sign-in, awaited as `oauth2_login`.
+/// Start a device-code sign-in, awaited as `oauth2_login`; with a
+/// `candidate`, the wizard's sign-in of an account not written yet.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn config_oauth2_login(
     session: State<'_, SessionHandle>,
     account: String,
+    candidate: Option<AccountDraft>,
 ) -> Result<OperationStarted, GuiError> {
     with_door(&session, move |session, door| {
-        config_oauth2_login_on(session, door, &account)
+        config_oauth2_login_on(session, door, &account, candidate.as_ref())
     })
     .await
+}
+
+/// Test a candidate account (the wizard's Connection step).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn config_probe(
+    session: State<'_, SessionHandle>,
+    account: AccountDraft,
+    check: ProbeCheck,
+    password: Option<String>,
+) -> Result<ProbeAnswer, GuiError> {
+    let probe = ProbeRequest::new(account, check, password);
+    with_door(&session, move |_, door| config_probe_on(door, &probe)).await
 }
 
 /// Whether each account's passwords and token are stored, for the Settings
@@ -977,9 +1126,9 @@ mod tests {
     fn a_sign_in_is_refused_with_the_daemons_sentences() {
         let session = SessionHandle::new(true);
         let (door, _f, _rx) = fixture_door();
-        let err = config_oauth2_login_on(&session, &door, "nobody").expect_err("unknown");
+        let err = config_oauth2_login_on(&session, &door, "nobody", None).expect_err("unknown");
         assert_eq!(err.message(), "Account 'nobody' not found in config");
-        let err = config_oauth2_login_on(&session, &door, "work").expect_err("password");
+        let err = config_oauth2_login_on(&session, &door, "work", None).expect_err("password");
         assert!(
             err.message()
                 .starts_with("Account 'work' uses auth_method = \"password\""),
@@ -987,10 +1136,140 @@ mod tests {
             err.message()
         );
         assert!(session.pending().is_empty());
-        let started = config_oauth2_login_on(&session, &door, "home").expect("graph signs in");
+        let started =
+            config_oauth2_login_on(&session, &door, "home", None).expect("graph signs in");
         assert_eq!(
             session.pending_kind(&started.operation_id),
             Some(PendingKind::OAuth2Login)
+        );
+    }
+
+    /// The wizard's connection test: a login the server accepts, one it
+    /// refuses (an answer, not an error), and the mailbox list, with nothing
+    /// written and the password in no journal, `Debug` or `tracing` line.
+    #[test]
+    fn a_probe_tests_the_candidate_and_lists_its_mailboxes_writing_nothing() {
+        use crate::fixture::{probe_refused, PROBE_IMAP_MAILBOXES, PROBE_WRONG_PASSWORD};
+        let (door, f, rx) = fixture_door();
+        let path = f.root().join("config.toml");
+        let before = std::fs::read_to_string(&path).expect("config.toml");
+        let (_, mut draft) = presets().remove(0);
+        draft.name = "fastmail".into();
+        draft.mailboxes = None;
+        let probe = |check, password: &str| {
+            ProbeRequest::new(draft.clone(), check, Some(password.to_string()))
+        };
+
+        let request = probe(ProbeCheck::Smtp, SECRET);
+        let debug = format!("{request:?} {request:#?}");
+        assert!(!debug.contains(SECRET), "{debug}");
+        assert!(debug.contains(REDACTED), "{debug}");
+        let (answer, lines) = traced(|| config_probe_on(&door, &request));
+        assert_eq!(
+            answer.expect("answered"),
+            ProbeAnswer {
+                ok: true,
+                ..Default::default()
+            }
+        );
+        assert!(
+            lines.contains("the smtp probe of the candidate fastmail passed"),
+            "{lines}"
+        );
+        assert!(!lines.contains(SECRET), "{lines}");
+
+        let refused = config_probe_on(&door, &probe(ProbeCheck::Imap, PROBE_WRONG_PASSWORD))
+            .expect("a refused login is an answer");
+        assert!(!refused.ok);
+        assert_eq!(
+            refused.error.as_deref(),
+            Some(probe_refused("imap").as_str())
+        );
+
+        let listed = config_probe_on(&door, &probe(ProbeCheck::Mailboxes, SECRET)).expect("listed");
+        assert!(listed.ok);
+        assert_eq!(listed.mailboxes, PROBE_IMAP_MAILBOXES);
+
+        // A password account is probed with its password, as the daemon asks.
+        let err = config_probe_on(
+            &door,
+            &ProbeRequest::new(draft.clone(), ProbeCheck::Smtp, None),
+        )
+        .expect_err("no password");
+        assert_eq!(
+            err.message(),
+            "a password account is probed with its password"
+        );
+
+        assert_eq!(std::fs::read_to_string(&path).expect("config.toml"), before);
+        assert!(f.password_writes().is_empty());
+        assert!(events(&rx).is_empty(), "a probe publishes nothing");
+        let calls = format!("{:?}", f.calls());
+        assert!(calls.contains("config.probe"), "{calls}");
+        assert!(!calls.contains(SECRET), "{calls}");
+    }
+
+    /// A token account is probed only with the sign-in its candidate staged:
+    /// none yet is a failed probe, a candidate named like a configured
+    /// account is refused (the security fix of `config.probe`), and the
+    /// write promotes the staged sign-in.
+    #[test]
+    fn a_candidate_sign_in_is_staged_for_its_probes_and_promoted_by_the_write() {
+        use crate::fixture::PROBE_GRAPH_FOLDERS;
+        let session = SessionHandle::new(true);
+        let (door, f, _rx) = fixture_door();
+        let (_, mut draft) = presets().remove(3);
+        draft.name = "contoso".into();
+        draft.mailboxes = None;
+        let probe = |draft: &AccountDraft, check| {
+            config_probe_on(&door, &ProbeRequest::new(draft.clone(), check, None))
+        };
+
+        let unsigned = probe(&draft, ProbeCheck::Graph).expect("answered");
+        assert!(!unsigned.ok);
+        assert_eq!(
+            unsigned.error.as_deref(),
+            Some("no OAuth2 sign-in is staged for the candidate contoso; sign in first")
+        );
+        let impostor = AccountDraft {
+            name: "home".into(),
+            ..draft.clone()
+        };
+        let err = probe(&impostor, ProbeCheck::Mailboxes).expect_err("a configured name");
+        assert!(
+            err.message().starts_with("home is a configured account:"),
+            "{}",
+            err.message()
+        );
+
+        let err = config_oauth2_login_on(&session, &door, "other", Some(&draft))
+            .expect_err("the candidate names itself");
+        assert_eq!(err.message(), "the candidate is named contoso, not other");
+        let started =
+            config_oauth2_login_on(&session, &door, "contoso", Some(&draft)).expect("started");
+        let call = f
+            .calls()
+            .into_iter()
+            .rev()
+            .find(|(m, _)| m == "config.oauth2_login")
+            .expect("called");
+        assert_eq!(call.1["candidate"]["auth_method"], "graph");
+        assert_eq!(
+            session.pending_kind(&started.operation_id),
+            Some(PendingKind::OAuth2Login)
+        );
+        f.simulate("oauth_approve").expect("approved");
+        assert!(probe(&draft, ProbeCheck::Graph).expect("answered").ok);
+        let listed = probe(&draft, ProbeCheck::Mailboxes).expect("listed");
+        assert_eq!(listed.mailboxes, PROBE_GRAPH_FOLDERS);
+
+        config_add_account_on(&door, &draft).expect("written");
+        let err = probe(&draft, ProbeCheck::Graph).expect_err("promoted, so configured");
+        assert!(
+            err.message()
+                .starts_with("contoso is a configured account:"),
+            "{}",
+            err.message()
         );
     }
 

@@ -55,6 +55,8 @@ import type {
   SavedAttachments,
   SearchForm,
   SearchPlan,
+  ProbeAnswer,
+  ProbeCheck,
   SecretKind,
   SecretStored,
   SendStarted,
@@ -323,10 +325,22 @@ export const configInit = (account: AccountDraft): Promise<ConfigInitialised> =>
 /**
  * Start the device-code sign-in of an `oauth2` or `graph` account, awaited
  * as `oauth2_login`: its one `operation.progress` (phase `device_code`)
- * carries "<url> <code>", and it settles with an `OAuth2Stored`.
+ * carries "<url> <code>", and it settles with an `OAuth2Stored`. With a
+ * `candidate` (the wizard's draft, named `account`) the account need not be
+ * configured: the daemon stages the token until the write promotes it.
  */
-export const configOauth2Login = (account: string): Promise<OperationStarted> =>
-  invoke<OperationStarted>("config_oauth2_login", { account });
+export const configOauth2Login = (account: string, candidate?: AccountDraft): Promise<OperationStarted> =>
+  invoke<OperationStarted>("config_oauth2_login", candidate ? { account, candidate } : { account });
+
+/**
+ * Test the wizard's candidate before anything is written (`config.probe`):
+ * a login, or the server's mailbox list. A server that refuses answers
+ * `ok: false` with its sentence; the daemon's refusals of the call (a
+ * candidate named like a configured account with no staged sign-in) reject.
+ * `password` is a password account's, held by the wizard until the write.
+ */
+export const configProbe = (account: AccountDraft, check: ProbeCheck, password?: string): Promise<ProbeAnswer> =>
+  invoke<ProbeAnswer>("config_probe", password === undefined ? { account, check } : { account, check, password });
 
 
 export const editorSettingGet = (): Promise<EditorSetting> => invoke<EditorSetting>("editor_setting_get");

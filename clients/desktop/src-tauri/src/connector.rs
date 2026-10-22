@@ -156,6 +156,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "config.init",
     "config.add_account",
     "config.oauth2_login",
+    "config.probe",
     "signature.list",
     "signature.read",
     "signature.create",
@@ -1252,6 +1253,7 @@ mod tests {
             "config.init",
             "config.add_account",
             "config.oauth2_login",
+            "config.probe",
         ] {
             assert!(REQUIRED_CAPABILITIES.contains(&method), "{method}");
         }

@@ -1695,7 +1695,7 @@ mod tests {
     fn a_device_code_reaches_only_its_awaited_sign_in_which_settles_as_oauth2_login() {
         let (session, door, fixture, rx, seen) = harness();
         fixture.set_device_code_delay(Duration::ZERO);
-        let mine = crate::configuration::config_oauth2_login_on(&session, &door, "home")
+        let mine = crate::configuration::config_oauth2_login_on(&session, &door, "home", None)
             .expect("started")
             .operation_id;
         // Another window's sign-in of the same account, which this one never awaited.
@@ -1734,6 +1734,7 @@ mod tests {
                 account: "home".into(),
                 kind: "graph".into(),
                 key: "oauth2-token-home".into(),
+                staged: false,
             }
         );
         assert!(events_of(&seen, &other).is_empty());
@@ -1744,7 +1745,7 @@ mod tests {
     fn a_denied_sign_in_fails_with_the_providers_sentence() {
         let (session, door, fixture, rx, seen) = harness();
         fixture.set_device_code_delay(Duration::ZERO);
-        let id = crate::configuration::config_oauth2_login_on(&session, &door, "home")
+        let id = crate::configuration::config_oauth2_login_on(&session, &door, "home", None)
             .expect("started")
             .operation_id;
         await_device_code(&door, &id);
@@ -1766,7 +1767,7 @@ mod tests {
     fn a_cancelled_sign_in_stays_awaited_until_its_cancelled_finish() {
         let (session, door, fixture, rx, seen) = harness();
         fixture.set_device_code_delay(Duration::ZERO);
-        let id = crate::configuration::config_oauth2_login_on(&session, &door, "home")
+        let id = crate::configuration::config_oauth2_login_on(&session, &door, "home", None)
             .expect("started")
             .operation_id;
         let outcome = crate::commands::operation_cancel_on(&door, &id).expect("cancel");
@@ -1787,7 +1788,7 @@ mod tests {
     fn a_sign_in_settled_by_the_requery_carries_its_kind() {
         let (session, door, fixture, rx, seen) = harness();
         fixture.set_device_code_delay(Duration::ZERO);
-        let id = crate::configuration::config_oauth2_login_on(&session, &door, "home")
+        let id = crate::configuration::config_oauth2_login_on(&session, &door, "home", None)
             .expect("started")
             .operation_id;
         await_device_code(&door, &id);
@@ -1814,8 +1815,8 @@ mod tests {
     #[test]
     fn a_restart_drops_a_sign_in_as_oauth2_login() {
         let (session, door, fixture, rx, seen) = harness();
-        let started =
-            crate::configuration::config_oauth2_login_on(&session, &door, "home").expect("started");
+        let started = crate::configuration::config_oauth2_login_on(&session, &door, "home", None)
+            .expect("started");
         fixture.simulate("restart").expect("restart");
         drain(&session, &door, &rx);
         let dropped = lock(&seen)

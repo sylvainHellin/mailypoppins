@@ -62,6 +62,8 @@ export type { OpenedFile } from "./OpenedFile";
 export type { OperationStarted } from "./OperationStarted";
 export type { OutboxDiscarded } from "./OutboxDiscarded";
 export type { PendingKind } from "./PendingKind";
+export type { ProbeAnswer } from "./ProbeAnswer";
+export type { ProbeCheck } from "./ProbeCheck";
 export type { ProtocolRange } from "./ProtocolRange";
 export type { RsvpSettled } from "./RsvpSettled";
 export type { SaveFailure } from "./SaveFailure";

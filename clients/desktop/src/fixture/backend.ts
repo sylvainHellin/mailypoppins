@@ -255,8 +255,10 @@ export const mock = {
   accounts: clone(fixtures.accounts),
   /** The effective configuration `config_get` answers. */
   config: clone(fixtures.config),
-  /** The sign-ins `config_oauth2_login` started and no test ended yet, oldest first. */
-  signIns: [] as { operation_id: string; account: string; kind: "oauth2" | "graph" }[],
+  /** The sign-ins `config_oauth2_login` started and no test ended yet, oldest first; `staged` for a wizard candidate's. */
+  signIns: [] as { operation_id: string; account: string; kind: "oauth2" | "graph"; staged: boolean }[],
+  /** The candidates whose approved sign-in is staged until `config_add_account` or `config_init` promotes it. */
+  stagedSignIns: new Set<string>(),
   /** The next sign-in's operation id counter. */
   nextSignIn: 1,
   /** What `update_check` answers: by default fixture mode's `disabled`, as updates.rs's gate says. */
@@ -296,6 +298,31 @@ export const DEVICE_CODE_MESSAGE = "https://microsoft.com/devicelogin FXTR-CODE"
 /** fixture.rs's `OAUTH_DENIED`, why an `oauth_deny` sign-in failed. */
 export const OAUTH_DENIED = "Authorization was declined by the user.";
 
+/** fixture.rs's `PROBE_WRONG_PASSWORD`, the one password a probe refuses. */
+export const PROBE_WRONG_PASSWORD = "wrong-password";
+
+/** fixture.rs's `probe_refused`, what the server says to it. */
+export function probeRefused(check: string): string {
+  return check === "smtp"
+    ? "SMTP authentication failed: 535 5.7.8 Authentication credentials invalid"
+    : "IMAP login failed: [AUTHENTICATIONFAILED] Authentication failed.";
+}
+
+/** fixture.rs's `PROBE_IMAP_MAILBOXES`, what a fixture IMAP server lists. */
+export const PROBE_IMAP_MAILBOXES = ["INBOX", "Archive", "Drafts", "Sent", "Spam", "Trash", "Lists/rust"];
+
+/** fixture.rs's `PROBE_GRAPH_FOLDERS`, what a fixture Graph account lists. */
+export const PROBE_GRAPH_FOLDERS = ["Inbox", "Archive", "Drafts", "Sent Items", "Deleted Items", "Junk Email"];
+
+/** The daemon's refusal of a token candidate named like a configured account with no staged sign-in. */
+export function probeConfiguredRefusal(name: string): string {
+  return (
+    `${name} is a configured account: a candidate of that name is probed only with the token its own sign-in staged, ` +
+    `never with the configured account's; sign the candidate in first (config.oauth2_login with candidate), ` +
+    `or probe the configured account through its configured settings`
+  );
+}
+
 /**
  * fixture.rs's `config_absent`, before the app starts: the daemon has no
  * config.toml and serves no account.
@@ -327,10 +354,11 @@ export function settleSignIn(opts: { deny?: boolean } = {}): string {
   if (opts.deny) {
     emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "failed", error: { code: -32603, message: OAUTH_DENIED } });
   } else {
+    if (run.staged) mock.stagedSignIns.add(run.account);
     emitEnvelope("operation.finished", {
       operation_id: run.operation_id,
       state: "succeeded",
-      result: { stored: true, account: run.account, kind: run.kind, key: `oauth2-token-${run.account}` },
+      result: { stored: true, staged: run.staged, account: run.account, kind: run.kind, key: `oauth2-token-${run.account}` },
     });
   }
   return run.operation_id;
@@ -339,6 +367,7 @@ export function settleSignIn(opts: { deny?: boolean } = {}): string {
 /** fixture.rs's `configure_account`: the account is served at once, ready, with Inbox, Archive and Sent. */
 function configureAccount(account: AccountDraft): string {
   const name = account.name;
+  mock.stagedSignIns.delete(name);
   const auth = account.auth_method ?? "password";
   mock.accounts.push({ name, default: mock.accounts.length === 0, backend: auth === "graph" ? "graph" : "imap", state: "ready" });
   mock.bootstrap.snapshot.accounts.push({
@@ -461,6 +490,7 @@ export function resetMock(): void {
   mock.accounts = clone(fixtures.accounts);
   mock.config = clone(fixtures.config);
   mock.signIns = [];
+  mock.stagedSignIns = new Set();
   mock.nextSignIn = 1;
   mock.updateCheck = { ...UPDATE_DISABLED };
   mock.updateStatus = { ...UPDATE_STATUS_FIXTURE };
@@ -1774,7 +1804,11 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     }
     // fixture.rs's `config.oauth2_login`: its refusals, then a sign-in a test reports and settles.
     case "config_oauth2_login": {
-      const a = mock.config.accounts.find((x) => x.name === account);
+      const candidate = args.candidate as AccountDraft | undefined;
+      if (candidate && candidate.name !== account) {
+        throw { kind: "protocol", code: -32602, message: `the candidate is named ${candidate.name}, not ${account}` };
+      }
+      const a = candidate ?? mock.config.accounts.find((x) => x.name === account);
       if (!a) throw { kind: "not_found", code: -32005, message: `Account '${account}' not found in config` };
       if (a.auth_method !== "oauth2" && a.auth_method !== "graph") {
         throw {
@@ -1784,8 +1818,37 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         };
       }
       const operation_id = `fixture-oauth-${mock.nextSignIn++}`;
-      mock.signIns.push({ operation_id, account, kind: a.auth_method });
+      mock.signIns.push({ operation_id, account, kind: a.auth_method, staged: candidate !== undefined });
       return { operation_id };
+    }
+    // fixture.rs's `config.probe`: the daemon's refusals, then a verdict.
+    case "config_probe": {
+      const draft = args.account as AccountDraft;
+      const check = String(args.check);
+      const password = args.password as string | undefined;
+      const auth = draft.auth_method ?? "password";
+      const name = draft.name;
+      if (auth === "graph" && (check === "smtp" || check === "imap")) {
+        throw { kind: "protocol", code: -32602, message: `${name} has auth_method = "graph" and no SMTP or IMAP server to test` };
+      }
+      if (auth !== "graph" && check === "graph") {
+        throw { kind: "protocol", code: -32602, message: `${name} does not use auth_method = "graph"` };
+      }
+      if (auth === "password" && password === undefined) {
+        throw { kind: "protocol", code: -32602, message: "a password account is probed with its password" };
+      }
+      const staged = mock.stagedSignIns.has(name);
+      if (auth !== "password" && !staged && mock.config.accounts.some((a) => a.name === name)) {
+        throw { kind: "protocol", code: -32602, message: probeConfiguredRefusal(name) };
+      }
+      if (auth !== "password" && !staged) {
+        return { ok: false, error: `no OAuth2 sign-in is staged for the candidate ${name}; sign in first`, mailboxes: [] };
+      }
+      if (password === PROBE_WRONG_PASSWORD) return { ok: false, error: probeRefused(check), mailboxes: [] };
+      if (check === "mailboxes") {
+        return { ok: true, error: null, mailboxes: auth === "graph" ? [...PROBE_GRAPH_FOLDERS] : [...PROBE_IMAP_MAILBOXES] };
+      }
+      return { ok: true, error: null, mailboxes: [] };
     }
     case "operation_cancel": {
       // Every operation the mock keeps running until a test settles it.

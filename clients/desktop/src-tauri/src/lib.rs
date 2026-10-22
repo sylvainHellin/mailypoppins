@@ -291,6 +291,7 @@ pub fn run() {
             configuration::config_init,
             configuration::config_add_account,
             configuration::config_oauth2_login,
+            configuration::config_probe,
             commands::sync_trigger,
             commands::restart_daemon,
             commands::intercepted_urls,

@@ -8,4 +8,9 @@ export type OAuth2Stored = { stored: boolean, account: string, kind: string,
 /**
  * The token cache's key, `oauth2-token-<account>`.
  */
-key: string, };
+key: string,
+/**
+ * A candidate's sign-in, kept aside until `config.init` or
+ * `config.add_account` writes the account and promotes it.
+ */
+staged: boolean, };

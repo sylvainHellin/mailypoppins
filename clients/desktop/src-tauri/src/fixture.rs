@@ -60,7 +60,14 @@
 //! password account, no client or tenant), then reports its device code
 //! ([`DEVICE_CODE_MESSAGE`]) as its one progress after [`DEVICE_CODE_DELAY`]
 //! and waits: `oauth_approve` settles every waiting sign-in `stored`,
-//! `oauth_deny` fails it with [`OAUTH_DENIED`].
+//! `oauth_deny` fails it with [`OAUTH_DENIED`]. With a `candidate` it signs
+//! the wizard's draft in instead of a configured account, and an approved one
+//! is staged until `config.add_account` or `config.init` writes the account.
+//! `config.probe` refuses as the daemon does, then accepts every login but
+//! one whose password is [`PROBE_WRONG_PASSWORD`] (answered `ok: false` with
+//! [`probe_refused`]'s sentence) and one of a token account with no staged
+//! sign-in; a `mailboxes` probe lists [`PROBE_IMAP_MAILBOXES`], or
+//! [`PROBE_GRAPH_FOLDERS`] for a Graph candidate.
 //!
 //! The signatures are `signatures.json`'s, held in memory and mirrored to
 //! `<temp>/mp-desktop-fixture-<pid>/signatures/<name>.md` so an Edit opens a
@@ -110,7 +117,7 @@
 
 mod conversations;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -257,6 +264,38 @@ pub const DEVICE_CODE_DELAY: Duration = Duration::from_millis(300);
 
 /// Why an `oauth_deny` sign-in failed, the provider flow's sentence.
 pub const OAUTH_DENIED: &str = "Authorization was declined by the user.";
+
+/// The one password a fixture probe refuses.
+pub const PROBE_WRONG_PASSWORD: &str = "wrong-password";
+
+/// What the server says to [`PROBE_WRONG_PASSWORD`], per check.
+pub fn probe_refused(check: &str) -> String {
+    match check {
+        "smtp" => "SMTP authentication failed: 535 5.7.8 Authentication credentials invalid".into(),
+        _ => "IMAP login failed: [AUTHENTICATIONFAILED] Authentication failed.".into(),
+    }
+}
+
+/// The mailboxes a fixture IMAP server lists, in its order.
+pub const PROBE_IMAP_MAILBOXES: &[&str] = &[
+    "INBOX",
+    "Archive",
+    "Drafts",
+    "Sent",
+    "Spam",
+    "Trash",
+    "Lists/rust",
+];
+
+/// The folders a fixture Graph account lists, in its order.
+pub const PROBE_GRAPH_FOLDERS: &[&str] = &[
+    "Inbox",
+    "Archive",
+    "Drafts",
+    "Sent Items",
+    "Deleted Items",
+    "Junk Email",
+];
 
 /// The three mailboxes an added account starts with: role, slug, label.
 const ADDED_MAILBOXES: [(&str, &str, &str); 3] = [
@@ -468,8 +507,12 @@ struct State {
     /// Every `config.set_password`, its value redacted, oldest first.
     password_writes: Vec<Value>,
     /// The sign-ins waiting for `oauth_approve` or `oauth_deny`, by
-    /// operation id: the account and the token's kind.
-    oauth_logins: BTreeMap<String, (String, &'static str)>,
+    /// operation id: the account, the token's kind, and whether it is a
+    /// candidate's, whose token is staged.
+    oauth_logins: BTreeMap<String, (String, &'static str, bool)>,
+    /// The candidates whose approved sign-in is staged, until the write
+    /// that promotes it.
+    staged_sign_ins: BTreeSet<String>,
     /// How long a sign-in takes to report its device code.
     device_code_delay: Duration,
 }
@@ -1174,6 +1217,7 @@ impl State {
         self.held_sends.clear();
         self.published.clear();
         self.oauth_logins.clear();
+        self.staged_sign_ins.clear();
         self.config["accounts"] = json!([]);
         let snapshot = &mut self.bootstrap["snapshot"];
         snapshot["accounts"] = json!([]);
@@ -2741,6 +2785,7 @@ impl Fixture {
             config_revision: 0,
             password_writes: Vec::new(),
             oauth_logins: BTreeMap::new(),
+            staged_sign_ins: BTreeSet::new(),
             device_code_delay: DEVICE_CODE_DELAY,
         };
         state.rescan();
@@ -2906,6 +2951,9 @@ impl Fixture {
             let mut recorded = params.clone();
             if method == "config.set_password" && recorded.get("value").is_some() {
                 recorded["value"] = json!(crate::configuration::REDACTED);
+            }
+            if method == "config.probe" && recorded.get("password").is_some() {
+                recorded["password"] = json!(crate::configuration::REDACTED);
             }
             calls.push((method.to_string(), recorded));
         }
@@ -3074,6 +3122,7 @@ impl Fixture {
                     refused(method, -32603, &format!("writing {}: {e}", path.display()))
                 })?;
                 let name = s.configure_account(account);
+                s.staged_sign_ins.remove(&name);
                 Ok(s.announce_added(self, &name))
             }
             // The daemon's `config.init`: only where no config.toml exists,
@@ -3119,6 +3168,7 @@ impl Fixture {
                     refused(method, -32603, &format!("writing {}: {e}", path.display()))
                 })?;
                 let name = s.configure_account(account);
+                s.staged_sign_ins.remove(&name);
                 let mut answer = s.announce_added(self, &name);
                 answer["path"] = json!(path.display().to_string());
                 Ok(answer)
@@ -3127,15 +3177,33 @@ impl Fixture {
             // operation whose one progress is the device code and which
             // waits for `oauth_approve` or `oauth_deny`.
             "config.oauth2_login" => {
-                only(method, &params, &["account"])?;
+                only(method, &params, &["account", "candidate"])?;
                 let name = param_str(method, &params, "account")?.to_string();
-                let Some(account) = s.configured(&name) else {
+                let candidate = match &params["candidate"] {
+                    Value::Null => None,
+                    block if block.is_object() => {
+                        let named = block["name"].as_str().unwrap_or_default();
+                        if named != name {
+                            return Err(refused(
+                                method,
+                                -32602,
+                                &format!("the candidate is named {named}, not {name}"),
+                            ));
+                        }
+                        Some(block.clone())
+                    }
+                    _ => return Err(refused(method, -32602, "candidate is an object parameter")),
+                };
+                let staged = candidate.is_some();
+                let configured = s.configured(&name).cloned();
+                let Some(account) = candidate.or(configured) else {
                     return Err(refused(
                         method,
                         -32005,
                         &format!("Account '{name}' not found in config"),
                     ));
                 };
+                let account = &account;
                 let kind = match account["auth_method"].as_str() {
                     Some("oauth2") => "oauth2",
                     Some("graph") => "graph",
@@ -3176,7 +3244,7 @@ impl Fixture {
                         "scope": "durable", "progress": null, "result": null, "error": null
                     }),
                 );
-                s.oauth_logins.insert(id.clone(), (name, kind));
+                s.oauth_logins.insert(id.clone(), (name, kind, staged));
                 let delay = s.device_code_delay;
                 drop(s);
                 let fixture = Arc::clone(self);
@@ -3186,6 +3254,94 @@ impl Fixture {
                     fixture.report_device_code(&op);
                 });
                 Ok(json!({"operation_id": id}))
+            }
+            // The daemon's `config.probe`: its refusals in its order and
+            // words, then a verdict on the candidate, never a refusal of
+            // the call for what the server said.
+            "config.probe" => {
+                only(method, &params, &["account", "check", "password"])?;
+                let account = &params["account"];
+                if !account.is_object() {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        "account is a required object parameter",
+                    ));
+                }
+                let name = param_str(method, account, "name")?.to_string();
+                let check = match params["check"].as_str() {
+                    Some(c @ ("smtp" | "imap" | "graph" | "mailboxes")) => c,
+                    _ => {
+                        return Err(refused(
+                            method,
+                            -32602,
+                            "check is one of \"smtp\", \"imap\", \"graph\", \"mailboxes\"",
+                        ))
+                    }
+                };
+                let password = match &params["password"] {
+                    Value::Null => None,
+                    Value::String(p) => Some(p.clone()),
+                    _ => return Err(refused(method, -32602, "password is a string parameter")),
+                };
+                let auth = account["auth_method"].as_str().unwrap_or("password");
+                let graph = auth == "graph";
+                if graph && matches!(check, "smtp" | "imap") {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!(
+                            "{name} has auth_method = \"graph\" and no SMTP or IMAP server to test"
+                        ),
+                    ));
+                }
+                if !graph && check == "graph" {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!("{name} does not use auth_method = \"graph\""),
+                    ));
+                }
+                if auth == "password" && check != "graph" && password.is_none() {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        "a password account is probed with its password",
+                    ));
+                }
+                let staged = s.staged_sign_ins.contains(&name);
+                if auth != "password" && s.configured(&name).is_some() && !staged {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &format!(
+                            "{name} is a configured account: a candidate of that name is probed only with \
+                             the token its own sign-in staged, never with the configured account's; sign \
+                             the candidate in first (config.oauth2_login with candidate), or probe the \
+                             configured account through its configured settings"
+                        ),
+                    ));
+                }
+                if auth != "password" && !staged {
+                    return Ok(json!({
+                        "ok": false,
+                        "error": format!(
+                            "no OAuth2 sign-in is staged for the candidate {name}; sign in first"
+                        ),
+                    }));
+                }
+                if password.as_deref() == Some(PROBE_WRONG_PASSWORD) {
+                    return Ok(json!({"ok": false, "error": probe_refused(check)}));
+                }
+                if check == "mailboxes" {
+                    let names = if graph {
+                        PROBE_GRAPH_FOLDERS
+                    } else {
+                        PROBE_IMAP_MAILBOXES
+                    };
+                    return Ok(json!({"ok": true, "mailboxes": names}));
+                }
+                Ok(json!({"ok": true}))
             }
             "diagnostic.log_path" => {
                 only(method, &params, &[])?;
@@ -4623,7 +4779,7 @@ impl Fixture {
     /// `oauth_approve` and `oauth_deny`: every sign-in still waiting ends,
     /// stored or declined.
     fn simulate_oauth(&self, approve: bool) -> Result<()> {
-        let waiting: Vec<(String, (String, &'static str))> = {
+        let waiting: Vec<(String, (String, &'static str, bool))> = {
             let mut s = self.state();
             std::mem::take(&mut s.oauth_logins).into_iter().collect()
         };
@@ -4634,10 +4790,13 @@ impl Fixture {
         if waiting.is_empty() {
             return Err(anyhow!("no sign-in is waiting for the provider"));
         }
-        for (id, (account, kind)) in waiting {
+        for (id, (account, kind, staged)) in waiting {
             if approve {
+                if staged {
+                    self.state().staged_sign_ins.insert(account.clone());
+                }
                 let result = json!({
-                    "stored": true, "account": account, "kind": kind,
+                    "stored": true, "staged": staged, "account": account, "kind": kind,
                     "key": format!("oauth2-token-{account}"),
                 });
                 self.settle(&id, "succeeded", Some(result));
