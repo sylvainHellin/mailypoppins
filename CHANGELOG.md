@@ -8,6 +8,10 @@ All notable changes to this project are documented in this file.
 - Config: any key config.toml does not know, anywhere in the file (a typo like `sync_intervall_secs`, a stray `[accounts.mailboxes.spesen]` table that belongs in `[[accounts.mailboxes.extra]]`), now warns, naming the key and its account: on stderr, in the TUI activity log, in the daemon log and as a `config_loaded` health warning, instead of being dropped silently; the config still loads (PERSO-118).
 - Desktop: the daemon's health checks that are not ok now show as calm, dismissible lines under the connection banner and in the activity log, from startup and live as they change; each line clears when its check recovers, and the config.toml line offers Open config.toml.
 - Desktop: `pnpm preview:browser` in clients/desktop runs the frontend in a browser on the tests' fixture backend, and `pnpm build` fails when an app module loads any part of that backend.
+- TUI and desktop: `ga` opens an account picker (#0147); j/k and Enter, or a digit, switch account, Esc and q cancel, and each row shows new mail (the inbox unread count in the app, a dot in the TUI) and whether the account is not ready yet. In the desktop sidebar only the selected account starts expanded, a header click expands another for the session, and `ga` Enter on the current account expands it again.
+
+### Changed
+- Desktop: prefix keys wait for the second key, as in the TUI (#0148). After g, f, c, t, s or Space the which-key list stays until the next key; Escape cancels it and does nothing else, and a click drops it.
 
 ### Fixed
 - Desktop: a pressed toggle shows as pressed in the dark theme (Theme, Reader, Editor colours, the reader's HTML and Text), and the Calendar view's Past events toggle shows when it is on.

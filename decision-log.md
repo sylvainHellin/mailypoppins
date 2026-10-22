@@ -89,14 +89,14 @@ Status: accepted
 
 ## 2026-10-22 - The account picker follows its plan's five recommendations
 
-Why: a plain list with the digits 1 to 9 and no filter field keeps `j` and `k` as navigation; each row shows new mail as the inbox unread count in the desktop and as a dot in the TUI, which keeps no per-account unread count; a desktop account expanded or collapsed by hand stays so until the app quits, and every start shows only the selected account expanded; in the desktop sidebar `j` and `k` skip collapsed accounts and `ga` is the keyboard path to another account; the unreachable `Ctrl+1..9` account jump leaves the TUI code. Ticket [#0147](docs/tickets/0147-account-picker.md), plan `docs/plans/account-picker.md`.
+Why: a plain list with the digits 1 to 9 and no filter field keeps `j` and `k` as navigation; each row shows new mail as the inbox unread count in the desktop and as a dot in the TUI, which keeps no per-account unread count; a desktop account expanded or collapsed by hand stays so until the app quits, and every start shows only the selected account expanded; in the desktop sidebar `j` and `k` skip collapsed accounts and `ga` is the keyboard path to another account, and picking the current account there expands it again after a hand collapse, since its header takes no key; a row of an account that is not serving says so in both pickers (the runtime state in the desktop, `not ready` in the TUI, which has one flag for opening and blocked); the unreachable `Ctrl+1..9` account jump leaves the TUI code. Ticket [#0147](docs/tickets/0147-account-picker.md), plan `docs/plans/account-picker.md`.
 Rejected: a type-to-filter field (it would swallow `j` and `k`); a TUI unread count per account (new state for a cosmetic gain); remembering the expand state across restarts; a cursor stop on every account header with Enter to toggle it (a second keyboard model for the picker's job).
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 1, answered 2026-10-22.
 Status: accepted
 
 ## 2026-10-22 - The desktop prefix chord never times out, as in the TUI
 
-Why: a pending prefix waits for its second key with no timer and no setting, so `c`, a pause of any length, then `a` replies to all in both clients; Escape cancels the prefix and does nothing else, and the which-key popup appears at once. Ticket [#0148](docs/tickets/0148-chord-timeout.md), plan `docs/plans/chord-timeout.md`.
+Why: a pending prefix waits for its second key with no timer and no setting, so `c`, a pause of any length, then `a` replies to all in both clients; Escape cancels the prefix and does nothing else, a click drops it so an abandoned chord never resolves with a much later key, and the which-key popup appears at once. Ticket [#0148](docs/tickets/0148-chord-timeout.md), plan `docs/plans/chord-timeout.md`.
 Rejected: a 5 s default with four presets in Settings (the earlier entry of the same day; two behaviours between the clients and a setting changed once); a show delay before the popup.
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 1, answered 2026-10-22.
 Status: accepted
