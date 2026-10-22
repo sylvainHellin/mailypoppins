@@ -72,7 +72,7 @@ describe("the prefix popup", () => {
     await shellReady();
     await user.keyboard("g");
     expect(title()).toBe("go");
-    expect(rows().map(([k]) => k)).toEqual(["gm", "ga", "gj / gk", "gg / G", "gr", "go"]);
+    expect(rows().map(([k]) => k)).toEqual(["gm", "gl", "gr", "ga", "gj / gk", "gg / G", "go"]);
     await user.keyboard("{Escape}");
     await user.keyboard(" c");
     await screen.findByRole("region", { name: "Contacts" });
@@ -88,7 +88,7 @@ describe("the prefix popup", () => {
     });
     await shellReady();
     await user.keyboard("g");
-    expect(rows().map(([k]) => k)).toEqual(["gm", "gj / gk", "gg / G", "gr", "go"]);
+    expect(rows().map(([k]) => k)).toEqual(["gm", "gl", "gr", "gj / gk", "gg / G", "go"]);
   });
 
   it("Space lists the view family", async () => {

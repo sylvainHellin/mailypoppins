@@ -249,6 +249,11 @@ pub enum KeyAction {
     JumpMailbox,
     /// `gm`: focus the mailbox sidebar (go to mailboxes).
     GoMailbox,
+    /// `gl`: focus the message list, the desktop's `gl`.
+    GoList,
+    /// `gr`: focus the body pane (go to the reader), the desktop's `gr`;
+    /// landing there marks the message read, as Tab into it does (#0110).
+    GoReader,
     FocusForward,
     FocusBackward,
     /// Arm one of the mnemonic family leaders (`f`/`c`/`g`/`t`/`s`, #0092).
@@ -754,6 +759,24 @@ pub static KEYMAP: &[KeyBinding] = &[
         KeyCtx::Global,
         KeyAction::GoMailbox,
         "Go to mailboxes (sidebar)",
+        false,
+    ),
+    p(
+        "gl",
+        Chord::Char('l'),
+        'g',
+        KeyCtx::Global,
+        KeyAction::GoList,
+        "Go to message list",
+        false,
+    ),
+    p(
+        "gr",
+        Chord::Char('r'),
+        'g',
+        KeyCtx::Global,
+        KeyAction::GoReader,
+        "Go to reader (body)",
         false,
     ),
     pg(

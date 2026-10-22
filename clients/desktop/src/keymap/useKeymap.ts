@@ -107,8 +107,9 @@ const COMPOSE_ROW_KEYS: Record<string, ActionId> = {
 /** Mail's prefix continuations that run from any pane. */
 const MAIL_COMBOS: Record<string, ActionId> = {
   gg: "list_top",
+  // The pane jumps, the TUI's `gm`, `gl` and `gr`.
   gm: "focus_sidebar",
-  // Desktop only: the TUI reaches its body pane by Tab alone, and has no `gr`.
+  gl: "focus_list",
   gr: "focus_reader",
   ga: "open_account_picker",
   // Desktop only: the TUI has no outbox view, and no `go`.

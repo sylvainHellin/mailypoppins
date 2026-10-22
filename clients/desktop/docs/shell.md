@@ -505,7 +505,7 @@ The TUI has no outbox view, and its operator actions are the CLI's `mp outbox li
 - The sidebar's outbox line under each account, shown while something is queued, failed or partly delivered: "Outbox: 1 queued, 1 failed, 1 partly delivered".
   It is a button that opens that account's outbox.
 - `go`, from any pane: the selected account's outbox.
-  The TUI's `g` family binds `gg`, `gm`, `ga`, `gj`, `gk` and `gt`, so `go` is free there and in the desktop.
+  The TUI's `g` family binds `gg`, `gm`, `gl`, `gr`, `ga`, `gj`, `gk` and `gt`, so `go` is free there and in the desktop.
 - The palette's "Open outbox".
 
 The view replaces the list pane's content, as search results do, and focuses the list pane.
@@ -1083,7 +1083,7 @@ The window has three panes, each one tab stop, in reading order:
 3. Reader (`<aside aria-label="Reader">`, complementary): the scrollable message; outside Mail there is none, and Tab cycles the first two.
 
 Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, reader, sidebar), starting from the pane the model holds as focused, and only while focus sits in a pane or on the page; anywhere else (a dialog, a screen's buttons, the splitter) they are the browser's.
-`gm` focuses the sidebar as in the TUI, and `gr` or the palette's "Focus reader" the reader, a desktop key free in the TUI's go family; from a full-pane view the palette's row brings Mail back first, and landing in the reader is an explicit open, as Tab into it is.
+`gm` focuses the sidebar, `gl` the list, and `gr` or the palette's "Go to reader (body)" the reader, the TUI's three pane jumps; from a full-pane view the palette's row brings Mail back first, and landing in the reader is an explicit open, as Tab into it is.
 The pane the model holds as focused (`state.focus`) carries `data-focused="true"` on its `data-pane` root (`usePaneFocused` in `src/hooks/use-pane-focused.ts`), whether or not the DOM focus is inside it, and `index.css` draws it as one 1px `ring` line just inside the pane's edge (`sidebar-ring` on the sidebar), above its content, the reader's frame included, and never taking a click; a full-pane view's region carries the list's mark.
 The ring is rounded only where the pane's corner is the inset card's: the list's right corners and the reader's left ones, which meet across the splitter, are square, a banner or the narrow bar above the pane row squares the top corners, and a pane alone in the row (zoomed, narrow, a full-pane view) and the sidebar keep all four (PERSO-95).
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
@@ -1105,7 +1105,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `j`/`k`, arrows: move in the focused pane (the sidebar cursor, the list selection, or scroll the reader).
 - `J`/`K`, `gj`/`gk`: next and previous message from any pane.
 - `Enter`: open the mailbox under the cursor, or open the message in the reader and mark it read.
-- `Tab`/`Shift+Tab`: cycle panes; `gm`: the sidebar; `gr`: the reader, a desktop key; `Space m`: Mail and its list; `Space c`, `Space a`: Contacts and Calendar (see Views); `ga`: the account picker (see Model, "Accounts in the sidebar").
+- `Tab`/`Shift+Tab`: cycle panes; `gm`, `gl`, `gr`: the sidebar, the list and the reader, as in the TUI; `Space m`: Mail and its list; `Space c`, `Space a`: Contacts and Calendar (see Views); `ga`: the account picker (see Model, "Accounts in the sidebar").
 - `1`-`9`: the selected account's nth mailbox.
 - `gg`/`G`, `Home`/`End`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`: jumps in the list or the reader.
 - `:` or `Ctrl+p`: the command palette; `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector, or in Drafts and on a conversation's draft member the draft's file path (PERSO-100, #0142).

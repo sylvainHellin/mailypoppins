@@ -59,6 +59,14 @@
         "action": "Go to mailboxes (sidebar)"
       },
       {
+        "key": "gl",
+        "action": "Go to message list"
+      },
+      {
+        "key": "gr",
+        "action": "Go to reader (body)"
+      },
+      {
         "key": "ga",
         "action": "Switch account"
       },

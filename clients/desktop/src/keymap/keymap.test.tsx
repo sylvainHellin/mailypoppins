@@ -75,7 +75,7 @@ describe("keyboard routing", () => {
     expect(pane()).toBe("sidebar");
   });
 
-  it("marks the pane holding the focus with data-focused, and gr or the palette's Focus reader focus the reader", async () => {
+  it("marks the pane holding the focus with data-focused, and gr or the palette's Go to reader focus the reader", async () => {
     const { user } = renderApp();
     await shellReady();
     const pane = () => document.activeElement?.closest("[data-pane]")?.getAttribute("data-pane");
@@ -89,13 +89,28 @@ describe("keyboard routing", () => {
     await user.keyboard("{Tab}");
     expect(marked()).toEqual(["sidebar"]);
     await user.keyboard(":");
-    await user.keyboard("Focus reader");
+    await user.keyboard("Go to reader");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(marked()).toEqual(["reader"]));
     // Outside Mail there is no reader to mark, and the view's region takes the list's mark.
     await user.keyboard(" c");
     await screen.findByRole("region", { name: "Contacts" });
     expect(marked()).toEqual(["list"]);
+  });
+
+  it("gl focuses the message list from the sidebar and the reader, as the TUI's gl", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const marked = () => [...document.querySelectorAll('[data-pane][data-focused="true"]')].map((e) => e.getAttribute("data-pane"));
+    await user.keyboard("gm");
+    expect(marked()).toEqual(["sidebar"]);
+    await user.keyboard("gl");
+    expect(marked()).toEqual(["list"]);
+    await user.keyboard("gr");
+    expect(marked()).toEqual(["reader"]);
+    await user.keyboard("gl");
+    expect(marked()).toEqual(["list"]);
+    expect(document.activeElement?.closest("[data-pane]")?.getAttribute("data-pane")).toBe("list");
   });
 
   it("the sidebar cursor moves with j and Enter opens the mailbox", async () => {

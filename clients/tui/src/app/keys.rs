@@ -299,6 +299,27 @@ impl App {
                 self.pending_prefix = None;
                 self.focus = Focus::Sidebar;
             }
+            A::GoList => {
+                // `gl`: go to the message list. The sidebar's highlight is not
+                // opened, as the desktop's `gl` does not open its cursor's
+                // mailbox: Enter in the sidebar does that.
+                self.pending_prefix = None;
+                self.focus = Focus::List;
+            }
+            A::GoReader => {
+                // `gr`: go to the body pane, an explicit "I am reading this"
+                // that marks the message read, as Tab into it does (#0110).
+                // Under 80 columns it zooms, as `Enter` does, because the
+                // split draws no body pane there.
+                self.pending_prefix = None;
+                if self.focus != Focus::Preview {
+                    self.focus = Focus::Preview;
+                    if self.terminal_width < 80 {
+                        self.zoomed = true;
+                    }
+                    self.queue_mark_open_read();
+                }
+            }
             A::FocusForward => {
                 self.pending_prefix = None;
                 if self.focus == Focus::Sidebar {
@@ -3933,6 +3954,60 @@ mod tests {
         assert_eq!(app.focus, Focus::Preview);
         assert_eq!(queued_edits(&app), 0, "Enter must not open $EDITOR");
         assert_eq!(queued_mark_reads(&app), 1, "Enter is an open (#0110)");
+    }
+
+    /// `gr` goes to the body pane and marks the message read once, `gl` comes
+    /// back to the list, and `gm` reaches the sidebar: the desktop's three
+    /// `g` pane jumps.
+    #[test]
+    fn g_prefix_jumps_to_the_reader_the_list_and_the_sidebar() {
+        let mut app = app_with_emails(sample());
+        app.terminal_width = 120;
+        app.list_index = 0;
+        let press = |app: &mut App, c: char| {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        };
+
+        press(&mut app, 'g');
+        press(&mut app, 'r');
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(app.pending_prefix, None);
+        assert_eq!(
+            queued_mark_reads(&app),
+            1,
+            "landing in the body is an open (#0110)"
+        );
+        assert_eq!(app.zoomed_pane(), None, "a wide terminal keeps the split");
+
+        press(&mut app, 'g');
+        press(&mut app, 'r');
+        assert_eq!(
+            queued_mark_reads(&app),
+            1,
+            "already reading: no second open"
+        );
+
+        press(&mut app, 'g');
+        press(&mut app, 'l');
+        assert_eq!(app.focus, Focus::List);
+
+        press(&mut app, 'g');
+        press(&mut app, 'm');
+        assert_eq!(app.focus, Focus::Sidebar);
+        press(&mut app, 'g');
+        press(&mut app, 'l');
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    /// Under 80 columns `gr` zooms the body pane, as `Enter` does.
+    #[test]
+    fn gr_in_a_narrow_terminal_zooms_the_body_pane() {
+        let mut app = app_with_emails(sample());
+        app.terminal_width = 60;
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('r')));
+        assert_eq!(app.focus, Focus::Preview);
+        assert_eq!(app.zoomed_pane(), Some(Focus::Preview));
     }
 
     /// Under 80 columns the split draws no body pane, so `Enter` zooms it:

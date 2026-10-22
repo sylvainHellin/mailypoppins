@@ -26,11 +26,11 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 20 |│                             │New draft                                                 │                             │
 21 |│                             │Manage signatures                                         │                             │
 22 |│                             │Go to mailboxes (sidebar)                                 │                             │
-23 |│                             │Switch account                                            │                             │
-24 |│                             │Quick sync                                                │                             │
-25 |│                             │Full sync                                                 │                             │
-26 |│                             │Activity log overlay                                      │                             │
-27 |╰─────────────────────────────│Open config.toml in $EDITOR                               │                             │
+23 |│                             │Go to message list                                        │                             │
+24 |│                             │Go to reader (body)                                       │                             │
+25 |│                             │Switch account                                            │                             │
+26 |│                             │Quick sync                                                │                             │
+27 |╰─────────────────────────────│Full sync                                                 │                             │
 28 |╭ Activity ───────────────────│type filter  ↑/↓ nav  Enter run  Esc cancel               │                             │
 29 |│  No activity yet            ╰──────────────────────────────────────────────────────────╯                             │
 30 |│                                        ││                                                                            │
