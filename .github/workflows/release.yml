@@ -16,6 +16,12 @@
 #      read `releases/latest/download/latest.json`, so they keep the
 #      previous, complete manifest until this one is whole.
 #
+# A tag with a SemVer pre-release part (`v0.12.0-rc.1`) is published as a
+# GitHub prerelease: it gets every asset and its own latest.json, but it is
+# never marked "latest" and the Homebrew tap skips it, so neither installed
+# apps nor `brew upgrade` are offered it. tests/release_workflow.rs runs the
+# steps' scripts against both kinds of tag.
+#
 # See docs/release-process.md for the full release procedure.
 
 name: Release
@@ -65,11 +71,17 @@ jobs:
           # Not "latest" yet: desktop-manifest moves the flag once latest.json
           # is uploaded (#0139). Public from the start, not a draft, since
           # homebrew-tap downloads the .sha256 assets by their tag URL.
+          # A pre-release tag (a hyphen after the version) is a prerelease.
+          prerelease=false
+          case "$GITHUB_REF_NAME" in
+            *-*) prerelease=true ;;
+          esac
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --notes-file /tmp/notes.md \
-            --latest=false
+            --latest=false \
+            --prerelease="$prerelease"
 
   upload-assets:
     needs: create-release
@@ -209,7 +221,8 @@ jobs:
   # releases/latest/download/latest.json, so the release becomes "latest"
   # only after this job uploaded a complete manifest; create-release made it
   # with --latest=false. If desktop-macos fails, this job is skipped and
-  # "latest" stays on the previous release, whose manifest is whole.
+  # "latest" stays on the previous release, whose manifest is whole. A
+  # prerelease keeps its manifest as an asset and is never marked latest.
   desktop-manifest:
     needs: desktop-macos
     runs-on: ubuntu-latest
@@ -253,10 +266,17 @@ jobs:
             > latest.json
           cat latest.json
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber latest.json
-      - name: Mark the release latest
+      - name: Mark the release latest, unless it is a prerelease
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --latest
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*)
+              echo "::notice::$GITHUB_REF_NAME is a prerelease; the latest release stays where it was, so installed apps are not offered it."
+              exit 0
+              ;;
+          esac
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --latest
 
   # Update the Homebrew tap (ticket #0013). Requires the TAP_DEPLOY_KEY
   # repository secret: the PRIVATE half of an ed25519 deploy key whose
@@ -264,9 +284,11 @@ jobs:
   # sylvainHellin/homebrew-mailypoppins. Auth is over SSH via ssh-agent;
   # no PAT is involved. Skipped with a notice (not a failure) until the
   # tap repo + key exist -- see docs/release-process.md for the one-time
-  # setup.
+  # setup. Skipped for a prerelease tag, the same rule as create-release's,
+  # so `brew upgrade` never moves to a prerelease.
   homebrew-tap:
     needs: upload-assets
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     env:
       TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}

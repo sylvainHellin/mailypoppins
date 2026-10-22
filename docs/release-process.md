@@ -51,6 +51,14 @@ Homebrew tap. The pipeline lives in
      it to the tap repo (skipped with a notice while the
      `TAP_DEPLOY_KEY` secret is absent).
 
+5. **A prerelease** is a tag with a SemVer pre-release part, such as
+   `v0.12.0-rc.1`, with the same version in `Cargo.toml` and a matching
+   `## [0.12.0-rc.1]` changelog section. The workflow publishes it as a
+   GitHub prerelease with every asset and its own `latest.json`, but never
+   marks it "latest" and skips the Homebrew tap, so installed apps and
+   `brew upgrade` stay on the last release. The rule is a hyphen in the tag,
+   checked by `tests/release_workflow.rs`, which runs the steps' scripts.
+
 There is no Intel macOS build (`x86_64-apple-darwin`) of the CLI or the
 app; an Intel Mac builds `mp` from source with `cargo install --path .`.
 
@@ -148,7 +156,8 @@ The release side:
   `{version, notes, pub_date, platforms: {"darwin-aarch64": {signature, url}}}`,
   where `notes` is the release's body, `signature` the `.sig` file's content
   and `url` the tag's own download URL of the archive. It uploads the file
-  and only then runs `gh release edit "$GITHUB_REF_NAME" --latest`.
+  and only then runs `gh release edit "$GITHUB_REF_NAME" --latest`, except
+  for a prerelease tag, which stays off "latest" (see step 5 above).
 - `create-release` passes `--latest=false`, so every installed app keeps
   reading the previous release's complete manifest until the new one is up.
   If the desktop build fails, the manifest job is skipped and "latest" stays
