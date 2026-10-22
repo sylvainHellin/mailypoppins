@@ -374,7 +374,7 @@ This is a watch and not a scheduler - it reacts to a server saying something cha
 A ready runtime with an IMAP or Graph server also runs a scheduler (`src/daemon/runtime/scheduler.rs`, #0134), spawned beside the watcher and the drainer and bound to the runtime the same way.
 It runs one quick tick once the account has gone `[accounts.imap] sync_interval_secs` without one: 900 seconds by default, `0` turns it off, and a value under 60 is raised to 60.
 The interval is measured from the end of the last tick of any origin (a manual `mp sync`, a TUI sync key, a client's startup fetch, a watcher round, the scheduler itself), which the runtime records as each tick that ran a body finishes, so another tick pushes the scheduled one back; a drain is not a tick and moves nothing.
-The first scheduled tick is an interval after the runtime starts.
+The first scheduled tick runs ten seconds after the runtime comes up (`STARTUP_TICK`, PERSO-178), so a daemon start or restart syncs every account once even with no client asking; a tick of any origin that finishes before then (a client's startup fetch) cancels it, and a client's fetch still running then is joined.
 It is what catches everything the watcher cannot hear: a change in any mailbox other than INBOX, a queued op or an outbox Sent copy waiting out its backoff, a body fetch the deadline cut short, an IDLE connection the server dropped silently, and an account with no client open at all.
 The scheduled tick goes through the same `tick_and_publish` as the watcher's, so it publishes `sync.completed` and the counts that moved exactly as a watcher tick does; it joins a tick already running, and it waits for a drain in flight through the runtime's turn.
 A blocked runtime, a local-only account and an interval of `0` get no scheduler.
@@ -641,7 +641,7 @@ It is what pins the backpressure cases in `tests/daemon_events.rs`, and its name
 
 `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME=<json>` commits one `sync.completed` outcome per element of a JSON array after **every** `state.bootstrap`, in array order, against the first configured account.
 A bare object is read as an array of one.
-A test daemon runs no real sync (the scheduler's first tick is fifteen minutes away and needs a server), so nothing would otherwise publish an outcome and every assertion about one arriving over the socket would be vacuous.
+A test daemon runs no real sync (the scheduler's startup tick needs a server, and a test account has none), so nothing would otherwise publish an outcome and every assertion about one arriving over the socket would be vacuous.
 Each element's `account` is ignored and replaced by the configured name, and every other field travels verbatim, `severity` included, so a test can pin a severity no fake sync could produce.
 The outcomes are committed off the bootstrap's own path and after its revision was captured, so every one of them lands above the revision the bootstrap reported.
 Unset, empty, unparseable, or with no configured account it does nothing.

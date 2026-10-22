@@ -18,8 +18,17 @@
 //! moment plus the interval. A manual `mp sync`, a watcher tick, a client's
 //! startup fetch and the scheduler's own tick all move it, so a busy account is
 //! never ticked twice in a row for the schedule's sake. A drain is not a tick
-//! and does not move it. The first scheduled tick is an interval after the
-//! runtime started.
+//! and does not move it.
+//!
+//! # A runtime that comes up syncs once
+//!
+//! The first scheduled tick is [`STARTUP_TICK`] after the runtime started,
+//! not an interval (PERSO-178). Neither watcher syncs on its first look, so a
+//! daemon start or restart with no client asking left every account a whole
+//! interval stale, a Graph account most visibly. Any tick that finishes
+//! before that deadline (a client's startup fetch, a watcher round) moves the
+//! record and cancels the startup tick: the next one is an interval after it.
+//! A startup tick that finds a client's fetch still running joins it.
 //!
 //! A scheduled tick that finds a tick running joins it, and one that finds a
 //! drain running waits for its turn: both are [`AccountRuntime::tick`]'s own
@@ -77,6 +86,11 @@ use super::publish::tick_and_publish;
 /// short against the seconds a Graph window takes to download.
 pub const BACKLOG_FOLLOW_UP: Duration = Duration::from_secs(5);
 
+/// How soon after the runtime comes up its first scheduled tick runs (see the
+/// module docs): long enough for a client's startup fetch, which cancels it,
+/// to reach the daemon first.
+pub const STARTUP_TICK: Duration = Duration::from_secs(10);
+
 /// Start the scheduler for `runtime`, if it has anything to schedule.
 ///
 /// The handle is the test's; the daemon lets the task run until the runtime
@@ -88,23 +102,23 @@ pub fn spawn(
 ) -> Option<JoinHandle<()>> {
     let interval = schedulable(runtime, cfg)?;
     info!(
-        "[scheduler] ticking {} after {}s without a sync",
+        "[scheduler] scheduling {}: a first sync in {}s, then one after {}s without a sync",
         cfg.name,
+        STARTUP_TICK.min(interval).as_secs(),
         interval.as_secs()
     );
     Some(tokio::spawn(run(
         Arc::downgrade(runtime),
         runtime.retired(),
         runtime.completed_ticks(),
-        interval,
-        BACKLOG_FOLLOW_UP,
+        Cadence {
+            startup: STARTUP_TICK,
+            interval,
+            follow_up: BACKLOG_FOLLOW_UP,
+        },
         Arc::new(move |runtime: Arc<AccountRuntime>| {
             let canonical = Arc::clone(&canonical);
             Box::pin(async move {
-                info!(
-                    "[scheduler] {} has gone its interval without a sync; ticking",
-                    runtime.account()
-                );
                 tick_and_publish(&runtime, &canonical, TickKind::Quick).await;
             }) as BoxFuture<'static, ()>
         }),
@@ -146,19 +160,47 @@ fn gap(interval: Duration, follow_up: Duration, backlog_owed: bool) -> Duration 
     }
 }
 
+/// The three waits a scheduler chooses between (see the module docs).
+#[derive(Debug, Clone, Copy)]
+struct Cadence {
+    /// After the runtime started, before its first scheduled tick.
+    startup: Duration,
+    /// After the last tick, in the steady state.
+    interval: Duration,
+    /// After a tick that left a backlog.
+    follow_up: Duration,
+}
+
+/// Why the scheduler is about to tick, for the log line.
+fn reason(startup: bool, owed: bool) -> &'static str {
+    if startup {
+        "has just come up"
+    } else if owed {
+        "still has new mail to download"
+    } else {
+        "has gone its interval without a sync"
+    }
+}
+
 /// One account's scheduler, until the runtime it was spawned for retires.
 async fn run(
     runtime: Weak<AccountRuntime>,
     mut retired: watch::Receiver<bool>,
     mut ticks: watch::Receiver<Instant>,
-    interval: Duration,
-    follow_up: Duration,
+    cadence: Cadence,
     fire: Fire,
 ) {
-    let account = runtime
+    let Cadence {
+        startup,
+        interval,
+        follow_up,
+    } = cadence;
+    let Some((account, started)) = runtime
         .upgrade()
-        .map(|runtime| runtime.account().to_string())
-        .unwrap_or_default();
+        .map(|runtime| (runtime.account().to_string(), runtime.started()))
+    else {
+        return;
+    };
     // A floor under the next deadline that the scheduler's own firing sets, so
     // a tick that was refused and moved nothing is not fired again at once.
     let mut fired: Option<Instant> = None;
@@ -167,13 +209,21 @@ async fn run(
         let owed = runtime
             .upgrade()
             .is_some_and(|runtime| runtime.backlog_owed());
+        // Owed until the scheduler fires once or a tick of another origin
+        // finishes, whichever comes first.
+        let at_startup = fired.is_none() && last == started;
+        let wait = if at_startup {
+            startup.min(interval)
+        } else {
+            gap(interval, follow_up, owed)
+        };
         if owed {
             info!(
                 "[scheduler] {account} still has new mail to download; ticking again in {}s",
-                gap(interval, follow_up, owed).as_secs()
+                wait.as_secs()
             );
         }
-        let due = fired.map_or(last, |fired| fired.max(last)) + gap(interval, follow_up, owed);
+        let due = fired.map_or(last, |fired| fired.max(last)) + wait;
         tokio::select! {
             // Checked first, so a retired runtime never fires a deadline that
             // expired at the same moment.
@@ -192,6 +242,15 @@ async fn run(
             break;
         };
         fired = Some(Instant::now());
+        if runtime.readiness() != Readiness::Ready {
+            // The tick would be refused: say so, and log no "ticking" for it.
+            debug!("[scheduler] not ticking {account}: its runtime is blocked");
+            continue;
+        }
+        info!(
+            "[scheduler] {account} {}; ticking",
+            reason(at_startup, owed)
+        );
         fire(runtime).await;
     }
     info!("[scheduler] {account}'s runtime retired; stopped scheduling");
@@ -244,24 +303,33 @@ mod tests {
 
     /// The scheduler over `runtime`, firing a real quick tick and counting the
     /// times it fired.
+    ///
+    /// Its startup tick waits the whole interval, so the tests that use it
+    /// read the steady-state interval alone; the startup tick has its own.
     fn scheduler(runtime: &Arc<AccountRuntime>, fired: &Arc<AtomicUsize>) -> JoinHandle<()> {
-        scheduler_with(runtime, fired, INTERVAL, INTERVAL / 6)
+        scheduler_with(
+            runtime,
+            fired,
+            Cadence {
+                startup: INTERVAL,
+                interval: INTERVAL,
+                follow_up: INTERVAL / 6,
+            },
+        )
     }
 
-    /// [`scheduler`] with its interval and backlog follow-up chosen.
+    /// [`scheduler`] with its cadence chosen.
     fn scheduler_with(
         runtime: &Arc<AccountRuntime>,
         fired: &Arc<AtomicUsize>,
-        interval: Duration,
-        follow_up: Duration,
+        cadence: Cadence,
     ) -> JoinHandle<()> {
         let fired = Arc::clone(fired);
         tokio::spawn(run(
             Arc::downgrade(runtime),
             runtime.retired(),
             runtime.completed_ticks(),
-            interval,
-            follow_up,
+            cadence,
             Arc::new(move |runtime: Arc<AccountRuntime>| {
                 fired.fetch_add(1, Ordering::SeqCst);
                 async move {
@@ -308,6 +376,54 @@ mod tests {
             .unwrap();
     }
 
+    /// PERSO-178: a runtime that comes up is ticked once soon after, not an
+    /// interval later, and the next tick then waits the interval.
+    #[tokio::test]
+    async fn a_runtime_that_comes_up_ticks_soon_and_then_on_the_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let bodies = Arc::new(AtomicUsize::new(0));
+        let runtime = started(dir.path(), &bodies);
+        let fired = Arc::new(AtomicUsize::new(0));
+        let start = Instant::now();
+        let cadence = Cadence {
+            startup: Duration::from_millis(50),
+            interval: Duration::from_millis(1500),
+            follow_up: Duration::from_millis(50),
+        };
+        let _task = scheduler_with(&runtime, &fired, cadence);
+
+        tokio::time::sleep_until(start + Duration::from_millis(500)).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "the startup tick fired");
+        assert_eq!(bodies.load(Ordering::SeqCst), 1, "and ran a body");
+        tokio::time::sleep_until(start + Duration::from_millis(1200)).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "then the interval");
+        tokio::time::sleep_until(start + Duration::from_millis(2300)).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 2);
+    }
+
+    /// A tick of another origin (a client's startup fetch) that finishes
+    /// before the startup tick cancels it: the next one is an interval later.
+    #[tokio::test]
+    async fn a_tick_before_the_startup_one_cancels_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let bodies = Arc::new(AtomicUsize::new(0));
+        let runtime = started(dir.path(), &bodies);
+        let fired = Arc::new(AtomicUsize::new(0));
+        let cadence = Cadence {
+            startup: Duration::from_millis(400),
+            interval: Duration::from_millis(1500),
+            follow_up: Duration::from_millis(50),
+        };
+        let _task = scheduler_with(&runtime, &fired, cadence);
+
+        let fetched = Instant::now();
+        runtime.tick(TickKind::Quick).await;
+        tokio::time::sleep_until(fetched + Duration::from_millis(900)).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "the fetch cancelled it");
+        tokio::time::sleep_until(fetched + Duration::from_millis(2200)).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
     /// A tick of another origin (a manual sync, the watcher) pushes the
     /// scheduled one back a whole interval from when it finished.
     #[tokio::test]
@@ -340,7 +456,12 @@ mod tests {
         let fired = Arc::new(AtomicUsize::new(0));
         let interval = Duration::from_secs(3);
         let follow_up = Duration::from_millis(50);
-        let _task = scheduler_with(&runtime, &fired, interval, follow_up);
+        let cadence = Cadence {
+            startup: interval,
+            interval,
+            follow_up,
+        };
+        let _task = scheduler_with(&runtime, &fired, cadence);
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(fired.load(Ordering::SeqCst), 0, "nothing owed yet");
@@ -443,9 +564,9 @@ mod tests {
         assert_eq!(bodies.load(Ordering::SeqCst), 0);
     }
 
-    /// A blocked runtime gets no scheduler; one forced onto it fires at most
-    /// once an interval, since its refused tick moves no deadline, and runs no
-    /// body.
+    /// A blocked runtime gets no scheduler; one forced onto it never fires,
+    /// startup tick included, since the tick would be refused, and it does
+    /// not loop on a deadline that nothing moves.
     #[tokio::test]
     async fn a_blocked_runtime_schedules_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -458,11 +579,17 @@ mod tests {
         assert!(spawn(&runtime, canonical(), &config()).is_none());
 
         let fired = Arc::new(AtomicUsize::new(0));
-        let _task = scheduler(&runtime, &fired);
+        let cadence = Cadence {
+            startup: INTERVAL / 10,
+            interval: INTERVAL,
+            follow_up: INTERVAL / 6,
+        };
+        let _task = scheduler_with(&runtime, &fired, cadence);
         tokio::time::sleep(INTERVAL * 5 / 2).await;
-        assert!(
-            fired.load(Ordering::SeqCst) <= 2,
-            "no hot loop on a tick that moves no deadline"
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "a tick that would be refused is not fired"
         );
         assert_eq!(bodies.load(Ordering::SeqCst), 0);
         drop(holder);

@@ -327,6 +327,10 @@ pub struct AccountRuntime {
     /// (#0134). Set by the runner of every tick that ran a body, whatever
     /// asked for it; a joiner, a refused tick and a drain leave it alone.
     ticked: watch::Sender<tokio::time::Instant>,
+    /// When the runtime started: `ticked`'s first value, kept so the
+    /// scheduler can tell "no tick has finished yet" from a tick that
+    /// finished before it first looked (PERSO-178).
+    started: tokio::time::Instant,
     /// Whether the last tick that ran a body left a Graph folder with a
     /// backlog the next quick tick can drain ([`SyncResult::backlogged`]),
     /// which the scheduler reads to run that tick at once (PERSO-172). Set
@@ -418,6 +422,7 @@ impl AccountRuntime {
         // the whole reason it is worth having.
         let pool = ReadPool::open(&dir.join("store.sqlite3"), pool_size)?;
 
+        let started = tokio::time::Instant::now();
         Ok(AccountRuntime {
             account,
             readiness,
@@ -429,7 +434,8 @@ impl AccountRuntime {
                 .then(|| Duration::from_secs(cfg.imap.body_fetch_deadline_secs)),
             running: Mutex::new(None),
             turn: tokio::sync::Mutex::new(()),
-            ticked: watch::channel(tokio::time::Instant::now()).0,
+            ticked: watch::channel(started).0,
+            started,
             backlog: AtomicBool::new(false),
             drain_requests: watch::channel(0).0,
             report: TickReport::default(),
@@ -457,6 +463,13 @@ impl AccountRuntime {
     /// closes when the runtime is dropped: what the scheduler waits on (#0134).
     pub fn completed_ticks(&self) -> watch::Receiver<tokio::time::Instant> {
         self.ticked.subscribe()
+    }
+
+    /// When this runtime started, which [`AccountRuntime::completed_ticks`]
+    /// holds until a tick finishes: what the scheduler's startup tick is
+    /// measured from (PERSO-178).
+    pub fn started(&self) -> tokio::time::Instant {
+        self.started
     }
 
     /// Whether the last tick left a backlog the next quick tick drains, so

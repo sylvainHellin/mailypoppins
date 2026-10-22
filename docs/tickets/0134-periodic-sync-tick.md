@@ -25,6 +25,7 @@ A per-account scheduler, `src/daemon/runtime/scheduler.rs`, spawned in `config::
 - No scheduler for a local-only account, a blocked runtime or `sync_interval_secs = 0`.
   A Graph account was excluded at first, because the daemon tick had no Graph backend; since 2026-10-21 the tick body runs `graph::sync_mailboxes_graph` for it and it is scheduled like an IMAP account.
 - No stagger: each runtime's clock starts when it comes up, and ticks on different runtimes share no lock.
+- The first scheduled tick is `STARTUP_TICK` (10 s) after the runtime comes up, not an interval (PERSO-178): neither watcher syncs on its first look, so a daemon start with no client left every account, a Graph one most visibly, an interval stale. A tick of another origin that finishes first cancels it. A runtime that is not ready is not fired at, and the "ticking" line is logged only for a tick that runs, with its reason (startup, backlog, interval).
 
 ### The config key
 
@@ -35,7 +36,7 @@ It is part of `config.get`'s effective account, so `config.reload` sees a change
 
 ## Tests
 
-- `src/daemon/runtime/scheduler.rs`: a tick fires after the interval and again an interval after it; a tick of another origin pushes the scheduled one back; a drain does not; `0` and local-only schedule nothing, a Graph account is scheduled; a retired runtime stops its scheduler and fires nothing; a blocked runtime gets no scheduler and a forced one runs no body and does not loop; a dropped runtime stops its scheduler.
+- `src/daemon/runtime/scheduler.rs`: a runtime that comes up ticks at the startup delay and then on the interval; a tick before the startup one cancels it; a tick fires after the interval and again an interval after it; a tick of another origin pushes the scheduled one back; a drain does not; `0` and local-only schedule nothing, a Graph account is scheduled; a retired runtime stops its scheduler and fires nothing; a blocked runtime gets no scheduler and a forced one fires nothing, startup tick included; a dropped runtime stops its scheduler.
 - `crates/mp-core/src/config.rs`: the default with and without an `[accounts.imap]` table, `0` disables, the 60 s floor.
 - `src/daemon/config.rs`: a changed `sync_interval_secs` makes the account `updated` in a reload.
 - `tests/daemon_config.rs`: `sync_interval_secs` is one of the `imap` keys `config.get` reports, with its default.
@@ -44,4 +45,3 @@ It is part of `config.get`'s effective account, so `config.reload` sees a change
 ## Left open
 
 - The Graph watcher still enumerates the whole inbox every 60 s rather than walking a delta: see `BACKLOG.md`.
-- The first scheduled tick is an interval after the daemon starts; a daemon started with no client and no watcher event syncs nothing for fifteen minutes.
