@@ -4595,6 +4595,61 @@ mod smtp_durability_tests {
         }
     }
 
+    /// Answers each submission with the next verdict of its script, the same
+    /// verdict for every recipient, and keeps every recipient list it was
+    /// handed.
+    struct ScriptedSmtp {
+        script: std::sync::Mutex<std::collections::VecDeque<RecipientVerdict>>,
+        submitted: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl ScriptedSmtp {
+        fn new(script: &[RecipientVerdict]) -> Self {
+            Self {
+                script: std::sync::Mutex::new(script.iter().copied().collect()),
+                submitted: std::sync::Mutex::default(),
+            }
+        }
+
+        fn submitted(&self) -> Vec<Vec<String>> {
+            self.submitted.lock().unwrap().clone()
+        }
+    }
+
+    impl SmtpSubmit for ScriptedSmtp {
+        fn submit(
+            &self,
+            built: &BuiltMessage,
+            _smtp_config: &SmtpConfig,
+        ) -> impl std::future::Future<Output = Result<SendResult>> {
+            let verdict = self
+                .script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("a submission the script did not expect");
+            self.submitted.lock().unwrap().push(
+                built
+                    .recipients
+                    .iter()
+                    .map(|(address, _)| address.clone())
+                    .collect(),
+            );
+            let results = built
+                .recipients
+                .iter()
+                .map(|(address, role)| RecipientResult {
+                    address: address.clone(),
+                    role: *role,
+                    success: verdict == RecipientVerdict::Delivered,
+                    error: (verdict != RecipientVerdict::Delivered).then(|| format!("{verdict:?}")),
+                    verdict,
+                })
+                .collect();
+            std::future::ready(Ok(SendResult { results }))
+        }
+    }
+
     fn smtp_config() -> SmtpConfig {
         SmtpConfig {
             host: "smtp.invalid".to_string(),
@@ -4768,6 +4823,80 @@ mod smtp_durability_tests {
         assert_eq!(row.state, OutboxState::PendingSend);
         assert_eq!(row.submission_started_at, None);
         assert_eq!(row.attempts, 1, "a clean failure, under backoff");
+    }
+
+    /// `mp outbox retry` of a row whose first send may have arrived (no
+    /// verdict came back), where every recipient refuses the retried send: the
+    /// row is failed with no marker, so the draft can be corrected and sent
+    /// again, and nothing submits the message a further time on its own.
+    #[tokio::test]
+    async fn a_retry_every_recipient_refuses_is_not_sent_and_leaves_the_draft_correctable() {
+        let outbox = Outbox::new();
+        let mut built = Outbox::built("<refused-retry@example.com>", Some("id:refused"));
+        built
+            .recipients
+            .push(("carol@example.com".to_string(), RecipientRole::Cc));
+        let row_id = outbox.enqueue(&built);
+        let smtp = ScriptedSmtp::new(&[RecipientVerdict::Unknown, RecipientVerdict::Rejected]);
+        let drafts = outbox.dir.path().join("drafts");
+        let config = smtp_config();
+        let resume_at = |now: i64| {
+            let rows = outbox::pending_send_rows(&outbox.store, ACCOUNT).unwrap();
+            resubmit_rows(
+                &outbox.store,
+                &outbox.blobs,
+                ACCOUNT,
+                &drafts,
+                rows,
+                now,
+                &config,
+                &smtp,
+            )
+        };
+
+        // The first send loses its answer: parked, marker kept, the draft held.
+        resume_at(outbox::unix_now()).await;
+        let row = outbox.row(row_id);
+        assert_eq!(row.state, OutboxState::Failed);
+        assert!(row.submission_started_at.is_some());
+        assert!(
+            outbox::refuse_a_finished_draft(&outbox.store, ACCOUNT, "id:refused", None).is_err(),
+            "a send that may have arrived holds the draft"
+        );
+
+        // The operator retries, and every recipient refuses this time.
+        outbox::retry(&outbox.store, row_id).unwrap();
+        resume_at(outbox::unix_now()).await;
+        let row = outbox.row(row_id);
+        assert_eq!(row.state, OutboxState::Failed, "not sent");
+        assert_eq!(row.submission_started_at, None, "proof nothing went out");
+        let envelope = row.envelope.unwrap();
+        assert!(envelope.delivered.is_empty());
+        assert_eq!(envelope.rejected.len(), 2);
+        outbox::refuse_a_finished_draft(&outbox.store, ACCOUNT, "id:refused", None)
+            .expect("the draft can be corrected and sent again");
+
+        // No later pass submits it again, whatever the clock says, and a
+        // second retry finds no recipient left to try.
+        resume_at(outbox::unix_now() + 86_400).await;
+        assert_eq!(outbox.row(row_id).state, OutboxState::Failed);
+        outbox::retry(&outbox.store, row_id).unwrap();
+        resume_at(outbox::unix_now() + 86_400).await;
+        let row = outbox.row(row_id);
+        assert_eq!(row.state, OutboxState::Failed);
+        assert_eq!(row.submission_started_at, None);
+        let two = vec![
+            "bob@example.com".to_string(),
+            "carol@example.com".to_string(),
+        ];
+        assert_eq!(
+            smtp.submitted(),
+            vec![two.clone(), two],
+            "two passes, no third"
+        );
+        assert!(outbox::pending_send_rows(&outbox.store, ACCOUNT)
+            .unwrap()
+            .is_empty());
     }
 
     /// A marker write the store skips without an error (the row was no
