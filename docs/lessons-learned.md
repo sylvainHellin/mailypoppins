@@ -2877,3 +2877,12 @@ A mailbox is now current only while no outbox is shown, and the cursor is tinted
 ## shadcn's CommandDialog keeps its screen-reader title on the page while closed (2026-10-22)
 
 The generated `CommandDialog` renders its sr-only `DialogHeader` beside `DialogContent`, and Base UI's `Dialog.Title` renders wherever it is placed, so the title and description of a closed palette stayed in the accessibility tree; inside the popup they unmount with it, and the dialog keeps its name.
+
+## ratatui's row highlight paints over every span colour on the cursor row (2026-10-22)
+
+A `Table`'s `row_highlight_style` is applied to the whole row after the cells render, so it paints over each span's own colour on the cursor row; a span colour, like the tint of the user's own mailbox label, shows only off the cursor (PERSO-179).
+
+## The account's address alone missed the user's own Sent copies (2026-10-22)
+
+`own` was first decided on `default_from` alone, and the config names no aliases, so a Sent copy sent from an alias or from a former `default_from` read as someone else's.
+The daemon now also counts every member in the `sent` mailbox as the user's own, as `agenda.rs` and the contacts extractor already treat Sent (PERSO-179).

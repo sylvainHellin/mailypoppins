@@ -9,8 +9,13 @@ All notable changes to this project are documented in this file.
 - Desktop: the daemon's health checks that are not ok now show as calm, dismissible lines under the connection banner and in the activity log, from startup and live as they change; each line clears when its check recovers, and the config.toml line offers Open config.toml.
 - Desktop: `pnpm preview:browser` in clients/desktop runs the frontend in a browser on the tests' fixture backend, and `pnpm build` fails when an app module loads any part of that backend.
 - TUI and desktop: `ga` opens an account picker (#0147); j/k and Enter, or a digit, switch account, Esc and q cancel, and each row shows new mail (the inbox unread count in the app, a dot in the TUI) and whether the account is not ready yet. In the desktop sidebar only the selected account starts expanded, a header click expands another for the session, and `ga` Enter on the current account expands it again.
+- Conversations: your own messages stand apart in an expanded conversation, with a tinted mailbox label and "Me" as the sender, and a draft reads "Draft" in both clients (PERSO-179).
+  A message counts as yours when it comes from the account's address, so a note to self in the Inbox counts, or when it sits in Sent, so a message sent from an alias counts too.
+- Conversations: an expanded conversation reads as one block with a visible end, its members tinted and indented, closed by a rule in the desktop and by a corner branch in the TUI (PERSO-179).
 
 ### Changed
+- TUI: in the wide list an expanded member shows its sender under CONTACT and its mailbox under SUBJECT, and in the narrow list a long mailbox label is cut short so the sender stays visible (PERSO-179).
+- TUI themes: every text colour of the list reaches 4.5:1 on both list backgrounds; mailypoppins-light's orange is a step darker, and catppuccin-latte's muted text, green, blue and yellow are darker than the upstream palette (PERSO-179).
 - Desktop: prefix keys wait for the second key, as in the TUI (#0148). After g, f, c, t, s or Space the which-key list stays until the next key; Escape cancels it and does nothing else, and a click drops it.
 
 ### Fixed
