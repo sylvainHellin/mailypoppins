@@ -26,6 +26,12 @@ import { codeTheme } from '../styles/code-theme';
         View the resolved config at any time with <code>mp config show</code>.
         Print the file path with <code>mp config path</code>.
       </p>
+      <p>
+        A key mailypoppins does not know, such as a typo like <code>sync_intervall_secs</code>,
+        does not stop the file from loading: it is ignored, and <code>mp</code> prints a warning
+        naming it and its account on every command, as do the daemon log,
+        <code>mp daemon health</code>, the TUI's activity log and a banner line in the desktop app.
+      </p>
     </section>
 
     <!-- Full Example -->
@@ -240,8 +246,7 @@ sync_interval_secs = 900    # Seconds without a sync before the daemon runs one 
         Any other name under <code>[mailboxes]</code>, such as a
         <code>[mailboxes.spesen]</code> table written where a <code>[[mailboxes.extra]]</code>
         entry was meant, is not a mailbox: the config still loads, the table is ignored, and
-        <code>mp</code> prints a warning naming it on every command, as do the daemon log,
-        <code>mp daemon health</code>, the TUI's activity log and a banner line in the desktop app.
+        the warning for it says the folder belongs in a <code>[[mailboxes.extra]]</code> entry.
       </p>
       <ConfigExample code={`[mailboxes.inbox]
 server = "INBOX"

@@ -954,6 +954,7 @@ mod tests {
         }))
         .expect("a well-formed account renders");
         let config: GlobalConfig = toml::from_str(&block).expect("and parses back");
+        assert_eq!(crate::config::config_warnings(&block), Vec::<String>::new());
         assert_eq!(config.accounts[0].name, "al\"pha");
         assert_eq!(config.accounts[0].smtp.port, 587);
         assert_eq!(config.accounts[0].imap.body_fetch_deadline_secs, 12);

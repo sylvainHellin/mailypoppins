@@ -1050,51 +1050,120 @@ pub fn load_global_config_with_warnings() -> Result<(GlobalConfig, Vec<String>)>
     Ok((config, warnings))
 }
 
-/// The mailbox keys an account's `mailboxes` table understands; serde ignores
-/// any other, which is what [`config_warnings`] exists to say out loud.
-const MAILBOX_KEYS: [&str; 4] = ["inbox", "archive", "sent", "extra"];
-
-/// Non-fatal findings about a config document, one line each.
+/// Non-fatal findings about a config document, one line each: every key the
+/// typed load ignores, anywhere in the file.
 ///
-/// Today that is one kind: a key under `[accounts.mailboxes]` other than the
-/// three roles and `extra`. serde drops it without a word, so a
-/// `[accounts.mailboxes.spesen]` table written where a
-/// `[[accounts.mailboxes.extra]]` entry was meant loads cleanly and the folder
-/// is never synced; `mp sync --mailbox Spesen` then reports the account has no
-/// such mailbox and nothing points at the config (PERSO-118). A warning rather
-/// than a refusal, because a config that loaded yesterday must load today.
+/// serde drops an unknown key without a word, so a typo (`[emial]`,
+/// `sync_intervall_secs`) or a `[accounts.mailboxes.spesen]` table written
+/// where a `[[accounts.mailboxes.extra]]` entry was meant loads cleanly and
+/// does nothing; for the mailbox, `mp sync --mailbox Spesen` then reports the
+/// account has no such mailbox and nothing points at the config (PERSO-118).
+/// A warning rather than a refusal, because a config that loaded yesterday
+/// must load today.
+///
+/// The keys are the ones `serde_ignored` sees the [`GlobalConfig`]
+/// deserializer skip, so the list cannot drift from the types. A flattened map
+/// (the legacy signature tables) consumes every key it is handed, so nothing
+/// it accepts is reported.
 ///
 /// A document that does not parse yields nothing: the parse error is the
 /// caller's to report.
 pub fn config_warnings(content: &str) -> Vec<String> {
-    let Ok(document) = content.parse::<toml::Table>() else {
+    let mut ignored: Vec<Vec<KeyStep>> = Vec::new();
+    let parsed: std::result::Result<GlobalConfig, _> =
+        serde_ignored::deserialize(toml::Deserializer::new(content), |path| {
+            ignored.push(key_steps(&path))
+        });
+    let Ok(config) = parsed else {
         return Vec::new();
     };
-    let Some(accounts) = document.get("accounts").and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    let mut warnings = Vec::new();
-    for (index, account) in accounts.iter().enumerate() {
-        let Some(mailboxes) = account.get("mailboxes").and_then(|v| v.as_table()) else {
-            continue;
-        };
-        let name = account
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(|name| format!("account {name:?}"))
-            .unwrap_or_else(|| format!("account #{}", index + 1));
-        for key in mailboxes.keys() {
-            if MAILBOX_KEYS.contains(&key.as_str()) {
-                continue;
+    ignored
+        .iter()
+        .map(|steps| ignored_key_warning(&config, steps))
+        .collect()
+}
+
+/// One step of the path to an ignored key: a table key or an array position.
+enum KeyStep {
+    Key(String),
+    Index(usize),
+}
+
+/// The path `serde_ignored` reports, root first, without the steps an
+/// `Option` or a newtype adds, which are not in the file.
+fn key_steps(path: &serde_ignored::Path) -> Vec<KeyStep> {
+    use serde_ignored::Path;
+    let mut steps = Vec::new();
+    let mut at = path;
+    loop {
+        at = match at {
+            Path::Root => break,
+            Path::Seq { parent, index } => {
+                steps.push(KeyStep::Index(*index));
+                parent
             }
-            warnings.push(format!(
-                "{name}: unknown mailbox key `accounts.mailboxes.{key}` is ignored; \
+            Path::Map { parent, key } => {
+                steps.push(KeyStep::Key(key.clone()));
+                parent
+            }
+            Path::Some { parent }
+            | Path::NewtypeStruct { parent }
+            | Path::NewtypeVariant { parent } => parent,
+        };
+    }
+    steps.reverse();
+    steps
+}
+
+/// The warning for one ignored key. Under `[[accounts]]` the array position
+/// becomes the account's name, and a key straight under `mailboxes` gets the
+/// hint the ticket was about, since that is where a folder meant for `extra`
+/// lands.
+fn ignored_key_warning(config: &GlobalConfig, steps: &[KeyStep]) -> String {
+    let (account, rest) = match steps {
+        [KeyStep::Key(accounts), KeyStep::Index(index), rest @ ..] if accounts == "accounts" => {
+            let name = config
+                .accounts
+                .get(*index)
+                .map(|account| account.name.as_str())
+                .filter(|name| !name.is_empty())
+                .map(|name| format!("account {name:?}: "))
+                .unwrap_or_else(|| format!("account #{}: ", index + 1));
+            (Some(name), rest)
+        }
+        _ => (None, steps),
+    };
+    let prefix = account.as_deref().unwrap_or_default();
+    if let (Some(_), [KeyStep::Key(mailboxes), KeyStep::Key(key)]) = (&account, rest) {
+        if mailboxes == "mailboxes" {
+            return format!(
+                "{prefix}unknown mailbox key `accounts.mailboxes.{key}` is ignored; \
                  the mailbox roles are inbox, archive and sent, and any other folder \
                  goes in a `[[accounts.mailboxes.extra]]` entry with `server = \"...\"`"
-            ));
+            );
         }
     }
-    warnings
+    // The key as a TOML table path, with the entry of an inner array of
+    // tables (`[[accounts.hooks]]`) named in words after it.
+    let mut key = String::from(if account.is_some() { "accounts" } else { "" });
+    let mut entries = Vec::new();
+    for step in rest {
+        match step {
+            KeyStep::Key(name) => {
+                if !key.is_empty() {
+                    key.push('.');
+                }
+                key.push_str(name);
+            }
+            KeyStep::Index(index) => entries.push(format!("entry {} of `{key}`", index + 1)),
+        }
+    }
+    let entries = if entries.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", entries.join(", "))
+    };
+    format!("{prefix}unknown key `{key}`{entries} is ignored")
 }
 
 /// Reject out-of-range retention values at load time rather than at the first
@@ -2529,7 +2598,7 @@ server = "INBOX"
     }
 
     // -----------------------------------------------------------------------
-    // config_warnings: unknown mailbox keys (PERSO-118)
+    // config_warnings: every key the load ignores (PERSO-118)
     // -----------------------------------------------------------------------
 
     /// The shape the ticket was found with: a named table where an `extra`
@@ -2571,11 +2640,46 @@ server = "Projects"
         );
     }
 
-    #[test]
-    fn config_warnings_is_silent_on_the_known_mailbox_keys() {
-        let toml = r#"
+    /// Every key the types know, at every level, the legacy flattened
+    /// signature tables and a hook's free-form `headers` map included: a
+    /// realistic config yields no warning at all.
+    const EVERY_KEY: &str = r#"
+theme = "mailypoppins"
+notifications = true
+secrets_backend = "keyring"
+
+[email]
+font_family = "Georgia, serif"
+font_size = "15px"
+include_signature = false
+send_hold_secs = 10
+
+[retention]
+metadata_horizon_days = 0
+body_horizon_days = 365
+attachment_horizon_days = 90
+max_disk_bytes = 5000000000
+
 [[accounts]]
-name = "x"
+name = "tum"
+default_from = "Sylvain <s@tum.example>"
+auth_method = "password"
+save_to_sent = "never"
+
+[accounts.smtp]
+host = "smtp.tum.example"
+port = 587
+username = "s"
+accept_invalid_certs = false
+
+[accounts.imap]
+host = "imap.tum.example"
+port = 993
+username = "s"
+accept_invalid_certs = false
+fetch_concurrency = 2
+body_fetch_deadline_secs = 60
+sync_interval_secs = 600
 
 [accounts.mailboxes.inbox]
 server = "INBOX"
@@ -2585,10 +2689,86 @@ server = "Archive"
 server = "Sent"
 [[accounts.mailboxes.extra]]
 server = "Spesen"
+
+[accounts.signatures]
+default = "work"
+[accounts.signatures.work]
+name = "Work"
+text = "Best regards"
+[accounts.signatures.short]
+path = "~/sig.md"
+
+[accounts.retention]
+body_horizon_days = 30
+
+[[accounts.hooks]]
+name = "invoices"
+mailbox = "Spesen"
+exec = ["/usr/local/bin/file-invoice"]
+timeout_secs = 30
+[accounts.hooks.match]
+authenticated_from = ["billing@vendor.example"]
+authserv_id = "mx.tum.example"
+accept_spf = true
+to = ["s+invoices@tum.example"]
+subject = "(?i)rechnung"
+[accounts.hooks.match.headers]
+X-Mailer = "Vendor"
+
+[[accounts]]
+name = "hines"
+auth_method = "graph"
+
+[accounts.oauth2]
+client_id = "00000000-0000-0000-0000-000000000000"
+tenant_id = "common"
 "#;
-        assert!(config_warnings(toml).is_empty());
+
+    #[test]
+    fn config_warnings_is_silent_on_a_config_that_uses_every_key() {
+        let config: GlobalConfig = toml::from_str(EVERY_KEY).expect("the fixture parses");
+        validate_hooks(&config).expect("and its hook is one the daemon runs");
+        assert_eq!(config_warnings(EVERY_KEY), Vec::<String>::new());
         assert!(config_warnings("theme = \"terminal\"\n").is_empty());
         assert!(config_warnings("[[accounts]\nbroken").is_empty());
+    }
+
+    #[test]
+    fn config_warnings_names_a_top_level_typo() {
+        let warnings = config_warnings("notifcations = true\n\n[emial]\nfont_size = \"14px\"\n");
+        assert_eq!(
+            warnings,
+            [
+                "unknown key `notifcations` is ignored",
+                "unknown key `emial` is ignored"
+            ]
+        );
+        assert_eq!(
+            config_warnings("[email]\nsend_hold_sec = 5\n"),
+            ["unknown key `email.send_hold_sec` is ignored"]
+        );
+    }
+
+    #[test]
+    fn config_warnings_names_an_account_typo_by_the_account() {
+        let toml = "[[accounts]]\nname = \"home\"\n\n[[accounts]]\nname = \"tum\"\ndefault_form = \"x\"\n\n[accounts.imap]\nsync_intervall_secs = 60\n\n[accounts.oauth2]\nclient = \"x\"\n";
+        assert_eq!(
+            config_warnings(toml),
+            [
+                "account \"tum\": unknown key `accounts.default_form` is ignored",
+                "account \"tum\": unknown key `accounts.imap.sync_intervall_secs` is ignored",
+                "account \"tum\": unknown key `accounts.oauth2.client` is ignored",
+            ]
+        );
+    }
+
+    #[test]
+    fn config_warnings_names_the_entry_of_an_inner_array_of_tables() {
+        let toml = "[[accounts]]\nname = \"tum\"\n\n[[accounts.hooks]]\nname = \"a\"\nexec = [\"x\"]\n\n[[accounts.hooks]]\nname = \"b\"\nexec = [\"x\"]\n[accounts.hooks.mtach]\nto = [\"x\"]\n";
+        assert_eq!(
+            config_warnings(toml),
+            ["account \"tum\": unknown key `accounts.hooks.mtach` (entry 2 of `accounts.hooks`) is ignored"]
+        );
     }
 
     #[test]

@@ -287,7 +287,7 @@ fn preview_query_span(context: String) -> mp_core::timing::TimingSpan {
 
 impl App {
     pub fn new() -> Self {
-        // A config warning (an ignored mailbox key, PERSO-118) is not pushed
+        // A config warning (a key the load ignored, PERSO-118) is not pushed
         // here: the daemon's `config_loaded` check carries it into the
         // activity log through the bootstrap snapshot and, after an edit, a
         // `diagnostic.check_changed`, so it lands once and follows reloads.

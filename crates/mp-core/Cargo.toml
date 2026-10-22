@@ -53,6 +53,8 @@ time = { version = "0.3", features = ["macros"] }
 simplelog = "0.12"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
+# Names every config.toml key the typed load ignores (PERSO-118).
+serde_ignored = "0.1.14"
 zeroize = { version = "1.7", features = ["derive"] }
 # `types` re-exports the calendar frontmatter structs the daemon protocol owns
 # (P5-U10, #0124), so the YAML sidecar and the wire agree by construction.

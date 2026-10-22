@@ -556,6 +556,7 @@ All three print the two lines `mp daemon status` prints when nothing answers, an
 Every check `ok` is `✓ daemon healthy` and exit 0; a warning is `✓ daemon healthy, 1 check needs attention` and still exit 0, because a lock held elsewhere is a normal state of this machine; any failure is `✗ daemon unhealthy, 1 check failing` and exit 1, so a script running this as a probe learns something.
 The checks are `config_loaded`, `store_open`, `socket_owner`, `log_writable` and one `account:<name>` per configured account; `docs/daemon-protocol.md` fixes what each one means.
 `config_loaded` re-reads the file on disk rather than reporting the live snapshot, which is why a `config.reload` refused with `-32007` leaves it failing while the daemon keeps serving the configuration it has.
+A file that loads but carries a key the load ignores, anywhere in it, makes `config_loaded` a warning whose detail names each key and its account (PERSO-118).
 
 `mp daemon logs [--lines N] [--level L] [--json]` prints the tail of the structured log and **nothing** around it, because a header would end up in every `mp daemon logs | grep`.
 `--lines` defaults to 200 and above 5000 is refused naming the cap; `--level` is a minimum and takes `trace`, `debug`, `info`, `warn` or `error`.

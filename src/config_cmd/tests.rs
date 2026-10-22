@@ -145,6 +145,11 @@ fn test_build_init_toml_parseable() {
     // Verify the generated TOML is actually parseable as a valid GlobalConfig
     let config: crate::config::GlobalConfig =
         toml::from_str(&toml_str).expect("Generated TOML should be parseable as GlobalConfig");
+    // Every key the generator writes is one the load reads.
+    assert_eq!(
+        crate::config::config_warnings(&toml_str),
+        Vec::<String>::new()
+    );
     assert_eq!(config.accounts.len(), 1);
     assert_eq!(config.accounts[0].name, "test");
     assert_eq!(config.accounts[0].default_from, "test@example.com");
@@ -218,6 +223,11 @@ fn test_build_add_account_toml_appended_is_valid() {
     let combined = format!("{}{}", base, addition);
     let config: crate::config::GlobalConfig =
         toml::from_str(&combined).expect("Combined TOML should be parseable");
+    // Every key the generator writes is one the load reads.
+    assert_eq!(
+        crate::config::config_warnings(&combined),
+        Vec::<String>::new()
+    );
     assert_eq!(config.accounts.len(), 2);
     assert_eq!(config.accounts[0].name, "main");
     assert_eq!(config.accounts[1].name, "work");
@@ -252,6 +262,11 @@ fn test_build_init_toml_oauth2_exchange() {
 
     let config: crate::config::GlobalConfig =
         toml::from_str(&toml_str).expect("OAuth2 TOML should be parseable");
+    // Every key the generator writes is one the load reads.
+    assert_eq!(
+        crate::config::config_warnings(&toml_str),
+        Vec::<String>::new()
+    );
     assert_eq!(config.accounts[0].name, "work");
     assert_eq!(
         config.accounts[0].auth_method,
@@ -286,6 +301,11 @@ fn test_build_init_toml_password_no_oauth2_section() {
 
     let config: crate::config::GlobalConfig =
         toml::from_str(&toml_str).expect("Password TOML should be parseable");
+    // Every key the generator writes is one the load reads.
+    assert_eq!(
+        crate::config::config_warnings(&toml_str),
+        Vec::<String>::new()
+    );
     assert_eq!(
         config.accounts[0].auth_method,
         crate::config::AuthMethod::Password
@@ -365,6 +385,11 @@ fn wizard_answers_needing_toml_escapes_round_trip() {
     super::init::ensure_config_parses(&combined).expect("the escaped config parses");
     let config: crate::config::GlobalConfig =
         toml::from_str(&combined).expect("the escaped config parses");
+    // Every key the generator writes is one the load reads.
+    assert_eq!(
+        crate::config::config_warnings(&combined),
+        Vec::<String>::new()
+    );
 
     assert_eq!(config.accounts.len(), 2);
     for account in &config.accounts {
@@ -403,6 +428,8 @@ fn wizard_answers_needing_toml_escapes_round_trip() {
         "g", from, "client", "tenant", odd_box, "Archive", "Sent", &extra,
     );
     let config: crate::config::GlobalConfig = toml::from_str(&graph).expect("graph block parses");
+    // Every key the generator writes is one the load reads.
+    assert_eq!(crate::config::config_warnings(&graph), Vec::<String>::new());
     assert_eq!(config.accounts[0].default_from, from);
     assert_eq!(
         config.accounts[0].mailboxes.inbox.as_ref().unwrap().server,
@@ -445,6 +472,8 @@ fn graph_wizard_defaults_to_the_mailypoppins_app_and_common() {
         super::init::ensure_config_parses(&block).expect("the graph block parses");
         let config: crate::config::GlobalConfig =
             toml::from_str(&block).expect("graph block parses");
+        // Every key the generator writes is one the load reads.
+        assert_eq!(crate::config::config_warnings(&block), Vec::<String>::new());
         let graph = crate::config::GraphConfig::load(&config.accounts[0]).expect("graph config");
         assert_eq!(graph.client_id, client_out);
         assert_eq!(graph.tenant_id, tenant_out);

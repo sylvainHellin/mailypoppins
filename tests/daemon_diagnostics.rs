@@ -219,9 +219,33 @@ const MARKERS: [&str; 5] = [
 ];
 
 /// The sandbox configuration: two accounts with no host anywhere, so no
-/// runtime reaches for a network, and five secrets in the five key shapes the
-/// redaction rule names.
+/// runtime reaches for a network, and every key one the load reads, so a
+/// seeded root passes every check.
 const CONFIG: &str = r#"[[accounts]]
+name = "alpha"
+default_from = "alpha@example.com"
+
+[accounts.smtp]
+username = "alpha@example.com"
+
+[accounts.imap]
+username = "alpha@example.com"
+
+[accounts.oauth2]
+client_id = "00000000-0000-0000-0000-000000000000"
+tenant_id = "common"
+
+[[accounts]]
+name = "beta"
+default_from = "beta@example.com"
+"#;
+
+/// [`CONFIG`] with five secrets in the five key shapes the redaction rule
+/// names, for the bundle rows. No secret lives in `config.toml` any more, so
+/// the load ignores all five and `config_loaded` warns about them, which is
+/// why the other rows do not seed this one; a file written before the secrets
+/// backend still carries them, and the bundle must still strike them.
+const CONFIG_WITH_SECRETS: &str = r#"[[accounts]]
 name = "alpha"
 default_from = "alpha@example.com"
 
@@ -273,8 +297,17 @@ impl Diag {
 
     /// The same, with hooks put back on top of the sandbox.
     fn start_with(env: &[(&str, &str)]) -> Diag {
+        Diag::launch(CONFIG, env)
+    }
+
+    /// The same over [`CONFIG_WITH_SECRETS`], for the bundle rows.
+    fn start_with_secrets() -> Diag {
+        Diag::launch(CONFIG_WITH_SECRETS, &[])
+    }
+
+    fn launch(config: &str, env: &[(&str, &str)]) -> Diag {
         let tmp = tempfile::tempdir().expect("a temporary diagnostics root");
-        seed(tmp.path());
+        seed(tmp.path(), config);
         let daemon = DaemonFixture::start_with(tmp.path(), None, env);
         wait_settled(tmp.path());
         Diag {
@@ -304,9 +337,9 @@ impl Diag {
 }
 
 /// Write the configuration and one store per account under `root`.
-fn seed(root: &Path) {
+fn seed(root: &Path, config: &str) {
     fs::create_dir_all(root).unwrap_or_else(|e| panic!("create {}: {e}", root.display()));
-    fs::write(root.join("config.toml"), CONFIG).expect("write config.toml");
+    fs::write(root.join("config.toml"), config).expect("write config.toml");
     for account in [ALPHA, BETA] {
         let dir = account_dir(root, account);
         fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
@@ -960,7 +993,7 @@ fn every_check_status_is_one_of_three_words() {
 #[test]
 fn an_account_blocked_by_another_engine_is_a_warning() {
     let tmp = tempfile::tempdir().expect("a temporary diagnostics root");
-    seed(tmp.path());
+    seed(tmp.path(), CONFIG);
     let held = EngineLock::try_acquire_at(&engine_lock_path(tmp.path(), BETA), BETA)
         .expect("the engine lock is readable")
         .expect("and free before the daemon starts");
@@ -1012,7 +1045,7 @@ fn an_account_blocked_by_another_engine_is_a_warning() {
 #[test]
 fn an_account_whose_runtime_never_came_up_is_a_failure() {
     let tmp = tempfile::tempdir().expect("a temporary diagnostics root");
-    seed(tmp.path());
+    seed(tmp.path(), CONFIG);
     fs::write(
         tmp.path().join("config.toml"),
         format!("{CONFIG}\n[[accounts]]\nname = \"gamma\"\ndefault_from = \"gamma@example.com\"\n"),
@@ -1411,7 +1444,7 @@ fn a_bundle_holds_five_files_and_nothing_else() {
 /// mails to a stranger.
 #[test]
 fn a_redacted_bundle_carries_no_secret() {
-    let diag = Diag::start();
+    let diag = Diag::start_with_secrets();
     // One marker into the log as well, so the row is about all five files and
     // not only about the one every marker is seeded into.
     let logged = log_a_secret(diag.root(), MARKERS[0]);
@@ -1466,7 +1499,7 @@ fn a_redacted_bundle_carries_no_secret() {
 /// not passing over an empty bundle.
 #[test]
 fn an_unredacted_bundle_is_the_control() {
-    let diag = Diag::start();
+    let diag = Diag::start_with_secrets();
     let logged = log_a_secret(diag.root(), MARKERS[0]);
     let result = block_on(async {
         let mut conn = client(diag.root()).await;
@@ -1579,7 +1612,7 @@ fn a_bundle_goes_where_out_names_and_out_is_absolute() {
 #[test]
 fn the_bootstrap_carries_the_checks_that_are_not_ok() {
     let tmp = tempfile::tempdir().expect("a temporary diagnostics root");
-    seed(tmp.path());
+    seed(tmp.path(), CONFIG);
     let held = EngineLock::try_acquire_at(&engine_lock_path(tmp.path(), BETA), BETA)
         .expect("the engine lock is readable")
         .expect("and free before the daemon starts");
@@ -1848,7 +1881,7 @@ fn mp_daemon_health_prints_the_block_it_promises() {
 #[test]
 fn mp_daemon_health_treats_a_warning_as_healthy() {
     let tmp = tempfile::tempdir().expect("a temporary diagnostics root");
-    seed(tmp.path());
+    seed(tmp.path(), CONFIG);
     let held = EngineLock::try_acquire_at(&engine_lock_path(tmp.path(), BETA), BETA)
         .expect("the engine lock is readable")
         .expect("and free before the daemon starts");
@@ -1883,7 +1916,7 @@ fn mp_daemon_health_treats_a_warning_as_healthy() {
 #[test]
 fn mp_daemon_health_exits_one_on_a_failing_check() {
     let tmp = tempfile::tempdir().expect("a temporary diagnostics root");
-    seed(tmp.path());
+    seed(tmp.path(), CONFIG);
     fs::write(
         tmp.path().join("config.toml"),
         format!("{CONFIG}\n[[accounts]]\nname = \"gamma\"\ndefault_from = \"gamma@example.com\"\n"),
@@ -1965,7 +1998,7 @@ fn mp_daemon_logs_prints_the_lines_and_no_header() {
 /// `mp daemon support-bundle` writes where it is told and reports what it did.
 #[test]
 fn mp_daemon_support_bundle_reports_what_it_wrote() {
-    let diag = Diag::start();
+    let diag = Diag::start_with_secrets();
     let out = diag.mp(&["daemon", "support-bundle"]);
     assert_eq!(code(&out), 0, "stderr: {}", stderr_text(&out));
     let lines = stdout_lines(&out);
@@ -2015,7 +2048,7 @@ fn mp_daemon_support_bundle_says_when_it_did_not_redact() {
 #[test]
 fn the_three_commands_refuse_when_no_daemon_is_running() {
     let tmp = tempfile::tempdir().expect("a temporary diagnostics root");
-    seed(tmp.path());
+    seed(tmp.path(), CONFIG);
 
     for args in [
         vec!["daemon", "health"],

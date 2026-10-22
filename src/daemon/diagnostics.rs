@@ -405,7 +405,8 @@ impl Diagnostics {
             Ok(config) => {
                 let loaded = format!("{shown} loaded, {} account(s)", config.accounts.len());
                 // A key the load ignored (PERSO-118) does not stop the load
-                // but is worth the amber: it is a folder that never syncs.
+                // but is worth the amber: it is a setting, or a folder, that
+                // silently does nothing.
                 let warnings = crate::config::config_warnings(&text);
                 if warnings.is_empty() {
                     Check::new("config_loaded", Status::Ok, loaded)
