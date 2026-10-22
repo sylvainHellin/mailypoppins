@@ -31,7 +31,7 @@ For the TUM tenant, still blocked:
 
 App registered 2026-10-21: client ID `439d7ebd-7898-4df2-b2d6-88bb61e2597b`, tenant `365f441f-42ba-4b36-851f-8b124c7becbb` (mailypoppins).
 EVOQS: consented for the whole organisation by Sylvain at the first device-code sign-in (2026-10-21); the `evoqs` Graph account syncs. For the onboarding test, delete the app from EVOQS's Enterprise applications after verification and consent again as a new organisation would.
-Publisher verification: `mailypoppins.com` is a verified custom domain in the mailypoppins tenant, the native admin `admin@mailypoppins.com` has MFA, app branding is saved (logo, home page, privacy URL, publisher domain), and the Partner Center enrolment of EVOQS GmbH (contact `admin@mailypoppins.com`) is submitted (2026-10-21).
+Publisher verification: `mailypoppins.com` is a verified custom domain in the mailypoppins tenant, the native admin `admin@mailypoppins.com` has MFA, app branding is saved (logo, home page, privacy URL, publisher domain), the Partner Center enrolment of EVOQS GmbH (contact `admin@mailypoppins.com`) is submitted (2026-10-21), and Sylvain completed the Verified ID check (2026-10-22); Microsoft's review of the enrolment is pending.
 Contact verification passed; business verification waits on Microsoft; identity verification waits on Sylvain's Verified ID in Microsoft Authenticator (Partner Center > Account settings > Legal entity info > Verification Summary).
 Next: once verified, add the Partner One ID under the app's Branding & properties > Publisher verification and click Verify, signed in as `admin@mailypoppins.com`.
 TUM: admin approval unobtainable; revisit if the tenant policy changes.
