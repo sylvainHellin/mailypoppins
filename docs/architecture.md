@@ -341,6 +341,15 @@ A row with a recipient that gave no verdict at all is parked in `failed` as befo
 One draft is one submission at a time.
 Every build mints a fresh `Message-ID`, so a second send of the same draft would look like an unrelated message to both the outbox and the Sent dedup search; the envelope therefore carries the draft key, `outbox::enqueue` refuses a draft that already has an open row, and `send_draft` holds a process-wide slot per draft so the TUI's cursor send and approved batch cannot both submit it.
 
+A Graph account submits through `send::graph_submit`, from the same RFC 822 bytes the outbox row holds.
+A message whose base64 MIME fits one request (3.5 MB) goes as one MIME `/me/sendMail`, which keeps our `Message-ID`, `In-Reply-To` and `References` (PERSO-144).
+A larger one is staged: a draft created from the same MIME with its largest attachments taken out, those attachments added to the draft one request each (a POST under 2.5 MB, an upload session above), then `POST /me/messages/{id}/send`.
+The draft keeps every header the small path sends, so a large reply threads in Outlook like a small one; this was chosen over `createReply` on the parent because it keeps our `Message-ID`, needs no Graph id of the parent, and serves forwards and new messages too.
+Only a body too large for any MIME request still goes as the JSON resource, staged the same way, and that one carries no threading headers, since Graph accepts only `x-` names in `internetMessageHeaders`.
+The marker is committed immediately before the one request that delivers (`sendMail` or the draft's `send`), never before creating or filling a draft, and the draft's Graph id goes into the row's envelope (`graph-draft:`) as soon as it exists.
+The resume (`graph_submit::resume_rows`) settles every Graph `pending_send` row instead of sweeping it: with no marker it discards whatever an interrupted attempt left in Drafts under our `Message-ID` or the recorded id and submits afresh; with a marker it asks the mailbox, records a copy in Sent Items as sent, sends the recorded draft again if it is still in Drafts 600 s after its send, and parks the row in `failed` when neither is there.
+A live delivering request that loses its answer leaves the row `pending_send` with its marker for that same reconciliation, and a resume leaves alone any row whose draft a send in this process still holds.
+
 ## Sync backends
 
 Two transports, one ingest path and one `SyncResult` shape: IMAP/SMTP for password and OAuth2 XOAUTH2 accounts, Microsoft Graph REST for tenants that block IMAP/SMTP (see [auth.md](auth.md)).
@@ -423,6 +432,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `mp-core/draft.rs` + `src/draft.rs` | Draft parsing and validation, reply and forward creation, status transitions. Split at what needs an index, a row or an outbox record: the file format is in `mp-core`, `new_draft_skeleton`, `source_from_row`, `create_draft_from_source`, `settle_sent_draft` and `delete_indexed_draft` stay. |
 | `mp-core/addresses.rs` | RFC 5322 address strings: `split_addresses`, `normalize_address_for_smtp`, `quote_display_name`, `format_recipient`. Out of `send` in P5-U10b, which re-exports them, because `draft`'s validation reads them and wants no transport. |
 | `src/send.rs` | `markdown_to_html`, message building, `send_draft` + `SendContext`, per-recipient submission, `DurableSend`, `resume_outbox` |
+| `src/send/graph_submit.rs` | The Graph submission: the plan (one MIME `sendMail`, or a draft with attachments added separately), the staged send behind the `GraphSendApi` seam, and the resume that settles a Graph `pending_send` row against the mailbox |
 | `src/outbox.rs` | The durable send state machine and its blob refcounting |
 | `src/ops.rs` | `ServerOp` (the remote half of a mutation) and its IMAP/Graph execution seam `run_op`, at library layer so the durable queue and the CLI can drive it without depending on `tui/` |
 | `src/pending_ops.rs` | The durable mutation queue (#0039): atomic local-write-plus-enqueue, the drain with backoff and per-kind rollback, crash-replay, `resume_account` (sync-tick drain) and `run_and_settle` (the CLI's synchronous single-op path) |

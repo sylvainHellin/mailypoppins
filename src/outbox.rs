@@ -271,6 +271,11 @@ pub struct Envelope {
     /// durable half of the admission gate: a second send of the same draft
     /// finds this row instead of enqueuing a second copy (#0063).
     pub draft_key: Option<String>,
+    /// The server-side draft a staged Graph submission created for this row
+    /// and has not yet sent or discarded ([`crate::graph_send`], #0063 item
+    /// 3): the one item a resume may send in place of creating another, and
+    /// the one it must discard before creating another.
+    pub graph_draft: Option<String>,
 }
 
 /// Two recipient strings that name the same recipient.
@@ -325,6 +330,10 @@ impl Envelope {
             out.push_str("\ndraft:");
             out.push_str(&one_line(key));
         }
+        if let Some(id) = &self.graph_draft {
+            out.push_str("\ngraph-draft:");
+            out.push_str(&one_line(id));
+        }
         out
     }
 
@@ -349,6 +358,7 @@ impl Envelope {
                     env.rejected.push((addr.to_string(), reason.to_string()));
                 }
                 "draft" => env.draft_key = Some(addr.to_string()),
+                "graph-draft" => env.graph_draft = Some(addr.to_string()),
                 _ => {}
             }
         }
@@ -559,7 +569,7 @@ pub enum AppendOutcome {
 
 /// Marker error for a submission that never produced a verdict.
 ///
-/// Attached by a transport (see [`crate::graph::GraphClient::send_mail`]) when
+/// Attached by a transport (see [`crate::graph::GraphClient::send_mime`]) when
 /// the request went out but no answer came back, so the message may or may not
 /// have been accepted. [`classify_submission_error`] turns it into
 /// [`SubmitOutcome::Ambiguous`], which parks the row in `failed` instead of
@@ -811,6 +821,44 @@ pub fn mark_submission_started(store: &Store, id: i64) -> Result<()> {
         warn!("[outbox] row {id} is not pending_send; not marking a submission start");
     }
     Ok(())
+}
+
+/// Record on a `pending_send` row which server-side draft a staged Graph
+/// submission holds for it, or that it holds none any more (#0063 item 3).
+///
+/// Committed on its own, immediately after the draft is created and after it
+/// is discarded, so a process that dies anywhere in between leaves a row that
+/// names the item a resume has to send or clean up. A row that has left
+/// `pending_send` is not touched: its draft, if any, is already settled.
+pub fn set_graph_draft(store: &Store, id: i64, draft: Option<&str>) -> Result<()> {
+    let Some(row) = load(store, id)? else {
+        return Ok(());
+    };
+    if row.state != OutboxState::PendingSend {
+        return Ok(());
+    }
+    let mut envelope = row.envelope.unwrap_or_default();
+    envelope.graph_draft = draft.map(str::to_string);
+    store
+        .conn()
+        .execute(
+            "UPDATE outbox SET envelope = ?2 WHERE id = ?1 AND state = 'pending_send'",
+            rusqlite::params![id, envelope.encode()],
+        )
+        .context("recording the Graph draft of an outbox row")?;
+    Ok(())
+}
+
+/// Every `pending_send` row of one account, oldest first, marker or not and
+/// without moving any of them.
+///
+/// The Graph resume reads these instead of [`sweep_pending_sends`]: a Graph
+/// submission that died inside its delivering request can be settled by
+/// asking the mailbox whether the message is in Sent Items, so a marker there
+/// is a question to put to the server rather than a reason to park the row
+/// ([`crate::graph_send::resume_rows`]).
+pub fn pending_send_rows(store: &Store, account: &str) -> Result<Vec<OutboxRow>> {
+    rows_in_states(store, account, "state = 'pending_send'")
 }
 
 /// Record what SMTP did. The only transition out of `pending_send`.

@@ -3262,13 +3262,14 @@ pub async fn sync_mailboxes_graph(
 // Phase 5: Send via Graph
 // ---------------------------------------------------------------------------
 
-/// The largest base64 MIME body sent through `/me/sendMail` (PERSO-144).
+/// The largest base64 MIME body sent in one Graph request, a `/me/sendMail`
+/// or a `/me/messages` draft (PERSO-144).
 ///
-/// Graph caps a sendMail request at about 4 MB (a 413 or "maximum request
-/// length supported is 4MB" above it); 3.5 MB of base64, about 2.6 MB of raw
-/// MIME, leaves headroom for the request line and headers and for the cap
-/// being counted in MiB or MB. A message above it goes as the JSON payload,
-/// which has no threading headers.
+/// Graph caps a request at about 4 MB (a 413 or "maximum request length
+/// supported is 4MB" above it); 3.5 MB of base64, about 2.6 MB of raw MIME,
+/// leaves headroom for the request line and headers and for the cap being
+/// counted in MiB or MB. A message above it goes as a draft whose attachments
+/// are added one request each ([`crate::send::graph_submit`]).
 pub const MIME_SEND_MAX_BASE64_BYTES: usize = 3_500_000;
 
 /// The request body `/me/sendMail` takes for a MIME send: the whole
@@ -3278,109 +3279,129 @@ pub fn mime_send_body(mime: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(mime)
 }
 
-/// Whether a base64 MIME body of `base64_len` bytes is small enough for a
-/// MIME sendMail; see [`MIME_SEND_MAX_BASE64_BYTES`].
+/// Whether a base64 MIME body of `base64_len` bytes is small enough for one
+/// MIME request; see [`MIME_SEND_MAX_BASE64_BYTES`].
 pub fn fits_mime_send(base64_len: usize) -> bool {
     base64_len <= MIME_SEND_MAX_BASE64_BYTES
 }
 
-impl GraphClient {
-    /// Send an email via Graph API's /me/sendMail endpoint, as the JSON
-    /// message resource.
-    /// Graph automatically places the message in Sent Items.
-    ///
-    /// Exchange stamps its own `Message-ID` and the JSON form takes no
-    /// `In-Reply-To` or `References`, so this is only the fallback for a
-    /// message too large for [`GraphClient::send_mime`].
-    pub async fn send_mail(
-        &self,
-        to: &[(&str, &str)], // (name, address) pairs
-        cc: &[(&str, &str)],
-        bcc: &[(&str, &str)],
-        subject: &str,
-        html_body: &str,
-        attachments: &[(String, Vec<u8>, String)], // (filename, content, content_type)
-    ) -> Result<()> {
-        let url = format!("{}/me/sendMail", GRAPH_BASE);
+/// The largest attachment added to a draft in one `POST .../attachments`.
+///
+/// Graph's guidance is one POST under 3 MB and an upload session from 3 MB to
+/// 150 MB; the POST carries the bytes as base64 inside JSON, so 2.5 MB of file
+/// is about 3.4 MB of request, under the same 4 MB cap with the same headroom
+/// [`MIME_SEND_MAX_BASE64_BYTES`] keeps.
+pub const ATTACHMENT_POST_MAX_BYTES: usize = 2_500_000;
 
-        let to_json: Vec<serde_json::Value> = to
-            .iter()
-            .map(|(name, addr)| {
-                serde_json::json!({
-                    "emailAddress": {
-                        "name": name,
-                        "address": addr
-                    }
-                })
-            })
-            .collect();
+/// The byte range one upload-session `PUT` carries: Graph asks for less than
+/// 4 MB per request.
+pub const UPLOAD_CHUNK_BYTES: usize = 3 * 1024 * 1024;
 
-        let cc_json: Vec<serde_json::Value> = cc
-            .iter()
-            .map(|(name, addr)| {
-                serde_json::json!({
-                    "emailAddress": {
-                        "name": name,
-                        "address": addr
-                    }
-                })
-            })
-            .collect();
+/// One file attachment added to a Graph draft after the draft is created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutgoingAttachment {
+    pub name: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
 
-        let bcc_json: Vec<serde_json::Value> = bcc
-            .iter()
-            .map(|(name, addr)| {
-                serde_json::json!({
-                    "emailAddress": {
-                        "name": name,
-                        "address": addr
-                    }
-                })
-            })
-            .collect();
+/// What the mailbox holds under one RFC 5322 `Message-ID`, for the outbox's
+/// resume (#0063 item 3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerCopies {
+    /// A copy that is not a draft exists: Exchange has sent the message and
+    /// filed it (Sent Items, or wherever a rule moved it).
+    pub sent: bool,
+    /// The Graph ids of the copies still sitting in Drafts.
+    pub drafts: Vec<String>,
+}
 
-        let att_json: Vec<serde_json::Value> = attachments
-            .iter()
-            .map(|(filename, content, content_type)| {
-                use base64::Engine;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(content);
-                serde_json::json!({
-                    "@odata.type": "#microsoft.graph.fileAttachment",
-                    "name": filename,
-                    "contentType": content_type,
-                    "contentBytes": b64
-                })
-            })
-            .collect();
+/// The JSON body of `POST /me/messages/{id}/attachments` for one small file.
+pub fn attachment_post_body(attachment: &OutgoingAttachment) -> serde_json::Value {
+    use base64::Engine;
+    serde_json::json!({
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "name": attachment.name,
+        "contentType": attachment.content_type,
+        "contentBytes": base64::engine::general_purpose::STANDARD.encode(&attachment.bytes),
+    })
+}
 
-        let mut message = serde_json::json!({
-            "subject": subject,
-            "body": {
-                "contentType": "HTML",
-                "content": html_body
-            },
-            "toRecipients": to_json,
-        });
-
-        if !cc_json.is_empty() {
-            message["ccRecipients"] = serde_json::json!(cc_json);
+/// The JSON body of `POST /me/messages/{id}/attachments/createUploadSession`.
+pub fn upload_session_body(attachment: &OutgoingAttachment) -> serde_json::Value {
+    serde_json::json!({
+        "AttachmentItem": {
+            "attachmentType": "file",
+            "name": attachment.name,
+            "contentType": attachment.content_type,
+            "size": attachment.bytes.len(),
         }
-        if !bcc_json.is_empty() {
-            message["bccRecipients"] = serde_json::json!(bcc_json);
-        }
-        if !att_json.is_empty() {
-            message["attachments"] = serde_json::json!(att_json);
-        }
+    })
+}
 
-        let payload = serde_json::json!({
-            "message": message,
-            "saveToSentItems": "true"
-        });
+/// The `[start, end)` byte ranges an upload session sends, in order.
+pub fn upload_ranges(total: usize, chunk: usize) -> Vec<(usize, usize)> {
+    let chunk = chunk.max(1);
+    (0..total)
+        .step_by(chunk)
+        .map(|start| (start, (start + chunk).min(total)))
+        .collect()
+}
 
-        self.submit_send_mail(self.client.post(&url).json(&payload))
-            .await
+/// The `Content-Range` header of one upload-session `PUT`: inclusive bounds,
+/// then the file size.
+pub fn content_range(start: usize, end: usize, total: usize) -> String {
+    format!("bytes {start}-{}/{total}", end.saturating_sub(1))
+}
+
+/// `/me/messages/{id}/{action}`.
+fn message_action_url(message_id: &str, action: &str) -> String {
+    format!("{GRAPH_BASE}/me/messages/{message_id}/{action}")
+}
+
+/// A request that may deliver the message failed: say whether it can have.
+///
+/// A connect or builder failure never reached the API, so nothing was sent;
+/// anything else (a timeout, a dropped response) leaves it unknown, and the
+/// outbox must settle it by asking the mailbox rather than by sending again.
+/// See [`crate::outbox::AmbiguousSubmission`].
+fn delivering_request_error(e: reqwest::Error, what: &str) -> anyhow::Error {
+    if e.is_connect() || e.is_builder() {
+        anyhow!(e).context(format!("{what} via Graph API"))
+    } else {
+        anyhow!(crate::outbox::AmbiguousSubmission(e.to_string()))
+            .context(format!("{what} via Graph API"))
     }
+}
 
+/// The id of the message a `201 Created` answered with.
+#[derive(Debug, Deserialize)]
+struct CreatedMessage {
+    id: String,
+}
+
+/// The `uploadUrl` of a new upload session.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadSession {
+    upload_url: String,
+}
+
+/// One copy of a message, as the resume's lookup selects it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CopyEntry {
+    id: String,
+    #[serde(default)]
+    is_draft: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CopyList {
+    value: Vec<CopyEntry>,
+}
+
+impl GraphClient {
     /// Send a whole RFC 5322 message through `/me/sendMail` (PERSO-144).
     ///
     /// `mime_base64` is [`mime_send_body`] of the bytes: Graph takes the
@@ -3390,34 +3411,16 @@ impl GraphClient {
     /// Saved to Sent Items, the endpoint's default.
     pub async fn send_mime(&self, mime_base64: String) -> Result<()> {
         let url = format!("{}/me/sendMail", GRAPH_BASE);
-        self.submit_send_mail(
-            self.client
-                .post(&url)
-                .header(reqwest::header::CONTENT_TYPE, "text/plain")
-                .body(mime_base64),
-        )
-        .await
-    }
-
-    /// Issue one `/me/sendMail` request, JSON or MIME, and read its outcome
-    /// with the outbox's durability semantics.
-    async fn submit_send_mail(&self, request: reqwest::RequestBuilder) -> Result<()> {
-        // A connect or builder failure never reached the API, so nothing was
-        // sent; anything else (a timeout, a dropped response) leaves it
-        // unknown, and the outbox must not re-send on its own. See
-        // [`crate::outbox::AmbiguousSubmission`].
-        let resp = match request.bearer_auth(self.bearer()).send().await {
-            Ok(resp) => resp,
-            Err(e) if e.is_connect() || e.is_builder() => {
-                return Err(anyhow!(e).context("Failed to send mail via Graph API"))
-            }
-            Err(e) => {
-                return Err(anyhow!(crate::outbox::AmbiguousSubmission(e.to_string()))
-                    .context("Failed to send mail via Graph API"))
-            }
-        };
-
-        if resp.status().is_success() || resp.status().as_u16() == 202 {
+        let resp = self
+            .client
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "text/plain")
+            .body(mime_base64)
+            .bearer_auth(self.bearer())
+            .send()
+            .await
+            .map_err(|e| delivering_request_error(e, "Failed to send mail"))?;
+        if resp.status().is_success() {
             info!("Graph sendMail succeeded");
             Ok(())
         } else {
@@ -3425,6 +3428,217 @@ impl GraphClient {
             let body = resp.text().await.unwrap_or_default();
             Err(anyhow!("Graph sendMail failed (HTTP {}): {}", status, body))
         }
+    }
+
+    /// Create a draft from a whole RFC 5322 message, `POST /me/messages` with
+    /// the base64 MIME as a `text/plain` body, and return its Graph id.
+    ///
+    /// The same MIME conversion `/me/sendMail` runs, so the draft keeps the
+    /// headers a MIME send keeps; the difference is that nothing goes out
+    /// until [`GraphClient::send_draft`].
+    pub async fn create_draft_mime(&self, mime_base64: String) -> Result<String> {
+        let request = self
+            .client
+            .post(format!("{GRAPH_BASE}/me/messages"))
+            .header(reqwest::header::CONTENT_TYPE, "text/plain")
+            .body(mime_base64);
+        self.create_draft(request).await
+    }
+
+    /// Create a draft from a JSON message resource and return its Graph id.
+    pub async fn create_draft_json(&self, message: &serde_json::Value) -> Result<String> {
+        let request = self
+            .client
+            .post(format!("{GRAPH_BASE}/me/messages"))
+            .json(message);
+        self.create_draft(request).await
+    }
+
+    async fn create_draft(&self, request: reqwest::RequestBuilder) -> Result<String> {
+        let resp = request
+            .bearer_auth(self.bearer())
+            .send()
+            .await
+            .context("Failed to create the Graph draft")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Creating the Graph draft failed (HTTP {status}): {body}"
+            ));
+        }
+        let created: CreatedMessage = resp
+            .json()
+            .await
+            .context("Failed to read the created Graph draft")?;
+        Ok(created.id)
+    }
+
+    /// Add one file to a draft: a single POST when it is small, an upload
+    /// session in [`UPLOAD_CHUNK_BYTES`] ranges otherwise.
+    pub async fn add_attachment(
+        &self,
+        draft_id: &str,
+        attachment: &OutgoingAttachment,
+    ) -> Result<()> {
+        if attachment.bytes.len() <= ATTACHMENT_POST_MAX_BYTES {
+            let resp = self
+                .client
+                .post(message_action_url(draft_id, "attachments"))
+                .bearer_auth(self.bearer())
+                .json(&attachment_post_body(attachment))
+                .send()
+                .await
+                .with_context(|| format!("Failed to attach {}", attachment.name))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(anyhow!(
+                    "Attaching {} failed (HTTP {status}): {body}",
+                    attachment.name
+                ));
+            }
+            return Ok(());
+        }
+
+        let resp = self
+            .client
+            .post(message_action_url(
+                draft_id,
+                "attachments/createUploadSession",
+            ))
+            .bearer_auth(self.bearer())
+            .json(&upload_session_body(attachment))
+            .send()
+            .await
+            .with_context(|| format!("Failed to open an upload session for {}", attachment.name))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Opening an upload session for {} failed (HTTP {status}): {body}",
+                attachment.name
+            ));
+        }
+        let session: UploadSession = resp
+            .json()
+            .await
+            .context("Failed to read the upload session")?;
+
+        let total = attachment.bytes.len();
+        for (start, end) in upload_ranges(total, UPLOAD_CHUNK_BYTES) {
+            // The upload URL is pre-authenticated: Graph refuses a bearer
+            // token on it.
+            let resp = self
+                .client
+                .put(&session.upload_url)
+                .header(
+                    reqwest::header::CONTENT_RANGE,
+                    content_range(start, end, total),
+                )
+                .body(attachment.bytes[start..end].to_vec())
+                .send()
+                .await
+                .with_context(|| format!("Failed to upload {}", attachment.name))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(anyhow!(
+                    "Uploading {} failed at byte {start} (HTTP {status}): {body}",
+                    attachment.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Send a draft, `POST /me/messages/{id}/send`. Exchange files it in Sent
+    /// Items and it stops being a draft.
+    pub async fn send_draft(&self, draft_id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(message_action_url(draft_id, "send"))
+            .header(reqwest::header::CONTENT_LENGTH, "0")
+            .bearer_auth(self.bearer())
+            .send()
+            .await
+            .map_err(|e| delivering_request_error(e, "Failed to send the draft"))?;
+        if resp.status().is_success() {
+            info!("Graph draft send succeeded");
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(anyhow!(
+                "Graph draft send failed (HTTP {}): {}",
+                status,
+                body
+            ))
+        }
+    }
+
+    /// Remove a draft this client created and will not send, for good
+    /// (`permanentDelete`, so it does not land in Deleted Items). A draft that
+    /// is already gone counts as removed.
+    pub async fn discard_draft(&self, draft_id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(message_action_url(draft_id, "permanentDelete"))
+            .header(reqwest::header::CONTENT_LENGTH, "0")
+            .bearer_auth(self.bearer())
+            .send()
+            .await
+            .context("Failed to discard the Graph draft")?;
+        if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(anyhow!(
+                "Discarding the Graph draft failed (HTTP {status}): {body}"
+            ))
+        }
+    }
+
+    /// What the mailbox holds under one `Message-ID`: whether a sent copy
+    /// exists anywhere, and which copies still sit in Drafts.
+    pub async fn server_copies(&self, internet_message_id: &str) -> Result<ServerCopies> {
+        let all: CopyList = self
+            .get_json(internet_id_url(
+                "me/messages",
+                internet_message_id,
+                "id,isDraft",
+            )?)
+            .await?;
+        let drafts: CopyList = self
+            .get_json(internet_id_url(
+                "me/mailFolders/drafts/messages",
+                internet_message_id,
+                "id",
+            )?)
+            .await?;
+        Ok(ServerCopies {
+            sent: all.value.iter().any(|c| !c.is_draft),
+            drafts: drafts.value.into_iter().map(|c| c.id).collect(),
+        })
+    }
+
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: reqwest::Url) -> Result<T> {
+        let resp = self
+            .client
+            .get(url)
+            .bearer_auth(self.bearer())
+            .send()
+            .await
+            .context("Failed to look the message up")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Message lookup failed (HTTP {status}): {body}"));
+        }
+        resp.json()
+            .await
+            .context("Failed to parse the message lookup")
     }
 }
 
@@ -3890,13 +4104,23 @@ fn mime_url(graph_id: &str) -> String {
 /// read as a space, a `&` would end the parameter and a `#` the query, and the
 /// lookup would quietly find nothing.
 fn message_lookup_url(internet_message_id: &str) -> Result<reqwest::Url> {
+    internet_id_url("me/messages", internet_message_id, "id")
+}
+
+/// `{collection}?$filter=internetMessageId eq '<id>'&$select={select}`, the
+/// one lookup by RFC 5322 `Message-ID` Graph offers.
+fn internet_id_url(
+    collection: &str,
+    internet_message_id: &str,
+    select: &str,
+) -> Result<reqwest::Url> {
     let clean_id = internet_message_id.trim_matches(|c| c == '<' || c == '>');
     let filter = format!("internetMessageId eq '<{}>'", clean_id.replace('\'', "''"));
     let query = format!(
-        "$filter={}&$select=id",
+        "$filter={}&$select={select}",
         percent_encoding::utf8_percent_encode(&filter, QUERY_VALUE_ENCODE_SET)
     );
-    let base = format!("{GRAPH_BASE}/me/messages");
+    let base = format!("{GRAPH_BASE}/{collection}");
     let mut url = reqwest::Url::parse(&base).with_context(|| format!("parsing {base}"))?;
     url.set_query(Some(&query));
     Ok(url)
@@ -4226,7 +4450,8 @@ mod tests {
     use super::*;
 
     /// A MIME send is allowed up to the threshold inclusive and refused one
-    /// byte past it, where the caller falls back to JSON (PERSO-144).
+    /// byte past it, where the caller stages the send through a draft
+    /// (PERSO-144).
     #[test]
     fn the_mime_send_threshold_is_inclusive_and_under_four_megabytes() {
         assert!(fits_mime_send(0));
@@ -4234,6 +4459,77 @@ mod tests {
         assert!(!fits_mime_send(MIME_SEND_MAX_BASE64_BYTES + 1));
         assert!(!fits_mime_send(4 * 1024 * 1024));
         const { assert!(MIME_SEND_MAX_BASE64_BYTES < 4_000_000) };
+    }
+
+    /// An upload session sends the file in order, in ranges under 4 MB, and
+    /// names each with inclusive bounds and the total (Graph large-attachment
+    /// guide).
+    #[test]
+    fn an_upload_session_covers_the_file_in_ordered_ranges_under_four_megabytes() {
+        const { assert!(UPLOAD_CHUNK_BYTES < 4_000_000) };
+        assert_eq!(
+            upload_ranges(7_000_000, UPLOAD_CHUNK_BYTES),
+            [
+                (0, 3_145_728),
+                (3_145_728, 6_291_456),
+                (6_291_456, 7_000_000)
+            ]
+        );
+        assert_eq!(upload_ranges(10, 10), [(0, 10)]);
+        assert!(upload_ranges(0, 10).is_empty());
+        assert_eq!(
+            content_range(0, 3_145_728, 7_000_000),
+            "bytes 0-3145727/7000000"
+        );
+        assert_eq!(
+            content_range(6_291_456, 7_000_000, 7_000_000),
+            "bytes 6291456-6999999/7000000"
+        );
+    }
+
+    /// A small attachment goes as one base64 `fileAttachment`, a large one
+    /// opens a session naming its size; the POST cap keeps the base64 JSON
+    /// under the request limit.
+    #[test]
+    fn attachment_requests_name_the_file_its_type_and_size() {
+        use base64::Engine;
+        const { assert!(ATTACHMENT_POST_MAX_BYTES.div_ceil(3) * 4 < MIME_SEND_MAX_BASE64_BYTES) };
+        let file = OutgoingAttachment {
+            name: "plans.pdf".to_string(),
+            content_type: "application/pdf".to_string(),
+            bytes: b"%PDF".to_vec(),
+        };
+        let post = attachment_post_body(&file);
+        assert_eq!(post["@odata.type"], "#microsoft.graph.fileAttachment");
+        assert_eq!(post["name"], "plans.pdf");
+        assert_eq!(post["contentType"], "application/pdf");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(post["contentBytes"].as_str().unwrap())
+                .unwrap(),
+            b"%PDF"
+        );
+        let session = upload_session_body(&file);
+        assert_eq!(session["AttachmentItem"]["attachmentType"], "file");
+        assert_eq!(session["AttachmentItem"]["name"], "plans.pdf");
+        assert_eq!(session["AttachmentItem"]["size"], 4);
+    }
+
+    /// The resume's two lookups: every copy with its draft bit, and the
+    /// copies in Drafts, both by the bracketed `Message-ID`.
+    #[test]
+    fn the_resume_looks_a_message_up_everywhere_and_in_drafts() {
+        let all = internet_id_url("me/messages", "<a'b@x>", "id,isDraft").unwrap();
+        assert_eq!(all.path(), "/v1.0/me/messages");
+        let query: std::collections::HashMap<_, _> = all.query_pairs().collect();
+        assert_eq!(query["$filter"], "internetMessageId eq '<a''b@x>'");
+        assert_eq!(query["$select"], "id,isDraft");
+        let drafts = internet_id_url("me/mailFolders/drafts/messages", "a@x", "id").unwrap();
+        assert_eq!(drafts.path(), "/v1.0/me/mailFolders/drafts/messages");
+        assert_eq!(
+            message_action_url("AAMk=", "send"),
+            format!("{GRAPH_BASE}/me/messages/AAMk=/send")
+        );
     }
 
     /// The sendMail MIME body is the message in standard, unwrapped base64.

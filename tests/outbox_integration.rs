@@ -1443,6 +1443,7 @@ fn the_envelope_encoding_carries_the_verdicts_and_stays_backwards_readable() {
             ("blind@example.com".into(), RecipientRole::Bcc),
         ],
         draft_key: Some("id:2026-08-06-note".into()),
+        graph_draft: Some("AAMkAD-x_y=".into()),
         ..Default::default()
     };
     envelope.record_delivered("\"Doe, Jane\" <jane@example.com>");
@@ -1452,6 +1453,7 @@ fn the_envelope_encoding_carries_the_verdicts_and_stays_backwards_readable() {
     assert_eq!(decoded.from, envelope.from);
     assert_eq!(decoded.recipients, envelope.recipients);
     assert_eq!(decoded.draft_key, envelope.draft_key);
+    assert_eq!(decoded.graph_draft, envelope.graph_draft);
     assert_eq!(
         decoded.delivered,
         vec!["\"Doe, Jane\" <jane@example.com>".to_string()]
@@ -1466,7 +1468,12 @@ fn the_envelope_encoding_carries_the_verdicts_and_stays_backwards_readable() {
     );
 
     let old = Envelope::decode("from:alice@example.com\nto:bob@example.com");
-    assert!(old.delivered.is_empty() && old.rejected.is_empty() && old.draft_key.is_none());
+    assert!(
+        old.delivered.is_empty()
+            && old.rejected.is_empty()
+            && old.draft_key.is_none()
+            && old.graph_draft.is_none()
+    );
     assert_eq!(
         old.outstanding(),
         vec![("bob@example.com".to_string(), RecipientRole::To)],

@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use crate::config::{AuthMethod, EmailSettings, SmtpConfig};
 use crate::types::{EmailDraft, EmailStatus};
 
+pub mod graph_submit;
+
 // The RFC 5322 address-string half of this module, which needs no transport and
 // which `draft` reads without wanting one, lives in `mp-core` since #0126
 // (P5-U10b). Re-exported so `crate::send::split_addresses` and the two
@@ -1035,7 +1037,7 @@ mod tests {
         );
     }
 
-    fn draft_with(id: Option<&str>, path: &str) -> EmailDraft {
+    pub(super) fn draft_with(id: Option<&str>, path: &str) -> EmailDraft {
         EmailDraft {
             path: std::path::PathBuf::from(path),
             frontmatter: crate::types::EmailFrontmatter {
@@ -1105,7 +1107,7 @@ mod tests {
         )
     }
 
-    fn build_with_ancestry(draft: &EmailDraft, ancestry: Option<&str>) -> BuiltMessage {
+    pub(super) fn build_with_ancestry(draft: &EmailDraft, ancestry: Option<&str>) -> BuiltMessage {
         build_draft_message(
             draft,
             "me@example.com",
@@ -1280,14 +1282,14 @@ mod tests {
     }
 
     /// The message a Graph MIME send submits, decoded back from the request
-    /// body [`graph_route`] produced.
+    /// body [`graph_submit::plan`] produced.
     fn graph_request_mime(built: &BuiltMessage) -> Vec<u8> {
         use base64::Engine;
-        match graph_route(built).expect("the route is decided") {
-            GraphRoute::Mime(body) => base64::engine::general_purpose::STANDARD
+        match graph_submit::plan(built).expect("the route is decided") {
+            graph_submit::GraphPlan::Mime(body) => base64::engine::general_purpose::STANDARD
                 .decode(body)
                 .expect("the request body is standard base64"),
-            GraphRoute::Json => panic!("a small message goes as MIME"),
+            other => panic!("a small message goes as one MIME sendMail, not {other:?}"),
         }
     }
 
@@ -1403,19 +1405,107 @@ mod tests {
         assert_eq!(attachment.get_body().unwrap().trim_end(), "attached text");
     }
 
-    /// A message whose base64 MIME would exceed Graph's sendMail limit falls
-    /// back to the JSON payload instead of failing with a 413 (PERSO-144).
+    /// A reply too large for one sendMail goes as a draft made from its own
+    /// MIME, so it keeps `In-Reply-To`, `References`, our `Message-ID` and the
+    /// Bcc header; only the attachment that does not fit is taken out, to be
+    /// added to the draft on its own, and a small one stays inside (PERSO-144
+    /// follow-up). Before, the whole message fell back to the JSON resource
+    /// and landed outside its conversation in Outlook.
     #[test]
-    fn a_message_over_the_mime_limit_falls_back_to_json() {
-        let mut big = draft_with(None, "/drafts/big.md");
-        big.frontmatter.in_reply_to = Some("<parent@example.com>".to_string());
-        big.body_markdown = "word ".repeat(600_000);
-        let built = build_with_ancestry(&big, None);
+    fn a_large_reply_goes_as_a_mime_draft_that_keeps_its_threading() {
+        use base64::Engine;
+        use mailparse::MailHeaderMap;
+        let tmp = tempfile::tempdir().unwrap();
+        let big: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(tmp.path().join("plans.pdf"), &big).unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"attached text").unwrap();
+        let mut reply = draft_with(None, tmp.path().join("r.md").to_str().unwrap());
+        reply.frontmatter.subject = "Re: Plan".to_string();
+        reply.frontmatter.in_reply_to = Some("<parent@example.com>".to_string());
+        reply.frontmatter.bcc = Some("dan@example.com".to_string());
+        reply.frontmatter.attachments =
+            Some(vec!["notes.txt".to_string(), "plans.pdf".to_string()]);
+        let built = build_with_ancestry(&reply, Some("<root@example.com>"));
         assert!(
             crate::graph::mime_send_body(&graph_mime(&built).unwrap()).len()
                 > crate::graph::MIME_SEND_MAX_BASE64_BYTES
         );
-        assert_eq!(graph_route(&built).unwrap(), GraphRoute::Json);
+
+        let graph_submit::GraphPlan::Draft {
+            body: graph_submit::DraftBody::Mime(body),
+            attachments,
+        } = graph_submit::plan(&built).unwrap()
+        else {
+            panic!("a large reply goes as a MIME draft");
+        };
+        assert!(crate::graph::fits_mime_send(body.len()));
+        let mime = base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .unwrap();
+        let parsed = mailparse::parse_mail(&mime).expect("the draft MIME parses");
+        let header = |name: &str| parsed.headers.get_first_value(name);
+        assert_eq!(header("Message-ID"), Some(built.message_id.clone()));
+        assert_eq!(
+            header("In-Reply-To").as_deref(),
+            Some("<parent@example.com>")
+        );
+        assert_eq!(
+            header("References").as_deref(),
+            Some("<root@example.com> <parent@example.com>")
+        );
+        assert_eq!(header("Bcc").as_deref(), Some("dan@example.com"));
+
+        assert_eq!(parsed.ctype.mimetype, "multipart/mixed");
+        let kept: Vec<String> = parsed
+            .subparts
+            .iter()
+            .map(|p| p.ctype.mimetype.clone())
+            .collect();
+        assert_eq!(kept, ["multipart/alternative", "text/plain"]);
+        assert_eq!(
+            parsed.subparts[1].get_body().unwrap().trim_end(),
+            "attached text",
+            "the small attachment stays inside the MIME"
+        );
+
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].name, "plans.pdf");
+        assert_eq!(attachments[0].content_type, "application/pdf");
+        assert!(
+            attachments[0].bytes == big,
+            "the moved file is byte-identical"
+        );
+    }
+
+    /// A body too large for any MIME request still goes, as the JSON resource
+    /// staged through a draft: the one case that cannot carry threading.
+    #[test]
+    fn a_body_too_large_for_mime_goes_as_a_json_draft() {
+        let mut big = draft_with(None, "/drafts/big.md");
+        big.frontmatter.in_reply_to = Some("<parent@example.com>".to_string());
+        big.frontmatter.cc = Some("Carol <carol@example.com>".to_string());
+        big.body_markdown = "word ".repeat(600_000);
+        let built = build_with_ancestry(&big, None);
+
+        let graph_submit::GraphPlan::Draft {
+            body: graph_submit::DraftBody::Json(message),
+            attachments,
+        } = graph_submit::plan(&built).unwrap()
+        else {
+            panic!("a body over the MIME limit goes as JSON");
+        };
+        assert!(attachments.is_empty());
+        assert_eq!(message["subject"], "Hello");
+        assert_eq!(message["body"]["contentType"], "HTML");
+        assert!(message["body"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("word word"));
+        assert_eq!(
+            message["toRecipients"][0]["emailAddress"]["address"],
+            "bob@example.com"
+        );
+        assert_eq!(message["ccRecipients"][0]["emailAddress"]["name"], "Carol");
     }
 
     /// The local half of the post-send hook flags *every* copy of the source,
@@ -2537,6 +2627,17 @@ impl SendReport {
         if !self.send_result.failed().is_empty() && self.send_result.any_succeeded() {
             return "partly delivered, see `mp outbox list`".to_string();
         }
+        // A Graph send whose delivering request lost its answer stays queued
+        // until the outbox has asked the mailbox whether it went out (#0063).
+        if self.state == Some(OutboxState::PendingSend)
+            && self
+                .send_result
+                .results
+                .iter()
+                .any(|r| r.verdict == RecipientVerdict::Unknown)
+        {
+            return "submitted, not yet confirmed (see `mp outbox list`)".to_string();
+        }
         match self.state {
             Some(OutboxState::Done) => "sent + saved".to_string(),
             Some(OutboxState::SentPendingAppend) => "sent + append pending".to_string(),
@@ -2709,21 +2810,23 @@ pub async fn send_durably(
     })
 }
 
-/// The durable path for a submission that is not SMTP (Microsoft Graph).
+/// The durable path for a Microsoft Graph submission (PERSO-144, #0063).
 ///
-/// `submission` is the API call, handed over as a future so the outbox row is
-/// committed before it is polled. Graph files its own copy in Sent Items, so
-/// with `save_to_sent = "auto"` the row never carries a target mailbox and
-/// goes straight from `pending_send` to `done`; the durability being bought
-/// here is of the submission itself.
-pub async fn send_durably_via<F>(
+/// The row is committed before the first request, as for SMTP, and
+/// [`graph_submit::submit`] writes its progress to it: the draft it created,
+/// and the marker immediately before the request that delivers. Graph files
+/// its own copy in Sent Items, so with `save_to_sent = "auto"` the row never
+/// carries a target mailbox and goes straight from `pending_send` to `done`.
+///
+/// A delivering request that lost its answer commits nothing: the row stays
+/// `pending_send` with its marker, and the next resume asks the mailbox
+/// ([`graph_submit::resume_rows`]).
+pub async fn send_durably_graph<A: graph_submit::GraphSendApi>(
     built: &BuiltMessage,
     account: &crate::config::AccountConfig,
-    submission: F,
-) -> Result<SendReport>
-where
-    F: std::future::Future<Output = Result<()>>,
-{
+    plan: graph_submit::GraphPlan,
+    api: &A,
+) -> Result<SendReport> {
     let durable = match DurableSend::begin(account, built) {
         Ok(d) => Some(d),
         Err(e) if crate::outbox::is_already_in_flight(&e) => return Err(e),
@@ -2737,13 +2840,12 @@ where
         }
     };
 
-    if let Some(durable) = durable.as_ref() {
-        durable.mark_started();
-    }
-    let submitted = submission.await;
-    let outcome = match &submitted {
-        Ok(()) => crate::outbox::SubmitOutcome::Accepted,
-        Err(e) => crate::outbox::classify_submission_error(e),
+    let outcome =
+        graph_submit::submit(durable.as_ref().map(|d| (&d.store, d.row_id)), plan, api).await;
+    let verdict = match &outcome {
+        graph_submit::GraphOutcome::Delivered => RecipientVerdict::Delivered,
+        graph_submit::GraphOutcome::Clean(_) => RecipientVerdict::Retryable,
+        graph_submit::GraphOutcome::Unconfirmed(_) => RecipientVerdict::Unknown,
     };
     let send_result = SendResult {
         results: built
@@ -2752,13 +2854,9 @@ where
             .map(|(addr, role)| RecipientResult {
                 address: addr.clone(),
                 role: *role,
-                success: submitted.is_ok(),
-                error: submitted.as_ref().err().map(|e| format!("{e:#}")),
-                verdict: match &outcome {
-                    crate::outbox::SubmitOutcome::Accepted => RecipientVerdict::Delivered,
-                    crate::outbox::SubmitOutcome::Ambiguous(_) => RecipientVerdict::Unknown,
-                    _ => RecipientVerdict::Retryable,
-                },
+                success: outcome == graph_submit::GraphOutcome::Delivered,
+                error: outcome.error().map(str::to_string),
+                verdict,
             })
             .collect(),
     };
@@ -2770,7 +2868,10 @@ where
             row_id: None,
         });
     };
-    let mut state = durable.record(&outcome)?;
+    let mut state = match outcome.submit_outcome() {
+        Some(transition) => durable.record(&transition)?,
+        None => crate::outbox::OutboxState::PendingSend,
+    };
     if state == crate::outbox::OutboxState::SentPendingAppend {
         state = durable.settle().await?;
     }
@@ -2878,7 +2979,7 @@ pub struct SentDraft {
 
 /// Parse an address string like `"Name <addr>"` or `"addr"` into
 /// `(name, address)`.
-fn parse_name_address(s: &str) -> (String, String) {
+pub(crate) fn parse_name_address(s: &str) -> (String, String) {
     let s = s.trim();
     if let Some(lt) = s.find('<') {
         if let Some(gt) = s.find('>') {
@@ -3158,23 +3259,6 @@ fn seven_bit_fallback(raw: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The attachments a draft names, read off the paths in its frontmatter.
-///
-/// Only the Graph path needs them separately: the SMTP path's bytes are built
-/// by [`build_draft_message`], which reads the same list itself and fails the
-/// same way on a path that is not there. Directory entries are expanded by
-/// [`resolve_attachment_paths`].
-fn draft_attachments(draft: &EmailDraft) -> Result<Vec<(String, Vec<u8>, String)>> {
-    let Some(attachments) = draft.frontmatter.attachments.as_ref() else {
-        return Ok(Vec::new());
-    };
-    let mut data = Vec::new();
-    for path in resolve_attachment_paths(attachments, attachment_anchor(draft))? {
-        data.push(read_attachment(&path)?);
-    }
-    Ok(data)
-}
-
 /// Send one draft: the single orchestration behind `mp send`,
 /// `mp send-approved` and the TUI's send key (#0058).
 ///
@@ -3210,46 +3294,15 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
     )?;
 
     let report = match ctx.graph.as_ref() {
-        Some(graph_config) => match graph_route(&built)? {
-            // Graph files its own copy in Sent Items, so the outbox row never
-            // carries a target mailbox; what it buys here is exactly-once
-            // durability of the submission.
-            GraphRoute::Mime(body) => {
-                let client = crate::graph::GraphClient::new_async(graph_config).await?;
-                send_durably_via(&built, &ctx.account, client.send_mime(body)).await?
-            }
-            GraphRoute::Json => {
-                let to = parse_graph_recipients(draft.frontmatter.to.as_deref());
-                let cc = parse_graph_recipients(draft.frontmatter.cc.as_deref());
-                let bcc = parse_graph_recipients(draft.frontmatter.bcc.as_deref());
-                let to_refs: Vec<(&str, &str)> =
-                    to.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
-                let cc_refs: Vec<(&str, &str)> =
-                    cc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
-                let bcc_refs: Vec<(&str, &str)> =
-                    bcc.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
-
-                // The JSON fallback takes a rendered body rather than bytes: the
-                // same HTML part the SMTP bytes carry, quoted reply included.
-                let html_body =
-                    draft_html_body(draft, &ctx.email_settings, ctx.signature.as_deref());
-                let att_data = draft_attachments(draft)?;
-                let client = crate::graph::GraphClient::new_async(graph_config).await?;
-                send_durably_via(
-                    &built,
-                    &ctx.account,
-                    client.send_mail(
-                        &to_refs,
-                        &cc_refs,
-                        &bcc_refs,
-                        &draft.frontmatter.subject,
-                        &html_body,
-                        &att_data,
-                    ),
-                )
-                .await?
-            }
-        },
+        // Graph files its own copy in Sent Items, so the outbox row never
+        // carries a target mailbox; what it buys here is exactly-once
+        // durability of the submission. The plan is decided before the row is
+        // committed, so a message Graph can never take is refused, not queued.
+        Some(graph_config) => {
+            let plan = graph_submit::plan(&built)?;
+            let client = crate::graph::GraphClient::new_async(graph_config).await?;
+            send_durably_graph(&built, &ctx.account, plan, &client).await?
+        }
         None => {
             let smtp = ctx
                 .smtp
@@ -3609,6 +3662,13 @@ async fn resubmit_pending(
     account: &crate::config::AccountConfig,
     now: i64,
 ) {
+    // Before the sweep: a Graph row with a marker is settled by asking the
+    // mailbox, not parked unseen (#0063 item 3).
+    if account.auth_method == crate::config::AuthMethod::Graph {
+        resubmit_pending_graph(store, blobs, account, now).await;
+        return;
+    }
+
     let sweep = match crate::outbox::sweep_pending_sends(store, &account.name) {
         Ok(sweep) => sweep,
         Err(e) => {
@@ -3628,20 +3688,6 @@ async fn resubmit_pending(
         );
     }
     if sweep.resubmittable.is_empty() {
-        return;
-    }
-
-    if account.auth_method == crate::config::AuthMethod::Graph {
-        // The Graph transport sends a structured JSON message, not the RFC822
-        // bytes the row holds, so there is nothing here to resubmit from. The
-        // rows stay visible in `mp outbox list` for a human to discard or to
-        // re-send from the draft.
-        log::warn!(
-            "[outbox] {} has {} queued message(s) that were never submitted, and the Graph \
-             transport cannot resend stored RFC822 bytes; see `mp outbox list`",
-            account.name,
-            sweep.resubmittable.len()
-        );
         return;
     }
 
@@ -3676,6 +3722,42 @@ async fn resubmit_pending(
         if let Err(e) = resubmit_row(store, blobs, &row, &smtp_config).await {
             log::warn!("[outbox] could not resubmit row {}: {e:#}", row.id);
         }
+    }
+}
+
+/// The Graph half of [`resubmit_pending`]: every `pending_send` row of the
+/// account, settled or resubmitted by [`graph_submit::resume_rows`].
+///
+/// The client is built only when there is a row, so a clean account costs no
+/// token refresh on its tick. Without a client the rows stay as they are, for
+/// the next pass.
+async fn resubmit_pending_graph(
+    store: &crate::store::Store,
+    blobs: &crate::store::BlobStore,
+    account: &crate::config::AccountConfig,
+    now: i64,
+) {
+    match crate::outbox::pending_send_rows(store, &account.name) {
+        Ok(rows) if rows.is_empty() => return,
+        Ok(_) => {}
+        Err(e) => {
+            log::warn!(
+                "[outbox] could not read the pending sends for {}: {e:#}",
+                account.name
+            );
+            return;
+        }
+    }
+    let client = match crate::config::GraphConfig::load(account) {
+        Ok(config) => crate::graph::GraphClient::new_async(&config).await,
+        Err(e) => Err(e),
+    };
+    match client {
+        Ok(client) => graph_submit::resume_rows(store, blobs, &account.name, now, &client).await,
+        Err(e) => log::warn!(
+            "[outbox] {} has queued Graph sends but no usable Graph client: {e:#}",
+            account.name
+        ),
     }
 }
 
@@ -4053,35 +4135,6 @@ pub fn graph_mime(built: &BuiltMessage) -> Result<Vec<u8>> {
     let mut raw = headers.to_string().into_bytes();
     raw.extend_from_slice(&built.raw);
     Ok(raw)
-}
-
-/// How [`send_draft`] submits a message over Graph.
-#[derive(Debug, PartialEq, Eq)]
-enum GraphRoute {
-    /// `/me/sendMail` with the base64 MIME body: threading headers and our
-    /// `Message-ID` survive.
-    Mime(String),
-    /// The JSON message resource, for a message over
-    /// [`crate::graph::MIME_SEND_MAX_BASE64_BYTES`]; Exchange threads it on
-    /// nothing.
-    Json,
-}
-
-/// The route a built message takes over Graph (PERSO-144).
-fn graph_route(built: &BuiltMessage) -> Result<GraphRoute> {
-    let body = crate::graph::mime_send_body(&graph_mime(built)?);
-    if crate::graph::fits_mime_send(body.len()) {
-        Ok(GraphRoute::Mime(body))
-    } else {
-        warn!(
-            "[send] {} is {} bytes of base64 MIME, over Graph's sendMail limit of {}; \
-             sending it as JSON, which carries no In-Reply-To or References",
-            built.message_id,
-            body.len(),
-            crate::graph::MIME_SEND_MAX_BASE64_BYTES,
-        );
-        Ok(GraphRoute::Json)
-    }
 }
 
 /// Submit an already-built message over SMTP, one envelope per recipient.

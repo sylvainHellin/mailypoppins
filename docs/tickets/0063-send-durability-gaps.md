@@ -9,10 +9,9 @@ created: 2026-08-06
 
 From the architecture review synthesis, Tier 3: [2026-08-06_architecture-review-synthesis](../../.agents/handoff/2026-08-06_architecture-review-synthesis.md).
 Effort: M each.
-Partly parked 2026-08-06: the Graph backend is parked, so scope item 3 (resumable Graph `pending_send` rows) waits with it; the partial-recipient and double-submit halves are SMTP-side and stay active.
 Shipped 2026-08-07: scope items 1, 2 and 4 and the double-submit admission gate, on the SMTP path.
-What is left of this ticket is scope item 3 alone, parked with the backend, which is why the ticket stays open and is listed under Parked (Graph).
-See [BACKLOG](../../BACKLOG.md).
+Shipped offline 2026-10-22: scope item 3, the Graph half, with the staged send that keeps a large Graph reply threaded (PERSO-144 follow-up); see [The Graph half](#the-graph-half-2026-10-22).
+The ticket stays open for the live checks listed there, under the Graph backend section of the [BACKLOG](../../BACKLOG.md).
 
 Two holes the durable outbox of [#0037](0037-sqlite-store-engine-skeleton.md) left open.
 Both lose a delivery quietly, which is the failure mode the outbox exists to prevent.
@@ -36,16 +35,16 @@ Both lose a delivery quietly, which is the failure mode the outbox exists to pre
 1. Record the per-recipient verdict durably, not just in the status line: extend the `outbox` envelope column or add a per-recipient table, so a partially delivered message names its undelivered recipients after a restart.
 2. Retry the failed recipients only, with the existing backoff, and reach a terminal state that the user can see.
 3. Give the Graph path a resumable representation: either store the structured payload alongside the RFC822 bytes, or reconstruct the Graph message from the stored bytes at resume time.
-   Decide which and record the choice here.
-   **Parked** with the Graph backend (2026-08-07): the decision is deliberately not taken here, because it is a decision about a transport nothing runs today and the answer depends on what the woken backend looks like.
+   **Decided** (2026-10-22): reconstruct from the stored bytes.
+   Since PERSO-144 the Graph transport sends MIME, so the row's bytes plus the envelope's recipient roles (for the `Bcc:` header) are the whole message, and the resume plans it exactly as the live send did.
 4. Keep the exactly-once marker semantics intact; a retry must not deliver twice to a recipient that already got a 250.
 
 ## Acceptance criteria
 
 - A send where one of two recipients is rejected leaves an outbox row that names the rejected recipient and reaches a terminal state without manual intervention. **Met.**
 - No recipient receives the message twice across a retry. **Met**, by `Envelope::outstanding()` being the only thing a resubmission attempts.
-- A Graph account with a `pending_send` row left by a crash resumes automatically on the next run, or fails with an explicit, actionable reason. **Parked** with the Graph backend; the row still stays visible with the explicit log line `resubmit_pending` writes.
-- Tests cover the partial-failure and the Graph-resume path offline. **Half met**: the partial-failure, retry, recovery and admission-gate paths are covered in `tests/outbox_integration.rs`; the Graph-resume path waits with scope item 3.
+- A Graph account with a `pending_send` row left by a crash resumes automatically on the next run, or fails with an explicit, actionable reason. **Met offline**, live checks pending.
+- Tests cover the partial-failure and the Graph-resume path offline. **Met**: the partial-failure, retry, recovery and admission-gate paths in `tests/outbox_integration.rs`, the Graph crash windows in `src/send/graph_submit/tests.rs` against an in-memory mailbox.
 
 ## What shipped
 
@@ -91,3 +90,26 @@ Four further properties were judged worth writing down rather than changing:
 - The retryable bucket has no attempt cap: a `Kind::Client` condition that is permanent in practice keeps the row retrying at the 900s backoff ceiling for as long as the user leaves it there.
   It stays visible in `mp outbox list` throughout, and discarding it is the human's call.
 - `mp outbox retry` still refuses a `pending_send` row by design, which is what makes the `from:` bug above a dead end rather than an inconvenience; with the normalisation fixed, no known path enqueues a row that cannot be submitted.
+
+## The Graph half (2026-10-22)
+
+A Graph submission is made of more than one request once the message is large, so "was the transport entered" needs a finer answer than for SMTP.
+`src/send/graph_submit.rs` gives it one:
+
+- The marker is committed immediately before the one request that delivers (`/me/sendMail`, or `POST /me/messages/{id}/send`), never before creating or filling a draft, which deliver nothing.
+- The Graph id of a draft the send created goes into the envelope (`graph-draft:` line, no schema change) as soon as it exists, and leaves it when the draft is discarded.
+- A row with no marker never delivered: the resume discards whatever an interrupted attempt left in Drafts (found by our `Message-ID`, which a MIME draft keeps, or by the recorded id), then submits afresh from the bytes; a copy already in Sent Items (an operator retry of a message that did arrive) is recorded as sent instead.
+- A row with a marker lost the answer to its delivering request: a copy in Sent Items means delivered; the recorded draft still in Drafts 600 s after its send means the send never took, and that same draft is sent rather than a new one; neither means nobody can tell, and the row is parked in `failed` with that reason.
+- A live delivering request that times out records nothing, so the row stays `pending_send` with its marker and the next resume settles it the same way; the status line says "submitted, not yet confirmed".
+- The resume claims the same in-process slot `send_draft` holds, so it never touches a row whose draft a send in this process is still filling (a row with no marker yet).
+
+The large-message threading fix rides on the same staged send: a message too large for one MIME `sendMail` is a draft created from its own MIME with the largest attachments taken out, the attachments added one request each (a POST under 2.5 MB, an upload session above), then `send`.
+Chosen over `createReply` on the parent because it keeps our `Message-ID` (which the outbox, the local Sent copy and the resume's lookup all key on), needs no Graph id of the parent, and serves forwards and new messages too; `internetMessageHeaders` was never an option, as Graph takes only `x-` names there.
+Only a body that alone exceeds one request still goes as JSON (staged the same way, without threading headers, and without a `Message-ID` of ours, so a crash inside its draft creation can leave one draft the resume cannot find).
+
+### Live checks still owed (EVOQS)
+
+- A reply with a 5 MB attachment to a message in the inbox: it arrives in the same Outlook conversation as its parent, on the sender's and on an external recipient's side, with our `Message-ID`, `In-Reply-To` and `References` in its headers.
+- The MIME draft created by `POST /me/messages` reports our `Message-ID` as its `internetMessageId`, before and after `send` (the resume's lookup depends on it).
+- A draft that was sent no longer answers the Drafts-folder lookup, and the Sent Items copy has `isDraft` false.
+- Kill the daemon during the attachment upload of a large send, restart it: one message arrives, and Drafts holds nothing of it.
