@@ -48,6 +48,7 @@ All notable changes to this project are documented in this file.
 - TUI: after a daemon restart an account no longer stays `opening` in the account picker and the sidebar; the daemon's word that it is ready ends it and reloads the account's counts, as in the desktop.
 - TUI: an account whose last sync failed before the TUI started is marked in the account picker and the sidebar, with the daemon's reason and time, as the desktop's picker marks it.
 - The test suite no longer posts real desktop notifications.
+- Daemon: a client that bootstraps while the daemon commits a long run of changes is answered at once instead of after the run, and queueing an event for a slow client no longer copies every queued event to look for a duplicate.
 
 ### Removed
 - The obsolete `spikes/ipc-bench` benchmark.

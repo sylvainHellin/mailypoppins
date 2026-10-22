@@ -2958,3 +2958,12 @@ Record the target with `git rev-parse origin/main` right after the fetch and reb
 
 A layout change that shifts every cell (an outer frame, a margin) rewrites every golden frame at once, including the root crate's `src/tui_tests` snapshots.
 A test that asserts several snapshots stops at the first failure and hides the rest, so run `cargo test --workspace --no-fail-fast`, accept, and run again until no `.snap.new` appears.
+
+## A barging state gate starves a bootstrap behind a run of commits (2026-10-22)
+
+`tests/daemon_events.rs::a_stalled_reader_does_not_delay_another_clients_round_trip` failed on the healthy client's `state.bootstrap` under parallel load, never on its `daemon.status` samples.
+The state gate handed itself straight back to the burst thread that had just left it, because the waiter it woke was not yet scheduled, so the bootstrap waited out the rest of the 20 000-commit burst; the gate now admits waiters by ticket, in arrival order.
+A second cost sat on the same path: `Outbound::position_of` built a cloned coalescing key for every queued entry on every push, and on a loaded machine a bootstrap's reply waited up to 1.9 s behind its own connection's drain; keys are now compared in place.
+Fixing the key cost alone made the flake worse (18 failed binaries in 80), because a faster burst holds an unfair gate more of the time.
+Its sibling `a_stalled_reader_is_told_to_resync_and_sees_no_domain_event_after_it` failed on a `diagnostic.check_changed` after the resync: a lifecycle event, which the contract keeps through the poison, published once the account runtime has started; the test now rejects only domain kinds after the resync.
+Neither reproduced in 105 isolated runs; both did with eight to sixteen parallel copies of the test binary and twelve `yes > /dev/null` processes on the 12-core Mac.
