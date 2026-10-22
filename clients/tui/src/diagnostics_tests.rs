@@ -153,6 +153,34 @@ fn every_flip_is_its_own_entry_in_arrival_order() {
     );
 }
 
+/// A new sentence under a status that did not move (a second ignored key while
+/// `config_loaded` already warns) is one more line carrying the whole new
+/// sentence, at the same level: the ring is a history, so the first line stays
+/// as what was true then, and nothing is written twice.
+#[test]
+fn a_new_detail_under_the_same_status_is_one_more_line() {
+    let mut app = bootstrapped(vec![check(
+        "config_loaded",
+        CheckStatus::Warn,
+        "loaded; `a` is ignored",
+    )]);
+
+    app.apply_event(&check_event(
+        "config_loaded",
+        "warn",
+        "loaded; `a` is ignored; `b` is ignored",
+    ));
+
+    assert_eq!(
+        messages(&app),
+        vec![
+            "config_loaded: loaded; `a` is ignored".to_string(),
+            "config_loaded: loaded; `a` is ignored; `b` is ignored".to_string(),
+        ]
+    );
+    assert_eq!(levels(&app), vec!["Warning", "Warning"]);
+}
+
 // ---------------------------------------------------------------------------
 // (b) The watermark rules apply, because this is an ordinary event
 // ---------------------------------------------------------------------------

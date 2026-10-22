@@ -579,7 +579,7 @@ Email addresses and OAuth2 client ids stay verbatim: a bundle without them is us
 `secrets.enc` and `tokens/` are never copied, redacted or not, because ciphertext is still a credential.
 `--no-redact` copies every value verbatim and says so on the line where the count would have been - `  redactions: none, --no-redact was given` - never a `0`: a bundle full of credentials must not look like any other bundle.
 
-The daemon re-evaluates its checks when an account runtime reports, when a `config.reload` happens or is refused, and every 60 seconds as a safety net, and publishes `diagnostic.check_changed` for a check whose **status** moved.
+The daemon re-evaluates its checks when an account runtime reports, when a `config.reload` happens or is refused, and every 60 seconds as a safety net, and publishes `diagnostic.check_changed` for a check whose **status** moved, or whose **detail** moved under a `warn` or `fail`.
 The TUI lands each one as an entry in its activity ring (`sl`), at the level the status maps to, and never on the status line: a check the user did not ask about may not overwrite the sentence his own last action put there.
 
 ## Recovery

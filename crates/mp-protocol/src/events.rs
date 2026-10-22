@@ -193,13 +193,15 @@ pub const KIND_OPERATION_PROGRESS: &str = "operation.progress";
 /// `{operation_id, state, result?, error?}`.
 pub const KIND_OPERATION_FINISHED: &str = "operation.finished";
 
-/// The `kind` a health check whose status moved travels as (P6-U8).
+/// The `kind` a health check that moved travels as (P6-U8).
 ///
 /// The payload is one check, `{name, status, detail}`, the same three keys
-/// `diagnostic.health` and `snapshot.diagnostics` carry. Published on a change
-/// of `status` only, never for a detail that moved under an unchanged status: a
-/// daemon that republished its whole check set on every evaluation would fill a
-/// client's activity log with news that nothing happened.
+/// `diagnostic.health` and `snapshot.diagnostics` carry. Published when the
+/// `status` changes, or when the `detail` changes under a `warn` or `fail`
+/// (a second ignored key while `config_loaded` already warns), and never for a
+/// check that did not move or for a new detail under `ok`: a daemon that
+/// republished its whole check set on every evaluation would fill a client's
+/// activity log with news that nothing happened.
 pub const KIND_DIAGNOSTIC_CHECK_CHANGED: &str = "diagnostic.check_changed";
 
 /// One thing wrong with a file, positioned when the parser gave a position.

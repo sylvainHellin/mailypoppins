@@ -142,7 +142,7 @@ The grace is a ceiling and never a sleep, which is what keeps stopping an idle d
 
 **Diagnostics are an assembly, not a family of getters** (`src/daemon/diagnostics.rs`).
 One module holds the checks, the ledger a check's status is compared against, the log reader and the redacting bundle writer; everything else is routing, four method arms and three CLI commands.
-A check is re-evaluated when an account runtime reports, when a `config.reload` happens or is refused, and every 60 seconds as a safety net, and only a status that *moved* publishes `diagnostic.check_changed`.
+A check is re-evaluated when an account runtime reports, when a `config.reload` happens or is refused, and every 60 seconds as a safety net, and only a status that *moved*, or a detail that moved under a `warn` or `fail`, publishes `diagnostic.check_changed`.
 Reads evaluate and publish nothing, which is what keeps a bootstrap from announcing the very checks it is handing over in the same frame.
 
 **The login service is two templates and a writer** (`src/daemon/service.rs`, `src/daemon/templates/`).

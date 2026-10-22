@@ -59,8 +59,9 @@
 //!
 //! state.event {kind: "diagnostic.check_changed",
 //!              payload: {name, status, detail}}   -> every bootstrapped client
-//!     Published when a check's `status` changes, never for a detail that moved
-//!     under an unchanged status.
+//!     Published when a check's `status` changes, or its `detail` changes
+//!     under `warn` or `fail`; never for a check that did not move, nor for a
+//!     new detail under `ok`.
 //!
 //! state.bootstrap's snapshot.diagnostics: the checks that are not `ok`, in
 //!     `checks` order, each item the `checks` item verbatim.
@@ -547,6 +548,18 @@ async fn await_kind(conn: &mut Connection, kind: &str) -> Value {
             .unwrap_or_else(|| panic!("the daemon closed the connection before any {kind}"));
         if notification.params["kind"] == kind {
             return notification.params["payload"].clone();
+        }
+    }
+}
+
+/// Read `diagnostic.check_changed` events until one is about `name`, and
+/// answer its payload: an account check settling in the meantime is not the
+/// one a row is waiting for.
+async fn await_check(conn: &mut Connection, name: &str) -> Value {
+    loop {
+        let payload = await_kind(conn, KIND_CHECK_CHANGED).await;
+        if payload["name"] == name {
+            return payload;
         }
     }
 }
@@ -1765,6 +1778,54 @@ fn an_unknown_mailbox_table_turns_config_loaded_into_a_warning() {
     assert!(detail.contains("loaded, 2 account(s)"), "{detail}");
     assert!(detail.contains("accounts.mailboxes.spesen"), "{detail}");
     assert!(detail.contains("[[accounts.mailboxes.extra]]"), "{detail}");
+    diag.stop();
+}
+
+/// A second ignored key while `config_loaded` already warns keeps the status
+/// and changes the sentence, and the new sentence is published: a client told
+/// only about the first key would go on showing it alone.
+#[test]
+fn a_new_detail_under_a_warning_publishes_an_event() {
+    let diag = Diag::start();
+    let config = diag.root().join("config.toml");
+    let (first, second) = block_on(async {
+        let mut conn = subscribed(diag.root()).await;
+        fs::write(
+            &config,
+            format!("{CONFIG}\n[accounts.mailboxes.spesen]\nserver = \"Spesen\"\n"),
+        )
+        .expect("add one stray mailbox table");
+        call(&mut conn, "config.reload", json!({})).await;
+        let first = await_check(&mut conn, "config_loaded").await;
+        fs::write(
+            &config,
+            format!(
+                "{CONFIG}\n[accounts.mailboxes.spesen]\nserver = \"Spesen\"\n\n\
+                 [accounts.mailboxes.reisen]\nserver = \"Reisen\"\n"
+            ),
+        )
+        .expect("add a second stray mailbox table");
+        call(&mut conn, "config.reload", json!({})).await;
+        let second = await_check(&mut conn, "config_loaded").await;
+        (first, second)
+    });
+
+    assert_eq!(text(&first, "status"), "warn", "{first}");
+    assert!(
+        !text(&first, "detail").contains("accounts.mailboxes.reisen"),
+        "{first}"
+    );
+    assert_eq!(
+        text(&second, "status"),
+        "warn",
+        "the status did not move: {second}"
+    );
+    let detail = text(&second, "detail");
+    assert!(detail.contains("accounts.mailboxes.spesen"), "{detail}");
+    assert!(
+        detail.contains("accounts.mailboxes.reisen"),
+        "and the new key is in the sentence the event carried: {detail}"
+    );
     diag.stop();
 }
 

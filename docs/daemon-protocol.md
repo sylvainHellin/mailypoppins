@@ -1156,7 +1156,7 @@ It is a lifecycle event, it reaches every bootstrapped connection once, and it i
 A client renders it and waits for the EOF: reconnecting is what it already does when a daemon goes away, and this is the second of warning that distinguishes an orderly stop from a crash.
 
 `diagnostic.check_changed` says that one of the daemon's health checks moved, with a payload of `{name, status, detail}`, the same three keys `snapshot.diagnostics` and `diagnostic.health` carry.
-It is a lifecycle event and published on a change of `status` only, never for a detail that moved under an unchanged status: a daemon that republished its whole check set on every evaluation would fill a client's activity log with news that nothing happened.
+It is a lifecycle event, published when the `status` changes or when the `detail` changes under a `warn` or `fail` (a second ignored key while `config_loaded` already warns), and never for a check that did not move or for a new detail under `ok`: a daemon that republished its whole check set on every evaluation would fill a client's activity log with news that nothing happened.
 A name a client has not seen before was `ok` as far as the daemon is concerned, so the first evaluation after a startup announces what is wrong and says nothing about what is right.
 
 `operation.progress` and `operation.finished` are the two lifecycle kinds of the operation family, described with the long-running operations above.
@@ -1450,7 +1450,7 @@ It writes a **directory** of five files - `config.toml`, `daemon-status.json`, `
 `redact` defaults to `true`: the keys `password`, `client_secret`, `access_token`, `refresh_token` and any `*_secret` or `*_token` decide what is a secret, and every value so identified is struck from **every** file of the bundle with the literal `<redacted>`, `log.txt` included, because a library that logged a credential did not know it was one.
 The key stays, so a reader sees that a password was set; email addresses and OAuth2 client ids stay verbatim, since a bundle without them is useless and neither is a credential.
 Neither `secrets.enc` nor the token cache is ever copied, redacted or not: ciphertext is still a credential and no support case needs it.
-The kind `diagnostic.check_changed` carries one check, `{name, status, detail}`, on a change of `status` only; the fixtures are `crates/mp-protocol/fixtures/diagnostic.health.request.json`, `diagnostic.health.response.json`, `diagnostic.logs.response.json` and `notification.diagnostic_check_changed.json`.
+The kind `diagnostic.check_changed` carries one check, `{name, status, detail}`, on a change of `status`, or of `detail` under `warn` or `fail`; the fixtures are `crates/mp-protocol/fixtures/diagnostic.health.request.json`, `diagnostic.health.response.json`, `diagnostic.logs.response.json` and `notification.diagnostic_check_changed.json`.
 The bootstrap snapshot's `diagnostics` array stopped being empty: it carries the checks that are not `ok`, in report order, so a client that has just connected finds the daemon's current complaints without waiting for a flip that may never come.
 
 The #0125 follow-ups typed the snapshot's three projections, which moves nothing on the wire.

@@ -174,6 +174,26 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Whether `check`, against what the ledger last held for it, publishes a
+/// `diagnostic.check_changed`.
+///
+/// A status that moved always does; a check the ledger never saw counts as
+/// having been `ok`, so a new account that comes up warning is announced and
+/// one that comes up serving is not. A detail that moved under the same status
+/// does too while that status is `warn` or `fail`: a second ignored key in
+/// `config.toml` keeps `config_loaded` at `warn`, and a client that was never
+/// told about it would keep showing the first sentence alone. An `ok` check's
+/// new detail (one more account loaded, a new day's log file) publishes
+/// nothing, because a client only shows a check that is not `ok` and would
+/// otherwise log a recovery that never happened.
+fn is_news(previous: Option<&Check>, check: &Check) -> bool {
+    match previous {
+        None => check.status != Status::Ok,
+        Some(previous) if previous.status != check.status => true,
+        Some(previous) => check.status != Status::Ok && previous.detail != check.detail,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The assembly
 // ---------------------------------------------------------------------------
@@ -193,7 +213,9 @@ pub struct Diagnostics {
     operations: Arc<OperationRegistry>,
     holds: Arc<HoldScheduler>,
     canonical: Weak<CanonicalState>,
-    ledger: Mutex<BTreeMap<String, Status>>,
+    /// Each check as the last refresh evaluated it, status and detail both:
+    /// what [`is_news`] compares the next evaluation against.
+    ledger: Mutex<BTreeMap<String, Check>>,
     /// Held across a whole [`Diagnostics::refresh`], from evaluating the
     /// checks to publishing what flipped. Each account task refreshes on its
     /// own, and without it two refreshes could evaluate in one order and
@@ -313,7 +335,8 @@ impl Diagnostics {
             .collect()
     }
 
-    /// Evaluate every check and publish the ones whose status moved.
+    /// Evaluate every check and publish the ones that are news ([`is_news`]):
+    /// a status that moved, or a new detail under a status that is not `ok`.
     ///
     /// Called when the daemon has a reason to believe something changed: an
     /// account runtime reported, a configuration reload happened or was
@@ -329,10 +352,8 @@ impl Diagnostics {
             let flipped = checks
                 .iter()
                 .filter(|check| {
-                    ledger
-                        .insert(check.name.clone(), check.status)
-                        .unwrap_or(Status::Ok)
-                        != check.status
+                    let previous = ledger.insert(check.name.clone(), (*check).clone());
+                    is_news(previous.as_ref(), check)
                 })
                 .cloned()
                 .collect();
@@ -1070,6 +1091,33 @@ mod tests {
             .expect("a line in the gap is kept");
         assert_eq!(rest, "[INFO] gap");
         assert!([3600, 7200].contains(&gap.offset().local_minus_utc()));
+    }
+
+    /// What publishes: a moved status, or a new sentence under `warn` or
+    /// `fail` (a second ignored key while `config_loaded` already warns); an
+    /// unchanged check, or a new sentence under `ok`, publishes nothing.
+    #[test]
+    fn a_new_detail_is_news_only_while_the_check_is_not_ok() {
+        let warn = |detail: &str| Check::new("config_loaded", Status::Warn, detail);
+        let ok = |detail: &str| Check::new("config_loaded", Status::Ok, detail);
+        assert!(is_news(None, &warn("a")), "a check first seen warning");
+        assert!(!is_news(None, &ok("a")), "a check first seen ok");
+        assert!(is_news(Some(&ok("a")), &warn("a")), "a status that moved");
+        assert!(is_news(Some(&warn("a")), &ok("a")), "a recovery");
+        assert!(
+            is_news(Some(&warn("one key")), &warn("two keys")),
+            "a new detail under warn"
+        );
+        let fail = |detail: &str| Check::new("config_loaded", Status::Fail, detail);
+        assert!(
+            is_news(Some(&fail("line 1")), &fail("line 3")),
+            "a new detail under fail"
+        );
+        assert!(!is_news(Some(&warn("a")), &warn("a")), "nothing moved");
+        assert!(
+            !is_news(Some(&ok("2 account(s)")), &ok("3 account(s)")),
+            "a new detail under ok"
+        );
     }
 
     /// At `DEBUG` the writer adds the thread id and the module path, and both
