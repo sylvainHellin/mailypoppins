@@ -195,6 +195,7 @@ export type Overlay =
   | "compose_leave"
   | "server_search"
   | "account_picker"
+  | "folder_picker"
   | null;
 
 /**

@@ -35,6 +35,7 @@ import type {
   ThreadMessage,
 } from "@/protocol/types";
 import { FakeBridge } from "@/fixture/terminal-bridge";
+import { kindOfRole } from "@/components/sidebar/icons";
 import type {
   AccountDraft,
   AccountInfo,
@@ -792,9 +793,6 @@ export function emitMenu(id: string): void {
   mock.menu?.({ payload: id });
 }
 
-function kindOf(role: string): MailboxListing["mailboxes"][number]["kind"] {
-  return role === "inbox" || role === "drafts" || role === "sent" || role === "archive" ? role : "extra";
-}
 
 /** A fixture row as `message.list` sends it: listed headers are "" when absent. */
 /** What `search_local` rejects a `to:` or `cc:` query with, the daemon's words (fixture.rs). */
@@ -882,14 +880,19 @@ export function mailboxListing(account: string): MailboxListing {
     const msgs = mock.rows[account]?.[m.slug] ?? [];
     const total = m.role === "drafts" ? (mock.drafts[account]?.drafts.length ?? 0) : msgs.length;
     const unread = m.role === "drafts" ? 0 : msgs.filter((r) => !r.flags.seen).length;
-    return { slug: m.slug, label: m.label, role: m.role, kind: kindOf(m.role), total, unread, badge: total };
+    // A seed that predates ticket 0141 names no server and no policy.
+    const server = m.server ?? (m.role === "drafts" ? null : m.label);
+    const policy = m.policy ?? "sync";
+    return { slug: m.slug, label: m.label, role: m.role, kind: kindOfRole(m.role), server, policy, total, unread, badge: total };
   });
   const a = snap.accounts.find((x) => x.name === account);
+  // The account's totals count received mail: its `sync` mailboxes (ticket 0141).
+  const received = mailboxes.filter((m) => m.policy === "sync");
   return {
     account,
     mailboxes,
-    total: mailboxes.reduce((n, m) => n + m.total, 0),
-    unread: mailboxes.reduce((n, m) => n + m.unread, 0),
+    total: received.reduce((n, m) => n + m.total, 0),
+    unread: received.reduce((n, m) => n + m.unread, 0),
     runtime_state: a?.state ?? "opening",
     sync_health: a?.sync_health.state ?? "unknown",
   };

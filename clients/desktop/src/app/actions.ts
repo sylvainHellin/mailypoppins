@@ -104,6 +104,8 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return dispatch({ type: "toggle_zoom" });
     case "open_account_picker":
       return dispatch({ type: "open_account_picker" });
+    case "go_to_mailbox":
+      return dispatch({ type: "overlay", overlay: "folder_picker" });
     case "next_message":
       return dispatch({ type: "move_selection", to: 1, relative: true });
     case "prev_message":

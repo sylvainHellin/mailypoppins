@@ -28,7 +28,7 @@ use mp_protocol::draft::{
 use mp_protocol::events::DraftInvalid;
 use mp_protocol::listing::{ConversationRow, MessageListRow, ThreadListing};
 use mp_protocol::send::{HoldListing, OutboxListing};
-use mp_protocol::state::{AccountState, Bootstrap, OutboxCounts, SyncHealthState};
+use mp_protocol::state::{AccountState, Bootstrap, FolderPolicy, OutboxCounts, SyncHealthState};
 use mp_protocol::{PROTOCOL_MAX, PROTOCOL_MIN};
 
 use crate::connector;
@@ -130,6 +130,10 @@ pub enum MailboxKind {
     Drafts,
     Sent,
     Archive,
+    /// The server's trash folder, found by its role (#0141).
+    Trash,
+    /// The server's junk folder, found by its role (#0141).
+    Junk,
     Extra,
 }
 
@@ -140,6 +144,8 @@ impl MailboxKind {
             "drafts" => MailboxKind::Drafts,
             "sent" => MailboxKind::Sent,
             "archive" => MailboxKind::Archive,
+            "trash" => MailboxKind::Trash,
+            "junk" => MailboxKind::Junk,
             _ => MailboxKind::Extra,
         }
     }
@@ -155,6 +161,11 @@ pub struct MailboxInfo {
     pub label: String,
     pub role: String,
     pub kind: MailboxKind,
+    /// The folder's server name, `None` for the local Drafts view (#0141).
+    pub server: Option<String>,
+    /// How the daemon keeps the folder: `status-only` counts are the
+    /// server's and the store holds at most a tail of the folder (#0141).
+    pub policy: FolderPolicy,
     pub total: u64,
     pub unread: u64,
     pub badge: u64,
@@ -167,7 +178,9 @@ pub struct MailboxInfo {
 pub struct MailboxListing {
     pub account: String,
     pub mailboxes: Vec<MailboxInfo>,
-    /// Sums over the mailboxes, Drafts excluded from `unread` (it has none).
+    /// Sums over the `sync` mailboxes, Drafts excluded from `unread` (it has
+    /// none): the trash, the junk and Proton's labels are counted by the
+    /// server and are not mail the account received (#0141).
     pub total: u64,
     pub unread: u64,
     pub runtime_state: AccountState,
@@ -769,20 +782,36 @@ pub fn list_mailboxes_on(
             slug: row.slug,
             label: row.label,
             role: row.role,
+            server: row.server,
+            policy: row.policy,
             total: row.total,
             unread: row.unread,
             badge: row.badge,
         })
         .collect();
     let snap = snapshot.and_then(|b| b.snapshot.accounts.iter().find(|a| a.name == account));
+    let (total, unread) = received_totals(&mailboxes);
     Ok(MailboxListing {
         account: account.to_string(),
-        total: mailboxes.iter().map(|m| m.total).sum(),
-        unread: mailboxes.iter().map(|m| m.unread).sum(),
+        total,
+        unread,
         runtime_state: snap.map(|a| a.state).unwrap_or_default(),
         sync_health: snap.map(|a| a.sync_health.state).unwrap_or_default(),
         mailboxes,
     })
+}
+
+/// An account's total and unread counts: the sums over its `sync` mailboxes,
+/// which hold the mail it received. A `status-only` folder's counts are the
+/// server's, for the trash, the junk and Proton's labels, whose messages a
+/// badge must not count again (#0141).
+fn received_totals(mailboxes: &[MailboxInfo]) -> (u64, u64) {
+    mailboxes
+        .iter()
+        .filter(|m| m.policy == FolderPolicy::Sync)
+        .fold((0, 0), |(total, unread), m| {
+            (total + m.total, unread + m.unread)
+        })
 }
 
 pub fn list_messages_on(
@@ -2521,6 +2550,33 @@ mod tests {
         assert!(refused.done.is_empty() && not_found_row(&refused.failed[0]));
         let refused = message_move_on(&d, "home", &[1016], "nowhere").expect("batch");
         assert!(refused.failed[0].error.message().contains("not a mailbox"));
+    }
+
+    /// The account badge counts received mail only: a counts-only folder (the
+    /// trash, a label) is listed with the server's counts and left out of the
+    /// sums (#0141).
+    #[test]
+    fn account_totals_leave_counts_only_folders_out() {
+        let mailbox = |slug: &str, policy: FolderPolicy, total: u64, unread: u64| MailboxInfo {
+            slug: slug.to_string(),
+            label: slug.to_string(),
+            role: "other".to_string(),
+            kind: MailboxKind::Extra,
+            server: Some(slug.to_string()),
+            policy,
+            total,
+            unread,
+            badge: total,
+        };
+        let listed = [
+            mailbox("inbox", FolderPolicy::Sync, 10, 2),
+            mailbox("Spesen", FolderPolicy::Sync, 5, 1),
+            mailbox("Deleted Items", FolderPolicy::StatusOnly, 1200, 40),
+            mailbox("Labels/AI", FolderPolicy::StatusOnly, 12, 3),
+        ];
+        assert_eq!(received_totals(&listed), (15, 3));
+        assert_eq!(MailboxKind::from_role("trash"), MailboxKind::Trash);
+        assert_eq!(MailboxKind::from_role("junk"), MailboxKind::Junk);
     }
 
     #[test]

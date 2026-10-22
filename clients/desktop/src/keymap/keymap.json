@@ -67,6 +67,10 @@
         "action": "Go to reader (body)"
       },
       {
+        "key": "gf",
+        "action": "Go to mailbox (fuzzy picker)"
+      },
+      {
         "key": "ga",
         "action": "Switch account"
       },

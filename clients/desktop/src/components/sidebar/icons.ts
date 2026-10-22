@@ -6,7 +6,9 @@ import {
   FileText,
   Folder,
   Inbox,
+  OctagonAlert,
   Send,
+  Trash2,
   type LucideIcon,
 } from "lucide-react";
 import type { MailboxKind } from "@/lib/gui-types";
@@ -17,6 +19,8 @@ export const MAILBOX_ICON: Record<MailboxKind, LucideIcon> = {
   drafts: FileText,
   sent: Send,
   archive: Archive,
+  trash: Trash2,
+  junk: OctagonAlert,
   extra: Folder,
 };
 
@@ -26,6 +30,17 @@ export const HEALTH: Record<SyncHealthState, { icon: LucideIcon; label: string; 
   unknown: { icon: CircleDashed, label: "No sync has finished yet", className: "text-muted-foreground" },
 };
 
+/** A sidebar row's kind from its wire role; the trash and junk roles come with ticket 0141. */
 export function kindOfRole(role: string): MailboxKind {
-  return role === "inbox" || role === "drafts" || role === "sent" || role === "archive" ? role : "extra";
+  switch (role) {
+    case "inbox":
+    case "drafts":
+    case "sent":
+    case "archive":
+    case "trash":
+    case "junk":
+      return role;
+    default:
+      return "extra";
+  }
 }

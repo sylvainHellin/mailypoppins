@@ -112,6 +112,8 @@ const MAIL_COMBOS: Record<string, ActionId> = {
   gl: "focus_list",
   gr: "focus_reader",
   ga: "open_account_picker",
+  // Every mailbox by name, past the nine digits (ticket 0141).
+  gf: "go_to_mailbox",
   // Desktop only: the TUI has no outbox view, and no `go`.
   go: "open_outbox",
   gj: "next_message",

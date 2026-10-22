@@ -8,6 +8,8 @@ import type { MailboxInfo } from "./MailboxInfo";
  */
 export type MailboxListing = { account: string, mailboxes: Array<MailboxInfo>,
 /**
- * Sums over the mailboxes, Drafts excluded from `unread` (it has none).
+ * Sums over the `sync` mailboxes, Drafts excluded from `unread` (it has
+ * none): the trash, the junk and Proton's labels are counted by the
+ * server and are not mail the account received (#0141).
  */
 total: number, unread: number, runtime_state: AccountState, sync_health: SyncHealthState, };

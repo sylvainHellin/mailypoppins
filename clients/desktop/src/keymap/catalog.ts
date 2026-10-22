@@ -21,6 +21,8 @@ export type ActionId =
   | "toggle_zoom"
   | "open_palette"
   | "open_account_picker"
+  /** `gf`: every mailbox of the selected account by name (ticket 0141). */
+  | "go_to_mailbox"
   | "next_message"
   | "prev_message"
   | "open_message"
@@ -150,6 +152,7 @@ const BY_ACTION: Record<string, Binding> = {
   "Go to message list": { id: "focus_list" },
   "Go to reader (body)": { id: "focus_reader" },
   "Switch account": { id: "open_account_picker" },
+  "Go to mailbox (fuzzy picker)": { id: "go_to_mailbox" },
   "Quick sync": { id: "quick_sync" },
   "Full sync": { id: "full_sync" },
   "Activity log overlay": { id: "activity_log" },

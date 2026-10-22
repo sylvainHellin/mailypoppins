@@ -3,4 +3,4 @@
 /**
  * What a sidebar row is, from its role (the TUI's `MailboxKind`).
  */
-export type MailboxKind = "inbox" | "drafts" | "sent" | "archive" | "extra";
+export type MailboxKind = "inbox" | "drafts" | "sent" | "archive" | "trash" | "junk" | "extra";
