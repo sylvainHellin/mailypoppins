@@ -76,14 +76,16 @@ impl Outbox {
 
     /// Make every write of the send marker fail, as a full disk or a store
     /// another process holds would, while every other write still lands.
-    fn break_the_marker(&self) {
+    /// `raise` is the trigger's `RAISE` argument: `ABORT, '...'` fails the
+    /// write with an error, `IGNORE` skips it without one.
+    fn break_the_marker(&self, raise: &str) {
         self.store
             .conn()
-            .execute_batch(
+            .execute_batch(&format!(
                 "CREATE TRIGGER no_marker BEFORE UPDATE OF submission_started_at ON outbox
                  WHEN NEW.submission_started_at IS NOT NULL
-                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
-            )
+                 BEGIN SELECT RAISE({raise}); END;"
+            ))
             .unwrap();
     }
 
@@ -678,15 +680,19 @@ async fn an_unconfirmed_send_found_in_sent_items_retires_its_draft_file() {
 /// A send whose marker cannot be committed does not go out: on the MIME route
 /// nothing is sent, on the staged route the draft it made is discarded, and
 /// the row stays submittable with no marker for the resume.
+/// A marker write the store skips without an error holds the send back the
+/// same way as one that fails.
 #[tokio::test]
 async fn a_send_whose_marker_did_not_commit_sends_nothing_and_leaves_no_draft() {
-    for built in [
-        small_message("unmarked-mime"),
-        large_reply("unmarked-draft"),
+    for (built, raise) in [
+        (small_message("unmarked-mime"), "ABORT, 'disk I/O error'"),
+        (large_reply("unmarked-draft"), "ABORT, 'disk I/O error'"),
+        (small_message("unlanded-mime"), "IGNORE"),
+        (large_reply("unlanded-draft"), "IGNORE"),
     ] {
         let outbox = Outbox::new();
         let id = outbox.enqueue(&built);
-        outbox.break_the_marker();
+        outbox.break_the_marker(raise);
         let graph = FakeGraph::default();
 
         let outcome = outbox.live(id, &built, &graph).await;

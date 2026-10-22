@@ -4769,4 +4769,61 @@ mod smtp_durability_tests {
         assert_eq!(row.submission_started_at, None);
         assert_eq!(row.attempts, 1, "a clean failure, under backoff");
     }
+
+    /// A marker write the store skips without an error (the row was no
+    /// longer `pending_send`, or a write that silently did not land) holds
+    /// the send back too, on the live send and on the resume alike.
+    #[tokio::test]
+    async fn an_smtp_send_whose_marker_did_not_land_sends_nothing() {
+        let outbox = Outbox::new();
+        let built = Outbox::built("<unlanded-smtp@example.com>", Some("id:z"));
+        let row_id = outbox.enqueue(&built);
+        outbox
+            .store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER skip_marker BEFORE UPDATE OF submission_started_at ON outbox
+                 WHEN NEW.submission_started_at IS NOT NULL
+                 BEGIN SELECT RAISE(IGNORE); END;",
+            )
+            .unwrap();
+        let durable = DurableSend {
+            store: Store::open(outbox.dir.path().join("store.sqlite3")).unwrap(),
+            blobs: BlobStore::new(outbox.dir.path().join("blobs")),
+            account: crate::config::AccountConfig {
+                name: ACCOUNT.to_string(),
+                ..Default::default()
+            },
+            row_id,
+        };
+        let smtp = CountingSmtp::default();
+
+        let refused = submit_durably(Some(durable), &built, &smtp_config(), &smtp)
+            .await
+            .err()
+            .expect("the send is held back");
+        assert!(
+            refused.to_string().contains("nothing was sent"),
+            "{refused:#}"
+        );
+        assert_eq!(smtp.calls(), 0);
+
+        // Past the backoff of that clean failure, so the resume takes the row.
+        let rows = outbox::pending_send_rows(&outbox.store, ACCOUNT).unwrap();
+        resubmit_rows(
+            &outbox.store,
+            &outbox.blobs,
+            ACCOUNT,
+            &outbox.dir.path().join("drafts"),
+            rows,
+            outbox::unix_now() + 86_400,
+            &smtp_config(),
+            &smtp,
+        )
+        .await;
+        assert_eq!(smtp.calls(), 0, "the resume holds it back as well");
+        let row = outbox.row(row_id);
+        assert_eq!(row.state, OutboxState::PendingSend);
+        assert_eq!(row.submission_started_at, None);
+    }
 }

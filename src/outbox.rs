@@ -876,6 +876,8 @@ pub fn active_submission_for_draft(
 ///
 /// Refuses any state but `pending_send`, so a caller that re-runs a send cannot
 /// re-arm a row that has already left the transport.
+/// The refusal is an error like a failed write: either way no marker landed,
+/// and a send that went ahead would be one the resume cannot see.
 pub fn mark_submission_started(store: &Store, id: i64) -> Result<()> {
     let now = unix_now();
     let changed = store
@@ -887,7 +889,7 @@ pub fn mark_submission_started(store: &Store, id: i64) -> Result<()> {
         )
         .context("marking the outbox row as entering submission")?;
     if changed == 0 {
-        warn!("[outbox] row {id} is not pending_send; not marking a submission start");
+        anyhow::bail!("outbox row {id} is not pending_send, so its send start was not recorded");
     }
     Ok(())
 }
