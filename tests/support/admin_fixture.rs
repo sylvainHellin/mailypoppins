@@ -304,6 +304,8 @@ pub fn seed(root: &Path) {
 
 /// The five configured accounts of [`send_fixture`], in the same order, with
 /// every port written out. See the module header for why the ports are here.
+/// `graph` and `gamma` have a server, so they set `sync_interval_secs = 0`
+/// to keep the daemon scheduler's startup sync (PERSO-178) out of the tests.
 pub const CONFIG: &str = r#"
 [[accounts]]
 name = "alpha"
@@ -351,6 +353,7 @@ port = 465
 
 [accounts.imap]
 port = 993
+sync_interval_secs = 0
 
 [accounts.oauth2]
 client_id = "11111111-1111-1111-1111-111111111111"
@@ -367,6 +370,7 @@ username = "gamma@example.com"
 
 [accounts.imap]
 port = 993
+sync_interval_secs = 0
 "#;
 
 /// The three calendar rows: one invitation to answer, one invitation this

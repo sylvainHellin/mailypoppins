@@ -59,7 +59,9 @@
 //!   the `sync.completed` outcome row (c) and row (b) count. That is the real
 //!   sync path, not the `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME` hook: the hook
 //!   fires once per `state.bootstrap` and cannot be driven 200 times without
-//!   200 bootstraps, each of which would also fire the event burst.
+//!   200 bootstraps, each of which would also fire the event burst. The
+//!   table also sets `sync_interval_secs = 0`, so the scheduler's startup
+//!   sync (PERSO-178) never adds an outcome the rows did not ask for.
 //! - `[email] send_hold_secs`, since row (f) needs a window to arm, plus one
 //!   approved draft for it to arm on.
 //!
@@ -635,7 +637,8 @@ fn assert_fixture_shape(data: &Path) {
 fn soak_config(generated: &str) -> String {
     let with_imap = generated.replacen(
         "[accounts.mailboxes.inbox]",
-        "[accounts.imap]\nhost = \"imap.fixture.invalid\"\nusername = \"alpha@fixture.invalid\"\n\n\
+        "[accounts.imap]\nhost = \"imap.fixture.invalid\"\nusername = \"alpha@fixture.invalid\"\n\
+         sync_interval_secs = 0\n\n\
          [accounts.mailboxes.inbox]",
         1,
     );

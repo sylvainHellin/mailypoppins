@@ -34,6 +34,11 @@
 //! a connection error rather than [`secret_refusal`] would be reporting a real
 //! ordering change.
 //!
+//! `gamma` sets `sync_interval_secs = 0`, so the daemon's scheduler leaves it
+//! alone: its startup sync (PERSO-178) would otherwise commit a
+//! `sync.completed` no test asked for once a slow setup outlasts the startup
+//! delay.
+//!
 //! # No fake IMAP server, and what that costs
 //!
 //! `rg -l 'fake_imap|FakeImap|MockImap|imap_server' tests src crates` finds
@@ -124,6 +129,7 @@ default_from = "gamma@example.com"
 host = "127.0.0.1"
 port = 9
 username = "gamma@example.com"
+sync_interval_secs = 0
 
 [accounts.mailboxes.inbox]
 server = "INBOX"

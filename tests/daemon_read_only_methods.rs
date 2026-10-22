@@ -192,6 +192,9 @@ name = "gamma"
 default_from = "gamma@example.com"
 auth_method = "graph"
 
+[accounts.imap]
+sync_interval_secs = 0
+
 [accounts.oauth2]
 client_id = "00000000-0000-0000-0000-000000000000"
 tenant_id = "11111111-1111-1111-1111-111111111111"

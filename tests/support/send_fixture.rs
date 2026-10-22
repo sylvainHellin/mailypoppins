@@ -391,12 +391,17 @@ pub fn searches(log: &Path) -> usize {
 // ---------------------------------------------------------------------------
 
 /// The two accounts this fixture adds to [`read_fixture::CONFIG`], appended so
-/// `alpha` is still first and still the default.
+/// `alpha` is still first and still the default. Both set
+/// `sync_interval_secs = 0`: they have a server, and the daemon scheduler's
+/// startup sync (PERSO-178) would otherwise run on them during a slow test.
 pub const EXTRA_ACCOUNTS: &str = r#"
 [[accounts]]
 name = "graph"
 default_from = "graph@example.com"
 auth_method = "graph"
+
+[accounts.imap]
+sync_interval_secs = 0
 
 [accounts.oauth2]
 client_id = "11111111-1111-1111-1111-111111111111"
@@ -410,6 +415,9 @@ default_from = "gamma@example.com"
 host = "127.0.0.1"
 port = 9
 username = "gamma@example.com"
+
+[accounts.imap]
+sync_interval_secs = 0
 "#;
 
 /// Write the configuration, the stores, the drafts and the outbox under
