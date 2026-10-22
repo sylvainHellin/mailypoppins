@@ -1,12 +1,16 @@
 # mailypoppins
 
-I live in the terminal and write everything in Neovim, except my email.
-No mainstream client let me read and edit a message in Neovim, and the system-wide Vim layers on the Mac never worked well.
-I also wanted my AI agents to help with email: tell me which messages still wait for an answer, and check my drafts for typos, missing points and language before I send them.
-With Copilot and the AI extensions of existing clients, that meant pasting my text into a chat, pasting the corrections back, and never seeing what the agent had changed.
-So I wrote my own client.
-In mailypoppins every draft is a Markdown file that I write in Neovim and my agent edits in place.
-Because it is a plain file, I see the agent's changes as a diff, and nothing is sent before I approve it.
+I created mailypoppins for two reasons.
+
+First, I wanted to read and edit my emails in Neovim, like I edit everything else.
+I live in the terminal, none of the mainstream email clients let me do that, and the global Vim layers on the Mac all fall short.
+
+Second, I wanted my AI agents to help me with email: tell me which messages I still have to answer, and check my drafts for typos, missing points and language before I send them.
+I wanted to work on a draft together with the agent, without copying my text over to it and its corrections back, and to see the difference between my version and its version.
+None of this worked with Copilot or the AI extensions of existing email clients.
+
+So I built it myself.
+In mailypoppins every draft is a Markdown file: I write it in Neovim, my agent edits the same file, and a diff shows what it changed.
 
 ![The mailypoppins desktop app](docs/screenshots/desktop-app.png)
 
@@ -38,9 +42,10 @@ A change made in one client shows up in the others at once.
 Install the command line and the terminal UI with Homebrew, on macOS or Linux:
 
 ```sh
-brew tap sylvainHellin/mailypoppins
-brew install mailypoppins
+brew install sylvainHellin/mailypoppins/mailypoppins
 ```
+
+The full name taps the repository and trusts only this formula, which Homebrew 6 requires for any third-party tap.
 
 The desktop app is a DMG for Apple silicon on the [releases page](https://github.com/sylvainHellin/mailypoppins/releases); it carries its own `mp`.
 The app is not signed yet, so macOS blocks its first launch: the [getting started guide](https://mailypoppins.com/getting-started/#mac-app) shows how to allow it and how to use the app's `mp` from a terminal.

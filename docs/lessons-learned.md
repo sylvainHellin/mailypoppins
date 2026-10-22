@@ -2918,3 +2918,8 @@ The transport exposes no EHLO answer to check first, so `send::submit_through` c
 ## A server-only hit's .eml comes from fetch_raw, not from the store (2026-10-22)
 
 A server-search hit with no row has a `Message-ID` and a mailbox, which is all `message_eml::fetch_raw` needs: `message.materialise_eml`'s `hit` address and `draft.forward`'s `source.hit` download the raw copy without ingesting it, so the hit stays a hit and no unread count moves (PERSO-174).
+
+## Homebrew 6 refuses a short-name install from an untrusted tap (2026-10-22)
+
+Since Homebrew 6.0, `brew tap` followed by a short-name `brew install mailypoppins` fails with "Refusing to load formula ... from untrusted tap", because a third-party tap needs explicit trust before Homebrew evaluates its Ruby.
+The fully qualified name `sylvainHellin/mailypoppins/mailypoppins` taps the repository and trusts only that formula in one step, so every install instruction uses it; a user who tapped earlier runs `brew trust --formula` on that name once.

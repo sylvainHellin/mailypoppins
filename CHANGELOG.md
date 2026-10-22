@@ -30,6 +30,7 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 - Sending: a forwarded `.eml` is labelled `7bit` or `8bit` as RFC 2046 requires and is never re-encoded; one with a line over 998 octets goes as `application/octet-stream` under the same name, and so does any 8bit one to an SMTP server that does not offer 8BITMIME, where the send retries once without anything going out twice (PERSO-174).
+- Install: the README, the website and the release notes install with `brew install sylvainHellin/mailypoppins/mailypoppins`, since Homebrew 6 refuses a short-name install from an untrusted tap.
 - Desktop: a pressed toggle shows as pressed in the dark theme (Theme, Reader, Editor colours, the reader's HTML and Text), and the Calendar view's Past events toggle shows when it is on.
 - Desktop: the attachment picker highlights its cursor row (PERSO-159).
 - Desktop and TUI: the palette lists the best match first, scored the same way in both clients, so a typed name and Enter run it; while a search runs, each desktop row names its section.

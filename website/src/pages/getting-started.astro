@@ -20,12 +20,12 @@ import { Code } from 'astro:components';
 
       <h3>Homebrew (macOS and Linux)</h3>
       <p>
-        Installs a prebuilt binary, with no Rust toolchain needed:
+        Installs a prebuilt binary, with no Rust toolchain needed.
+        The full name taps the repository and trusts only this formula, which Homebrew 6 requires for any third-party tap:
       </p>
       <CodeBlock
         lang="bash"
-        code={`brew tap sylvainHellin/mailypoppins
-brew install mailypoppins`}
+        code={`brew install sylvainHellin/mailypoppins/mailypoppins`}
       />
 
       <h3>Prebuilt binaries</h3>

@@ -203,9 +203,15 @@ the `.app` and `dmg/` for the DMG, where `<target dir>` is
 Users install with:
 
 ```sh
-brew tap sylvainHellin/mailypoppins
-brew install mailypoppins
+brew install sylvainHellin/mailypoppins/mailypoppins
 ```
+
+Since Homebrew 6.0, a third-party tap is untrusted until the user trusts it,
+and `brew tap` followed by a short-name `brew install mailypoppins` fails with
+"Refusing to load formula ... from untrusted tap". The fully qualified name
+taps the repository and trusts only this formula in one step. A user who
+tapped before Homebrew 6 runs
+`brew trust --formula sylvainHellin/mailypoppins/mailypoppins` once.
 
 The formula ([packaging/homebrew/mailypoppins.rb.tmpl](../packaging/homebrew/mailypoppins.rb.tmpl))
 downloads prebuilt release binaries instead of building from source, so
