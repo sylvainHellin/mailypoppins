@@ -14,7 +14,7 @@
  *   Prussian blue #0C1B33  outer canvas and dominant background
  *   Cream         #F4F1E8  primary foreground
  *   Ocean blue    #2E86AB  selection, focus, links, framing (lighter variants for text)
- *   Pumpkin       #FF6700  primary actions, attention warnings, deltas only
+ *   Pumpkin       #FF6700  primary actions and deltas; a lighter shade for attention
  *
  * Light, `:root.light`, Palette D itself:
  *   Cream         #F4F1E8  outer canvas, lifted to off-white for the surfaces
@@ -115,7 +115,7 @@
     /* Pumpkin: primary actions, attention, deltas. */
     --primary: #FF6700;
     --primary-foreground: #0C1B33;
-    --warning: #FF6700;
+    --warning: #FF7212;             /* Pumpkin lightened to clear 4.5:1 on muted */
 
     /* The reader frame's canvas: mail is authored for a white page, and a
        message that sets no background would otherwise draw its default black
@@ -149,7 +149,7 @@
     --terminal-bright-black: #7D8BA3;   /* disabled-foreground */
     --terminal-bright-red: #FF9AA2;
     --terminal-bright-green: #B0E3BB;
-    --terminal-bright-yellow: #FF6700;  /* warning, Pumpkin */
+    --terminal-bright-yellow: #FF7212;  /* warning, Pumpkin lightened */
     --terminal-bright-blue: #6DB6DA;    /* link */
     --terminal-bright-magenta: #E6C3F0;
     --terminal-bright-cyan: #8EDCDC;
@@ -196,10 +196,11 @@
     --link: #1A6385;
 
     /* Pumpkin: primary actions as in dark; attention text in a darker
-       shade, since #FF6700 reaches only 2.6:1 on cream. */
+       shade, since #FF6700 reaches only 2.6:1 on cream, dark enough for
+       4.5:1 on muted. */
     --primary: #FF6700;
     --primary-foreground: #0C1B33;
-    --warning: #B34700;
+    --warning: #B24600;
 
     /* The scrim: the Prussian ink at 40%, lighter than dark's over a light page. */
     --overlay: #0C1B3366;
@@ -226,7 +227,7 @@
     --terminal-bright-black: #77839A;   /* disabled-foreground */
     --terminal-bright-red: #D6404B;
     --terminal-bright-green: #3E9450;
-    --terminal-bright-yellow: #B34700;  /* warning, Pumpkin darkened */
+    --terminal-bright-yellow: #B24600;  /* warning, Pumpkin darkened */
     --terminal-bright-blue: #1F6F93;    /* ring */
     --terminal-bright-magenta: #A35BB8;
     --terminal-bright-cyan: #2A9494;

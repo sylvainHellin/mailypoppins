@@ -175,7 +175,7 @@ impl Theme {
             emphasis: Color::Rgb(242, 193, 78), // #F2C14E terminal yellow
             code: Color::Rgb(255, 138, 61),   // #FF8A3D
             success: Color::Rgb(143, 209, 158), // #8FD19E terminal green
-            warning: Color::Rgb(255, 103, 0), // #FF6700 warning, Pumpkin
+            warning: Color::Rgb(255, 114, 18), // #FF7212 the app's warning, Pumpkin lightened
             error: Color::Rgb(255, 122, 133), // #FF7A85 destructive
             info: Color::Rgb(75, 163, 204),   // #4BA3CC
         }
@@ -202,7 +202,7 @@ impl Theme {
             emphasis: Color::Rgb(138, 97, 0),    // #8A6100 terminal yellow
             code: Color::Rgb(160, 64, 0),        // #A04000
             success: Color::Rgb(47, 122, 62),    // #2F7A3E terminal green
-            warning: Color::Rgb(178, 70, 0),     // #B24600 warning, the app's #B34700 a step darker
+            warning: Color::Rgb(178, 70, 0),     // #B24600 the app's warning, Pumpkin darkened
             error: Color::Rgb(180, 35, 46),      // #B4232E destructive
             info: Color::Rgb(31, 111, 147),      // #1F6F93
         }

@@ -106,6 +106,7 @@ export const PAIRS: Pair[] = [
   { fg: "muted-foreground", bg: "accent", need: "text", use: "Secondary text in a marked row" },
   { fg: "background", bg: "link", need: "ui", use: "Check in a mark box" },
   { fg: "warning", bg: "popover", need: "text", use: "Held send icon and countdown bar in a toast" },
+  { fg: "warning", bg: "muted", need: "text", use: "Countdown bar on its track, flag on an open conversation's header" },
   { fg: "destructive", bg: "popover", need: "text", use: "Failure icon in a toast" },
   { fg: "sidebar-foreground", bg: "sidebar", need: "text", use: "Sidebar item" },
   { fg: "sidebar-accent-foreground", bg: "sidebar-accent", need: "text", use: "Active sidebar item" },
