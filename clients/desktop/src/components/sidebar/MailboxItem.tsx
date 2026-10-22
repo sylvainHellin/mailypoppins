@@ -13,6 +13,9 @@ export type MailboxItemProps = {
   /** 1-9 when the digit key jumps here. */
   digit: number | null;
   active: boolean;
+  /** The mailbox the selection is in, current page or not. */
+  selected: boolean;
+  /** The sidebar's keyboard cursor; tinted only where it left the selection. */
   cursor: boolean;
   onSelect: (account: string, slug: string) => void;
 };
@@ -33,7 +36,7 @@ export const MailboxItem = memo(function MailboxItem(p: MailboxItemProps) {
         data-mailbox={`${p.account}/${p.slug}`}
         aria-label={`${p.label}, ${countLabel}${p.digit ? `, key ${p.digit}` : ""}`}
         onClick={() => p.onSelect(p.account, p.slug)}
-        className={p.cursor && !p.active ? "bg-sidebar-accent/50" : undefined}
+        className={p.cursor && !p.selected ? "bg-sidebar-accent/50" : undefined}
       >
         <Icon aria-hidden="true" />
         <span>{p.label}</span>

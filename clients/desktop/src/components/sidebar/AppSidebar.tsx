@@ -92,6 +92,7 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
               health={a.health}
               outbox={a.outbox}
               outboxOpen={s.outboxView?.account === a.name}
+              outboxShown={s.outboxView !== null}
               mailShown={mail}
               onOpenOutbox={onOpenOutbox}
               mailboxes={a.mailboxes}

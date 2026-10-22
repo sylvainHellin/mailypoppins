@@ -22,6 +22,8 @@ export type AccountGroupProps = {
   outbox: OutboxSummary;
   /** The outbox view shows this account's outbox. */
   outboxOpen: boolean;
+  /** The outbox view shows some account's outbox, so no mailbox is the current page. */
+  outboxShown: boolean;
   /** Mail is the view shown, so the selected mailbox or the open outbox is the current page. */
   mailShown: boolean;
   mailboxes: SidebarMailbox[] | null;
@@ -52,21 +54,25 @@ export function AccountGroup(p: AccountGroupProps) {
                   <Skeleton className="h-6 w-full" />
                 </li>
               ))
-            : p.mailboxes.map((m, i) => (
-                <MailboxItem
-                  key={m.slug}
-                  account={p.name}
-                  slug={m.slug}
-                  label={m.label}
-                  kind={m.kind}
-                  unread={m.unread}
-                  total={m.total}
-                  digit={p.digits && i < 9 ? i + 1 : null}
-                  active={p.mailShown && !p.outboxOpen && p.selected.account === p.name && p.selected.mailbox === m.slug}
-                  cursor={p.cursor?.account === p.name && p.cursor.slug === m.slug}
-                  onSelect={p.onSelect}
-                />
-              ))}
+            : p.mailboxes.map((m, i) => {
+                const selected = p.selected.account === p.name && p.selected.mailbox === m.slug;
+                return (
+                  <MailboxItem
+                    key={m.slug}
+                    account={p.name}
+                    slug={m.slug}
+                    label={m.label}
+                    kind={m.kind}
+                    unread={m.unread}
+                    total={m.total}
+                    digit={p.digits && i < 9 ? i + 1 : null}
+                    active={p.mailShown && !p.outboxShown && selected}
+                    selected={selected}
+                    cursor={p.cursor?.account === p.name && p.cursor.slug === m.slug}
+                    onSelect={p.onSelect}
+                  />
+                );
+              })}
           <OutboxState account={p.name} outbox={p.outbox} active={p.mailShown && p.outboxOpen} onOpen={p.onOpenOutbox} />
         </SidebarMenu>
       </SidebarGroupContent>

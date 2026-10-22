@@ -310,6 +310,23 @@ describe("accessibility primitives", () => {
     await waitFor(() => expect(within(dialog).getByRole("button", { name: "Discard" })).toHaveFocus());
   });
 
+  it("highlights one sidebar entry, the open outbox or view, and tints the cursor only where it left the selection", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const nav = screen.getByRole("navigation", { name: "Accounts and mailboxes" });
+    const lit = () =>
+      [...nav.querySelectorAll<HTMLElement>('[data-sidebar="menu-button"]')]
+        .filter((b) => b.hasAttribute("data-active") || b.classList.contains("bg-sidebar-accent/50"))
+        .map((b) => b.getAttribute("aria-label"));
+    expect(lit()).toEqual([expect.stringMatching(/^Inbox, /)]);
+    await user.click(screen.getByRole("button", { name: /Outbox of home/ }));
+    await screen.findByRole("region", { name: "Outbox of home" });
+    expect(lit()).toEqual([expect.stringMatching(/^Outbox of home/)]);
+    await user.click(screen.getByRole("button", { name: /^Contacts, key/ }));
+    await screen.findByRole("region", { name: "Contacts" });
+    expect(lit()).toEqual([expect.stringMatching(/^Contacts, key/)]);
+  });
+
   it("names the attach and save dialogs, starts each in its field, ties the picker note to it and keeps the error in an alert", async () => {
     const { user } = renderApp();
     await shellReady();
