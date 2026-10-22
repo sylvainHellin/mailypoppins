@@ -1271,10 +1271,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### INT-05 Desktop notifications for new mail
 
 - Classification: GUI parity
-- Source anchor: `src/notify.rs`, using osascript on macOS and notify-send on Linux with sanitized payloads
+- Source anchor: `crates/mp-core/src/notify.rs`, using osascript on macOS and notify-send on Linux with sanitized payloads; a test build records into `notify::test_sink` instead and panics without a capture, so no test reaches the host's notification centre
 - Daemon surface: the daemon decides a notification is warranted and emits `state.event`; the client holding the entitlement presents it
 - GUI location: clients/desktop (M6, #0132)
-- Validation: unit tests in `src/notify.rs`; `a_tick_with_arrivals_notifies_the_user_and_refreshes_the_list` (`src/tui_tests/events.rs`), `a_runtime_tick_reaches_a_subscribed_client_with_its_arrivals` (`tests/tui_daemon_recovery.rs`)
+- Validation: unit tests in `crates/mp-core/src/notify.rs`; `a_tick_with_arrivals_notifies_the_user_and_refreshes_the_list` (`src/tui_tests/events.rs`), `a_runtime_tick_reaches_a_subscribed_client_with_its_arrivals` (`tests/tui_daemon_recovery.rs`)
 - Status: routed (P5-U8); GUI not started
 - Note: the daemon decides *what arrived* and the client decides whether to notify. `sync.completed` carries `new_inbox_mail`, `[{from, subject}]` per ingested inbox message, and the TUI reads `notifications = true` on the way to `crate::notify` exactly where it always did (#0009). A client that dropped the event for that setting would drop the status line and the reload with it, so the opt-in is at the notifier and not at the stream.
 

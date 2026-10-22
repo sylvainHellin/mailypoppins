@@ -96,10 +96,20 @@ pub fn format_new_mail_notification(
 /// `new` is empty. Non-blocking: the platform tool runs on a detached
 /// thread (which also reaps the child process), and any failure is
 /// logged at debug level and otherwise ignored.
+///
+/// In a test build (`cfg(test)` or the `test-support` feature every test
+/// suite turns on) the notification goes to [`test_sink`] instead and never
+/// reaches the host's notification centre; a test that did not open a
+/// capture panics here rather than post one.
 pub fn notify_new_mail(account: &str, new: &[NewMailMeta]) {
     let Some((title, body)) = format_new_mail_notification(account, new) else {
         return;
     };
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        test_sink::record(title, body);
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
     std::thread::spawn(move || {
         if let Err(e) = send_desktop_notification(&title, &body) {
             log::debug!("Desktop notification failed: {e}");
@@ -107,10 +117,63 @@ pub fn notify_new_mail(account: &str, new: &[NewMailMeta]) {
     });
 }
 
+/// Where a test build sends a notification: a per-thread record, so a test
+/// asserts the title and body the user would have seen and the host's
+/// notification centre is never touched.
+///
+/// Per thread because each test runs on its own thread and the TUI calls
+/// [`notify_new_mail`] on the thread that applies the event, which in a test
+/// is the test's. A notification with no capture open panics: the
+/// alternative, a silent drop, would let a test enable notifications without
+/// saying what it expects, and before this sink such a test ran `osascript`
+/// on the developer's machine.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_sink {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SHOWN: RefCell<Option<Vec<(String, String)>>> = const { RefCell::new(None) };
+    }
+
+    /// An open capture; dropping it closes it.
+    #[must_use = "the capture closes when dropped"]
+    pub struct Capture(());
+
+    /// Start recording this thread's notifications.
+    pub fn capture() -> Capture {
+        SHOWN.with(|shown| *shown.borrow_mut() = Some(Vec::new()));
+        Capture(())
+    }
+
+    impl Capture {
+        /// Every `(title, body)` recorded since [`capture`], oldest first.
+        pub fn shown(&self) -> Vec<(String, String)> {
+            SHOWN.with(|shown| shown.borrow().clone().unwrap_or_default())
+        }
+    }
+
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            SHOWN.with(|shown| *shown.borrow_mut() = None);
+        }
+    }
+
+    pub(super) fn record(title: String, body: String) {
+        SHOWN.with(|shown| match shown.borrow_mut().as_mut() {
+            Some(list) => list.push((title, body)),
+            None => panic!(
+                "a test reached the host's notification centre with {title:?} / {body:?}; \
+                 open mp_core::notify::test_sink::capture() and assert what it records"
+            ),
+        });
+    }
+}
+
 /// macOS: `osascript` with the text passed through `on run argv` --
 /// the attacker-controlled strings never touch AppleScript source, so
 /// no quoting or escaping is involved at all.
 #[cfg(target_os = "macos")]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 fn send_desktop_notification(title: &str, body: &str) -> std::io::Result<()> {
     use std::process::{Command, Stdio};
     Command::new("osascript")
@@ -132,6 +195,7 @@ fn send_desktop_notification(title: &str, body: &str) -> std::io::Result<()> {
 /// Linux (incl. WSL with a notification daemon): `notify-send`, with
 /// `--` terminating option parsing before the attacker-influenced args.
 #[cfg(target_os = "linux")]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 fn send_desktop_notification(title: &str, body: &str) -> std::io::Result<()> {
     use std::process::{Command, Stdio};
     Command::new("notify-send")
@@ -148,6 +212,7 @@ fn send_desktop_notification(title: &str, body: &str) -> std::io::Result<()> {
 
 /// Other platforms: silently do nothing.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 fn send_desktop_notification(_title: &str, _body: &str) -> std::io::Result<()> {
     Ok(())
 }
@@ -266,6 +331,28 @@ mod tests {
         // 120 chars + ellipsis + "a: " prefix
         assert_eq!(body.chars().count(), 3 + 120 + 1);
         assert!(body.ends_with('\u{2026}'));
+    }
+
+    // -- test_sink ------------------------------------------------------
+
+    #[test]
+    fn a_test_build_records_the_notification_instead_of_posting_it() {
+        let capture = test_sink::capture();
+        notify_new_mail("work", &[meta("Alice <a@example.com>", "Hi there")]);
+        notify_new_mail("work", &[]);
+        assert_eq!(
+            capture.shown(),
+            vec![(
+                "New email (work)".to_string(),
+                "Alice <a@example.com>: Hi there".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a test reached the host's notification centre")]
+    fn a_notification_with_no_capture_open_panics() {
+        notify_new_mail("work", &[meta("a", "s")]);
     }
 
     // -- NewMailMeta::new ----------------------------------------------

@@ -354,6 +354,7 @@ fn a_tick_with_arrivals_notifies_the_user_and_refreshes_the_list() {
     let mut app = app_on_inbox(&fixture);
     app.global_config.notifications = true;
     watermarked(&mut app);
+    let notifications = mp_core::notify::test_sink::capture();
 
     let applied = app.apply_event(&envelope(
         INSTANCE,
@@ -374,6 +375,14 @@ fn a_tick_with_arrivals_notifies_the_user_and_refreshes_the_list() {
             subject: "Analytical engine".to_string(),
         }]),
         "the arrivals the tick reported are the ones the notification renders"
+    );
+    assert_eq!(
+        notifications.shown(),
+        vec![(
+            "New email (alice)".to_string(),
+            "Ada <ada@example.com>: Analytical engine".to_string()
+        )],
+        "one notification, for the one arrival, through the sink and not the host"
     );
     assert_eq!(
         app.status_message.as_deref(),
@@ -401,6 +410,7 @@ fn notifications_off_notifies_nobody_and_still_syncs_the_view() {
     let mut app = app_on_inbox(&fixture);
     app.global_config.notifications = false;
     watermarked(&mut app);
+    let notifications = mp_core::notify::test_sink::capture();
 
     let applied = app.apply_event(&envelope(
         INSTANCE,
@@ -418,6 +428,10 @@ fn notifications_off_notifies_nobody_and_still_syncs_the_view() {
         applied,
         Applied::NewMail(Vec::new()),
         "nothing was notified about, which is what the empty list says"
+    );
+    assert!(
+        notifications.shown().is_empty(),
+        "and nothing reached the notifier"
     );
     assert_eq!(
         app.status_message.as_deref(),
@@ -542,6 +556,7 @@ fn the_finished_operation_lands_where_the_poll_landed() {
     fixture.forget();
     dispatch(&mut app, &fixture, &Action::Fetch);
     let id = fixture.operation_id("sync.quick");
+    let notifications = mp_core::notify::test_sink::capture();
 
     let applied = app.apply_event(&envelope(
         INSTANCE,
@@ -563,6 +578,14 @@ fn the_finished_operation_lands_where_the_poll_landed() {
         app.status_message.as_deref(),
         Some("Synced: 3 new, 4 existing"),
         "the same line the polled answer produced, from the same pure function"
+    );
+    assert_eq!(
+        notifications.shown(),
+        vec![(
+            "New email (alice)".to_string(),
+            "Ada <ada@example.com>: Engine".to_string()
+        )],
+        "the arrivals the answer carried notify, through the sink and not the host"
     );
 }
 
