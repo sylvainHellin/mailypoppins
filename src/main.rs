@@ -414,7 +414,7 @@ enum Commands {
         before: Option<String>,
         /// Max results across every searched mailbox, the newest winning
         /// wherever they sit; a server search cut by it ends with a
-        /// "raise -n" line
+        /// "raise -n" line. Exchange stops a search at 1000 results
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
         /// Show full body instead of preview
@@ -4463,9 +4463,22 @@ async fn main() -> Result<()> {
                 let server_folder = mailbox_name
                     .as_deref()
                     .map(|mb| find_server_name_for_role(&account_config, mb));
-                let mut emails = client
-                    .search_messages(&query_ast, server_folder.as_deref(), limit)
+                let search = client
+                    .search_messages_counted(&query_ast, server_folder.as_deref(), limit)
                     .await?;
+                // Graph stops a `$search` at its cap however it is paged, so
+                // raising -n cannot help: stderr says so beside --json, the
+                // text listing's last line otherwise.
+                let capped = search.capped;
+                if capped && json {
+                    eprintln!(
+                        "{} {}",
+                        "\u{26a0}".yellow(),
+                        mailypoppins::read_cmd::graph_search_cap_line(graph::GRAPH_SEARCH_CAP)
+                    );
+                }
+                let truncated = search.truncated;
+                let mut emails = search.hits;
                 sort_fetched_by_date(&mut emails);
                 if json {
                     // Graph names no folder per hit, so only a scoped search
@@ -4478,7 +4491,7 @@ async fn main() -> Result<()> {
                         &account_config.name,
                         &query,
                         &[],
-                        false,
+                        truncated,
                         &tagged,
                         full,
                     )?;
@@ -4486,6 +4499,14 @@ async fn main() -> Result<()> {
                     println!("{}", "No results found".yellow());
                 } else {
                     display_fetched_emails(&emails, full);
+                    if capped {
+                        println!(
+                            "{}",
+                            mailypoppins::read_cmd::graph_search_cap_line(graph::GRAPH_SEARCH_CAP)
+                        );
+                    } else if truncated {
+                        println!("{}", mailypoppins::read_cmd::more_results_line(limit));
+                    }
                 }
             } else {
                 let imap_config = ImapConfig::load(&account_config)?;

@@ -671,6 +671,15 @@ pub fn more_results_line(limit: usize) -> String {
     format!("More results than the {limit} shown: raise -n to see them.")
 }
 
+/// The line a Graph search stopped by Microsoft's `$search` cap prints, where
+/// raising `-n` cannot help.
+pub fn graph_search_cap_line(cap: usize) -> String {
+    format!(
+        "Microsoft Graph stops a search at {cap} results: narrow the query \
+         (after:, before:, in:) to reach the rest."
+    )
+}
+
 /// The coverage caveat of a server search's stdout header, `local store only:
 /// has:attachment`, or `None` when the server answered every term.
 ///

@@ -467,6 +467,9 @@ struct GraphBody {
 #[derive(Debug, Deserialize)]
 struct GraphMessageList {
     value: Vec<GraphMessage>,
+    /// The next page, which a search follows up to its limit.
+    #[serde(rename = "@odata.nextLink", default)]
+    next_link: Option<String>,
 }
 
 /// One entry of a message's `/attachments` collection.
@@ -3521,9 +3524,72 @@ const QUERY_VALUE_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::N
     .remove(b'_')
     .remove(b'~');
 
-/// The most messages one Graph page returns: `$top` takes 1 to 1000, and a
-/// `$search` answers at most 1000 results.
+/// The most messages one Graph page returns: `$top` takes 1 to 1000.
 const GRAPH_MAX_TOP: usize = 1000;
+
+/// The most results a `$search` on messages answers across all its pages:
+/// "A `$search` request returns up to 1,000 results" (Microsoft Learn, "Use
+/// the $search query parameter"). A `$filter` or a plain listing pages on
+/// past it.
+pub const GRAPH_SEARCH_CAP: usize = 1000;
+
+/// What a search does after one page of hits.
+#[derive(Debug, PartialEq)]
+enum SearchStep {
+    /// Fetch this `@odata.nextLink`.
+    Next(String),
+    /// Stop: `truncated` when more matched than the search returns, `capped`
+    /// when it is Graph's `$search` cap rather than the limit that stopped it.
+    Done { truncated: bool, capped: bool },
+}
+
+/// The paging decision of a search that has `collected` hits after `pages`
+/// pages, wants `limit` and was handed `next_link`.
+///
+/// It pages until the limit, which one page of at most [`GRAPH_MAX_TOP`]
+/// cannot reach past 1000, and stops at [`MAX_ENUMERATION_PAGES`] because a
+/// `@odata.nextLink` chain has no other termination proof. A `$search` that
+/// runs out of pages at [`GRAPH_SEARCH_CAP`] hits under a larger limit was
+/// cut by Graph, not finished, and says so.
+fn after_search_page(
+    collected: usize,
+    limit: usize,
+    next_link: Option<String>,
+    is_search: bool,
+    pages: usize,
+) -> SearchStep {
+    if collected >= limit {
+        return SearchStep::Done {
+            truncated: collected > limit || next_link.is_some(),
+            capped: false,
+        };
+    }
+    match next_link {
+        Some(next) if pages < MAX_ENUMERATION_PAGES => SearchStep::Next(next),
+        Some(_) => SearchStep::Done {
+            truncated: true,
+            capped: false,
+        },
+        None => {
+            let capped = is_search && collected >= GRAPH_SEARCH_CAP;
+            SearchStep::Done {
+                truncated: capped,
+                capped,
+            }
+        }
+    }
+}
+
+/// A Graph search's hits, newest first as Graph orders them, and whether
+/// more matched than they hold (PERSO-175).
+pub struct GraphSearch<T> {
+    pub hits: Vec<T>,
+    /// More matched than `hits` holds.
+    pub truncated: bool,
+    /// Graph's [`GRAPH_SEARCH_CAP`] stopped the search short of its limit,
+    /// which no paging gets past: a narrower query is the only way on.
+    pub capped: bool,
+}
 
 /// The query parameter a [`crate::search::GraphQuery`] travels as, for the URL
 /// and for the error that names a refused search.
@@ -3611,8 +3677,9 @@ fn search_refused(
 }
 
 impl GraphClient {
-    /// Search messages with one Graph request: a KQL `$search` for every
-    /// match term, or the `$filter` of an exact Message-ID lookup.
+    /// Search messages: a KQL `$search` for every match term, or the
+    /// `$filter` of an exact Message-ID lookup, paged through
+    /// `@odata.nextLink` up to `limit`.
     ///
     /// A refused request is an error naming what was sent. There is no
     /// fallback: the one this replaced dropped the `$search` half and listed
@@ -3624,11 +3691,25 @@ impl GraphClient {
         limit: usize,
     ) -> Result<Vec<FetchedEmail>> {
         Ok(self
-            .search_messages_threaded(query, folder, limit)
+            .search_messages_counted(query, folder, limit)
             .await?
-            .into_iter()
-            .map(|hit| hit.email)
-            .collect())
+            .hits)
+    }
+
+    /// [`Self::search_messages`], saying whether more matched than it
+    /// returns, for `mp search` to report the cut (PERSO-175).
+    pub async fn search_messages_counted(
+        &self,
+        query: &crate::search::Query,
+        folder: Option<&str>,
+        limit: usize,
+    ) -> Result<GraphSearch<FetchedEmail>> {
+        let search = self.search_messages_paged(query, folder, limit).await?;
+        Ok(GraphSearch {
+            hits: search.hits.into_iter().map(|hit| hit.email).collect(),
+            truncated: search.truncated,
+            capped: search.capped,
+        })
     }
 
     /// [`Self::search_messages`], with each hit's threading signals beside it
@@ -3639,6 +3720,20 @@ impl GraphClient {
         folder: Option<&str>,
         limit: usize,
     ) -> Result<Vec<GraphFetched>> {
+        Ok(self.search_messages_paged(query, folder, limit).await?.hits)
+    }
+
+    /// The one search all three entry points run.
+    ///
+    /// One page used to be all a search read, with `$top` clamped to 1000,
+    /// so `--limit 2500` quietly answered 1000; it now follows
+    /// `@odata.nextLink` until the limit (see [`after_search_page`]).
+    async fn search_messages_paged(
+        &self,
+        query: &crate::search::Query,
+        folder: Option<&str>,
+        limit: usize,
+    ) -> Result<GraphSearch<GraphFetched>> {
         let graph_query = crate::search::to_graph(query).map_err(|e| anyhow!("{e}"))?;
 
         let base = if let Some(f) = folder {
@@ -3648,32 +3743,48 @@ impl GraphClient {
             format!("{}/me/messages", GRAPH_BASE)
         };
 
-        let url = search_url(&base, limit, &graph_query)?;
-        debug!("Graph search URL: {}", url);
+        let is_search = matches!(graph_query, crate::search::GraphQuery::Search(_));
+        let mut url = search_url(&base, limit, &graph_query)?;
+        let mut messages: Vec<GraphMessage> = Vec::new();
+        let mut pages = 0usize;
+        let (truncated, capped) = loop {
+            debug!("Graph search URL: {}", url);
+            // No `ConsistencyLevel: eventual`: Graph wants it for advanced
+            // queries on directory objects, not for `$search` on messages.
+            let resp = self
+                .client
+                .get(url.clone())
+                .bearer_auth(self.bearer())
+                .send()
+                .await
+                .context("Failed to search messages")?;
 
-        // No `ConsistencyLevel: eventual`: Graph wants it for advanced queries
-        // on directory objects, not for `$search` on messages.
-        let resp = self
-            .client
-            .get(url)
-            .bearer_auth(self.bearer())
-            .send()
-            .await
-            .context("Failed to search messages")?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(search_refused(&graph_query, status, &body));
+            }
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(search_refused(&graph_query, status, &body));
-        }
+            let page: GraphMessageList = resp
+                .json()
+                .await
+                .context("Failed to parse search results")?;
+            pages += 1;
+            messages.extend(page.value);
+            match after_search_page(messages.len(), limit, page.next_link, is_search, pages) {
+                // The whole link, as Graph hands it: its `$skip` counts items
+                // Graph walked, not hits, and is not ours to rebuild.
+                SearchStep::Next(next) => {
+                    url = reqwest::Url::parse(&next)
+                        .with_context(|| format!("parsing the search's next page {next}"))?;
+                }
+                SearchStep::Done { truncated, capped } => break (truncated, capped),
+            }
+        };
+        messages.truncate(limit);
 
-        let msg_list: GraphMessageList = resp
-            .json()
-            .await
-            .context("Failed to parse search results")?;
-
-        let mut emails = Vec::with_capacity(msg_list.value.len());
-        for msg in &msg_list.value {
+        let mut emails = Vec::with_capacity(messages.len());
+        for msg in &messages {
             let mut email = graph_message_to_fetched_email(msg);
             if lists_attachments(msg) {
                 if let Ok(att) = self.fetch_attachments(&msg.id).await {
@@ -3692,7 +3803,11 @@ impl GraphClient {
 
         retain_exact_message_id_graph(&mut emails, query.message_id.as_deref());
 
-        Ok(emails)
+        Ok(GraphSearch {
+            hits: emails,
+            truncated,
+            capped,
+        })
     }
 }
 
@@ -5147,6 +5262,114 @@ mod tests {
             r#""from:a+b@x.com AND subject:\"R&D #1\"""#
         );
         assert_eq!(pairs["$top"], "10");
+    }
+
+    /// A search page carries Graph's `@odata.nextLink`, which the search
+    /// follows; the list used to drop it, so one page was all a search read.
+    #[test]
+    fn a_search_page_keeps_its_next_link() {
+        let page: GraphMessageList = serde_json::from_value(serde_json::json!({
+            "value": [],
+            "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skip=1000"
+        }))
+        .unwrap();
+        assert_eq!(
+            page.next_link.as_deref(),
+            Some("https://graph.microsoft.com/v1.0/me/messages?$skip=1000")
+        );
+        let last: GraphMessageList =
+            serde_json::from_value(serde_json::json!({"value": []})).unwrap();
+        assert_eq!(last.next_link, None);
+    }
+
+    /// `--limit 2500` pages past one page of 1000 instead of answering 1000
+    /// (PERSO-173 review), and stops at the limit, saying more matched when
+    /// Graph still holds a page.
+    #[test]
+    fn a_search_pages_until_its_limit() {
+        let next = || Some("https://graph.microsoft.com/v1.0/next".to_string());
+        assert_eq!(
+            after_search_page(1000, 2500, next(), false, 1),
+            SearchStep::Next("https://graph.microsoft.com/v1.0/next".into())
+        );
+        assert_eq!(
+            after_search_page(2500, 2500, next(), false, 3),
+            SearchStep::Done {
+                truncated: true,
+                capped: false
+            }
+        );
+        assert_eq!(
+            after_search_page(2500, 2500, None, false, 3),
+            SearchStep::Done {
+                truncated: false,
+                capped: false
+            }
+        );
+        assert_eq!(
+            after_search_page(1800, 2500, None, false, 2),
+            SearchStep::Done {
+                truncated: false,
+                capped: false
+            },
+            "a filter that runs out of pages found everything"
+        );
+        assert_eq!(
+            after_search_page(30, 20, None, true, 1),
+            SearchStep::Done {
+                truncated: true,
+                capped: false
+            },
+            "a page longer than the limit is cut"
+        );
+    }
+
+    /// A `$search` answers 1000 results at most however it is paged, so one
+    /// that runs out there under a larger limit was cut by Graph and says so;
+    /// one that runs out below it found everything.
+    #[test]
+    fn a_search_that_runs_out_at_the_graph_cap_says_it_was_capped() {
+        assert_eq!(
+            after_search_page(GRAPH_SEARCH_CAP, 2500, None, true, 2),
+            SearchStep::Done {
+                truncated: true,
+                capped: true
+            }
+        );
+        assert_eq!(
+            after_search_page(999, 2500, None, true, 2),
+            SearchStep::Done {
+                truncated: false,
+                capped: false
+            }
+        );
+        assert_eq!(
+            after_search_page(GRAPH_SEARCH_CAP, GRAPH_SEARCH_CAP, None, true, 1),
+            SearchStep::Done {
+                truncated: false,
+                capped: false
+            },
+            "a limit Graph can meet is not capped"
+        );
+    }
+
+    /// A `@odata.nextLink` chain has no termination proof of its own, so the
+    /// search stops at the page bound and calls the answer cut.
+    #[test]
+    fn a_search_stops_at_the_page_bound() {
+        assert_eq!(
+            after_search_page(
+                10,
+                2500,
+                Some("https://graph.microsoft.com/v1.0/next".into()),
+                true,
+                MAX_ENUMERATION_PAGES
+            ),
+            SearchStep::Done {
+                truncated: true,
+                capped: false
+            }
+        );
     }
 
     fn url_pairs(query: &str, limit: usize) -> std::collections::HashMap<String, String> {

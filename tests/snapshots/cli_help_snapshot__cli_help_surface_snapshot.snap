@@ -505,7 +505,7 @@ Options:
           Strictly before this date, YYYY-MM-DD (before:)
 
   -n, --limit <LIMIT>
-          Max results across every searched mailbox, the newest winning wherever they sit; a server search cut by it ends with a "raise -n" line
+          Max results across every searched mailbox, the newest winning wherever they sit; a server search cut by it ends with a "raise -n" line. Exchange stops a search at 1000 results
           
           [default: 20]
 
