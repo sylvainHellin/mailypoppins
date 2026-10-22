@@ -2307,20 +2307,27 @@ impl App {
     ///
     /// One `mailbox.list` where it was one grouped store query, on the same
     /// thread it always ran on: this is a recount after a sync, not a
-    /// per-keystroke read.
+    /// per-keystroke read. The same answer carries the sidebar hierarchy, so
+    /// a folder a tick discovered (or lost) on the server reaches the sidebar
+    /// with the counts that announced it (#0141).
     pub fn recount_all_mailboxes(&mut self) {
         let account = self.account_config.name.clone();
-        self.mailbox_counts = match self.queries() {
-            Some(queries) => super::queries::mailbox_counts(queries, &account, &self.mailboxes)
-                .unwrap_or_else(|e| {
-                    log::warn!("[queries] recounting the mailboxes of {account}: {e:#}");
-                    vec![0; self.mailboxes.len()]
-                }),
+        let answer = match self.queries() {
+            Some(queries) => queries
+                .call("mailbox.list", super::queries::counts_params(&account))
+                .map_err(|e| log::warn!("[queries] recounting the mailboxes of {account}: {e:#}"))
+                .ok(),
             None => {
                 log::warn!("[queries] no daemon session: the counts of {account} stay zero");
-                vec![0; self.mailboxes.len()]
+                None
             }
         };
+        let Some(answer) = answer else {
+            self.mailbox_counts = vec![0; self.mailboxes.len()];
+            return;
+        };
+        self.adopt_mailbox_rows(&mp_client::queries::decode_mailbox_rows(&answer));
+        self.mailbox_counts = super::queries::decode_counts(&self.mailboxes, &answer);
     }
 
     pub(crate) fn switch_mailbox(&mut self, idx: usize) {

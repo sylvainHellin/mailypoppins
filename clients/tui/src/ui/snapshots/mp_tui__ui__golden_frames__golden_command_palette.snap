@@ -28,9 +28,9 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 22 |││                            │Go to mailboxes (sidebar)                                 │                            ││
 23 |││                            │Go to message list                                        │                            ││
 24 |││                            │Go to reader (body)                                       │                            ││
-25 |││                            │Switch account                                            │                            ││
-26 |│╰────────────────────────────│Quick sync                                                │                            ││
-27 |│╭ Activity ──────────────────│Full sync                                                 │                            ││
+25 |││                            │Go to mailbox (fuzzy picker)                              │                            ││
+26 |│╰────────────────────────────│Switch account                                            │                            ││
+27 |│╭ Activity ──────────────────│Quick sync                                                │                            ││
 28 |││  No activity yet           │type filter  ↑/↓ nav  Enter run  Esc cancel               │                            ││
 29 |││                            ╰──────────────────────────────────────────────────────────╯                            ││
 30 |││                                       ││                                                                           ││

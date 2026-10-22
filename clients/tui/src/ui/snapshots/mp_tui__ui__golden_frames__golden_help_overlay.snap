@@ -23,30 +23,30 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 17 |││                                 │  gm          Go to mailboxes (sidebar)         │                                 ││
 18 |││                                 │  gl          Go to message list                │                                 ││
 19 |││                                 │  gr          Go to reader (body)               │                                 ││
-20 |││                                 │  ga          Switch account                    │                                 ││
-21 |││                                 │  ss          Quick sync                        │                                 ││
-22 |││                                 │  sS          Full sync                         │                                 ││
-23 |││                                 │  sl          Activity log overlay              │                                 ││
-24 |││                                 │  sc          Open config.toml in $EDITOR       │                                 ││
-25 |││                                 │  sf          Open log file in $EDITOR          │                                 ││
-26 |│╰─────────────────────────────────│  Space m     Switch to Mail view               │                                 ││
-27 |│╭ Activity ───────────────────────│  Space c     Switch to Contacts view           │                                 ││
-28 |││  No activity yet                │  Space a     Switch to Calendar view           │                                 ││
-29 |││                                 │                                                │                                 ││
-30 |││                                 │  MESSAGE (list, headers, body)                 │                                 ││
-31 |││                                 │  J / K       Next / previous message           │                                 ││
-32 |│╰─────────────────────────────────│  Enter       Read (focus the body pane)        │                                 ││
-33 |│╭ View ───────────────────────────│  e           Open in editor (mail read-only)   │                                 ││
-34 |││    mail  |  contacts  |  calenda│  r           Reply                             │                                 ││
-35 |│╰─────────────────────────────────│  a           Archive                           │─────────────────────────────────╯│
-36 |│╭─────────────────────────────────│  d           Delete                            │─────────────────────────────────╮│
-37 |││ HELP                            ╰─────────────────── 1-34/124 ───────────────────╯                                 ││
+20 |││                                 │  gf          Go to mailbox (fuzzy picker)      │                                 ││
+21 |││                                 │  ga          Switch account                    │                                 ││
+22 |││                                 │  ss          Quick sync                        │                                 ││
+23 |││                                 │  sS          Full sync                         │                                 ││
+24 |││                                 │  sl          Activity log overlay              │                                 ││
+25 |││                                 │  sc          Open config.toml in $EDITOR       │                                 ││
+26 |│╰─────────────────────────────────│  sf          Open log file in $EDITOR          │                                 ││
+27 |│╭ Activity ───────────────────────│  Space m     Switch to Mail view               │                                 ││
+28 |││  No activity yet                │  Space c     Switch to Contacts view           │                                 ││
+29 |││                                 │  Space a     Switch to Calendar view           │                                 ││
+30 |││                                 │                                                │                                 ││
+31 |││                                 │  MESSAGE (list, headers, body)                 │                                 ││
+32 |│╰─────────────────────────────────│  J / K       Next / previous message           │                                 ││
+33 |│╭ View ───────────────────────────│  Enter       Read (focus the body pane)        │                                 ││
+34 |││    mail  |  contacts  |  calenda│  e           Open in editor (mail read-only)   │                                 ││
+35 |│╰─────────────────────────────────│  r           Reply                             │─────────────────────────────────╯│
+36 |│╭─────────────────────────────────│  a           Archive                           │─────────────────────────────────╮│
+37 |││ HELP                            ╰─────────────────── 1-34/125 ───────────────────╯                                 ││
 38 |│╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│
 39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
 03 |bold@36..44
 10 |bg:surface+fg:selection+bold@2..35
 12 |bold@2..35
-30 |bold@36..67
+31 |bold@36..67
 34 |bold@5..11
 37 |bold@2..8

@@ -41,7 +41,7 @@
 //! why a resync and a reconnect are spelled "bootstrap again" rather than
 //! "clear a flag".
 
-use mp_protocol::state::{AccountState as WireAccountState, Bootstrap, MailboxRow};
+use mp_protocol::state::{AccountState as WireAccountState, Bootstrap, FolderPolicy, MailboxRow};
 
 use super::{AccountState, App, MailboxInfo, MailboxKind, StatusLevel};
 
@@ -285,17 +285,20 @@ fn land_sync_health(
 /// One wire mailbox row as the sidebar's [`MailboxInfo`].
 ///
 /// The icon and the [`MailboxKind`] a renderer branches on come from the role,
-/// via the same [`build_mailboxes`](super::build_mailboxes) the daemon derived
-/// its seeds from, so the two cannot disagree about what an Inbox looks like.
-/// The label and the slug come from the wire, because those are the two things
-/// a daemon can know that a client's own config cannot: the label an account
-/// gave its Inbox, and the store key its messages are filed under.
+/// via the same [`build_mailboxes`](super::build_mailboxes) the four fixed rows
+/// are drawn from, so the two cannot disagree about what an Inbox looks like.
+/// The label, the slug and the server name come from the wire, because those
+/// are what a daemon can know that a client's own config cannot: the label an
+/// account gave its Inbox, the store key its messages are filed under, and
+/// the folder the server lists for it (#0141). A daemon that predates the
+/// `server` member leaves it out, and the row then takes the configured
+/// mailbox's server name, as it did before.
 ///
-/// The template is matched by slug first and by kind second: an account with
-/// two extra mailboxes has two `Extra` entries that only their slug tells
-/// apart, and a role the client does not know yet falls through to a plain
-/// extra rather than to a panic.
-fn mailbox_info(template: &[MailboxInfo], row: &MailboxRow) -> MailboxInfo {
+/// The template is matched by slug first and by kind second, the second only
+/// for the role rows: two extra mailboxes are two `Extra` entries only their
+/// slug tells apart, so one the config does not describe never borrows a
+/// sibling's server name.
+pub(super) fn mailbox_info(template: &[MailboxInfo], row: &MailboxRow) -> MailboxInfo {
     let kind = match row.role.as_str() {
         "inbox" => MailboxKind::Inbox,
         "drafts" => MailboxKind::Drafts,
@@ -306,24 +309,99 @@ fn mailbox_info(template: &[MailboxInfo], row: &MailboxRow) -> MailboxInfo {
     let base = template
         .iter()
         .find(|info| info.id == row.slug)
-        .or_else(|| template.iter().find(|info| info.kind == kind));
-    match base {
-        Some(info) => MailboxInfo {
-            label: row.label.clone(),
-            id: row.slug.clone(),
-            icon: info.icon,
-            kind,
-            server_name: info.server_name.clone(),
-        },
-        // A mailbox the local config does not describe: the server name is the
-        // label, which is what `build_mailboxes` does for a configured extra.
-        None => MailboxInfo {
-            label: row.label.clone(),
-            icon: "\u{f0247}",
-            id: row.slug.clone(),
-            kind,
-            server_name: Some(row.label.clone()),
-        },
+        .or_else(|| {
+            (kind != MailboxKind::Extra)
+                .then(|| template.iter().find(|info| info.kind == kind))
+                .flatten()
+        });
+    let icon = match (row.role.as_str(), row.policy, base) {
+        ("trash", ..) => "\u{f0a7a}",
+        ("junk", ..) => "\u{f0029}",
+        (_, _, Some(info)) => info.icon,
+        (_, FolderPolicy::StatusOnly, None) => "\u{f0315}",
+        (_, _, None) => "\u{f0247}",
+    };
+    // A daemon that predates the `server` member: the configured mailbox's
+    // name, and for a mailbox the config does not describe its label, which is
+    // what `build_mailboxes` does for a configured extra.
+    let server_name = match (kind, &row.server, base) {
+        (MailboxKind::Drafts, ..) => None,
+        (_, Some(server), _) => Some(server.clone()),
+        (_, None, Some(info)) => info.server_name.clone(),
+        (MailboxKind::Extra, None, None) => Some(row.label.clone()),
+        (_, None, None) => None,
+    };
+    MailboxInfo {
+        label: row.label.clone(),
+        icon,
+        id: row.slug.clone(),
+        kind,
+        server_name,
+    }
+}
+
+impl App {
+    /// Take the daemon's sidebar hierarchy for the active account when it is
+    /// not the one on screen (#0141): a tick listed a folder the server just
+    /// created, or one it stopped listing.
+    ///
+    /// The open mailbox, the sidebar cursor and every cached listing follow
+    /// their mailbox by slug rather than by position, so a row added above the
+    /// open one does not swap the list under the user; a mailbox that went
+    /// away falls back to the Inbox. Answers whether anything changed.
+    pub(crate) fn adopt_mailbox_rows(&mut self, rows: &[MailboxRow]) -> bool {
+        if rows.is_empty() {
+            return false;
+        }
+        let template = super::build_mailboxes(&self.account_config);
+        let fresh: Vec<MailboxInfo> = rows
+            .iter()
+            .map(|row| mailbox_info(&template, row))
+            .collect();
+        let same = fresh.len() == self.mailboxes.len()
+            && fresh.iter().zip(&self.mailboxes).all(|(a, b)| {
+                a.id == b.id
+                    && a.label == b.label
+                    && a.server_name == b.server_name
+                    && a.kind == b.kind
+            });
+        if same {
+            return false;
+        }
+        let id_at = |index: usize, list: &[MailboxInfo]| list.get(index).map(|m| m.id.clone());
+        let follow = |id: Option<String>| {
+            id.and_then(|id| fresh.iter().position(|m| m.id == id))
+                .unwrap_or(0)
+        };
+        let active = follow(id_at(self.active_mailbox, &self.mailboxes));
+        let cursor = follow(id_at(self.sidebar_index, &self.mailboxes));
+        let cache: Vec<_> = fresh
+            .iter()
+            .map(|m| {
+                self.mailboxes
+                    .iter()
+                    .position(|old| old.id == m.id)
+                    .and_then(|old| self.email_cache.get(old).cloned().flatten())
+            })
+            .collect();
+        let moved_away = self
+            .mailboxes
+            .get(self.active_mailbox)
+            .is_some_and(|m| !fresh.iter().any(|f| f.id == m.id));
+        self.mailboxes = fresh;
+        self.email_cache = cache;
+        self.mailbox_counts.resize(self.mailboxes.len(), 0);
+        self.sidebar_index = cursor;
+        if let Some(state) = self.accounts.get_mut(self.active_account) {
+            state.mailboxes = self.mailboxes.clone();
+            state.email_cache = self.email_cache.clone();
+        }
+        if moved_away {
+            self.switch_mailbox(active);
+        } else {
+            self.active_mailbox = active;
+        }
+        true
     }
 }
 
@@ -554,6 +632,61 @@ mod tests {
         assert_eq!(app.mailboxes[4].kind, MailboxKind::Extra);
         assert_eq!(app.mailboxes[4].id, "Projekte");
         assert_eq!(app.mailbox_counts, vec![5, 2, 41, 128, 7]);
+    }
+
+    /// A recount whose `mailbox.list` carries folders a tick discovered adopts
+    /// the new hierarchy (#0141): the open mailbox and its cached listing
+    /// follow it by slug, a discovered folder takes its server name and its
+    /// role's icon from the wire, and a mailbox that went away falls back to
+    /// the Inbox.
+    #[test]
+    fn a_recount_adopts_the_folders_a_tick_discovered() {
+        let _data = mp_core::config::test_env::TestDataDir::new();
+        let mut rows = four_rows();
+        rows.push(row("other", "Spesen", "Spesen", 3));
+        let mut app = App::from_bootstrap(
+            config("fixture"),
+            &bootstrap("fixture", WireAccountState::Ready, rows.clone()),
+        );
+        app.active_mailbox = 4;
+        app.sidebar_index = 4;
+        let cached = std::sync::Arc::new(Vec::new());
+        app.email_cache[4] = Some(std::sync::Arc::clone(&cached));
+
+        let mut trash = row("trash", "Deleted Items", "Trash", 120);
+        trash.server = Some("Deleted Items".to_string());
+        trash.policy = FolderPolicy::StatusOnly;
+        let mut discovered = four_rows();
+        discovered.push(trash);
+        discovered.push(rows[4].clone());
+        assert!(app.adopt_mailbox_rows(&discovered));
+        assert_eq!(app.mailboxes.len(), 6);
+        assert_eq!(
+            app.mailboxes[app.active_mailbox].id, "Spesen",
+            "the open mailbox follows"
+        );
+        assert_eq!(app.sidebar_index, 5);
+        assert!(
+            app.email_cache[5].is_some(),
+            "and so does its cached listing"
+        );
+        assert_eq!(
+            app.mailboxes[4].server_name.as_deref(),
+            Some("Deleted Items")
+        );
+        assert_eq!(app.mailboxes[4].icon, "\u{f0a7a}");
+        assert_eq!(app.accounts[0].mailboxes.len(), 6);
+        assert!(
+            !app.adopt_mailbox_rows(&discovered),
+            "the same rows change nothing"
+        );
+
+        discovered.pop();
+        assert!(app.adopt_mailbox_rows(&discovered));
+        assert_eq!(
+            app.active_mailbox, 0,
+            "a mailbox that went away falls back to the Inbox"
+        );
     }
 
     /// An account the snapshot names and the configuration does not still gets

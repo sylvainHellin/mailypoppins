@@ -131,6 +131,17 @@ pub(super) fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
 
+    // A sidebar taller than its pane scrolls (#0141): an account whose server
+    // lists more folders than the terminal has rows keeps the highlighted
+    // mailbox, or the open one, on screen rather than below the border.
+    let rows = (inner.height as usize).saturating_sub(sync_health_rows(app) as usize);
+    let anchor = if app.focus == Focus::Sidebar {
+        app.sidebar_index
+    } else {
+        app.active_mailbox
+    };
+    let skip = (anchor + 1).saturating_sub(rows);
+
     // While the active account's store is still opening in the background
     // (#0003 two-phase startup) the counts are all zero and meaningless, so the
     // count column shows a loading marker rather than a wrong `0`.
@@ -139,7 +150,7 @@ pub(super) fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         .get(app.active_account)
         .is_some_and(|a| a.opening);
 
-    for (i, mb) in app.mailboxes.iter().enumerate() {
+    for (i, mb) in app.mailboxes.iter().enumerate().skip(skip).take(rows) {
         let is_selected = i == app.active_mailbox;
         let is_highlighted = app.focus == Focus::Sidebar && i == app.sidebar_index;
         let count = app.mailbox_counts.get(i).copied().unwrap_or(0);
@@ -369,6 +380,33 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A sidebar shorter than its mailboxes scrolls to keep the open one, or
+    /// the highlighted one while the sidebar has the focus, on screen (#0141).
+    #[test]
+    fn a_short_sidebar_scrolls_to_the_open_mailbox() {
+        let mut app = app_with(vec![account("tum", SyncHealth::default())], 0);
+        app.mailboxes = (0..12)
+            .map(|i| crate::app::MailboxInfo {
+                label: format!("Folder{i:02}"),
+                icon: "*",
+                id: format!("f{i}"),
+                kind: crate::app::MailboxKind::Extra,
+                server_name: Some(format!("Folder{i:02}")),
+            })
+            .collect();
+        app.mailbox_counts = vec![0; 12];
+        app.active_mailbox = 10;
+        let shown = render(&app, 30, 7);
+        assert!(shown.contains("Folder10"), "{shown}");
+        assert!(!shown.contains("Folder00"), "{shown}");
+
+        app.focus = Focus::Sidebar;
+        app.sidebar_index = 1;
+        let shown = render(&app, 30, 7);
+        assert!(shown.contains("Folder01"), "{shown}");
+        assert!(!shown.contains("Folder10"), "{shown}");
     }
 
     /// The persistent surface (#0071): the failing account's reason is drawn

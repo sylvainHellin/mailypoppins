@@ -7,8 +7,8 @@ use super::{
     AccountPicker, Action, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
     ComposeField, ComposeMode, ComposeSuggestion, ComposeWizard, ConfirmAction, ConfirmDialog,
     DirPicker, DirPickerMode, EmailEntry, EntryKey, Focus, MailboxKind, MailboxPicker, Message,
-    MessageRef, Overlay, RsvpChoice, RsvpOverlay, SearchField, SearchOverlayFocus, SearchScope,
-    SignaturesMode, SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
+    MessageRef, Overlay, PickerPurpose, RsvpChoice, RsvpOverlay, SearchField, SearchOverlayFocus,
+    SearchScope, SignaturesMode, SignaturesOverlay, StatusLevel, ThreadEntry, ThreadOverlay,
 };
 
 impl App {
@@ -836,6 +836,10 @@ impl App {
             A::MovePicker => {
                 self.pending_prefix = None;
                 self.open_mailbox_picker();
+            }
+            A::FolderPicker => {
+                self.pending_prefix = None;
+                self.open_folder_picker();
             }
             A::Rsvp => {
                 self.pending_prefix = None;
@@ -2233,7 +2237,30 @@ impl App {
             candidates,
             filtered,
             selected: 0,
-            msgs,
+            purpose: PickerPurpose::Move(msgs),
+        });
+    }
+
+    /// Open the fuzzy picker over every mailbox of the sidebar (`gf`, #0141).
+    ///
+    /// The number keys reach the first nine; an account whose server lists
+    /// more folders than that reaches the rest by name here, as aerc's and
+    /// neomutt's folder pickers do. The open mailbox is listed too, so the
+    /// candidates read as the sidebar does.
+    fn open_folder_picker(&mut self) {
+        let candidates: Vec<(usize, String)> = self
+            .mailboxes
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i, m.label.clone()))
+            .collect();
+        let filtered = (0..candidates.len()).collect();
+        self.overlay = Overlay::Mailbox(MailboxPicker {
+            query: String::new(),
+            candidates,
+            filtered,
+            selected: 0,
+            purpose: PickerPurpose::Jump,
         });
     }
 
@@ -2276,11 +2303,17 @@ impl App {
                     else {
                         return None;
                     };
-                    self.selection.clear();
-                    self.push_action(Action::MoveToMailbox {
-                        msgs: picker.msgs,
-                        dest_idx,
-                    });
+                    match picker.purpose {
+                        PickerPurpose::Move(msgs) => {
+                            self.selection.clear();
+                            self.push_action(Action::MoveToMailbox { msgs, dest_idx });
+                        }
+                        PickerPurpose::Jump => {
+                            self.sidebar_index = dest_idx;
+                            self.switch_mailbox(dest_idx);
+                            self.focus = Focus::List;
+                        }
+                    }
                     // Consume-and-close: promote any error queued behind it.
                     self.promote_pending_error();
                 }
@@ -4378,7 +4411,7 @@ mod tests {
                 .collect(),
             filtered: (0..labels.len()).collect(),
             selected: 0,
-            msgs: vec![MessageRef::new(1)],
+            purpose: PickerPurpose::Move(vec![MessageRef::new(1)]),
         }
     }
 
@@ -4452,7 +4485,55 @@ mod tests {
         let labels: Vec<&str> = picker.candidates.iter().map(|(_, l)| l.as_str()).collect();
         assert_eq!(labels, vec!["Sent", "Archive"]);
         // Cursor email is carried as the move target.
-        assert_eq!(picker.msgs.len(), 1);
+        assert_eq!(picker.msgs().len(), 1);
+    }
+
+    /// `gf` lists every mailbox of the sidebar, a discovered folder past the
+    /// nine number keys included, and Enter opens the one picked rather than
+    /// moving anything (#0141).
+    #[test]
+    fn the_folder_picker_opens_any_mailbox_by_name() {
+        let mut app = app_with_mailboxes();
+        for name in [
+            "Spesen",
+            "Archive1",
+            "Read",
+            "Scheduled",
+            "Deleted Items",
+            "Labels/AI",
+        ] {
+            app.mailboxes
+                .push(mb_info(name, name, MailboxKind::Extra, Some(name)));
+        }
+        app.email_cache = vec![None; app.mailboxes.len()];
+        app.mailbox_counts = vec![0; app.mailboxes.len()];
+        assert!(app.mailboxes.len() > 9, "past the number keys");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        let Overlay::Mailbox(picker) = &app.overlay else {
+            panic!("gf opens the folder picker");
+        };
+        assert_eq!(
+            picker.candidates.len(),
+            app.mailboxes.len(),
+            "every mailbox"
+        );
+        assert!(picker.msgs().is_empty(), "nothing to move");
+
+        for c in "labai".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.mailboxes[app.active_mailbox].id, "Labels/AI");
+        assert_eq!(app.focus, Focus::List);
+        assert!(
+            !app.pending_actions
+                .iter()
+                .any(|a| matches!(a, Action::MoveToMailbox { .. })),
+            "a jump moves nothing"
+        );
     }
 
     #[test]
@@ -4466,7 +4547,7 @@ mod tests {
         let Overlay::Mailbox(picker) = &app.overlay else {
             panic!("picker should open");
         };
-        assert_eq!(picker.msgs.len(), 2);
+        assert_eq!(picker.msgs().len(), 2);
     }
 
     #[test]
@@ -5087,7 +5168,7 @@ mod tests {
         let Overlay::Mailbox(picker) = &app.overlay else {
             panic!("picker must not be clobbered by a background error");
         };
-        assert_eq!(picker.msgs.len(), 1);
+        assert_eq!(picker.msgs().len(), 1);
         assert!(app.pending_error.is_some());
         assert_eq!(app.status_message.as_deref(), Some("Move failed: boom"));
 

@@ -1510,9 +1510,9 @@ fn move_msgs(app: &mut App, commands: &dyn Queries, msgs: Vec<MessageRef>, dest_
         None => return,
     };
     // No client-side check that the destination has a server-side folder any
-    // more: `find_server_name_for_role` is the daemon's own resolution of the
-    // account's `[[mailboxes]]` mapping, and the sidebar's `server_name` was a
-    // second copy of it that refused moves the daemon can name a folder for.
+    // more: the daemon resolves the folder behind a mailbox key from the
+    // account's mailbox catalogue (#0141), and the sidebar's `server_name` was
+    // a second copy of it that refused moves the daemon can name a folder for.
 
     let account = app.account_config.name.clone();
     let touched_invite = any_invite(app, &msgs);

@@ -2378,23 +2378,42 @@ pub struct AccountPicker {
     pub selected: usize,
 }
 
-/// Overlay state for the quick-move mailbox picker (#0018): a fuzzy
-/// type-to-filter list of destination mailboxes, opened with `M` from
-/// the email list.
+/// Overlay state for the fuzzy mailbox picker: a type-to-filter list of
+/// mailboxes, opened with `M` to move the selection there (#0018) or with
+/// `gf` to open one (#0141), which is how a folder past the nine number keys
+/// is reached by name.
 pub struct MailboxPicker {
     /// Type-to-filter query.
     pub query: String,
-    /// Candidate destinations: `(mailbox index into App::mailboxes,
-    /// label)`. Excludes the mailboxes the rows live in (the active one,
-    /// and an expanded conversation member's own) and any mailbox without
-    /// a server-side folder.
+    /// Candidates: `(mailbox index into App::mailboxes, label)`. A move
+    /// excludes the mailboxes the rows live in (the active one, and an
+    /// expanded conversation member's own) and any mailbox without a
+    /// server-side folder; a jump lists every mailbox of the sidebar.
     pub candidates: Vec<(usize, String)>,
     /// Indices into `candidates` matching the current query.
     pub filtered: Vec<usize>,
     /// Cursor position in `filtered`.
     pub selected: usize,
-    /// Emails to move (current selection, or the cursor email).
-    pub msgs: Vec<MessageRef>,
+    /// What Enter does with the picked mailbox.
+    pub purpose: PickerPurpose,
+}
+
+/// What a [`MailboxPicker`] is for.
+pub enum PickerPurpose {
+    /// Move these emails there (the current selection, or the cursor email).
+    Move(Vec<MessageRef>),
+    /// Open it in the list.
+    Jump,
+}
+
+impl MailboxPicker {
+    /// The emails a move picker moves; none for a jump.
+    pub fn msgs(&self) -> &[MessageRef] {
+        match &self.purpose {
+            PickerPurpose::Move(msgs) => msgs,
+            PickerPurpose::Jump => &[],
+        }
+    }
 }
 
 /// What the signatures overlay is doing right now (#0107).

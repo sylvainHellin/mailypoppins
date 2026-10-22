@@ -6,8 +6,8 @@ use ratatui::Frame;
 
 use super::super::app::{
     AccountPicker, AccountState, App, AttachmentPicker, AttachmentPickerMode, CommandPalette,
-    ConfirmDialog, DirPicker, DirPickerMode, MailboxPicker, PersistentError, RsvpOverlay,
-    SignaturesMode, SignaturesOverlay, ThreadEntry, ThreadOverlay,
+    ConfirmDialog, DirPicker, DirPickerMode, MailboxPicker, PersistentError, PickerPurpose,
+    RsvpOverlay, SignaturesMode, SignaturesOverlay, ThreadEntry, ThreadOverlay,
 };
 use super::super::theme;
 use super::util::truncate;
@@ -589,8 +589,11 @@ pub(super) fn render_mailbox_picker(picker: &MailboxPicker, frame: &mut Frame, a
     let dialog_area = vertical[0];
     frame.render_widget(Clear, dialog_area);
 
-    let count = picker.msgs.len();
-    let title = if count == 1 {
+    let jump = matches!(picker.purpose, PickerPurpose::Jump);
+    let count = picker.msgs().len();
+    let title = if jump {
+        " Go to mailbox ".to_string()
+    } else if count == 1 {
         " Move to ".to_string()
     } else {
         format!(" Move {count} emails to ")
@@ -657,7 +660,11 @@ pub(super) fn render_mailbox_picker(picker: &MailboxPicker, frame: &mut Frame, a
     // Footer
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "type filter  \u{2191}/\u{2193} nav  Enter move  Esc cancel",
+            if jump {
+                "type filter  \u{2191}/\u{2193} nav  Enter open  Esc cancel"
+            } else {
+                "type filter  \u{2191}/\u{2193} nav  Enter move  Esc cancel"
+            },
             Style::default().fg(theme::active().text_muted),
         ))),
         chunks[2],

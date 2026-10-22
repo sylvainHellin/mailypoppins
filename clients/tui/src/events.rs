@@ -352,6 +352,15 @@ impl App {
             KIND_DRAFT_CHANGED | KIND_DRAFT_INVALID => {
                 self.apply_draft_change(event.payload["account"].as_str())
             }
+            // A mailbox the server stopped listing (#0141): the recount reads
+            // the hierarchy that no longer has it.
+            KIND_REMOVE
+                if event.payload["resource"]
+                    .as_str()
+                    .is_some_and(|resource| resource.starts_with("mailbox:")) =>
+            {
+                self.apply_counts(event)
+            }
             KIND_REMOVE if draft_resource_account(event).is_some() => {
                 self.apply_draft_change(draft_resource_account(event))
             }

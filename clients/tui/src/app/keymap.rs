@@ -325,6 +325,8 @@ pub enum KeyAction {
     /// explicit open that marks the message read (#0110, PERSO-92).
     FocusBody,
     MovePicker,
+    /// `gf`: the fuzzy picker over every mailbox, to open one by name (#0141).
+    FolderPicker,
     Rsvp,
     /// Open the conversation (threading) overlay for the cursor message (#0008).
     OpenThread,
@@ -777,6 +779,17 @@ pub static KEYMAP: &[KeyBinding] = &[
         KeyCtx::Global,
         KeyAction::GoReader,
         "Go to reader (body)",
+        false,
+    ),
+    // `gf` ("go to folder", #0141): every mailbox by name, which is how a
+    // folder past the nine number keys is reached.
+    p(
+        "gf",
+        Chord::Char('f'),
+        'g',
+        KeyCtx::Global,
+        KeyAction::FolderPicker,
+        "Go to mailbox (fuzzy picker)",
         false,
     ),
     pg(
