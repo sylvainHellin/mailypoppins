@@ -17,6 +17,7 @@
         "id": 3141,
         "mailbox": "inbox",
         "message_id": "<Bericht@example.com>",
+        "own": false,
         "selector": "mp://work/inbox/Bericht@example.com"
       },
       {
@@ -32,6 +33,7 @@
         "id": 3142,
         "mailbox": "sent",
         "message_id": "<Re-Bericht@example.com>",
+        "own": true,
         "selector": "mp://work/sent/Re-Bericht@example.com"
       },
       {
@@ -48,6 +50,7 @@
         "id": 0,
         "mailbox": "drafts",
         "message_id": "",
+        "own": true,
         "path": "/home/alice/.local/share/mailypoppins/work/drafts/2026-07-03-re-bericht.md",
         "selector": "mp://work/drafts/c3f1a2b4d5e6f708"
       }

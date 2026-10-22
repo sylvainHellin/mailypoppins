@@ -440,6 +440,7 @@ A query nothing matches is an empty `hits` array, not an error.
     "mailbox": "inbox",
     "message_id": "<Bericht@example.com>",
     "from": "Ivana <ivana@example.com>",
+    "own": false,
     "date_display": "Thu, 2 Jul 2026 13:57:30 +0200",
     "flags": {"seen": true, "answered": true, "forwarded": false, "flagged": false},
     "current": false,
@@ -460,6 +461,7 @@ It does carry `selector`, the canonical `mp://` name a listing row gives the sam
 A client that wants the whole message asks `message.get` with the row's `id`, which is the same `messages.id` a listing row carries under the same name.
 
 `current` marks the message the conversation was opened from, and it is decided on the `Message-ID` rather than on the row id: the dedup above may have kept another copy of the addressed message, so the marked row can carry an `id` other than the one the call named.
+`own` says the `From:` address is the account's own `default_from` address, compared case-insensitively on the address alone (PERSO-179); it is decided on the address rather than on the mailbox, so a note to self listed in the Inbox is `own` as much as its Sent copy, and the daemon decides it because it is the side that holds the configuration.
 `subject` is the addressed message's `Subject:` verbatim, `""` when it carried none, and the client renders its own `(no subject)` placeholder.
 
 **A message with no relatives answers with itself alone.** A one-row conversation is the truthful answer to "what else is in this thread", and the client is what turns it into a sentence: the TUI says "No related emails for this message in the store" and opens no overlay for it.
@@ -472,7 +474,7 @@ Two optional parameters make the answer the expansion of a conversation row ([Th
 - `prefer_mailbox: str` changes which copy of a `Message-ID` the dedup keeps: the copy in this mailbox when there is one, and otherwise the first row as above. It resolves as `message.list`'s `mailbox` does, so an unknown mailbox and Drafts are `-32602`. An expanded inbox conversation then names the inbox copy, the row an action on the collapsed row would have touched.
 - `include_drafts: bool`, `false` by default, adds the drafts that answer or forward a member of the conversation, by `Message-ID`, as members among the messages ordered by their file's `mtime` against the messages' `date_sort`. A draft with `status: sent` is left out, since the Sent copy stands for it.
 
-A draft member is a `ThreadMessage` with `draft_id` set to its draft id, `id: 0`, `mailbox: "drafts"`, an empty `message_id`, the account's `default_from` as `from`, the frontmatter `date` (or `""`) as `date_display`, no flag set and `current: false`.
+A draft member is a `ThreadMessage` with `draft_id` set to its draft id, `id: 0`, `mailbox: "drafts"`, an empty `message_id`, the account's `default_from` as `from`, `own: true`, the frontmatter `date` (or `""`) as `date_display`, no flag set and `current: false`.
 A message member carries no `draft_id` key, which is what keeps an answer without drafts unchanged.
 The drafts are read from the `drafts` table of the account's store, the index `has_draft` reads too, rather than from a scan of the drafts directory.
 The rows of the account's `drafts` mailbox, the server copy of a draft once #0143 syncs it, are left out of every conversation, so a draft is never listed twice.
@@ -1500,3 +1502,6 @@ The type is `mp_protocol::draft::DraftHtml` with the constant `METHOD_DRAFT_HTML
 `message.thread` gained `prefer_mailbox` and `include_drafts`, and `ThreadMessage` gained `draft_id`, present on a draft member only, so an answer without the two parameters is byte for byte the one before.
 The types are `mp_protocol::listing::ConversationRow`, `ConversationRowsChunk` and `ConversationListing` with the constants `METHOD_MESSAGE_LIST_CONVERSATIONS` and `mp_protocol::METHOD_MESSAGE_CONVERSATIONS`, and the fixtures are `crates/mp-protocol/fixtures/message.list_conversations.{request,response}.json`, `notification.message_conversations.json` and `message.thread.drafts.{request,response}.json`.
 It is declared in `MESSAGE_CONVERSATION_METHOD_SPECS`, an array of its own for the reason `MESSAGE_STREAM_METHOD_SPECS` is one, and the capability list grew by its name.
+
+PERSO-179 added `own` to `ThreadMessage`, one member, additively; no field was renamed, none was dropped, and no command's output moved.
+It is `default` on the way in, so a row from a daemon that predates it claims no member as the user's, and the fixtures `message.thread.response.json` and `message.thread.drafts.response.json` carry it.

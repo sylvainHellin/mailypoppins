@@ -42,20 +42,31 @@ const DRAFT_GLYPH: &str = "\u{f03eb}";
 /// branch that hang it under its header (#0142).
 const MEMBER_INDENT: &str = " \u{2514} ";
 
+/// What an expanded member from one of the user's own addresses names its
+/// sender as (PERSO-179), where another member names the sender's display name.
+const OWN_SENDER: &str = "Me";
+
 /// The contact cell of one row.
 ///
 /// A flat row, and a conversation of one message, shows the mailbox's contact
 /// as it always did. A conversation of several shows its participants and the
 /// `(n)` count, the count kept whole and the names truncated before it. An
 /// expanded member shows the mailbox its copy lives in, hung under its header
-/// (#0142).
-fn contact_text(app: &App, email: &EmailEntry, width: usize) -> String {
+/// (#0142), the label tinted when the member is the user's own (PERSO-179).
+fn contact_cell(app: &App, email: &EmailEntry, width: usize) -> Cell<'static> {
     if let Some(mailbox) = email.member_mailbox() {
-        return truncate(
-            &format!("{MEMBER_INDENT}{}", app.mailbox_label(mailbox)),
-            width,
-        );
+        let room = width.saturating_sub(display_width(MEMBER_INDENT));
+        let label = truncate(&app.mailbox_label(mailbox), room);
+        return Cell::from(Line::from(vec![
+            Span::raw(MEMBER_INDENT),
+            member_label_span(label, email.member_own()),
+        ]));
     }
+    Cell::from(contact_text(app, email, width))
+}
+
+/// The contact text of a row that is not an expanded member.
+fn contact_text(app: &App, email: &EmailEntry, width: usize) -> String {
     match email.header() {
         Some(header) if header.count > 1 => {
             let count = format!(" ({})", header.count);
@@ -67,16 +78,51 @@ fn contact_text(app: &App, email: &EmailEntry, width: usize) -> String {
     }
 }
 
-/// The subject of a row in the narrow layout, which has no contact column: a
-/// member names its mailbox and a conversation its count before the subject
-/// (#0142).
-fn narrow_subject_prefix(app: &App, email: &EmailEntry) -> String {
+/// The mailbox label of an expanded member: in the theme's `accent` colour
+/// when the member is from one of the user's own addresses (PERSO-179), so the
+/// user's own messages stand apart from the others in a conversation, and in
+/// the row's own style otherwise. `accent` is the desktop's link ocean in the
+/// mailypoppins themes, the tint the desktop gives the same chip. On the
+/// cursor row the highlight style paints over it, as the desktop's chip takes
+/// the selection foreground there.
+fn member_label_span(label: String, own: bool) -> Span<'static> {
+    if own {
+        Span::styled(label, Style::default().fg(theme::active().accent))
+    } else {
+        Span::raw(label)
+    }
+}
+
+/// What the subject column of a row prints after its badges.
+///
+/// An expanded member prints its sender there (PERSO-179), [`OWN_SENDER`] for
+/// the user's own: the header above it already prints the conversation's
+/// subject, and a member carries no subject of its own, so repeating it on
+/// every member told the rows apart by nothing but their mailbox.
+fn row_text(email: &EmailEntry) -> &str {
+    if email.member_mailbox().is_none() {
+        &email.subject
+    } else if email.member_own() {
+        OWN_SENDER
+    } else {
+        &email.from
+    }
+}
+
+/// The lead of a row's subject in the narrow layout, which has no contact
+/// column: a member names its mailbox and a conversation its count before the
+/// subject (#0142).
+fn narrow_subject_prefix(app: &App, email: &EmailEntry) -> Vec<Span<'static>> {
     if let Some(mailbox) = email.member_mailbox() {
-        return format!("{MEMBER_INDENT}{}: ", app.mailbox_label(mailbox));
+        return vec![
+            Span::raw(MEMBER_INDENT),
+            member_label_span(app.mailbox_label(mailbox), email.member_own()),
+            Span::raw(": "),
+        ];
     }
     match email.header() {
-        Some(header) if header.count > 1 => format!("({}) ", header.count),
-        _ => String::new(),
+        Some(header) if header.count > 1 => vec![Span::raw(format!("({}) ", header.count))],
+        _ => Vec::new(),
     }
 }
 
@@ -110,33 +156,35 @@ fn status_marker(email: &EmailEntry) -> Span<'static> {
 /// The subject cell: the invite/attachment badges plus the truncated subject,
 /// with a coloured flag glyph prepended when the message is starred (#0007).
 ///
-/// The flag rides its own [`Span`] so it keeps the `warning` colour on a
-/// cursor row, the same way the status marker keeps its colour; the badges and
-/// subject stay in the row's own style. When flagged, the glyph plus its space
-/// costs two columns, so the subject is truncated to what is left.
+/// The flag rides its own [`Span`] in the `warning` colour, the way the status
+/// marker has its own; the badges and subject stay in the row's own style, and
+/// on the cursor row the table's highlight style paints over every span. When
+/// flagged, the glyph plus its space costs two columns, so the subject is
+/// truncated to what is left.
 fn subject_cell(email: &EmailEntry, width: usize) -> Cell<'static> {
-    subject_cell_after(email, "", width)
+    subject_cell_after(email, Vec::new(), width)
 }
 
 /// [`subject_cell`] with `lead` before the badges, which the narrow layout
-/// fills for a conversation row.
-fn subject_cell_after(email: &EmailEntry, lead: &str, width: usize) -> Cell<'static> {
-    let text = format!(
-        "{lead}{}{}",
-        invite_and_attachment_prefix(email),
-        email.subject
-    );
-    match flag_span(email) {
-        Some(flag) => {
-            let body = truncate(&text, width.saturating_sub(2));
-            Cell::from(Line::from(vec![flag, Span::raw(" "), Span::raw(body)]))
-        }
-        None => Cell::from(truncate(&text, width)),
+/// fills for a conversation row; the text after the badges is [`row_text`]'s,
+/// truncated to what the flag and the lead leave.
+fn subject_cell_after(email: &EmailEntry, lead: Vec<Span<'static>>, width: usize) -> Cell<'static> {
+    let text = format!("{}{}", invite_and_attachment_prefix(email), row_text(email));
+    let lead_width: usize = lead.iter().map(|span| display_width(&span.content)).sum();
+    let mut spans = Vec::new();
+    let mut room = width.saturating_sub(lead_width);
+    if let Some(flag) = flag_span(email) {
+        spans.push(flag);
+        spans.push(Span::raw(" "));
+        room = room.saturating_sub(2);
     }
+    spans.extend(lead);
+    spans.push(Span::raw(truncate(&text, room)));
+    Cell::from(Line::from(spans))
 }
 
 /// The coloured flag glyph for a starred message, or `None` for an unflagged
-/// one (#0007). Its own span so it keeps the `warning` colour on a cursor row.
+/// one (#0007), in its own span so it takes the `warning` colour.
 fn flag_span(email: &EmailEntry) -> Option<Span<'static>> {
     email
         .flagged
@@ -344,7 +392,7 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
             .map(|(i, email)| {
                 let is_cursor = i == app.list_index;
                 let is_in_selection = has_selection && app.is_selected(email);
-                let contact = contact_text(app, email, contact_width);
+                let contact = contact_cell(app, email, contact_width);
 
                 let style = list_row_style(email, is_cursor, is_in_selection);
 
@@ -360,7 +408,7 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
                 // Read/answered/forwarded indicator (#TKT-0051).
                 cells.push(Cell::from(status_marker(email)));
                 cells.push(Cell::from(email.list_date_display().to_string()));
-                cells.push(Cell::from(contact));
+                cells.push(contact);
                 // Invite/attachment badges, subject, and the flag star (#0007).
                 cells.push(subject_cell(email, subject_width));
 
@@ -430,7 +478,7 @@ pub(super) fn render_email_list(app: &mut App, frame: &mut Frame, area: Rect) {
                 cells.push(Cell::from(email.list_date_display().to_string()));
                 // Subject with badges and the flag star (#0007).
                 let lead = narrow_subject_prefix(app, email);
-                cells.push(subject_cell_after(email, &lead, subject_width));
+                cells.push(subject_cell_after(email, lead, subject_width));
 
                 Row::new(cells).style(style)
             })
@@ -487,6 +535,43 @@ mod badge_tests {
             is_invite,
             conv: None,
         }
+    }
+
+    /// An expanded member of a conversation, in Sent, from `Ivana` unless it is
+    /// the user's own.
+    fn member(own: bool) -> EmailEntry {
+        let mut e = entry(false, false);
+        e.from = "Ivana".into();
+        e.conv = Some(crate::app::ConvRole::Member {
+            thread_id: "<t@example.com>".into(),
+            mailbox: "sent".into(),
+            own,
+        });
+        e
+    }
+
+    /// PERSO-179: a member prints its sender where other rows print the
+    /// subject, "Me" for the user's own; any other row keeps its subject.
+    #[test]
+    fn a_member_names_its_sender_and_the_users_own_reads_me() {
+        assert_eq!(row_text(&member(true)), OWN_SENDER);
+        assert_eq!(row_text(&member(false)), "Ivana");
+        assert_eq!(row_text(&entry(false, false)), "S");
+        assert!(member(true).member_own());
+        assert!(!member(false).member_own());
+        assert!(!entry(false, false).member_own(), "a flat row is no member");
+    }
+
+    /// PERSO-179: the mailbox label of the user's own member takes the theme's
+    /// `accent` colour in its own span; another
+    /// member's label keeps the row's style.
+    #[test]
+    fn the_users_own_member_label_is_tinted() {
+        crate::theme::init(crate::theme::DEFAULT_THEME_NAME);
+        let own = member_label_span("Sent".into(), true);
+        assert_eq!(own.style.fg, Some(theme::active().accent));
+        let other = member_label_span("Inbox".into(), false);
+        assert_eq!(other.style, Style::default());
     }
 
     #[test]

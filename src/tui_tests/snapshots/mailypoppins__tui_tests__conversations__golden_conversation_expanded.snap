@@ -13,11 +13,11 @@ expression: frame
 07 |╭ Inbox ─────────────────────────────────╮╭ Body ──────────────────────────────────────────────────────────────────────╮
 08 |│   DATE       SUBJECT                   ││Hallo Ivana,                                                                │
 09 |│  2024-01-04 (4) 󰏫 Re: Frage zum Beri… ││                                                                            │
-10 |│   2024-01-05  └ Drafts: Re: Frage zum… ││der Bericht folgt morgen.                                                   │
-11 |│   2024-01-04  └ Sent: Re: Frage zum B… ││                                                                            │
-12 |│  2024-01-03  └ Inbox: Re: Frage zum … ││                                                                            │
-13 |│   2024-01-02  └ Sent: Re: Frage zum B… ││                                                                            │
-14 |│  2024-01-01  └ Inbox: Re: Frage zum … ││                                                                            │
+10 |│   2024-01-05  └ Drafts: Me             ││der Bericht folgt morgen.                                                   │
+11 |│   2024-01-04  └ Sent: Me               ││                                                                            │
+12 |│  2024-01-03  └ Inbox: Ivana Petrova   ││                                                                            │
+13 |│   2024-01-02  └ Sent: Me               ││                                                                            │
+14 |│  2024-01-01  └ Inbox: Ivana Petrova   ││                                                                            │
 15 |│   2024-01-02 Wochenbericht             ││                                                                            │
 16 |│                                        ││                                                                            │
 17 |│                                        ││                                                                            │

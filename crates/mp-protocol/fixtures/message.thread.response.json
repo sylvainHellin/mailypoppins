@@ -17,6 +17,7 @@
         "id": 3141,
         "mailbox": "inbox",
         "message_id": "<Bericht@example.com>",
+        "own": false,
         "selector": "mp://work/inbox/Bericht@example.com"
       },
       {
@@ -32,6 +33,7 @@
         "id": 3142,
         "mailbox": "sent",
         "message_id": "<Re-Bericht@example.com>",
+        "own": true,
         "selector": "mp://work/sent/Re-Bericht@example.com"
       },
       {
@@ -47,6 +49,7 @@
         "id": 3148,
         "mailbox": "inbox",
         "message_id": "<Re-Re-Bericht@example.com>",
+        "own": false,
         "selector": "mp://work/inbox/Re-Re-Bericht@example.com"
       }
     ],

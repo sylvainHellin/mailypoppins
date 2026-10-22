@@ -377,6 +377,16 @@ pub struct ThreadMessage {
     /// name is extracted client-side, as it is for a listing row.
     #[serde(default)]
     pub from: String,
+    /// Whether `from` is one of the account's own addresses (PERSO-179), which
+    /// is what a client draws the user's own messages apart by.
+    ///
+    /// Decided daemon-side on the address, not on the mailbox: a copy of a
+    /// message the user sent to themselves sits in the Inbox and is still
+    /// theirs, and the daemon is the one side that holds the configuration
+    /// naming the addresses. A draft member is always the account's own.
+    /// `false` from a daemon older than the field.
+    #[serde(default)]
+    pub own: bool,
     /// The `Date:` header as the store holds it, which is the column the
     /// overlay prints.
     #[serde(default)]
@@ -812,6 +822,9 @@ mod tests {
         assert_eq!(draft.draft_id.as_deref(), Some("c3f1a2b4d5e6f708"));
         assert_eq!((draft.id, draft.mailbox.as_str()), (0, "drafts"));
         assert_eq!(draft.message_id, "");
+        assert!(draft.own, "a draft member is the account's own");
+        let own: Vec<bool> = thread.messages.iter().map(|m| m.own).collect();
+        assert_eq!(own, [false, true, true], "the reply from alice is hers");
         assert!(thread.messages[..2].iter().all(|m| m.draft_id.is_none()));
         assert!(response["result"]["messages"][0].get("draft_id").is_none());
 
@@ -948,6 +961,10 @@ mod tests {
         assert_eq!(thread.messages[0].mailbox, "");
         assert_eq!(thread.messages[0].flags, MessageFlags::default());
         assert!(thread.messages[0].current);
+        assert!(
+            !thread.messages[0].own,
+            "a daemon older than `own` claims no member as the user's"
+        );
     }
 
     /// Round trip, which is what lets a test build a conversation by hand and
@@ -963,6 +980,7 @@ mod tests {
                 mailbox: "Team/Reports".to_string(),
                 message_id: "<root@example.com>".to_string(),
                 from: "Ivana <ivana@example.com>".to_string(),
+                own: true,
                 date_display: "Thu, 2 Jul 2026 13:57:30 +0200".to_string(),
                 flags: MessageFlags {
                     seen: true,
@@ -979,6 +997,7 @@ mod tests {
         let encoded = serde_json::to_value(&thread).expect("it serialises");
         assert_eq!(encoded["messages"][0]["mailbox"], json!("Team/Reports"));
         assert_eq!(encoded["messages"][0]["flags"]["flagged"], json!(true));
+        assert_eq!(encoded["messages"][0]["own"], json!(true));
         let decoded: ThreadListing = serde_json::from_value(encoded).expect("it decodes");
         assert_eq!(decoded, thread);
     }

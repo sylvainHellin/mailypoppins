@@ -255,6 +255,25 @@ fn seed(root: &Path) -> HashMap<&'static str, i64> {
             None,
         ),
     );
+    // A note to self, its bare address in another case than `default_from`:
+    // the Inbox copy is the user's own message all the same (PERSO-179).
+    ids.insert(
+        "note_to_self",
+        ingest(
+            &store,
+            &blobs,
+            "inbox",
+            3,
+            &message(
+                "<note@example.com>",
+                "ALPHA@example.com",
+                "Notiz",
+                "Mon, 1 Jan 2024 07:00:00 +0000",
+                true,
+            ),
+            None,
+        ),
+    );
 
     for t in 0..BULK_THREADS {
         let day = 2 + t % 27;
@@ -626,6 +645,12 @@ async fn an_inbox_message_its_two_sent_replies_and_a_draft_are_one_conversation(
     let thread = expanded(&mut conn, question, "inbox").await;
     let labels: Vec<&str> = thread.messages.iter().map(|m| m.mailbox.as_str()).collect();
     assert_eq!(labels, ["inbox", "sent", "sent", "drafts"]);
+    let own: Vec<bool> = thread.messages.iter().map(|m| m.own).collect();
+    assert_eq!(
+        own,
+        [false, true, true, true],
+        "the two replies and the draft are the user's own, the question is not"
+    );
     assert_eq!(
         thread.messages[0].id, question,
         "the copy in the listed mailbox"
@@ -709,6 +734,21 @@ async fn an_inbox_message_its_two_sent_replies_and_a_draft_are_one_conversation(
     assert_eq!((lone.count, lone.unread), (1, 0));
     assert_eq!(lone.mailboxes, ["inbox"]);
     assert!(!lone.has_draft);
+}
+
+/// PERSO-179: `own` follows the `From:` address, not the mailbox, so a note to
+/// self listed in the Inbox is the user's own message.
+#[tokio::test]
+async fn a_note_to_self_in_the_inbox_is_the_users_own() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let note = expanded(&mut conn, slice.id("note_to_self"), "inbox").await;
+    assert_eq!(note.messages.len(), 1);
+    assert_eq!(note.messages[0].mailbox, "inbox");
+    assert!(note.messages[0].own, "{:?}", note.messages[0]);
+
+    let lone = expanded(&mut conn, slice.id("lone"), "inbox").await;
+    assert!(!lone.messages[0].own, "{:?}", lone.messages[0]);
 }
 
 /// Every refusal is the call's own error, issued before any operation.

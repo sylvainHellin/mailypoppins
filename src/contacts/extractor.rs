@@ -20,7 +20,7 @@ use crate::store::{open_store, Store};
 use crate::types::MailboxRole;
 use anyhow::Result;
 use mp_core::contacts::extractor::{
-    empty_index, parse_date_to_rfc3339, process_header, self_address, UNDATED_OBSERVED_AT,
+    empty_index, parse_date_to_rfc3339, process_header, UNDATED_OBSERVED_AT,
 };
 use mp_core::contacts::rank::ObservationField;
 
@@ -68,7 +68,7 @@ fn build_index_from_store_until(
     stop: impl Fn() -> bool,
 ) -> Result<Option<ContactIndex>> {
     let mut index = empty_index(account);
-    let self_addr = self_address(account);
+    let self_addr = account.own_address();
 
     for (n, row) in read::list_account(store, &account.name)?
         .into_iter()

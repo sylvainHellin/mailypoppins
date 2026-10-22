@@ -80,7 +80,8 @@ fn rows_of(boxes: &BTreeMap<String, Vec<Value>>) -> Vec<(&str, &Value)> {
         .collect()
 }
 
-/// The address of a `From:` header, lowercased, for the participant dedup.
+/// The address of a `From:` header, lowercased, for the participant dedup and
+/// a member's `own`.
 fn address(from: &str) -> String {
     let inner = match (from.rfind('<'), from.rfind('>')) {
         (Some(open), Some(close)) if open < close => &from[open + 1..close],
@@ -210,6 +211,7 @@ pub fn thread(
                 mailbox: mailbox.to_string(),
                 current: row.message_id == current.message_id,
                 message_id: row.message_id,
+                own: !from.is_empty() && address(&row.from) == address(from),
                 from: row.from,
                 date_display: row.date_display,
                 flags: row.flags,
@@ -226,6 +228,7 @@ pub fn thread(
             mailbox: DRAFTS.to_string(),
             message_id: String::new(),
             from: from.to_string(),
+            own: true,
             date_display: draft.date.clone(),
             flags: MessageFlags::default(),
             current: false,

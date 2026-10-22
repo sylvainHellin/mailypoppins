@@ -62,6 +62,35 @@ describe("the conversation list", () => {
     expect(callsOf("message_html_meta")).toContainEqual({ account: "work", row_id: 1007 });
   });
 
+  it("tells the user's own members apart: a tinted mailbox chip and Me, with the address it went out from", async () => {
+    const { user } = renderGrouped();
+    await shellReady();
+    await waitFor(() => expect(offsite()).not.toBeNull());
+    await user.click(offsite());
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(members()).toHaveLength(4));
+    const [draft, sentLater, sentEarlier, inbox] = members();
+    // `own` is the daemon's, decided on the address: both Sent replies and the draft.
+    expect(members().map((m) => m.hasAttribute("data-own"))).toEqual([true, true, true, false]);
+    const chip = (m: HTMLElement) => m.querySelector<HTMLElement>('[data-slot="member-mailbox"]')!;
+    expect(chip(sentEarlier)).toHaveClass("text-link", "bg-link/10", "border-framing/60");
+    expect(chip(inbox)).toHaveClass("text-muted-foreground", "border-border");
+    expect(chip(inbox)).not.toHaveClass("text-link");
+    // "Me" on the name line, the bare address under it; others keep their header.
+    expect(sentEarlier).toHaveAccessibleName(/^Sent: Me, /);
+    expect(within(sentEarlier).getByText("Me")).toBeInTheDocument();
+    expect(within(sentEarlier).getByText("me@example.com")).toBeInTheDocument();
+    expect(inbox).toHaveAccessibleName(/^Inbox: Marta Silva, /);
+    // A draft keeps its own wording, and its chip is tinted as the user's.
+    expect(draft).toHaveAccessibleName(/^Drafts: Draft, /);
+    expect(chip(draft)).toHaveClass("text-link");
+    // On the cursor row the chip text takes the selection foreground, the tint stays.
+    await user.click(sentLater);
+    await waitFor(() => expect(cursorRow()).toBe(sentLater));
+    expect(chip(sentLater)).toHaveClass("text-selection-foreground", "bg-link/10");
+    expect(chip(sentLater)).not.toHaveClass("text-link");
+  });
+
   it("h collapses from a member back to its header, l expands again, and a member in Sent opens in place", async () => {
     const { user } = renderGrouped();
     await shellReady();

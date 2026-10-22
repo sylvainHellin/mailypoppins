@@ -49,18 +49,27 @@ impl TestDaemon {
     /// A daemon over the ambient data root, configured with `accounts` in the
     /// order given, each with nothing but its name.
     pub(super) fn new(accounts: &[&str]) -> TestDaemon {
+        TestDaemon::with_accounts(
+            accounts
+                .iter()
+                .map(|name| AccountConfig {
+                    name: (*name).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+        )
+    }
+
+    /// A daemon over the ambient data root, configured with `accounts` as
+    /// given, for a test that needs more of an account than its name (its
+    /// `default_from`, which decides a conversation member's `own`).
+    pub(super) fn with_accounts(accounts: Vec<AccountConfig>) -> TestDaemon {
         let root = crate::config::mailypoppins_data_dir();
         let config = Arc::new(ConfigStore::new(
             root.join("config.toml"),
             ConfigState::Ok,
             GlobalConfig {
-                accounts: accounts
-                    .iter()
-                    .map(|name| AccountConfig {
-                        name: (*name).to_string(),
-                        ..Default::default()
-                    })
-                    .collect(),
+                accounts,
                 ..Default::default()
             },
             false,

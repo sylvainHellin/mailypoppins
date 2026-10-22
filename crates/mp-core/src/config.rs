@@ -261,6 +261,38 @@ impl AccountConfig {
             && self.imap.host.trim().is_empty()
             && self.smtp.host.trim().is_empty()
     }
+
+    /// The account's own address, lowercased, the one notion of "own
+    /// address" the config has.
+    ///
+    /// `default_from` is a config string a user is free to write as
+    /// `Name <addr@host>`, and comparing that verbatim against a parsed header
+    /// address never matched, so the user's own address stayed in their own
+    /// contact corpus (#0067). Parse it the same way the headers are parsed and
+    /// fall back to the raw string when it does not parse as an address.
+    pub fn own_address(&self) -> String {
+        let raw = self.default_from.trim();
+        match mailparse::addrparse(raw).ok().and_then(|addrs| {
+            addrs.iter().find_map(|info| match info {
+                mailparse::MailAddr::Single(s) => Some(s.addr.clone()),
+                mailparse::MailAddr::Group(g) => g.addrs.first().map(|s| s.addr.clone()),
+            })
+        }) {
+            Some(addr) => addr.to_ascii_lowercase(),
+            None => raw.to_ascii_lowercase(),
+        }
+    }
+
+    /// Whether a `From:` header names this account's [own
+    /// address](Self::own_address), compared case-insensitively on the address
+    /// alone so the display name a client wrote does not matter (PERSO-179).
+    ///
+    /// An account with no `default_from` owns nothing, rather than every
+    /// message with an empty `From:`.
+    pub fn sends_as(&self, from: &str) -> bool {
+        let own = self.own_address();
+        !own.is_empty() && crate::parse::extract_email_address(from).to_ascii_lowercase() == own
+    }
 }
 
 /// Whether the client APPENDs its own copy of a sent message to the Sent
@@ -2321,6 +2353,29 @@ name = "test"
         };
         // Should match even when wrapped in a display name
         assert!(find_account_by_from(&config, "Alice Smith <alice@example.com>").is_some());
+    }
+
+    /// PERSO-179: an account sends as its `default_from` address whatever
+    /// display name either side writes and in any case, never as a different
+    /// address that merely contains it, and an account with no `default_from`
+    /// sends as nobody.
+    #[test]
+    fn an_account_sends_as_its_default_from_address_alone() {
+        let account = AccountConfig {
+            default_from: "Sylvain Hellin <Sylvain.Hellin@tum.de>".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(account.own_address(), "sylvain.hellin@tum.de");
+        assert!(account.sends_as("sylvain.hellin@tum.de"));
+        assert!(account.sends_as("<SYLVAIN.HELLIN@tum.de>"));
+        assert!(account.sends_as("\"Hellin, Sylvain\" <sylvain.hellin@tum.de>"));
+        assert!(!account.sends_as("Florian Gall <florian.gall@alasco.com>"));
+        assert!(!account.sends_as("x.sylvain.hellin@tum.de"));
+        assert!(!account.sends_as(""));
+
+        let unset = AccountConfig::default();
+        assert!(!unset.sends_as(""));
+        assert!(!unset.sends_as("someone@example.com"));
     }
 
     // -----------------------------------------------------------------------

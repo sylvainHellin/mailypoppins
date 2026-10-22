@@ -81,8 +81,10 @@ impl Fixture {
         let ids = seed();
         let log = CallLog::default();
         let mut app = App::default_for_tests();
+        // Alice is the account: her replies are the user's own (PERSO-179).
         app.account_config = AccountConfig {
             name: ACCOUNT.to_string(),
+            default_from: "alice@example.com".to_string(),
             ..Default::default()
         };
         app.accounts = vec![account_state()];
@@ -93,7 +95,10 @@ impl Fixture {
             .find_mailbox_by_kind(MailboxKind::Inbox)
             .expect("an inbox");
         app.sidebar_index = app.active_mailbox;
-        app.session = Some(TestDaemon::new(&[ACCOUNT]).recording_session(log.clone()));
+        app.session = Some(
+            TestDaemon::with_accounts(vec![app.account_config.clone()])
+                .recording_session(log.clone()),
+        );
         app.apply_bootstrap(&Bootstrap {
             instance_id: INSTANCE.to_string(),
             revision: WATERMARK,
@@ -523,6 +528,55 @@ fn golden_conversation_expanded() {
     fx.app.zoomed = true;
     let wide = frame_snapshot(&mut fx.app, WIDTH, HEIGHT);
     assert_snapshot!("golden_conversation_expanded_wide", wide);
+}
+
+/// The foreground of the first cell of the first run of cells that spells
+/// `needle`, `None` when no row holds it.
+fn fg_of(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<ratatui::style::Color> {
+    let area = *buffer.area();
+    let wanted: Vec<String> = needle.chars().map(String::from).collect();
+    for y in 0..area.height {
+        for x in 0..area.width.saturating_sub(wanted.len() as u16) {
+            let spells = wanted
+                .iter()
+                .enumerate()
+                .all(|(i, c)| buffer[(x + i as u16, y)].symbol() == c);
+            if spells {
+                return Some(buffer[(x, y)].fg);
+            }
+        }
+    }
+    None
+}
+
+/// PERSO-179: the members from the account's own address (Alice's two
+/// replies and her draft) name her "Me" where the others name their sender,
+/// and their mailbox label takes the theme's accent off the cursor row.
+#[test]
+fn the_users_own_members_read_me_with_a_tinted_label() {
+    let mut fx = Fixture::new();
+    fx.key(crossterm::event::KeyCode::Enter);
+    let own: Vec<bool> = fx.app.emails[1..6].iter().map(|e| e.member_own()).collect();
+    assert_eq!(
+        own,
+        [true, true, false, true, false],
+        "decided by the daemon"
+    );
+    fx.char('j');
+
+    let buffer = crate::tui::ui::golden_frames::render_buffer(&mut fx.app, WIDTH, HEIGHT);
+    let text = text_rows(&buffer);
+    assert!(text.contains("\u{2514} Sent: Me"), "{text}");
+    assert!(text.contains("\u{2514} Inbox: Ivana Petrova"), "{text}");
+    assert!(!text.contains("Sent: Alice"), "{text}");
+    let accent = crate::tui::theme::active().accent;
+    assert_eq!(fg_of(&buffer, "Sent:"), Some(accent));
+    assert_ne!(fg_of(&buffer, "Inbox:"), Some(accent));
+    assert_eq!(
+        fg_of(&buffer, "Drafts:"),
+        Some(crate::tui::theme::active().selection),
+        "the cursor row's highlight paints over the tint"
+    );
 }
 
 /// The conversation overlay's rows as `(row id, mailbox, current)`, oldest

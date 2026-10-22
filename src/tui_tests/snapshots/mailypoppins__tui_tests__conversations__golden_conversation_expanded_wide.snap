@@ -6,11 +6,11 @@ expression: wide
 00 |╭ Inbox ───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 01 |│   DATE       CONTACT         SUBJECT                                                                                 │
 02 |│  2024-01-04 Alice Mart… (4) 󰏫 Re: Frage zum Bericht                                                                 │
-03 |│   2024-01-05  └ Drafts       Re: Frage zum Bericht                                                                   │
-04 |│   2024-01-04  └ Sent         Re: Frage zum Bericht                                                                   │
-05 |│  2024-01-03  └ Inbox        Re: Frage zum Bericht                                                                   │
-06 |│   2024-01-02  └ Sent         Re: Frage zum Bericht                                                                   │
-07 |│  2024-01-01  └ Inbox        Re: Frage zum Bericht                                                                   │
+03 |│   2024-01-05  └ Drafts       Me                                                                                      │
+04 |│   2024-01-04  └ Sent         Me                                                                                      │
+05 |│  2024-01-03  └ Inbox        Ivana Petrova                                                                           │
+06 |│   2024-01-02  └ Sent         Me                                                                                      │
+07 |│  2024-01-01  └ Inbox        Ivana Petrova                                                                           │
 08 |│   2024-01-02 Bot             Wochenbericht                                                                           │
 09 |│                                                                                                                      │
 10 |│                                                                                                                      │

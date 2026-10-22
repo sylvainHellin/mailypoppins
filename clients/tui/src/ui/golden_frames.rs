@@ -80,6 +80,18 @@ pub fn pin_theme() {
 /// Render `app` through [`super::view`] on a `TestBackend` and return the
 /// snapshot body: the text rows, then the meaning-carrying style runs.
 pub fn frame_snapshot(app: &mut App, width: u16, height: u16) -> String {
+    let buffer = render_buffer(app, width, height);
+    format!(
+        "== text {width}x{height} (trailing spaces trimmed) ==\n{}\n\
+         == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==\n{}",
+        text_rows(&buffer),
+        style_runs(&buffer)
+    )
+}
+
+/// Render `app` through [`super::view`] on a `TestBackend` and return the
+/// buffer, for a test that reads a colour the style runs do not record.
+pub fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
     pin_theme();
     // The layout branches on the app's own idea of the terminal size (the
     // real one gets it from the resize handler), so it must match the backend.
@@ -89,14 +101,7 @@ pub fn frame_snapshot(app: &mut App, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| super::view(app, frame)).unwrap();
-    let buffer = terminal.backend().buffer().clone();
-
-    format!(
-        "== text {width}x{height} (trailing spaces trimmed) ==\n{}\n\
-         == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==\n{}",
-        text_rows(&buffer),
-        style_runs(&buffer)
-    )
+    terminal.backend().buffer().clone()
 }
 
 /// The rendered glyphs, one line per row, prefixed with the row number so a

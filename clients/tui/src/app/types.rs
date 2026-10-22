@@ -221,6 +221,9 @@ pub enum ConvRole {
         /// The mailbox this copy lives in, as the store holds it; `drafts` for
         /// a draft member.
         mailbox: String,
+        /// Whether it is from one of the account's own addresses, as the
+        /// daemon decided it (PERSO-179), whatever mailbox it lives in.
+        own: bool,
     },
 }
 
@@ -304,6 +307,12 @@ impl EmailEntry {
             Some(ConvRole::Member { mailbox, .. }) => Some(mailbox),
             _ => None,
         }
+    }
+
+    /// Whether this row is an expanded member from one of the account's own
+    /// addresses (PERSO-179); `false` for any other row.
+    pub fn member_own(&self) -> bool {
+        matches!(&self.conv, Some(ConvRole::Member { own: true, .. }))
     }
 
     /// The date the list prints: a header's is its conversation's, every
@@ -416,6 +425,7 @@ pub fn entry_from_member(member: &ThreadMessage, thread_id: &str, subject: &str)
         conv: Some(ConvRole::Member {
             thread_id: thread_id.to_string(),
             mailbox: member.mailbox.clone(),
+            own: member.own,
         }),
     }
 }

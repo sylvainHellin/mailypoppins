@@ -1,7 +1,7 @@
 import { memo, type MouseEvent } from "react";
 import { CornerUpLeft, Pencil, Star } from "lucide-react";
 import type { ThreadMessage } from "@/protocol/types";
-import { senderName, shortDate } from "@/components/list/format";
+import { senderAddress, senderName, shortDate } from "@/components/list/format";
 import { MarkBox, PendingMark } from "@/components/list/RowControls";
 import { ROW_HEIGHT } from "@/components/list/useWindow";
 
@@ -29,6 +29,11 @@ export type ConversationMemberRowProps = {
  * mailbox it lives in where a message row has its sender, then the sender,
  * the markers and the date. Every action on it applies to it alone, in its
  * own mailbox. Pure.
+ *
+ * A member the daemon calls `own` (PERSO-179), from the account's own address
+ * whatever mailbox it is in, reads apart from the others: its mailbox chip
+ * takes the ocean tint and its sender reads "Me", with the address it went out
+ * from on the second line.
  */
 export const ConversationMemberRow = memo(function ConversationMemberRow({
   threadId,
@@ -48,7 +53,9 @@ export const ConversationMemberRow = memo(function ConversationMemberRow({
 }: ConversationMemberRowProps) {
   const draft = member.draft_id ?? null;
   const unread = draft === null && !member.flags.seen;
-  const sender = draft !== null ? "Draft" : senderName(member.from);
+  const own = member.own;
+  const sender = draft !== null ? "Draft" : own ? "Me" : senderName(member.from);
+  const detail = draft !== null ? "Draft reply" : own ? senderAddress(member.from) : member.from || "(no sender)";
   const date = shortDate(member.date_display);
   const state = [
     marked ? "marked" : null,
@@ -77,6 +84,7 @@ export const ConversationMemberRow = memo(function ConversationMemberRow({
       data-cursor={cursor || undefined}
       data-marked={marked || undefined}
       data-member={memberKey}
+      data-own={own || undefined}
       data-row-id={draft === null ? member.id : undefined}
       data-draft-id={draft ?? undefined}
       style={{ height: ROW_HEIGHT }}
@@ -90,7 +98,11 @@ export const ConversationMemberRow = memo(function ConversationMemberRow({
         <MarkBox marked={marked} anyMarked={anyMarked} onToggle={(range) => onMark(member, range)} />
         <span
           data-slot="member-mailbox"
-          className="shrink-0 rounded-sm border border-border px-1 text-xs leading-4 text-muted-foreground"
+          className={`shrink-0 rounded-sm border px-1 text-xs leading-4 ${
+            own
+              ? `border-framing/60 bg-link/10 ${cursor ? "text-selection-foreground" : "text-link"}`
+              : "border-border text-muted-foreground"
+          }`}
         >
           {mailboxLabel}
         </span>
@@ -104,7 +116,7 @@ export const ConversationMemberRow = memo(function ConversationMemberRow({
         <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{date}</span>
       </div>
       <div className={`truncate pl-6 ${cursor ? "text-selection-foreground" : "text-muted-foreground"}`}>
-        {draft !== null ? "Draft reply" : member.from || "(no sender)"}
+        {detail}
       </div>
     </div>
   );

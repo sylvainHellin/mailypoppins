@@ -1037,6 +1037,7 @@ fn the_thread_with_drafts_carries_a_draft_member() {
         "id",
         "mailbox",
         "message_id",
+        "own",
         "selector",
     ];
     let name = "message.thread.drafts.response.json";
@@ -1052,6 +1053,11 @@ fn the_thread_with_drafts_carries_a_draft_member() {
     assert_eq!(draft["id"], json!(0));
     assert_eq!(draft["mailbox"], json!("drafts"));
     assert_eq!(draft["message_id"], json!(""));
+    assert_eq!(
+        draft["own"],
+        json!(true),
+        "a draft member is the user's own"
+    );
     assert_eq!(
         draft["selector"],
         json!(format!(

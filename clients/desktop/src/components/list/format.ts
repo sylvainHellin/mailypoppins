@@ -9,6 +9,12 @@ export function senderName(from: string): string {
   return f;
 }
 
+/** "Ivana Petrova <ivana@example.com>" and "<ivana@example.com>" to "ivana@example.com"; a bare address stays. */
+export function senderAddress(from: string): string {
+  const f = from.trim();
+  return (/<([^>]+)>\s*$/.exec(f)?.[1] ?? f).trim();
+}
+
 const sameDay = (a: Date, b: Date) =>
   a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 

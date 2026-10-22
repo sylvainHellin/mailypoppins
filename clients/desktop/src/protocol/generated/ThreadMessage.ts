@@ -40,6 +40,17 @@ message_id: string,
  */
 from: string,
 /**
+ * Whether `from` is one of the account's own addresses (PERSO-179), which
+ * is what a client draws the user's own messages apart by.
+ *
+ * Decided daemon-side on the address, not on the mailbox: a copy of a
+ * message the user sent to themselves sits in the Inbox and is still
+ * theirs, and the daemon is the one side that holds the configuration
+ * naming the addresses. A draft member is always the account's own.
+ * `false` from a daemon older than the field.
+ */
+own: boolean,
+/**
  * The `Date:` header as the store holds it, which is the column the
  * overlay prints.
  */

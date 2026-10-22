@@ -40,27 +40,6 @@ pub enum ObservedIn {
 #[doc(hidden)]
 pub const UNDATED_OBSERVED_AT: &str = "1970-01-01T00:00:00+00:00";
 
-/// The account's own address, lowercased, for self-filtering.
-///
-/// `default_from` is a config string a user is free to write as
-/// `Name <addr@host>`, and comparing that verbatim against a parsed header
-/// address never matched, so the user's own address stayed in their own
-/// contact corpus (#0067). Parse it the same way the headers are parsed and
-/// fall back to the raw string when it does not parse as an address.
-#[doc(hidden)]
-pub fn self_address(account: &AccountConfig) -> String {
-    let raw = account.default_from.trim();
-    match addrparse(raw).ok().and_then(|addrs| {
-        addrs.iter().find_map(|info| match info {
-            mailparse::MailAddr::Single(s) => Some(s.addr.clone()),
-            mailparse::MailAddr::Group(g) => g.addrs.first().map(|s| s.addr.clone()),
-        })
-    }) {
-        Some(addr) => addr.to_ascii_lowercase(),
-        None => raw.to_ascii_lowercase(),
-    }
-}
-
 #[doc(hidden)]
 pub fn empty_index(account: &AccountConfig) -> ContactIndex {
     ContactIndex {

@@ -848,6 +848,8 @@ export const CANNED_DRAFT = { account: "work", id: "offsite-note" };
 
 const threadOf = (r: FixtureRow) => (CANNED_MEMBERS.includes(r.message_id) ? CANNED_THREAD : r.message_id);
 const addressOf = (from: string) => (/<([^>]+)>/.exec(from)?.[1] ?? from).trim().toLowerCase();
+/** The fixture account's own address, `FIXTURE_FROM` in src-tauri/src/fixture.rs, which decides a member's `own`. */
+const FIXTURE_ADDRESS = "me@example.com";
 
 /** The drafts that join a conversation: the canned one while it is listed and not sent. */
 function conversationDrafts(account: string): { id: string; date: string; thread_id: string; path: string }[] {
@@ -922,6 +924,7 @@ export function threadListing(account: string, rowId: number, prefer: string): T
       mailbox,
       message_id: row.message_id,
       from: row.from,
+      own: addressOf(row.from) === FIXTURE_ADDRESS,
       date_display: row.date_display,
       flags: row.flags,
       current: row.message_id === addressed.row.message_id,
@@ -933,7 +936,8 @@ export function threadListing(account: string, rowId: number, prefer: string): T
       id: 0,
       mailbox: "drafts",
       message_id: "",
-      from: "Me <me@example.com>",
+      from: `Me <${FIXTURE_ADDRESS}>`,
+      own: true,
       date_display: d.date,
       flags: { seen: false, answered: false, forwarded: false, flagged: false },
       current: false,

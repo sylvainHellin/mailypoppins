@@ -111,6 +111,8 @@ export const PAIRS: Pair[] = [
   { fg: "sidebar-primary-foreground", bg: "sidebar-primary", need: "text", use: "Sidebar primary mark" },
   { fg: "link", bg: "background", need: "text", use: "Links and ocean text" },
   { fg: "link", bg: "sidebar", need: "text", use: "Ocean text on the canvas" },
+  { fg: "link", bg: "muted", need: "text", use: "Mailbox chip of an own message in a conversation member row" },
+  { fg: "link", bg: "accent", need: "text", use: "Mailbox chip of an own message in a marked or hovered member row" },
   { fg: "warning", bg: "background", need: "text", use: "Attention text (pumpkin)" },
   { fg: "warning", bg: "sidebar", need: "text", use: "Attention text on the canvas" },
   { fg: "destructive", bg: "background", need: "text", use: "Error text" },

@@ -80,7 +80,7 @@ const METHOD: &str = "message.thread";
 
 /// Every field of a thread row, which is what the fixture and
 /// `docs/daemon-protocol.md` document and what a client may read.
-const ROW_FIELDS: [&str; 8] = [
+const ROW_FIELDS: [&str; 9] = [
     "current",
     "date_display",
     "flags",
@@ -88,6 +88,7 @@ const ROW_FIELDS: [&str; 8] = [
     "id",
     "mailbox",
     "message_id",
+    "own",
     "selector",
 ];
 

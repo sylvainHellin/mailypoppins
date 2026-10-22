@@ -1147,6 +1147,10 @@ pub(super) fn address(
 /// addressed message can carry an `id` the call did not name, and a client
 /// computing the flag from what it asked about would mark nothing.
 ///
+/// `own` is decided on the `From:` address against the account's
+/// ([`AccountConfig::sends_as`], PERSO-179) rather than on the mailbox, so a
+/// copy of a note to self in the Inbox is the user's as much as its Sent copy.
+///
 /// `prefer_mailbox` and `include_drafts` make the answer the expansion of a
 /// conversation row (#0142): the fold keeps the copy in the preferred mailbox,
 /// and the drafts that answer or forward a member join it ([`join_drafts`]).
@@ -1191,6 +1195,10 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
                 mailbox: member.mailbox.clone(),
                 message_id: member.message_id.clone(),
                 from: member.from.clone().unwrap_or_default(),
+                own: member
+                    .from
+                    .as_deref()
+                    .is_some_and(|from| account.sends_as(from)),
                 date_display: member.date_display.clone().unwrap_or_default(),
                 flags: mp_protocol::listing::MessageFlags {
                     seen: flags.seen,
@@ -1234,8 +1242,8 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
 /// `members` is oldest first by `date_sort`, `NULL` first, so the place is a
 /// partition point; drafts of one `mtime` keep the index's order. A draft
 /// member is drawn from the index: its id, `mailbox: "drafts"`, no
-/// `Message-ID` of its own yet, the account's address as its sender, and the
-/// frontmatter `date` as its date.
+/// `Message-ID` of its own yet, the account's address as its sender (so it is
+/// `own`), and the frontmatter `date` as its date.
 fn join_drafts(
     store: &Store,
     account: &AccountConfig,
@@ -1257,6 +1265,7 @@ fn join_drafts(
             mailbox: DRAFTS_MAILBOX.to_string(),
             message_id: String::new(),
             from: account.default_from.clone(),
+            own: true,
             date_display: draft.date.unwrap_or_default(),
             flags: mp_protocol::listing::MessageFlags::default(),
             current: false,
