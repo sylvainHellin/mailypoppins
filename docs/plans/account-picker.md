@@ -23,6 +23,7 @@ The keybinding redesign already described `ga` as "Switch account (picker)" ([ke
 - `1` to `9` switch straight to the nth account and close the picker; a digit past the last account does nothing.
 - Esc and `q` close it with nothing changed.
 - Each row shows the digit, the name, the current marker and the new-mail indicator: the inbox unread count in the desktop, the `has_unseen` dot in the TUI.
+- A row whose account is not serving says so: the runtime state (`opening` or `blocked`) in the desktop, `not ready` in the TUI, whose `AccountState::opening` is one flag for both.
 - No type-to-filter field: a filter would take `j` and `k` as text, and at four accounts the digits are faster.
 - The palette's "Switch account" opens the same picker.
 - The KEYMAP label stays "Switch account", so `mp dump-keys`, `website/src/data/tui-keys.json`, the desktop's `keymap.json` and the help and palette golden frames do not change.
@@ -69,7 +70,7 @@ The keybinding redesign already described `ga` as "Switch account (picker)" ([ke
 ## Tests
 
 - TUI, `clients/tui/src/app/keys.rs`: `ga` opens the picker on the active account; `j`/`k` clamp and Enter switches; Esc and `q` change nothing; a digit switches and one past the end does nothing; Enter on the active account only closes; a switch clears the new account's dot; with one account `ga` and the palette open nothing and the popup omits `ga`; with two the palette opens the picker.
-- TUI render test `account_picker_lists_the_accounts_with_digit_current_and_new_mail_dot` in `clients/tui/src/ui/overlays.rs`: the rows, the current marker, the dot, the cursor style and the blank digit past the ninth account.
+- TUI render test `account_picker_lists_the_accounts_with_digit_current_and_new_mail_dot` in `clients/tui/src/ui/overlays.rs`: the rows, the current marker, the dot, the `not ready` tag, the cursor style and the blank digit past the ninth account.
   It is a render test rather than a golden frame: every golden frame needs a daemon twin (`tests/phase5_parity_gate.rs`), whose fixture has one account.
 - Desktop, `src/app/reducer.test.ts`: the overlay with two accounts and a no-op with one; the expansion defaults, the toggle, a hand-expanded account kept after a switch away, a hand-collapsed account opened on selection, `expand_account`, and the cursor walk over expanded accounts.
 - Desktop, `src/components/sidebar/accountPicker.test.tsx`: the picker's keys, click, Escape, `q`, digits, the search kept on the current account, the palette entry, one account; the collapsed headers, their unread count, the header toggle, the current account expanded again by `ga` Enter.

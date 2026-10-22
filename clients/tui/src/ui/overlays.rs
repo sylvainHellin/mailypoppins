@@ -282,6 +282,9 @@ pub(super) fn render_account_picker(
     );
 
     const CURRENT_TAG: &str = "  current";
+    // An account whose store is opening or blocked (`AccountState::opening`,
+    // the TUI's one not-ready state), where the desktop names the runtime state.
+    const NOT_READY_TAG: &str = "  not ready";
     const UNSEEN_TAG: &str = "  \u{25cf}";
     // The digit column: `1` to `9`, blank past the ninth account.
     const DIGIT_W: usize = 3;
@@ -297,7 +300,8 @@ pub(super) fn render_account_picker(
                 " ".repeat(DIGIT_W)
             };
             let current = i == active;
-            let tags = if current { CURRENT_TAG.len() } else { 0 }
+            let tags = if acct.opening { NOT_READY_TAG.len() } else { 0 }
+                + if current { CURRENT_TAG.len() } else { 0 }
                 + if acct.has_unseen {
                     UNSEEN_TAG.chars().count()
                 } else {
@@ -318,6 +322,12 @@ pub(super) fn render_account_picker(
                 Span::styled(digit, Style::default().fg(theme::active().text_faint)),
                 Span::styled(name, name_style),
             ];
+            if acct.opening {
+                spans.push(Span::styled(
+                    NOT_READY_TAG,
+                    Style::default().fg(theme::active().text_muted),
+                ));
+            }
             if current {
                 spans.push(Span::styled(
                     CURRENT_TAG,
@@ -1216,15 +1226,17 @@ mod tests {
 
     /// The account picker (`ga`, #0147): one row per account in config order
     /// with its digit, `current` on the active account, the dot on a
-    /// background account with new mail, and the cursor row in the selection
-    /// style; past the ninth account the digit column is blank.
+    /// background account with new mail, `not ready` on an account that is
+    /// opening or blocked, and the cursor row in the selection style; past the
+    /// ninth account the digit column is blank.
     #[test]
     fn account_picker_lists_the_accounts_with_digit_current_and_new_mail_dot() {
-        let mut accounts: Vec<AccountState> = ["work", "home", "club"]
+        let mut accounts: Vec<AccountState> = ["work", "home", "club", "lab"]
             .into_iter()
             .map(AccountState::for_tests)
             .collect();
         accounts[1].has_unseen = true;
+        accounts[3].opening = true;
         let picker = AccountPicker { selected: 1 };
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal
@@ -1248,9 +1260,10 @@ mod tests {
         assert!(rows[row("2  home")].contains("2  home  \u{25cf}"));
         let club = &rows[row("3  club")];
         assert!(
-            !club.contains("current") && !club.contains('\u{25cf}'),
+            !club.contains("current") && !club.contains('\u{25cf}') && !club.contains("not ready"),
             "{club}"
         );
+        assert!(rows[row("4  lab")].contains("4  lab  not ready"));
         assert!(rows[row("j/k nav")].contains("1-9 jump  Enter switch  Esc cancel"));
 
         // The cursor row's name carries the selection style, the others not.
