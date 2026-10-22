@@ -1469,6 +1469,81 @@ mod tests {
         }
     }
 
+    /// The sender's address survives the quote header of a sent reply,
+    /// reply-all and forward in both parts (PERSO-169): the plain part
+    /// carries `Name <addr>` as written, and the HTML part, rendered to text
+    /// the way a mail client shows it, still names the address. Checked with
+    /// a companion HTML original (the escaped header) and without one (the
+    /// Markdown header, where `<addr>` is an email autolink).
+    #[test]
+    fn a_sent_quote_header_keeps_the_sender_address_in_both_parts() {
+        use crate::draft::{create_forward_draft_from, create_reply_draft_from, SourceMessage};
+        let senders = [
+            ("Sylvain Hellin <s.hellin@evoqs.com>", "s.hellin@evoqs.com"),
+            ("Zoë Müller <zoe@example.de>", "zoe@example.de"),
+            ("\"AT&T Support\" <help@att.com>", "help@att.com"),
+            ("bare@example.com", "bare@example.com"),
+        ];
+        for (from, addr) in senders {
+            for with_html in [false, true] {
+                for kind in ["reply", "reply-all", "forward"] {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let source = SourceMessage {
+                        from: from.into(),
+                        to: "me@example.com, carol@example.com".into(),
+                        subject: "Status".into(),
+                        date: Some("Tue, 21 Oct 2026 20:12:00 +0200".into()),
+                        body: "Original text".into(),
+                        html: with_html.then(|| "<p>Original text</p>".to_string()),
+                        ..Default::default()
+                    };
+                    let path = match kind {
+                        "forward" => create_forward_draft_from(
+                            &source,
+                            "me@example.com",
+                            Some(tmp.path()),
+                            None,
+                        ),
+                        _ => create_reply_draft_from(
+                            &source,
+                            kind == "reply-all",
+                            "me@example.com",
+                            Some(tmp.path()),
+                            None,
+                        ),
+                    }
+                    .unwrap();
+                    let mut draft = crate::draft::parse_email_draft(&path).unwrap();
+                    draft.frontmatter.status = EmailStatus::Approved;
+                    draft.frontmatter.to = Some("dave@example.com".into());
+                    let built = build_draft_message(
+                        &draft,
+                        "me@example.com",
+                        &EmailSettings::default(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    let (plain, html) = text_parts(&built.raw);
+                    let case = format!("{from} / {kind} / html {with_html}");
+                    assert!(plain[0].contains(from), "{case}: plain {}", plain[0]);
+                    let shown = crate::parse::html_to_plain(&html[0]);
+                    assert!(shown.contains(addr), "{case}: shown {shown}\n{}", html[0]);
+                    assert!(shown.contains("Original text"), "{case}: {shown}");
+                    if with_html {
+                        let escaped = from
+                            .replace('&', "&amp;")
+                            .replace('<', "&lt;")
+                            .replace('>', "&gt;")
+                            .replace('"', "&quot;");
+                        assert!(html[0].contains(&escaped), "{case}: {}", html[0]);
+                    }
+                }
+            }
+        }
+    }
+
     /// The unified Markdown signature (spliced into the reply body at draft
     /// creation, #0099) is the single source for both outgoing parts: the
     /// plain part carries it once (as Markdown link syntax) with no marker, and

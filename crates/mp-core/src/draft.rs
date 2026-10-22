@@ -742,7 +742,10 @@ pub fn create_reply_draft_from(
 
     fs::write(&dest, full_content)?;
 
-    // Copy and wrap companion HTML for the draft if the original has one
+    // Copy and wrap companion HTML for the draft if the original has one.
+    // The header values are text, not markup: a raw `Name <addr>` would reach
+    // the sent HTML as an unknown `<addr>` tag that every client drops
+    // (PERSO-169), so each one is escaped.
     {
         if let Some(html_content) = inbox.html.clone() {
             let wrapped = format!(
@@ -750,8 +753,8 @@ pub fn create_reply_draft_from(
                  <div style=\"margin:0;padding:0 0 0 1em;border-left:2px solid #ccc\">\n\
                  {}\n\
                  </div>",
-                inbox.date.as_deref().unwrap_or("(unknown date)"),
-                inbox.from,
+                escape_html_text(inbox.date.as_deref().unwrap_or("(unknown date)")),
+                escape_html_text(&inbox.from),
                 html_content,
             );
             let draft_html = dest.with_extension("html");
@@ -875,7 +878,8 @@ pub fn create_forward_draft_from(
 
     fs::write(&dest, full_content)?;
 
-    // Create companion HTML for the forward
+    // Create companion HTML for the forward, its header values escaped as in
+    // create_reply_draft_from (PERSO-169).
     {
         if let Some(html_content) = inbox.html.clone() {
             let wrapped = format!(
@@ -887,10 +891,10 @@ pub fn create_forward_draft_from(
                  <div>\n\
                  {}\n\
                  </div>",
-                inbox.from,
-                inbox.date.as_deref().unwrap_or("(unknown date)"),
-                inbox.subject,
-                inbox.to,
+                escape_html_text(&inbox.from),
+                escape_html_text(inbox.date.as_deref().unwrap_or("(unknown date)")),
+                escape_html_text(&inbox.subject),
+                escape_html_text(&inbox.to),
                 html_content,
             );
             let draft_html = dest.with_extension("html");
@@ -1470,6 +1474,23 @@ fn yaml_printable(c: char) -> bool {
     matches!(c,
         '\t' | '\n' | '\r' | '\u{20}'..='\u{7e}' | '\u{85}'
         | '\u{a0}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+}
+
+/// Escape a header value for HTML text content: `&` first, then the angle
+/// brackets that would open a tag and the double quote, so the value reads the
+/// same in a browser as it does in the plain-text part.
+fn escape_html_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn yaml_dq_escape(s: &str) -> String {
@@ -3583,5 +3604,117 @@ mod tests {
             draft.frontmatter.attachments,
             Some(vec!["/tmp/a\nbcc: x@evil.tld".to_string()])
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Quote headers in the companion HTML (PERSO-169)
+    // -----------------------------------------------------------------------
+
+    fn html_source(from: &str) -> SourceMessage {
+        SourceMessage {
+            from: from.into(),
+            to: "Me <me@example.com>, Ops & Co <ops@x.com>".into(),
+            cc: Some("carol@example.com".into()),
+            subject: "Q&A <draft> \"v2\"".into(),
+            date: Some("Tue, 21 Oct 2026 20:12:00 +0200".into()),
+            body: "Original body".into(),
+            html: Some("<p>Original <b>body</b></p>".into()),
+            ..Default::default()
+        }
+    }
+
+    fn companion_html(draft: &Path) -> String {
+        fs::read_to_string(draft.with_extension("html")).unwrap()
+    }
+
+    #[test]
+    fn escape_html_text_escapes_markup_characters_only() {
+        assert_eq!(
+            escape_html_text(r#"Zoë & "Bo" <z@x.com>"#),
+            "Zoë &amp; &quot;Bo&quot; &lt;z@x.com&gt;"
+        );
+        assert_eq!(escape_html_text("&amp;"), "&amp;amp;");
+        assert_eq!(escape_html_text("plain"), "plain");
+    }
+
+    /// The reply and reply-all attribution carries the address as text in the
+    /// HTML and as written in the Markdown draft, for a plain name, a
+    /// non-ASCII name, a name with `&` and a bare address.
+    #[test]
+    fn reply_quote_header_escapes_the_sender_in_html_only() {
+        let cases = [
+            (
+                "Sylvain Hellin <s.hellin@evoqs.com>",
+                "Sylvain Hellin &lt;s.hellin@evoqs.com&gt;",
+            ),
+            (
+                "Zoë Müller-Łukasz <zoe@example.de>",
+                "Zoë Müller-Łukasz &lt;zoe@example.de&gt;",
+            ),
+            (
+                "\"AT&T Support\" <help@att.com>",
+                "&quot;AT&amp;T Support&quot; &lt;help@att.com&gt;",
+            ),
+            ("bare@example.com", "bare@example.com"),
+        ];
+        for (from, escaped) in cases {
+            for all in [false, true] {
+                let tmp = tempfile::tempdir().unwrap();
+                let path = create_reply_draft_from(
+                    &html_source(from),
+                    all,
+                    "me@example.com",
+                    Some(tmp.path()),
+                    None,
+                )
+                .unwrap();
+                let html = companion_html(&path);
+                let expected = format!(
+                    "<p style=\"color:#666\">On Tue, 21 Oct 2026 20:12:00 +0200, {escaped} wrote:</p>"
+                );
+                assert!(html.starts_with(&expected), "{from} (all {all}): {html}");
+                assert!(html.contains("<p>Original <b>body</b></p>"), "{html}");
+                let md = fs::read_to_string(&path).unwrap();
+                assert!(
+                    md.contains(&format!(
+                        "On Tue, 21 Oct 2026 20:12:00 +0200, {from} wrote:\n"
+                    )),
+                    "{from}: {md}"
+                );
+            }
+        }
+    }
+
+    /// Every forward header value is escaped in the HTML, the subject and the
+    /// recipient list included, and left as written in the Markdown draft.
+    #[test]
+    fn forward_header_escapes_every_value_in_html_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = html_source("Zoë & Co <zoe@example.de>");
+        let path =
+            create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None).unwrap();
+        let html = companion_html(&path);
+        for line in [
+            "From: Zoë &amp; Co &lt;zoe@example.de&gt;<br/>",
+            "Date: Tue, 21 Oct 2026 20:12:00 +0200<br/>",
+            "Subject: Q&amp;A &lt;draft&gt; &quot;v2&quot;<br/>",
+            "To: Me &lt;me@example.com&gt;, Ops &amp; Co &lt;ops@x.com&gt;</p>",
+        ] {
+            assert!(html.contains(line), "{line} missing: {html}");
+        }
+        assert!(html.contains("<p>Original <b>body</b></p>"), "{html}");
+        let md = fs::read_to_string(&path).unwrap();
+        for line in [
+            "From: Zoë & Co <zoe@example.de>\n",
+            "Subject: Q&A <draft> \"v2\"\n",
+            "To: Me <me@example.com>, Ops & Co <ops@x.com>\n",
+        ] {
+            assert!(md.contains(line), "{line} missing: {md}");
+        }
+
+        let bare = html_source("bare@example.com");
+        let path =
+            create_forward_draft_from(&bare, "me@example.com", Some(tmp.path()), None).unwrap();
+        assert!(companion_html(&path).contains("From: bare@example.com<br/>"));
     }
 }
