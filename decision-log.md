@@ -58,3 +58,10 @@ Why: the TUI sidebar never lists the other accounts, so the request is already m
 Rejected: collapsed header rows for the other accounts in the TUI sidebar (extra work for the same result).
 Source: chat with Sylvain, 2026-10-22.
 Status: accepted
+
+## 2026-10-22 - mp gets named profiles; the demo mailbox and its fake data live outside the repo
+
+Why: a profile (its own config, data, store and daemon) is useful beyond demos, for testing or a separate work setup, and is the only thing a demo needs from mp; the made-up corpus and its seed script talk to mp only through IMAP and `.eml`, so they cannot drift with mp's internals and stay off the public repo. The demo account is a real Zimbra mailbox, `demo@mailypoppins.com`, seeded over IMAP APPEND from a local repo on the home server (`~/code/side-projects/mailypoppins-demo`); live replies on stage go to one of Sylvain's real addresses.
+Rejected: a local fake IMAP/SMTP server (mp needs CONDSTORE, QRESYNC, IDLE, MOVE and UIDPLUS, so it means installing Stalwart or Dovecot, against a real mailbox that needs nothing); a store seeded without a server (archive, send and sync would fail on camera); a `demo/` folder in this repo (fake data in the public repo for no gain).
+Source: chat with Sylvain, 2026-10-22.
+Status: accepted
