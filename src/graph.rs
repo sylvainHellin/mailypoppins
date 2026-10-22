@@ -354,6 +354,10 @@ pub struct GraphMailFolder {
     pub total_item_count: i64,
     #[serde(default)]
     pub unread_item_count: i64,
+    /// How many folders sit under this one, which is what tells the folder
+    /// tree walk (#0141) whether to ask for its children.
+    #[serde(default)]
+    pub child_folder_count: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -984,6 +988,9 @@ fn well_known_folder(folder: &str) -> Option<&'static str> {
     })
 }
 
+/// How deep [`GraphClient::list_folder_tree`] walks the folder tree.
+const MAX_FOLDER_DEPTH: usize = 8;
+
 /// Whether a configured folder already is a Graph folder id.
 ///
 /// Mail folder ids are base64 strings of well over a hundred characters with
@@ -1046,6 +1053,72 @@ impl GraphClient {
             }
         }
         Ok(all)
+    }
+
+    /// Every mail folder of the mailbox, the whole tree (#0141), each with
+    /// the `Parent/Child` path [`Self::folder_path`] resolves back to it.
+    ///
+    /// Breadth-first, one request per level of each folder that has children,
+    /// and bounded at [`MAX_FOLDER_DEPTH`] levels, so a pathological tree
+    /// cannot keep a tick listing forever.
+    pub async fn list_folder_tree(&self) -> Result<Vec<(String, GraphMailFolder)>> {
+        let mut out = Vec::new();
+        let mut level: Vec<(String, GraphMailFolder)> = self
+            .list_folders()
+            .await?
+            .into_iter()
+            .map(|folder| (folder.display_name.clone(), folder))
+            .collect();
+        for _ in 0..MAX_FOLDER_DEPTH {
+            let mut next = Vec::new();
+            for (path, folder) in &level {
+                if folder.child_folder_count > 0 {
+                    let children = self
+                        .list_folder_level(&format!(
+                            "{}/me/mailFolders/{}/childFolders?$top=100",
+                            GRAPH_BASE, folder.id
+                        ))
+                        .await?;
+                    next.extend(
+                        children
+                            .into_iter()
+                            .map(|child| (format!("{path}/{}", child.display_name), child)),
+                    );
+                }
+            }
+            out.append(&mut level);
+            if next.is_empty() {
+                break;
+            }
+            level = next;
+        }
+        out.append(&mut level);
+        Ok(out)
+    }
+
+    /// The id of a well-known folder (`sentitems`, `drafts`, ...), or `None`
+    /// when the mailbox has none, which Graph answers with a 404 (#0141).
+    pub async fn well_known_folder_id(&self, name: &str) -> Result<Option<String>> {
+        let url = format!("{GRAPH_BASE}/me/mailFolders/{name}?$select=id");
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(self.bearer())
+            .send()
+            .await
+            .with_context(|| format!("Failed to read the {name} folder"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Read the {name} folder failed (HTTP {status}): {body}"
+            ));
+        }
+        let folder: GraphFolderId = resp.json().await.context("Failed to parse the folder")?;
+        Ok(Some(folder.id))
     }
 
     /// The URL path segment that names `folder` in `/me/mailFolders/{x}`.
@@ -2901,6 +2974,8 @@ pub async fn sync_mailboxes_graph(
             );
             return Ok(result);
         }
+        // A `status-only` folder's own window (#0141), below the pass's limit.
+        let limit = target.limit(limit);
         let known = crate::ingest::known_message_ids(&store, account_name, target.role.as_str())?;
         let mailbox = target.role.as_str();
         let stored = crate::ingest::load_mailbox_cursor(&store, account_name, mailbox)?;
@@ -3035,8 +3110,11 @@ pub async fn sync_mailboxes_graph(
             };
         span.mark(&format!("fetch:{}", target.role));
 
+        // What a `status-only` window leaves on the server is its policy, not a
+        // short pass (#0141, [`SyncTarget::short_download_counts`]).
+        let short = download_incomplete && target.short_download_counts();
         if dry_run {
-            coverage.push((complete, download_incomplete));
+            coverage.push((complete, short));
             result.saved += new_emails.len();
             continue;
         }
@@ -3064,7 +3142,7 @@ pub async fn sync_mailboxes_graph(
             &mut result,
         );
         let ingest_failed = window.owed_failure;
-        coverage.push((complete, download_incomplete || ingest_failed));
+        coverage.push((complete, short || ingest_failed));
         // A window that moved the drain on leaves the next one for the next
         // pass, which the runtime runs at once rather than an interval from now.
         if owes_follow_up(backlog, &window) {
@@ -5104,10 +5182,7 @@ mod tests {
     }
 
     fn sync_target(role: MailboxRole, server_name: &str) -> SyncTarget {
-        SyncTarget {
-            role,
-            server_name: server_name.into(),
-        }
+        SyncTarget::new(role, server_name)
     }
 
     /// A message as the Graph download hands it over, dated by its

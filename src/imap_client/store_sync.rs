@@ -116,7 +116,7 @@ impl SyncBackend for ImapBackend<'_> {
                     let out = fetch_new_raw_on_session(
                         pooled.session(),
                         &target.server_name,
-                        Some(limit),
+                        Some(target.limit(limit)),
                         known,
                         caps,
                         body_budget,
@@ -267,9 +267,53 @@ fn attribute_token(attribute: &async_imap::types::NameAttribute<'_>) -> String {
         NameAttribute::NoSelect => "\\Noselect".to_string(),
         NameAttribute::Marked => "\\Marked".to_string(),
         NameAttribute::Unmarked => "\\Unmarked".to_string(),
+        NameAttribute::All => "\\All".to_string(),
+        NameAttribute::Archive => "\\Archive".to_string(),
+        NameAttribute::Drafts => "\\Drafts".to_string(),
+        NameAttribute::Flagged => "\\Flagged".to_string(),
+        NameAttribute::Junk => "\\Junk".to_string(),
+        NameAttribute::Sent => "\\Sent".to_string(),
+        NameAttribute::Trash => "\\Trash".to_string(),
         NameAttribute::Extension(name) => format!("\\{name}"),
         other => format!("{other:?}"),
     }
+}
+
+/// The message and unread counts of each of `names`, from one `STATUS
+/// (MESSAGES UNSEEN)` per folder on one borrowed session (#0141).
+///
+/// What a `status-only` folder's sidebar row shows, since its store holds at
+/// most a tail of it. A folder the server refuses is left out and logged
+/// rather than failing the rest: one renamed folder must not blank every
+/// other count.
+pub async fn status_counts(
+    imap_config: &ImapConfig,
+    names: &[String],
+) -> Result<Vec<(String, u64, u64)>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut pooled = pool::checkout(imap_config).await?;
+    let session = pooled.session();
+    let counted = async {
+        let mut counts = Vec::with_capacity(names.len());
+        for name in names {
+            match session.status(name, "(MESSAGES UNSEEN)").await {
+                Ok(mailbox) => counts.push((
+                    name.clone(),
+                    u64::from(mailbox.exists),
+                    u64::from(mailbox.unseen.unwrap_or(0)),
+                )),
+                Err(async_imap::error::Error::No(why)) => {
+                    log::warn!("[catalogue] STATUS {name} was refused: {why}");
+                }
+                Err(e) => return Err(anyhow!("STATUS {name} failed: {e}")),
+            }
+        }
+        Ok(counts)
+    }
+    .await;
+    pooled.check(counted)
 }
 
 #[cfg(test)]

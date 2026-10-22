@@ -22,7 +22,8 @@ pub use search::{
 };
 pub use sent::ImapSentMailbox;
 pub use store_sync::{
-    list_mailboxes, list_mailboxes_detailed, sync_mailboxes, ImapBackend, ServerMailbox,
+    list_mailboxes, list_mailboxes_detailed, status_counts, sync_mailboxes, ImapBackend,
+    ServerMailbox,
 };
 // The sync types moved to `crate::sync` with the engine (#0059); re-exported
 // here so the call sites that name them through this module keep compiling.

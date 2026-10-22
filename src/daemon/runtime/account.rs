@@ -990,10 +990,7 @@ fn tick_limit(kind: TickKind) -> usize {
 fn tick_targets(cfg: &AccountConfig) -> Vec<crate::sync::SyncTarget> {
     crate::config::all_configured_mailboxes(cfg)
         .iter()
-        .map(|(role, mapping)| crate::sync::SyncTarget {
-            role: role.clone(),
-            server_name: mapping.server.clone(),
-        })
+        .map(|(role, mapping)| crate::sync::SyncTarget::new(role.clone(), mapping.server.clone()))
         .collect()
 }
 

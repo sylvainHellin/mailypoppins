@@ -804,17 +804,14 @@ fn resolve_targets(
     let Some(wanted) = wanted else {
         return Ok(crate::config::all_configured_mailboxes(account)
             .iter()
-            .map(|(role, mapping)| SyncTarget {
-                role: role.clone(),
-                server_name: mapping.server.clone(),
-            })
+            .map(|(role, mapping)| SyncTarget::new(role.clone(), mapping.server.clone()))
             .collect());
     };
     wanted
         .iter()
         .map(|name| {
             crate::config::find_sync_target(account, name)
-                .map(|(role, server_name)| SyncTarget { role, server_name })
+                .map(|(role, server_name)| SyncTarget::new(role, server_name))
                 .ok_or_else(|| {
                     invalid_params(format!(
                         "account '{}' has no mailbox '{name}' configured; it knows {}",

@@ -87,10 +87,41 @@ pub fn stops_at(stop: Option<&Stop>, point: StopPoint) -> bool {
 /// ingest path has no filesystem destination. The role is a [`MailboxRole`]
 /// rather than a bare string, so `--mailbox INBOX` and the configured inbox
 /// are the same target and file their rows under one key (#0064).
+///
+/// `window` caps a `status-only` folder's download at its newest few messages
+/// (#0141, [`crate::catalogue::STATUS_ONLY_WINDOW`]), below whatever limit the
+/// pass runs at. A capped target never holds the account's prune gate shut by
+/// what it left on the server: leaving the folder's history there is its
+/// policy, not a short pass, and gating on it would suspend every prune for as
+/// long as the folder holds more than the window.
 #[derive(Debug, Clone)]
 pub struct SyncTarget {
     pub role: MailboxRole,
     pub server_name: String,
+    pub window: Option<usize>,
+}
+
+impl SyncTarget {
+    /// A target downloading up to the pass's limit.
+    pub fn new(role: MailboxRole, server_name: impl Into<String>) -> Self {
+        SyncTarget {
+            role,
+            server_name: server_name.into(),
+            window: None,
+        }
+    }
+
+    /// How many new messages this target downloads in a pass whose limit is
+    /// `limit`.
+    pub fn limit(&self, limit: usize) -> usize {
+        self.window.map_or(limit, |window| window.min(limit))
+    }
+
+    /// Whether a short download of this target counts against the pass's
+    /// coverage; see the type's docs.
+    pub fn short_download_counts(&self) -> bool {
+        self.window.is_none()
+    }
 }
 
 /// One fresh address observation captured from a newly-ingested message.

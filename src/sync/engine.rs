@@ -383,7 +383,7 @@ pub async fn run_sync(
         if dry_run {
             coverage.push((
                 fetched.enumeration_complete,
-                fetched.download_incomplete || !bodies_complete,
+                (fetched.download_incomplete || !bodies_complete) && target.short_download_counts(),
             ));
             result.saved += new_messages.len();
             continue;
@@ -552,9 +552,13 @@ pub async fn run_sync(
             ingest::unbind_rows_on_uids(store, account, target.role.as_str(), &unverified);
         }
 
+        // A `status-only` target's window leaves the folder's history on the
+        // server by design (#0141), so only what it failed to write counts.
         coverage.push((
             fetched.enumeration_complete,
-            fetched.download_incomplete || !unmet.is_empty() || !bodies_complete,
+            !unmet.is_empty()
+                || ((fetched.download_incomplete || !bodies_complete)
+                    && target.short_download_counts()),
         ));
         let pending_arrival_mark = mark_below_unmet(pending_arrival_mark, &unmet);
 
@@ -831,14 +835,8 @@ mod tests {
 
     fn targets() -> Vec<SyncTarget> {
         vec![
-            SyncTarget {
-                role: MailboxRole::Inbox,
-                server_name: "INBOX".into(),
-            },
-            SyncTarget {
-                role: MailboxRole::Archive,
-                server_name: "Archive".into(),
-            },
+            SyncTarget::new(MailboxRole::Inbox, "INBOX"),
+            SyncTarget::new(MailboxRole::Archive, "Archive"),
         ]
     }
 
@@ -1102,10 +1100,7 @@ mod tests {
     #[test]
     fn a_pass_that_downloads_the_same_uids_again_reports_a_fetch_that_is_not_converging() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
         let same = || Ok(fetch(vec![(101, raw("one")), (102, raw("two"))]));
         backend.script(
@@ -1146,10 +1141,7 @@ mod tests {
     #[test]
     fn a_short_repeat_pass_neither_counts_nor_resets_the_streak() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
         let same = || fetch(vec![(101, raw("one")), (102, raw("two"))]);
         let truncated = || {
@@ -1184,10 +1176,7 @@ mod tests {
     #[test]
     fn a_uidvalidity_reset_clears_the_convergence_marker() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
         let same = || Ok(fetch(vec![(101, raw("one")), (102, raw("two"))]));
         let mut reset = fetch(vec![(1, raw("one")), (2, raw("two"))]);
@@ -1213,10 +1202,7 @@ mod tests {
     #[test]
     fn a_pass_with_nothing_new_clears_the_convergence_marker() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
         let same = || Ok(fetch(vec![(101, raw("one")), (102, raw("two"))]));
         backend.script("INBOX", vec![same(), same(), Ok(fetch(vec![]))]);
@@ -1241,10 +1227,7 @@ mod tests {
     #[test]
     fn a_message_the_store_gave_up_on_is_not_a_fetch_that_fails_to_converge() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
         let poisoned = || Ok(fetch(vec![(105, unparsable())]));
         let passes = ingest::MAX_INGEST_ATTEMPTS + 2;
@@ -1329,10 +1312,7 @@ mod tests {
     #[test]
     fn an_unwritable_message_holds_the_mark_down_and_the_retry_writes_it_once() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
 
         // Pass 0 seeds the row a later prune will delete, so `pruned` is
@@ -1416,10 +1396,7 @@ mod tests {
     #[test]
     fn a_pass_cut_by_the_body_deadline_defers_the_prune_records_no_modseq_and_resumes() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
 
         // Pass 0 seeds the row the prune will want to delete, so `pruned` is
@@ -1493,10 +1470,7 @@ mod tests {
     #[test]
     fn a_permanently_unwritable_message_stops_holding_the_prune_after_three_passes() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
         let poisoned = || {
             let mut f = fetch(vec![(105, unparsable())]);
@@ -1543,10 +1517,7 @@ mod tests {
     #[test]
     fn a_uidvalidity_reset_clears_the_mailboxs_failure_counts() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
         let poisoned = || Ok(fetch(vec![(105, unparsable())]));
         let mut after_reset = fetch(vec![(105, unparsable())]);
@@ -1645,14 +1616,51 @@ mod tests {
         );
     }
 
+    /// A `status-only` folder's tail window leaves the folder's history on
+    /// the server by policy (#0141), so its short download does not suspend
+    /// the account's prune: the message another client moved into Junk lands
+    /// there in the same pass that prunes its inbox row, and the row is never
+    /// missing. A short download of a full target still gates everything.
+    #[test]
+    fn a_windowed_targets_short_download_does_not_defer_the_prune() {
+        let fx = Fixture::new();
+        let junk = SyncTarget {
+            window: Some(crate::catalogue::STATUS_ONLY_WINDOW),
+            ..SyncTarget::new(MailboxRole::Other("Junk Email".into()), "Junk Email")
+        };
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX"), junk];
+        let mut backend = FakeBackend::default();
+        backend.script("INBOX", vec![Ok(fetch(vec![(101, raw("spam"))]))]);
+        backend.script("Junk Email", vec![Ok(fetch(vec![]))]);
+        fx.run(&mut backend, &targets);
+
+        let mut gone = fetch(vec![]);
+        gone.vanished = vec![101];
+        backend.script("INBOX", vec![Ok(gone)]);
+        // The newest message in Junk is the one moved there; older ones the
+        // window does not reach are what makes the download short.
+        let mut tail = fetch(vec![(9, raw("spam"))]);
+        tail.download_incomplete = true;
+        backend.script("Junk Email", vec![Ok(tail)]);
+        let result = fx.run(&mut backend, &targets);
+
+        assert_eq!(result.prunes_deferred, 0);
+        assert_eq!(result.pruned, 1);
+        assert!(fx.rows("inbox").is_empty());
+        assert_eq!(
+            fx.rows("Junk Email"),
+            vec![9],
+            "the moved message kept a row"
+        );
+        assert_eq!(targets[1].limit(100), crate::catalogue::STATUS_ONLY_WINDOW);
+        assert_eq!(targets[0].limit(100), 100);
+    }
+
     /// `dry_run` counts and writes nothing: no rows, no cursor, no prune.
     #[test]
     fn a_dry_run_touches_neither_the_store_nor_the_blobs() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
         let mut f = fetch(vec![(101, raw("one")), (102, raw("two"))]);
         f.vanished = vec![90];
@@ -1681,10 +1689,7 @@ mod tests {
     #[test]
     fn known_flags_from_the_backend_are_applied_to_rows_the_store_already_holds() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
         backend.script("INBOX", vec![Ok(fetch(vec![(101, raw("one"))]))]);
         fx.run(&mut backend, &targets);
@@ -1729,10 +1734,7 @@ mod tests {
     #[test]
     fn a_condstore_modseq_survives_the_passes_that_cannot_vouch_for_one() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Inbox,
-            server_name: "INBOX".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Inbox, "INBOX")];
         let mut backend = FakeBackend::default();
 
         // Pass 1 is a full pass over a CONDSTORE server: it records a modseq.
@@ -1793,10 +1795,7 @@ mod tests {
     #[test]
     fn n_listed_copies_of_one_message_id_get_n_rows_and_the_next_pass_skips_them_all() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Sent,
-            server_name: "Sent Items".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Sent, "Sent Items")];
         let mut backend = FakeBackend::default();
         let copy = || raw("dup");
         backend.script(
@@ -1912,10 +1911,7 @@ mod tests {
     fn an_empty_listing_falls_back_to_the_unconditional_rebind() {
         for short_enumeration in [false, true] {
             let fx = Fixture::new();
-            let targets = vec![SyncTarget {
-                role: MailboxRole::Sent,
-                server_name: "Sent Items".into(),
-            }];
+            let targets = vec![SyncTarget::new(MailboxRole::Sent, "Sent Items")];
             let mut backend = FakeBackend::default();
             let blind = |uid: u32| {
                 let mut f = fetch(vec![(uid, raw("dup"))]);
@@ -1957,10 +1953,7 @@ mod tests {
     #[test]
     fn a_reset_rebinds_every_copy_onto_its_own_row() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Sent,
-            server_name: "Sent Items".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Sent, "Sent Items")];
         let mut backend = FakeBackend::default();
         let copy = || raw("dup");
         let mut renumbered = fetch(vec![(11, copy()), (12, copy())]);
@@ -2006,10 +1999,7 @@ mod tests {
     #[test]
     fn a_reset_rebinds_a_row_parked_on_a_uid_its_own_listing_still_holds() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Sent,
-            server_name: "Sent Items".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Sent, "Sent Items")];
         let mut backend = FakeBackend::default();
         let mut renumbered = fetch(vec![(10, raw("one")), (11, raw("two"))]);
         renumbered.uidvalidity_reset = true;
@@ -2061,10 +2051,7 @@ mod tests {
     #[test]
     fn a_short_enumeration_rebinds_a_row_parked_on_a_uid_its_listing_holds() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Sent,
-            server_name: "Sent Items".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Sent, "Sent Items")];
         let mut backend = FakeBackend::default();
         let mut short = fetch(vec![(10, raw("one")), (11, raw("two"))]);
         short.enumeration_complete = false;
@@ -2143,10 +2130,7 @@ mod tests {
     #[test]
     fn a_reset_wider_than_the_window_converges_on_the_next_full_sync() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Sent,
-            server_name: "Sent Items".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Sent, "Sent Items")];
         let mut backend = FakeBackend::default();
 
         // Pass 2, the detecting pass: the mailbox was recreated under a new
@@ -2259,10 +2243,7 @@ mod tests {
     #[test]
     fn the_message_on_a_recycled_uid_is_downloaded_after_a_windowed_reset() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Sent,
-            server_name: "Sent Items".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Sent, "Sent Items")];
         let mut backend = FakeBackend {
             honour_skip_list: true,
             ..Default::default()
@@ -2321,10 +2302,7 @@ mod tests {
     #[test]
     fn a_reset_leaves_a_row_alone_when_the_new_listing_has_no_uid_for_it() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Sent,
-            server_name: "Sent Items".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Sent, "Sent Items")];
         let mut backend = FakeBackend::default();
 
         // The recreated mailbox lists 12 and 13 only: 11, which `one` sits on,
@@ -2363,10 +2341,7 @@ mod tests {
     #[test]
     fn a_reset_that_hands_a_held_uid_to_another_message_keeps_each_row_its_own() {
         let fx = Fixture::new();
-        let targets = vec![SyncTarget {
-            role: MailboxRole::Sent,
-            server_name: "Sent Items".into(),
-        }];
+        let targets = vec![SyncTarget::new(MailboxRole::Sent, "Sent Items")];
         let mut backend = FakeBackend::default();
 
         let mut renumbered = fetch(vec![(5, raw("f"))]);

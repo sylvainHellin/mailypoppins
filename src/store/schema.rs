@@ -558,7 +558,11 @@ pub const GRAPH_CLEANUPS_TABLE: &str = "graph_cleanups";
 ///
 /// Kept out of [`REQUIRED_TABLES`] on purpose: a store opened by a build that
 /// predates a table is still a valid store, it simply gains the table here.
-fn additive_tables() -> [(&'static str, String); 2] {
+///
+/// `mailbox_listing` is the server's folder list as the last discovery saw it
+/// (#0141, [`crate::catalogue::listing`]); losing it in a rebuild costs one
+/// `LIST` at the next tick.
+fn additive_tables() -> [(&'static str, String); 3] {
     [
         (
             ATTACHMENT_REPAIRS_TABLE,
@@ -582,6 +586,10 @@ fn additive_tables() -> [(&'static str, String); 2] {
                     created     INTEGER
                 )"
             ),
+        ),
+        (
+            crate::catalogue::listing::TABLE,
+            crate::catalogue::listing::create_sql(),
         ),
     ]
 }

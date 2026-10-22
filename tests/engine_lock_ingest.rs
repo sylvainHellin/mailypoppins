@@ -212,10 +212,7 @@ fn reset_fetch(messages: Vec<(u32, Vec<u8>)>) -> MailboxFetch {
 }
 
 fn sent_target() -> Vec<SyncTarget> {
-    vec![SyncTarget {
-        role: MailboxRole::Sent,
-        server_name: "Sent".into(),
-    }]
+    vec![SyncTarget::new(MailboxRole::Sent, "Sent")]
 }
 
 /// A message the server holds several copies of: the #0112 corpus, copied from
