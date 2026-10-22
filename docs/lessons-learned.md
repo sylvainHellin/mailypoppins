@@ -3075,3 +3075,25 @@ Taking the turn for an account with no password held the lock a newly added acco
 
 The agent environment exports `GIT_EDITOR=nvim`, so `git rebase --continue` waited for input until the call timed out.
 Run git with `GIT_EDITOR=true`, and `GIT_SEQUENCE_EDITOR=true` for a rebase with `--autosquash`.
+
+## The TUI's process is the CLI's, preamble included (2026-10-22)
+
+`mp` with no subcommand is the TUI, and it runs `main`'s client preamble first: the secrets backend was opened and the SMTP credential loaded for the default account before the first frame, whatever the TUI crate itself did.
+Taking the credential loads out of `mp-tui` was therefore half of "no secret in the TUI process"; the other half is `launches_tui` in `src/main.rs`, which skips both reads.
+A boundary that is drawn around a crate has to be checked against the binary that links it.
+
+## Ask what an action needs on the thread whose result decides it (2026-10-22)
+
+The startup auto-fetch skips an account with no server credentials, and the credentials are the daemon's `account.credentials` answer now.
+Asking for them on a thread of their own raced the account's open, whose landing decides the auto-fetch; asking on the same thread before `mailbox.list` and carrying the answer in `BgResult::AccountOpened` orders the two by construction.
+An account whose answer never came is not refused client-side: the daemon decides and words the refusal.
+
+## A route table that only agrees with its twin can drift from the calls (2026-10-22)
+
+`commands::route` and `ACTION_ROUTING` in `src/tui_tests/actions.rs` agree by test, and both still said `SendContactVcard` issued `draft.create` after it moved to `contact.vcard_draft`, and that `draft.attach` was not built after it was.
+Nothing compares the table with the calls an action makes, so a change of method has to be followed into both tables by hand, and a review of a routed action reads them.
+
+## A test-support feature a crate's own tests need belongs in its own dev-dependencies (2026-10-22)
+
+`cargo test --workspace` turns `mp-client/test-support` on for `mp-tui` through the root crate's dev-dependencies, so `Session::serving` compiled in the TUI's unit tests there and nowhere else.
+`cargo test -p mp-tui` alone would not have it, so `clients/tui/Cargo.toml` names `mp-client` with the feature under `[dev-dependencies]` too.

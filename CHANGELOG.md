@@ -31,8 +31,15 @@ All notable changes to this project are documented in this file.
 - `mp config show` lists every folder the server listed with its policy, ignored ones included (#0141).
 - Setup wizards: `mp config init`, `mp config add-account` and the desktop account wizard ask for the drafts, trash and junk folders, each left empty for the one the server marks, and for policy overrides (#0141).
 - Microsoft Graph: a folder renamed on the server keeps its messages and its sync state under the new name (#0141).
+- `mp signature list|show|new|edit|rename|delete|default` manages the signatures and each account's default from the CLI, over the same daemon methods as the TUI's `cs` overlay and the desktop's Signatures dialog.
+- `mp -A <account>` with no subcommand opens the TUI on that account; a name no account carries is refused before the TUI starts.
 
 ### Changed
+- TUI: no password or OAuth token is read in the TUI's process any more; whether an account can sync or send is the daemon's `account.credentials` answer, and `mp` without a subcommand no longer opens the secrets backend.
+- TUI: the Contacts view and the compose wizard's recipient completion read the contact index from the daemon (`contact.search`) instead of the cache file, refresh on `contact.changed`, and say on the status line when the index build a search ran was refused.
+- TUI: the compose wizard's new draft is the daemon's `draft.create`, `x` approves through `draft.validate` and `draft.approve`, and the attach prompt calls `draft.attach`, as in the desktop app; the wizard lists and opens signatures through `signature.*`.
+- Daemon: `contact.search` rows carry `first_seen` and `last_seen`, and `draft.create` records a signature it was asked for in the draft's `signature:` frontmatter, so a later header edit preselects it.
+- The hidden `--daemon` debug flag is `mp account list --daemon`, the one command it changed; anywhere else it is a usage error.
 - Server search: `mp search`, the TUI search overlay and the desktop search bar get the newest `--limit` results across every mailbox from one daemon search; each mailbox is asked for its newest N and only the N newest overall are downloaded (PERSO-175).
   A cut answer ends with "More results than the N shown", N being the results listed, and `mp search --json` carries `truncated`.
   On Microsoft Graph a search that names no mailbox is one query across every folder, so mail in a folder the account does not configure matches too, and each result shows the mailbox or folder it sits in.

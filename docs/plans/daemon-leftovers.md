@@ -54,11 +54,23 @@ Each item lands as one or more commits on the `daemon-leftovers` branch, in this
 
 - `signature.removed {name}`: the watcher publishes it when a signature file it announced is gone, as it publishes `draft.removed` for a draft.
 - `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default` on the daemon, answering what the desktop's commands answer today; the TUI's `cs` overlay, the desktop's Signatures dialog and `mp config show` call them.
-- The TUI compose wizard still calls `mp_core::signatures` to list the signatures it offers and to create and open the one it edits; a follow-up lane moves it onto the daemon methods.
+- The TUI compose wizard lists, opens and creates the signatures it offers through the same methods (the TUI follow-up below).
 - `contact.vcard_draft {account, name, address, display_name}`: the daemon writes the draft, the `.vcf` under `_vcards/` and the attachment, and answers the draft and the `.vcf` path; the TUI's `v` and the desktop's `v` call it.
 - `contact.changed {account}`: a lifecycle event the daemon publishes whenever an account's contact index is written (a rebuild, the implicit build of a search, the bump after a sync or a send); the desktop re-reads its list on it instead of after its own rebuild only, and the TUI re-reads its contacts view.
 - The implicit build's refusal: `contact.search` answers a `rebuild` object `{saved, contacts, kept}` when its implicit build was refused by the cache guard, and every client says so (the CLI on stderr, the TUI on the status line, the desktop as a notice).
 - The desktop docs, the fixture daemon and the parity rows lose their "the daemon does not" sentences.
+
+## 6. The TUI follow-ups (done, 2026-10-22)
+
+The review of this batch named four places where the TUI still did the daemon's work in its own process, all older than the batch; they are moved, and `tests/architecture_boundaries.rs` gates them (`TUI_DIRECT_REACHES`, `TUI_DIRECT_RESIDUE`).
+
+- Credentials: `AccountState` no longer loads `ImapConfig`, `SmtpConfig` or `GraphConfig`, whose loads read a password or an OAuth2 token; whether an account can sync or send is `account.credentials`, asked on the account's open thread, and the Graph check reads the configuration alone.
+  `mp` launching the TUI skips the preamble's secret reads too.
+- Contacts: the Contacts view and the compose wizard's completion read the index through `contact.search` with an empty query, off the UI thread, refresh on `contact.changed` and say on the status line when the search's implicit build was refused; the rows gained `first_seen` and `last_seen`, which the ranking and the detail pane read.
+- Drafts: the compose wizard's new draft is `draft.create`, which now records a named signature in `signature:`; `x` approves through `draft.validate` and `draft.approve`, and `ta` appends through `draft.attach`, as the desktop does.
+  The `ce` header rewrite stays client-side in both clients until a daemon method rewrites a draft's headers.
+- Signatures: the wizard's listing, editing and creation go through `signature.*`.
+- The CLI gained `mp signature list|show|new|edit|rename|delete|default` over the same methods, `mp -A <account>` with no subcommand opens the TUI on that account, and the hidden `--daemon` flag became `mp account list --daemon`, the one command it changed.
 
 ## Docs
 
