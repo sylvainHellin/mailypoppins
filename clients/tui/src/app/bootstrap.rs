@@ -341,6 +341,7 @@ mod tests {
             total,
             unread: 0,
             badge: 0,
+            ..Default::default()
         }
     }
 

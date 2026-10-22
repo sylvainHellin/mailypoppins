@@ -189,6 +189,19 @@ impl MailboxRole {
         }
     }
 
+    /// The role a store key stands for, read exactly: the three canonical
+    /// lowercase keys are the roles, and anything else is the server name it
+    /// is (#0141). Unlike [`From<&str>`], which reads what a person typed, a
+    /// folder keyed `Sent` by an `extra` entry stays [`MailboxRole::Other`].
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "inbox" => MailboxRole::Inbox,
+            "archive" => MailboxRole::Archive,
+            "sent" => MailboxRole::Sent,
+            _ => MailboxRole::Other(key.to_string()),
+        }
+    }
+
     pub fn is_inbox(&self) -> bool {
         matches!(self, MailboxRole::Inbox)
     }

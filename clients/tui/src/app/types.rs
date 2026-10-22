@@ -3065,6 +3065,7 @@ mod tests {
                 archive: Some(mapping("Archive")),
                 sent: Some(mapping("Sent")),
                 extra: Some(vec![mapping("INBOX.Archive")]),
+                ..Default::default()
             },
             ..Default::default()
         };

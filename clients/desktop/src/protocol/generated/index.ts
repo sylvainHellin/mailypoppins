@@ -38,6 +38,7 @@ export type { ErrorResponse } from "./ErrorResponse";
 export type { EventAttendee } from "./EventAttendee";
 export type { EventEnvelope } from "./EventEnvelope";
 export type { EventFrontmatter } from "./EventFrontmatter";
+export type { FolderPolicy } from "./FolderPolicy";
 export type { HealthCheck } from "./HealthCheck";
 export type { HoldListing } from "./HoldListing";
 export type { HoldStatus } from "./HoldStatus";

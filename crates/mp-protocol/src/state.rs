@@ -117,23 +117,73 @@ pub struct AccountSnapshot {
     pub sync_health: SyncHealth,
 }
 
+/// How the daemon keeps one server folder (#0141).
+///
+/// - `sync`: every tick downloads it, like the Inbox; the role folders, every
+///   user folder and every folder `config.toml` names.
+/// - `status-only`: the sidebar shows the server's counts; the store holds
+///   only what a tick's short tail window brought in (the trash and junk
+///   folders, so a message another client moved there keeps a row) or nothing
+///   at all (Proton's label folders, whose messages already live in a real
+///   folder).
+/// - `ignore`: never selected and never listed: non-mail and virtual folders,
+///   `\Noselect` parents, and a folder whose name would shadow a role.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "kebab-case")]
+pub enum FolderPolicy {
+    #[default]
+    Sync,
+    StatusOnly,
+    Ignore,
+}
+
+impl FolderPolicy {
+    /// The spelling `config.toml`, the wire and `mp list-mailboxes` use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FolderPolicy::Sync => "sync",
+            FolderPolicy::StatusOnly => "status-only",
+            FolderPolicy::Ignore => "ignore",
+        }
+    }
+}
+
+impl std::fmt::Display for FolderPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One mailbox row: the sidebar hierarchy plus the three counts.
 ///
-/// `role` is the product role (`inbox`, `drafts`, `sent`, `archive`, `other`)
-/// and is what a renderer branches on; `slug` is the store key and the
-/// selector segment, which is what a client addresses; `label` is what the
-/// sidebar shows. Three fields because they are three different jobs, and a
-/// client that derived one from another would be right until an account maps
-/// its Inbox to a server folder called something else.
+/// `role` is the product role (`inbox`, `drafts`, `sent`, `archive`, `trash`,
+/// `junk`, `other`) and is what a renderer branches on; `slug` is the store
+/// key and the selector segment, which is what a client addresses; `label` is
+/// what the sidebar shows. Three fields because they are three different jobs,
+/// and a client that derived one from another would be right until an account
+/// maps its Inbox to a server folder called something else.
+///
+/// `server` is the folder's name on the server, `None` for the local Drafts
+/// view and for a role the account has no folder for; `policy` says whether
+/// the counts are the store's (`sync`) or the server's (`status-only`), which
+/// is what an account total that should count received mail only reads.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MailboxRow {
-    /// `inbox`, `drafts`, `sent`, `archive` or `other`.
+    /// `inbox`, `drafts`, `sent`, `archive`, `trash`, `junk` or `other`.
     pub role: String,
     /// The store key and selector segment.
     pub slug: String,
     /// What the sidebar shows.
     pub label: String,
+    /// The folder's server name, `None` when it has none (#0141).
+    #[serde(default)]
+    pub server: Option<String>,
+    /// How the daemon keeps the folder (#0141); `sync` from a daemon that
+    /// predates the field.
+    #[serde(default)]
+    pub policy: FolderPolicy,
     /// Messages in the mailbox.
     #[serde(default)]
     pub total: u64,
@@ -412,6 +462,7 @@ mod tests {
                         total: 3,
                         unread: 1,
                         badge: 1,
+                        ..Default::default()
                     }],
                 )]),
                 drafts: BTreeMap::from([(

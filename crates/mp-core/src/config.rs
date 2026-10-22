@@ -497,6 +497,19 @@ pub struct MailboxMapping {
     pub server: String,
 }
 
+/// `[accounts.mailboxes]`: the folders an account pins, and the overrides of
+/// what discovery decides about the rest (#0141).
+///
+/// The daemon lists every server folder and keeps it by a policy it derives
+/// from the folder's role and a built-in exclude list; nothing here is needed
+/// for a folder to sync. What config adds:
+///
+/// - `inbox`, `archive`, `sent` and every `extra` entry are pins: always
+///   synced, whatever the server lists or marks, under the key they always
+///   had, so an existing config keeps working unchanged;
+/// - `drafts`, `trash` and `junk` name the folder holding that role when the
+///   server marks none, and pin nothing;
+/// - `override` entries change the policy of the folders a glob matches.
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct MailboxesConfig {
     #[serde(default)]
@@ -506,7 +519,57 @@ pub struct MailboxesConfig {
     #[serde(default)]
     pub sent: Option<MailboxMapping>,
     #[serde(default)]
+    pub drafts: Option<MailboxMapping>,
+    #[serde(default)]
+    pub trash: Option<MailboxMapping>,
+    #[serde(default)]
+    pub junk: Option<MailboxMapping>,
+    #[serde(default)]
     pub extra: Option<Vec<MailboxMapping>>,
+    /// `[[accounts.mailboxes.override]]`, in file order; the first entry whose
+    /// glob matches a folder decides its policy.
+    #[serde(default, rename = "override")]
+    pub overrides: Vec<MailboxOverride>,
+}
+
+/// One `[[accounts.mailboxes.override]]` entry (#0141).
+///
+/// `match` is a glob over the server name, `*` standing for any run of
+/// characters (the hierarchy delimiter included) and `?` for one, compared
+/// case-insensitively; `policy` is `sync`, `status-only` or `ignore`.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct MailboxOverride {
+    #[serde(rename = "match")]
+    pub pattern: String,
+    pub policy: FolderPolicy,
+}
+
+pub use mp_protocol::state::FolderPolicy;
+
+/// Whether `name` matches the `*`/`?` glob `pattern`, case-insensitively
+/// (#0141). Iterative with one backtrack point, so a pattern of many stars
+/// costs a product of the two lengths at worst rather than an exponent.
+pub fn glob_matches(pattern: &str, name: &str) -> bool {
+    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+    let name: Vec<char> = name.to_lowercase().chars().collect();
+    let (mut p, mut n) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while n < name.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == name[n]) {
+            p += 1;
+            n += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some((p, n));
+            p += 1;
+        } else if let Some((sp, sn)) = star {
+            p = sp + 1;
+            n = sn + 1;
+            star = Some((sp, sn + 1));
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|&c| c == '*')
 }
 
 /// Legacy signature tables (pre-#0107), read only by
@@ -1170,8 +1233,9 @@ fn ignored_key_warning(config: &GlobalConfig, steps: &[KeyStep]) -> String {
         if mailboxes == "mailboxes" {
             return format!(
                 "{prefix}unknown mailbox key `accounts.mailboxes.{key}` is ignored; \
-                 the mailbox roles are inbox, archive and sent, and any other folder \
-                 goes in a `[[accounts.mailboxes.extra]]` entry with `server = \"...\"`"
+                 the mailbox roles are inbox, archive, sent, drafts, trash and junk, \
+                 every other server folder is found without a config entry, and one \
+                 is pinned with a `[[accounts.mailboxes.extra]]` entry with `server = \"...\"`"
             );
         }
     }
@@ -2069,6 +2133,7 @@ host = "imap.example.com"
                 extra: Some(vec![MailboxMapping {
                     server: "Spam".to_string(),
                 }]),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -2742,8 +2807,17 @@ server = "INBOX"
 server = "Archive"
 [accounts.mailboxes.sent]
 server = "Sent"
+[accounts.mailboxes.drafts]
+server = "Drafts"
+[accounts.mailboxes.trash]
+server = "Trash"
+[accounts.mailboxes.junk]
+server = "Spam"
 [[accounts.mailboxes.extra]]
 server = "Spesen"
+[[accounts.mailboxes.override]]
+match = "Labels/*"
+policy = "ignore"
 
 [accounts.signatures]
 default = "work"
@@ -2788,6 +2862,38 @@ tenant_id = "common"
         assert!(config_warnings("[[accounts]\nbroken").is_empty());
     }
 
+    /// The override globs (#0141): `*` spans the delimiter, `?` is one
+    /// character, and the match ignores case.
+    #[test]
+    fn override_globs_match_server_names() {
+        assert!(glob_matches("Labels/*", "Labels/AI"));
+        assert!(glob_matches("labels/*", "LABELS/Receipt"));
+        assert!(glob_matches("*", "INBOX/reimbursements"));
+        assert!(glob_matches("Sync Issues*", "Sync Issues/Conflicts"));
+        assert!(glob_matches("Archive?", "Archive1"));
+        assert!(!glob_matches("Archive?", "Archive"));
+        assert!(!glob_matches("Labels/*", "Labels"));
+        assert!(glob_matches("*Items", "Deleted Items"));
+        assert!(glob_matches("a*b*c", "aXbYbZc"));
+        assert!(!glob_matches("a*b*c", "aXbYbZ"));
+    }
+
+    /// An override entry parses with its policy spelled as on the wire.
+    #[test]
+    fn a_mailbox_override_parses() {
+        let config: GlobalConfig = toml::from_str(
+            "[[accounts]]\nname = \"p\"\n[[accounts.mailboxes.override]]\nmatch = \"Labels/*\"\npolicy = \"status-only\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.accounts[0].mailboxes.overrides,
+            [MailboxOverride {
+                pattern: "Labels/*".to_string(),
+                policy: FolderPolicy::StatusOnly,
+            }]
+        );
+    }
+
     #[test]
     fn config_warnings_names_a_top_level_typo() {
         let warnings = config_warnings("notifcations = true\n\n[emial]\nfont_size = \"14px\"\n");
@@ -2828,7 +2934,7 @@ tenant_id = "common"
 
     #[test]
     fn config_warnings_falls_back_to_the_account_position_without_a_name() {
-        let warnings = config_warnings("[[accounts]]\n[accounts.mailboxes]\ndrafts = 1\n");
+        let warnings = config_warnings("[[accounts]]\n[accounts.mailboxes]\ndraft = 1\n");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].starts_with("account #1:"), "{}", warnings[0]);
     }

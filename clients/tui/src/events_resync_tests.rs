@@ -62,6 +62,7 @@ fn row(role: &str, slug: &str, label: &str, total: u64) -> MailboxRow {
         total,
         unread: 0,
         badge: 0,
+        ..Default::default()
     }
 }
 

@@ -766,6 +766,12 @@ mod tests {
         assert_eq!(rows.len(), 5);
         assert_eq!(rows[4].slug, "Newsletters");
         assert_eq!(rows[4].unread, 12);
+        assert_eq!(rows[0].server.as_deref(), Some("INBOX"));
+        assert_eq!(
+            rows[1].server, None,
+            "the local Drafts view has no server folder"
+        );
+        assert_eq!(rows[0].policy, mp_protocol::state::FolderPolicy::Sync);
         let totals = totals_by_slug(&rows);
         assert_eq!(totals.get("archive"), Some(&1408));
         assert_eq!(totals.get("drafts"), Some(&2));

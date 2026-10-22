@@ -7,7 +7,9 @@
       {
         "badge": 214,
         "label": "Inbox",
+        "policy": "sync",
         "role": "inbox",
+        "server": "INBOX",
         "slug": "inbox",
         "total": 214,
         "unread": 7
@@ -15,7 +17,9 @@
       {
         "badge": 2,
         "label": "Drafts",
+        "policy": "sync",
         "role": "drafts",
+        "server": null,
         "slug": "drafts",
         "total": 2,
         "unread": 0
@@ -23,7 +27,9 @@
       {
         "badge": 96,
         "label": "Sent",
+        "policy": "sync",
         "role": "sent",
+        "server": "Sent Items",
         "slug": "sent",
         "total": 96,
         "unread": 0
@@ -31,7 +37,9 @@
       {
         "badge": 1408,
         "label": "Archive",
+        "policy": "sync",
         "role": "archive",
+        "server": "Archive",
         "slug": "archive",
         "total": 1408,
         "unread": 0
@@ -39,7 +47,9 @@
       {
         "badge": 33,
         "label": "Newsletters",
+        "policy": "sync",
         "role": "other",
+        "server": "Newsletters",
         "slug": "Newsletters",
         "total": 33,
         "unread": 12
