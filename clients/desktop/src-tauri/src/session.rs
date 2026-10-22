@@ -1902,6 +1902,128 @@ mod tests {
         assert!(matched.is_ok(), "{:?}", matched.err());
     }
 
+    /// Write `dir/mp`, an `mp` whose `--version` says `version` and which
+    /// runs `real` for everything else. A `daemon restart` through it first
+    /// switches it to saying `then` and touches it, so the probe, keyed by
+    /// the binary's modification time, reads it again.
+    fn version_wrapper(
+        dir: &std::path::Path,
+        real: &std::ffi::OsStr,
+        version: &str,
+        then: &str,
+    ) -> std::path::PathBuf {
+        let path = dir.join("mp");
+        std::fs::write(dir.join("version"), version).expect("version");
+        std::fs::write(dir.join("then"), then).expect("then");
+        let script = format!(
+            "#!/bin/sh\n\
+             dir=$(dirname \"$0\")\n\
+             if [ \"$1\" = --version ]; then echo \"mailypoppins $(cat \"$dir/version\")\"; exit 0; fi\n\
+             if [ \"$1 $2\" = 'daemon restart' ]; then cp \"$dir/then\" \"$dir/version\"; touch \"$0\"; fi\n\
+             exec '{}' \"$@\"\n",
+            std::path::Path::new(real).display()
+        );
+        let tmp = dir.join("mp.tmp");
+        std::fs::write(&tmp, script).expect("wrapper");
+        std::fs::set_permissions(
+            &tmp,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("chmod");
+        // A new file each time, so its modification time is new too.
+        std::fs::rename(&tmp, &path).expect("wrapper in place");
+        path
+    }
+
+    /// The quiet restart after an update (#0139, stage 2) against a real
+    /// daemon. Two real versions of `mp` are not at hand, so the wrapper
+    /// plays the new bundle's `mp`: it says `99.0.0` (the update's `to`, also
+    /// this app's version) until `mp daemon restart` runs through it, and the
+    /// real daemon's version after, as a daemon of `to` would answer. The
+    /// daemon of the recorded `from` is restarted without the screen and the
+    /// record cleared; a daemon of any other version is refused as before
+    /// and left running. Run as `live_daemon_round_trip` is.
+    #[test]
+    #[ignore = "needs an `mp` binary in MP_DESKTOP_MP_BIN"]
+    fn live_daemon_quiet_restart_after_an_update() {
+        let _lock = crate::test_support::env_lock();
+        let real = std::env::var_os(connector::MP_BIN_ENV).expect("set MP_DESKTOP_MP_BIN");
+        live_dirs();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let stop = || {
+            let _ = std::process::Command::new(&real)
+                .args(["daemon", "stop"])
+                .status();
+        };
+        let scratch = crate::test_support::scratch_dir("live-quiet");
+        let record = crate::updates::state_path(&scratch);
+        connector::set_update_record(record.clone());
+        connector::set_app_version("99.0.0".into());
+
+        let first = match runtime.block_on(connector::connect_or_start(true)) {
+            Ok((_, hello)) => hello,
+            Err(e) => {
+                stop();
+                panic!("no daemon: {e:?}");
+            }
+        };
+        let from = first.app_version.clone();
+        let write_update = |from: &str| {
+            crate::updates::write_record(
+                &record,
+                &crate::updates::UpdateRecord {
+                    pending_restart: Some(crate::updates::PendingRestart {
+                        from: from.into(),
+                        to: "99.0.0".into(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("record");
+        };
+
+        // A daemon of another version than the update's `from`: the screen,
+        // and the daemon stays.
+        write_update("0.0.1");
+        let wrapper = version_wrapper(&scratch, &real, "99.0.0", &from);
+        std::env::set_var(connector::MP_BIN_ENV, &wrapper);
+        let refused = runtime.block_on(connector::connect_or_start(false));
+        let untouched = crate::updates::read_record(&record);
+        std::env::set_var(connector::MP_BIN_ENV, &real);
+        let same = runtime
+            .block_on(connector::connect_or_start(false))
+            .map(|(_, hello)| hello.instance_id);
+
+        // The daemon the update left behind: restarted, no screen.
+        write_update(&from);
+        let wrapper = version_wrapper(&scratch, &real, "99.0.0", &from);
+        std::env::set_var(connector::MP_BIN_ENV, &wrapper);
+        let quiet = runtime.block_on(connector::connect_or_start(false));
+        let after = crate::updates::read_record(&record);
+        std::env::set_var(connector::MP_BIN_ENV, &real);
+        stop();
+
+        match refused {
+            Err(e) => {
+                assert_eq!(e.kind, ConnectFailure::VersionMismatch, "{e:?}");
+                assert_eq!(e.daemon_version.as_deref(), Some(from.as_str()));
+            }
+            Ok((_, hello)) => panic!("another version was accepted: {hello:?}"),
+        }
+        assert!(untouched.pending_restart.is_some(), "{untouched:?}");
+        assert_eq!(same.ok().as_deref(), Some(first.instance_id.as_str()));
+        let (_, hello) = quiet.unwrap_or_else(|e| panic!("no quiet restart: {e:?}"));
+        assert_ne!(
+            hello.instance_id, first.instance_id,
+            "the daemon was not restarted"
+        );
+        assert_eq!(hello.app_version, from);
+        assert_eq!(after.pending_restart, None, "{after:?}");
+    }
+
     /// The real path against a real daemon in a scratch data directory:
     /// on-demand start through `mp daemon start`, the handshake with every
     /// required capability, the session, the first bootstrap, a command and

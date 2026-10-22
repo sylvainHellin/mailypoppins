@@ -101,7 +101,7 @@ ln -s /Applications/mailypoppins.app/Contents/MacOS/mp /usr/local/bin/mp   # opt
 
 The app starts its daemon with its own `Contents/MacOS/mp` unless `MP_DESKTOP_MP_BIN` names another, and refuses a running daemon of another version with the restart screen, whose Restart runs `mp daemon restart` with that binary.
 The symlink keeps the CLI, the TUI and the app's daemon on one version; with a Homebrew or `cargo` `mp` earlier on `PATH`, the two versions meet at the restart screen.
-To update: an installed app checks GitHub Releases once a day and offers "Update to <version>" at the sidebar's foot, and "Check for updates" (palette, App menu, Settings) checks at once; the download replaces the bundle in place and "Restart now" switches to it ([docs/shell.md](docs/shell.md), "Updates").
+To update: an installed app checks GitHub Releases once a day and offers "Update to <version>" at the sidebar's foot, and "Check for updates" (palette, App menu, Settings) checks at once; the download replaces the bundle in place and "Restart now" switches to it, while after "Later" the next launch restarts the old daemon without the restart screen ([docs/shell.md](docs/shell.md), "Updates").
 To uninstall: `mp daemon stop`, quit the app, delete `/Applications/mailypoppins.app` and the symlink; the mail store and `config.toml` are the CLI's and stay (`mp config path`).
 [docs/release-process.md](../../docs/release-process.md), "The desktop app", has the release side.
 

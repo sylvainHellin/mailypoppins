@@ -1,4 +1,4 @@
-//! The app's own updates from GitHub Releases (#0139, stage 1).
+//! The app's own updates from GitHub Releases (#0139, stages 1 and 2).
 //!
 //! `tauri-plugin-updater` reads `latest.json` from the endpoint in
 //! `tauri.conf.json` (`plugins.updater`), checks the archive's minisign
@@ -17,7 +17,11 @@
 //!   and for a webview that reloaded.
 //! - `update-state.json` in the app data directory keeps the last successful
 //!   check, the skipped version and the `{from, to}` of an installed update
-//!   ([`UpdateRecord`]); a missing or broken file reads as empty.
+//!   ([`UpdateRecord`]); a missing or broken file reads as empty. The
+//!   connector reads the `{from, to}` to restart the daemon an update left
+//!   behind without the blocking screen ([`take_quiet_restart`]).
+//! - Once this run installed an update, a check answers `restart_pending`
+//!   without reaching the endpoint ([`answer_before_fetch`]).
 //! - Nothing checks in a debug build, in fixture mode, or outside a `.app`
 //!   bundle ([`gate`]): a dev build is `0.1.0` and would always see an update.
 //!
@@ -368,8 +372,10 @@ pub struct UpdateRecord {
     pub last_check: Option<String>,
     /// The version `update_skip` recorded; the silent check does not offer it.
     pub skipped_version: Option<String>,
-    /// Written by a successful install, for the next launch (stage 2 reads
-    /// it to restart a daemon of version `from` without the blocking screen).
+    /// Written by a successful install, for the next launch: its first
+    /// connect restarts a daemon still at `from` without the blocking screen
+    /// ([`take_quiet_restart`]), and a daemon at `to` settles it
+    /// ([`settle_update`]).
     pub pending_restart: Option<PendingRestart>,
 }
 
@@ -406,6 +412,92 @@ pub fn read_record(file: &Path) -> UpdateRecord {
     }
 }
 
+/// Serialises the read-modify-write of `update-state.json` across the
+/// commands, the startup check and the connector.
+static FILE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Change the state file under [`FILE_LOCK`], writing it only when the
+/// change changed something; a file that cannot be written is logged, since
+/// nothing the user asked for depends on it.
+pub fn change_record(file: &Path, change: impl FnOnce(&mut UpdateRecord)) {
+    let _guard = lock(&FILE_LOCK);
+    let before = read_record(file);
+    let mut record = before.clone();
+    change(&mut record);
+    if record == before {
+        return;
+    }
+    if let Err(e) = write_record(file, &record) {
+        tracing::warn!("[update] could not write {}: {e}", file.display());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// After an update: the old daemon
+// ---------------------------------------------------------------------------
+
+/// Whether a version mismatch is the one an update leaves behind, which the
+/// connect fixes by restarting the daemon without the blocking screen: the
+/// daemon still runs the update's `from`, and this app and the `mp` it starts
+/// a daemon with are its `to`. That is the new app's first connect after
+/// Later and a quit; the old app in the Later window (its version is `from`)
+/// and every other mismatch still get the screen.
+pub fn restarts_quietly(
+    pending: Option<&PendingRestart>,
+    daemon_version: &str,
+    app_version: Option<&str>,
+    expected_version: &str,
+) -> bool {
+    pending.is_some_and(|p| {
+        p.from == daemon_version && app_version == Some(p.to.as_str()) && expected_version == p.to
+    })
+}
+
+/// Drop a recorded update that is not to the running version `current`: a
+/// later launch of another version (a reinstall from a DMG, a downgrade) is
+/// no longer that update's new app. Answers what it dropped.
+pub fn drop_stale_update(record: &mut UpdateRecord, current: &str) -> Option<PendingRestart> {
+    record.pending_restart.take_if(|p| p.to != current)
+}
+
+/// [`restarts_quietly`] against the record in `file`; when it holds, the
+/// record's `pending_restart` is cleared before the caller restarts, so the
+/// quiet restart runs once and a daemon that comes back at the wrong version
+/// gets the screen. Answers the update it applies to.
+pub fn take_quiet_restart(
+    file: &Path,
+    daemon_version: &str,
+    app_version: Option<&str>,
+    expected_version: &str,
+) -> Option<PendingRestart> {
+    let mut taken = None;
+    change_record(file, |r| {
+        taken = r
+            .pending_restart
+            .take_if(|p| restarts_quietly(Some(p), daemon_version, app_version, expected_version));
+    });
+    taken
+}
+
+/// A handshake with a daemon at `daemon_version` finished the update the
+/// record in `file` holds when that is its `to` and this app's version: the
+/// record is cleared, so a later mismatch is never taken for this update.
+pub fn settle_update(file: &Path, daemon_version: &str, app_version: Option<&str>) {
+    change_record(file, |r| {
+        let finished = r
+            .pending_restart
+            .take_if(|p| p.to == daemon_version && app_version == Some(p.to.as_str()));
+        if let Some(done) = finished {
+            tracing::info!(
+                "[update] the update from {} to {} is finished: the daemon runs {}",
+                done.from,
+                done.to,
+                done.to
+            );
+        }
+    });
+}
+
 /// Write the record whole: a temporary file beside it, then a rename, so a
 /// crash leaves the old file or the new one and never half of either.
 pub fn write_record(file: &Path, record: &UpdateRecord) -> std::io::Result<()> {
@@ -438,8 +530,6 @@ struct Inner {
     installed: Mutex<Option<String>>,
     /// An install is running.
     installing: AtomicBool,
-    /// Serialises the read-modify-write of `update-state.json`.
-    file: Mutex<()>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -478,15 +568,10 @@ impl Updates {
         Ok(Installing(Arc::clone(&self.inner)))
     }
 
-    /// Change the state file under the lock; a file that cannot be written
-    /// is logged, since nothing the user asked for depends on it.
+    /// [`change_record`], when there is a file.
     fn record(&self, file: Option<&Path>, change: impl FnOnce(&mut UpdateRecord)) {
-        let Some(file) = file else { return };
-        let _guard = lock(&self.inner.file);
-        let mut record = read_record(file);
-        change(&mut record);
-        if let Err(e) = write_record(file, &record) {
-            tracing::warn!("[update] could not write {}: {e}", file.display());
+        if let Some(file) = file {
+            change_record(file, change);
         }
     }
 }
@@ -501,7 +586,7 @@ fn current_version(app: &AppHandle) -> String {
 }
 
 /// `update-state.json` of this app, `None` when there is no data directory.
-fn record_file(app: &AppHandle) -> Option<PathBuf> {
+pub fn record_file(app: &AppHandle) -> Option<PathBuf> {
     match app.path().app_data_dir() {
         Ok(dir) => Some(state_path(&dir)),
         Err(e) => {
@@ -573,9 +658,10 @@ async fn run_check(app: &AppHandle, manual: bool) -> UpdateCheck {
     }
 }
 
-/// The silent check, [`STARTUP_DELAY`] after setup. A finished update is
-/// cleared from the record first, then the check runs under the cooldown;
-/// a failure is only logged.
+/// The silent check, [`STARTUP_DELAY`] after setup. A recorded update that
+/// is not this app's version is stale and cleared first (one that is stays
+/// for the connector, which settles it once the daemon runs it), then the
+/// check runs under the cooldown; a failure is only logged.
 pub fn spawn_startup_check(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(STARTUP_DELAY).await;
@@ -584,17 +670,16 @@ pub fn spawn_startup_check(app: AppHandle) {
             tracing::debug!("[update] no startup check: {reason}");
             return;
         }
-        let file = record_file(&app);
-        let updates = app.state::<Updates>().inner().clone();
-        if let Some(file) = file.as_deref() {
-            if let Some(done) = read_record(file).pending_restart {
-                tracing::info!(
-                    "[update] running {current}; the update recorded {} to {}",
-                    done.from,
-                    done.to
-                );
-                updates.record(Some(file), |r| r.pending_restart = None);
-            }
+        if let Some(file) = record_file(&app) {
+            change_record(&file, |r| {
+                if let Some(stale) = drop_stale_update(r, &current) {
+                    tracing::info!(
+                        "[update] running {current}, so the recorded update from {} to {} is stale",
+                        stale.from,
+                        stale.to
+                    );
+                }
+            });
         }
         let answer = run_check(&app, false).await;
         if answer.state == UpdateCheckState::Available {
@@ -787,7 +872,7 @@ pub async fn update_restart(app: AppHandle) -> Result<(), String> {
 
 /// `daemon.stop` through the session, then wait for the socket to go. No
 /// daemon is fine; a daemon that outlives the wait is logged and left to the
-/// new app's restart screen.
+/// new app, whose first connect restarts it quietly (`pending_restart`).
 fn stop_daemon(session: &SessionHandle) {
     if session.is_fixture() {
         return;
@@ -847,6 +932,114 @@ mod tests {
         assert!(!should_offer("0.12.0", Some("v0.12.0"), false));
         assert!(should_offer("0.12.0", Some("0.12.0"), true));
         assert!(should_offer("0.13.0", Some("0.12.0"), false));
+    }
+
+    fn update(from: &str, to: &str) -> PendingRestart {
+        PendingRestart {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    /// The stage 2 rule: only the daemon of the update's `from`, met by the
+    /// new app whose `mp` is the update's `to`, restarts without the screen.
+    #[test]
+    fn only_the_daemon_an_update_left_behind_restarts_quietly() {
+        let done = update("0.11.0", "0.12.0");
+        let p = Some(&done);
+        assert!(restarts_quietly(p, "0.11.0", Some("0.12.0"), "0.12.0"));
+        // No update recorded: the screen.
+        assert!(!restarts_quietly(None, "0.11.0", Some("0.12.0"), "0.12.0"));
+        // A daemon of another version than `from` (a cargo install, another app).
+        assert!(!restarts_quietly(p, "0.10.0", Some("0.12.0"), "0.12.0"));
+        // The old app in the Later window: it is `from`, and its reconnect
+        // probes the new `mp`.
+        assert!(!restarts_quietly(p, "0.11.0", Some("0.11.0"), "0.12.0"));
+        // An app whose version is unknown (no Tauri app, a test).
+        assert!(!restarts_quietly(p, "0.11.0", None, "0.12.0"));
+        // The `mp` it would start is not the update's (MP_DESKTOP_MP_BIN).
+        assert!(!restarts_quietly(p, "0.11.0", Some("0.12.0"), "0.13.0"));
+    }
+
+    #[test]
+    fn the_quiet_restart_is_taken_once_and_leaves_the_rest_of_the_record() {
+        let dir = scratch_dir("update-quiet");
+        let file = state_path(&dir);
+        let record = UpdateRecord {
+            last_check: Some("2026-10-05T12:00:00Z".into()),
+            skipped_version: Some("0.13.0".into()),
+            pending_restart: Some(update("0.11.0", "0.12.0")),
+        };
+        write_record(&file, &record).expect("write");
+        // Another mismatch takes nothing and keeps the record.
+        assert_eq!(
+            take_quiet_restart(&file, "0.10.0", Some("0.12.0"), "0.12.0"),
+            None
+        );
+        assert_eq!(read_record(&file), record);
+        assert_eq!(
+            take_quiet_restart(&file, "0.11.0", Some("0.12.0"), "0.12.0"),
+            Some(update("0.11.0", "0.12.0"))
+        );
+        assert_eq!(
+            read_record(&file),
+            UpdateRecord {
+                pending_restart: None,
+                ..record
+            }
+        );
+        // A daemon that comes back at `from` again gets the screen.
+        assert_eq!(
+            take_quiet_restart(&file, "0.11.0", Some("0.12.0"), "0.12.0"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_daemon_at_the_updates_version_settles_it() {
+        let dir = scratch_dir("update-settle");
+        let file = state_path(&dir);
+        let record = UpdateRecord {
+            pending_restart: Some(update("0.11.0", "0.12.0")),
+            ..UpdateRecord::default()
+        };
+        write_record(&file, &record).expect("write");
+        // A dev build (0.1.0) sharing the data directory, or a daemon still
+        // at `from`, leaves it for the new app.
+        settle_update(&file, "0.1.0", Some("0.1.0"));
+        settle_update(&file, "0.11.0", Some("0.12.0"));
+        settle_update(&file, "0.12.0", None);
+        assert_eq!(read_record(&file), record);
+        settle_update(&file, "0.12.0", Some("0.12.0"));
+        assert_eq!(read_record(&file), UpdateRecord::default());
+    }
+
+    #[test]
+    fn the_startup_drops_an_update_to_another_version_only() {
+        let mut record = UpdateRecord {
+            pending_restart: Some(update("0.11.0", "0.12.0")),
+            ..UpdateRecord::default()
+        };
+        assert_eq!(drop_stale_update(&mut record, "0.12.0"), None);
+        assert!(record.pending_restart.is_some());
+        assert_eq!(
+            drop_stale_update(&mut record, "0.11.0"),
+            Some(update("0.11.0", "0.12.0"))
+        );
+        assert_eq!(record.pending_restart, None);
+    }
+
+    #[test]
+    fn a_change_that_changes_nothing_writes_nothing() {
+        let dir = scratch_dir("update-unchanged");
+        let file = state_path(&dir);
+        change_record(&file, |r| r.pending_restart = None);
+        assert!(!file.exists());
+        change_record(&file, |r| r.skipped_version = Some("0.12.0".into()));
+        assert_eq!(
+            read_record(&file).skipped_version.as_deref(),
+            Some("0.12.0")
+        );
     }
 
     /// After an install and Later, a manual check says the restart is

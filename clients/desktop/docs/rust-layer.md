@@ -49,6 +49,7 @@ type GuiError =
 The connect also refuses a daemon whose `app_version` is not the version of the `mp` the layer would start one with (`MP_DESKTOP_MP_BIN`, else the bundled sidecar, else `PATH`; see Environment), read off that binary's `mp --version` and read again when the binary's size or modification time changes.
 That refusal is a `version_mismatch` too, its `why` naming both versions and the binary, so a daemon left by another install or by a `cargo install` with no `mp daemon restart` gets the same screen, and Restart replaces it with the matching one.
 A binary that is missing or prints no version skips the check, with a warning in the log.
+One mismatch skips the screen: the daemon an app update left behind (see Updates, "After an update").
 On a reconnect the same refusal turns `reconnecting` into `failed` with that error, pushed as soon as the session thread records it, while the thread keeps retrying; the next successful reconnect is `connected` again.
 The CLI and the TUI compare only the protocol range, since each is itself the `mp` that would start the daemon.
 The handshake requires every daemon method the layer calls (`REQUIRED_CAPABILITIES` in `connector.rs`), so a daemon that lacks one lands on that screen instead of failing at the first call; under test the fixture door panics on a method missing from the list, less the methods only the fixture answers (`FIXTURE_ONLY_METHODS` in `fixture.rs`: `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default`), whose work the layer does itself over a daemon.
@@ -829,7 +830,7 @@ The page moves the window through `data-tauri-drag-region` ([shell.md](shell.md)
 
 ## Updates
 
-`updates.rs` keeps the app current from GitHub Releases through `tauri-plugin-updater` (#0139, stage 1).
+`updates.rs` keeps the app current from GitHub Releases through `tauri-plugin-updater` (#0139, stages 1 and 2).
 The plugin reads `latest.json` from the one endpoint in `tauri.conf.json` (`plugins.updater.endpoints`, `https://github.com/sylvainHellin/mailypoppins/releases/latest/download/latest.json`) and checks the archive's minisign signature against `plugins.updater.pubkey`.
 `requireSignedVersion` is on, so a signature whose trusted comment names another version than the manifest is refused; `tauri build` writes that version into every signature it makes.
 On macOS the install untars the archive, renames the running bundle away and the new one into place, with an administrator prompt only when the bundle's directory is not writable.
@@ -862,7 +863,7 @@ The file sits in the app data directory (`~/Library/Application Support/dev.mail
 
 - `last_check` is the last successful check, RFC 3339, written by the silent check and by `update_check` alike; a failed check leaves it.
 - `skipped_version` is what `update_skip` recorded.
-- `pending_restart` is written by a successful install; the next launch logs it and clears it 10 s after setup, and stage 2 will read it before then to restart a daemon of version `from` without the blocking screen.
+- `pending_restart` is written by a successful install and read by the connect (see After an update); a handshake with a daemon of version `to` from an app of version `to` clears it, and the startup check, 10 s after setup, clears one whose `to` is not the running version, as after a reinstall from a DMG.
 
 Each key is `null` when unset.
 A missing file, one that does not parse, and a key of the wrong type all read as empty, with a warning in the log for the last two; an unknown key is ignored.
@@ -916,7 +917,7 @@ It rejects with a plain string, the sentence to show, not a `GuiError`: the gate
 
 `update_restart` needs an install from this run, and rejects with a string otherwise.
 It holds off the session's on-demand start, sends `daemon.stop` over the app's session (a lifecycle method every daemon answers, not in `REQUIRED_CAPABILITIES`), waits up to 15 s for the daemon's socket to go, and calls `AppHandle::request_restart`, which runs the exit path (the terminals are killed) and starts the new bundle.
-No daemon to stop is fine, and a daemon still there after the wait is logged and left to the new app's restart screen.
+No daemon to stop is fine, and a daemon still there after the wait is logged and left to the new app, whose first connect restarts it quietly (see After an update).
 The new app starts a daemon of its own version on its first connect.
 The frontend asks about open drafts first, as a window close does; this command asks nothing.
 
@@ -926,6 +927,15 @@ The frontend asks about open drafts first, as a window close does; this command 
 | `update:check_requested` | none (`null`) | the App menu's "Check for Updates…" |
 
 Both are app events, heard with `listen` under `core:default`, like `menu`.
+
+### After an update
+
+After Later and a quit, or a `daemon.stop` that did not land, the new app's first connect meets the daemon of the old version, still running from the bundle the plugin moved away.
+`connector::check_version` restarts that daemon without the blocking screen when `update-state.json` records the update (`updates::restarts_quietly`): the daemon's version is `pending_restart.from`, and both this app's version (`set_app_version`) and the `mp` it would start are `pending_restart.to`.
+`lib.rs` hands the connector the file's path (`connector::set_update_record`) before the session first connects.
+The connect clears `pending_restart` first, so the quiet restart runs once, then runs `mp daemon restart` with the expected binary, handshakes with the replacement within the on-demand start budget, and checks its version again; a replacement that still mismatches is the screen.
+The session shows `connecting` throughout, and a TUI or a CLI attached to the old daemon loses it for those seconds, as on any `mp daemon restart`.
+Every other mismatch is the screen as before: a daemon of another version than `from`, the old app in the Later window (its version is `from`, and a reconnect probes the new `mp`), and an `mp` overridden by `MP_DESKTOP_MP_BIN` to another version.
 
 ## Links
 

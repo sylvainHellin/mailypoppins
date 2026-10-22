@@ -96,6 +96,8 @@ The app checks the daemon it reaches against that `mp`: a daemon of another
 version is refused with the restart screen, whose Restart runs
 `mp daemon restart` with the bundled binary
 ([rust-layer.md](../clients/desktop/docs/rust-layer.md), "Conventions").
+The one exception is the daemon an app update left behind, which the new
+app restarts without the screen ("Updates", "After an update" there).
 
 The job uses plain `tauri build` rather than `tauri-apps/tauri-action`: the
 release already exists with the changelog notes, the sidecar has to be staged

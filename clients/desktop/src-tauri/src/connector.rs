@@ -36,6 +36,15 @@
 //! and the TUI check only the protocol range, since each is the `mp` that would
 //! start the daemon; the app ships its own and so checks the version too.
 //!
+//! One mismatch restarts the daemon without the screen: the one an app update
+//! leaves behind (#0139, stage 2). After Later and a quit, the new app's first
+//! connect meets the daemon of the old version, still running from the moved
+//! bundle; when `update-state.json` records that update (`from` the daemon's
+//! version, `to` this app's and the expected `mp`'s), the connect runs
+//! `mp daemon restart` once and hands back the replacement
+//! (`updates::restarts_quietly`). Any other mismatch, and a replacement that
+//! still mismatches, is the screen.
+//!
 //! `Connector` is two function pointers, so what they need (the paths, the
 //! app's version, the last handshake, the last reconnect failure) lives in
 //! statics here.
@@ -234,6 +243,8 @@ static APP_VERSION: OnceLock<String> = OnceLock::new();
 static LAST_HELLO: Mutex<Option<Hello>> = Mutex::new(None);
 static LAST_REOPEN_FAILURE: Mutex<Option<ConnectError>> = Mutex::new(None);
 static LAST_AUTOSTART: Mutex<Option<Instant>> = Mutex::new(None);
+/// `update-state.json`, for the quiet restart after an update.
+static UPDATE_RECORD: OnceLock<PathBuf> = OnceLock::new();
 
 /// Called when the kind of the latest reconnect failure changes, so the
 /// session can push its status: a reconnect refused for a version mismatch
@@ -250,6 +261,14 @@ fn paths() -> &'static Paths {
 /// call wins.
 pub fn set_app_version(version: String) {
     let _ = APP_VERSION.set(version);
+}
+
+/// Record where `update-state.json` lives (`updates::record_file`), before
+/// the session first connects, so a connect can restart the daemon an
+/// update left behind without the blocking screen. The first call wins;
+/// without one, every mismatch is the screen.
+pub fn set_update_record(file: PathBuf) {
+    let _ = UPDATE_RECORD.set(file);
 }
 
 /// The GUI's `ClientInfo`: the bundle's version once [`set_app_version`] ran,
@@ -514,7 +533,8 @@ pub fn version_mismatch(daemon_version: &str, expected: &ExpectedMp) -> Option<C
     Some(failure)
 }
 
-/// Hand back a handshake whose daemon runs the expected version, or refuse it.
+/// Hand back a handshake whose daemon runs the expected version, or refuse
+/// it; the daemon an app update left behind is restarted first, once.
 async fn check_version(
     open: (Connection, InitializeResult),
 ) -> Result<(Connection, InitializeResult), ConnectError> {
@@ -525,11 +545,99 @@ async fn check_version(
         );
         return Ok(open);
     };
-    match version_mismatch(&open.1.app_version, &expected) {
-        None => Ok(open),
-        Some(failure) => {
+    let app_version = APP_VERSION.get().map(String::as_str);
+    let quiet = match version_mismatch(&open.1.app_version, &expected) {
+        None => return Ok(settled(open, app_version)),
+        Some(failure) => UPDATE_RECORD
+            .get()
+            .and_then(|file| {
+                crate::updates::take_quiet_restart(
+                    file,
+                    &open.1.app_version,
+                    app_version,
+                    &expected.version,
+                )
+            })
+            .ok_or(failure),
+    };
+    let update = match quiet {
+        Ok(update) => update,
+        Err(failure) => {
             tracing::warn!("[connect] {}", failure.why);
+            return Err(failure);
+        }
+    };
+    tracing::info!(
+        "[connect] the daemon is still mailypoppins {}, left by the update to {}; restarting it with {}",
+        update.from,
+        update.to,
+        expected.path.display()
+    );
+    drop(open);
+    restart_daemon().await?;
+    let budget = autostart_budget();
+    let open = handshake_until(
+        Instant::now() + budget,
+        budget,
+        "the restarted daemon did not answer",
+    )
+    .await?;
+    // Probed again (a cache hit unless the binary changed), so the daemon
+    // is compared with the binary as it was when it started the daemon.
+    let expected = expected_mp().await.unwrap_or(expected);
+    match version_mismatch(&open.1.app_version, &expected) {
+        None => {
+            tracing::info!(
+                "[connect] the daemon runs mailypoppins {} after the update",
+                open.1.app_version
+            );
+            Ok(settled(open, app_version))
+        }
+        Some(failure) => {
+            tracing::warn!("[connect] after the restart, {}", failure.why);
             Err(failure)
+        }
+    }
+}
+
+/// A matching handshake settles an update whose `to` the daemon now runs.
+fn settled(
+    open: (Connection, InitializeResult),
+    app_version: Option<&str>,
+) -> (Connection, InitializeResult) {
+    if let Some(file) = UPDATE_RECORD.get() {
+        crate::updates::settle_update(file, &open.1.app_version, app_version);
+    }
+    open
+}
+
+/// Retry plain handshakes on a widening gap until one answers, a daemon
+/// refuses for a reason other than being unavailable, or `deadline` passes;
+/// the timeout's sentence is `what` and `budget`.
+async fn handshake_until(
+    deadline: Instant,
+    budget: Duration,
+    what: &str,
+) -> Result<(Connection, InitializeResult), ConnectError> {
+    let mut gap = RETRY_MIN;
+    loop {
+        match handshake().await {
+            Ok(open) => return Ok(open),
+            Err(e) => {
+                if let Some(failure) = classify(&e) {
+                    if failure.kind != ConnectFailure::Unavailable {
+                        return Err(failure);
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err(error(
+                        ConnectFailure::Unavailable,
+                        format!("{what} within {} ms: {e}", budget.as_millis()),
+                    ));
+                }
+                tokio::time::sleep(gap).await;
+                gap = (gap * 2).min(RETRY_MAX);
+            }
         }
     }
 }
@@ -560,32 +668,9 @@ pub async fn connect_or_start(
     let budget = autostart_budget();
     let deadline = Instant::now() + budget;
     start_daemon(budget).await?;
-
-    let mut gap = RETRY_MIN;
-    loop {
-        match handshake().await {
-            // Started with the expected binary, unless another starter won.
-            Ok(open) => return check_version(open).await,
-            Err(e) => {
-                if let Some(failure) = classify(&e) {
-                    if failure.kind != ConnectFailure::Unavailable {
-                        return Err(failure);
-                    }
-                }
-                if Instant::now() >= deadline {
-                    return Err(error(
-                        ConnectFailure::Unavailable,
-                        format!(
-                            "a daemon was started but did not answer within {} ms: {e}",
-                            budget.as_millis()
-                        ),
-                    ));
-                }
-                tokio::time::sleep(gap).await;
-                gap = (gap * 2).min(RETRY_MAX);
-            }
-        }
-    }
+    // Started with the expected binary, unless another starter won.
+    let open = handshake_until(deadline, budget, "a daemon was started but did not answer").await?;
+    check_version(open).await
 }
 
 /// How long the session's first connect retries. Under `mp_client`'s
@@ -846,6 +931,25 @@ async fn start_daemon(budget: Duration) -> Result<(), ConnectError> {
     let secs = budget.as_secs().max(1).to_string();
     let mut child = spawn_mp(&["daemon", "start", "--timeout-secs", &secs])?;
     let deadline = Instant::now() + budget + Duration::from_secs(1);
+    wait_child(&mut child, deadline, "mp daemon start").await
+}
+
+/// `mp daemon restart`, waited for without blocking the runtime: the quiet
+/// restart of the daemon an app update left behind ([`check_version`]).
+async fn restart_daemon() -> Result<(), ConnectError> {
+    let mut child = spawn_mp(&["daemon", "restart"])?;
+    let waited = wait_child(
+        &mut child,
+        Instant::now() + RESTART_TIMEOUT,
+        "mp daemon restart",
+    )
+    .await;
+    restarted();
+    waited
+}
+
+/// Wait for `child` until `deadline`, polling without blocking the runtime.
+async fn wait_child(child: &mut Child, deadline: Instant, what: &str) -> Result<(), ConnectError> {
     let waited = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Waited::Exited(status),
@@ -854,12 +958,19 @@ async fn start_daemon(budget: Duration) -> Result<(), ConnectError> {
             Err(e) => {
                 return Err(error(
                     ConnectFailure::Unavailable,
-                    format!("polling `mp daemon start` failed: {e}"),
+                    format!("polling `{what}` failed: {e}"),
                 ))
             }
         }
     };
-    finish_child(&mut child, waited, "mp daemon start")
+    finish_child(child, waited, what)
+}
+
+/// After a deliberate restart a reconnect may start a daemon at once.
+fn restarted() {
+    if let Ok(mut last) = LAST_AUTOSTART.lock() {
+        *last = None;
+    }
 }
 
 fn finish_child(child: &mut Child, waited: Waited, what: &str) -> Result<(), ConnectError> {
@@ -908,10 +1019,7 @@ pub fn restart_daemon_blocking() -> Result<(), ConnectError> {
             }
         }
     };
-    // A reconnect after a deliberate restart may start a daemon at once.
-    if let Ok(mut last) = LAST_AUTOSTART.lock() {
-        *last = None;
-    }
+    restarted();
     finish_child(&mut child, waited, "mp daemon restart")
 }
 

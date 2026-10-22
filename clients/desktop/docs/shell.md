@@ -942,7 +942,7 @@ For a removed account the daemon publishes `state.remove` of `account:<name>` fi
 
 ## Updates
 
-The app updates itself from GitHub Releases (#0139, stage 1); the Rust layer checks, downloads, verifies and installs ([rust-layer.md](rust-layer.md), "Updates"), and `src/app/updates.ts` shows what it knows.
+The app updates itself from GitHub Releases (#0139, stages 1 and 2); the Rust layer checks, downloads, verifies and installs ([rust-layer.md](rust-layer.md), "Updates"), and `src/app/updates.ts` shows what it knows.
 `state.update` is `idle`, `available` (version, notes, date, and `dismissed` once Later took its card away), `downloading` (version, bytes so far, archive size when known), `installed` (version, and `asking` while the card offers the restart) or `failed` (version and the reason), and `state.updateInfo` the running version, the last successful check and the gate's sentence when the build never checks, from the last `update_status` or `update_check` answer.
 
 ### Entry points
@@ -981,6 +981,7 @@ The install and its failure each leave a line in the activity log.
 "Restart now", the sidebar entry and the palette row call `update_restart`, which stops the daemon and relaunches into the new version.
 With an embedded editor running the leave question asks first (Compose, "The embedded editor"); its "Close the editor and restart" kills every embedded editor, then calls `update_restart`, and "Stay" changes nothing.
 A refused restart says "The restart failed: <why>" on the notice line.
+After Later and a quit, the new app's first connect meets the old version's daemon and restarts it with no restart screen, showing the connecting screen meanwhile ([rust-layer.md](rust-layer.md), "After an update"); the old app's own reconnects in the Later window still get the restart screen.
 
 ## Account wizard
 

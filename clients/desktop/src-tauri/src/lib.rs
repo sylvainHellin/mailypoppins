@@ -167,6 +167,11 @@ pub fn run() {
                 if fixture { " in fixture mode" } else { "" },
             );
             connector::set_app_version(version);
+            // Before the first connect, which may meet the daemon an update
+            // left behind and restart it quietly (#0139, stage 2).
+            if let Some(file) = updates::record_file(app.handle()) {
+                connector::set_update_record(file);
+            }
             setup_session.start();
             let dev_origin = if cfg!(debug_assertions) {
                 app.config().build.dev_url.clone()
