@@ -300,7 +300,7 @@ fn render_suggestions(wizard: &ComposeWizard, frame: &mut Frame, area: Rect) {
                 Style::default().fg(theme::active().text_muted),
             ),
             Span::styled(
-                "email contacts rebuild",
+                "mp contacts rebuild",
                 Style::default().fg(theme::active().emphasis),
             ),
             Span::styled(

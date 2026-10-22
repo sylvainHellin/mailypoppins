@@ -4,7 +4,7 @@ use std::sync::mpsc;
 
 use anyhow::{Context, Result};
 use ratatui::{backend::CrosstermBackend, Terminal};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::app::{
     mailbox_key, Action, App, BgResult, ComposeField, ComposeMode, ComposeWizard, Focus,
@@ -175,31 +175,40 @@ fn draft_attachment_files(app: &mut App) -> Option<Vec<PathBuf>> {
     Some(files)
 }
 
-/// Append a file path to the cursor draft's `attachments:` frontmatter (#0098).
+/// Append a file path to the cursor draft's `attachments:` frontmatter (#0098),
+/// through the daemon's `draft.attach`, the call the desktop's attach makes.
 ///
 /// The write counterpart of [`draft_attachment_files`] (#0016): where that
 /// resolves and opens the paths a draft already lists, this adds one. It
-/// reuses the same [`cursor_draft`] resolution, so the file it writes is the
-/// draft under the cursor, and it stores the path verbatim -- `~` and all --
-/// so the entry is the very one [`crate::send`]'s `draft_attachments` expands
-/// and sends. The path was checked for existence at the prompt (see
-/// `App::handle_attach_file_key`), which is where a stale path is surfaced;
-/// a write failure here is named on the status line.
+/// reuses the same [`cursor_draft`] resolution, so the draft it names is the
+/// one under the cursor; the daemon checks the file and writes the entry,
+/// `~` kept as the user typed it. The path was checked for existence at the
+/// prompt too (see `App::handle_attach_file_key`), which is where a stale path
+/// is surfaced first; a refusal here is named on the status line.
 fn attach_file_to_draft(app: &mut App, path: &str) {
-    let Some((id, draft_path)) = cursor_draft(
+    let Some((id, _path)) = cursor_draft(
         app,
         "Attach needs a draft; received mail has no attachments to grow",
     ) else {
         return;
     };
-    match mp_core::draft::append_draft_attachment(&draft_path, path) {
-        Ok(()) => {
-            let selector = Selector::for_draft(&app.account_config.name, &id);
+    let account = app.account_config.name.clone();
+    let attached = daemon_door(app).call(
+        "draft.attach",
+        json!({"account": account, "id": id, "path": path}),
+    );
+    match attached {
+        Ok(_) => {
+            let selector = Selector::for_draft(&account, &id);
             app.set_status(format!("Attached {path} to {selector}"));
             commands::refresh_drafts_after_flip(app);
         }
         Err(e) => {
-            app.set_status_level(format!("Attach failed: {e:#}"), StatusLevel::Error);
+            let why = match mp_client::session::refusal(&e) {
+                Some(refused) => refused.message.clone(),
+                None => format!("{e:#}"),
+            };
+            app.set_status_level(format!("Attach failed: {why}"), StatusLevel::Error);
         }
     }
 }
@@ -432,27 +441,45 @@ pub fn readonly_view(app: &mut App, address: &MessageAddress) -> Option<commands
     }
 }
 
-/// Parse and validate a draft, and only then persist its approved status.
+/// Validate a draft, and only then approve it, both through the daemon.
 ///
 /// `x` merges approve + send (#0092): the redesign dropped the separate
 /// approve key, so an unapproved draft is approved as part of the send.
-/// Approval runs strictly after the draft parses and validates (#0089): a
-/// draft that fails validation keeps its `draft` status instead of carrying an
-/// approved flag from a send that never happened. `mark_as_approved` is
-/// idempotent, so a draft approved out of band passes through unchanged.
+/// Approval runs strictly after the draft validates (#0089): a draft that
+/// fails validation keeps its `draft` status instead of carrying an approved
+/// flag from a send that never happened. `draft.approve` is idempotent, so a
+/// draft approved out of band passes through unchanged.
 ///
-/// The draft is re-parsed after the approval write, and that is load-bearing:
-/// `mark_as_approved` rewrites `status:` in the file, not in the struct this
-/// function already parsed. Returning the pre-approval value handed
-/// [`Action::Send`] a copy still reading `status: draft`, which
-/// [`crate::send::build_draft_message`] then refused with "Email not approved
-/// for sending" even though the file on disk was approved -- the `x`
-/// approve-and-send key could never send an unapproved draft.
-pub fn validate_then_approve(path: &Path) -> Result<mp_core::types::EmailDraft> {
-    let draft = mp_core::draft::parse_email_draft(path)?;
-    mp_core::draft::validate_draft(&draft)?;
-    mp_core::draft::mark_as_approved(path)?;
-    mp_core::draft::parse_email_draft(path)
+/// `draft.validate` then `draft.approve`, the sequence the desktop's send runs
+/// before `send.draft`: the draft file is the daemon's to rewrite. `Err` is
+/// the sentence the status line shows after `Send failed: `.
+pub fn validate_then_approve(
+    door: &dyn super::queries::Queries,
+    account: &str,
+    id: &str,
+) -> std::result::Result<(), String> {
+    let refused = |e: anyhow::Error| match mp_client::session::refusal(&e) {
+        Some(refused) => refused.message.clone(),
+        None => format!("{e:#}"),
+    };
+    let answer = door
+        .call("draft.validate", json!({"account": account, "id": id}))
+        .map_err(refused)?;
+    let validation: mp_protocol::draft::DraftValidation =
+        serde_json::from_value(answer).map_err(|e| format!("reading draft.validate: {e}"))?;
+    if let Some(report) = validation
+        .reports
+        .iter()
+        .find(|report| report.id == id && !report.valid)
+    {
+        return Err(report
+            .error
+            .clone()
+            .unwrap_or_else(|| "the draft does not validate".to_string()));
+    }
+    door.call("draft.approve", json!({"account": account, "id": id}))
+        .map_err(refused)?;
+    Ok(())
 }
 
 /// Hand the read-only view of a stored row to `$EDITOR` and discard it on the
@@ -842,30 +869,31 @@ pub(super) fn handle_action(
         }
         Action::Send => {
             // `send.draft` with the hold the daemon owns (P6-U2). The draft is
-            // resolved through the index and approved the way `x` has always
-            // approved it -- a write to a file this client is looking at --
-            // and everything after that is one method call: the build, the
-            // outbox row, the transport and the draft file's fate are the
-            // daemon's, and so is the undo window.
+            // resolved through the index, validated and approved through the
+            // daemon as the desktop's send does it, and everything after that
+            // is one method call: the build, the outbox row, the transport and
+            // the draft file's fate are the daemon's, and so is the undo
+            // window.
             let Some((id, path)) =
                 cursor_draft(app, "Send needs a draft; received mail has nothing to send")
             else {
                 return Ok(());
             };
-            if let Err(e) = validate_then_approve(&path) {
-                app.set_status_level(format!("Send failed: {e:#}"), StatusLevel::Error);
+            let drafts_account = app.account_config.name.clone();
+            if let Err(e) = validate_then_approve(&door, &drafts_account, &id) {
+                app.set_status_level(format!("Send failed: {e}"), StatusLevel::Error);
                 return Ok(());
             }
             // Which account sends it is the draft's own `from:`, not the open
             // mailbox: a draft written for another configured account leaves
             // through that account's credentials, and `send.draft` resolves
             // the draft under the account it is told.
-            let (account_index, smtp, _imap, graph, account_config) =
+            let (account_index, graph, smtp, account_config) =
                 super::helpers::resolve_send_account(app, &path);
             // The account's `auth_method` decides the transport, not which
-            // config happened to load. The check stays here because its
-            // refusal is this key's sentence, named before an operation is
-            // started for work that cannot happen.
+            // credentials happen to be stored. The check stays here because
+            // its refusal is this key's sentence, named before an operation
+            // is started for work that cannot happen.
             if let Err(missing) =
                 super::helpers::resolve_send_transport(&account_config, graph, smtp)
             {
@@ -1049,6 +1077,35 @@ pub(super) fn handle_action(
             });
         }
 
+        Action::LoadContacts { generation } => {
+            // The active account's whole index, off the UI thread: a search
+            // with no index builds one on the daemon, which is seconds on a
+            // large mailbox. Lands as `BgResult::ContactsLoaded`.
+            let account = app.account_config.name.clone();
+            let account_index = app.active_account;
+            let queries = app.session.as_ref().map(|session| session.handle());
+            app.bg_count += 1;
+            let tx = bg_tx.clone();
+            std::thread::spawn(move || {
+                let result = match queries {
+                    Some(queries) => {
+                        super::queries::contact_index(&queries, &account).map_err(|e| {
+                            match mp_client::session::refusal(&e) {
+                                Some(refused) => refused.message.clone(),
+                                None => format!("{e:#}"),
+                            }
+                        })
+                    }
+                    None => Err("no daemon session".to_string()),
+                };
+                let _ = tx.send(BgResult::ContactsLoaded {
+                    account_index,
+                    generation,
+                    result,
+                });
+            });
+        }
+
         Action::ServerSearch {
             query,
             targets,
@@ -1221,35 +1278,34 @@ pub fn cancel_compose_wizard(app: &mut App) {
     app.set_status("Compose cancelled".to_string());
 }
 
-fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
-    // Load contact cache (if any) for the active account.
-    let contacts = {
-        let root = mp_core::config::account_dir(&app.account_config.name);
-        mp_core::contacts::load_cache(&root).ok().flatten()
-    };
-
-    // The signature names for the Signature field selector (#0106) and the
-    // account's default, as the daemon's `signature.list` answers them. A
-    // refusal leaves the selector empty and says why; the wizard still opens.
+/// The signature names a compose wizard offers and the one it preselects, as
+/// the daemon's `signature.list` answers them for the active account (#0106).
+///
+/// A refusal leaves the selector empty and says why in the log; the wizard
+/// still opens. The default is preselected only when signatures are globally
+/// on, so a New draft with `include_signature = false` keeps carrying none
+/// (#0099 parity).
+fn wizard_signatures(app: &App) -> (Vec<String>, Option<String>) {
     let listing = match app.signature_listing(&app.account_config.name) {
-        Ok(listing) => Some(listing),
+        Ok(listing) => listing,
         Err(e) => {
             log::warn!("[actions] signature.list for the compose wizard: {e}");
-            None
+            return (Vec::new(), None);
         }
     };
-    let available_signatures = listing
-        .as_ref()
-        .map(|l| l.names.clone())
-        .unwrap_or_default();
-    // Only auto-select the default when signatures are globally on, so a New
-    // draft with `include_signature = false` keeps carrying none (#0099 parity).
-    let default_signature = if app.global_config.email.include_signature {
-        listing.and_then(|l| l.default)
+    let default = if app.global_config.email.include_signature {
+        listing.default.filter(|name| listing.names.contains(name))
     } else {
         None
     };
+    (listing.names, default)
+}
 
+fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
+    // The active account's contact index, for recipient completion: the
+    // daemon's, and on its way when the Contacts view has not asked yet.
+    let contacts = app.compose_contacts();
+    let (available_signatures, default_signature) = wizard_signatures(app);
     let (to, cc, bcc, subject, signature_name) = match &mode {
         ComposeMode::New => (
             String::new(),
@@ -1338,17 +1394,8 @@ fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
 /// the user returns to Contacts (the overlay is view-agnostic). Starts focus on
 /// the Subject field since the recipient is already filled.
 fn open_compose_wizard_seeded(app: &mut App, to: String) {
-    let contacts = {
-        let root = mp_core::config::account_dir(&app.account_config.name);
-        mp_core::contacts::load_cache(&root).ok().flatten()
-    };
-    let available_signatures = mp_core::signatures::list();
-    let signature_name = if app.global_config.email.include_signature {
-        mp_core::signatures::default_signature_name(&app.account_config.name)
-            .filter(|n| available_signatures.contains(n))
-    } else {
-        None
-    };
+    let contacts = app.compose_contacts();
+    let (available_signatures, signature_name) = wizard_signatures(app);
     app.overlay = Overlay::Compose(ComposeWizard {
         mode: ComposeMode::New,
         to,
@@ -1475,16 +1522,16 @@ fn edit_compose_signature(
         return Ok(());
     }
 
-    // The file may be missing if the selection went stale (renamed or deleted
-    // from elsewhere); create it rather than dropping the user into $EDITOR on
-    // a path that will not save.
-    if !mp_core::signatures::exists(&name) {
-        if let Err(e) = mp_core::signatures::write(&name, "") {
-            app.set_status_level(format!("Cannot open signature: {e:#}"), StatusLevel::Error);
+    // The daemon names the file, and creates it if the selection went stale
+    // (renamed or deleted from elsewhere) rather than dropping the user into
+    // $EDITOR on a path that will not save.
+    let path = match signature_path(app, &name) {
+        Ok(path) => path,
+        Err(e) => {
+            app.set_status_level(format!("Cannot open signature: {e}"), StatusLevel::Error);
             return Ok(());
         }
-    }
-    let path = mp_core::signatures::signature_file(&name);
+    };
 
     suspend_terminal(terminal)?;
     let edit_result = edit_file(&path);
@@ -1509,6 +1556,27 @@ fn note_compose_signature_edited(app: &mut App) {
     }
 }
 
+/// The file of the signature `name`, as the daemon's `signature.read` names
+/// it, created through `signature.create` when there is none.
+///
+/// The one door both editor launches take (the compose wizard's `e` and the
+/// signatures overlay's `e` and `n`): the signatures directory is the
+/// daemon's, and this process only runs the editor on the path it is given.
+fn signature_path(app: &App, name: &str) -> std::result::Result<PathBuf, String> {
+    let named = json!({ "name": name });
+    let file = match app.signature_call("signature.read", named.clone()) {
+        Ok(file) => file,
+        Err(e) if e.starts_with("no signature named") => {
+            app.signature_call("signature.create", named)?
+        }
+        Err(e) => return Err(e),
+    };
+    file["path"]
+        .as_str()
+        .map(PathBuf::from)
+        .ok_or_else(|| "the daemon named no file".to_string())
+}
+
 /// Edit one app-managed signature file in `$EDITOR` (#0107).
 ///
 /// The signatures overlay's `e`, and the tail of its `n`. Same suspend /
@@ -1522,25 +1590,10 @@ fn edit_signature_file(
     name: &str,
 ) -> Result<()> {
     // The daemon names the file. Missing means the selection went stale
-    // (renamed or deleted elsewhere): create it rather than dropping the user
-    // into `$EDITOR` on a path whose parent directory may not exist.
-    let named = json!({ "name": name });
-    let opened = match app.signature_call("signature.read", named.clone()) {
-        Ok(file) => Ok(file),
-        Err(e) if e.starts_with("no signature named") => {
-            app.signature_call("signature.create", named)
-        }
-        Err(e) => Err(e),
-    };
-    let path = match opened.map(|file| file["path"].as_str().map(PathBuf::from)) {
-        Ok(Some(path)) => path,
-        Ok(None) => {
-            app.set_status_level(
-                "Cannot open signature: the daemon named no file".to_string(),
-                StatusLevel::Error,
-            );
-            return Ok(());
-        }
+    // (renamed or deleted elsewhere): it is created rather than dropping the
+    // user into `$EDITOR` on a path whose parent directory may not exist.
+    let path = match signature_path(app, name) {
+        Ok(path) => path,
         Err(e) => {
             app.set_status_level(format!("Cannot open signature: {e}"), StatusLevel::Error);
             return Ok(());
@@ -1686,7 +1739,10 @@ fn submit_compose_wizard(
     }
 
     let draft_result = match &wizard.mode {
-        ComposeMode::New => write_new_draft_from_wizard(app, &wizard),
+        ComposeMode::New => match app.queries() {
+            Some(queries) => create_draft_from_wizard(app, queries, &wizard),
+            None => Err(anyhow::anyhow!("no daemon session")),
+        },
         ComposeMode::Forward { .. }
         | ComposeMode::SearchForward(_)
         | ComposeMode::EditDraft { .. } => {
@@ -1708,7 +1764,7 @@ fn submit_compose_wizard(
     }
 
     // A non-empty inline body (#0097) means the draft is complete: it was
-    // written into the file by `write_new_draft_from_wizard`, so skip the
+    // written into the file by `draft.create`, so skip the
     // `$EDITOR` round-trip and land in Drafts directly. An empty body keeps
     // the original behaviour and hands off to `$EDITOR` below.
     if !wizard.body.trim().is_empty() {
@@ -1741,89 +1797,84 @@ fn submit_compose_wizard(
     Ok(())
 }
 
-fn write_new_draft_from_wizard(app: &App, wizard: &ComposeWizard) -> Result<PathBuf> {
-    let dir = app.drafts_dir();
-    std::fs::create_dir_all(&dir)?;
-
-    let default_from = app
-        .smtp_config
-        .as_ref()
-        .map(|s| s.default_from.clone())
-        .unwrap_or_else(|| app.account_config.default_from.clone());
-    let from = default_from.as_str();
-    let now = chrono::Utc::now().to_rfc2822();
-
-    // Build a unique filename from the subject slug (fall back to timestamp).
-    let slug = slugify_subject_for_filename(&wizard.subject);
-    let timestamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S");
-    let base_name = if slug.is_empty() {
-        format!("draft-{timestamp}.md")
+/// The file name a new draft from the wizard is asked for: a timestamp, then
+/// the subject's slug, then `-<n>` when an earlier try was taken. The daemon
+/// adds the `.md`.
+fn wizard_draft_name(subject: &str, timestamp: &str, attempt: usize) -> String {
+    let slug = slugify_subject_for_filename(subject);
+    let base = if slug.is_empty() {
+        format!("draft-{timestamp}")
     } else {
-        format!("draft-{timestamp}-{slug}.md")
+        format!("draft-{timestamp}-{slug}")
     };
-    let mut path = dir.join(&base_name);
-    let mut counter = 1usize;
-    while path.exists() {
-        let name = if slug.is_empty() {
-            format!("draft-{timestamp}-{counter}.md")
-        } else {
-            format!("draft-{timestamp}-{slug}-{counter}.md")
-        };
-        path = dir.join(name);
-        counter += 1;
-    }
-
-    let mut fm = String::from("---\n");
-    fm.push_str(&format!("to: {}\n", yaml_escape(&wizard.to)));
-    if !wizard.cc.trim().is_empty() {
-        fm.push_str(&format!("cc: {}\n", yaml_escape(&wizard.cc)));
+    if attempt == 0 {
+        base
     } else {
-        fm.push_str("cc:\n");
+        format!("{base}-{attempt}")
     }
-    if !wizard.bcc.trim().is_empty() {
-        fm.push_str(&format!("bcc: {}\n", yaml_escape(&wizard.bcc)));
-    } else {
-        fm.push_str("bcc:\n");
-    }
-    fm.push_str(&format!("subject: {}\n", yaml_escape(&wizard.subject)));
-    fm.push_str("status: draft\n");
-    fm.push_str(&format!("from: \"{from}\"\n"));
-    fm.push_str(&format!("date: {now}\n"));
-    fm.push_str("reply_to:\n");
-    // The selected signature name (#0106); absent means the account default.
-    let (sig_md, sig_name) = wizard_signature(app, wizard);
-    if let Some(name) = &sig_name {
-        fm.push_str(&format!("signature: {}\n", yaml_escape(name)));
-    }
-    fm.push_str("attachments:\n");
-    fm.push_str("---\n\n");
+}
 
-    // An inline body (#0097) is written straight into the draft so a short
-    // message never needs `$EDITOR`. Empty leaves the body blank, which is the
-    // signal `submit_compose_wizard` uses to open `$EDITOR` instead.
-    let body = wizard.body.trim();
-    if !body.is_empty() {
-        fm.push_str(body);
-        fm.push('\n');
-    }
+/// How many names [`create_draft_from_wizard`] tries before it gives up on a
+/// drafts directory that already holds every one of them.
+const WIZARD_NAME_ATTEMPTS: usize = 100;
 
-    // The selected signature (#0099, #0106): spliced into the body at creation
-    // wrapped in the sentinel comments so a later re-splice can find it, below
-    // the inline body when there is one. An empty body still opens `$EDITOR`
-    // (that decision reads `wizard.body`, not the file), so the user edits a
-    // draft that already carries the signature.
-    if let Some(block) = sig_md
-        .as_deref()
-        .and_then(mp_core::draft::wrap_signature_block)
-    {
-        if !body.is_empty() {
-            fm.push('\n');
+/// The `draft.create` parameters a `New` wizard submits: the recipients and
+/// the subject as `headers`, the inline body (#0097), and the signature the
+/// selector chose (#0106), none when signatures are globally off, and the
+/// account default (which the daemon resolves) when the selector is empty.
+fn wizard_draft_params(app: &App, wizard: &ComposeWizard, name: &str) -> Value {
+    let mut params = json!({
+        "account": app.account_config.name,
+        "name": name,
+        "headers": {
+            "to": wizard.to,
+            "cc": wizard.cc,
+            "bcc": wizard.bcc,
+            "subject": wizard.subject,
+        },
+    });
+    if !wizard.body.trim().is_empty() {
+        params["body"] = json!(wizard.body.trim());
+    }
+    if !app.global_config.email.include_signature {
+        params["no_signature"] = json!(true);
+    } else if let Some(signature) = &wizard.signature_name {
+        params["signature"] = json!(signature);
+    }
+    params
+}
+
+/// Write a `New` wizard's draft through the daemon's `draft.create`, as the
+/// desktop's compose dialog does, and answer the path it wrote.
+///
+/// The daemon owns the drafts directory: it mints the id, writes the
+/// frontmatter, the body and the signature block, and refuses a name that is
+/// taken, in which case the next `-<n>` is tried, the suffix rule the TUI
+/// used when it wrote the file itself.
+fn create_draft_from_wizard(
+    app: &App,
+    queries: &dyn super::queries::Queries,
+    wizard: &ComposeWizard,
+) -> Result<PathBuf> {
+    let timestamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S").to_string();
+    for attempt in 0..WIZARD_NAME_ATTEMPTS {
+        let name = wizard_draft_name(&wizard.subject, &timestamp, attempt);
+        match queries.call("draft.create", wizard_draft_params(app, wizard, &name)) {
+            Ok(answer) => {
+                let created: mp_protocol::draft::DraftCreated = serde_json::from_value(answer)
+                    .map_err(|e| anyhow::anyhow!("reading draft.create: {e}"))?;
+                return Ok(PathBuf::from(created.path));
+            }
+            Err(e) => match mp_client::session::refusal(&e) {
+                Some(refused) if refused.message.starts_with("A draft already exists") => {}
+                Some(refused) => return Err(anyhow::anyhow!("{}", refused.message)),
+                None => return Err(e),
+            },
         }
-        fm.push_str(&block);
     }
-
-    std::fs::write(&path, fm)?;
-    Ok(path)
+    Err(anyhow::anyhow!(
+        "every draft name for this subject is taken at {timestamp}"
+    ))
 }
 
 /// The effective signature Markdown and name for a compose wizard (#0106):
@@ -1853,12 +1904,6 @@ fn normalize_recipient_field(s: &str) -> String {
     // Repeatedly strip any trailing `,` or whitespace chars.
     let cleaned = trimmed.trim_end_matches(|c: char| c == ',' || c.is_whitespace());
     cleaned.to_string()
-}
-
-/// YAML double-quote escape for a scalar string value.
-fn yaml_escape(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
 }
 
 fn slugify_subject_for_filename(subject: &str) -> String {
@@ -2499,41 +2544,290 @@ mod tests {
         }
     }
 
-    /// A non-empty inline body is written straight into the draft `.md`, after
-    /// the frontmatter fence, so a short message never needs `$EDITOR`.
-    #[test]
-    fn wizard_body_is_written_into_the_draft_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = App::default_for_tests();
-        app.drafts_dir = Some(dir.path().to_path_buf());
-
-        let wizard = wizard_with_body("Thanks, see you Tuesday.");
-        let path = write_new_draft_from_wizard(&app, &wizard).unwrap();
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("subject: \"Quick note\""), "{content}");
-        // Body follows the closing frontmatter fence, not the opening one.
-        let after_fence = content
-            .rsplit_once("---\n\n")
-            .map(|(_, tail)| tail)
-            .unwrap_or_default();
-        assert_eq!(after_fence, "Thanks, see you Tuesday.\n", "{content}");
+    /// A door that records every call and answers `draft.create` with the
+    /// draft it would have written, refusing the first `taken` names as the
+    /// daemon refuses a name already in the drafts directory.
+    struct DraftDoor {
+        calls: std::cell::RefCell<Vec<(String, Value)>>,
+        taken: usize,
     }
 
-    /// An empty inline body leaves the draft body blank: the file ends at the
-    /// closing fence, which is the signal `submit_compose_wizard` uses to open
-    /// `$EDITOR` instead.
+    impl super::super::queries::Queries for DraftDoor {
+        fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+            let mut calls = self.calls.borrow_mut();
+            calls.push((method.to_string(), params.clone()));
+            let name = params["name"].as_str().unwrap_or_default().to_string();
+            if calls.len() <= self.taken {
+                return Err(mp_client::session::Refused {
+                    method: method.to_string(),
+                    error: mp_protocol::RpcError {
+                        code: -32602,
+                        message: format!("A draft already exists at /drafts/{name}.md"),
+                        data: None,
+                    },
+                }
+                .into());
+            }
+            Ok(json!({
+                "account": "work",
+                "id": "d1",
+                "selector": "mp://work/drafts/d1",
+                "path": format!("/drafts/{name}.md"),
+                "source": null,
+                "subject": params["headers"]["subject"],
+            }))
+        }
+    }
+
+    fn draft_door(taken: usize) -> DraftDoor {
+        DraftDoor {
+            calls: std::cell::RefCell::new(Vec::new()),
+            taken,
+        }
+    }
+
+    /// A `New` wizard's draft is the daemon's `draft.create`, carrying the
+    /// recipients and subject as `headers`, the inline body and the selected
+    /// signature, and this process writes no file: the drafts directory is
+    /// the daemon's, as it is for the desktop's compose dialog.
     #[test]
-    fn wizard_empty_body_leaves_the_draft_body_blank() {
+    fn a_new_wizard_draft_is_created_by_the_daemon() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::default_for_tests();
+        app.account_config.name = "work".to_string();
+        app.global_config.email.include_signature = true;
         app.drafts_dir = Some(dir.path().to_path_buf());
+        let mut wizard = wizard_with_body("  Thanks, see you Tuesday.  ");
+        wizard.cc = "carol@example.com".to_string();
+        wizard.signature_name = Some("casual".to_string());
 
+        let door = draft_door(0);
+        let path = create_draft_from_wizard(&app, &door, &wizard).unwrap();
+
+        let calls = door.calls.borrow();
+        assert_eq!(calls.len(), 1, "one call: {calls:?}");
+        let (method, params) = &calls[0];
+        assert_eq!(method, "draft.create");
+        assert_eq!(params["account"], "work");
+        let name = params["name"].as_str().unwrap();
+        assert!(
+            name.starts_with("draft-") && name.ends_with("-quick-note"),
+            "the timestamp-and-slug name the TUI has always used: {name}"
+        );
+        assert_eq!(
+            params["headers"],
+            json!({
+                "to": "alice@example.com",
+                "cc": "carol@example.com",
+                "bcc": "",
+                "subject": "Quick note",
+            })
+        );
+        assert_eq!(params["body"], "Thanks, see you Tuesday.");
+        assert_eq!(params["signature"], "casual");
+        assert!(params.get("no_signature").is_none());
+        assert_eq!(path, PathBuf::from(format!("/drafts/{name}.md")));
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "the TUI writes nothing into the drafts directory"
+        );
+    }
+
+    /// An empty inline body sends none, which leaves the draft body to the
+    /// signature (or blank) and is the signal `submit_compose_wizard` uses to
+    /// open `$EDITOR`; signatures turned off globally ask for none, and an
+    /// empty selector leaves the account default to the daemon.
+    #[test]
+    fn the_wizard_asks_for_no_body_and_the_signature_the_config_allows() {
+        let mut app = App::default_for_tests();
+        app.account_config.name = "work".to_string();
         let wizard = wizard_with_body("   ");
-        let path = write_new_draft_from_wizard(&app, &wizard).unwrap();
 
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.ends_with("---\n\n"), "{content:?}");
+        app.global_config.email.include_signature = false;
+        let off = wizard_draft_params(&app, &wizard, "n");
+        assert!(off.get("body").is_none(), "{off}");
+        assert_eq!(off["no_signature"], true);
+        assert!(off.get("signature").is_none());
+
+        app.global_config.email.include_signature = true;
+        let default = wizard_draft_params(&app, &wizard, "n");
+        assert!(default.get("no_signature").is_none(), "{default}");
+        assert!(default.get("signature").is_none(), "{default}");
+    }
+
+    /// A name the drafts directory already holds is refused by the daemon and
+    /// the next `-<n>` is asked for, the suffix rule the TUI applied when it
+    /// wrote the file itself.
+    #[test]
+    fn a_taken_draft_name_is_retried_with_a_suffix() {
+        let app = App::default_for_tests();
+        let wizard = wizard_with_body("");
+        let door = draft_door(2);
+        let path = create_draft_from_wizard(&app, &door, &wizard).unwrap();
+        let names: Vec<String> = door
+            .calls
+            .borrow()
+            .iter()
+            .map(|(_, params)| params["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert_eq!(names[1], format!("{}-1", names[0]));
+        assert_eq!(names[2], format!("{}-2", names[0]));
+        assert_eq!(path, PathBuf::from(format!("/drafts/{}.md", names[2])));
+    }
+
+    // -----------------------------------------------------------------------
+    // Signatures and contacts through the daemon (the daemon leftovers' TUI
+    // follow-up)
+    // -----------------------------------------------------------------------
+
+    /// What a recording session answers: the account's signature listing, a
+    /// file under a daemon-chosen directory for `signature.read`, and nothing
+    /// for a name it does not hold, so `signature.create` is asked.
+    struct SignatureDoor {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+    }
+
+    impl super::super::queries::Queries for SignatureDoor {
+        fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((method.to_string(), params.clone()));
+            let name = params["name"].as_str().unwrap_or_default().to_string();
+            match method {
+                "signature.list" => Ok(json!({
+                    "account": params["account"],
+                    "names": ["casual", "work"],
+                    "default": "work",
+                })),
+                "signature.read" if name == "gone" => Err(mp_client::session::Refused {
+                    method: method.to_string(),
+                    error: mp_protocol::RpcError {
+                        code: -32602,
+                        message: format!("no signature named '{name}'"),
+                        data: None,
+                    },
+                }
+                .into()),
+                "signature.read" | "signature.create" => Ok(json!({
+                    "name": name,
+                    "path": format!("/daemon/signatures/{name}.md"),
+                    "content": "",
+                })),
+                other => Err(anyhow::anyhow!("unexpected {other}")),
+            }
+        }
+    }
+
+    type Calls = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+    fn app_with_signature_door() -> (App, Calls) {
+        let calls: Calls = Default::default();
+        let door_calls = calls.clone();
+        let mut app = App::default_for_tests();
+        app.account_config.name = "work".to_string();
+        app.global_config.email.include_signature = true;
+        app.session = Some(crate::session::Session::serving(move || SignatureDoor {
+            calls: door_calls,
+        }));
+        (app, calls)
+    }
+
+    fn methods(calls: &Calls) -> Vec<String> {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(m, _)| m.clone())
+            .collect()
+    }
+
+    /// Composing to a contact offers the signatures the daemon's
+    /// `signature.list` names and preselects the account default it reports;
+    /// the wizard reads no signature file itself.
+    #[test]
+    fn compose_to_contact_takes_its_signatures_from_the_daemon() {
+        let (mut app, calls) = app_with_signature_door();
+        open_compose_wizard_seeded(&mut app, "bob@example.com".to_string());
+        let wizard = app.compose_wizard().expect("the wizard is open");
+        assert_eq!(wizard.available_signatures, ["casual", "work"]);
+        assert_eq!(wizard.signature_name.as_deref(), Some("work"));
+        assert_eq!(wizard.to, "bob@example.com");
+        assert!(
+            methods(&calls).contains(&"signature.list".to_string()),
+            "{:?}",
+            methods(&calls)
+        );
+    }
+
+    /// The wizard's `e` and the overlay's `e` open the file the daemon names,
+    /// and a name it no longer holds is created through `signature.create`
+    /// rather than written here.
+    #[test]
+    fn a_signature_is_edited_at_the_path_the_daemon_names() {
+        let (app, calls) = app_with_signature_door();
+        assert_eq!(
+            signature_path(&app, "work"),
+            Ok(PathBuf::from("/daemon/signatures/work.md"))
+        );
+        assert_eq!(
+            signature_path(&app, "gone"),
+            Ok(PathBuf::from("/daemon/signatures/gone.md"))
+        );
+        assert_eq!(
+            methods(&calls),
+            ["signature.read", "signature.read", "signature.create"]
+        );
+    }
+
+    /// A wizard opened before the Contacts view asked for the index queues
+    /// the daemon's `contact.search` rather than reading the cache file, and
+    /// the answer, when it lands, fills the wizard's completion.
+    #[test]
+    fn a_compose_wizard_completes_from_the_daemon_contact_index() {
+        let _data = mp_core::config::test_env::TestDataDir::new();
+        // A cache file on disk that a direct read would have picked up.
+        let index = mp_core::contacts::ContactIndex {
+            account: "work".to_string(),
+            contacts: Default::default(),
+            built_at: String::new(),
+        };
+        let root = mp_core::config::account_dir("work");
+        std::fs::create_dir_all(&root).unwrap();
+        mp_core::contacts::save_cache(&root, &index).unwrap();
+
+        let (mut app, _calls) = app_with_signature_door();
+        open_compose_wizard_seeded(&mut app, String::new());
+        assert!(app.compose_wizard().unwrap().contacts.is_none());
+        let generation = match app.pending_actions.iter().find_map(|a| match a {
+            Action::LoadContacts { generation } => Some(*generation),
+            _ => None,
+        }) {
+            Some(generation) => generation,
+            None => panic!("the wizard asks the daemon for the index"),
+        };
+
+        let answer = crate::queries::decode_contacts(
+            "work",
+            &json!({"contacts": [{
+                "address": "ada@example.com",
+                "display_name": "Ada",
+                "sent_to": 3, "sent_cc": 0, "received": 1,
+                "first_seen": "2026-01-01T00:00:00Z",
+                "last_seen": "2026-02-01T00:00:00Z",
+                "score": 1,
+            }], "rebuild": null}),
+        );
+        app.land_contacts(app.active_account, generation, Ok(answer));
+        let contacts = app.compose_wizard().unwrap().contacts.as_ref();
+        let ada = contacts.and_then(|index| index.contacts.get("ada@example.com"));
+        assert_eq!(ada.map(|c| c.sent_to), Some(3));
+        assert_eq!(
+            ada.map(|c| c.last_seen.as_str()),
+            Some("2026-02-01T00:00:00Z")
+        );
     }
 
     // -----------------------------------------------------------------------

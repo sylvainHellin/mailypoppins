@@ -128,7 +128,7 @@ use mp_protocol::state::Bootstrap;
 use mp_protocol::{EventEnvelope, Request, RequestId, JSONRPC_VERSION};
 
 use super::daemon::TestDaemon;
-use crate::config::{AccountConfig, GlobalConfig, ImapConfig};
+use crate::config::{AccountConfig, GlobalConfig};
 use crate::daemon::config::{ConfigState, ConfigStore};
 use crate::daemon::dispatch::{ClientCtx, ClientKind};
 use crate::daemon::runtime::InstanceMeta;
@@ -523,7 +523,6 @@ fn a_quick_sync_starts_an_operation_and_polls_nothing() {
     let fixture = Fixture::new();
     seed_inbox();
     let mut app = app_on_inbox(&fixture);
-    app.imap_config = Some(imap_config());
     watermarked(&mut app);
     fixture.forget();
 
@@ -550,7 +549,6 @@ fn the_finished_operation_lands_where_the_poll_landed() {
     let fixture = Fixture::new();
     seed_inbox();
     let mut app = app_on_inbox(&fixture);
-    app.imap_config = Some(imap_config());
     app.global_config.notifications = true;
     watermarked(&mut app);
     fixture.forget();
@@ -1358,22 +1356,6 @@ fn global_config() -> GlobalConfig {
 /// The discard port, for the reason [`global_config`] gives.
 const DISCARD_PORT: u16 = 9;
 
-/// The resolved IMAP block an `App` carries, for the two rows whose action
-/// checks for one before it calls (the verbatim "IMAP not configured" refusal
-/// is client-side and stays there).
-fn imap_config() -> ImapConfig {
-    ImapConfig {
-        host: "127.0.0.1".to_string(),
-        port: DISCARD_PORT,
-        username: ACCOUNT.to_string(),
-        password: String::new(),
-        accept_invalid_certs: false,
-        auth_method: crate::config::AuthMethod::Password,
-        fetch_concurrency: 4,
-        body_fetch_deadline_secs: 30,
-    }
-}
-
 /// One fixture message, everything about it derived from `subject` so a failure
 /// names the row it is about.
 fn fixture_email(subject: &str, date: &str, read: bool) -> FetchedEmail {
@@ -1464,9 +1446,7 @@ fn account_state(name: &str) -> crate::tui::app::AccountState {
             name: name.to_string(),
             ..Default::default()
         },
-        imap_config: None,
-        smtp_config: None,
-        graph_config: None,
+        credentials: None,
         archive_server_name: "Archive".to_string(),
         drafts_dir: None,
         mailboxes: Vec::new(),

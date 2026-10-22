@@ -65,7 +65,11 @@ pub fn dump_keys_json() -> String {
 /// nor the lifecycle that starts one, so the binary hands it the two routines
 /// (#0126, P5-U10f). `mailypoppins::daemon::client::tui_connector` is the one
 /// caller.
-pub fn run(connector: session::Connector) -> Result<()> {
+///
+/// `account` is `mp -A <account>`'s: the TUI opens on that account rather
+/// than on the first configured one. The binary has already refused a name no
+/// account carries.
+pub fn run(connector: session::Connector, account: Option<&str>) -> Result<()> {
     // The daemon session comes up before the terminal does (P5-U2). Two
     // reasons: `client_session` may start a daemon and may end the run with the
     // exit-4 diagnostic, and neither reads well through a terminal already in
@@ -83,7 +87,7 @@ pub fn run(connector: session::Connector) -> Result<()> {
     };
     install_panic_hook();
     let mut terminal = init_terminal()?;
-    let result = run_loop(&mut terminal, session);
+    let result = run_loop(&mut terminal, session, account);
     restore_terminal()?;
     result
 }
@@ -91,9 +95,13 @@ pub fn run(connector: session::Connector) -> Result<()> {
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     session: Option<session::Session>,
+    account: Option<&str>,
 ) -> Result<()> {
     let mut app = App::new();
     app.session = session;
+    if let Some(account) = account {
+        app.open_on_account(account);
+    }
 
     let size = terminal.size()?;
     app.terminal_width = size.width;
@@ -157,6 +165,18 @@ fn run_loop(
             // grouped query behind it, so the shape of this phase is unchanged:
             // the opens overlap, none of them gates the paint, and the account
             // reports `AccountOpened` when its counts land.
+            //
+            // The account's credentials are asked first, on the same thread:
+            // whether it has a password or a token decides the auto-fetch the
+            // landing kicks, and the answer is the daemon's, since the secrets
+            // are. Asking here keeps the round trip off the first paint.
+            let credentials = queries.as_ref().and_then(|queries| {
+                queries::account_credentials(queries, &account_name)
+                    .map_err(|e| {
+                        log::warn!("[queries] the credentials of {account_name}: {e:#}");
+                    })
+                    .ok()
+            });
             let counts = match &queries {
                 Some(queries) => queries::mailbox_counts(queries, &account_name, &mailboxes)
                     .unwrap_or_else(|e| {
@@ -173,6 +193,7 @@ fn run_loop(
             let _ = tx.send(BgResult::AccountOpened {
                 account_index: i,
                 counts,
+                credentials,
             });
         });
     }

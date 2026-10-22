@@ -116,7 +116,7 @@ From Phase 4 the daemon is required by default, so there is one build, one test 
 cargo test --workspace   # the whole tree, daemon included
 ```
 
-The help surface evolves past `docs/baselines/pre-daemon/cli-help.txt` since the cutover shipped (its README lists the post-cutover divergences), with `tests/cli_help_snapshot.rs` as the living pin: `mp daemon` and `mp account` are listed in `mp --help`, and only the global `--daemon` flag keeps `hide = true`.
+The help surface evolves past `docs/baselines/pre-daemon/cli-help.txt` since the cutover shipped (its README lists the post-cutover divergences), with `tests/cli_help_snapshot.rs` as the living pin: `mp daemon` and `mp account` are listed in `mp --help`, and only the `--daemon` flag of `mp account list` keeps `hide = true`.
 
 `tests/test_selection_guard.rs` defends the arrangement from the other side.
 It counts `#[test]` attributes by scanning `clients/tui/src/**/*.rs`, `src/tui_tests/**/*.rs` and `crates/mp-core/src/**/*.rs` rather than by asking the harness what it selected, so a workspace change that silently deselects a whole file of tests fails the guard instead of shrinking a summary line nobody reads.
@@ -186,11 +186,11 @@ There is no `UPDATE_` switch for it: an entry is added by hand, with its reason,
 
 ### The daemon CLI surfaces
 
-`mp daemon` and `mp account` are listed in `mp --help`; only the debug `--daemon` flag carries `hide = true`, which `tests/daemon_read_only_methods.rs` asserts.
+`mp daemon` and `mp account` are listed in `mp --help`; only the debug `--daemon` flag of `mp account list` carries `hide = true`, which `tests/daemon_read_only_methods.rs` asserts.
 
 - `mp daemon run | start | status | stop | restart`, the lifecycle commands, plus `install-service | uninstall-service` (the login units) and `health | logs | support-bundle` (the diagnostics), all added in Phase 6 under the same subtree.
-- `mp --daemon`, a hidden global flag that routes a command through the daemon instead of answering it in process. It never falls back; a routed command that cannot reach a daemon exits 4.
-- `mp account list`, which lands with the daemon work because it is the oracle `mp --daemon account list` must match.
+- `mp account list --daemon`, a hidden flag that asks the daemon's `account.list` instead of answering in process, scoped to the one command that has an in-process answer to compare against. It never falls back; with no daemon to reach it exits 4.
+- `mp account list`, which lands with the daemon work because it is the oracle `mp account list --daemon` must match.
 
 ## The store
 

@@ -724,19 +724,21 @@ mod store_backed_mutations {
     /// The TUI send preamble (#0089): a draft that fails validation keeps its
     /// `draft` status. Approval must never persist off a send that was
     /// refused, or a later send would skip the approve-and-send warning the
-    /// confirm dialog shows for an unapproved draft.
+    /// confirm dialog shows for an unapproved draft. Both steps are the
+    /// daemon's `draft.validate` and `draft.approve`.
     #[test]
     fn a_draft_that_fails_validation_is_not_marked_approved() {
         let fx = Fixture::new();
-        let (path, _selector, _id) = a_draft(&fx);
+        let (path, _selector, id) = a_draft(&fx);
+        let session = fx.session();
         // Blank the recipients: validate_draft refuses a draft whose to, cc
         // and bcc are all empty.
         let text = std::fs::read_to_string(&path).unwrap();
         let unaddressed = text.replacen("\nto:", "\nto: \"\"\nx-to:", 1);
         std::fs::write(&path, &unaddressed).unwrap();
 
-        let err = validate_then_approve(&path).unwrap_err();
-        assert!(format!("{err:#}").contains("No recipients"), "{err:#}");
+        let err = validate_then_approve(&session, "alice", &id).unwrap_err();
+        assert!(err.contains("No recipients"), "{err}");
         assert!(
             std::fs::read_to_string(&path)
                 .unwrap()
@@ -746,32 +748,31 @@ mod store_backed_mutations {
 
         // With the recipients restored the same preamble approves the draft.
         std::fs::write(&path, &text).unwrap();
-        validate_then_approve(&path).unwrap();
+        validate_then_approve(&session, "alice", &id).unwrap();
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .contains("status: approved"));
     }
 
-    /// Regression: `validate_then_approve` must hand back the *approved*
-    /// draft, not the copy it parsed before the approval write.
+    /// The draft `validate_then_approve` approved is one the send path
+    /// accepts: the status is in the file the daemon rewrote, so a parse of it
+    /// reads `approved` and the send reaches the outbox.
     ///
-    /// `mark_as_approved` rewrites `status:` in the file only, so returning
-    /// the pre-approval struct gave [`Action::Send`] a value still reading
-    /// `status: draft`; `build_draft_message` reads that in-memory status and
-    /// refused every `x` approve-and-send with "Email not approved for
-    /// sending. Current status: draft", even though the file on disk was
-    /// approved. The two assertions are the two halves of that bug: the
-    /// returned status, and the send actually reaching the outbox.
+    /// The regression this row was written for (the approve returned the copy
+    /// parsed before the approval write, still reading `status: draft`, and
+    /// `build_draft_message` refused every `x`) cannot recur now that nothing
+    /// is returned, and the outbox half still pins the end of the chain.
     #[test]
     fn approve_and_send_returns_the_approved_draft_and_reaches_the_outbox() {
         let fx = Fixture::new();
-        let (path, _selector, _id) = a_draft(&fx);
+        let (path, _selector, id) = a_draft(&fx);
 
-        let draft = validate_then_approve(&path).unwrap();
+        validate_then_approve(&fx.session(), "alice", &id).unwrap();
+        let draft = crate::draft::parse_email_draft(&path).unwrap();
         assert_eq!(
             draft.frontmatter.status,
             crate::types::EmailStatus::Approved,
-            "the returned draft must carry the approval that was just written"
+            "the draft on disk carries the approval that was just written"
         );
 
         // The transport is dead, so the send fails at submission -- but it

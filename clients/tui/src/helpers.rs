@@ -185,37 +185,32 @@ pub(super) fn fetched_to_email_entry(
 /// Which transport a send actually uses, keyed off the account's
 /// `auth_method` alone.
 ///
-/// A Graph account sends over Graph or not at all: an SMTP config that happens
-/// to be loaded is not a fallback for a `GraphConfig` that is not.
-/// `AccountState::new` loads the Graph config with `GraphConfig::load(..).ok()`,
-/// so a Graph account whose config fails to load carries `graph_config: None`;
-/// a guard that asks "is there a Graph config?" therefore sends such an account
-/// over SMTP behind the user's back, under an identity Graph would have
-/// stamped. Asking the account what it is instead makes that case an error the
-/// user sees.
+/// A Graph account sends over Graph or not at all: SMTP credentials that
+/// happen to be stored are not a fallback for a Graph registration that is not
+/// configured. A guard that asked "is Graph configured?" would send such an
+/// account over SMTP behind the user's back, under an identity Graph would
+/// have stamped. Asking the account what it is instead makes that case an
+/// error the user sees.
 ///
-/// `Err` carries the status-line wording for the missing transport.
+/// `graph` is whether the Graph registration is configured and `smtp` whether
+/// `account.credentials` reports SMTP credentials (or has not answered yet).
+/// `Ok(true)` is a Graph send, `Ok(false)` an SMTP one, and `Err` carries the
+/// status-line wording for the missing transport.
 pub(super) fn resolve_send_transport(
     account_config: &AccountConfig,
-    graph: Option<mp_core::config::GraphConfig>,
-    smtp: Option<mp_core::config::SmtpConfig>,
-) -> Result<
-    (
-        Option<mp_core::config::GraphConfig>,
-        Option<mp_core::config::SmtpConfig>,
-    ),
-    &'static str,
-> {
+    graph: bool,
+    smtp: bool,
+) -> Result<bool, &'static str> {
     if account_config.auth_method == mp_core::config::AuthMethod::Graph {
-        match graph {
-            Some(g) => Ok((Some(g), None)),
-            None => Err("Graph not configured"),
+        if graph {
+            Ok(true)
+        } else {
+            Err("Graph not configured")
         }
+    } else if smtp {
+        Ok(false)
     } else {
-        match smtp {
-            Some(s) => Ok((None, Some(s))),
-            None => Err("SMTP not configured"),
-        }
+        Err("SMTP not configured")
     }
 }
 
@@ -225,38 +220,31 @@ pub(super) fn resolve_send_transport(
 /// The draft file rather than the open mailbox is the source of truth, because
 /// a draft written for another configured account (a reply to mail that
 /// arrived there) has to leave through that account's credentials.
+///
+/// Answers the account's index, whether it has a Graph registration, whether
+/// it can submit over SMTP, and its configuration: the two facts
+/// [`resolve_send_transport`] decides on, never a credential.
 pub(super) fn resolve_send_account(
     app: &App,
     draft_path: &Path,
-) -> (
-    usize,
-    Option<mp_core::config::SmtpConfig>,
-    Option<mp_core::config::ImapConfig>,
-    Option<mp_core::config::GraphConfig>,
-    AccountConfig,
-) {
+) -> (usize, bool, bool, AccountConfig) {
+    let answer = |i: usize, acct: &super::app::AccountState| {
+        (
+            i,
+            acct.has_graph(),
+            acct.has_smtp(),
+            acct.account_config.clone(),
+        )
+    };
     if let Ok(draft) = parse_email_draft(draft_path) {
         let from = draft.frontmatter.from.unwrap_or_default().to_lowercase();
         for (i, acct) in app.accounts.iter().enumerate() {
             if from.contains(&acct.account_config.default_from.to_lowercase()) {
-                return (
-                    i,
-                    acct.smtp_config.clone(),
-                    acct.imap_config.clone(),
-                    acct.graph_config.clone(),
-                    acct.account_config.clone(),
-                );
+                return answer(i, acct);
             }
         }
     }
-    let acct = &app.accounts[app.active_account];
-    (
-        app.active_account,
-        acct.smtp_config.clone(),
-        acct.imap_config.clone(),
-        acct.graph_config.clone(),
-        acct.account_config.clone(),
-    )
+    answer(app.active_account, &app.accounts[app.active_account])
 }
 
 // ---------------------------------------------------------------------------
@@ -280,9 +268,7 @@ mod tests {
     // Fixtures
     // -----------------------------------------------------------------------
 
-    /// A minimal `AccountState`. Built as a struct literal rather than through
-    /// `AccountState::new`, which reads the user's config, keyring and
-    /// files and would make these tests machine-dependent.
+    /// A minimal `AccountState`, built as a struct literal.
     fn account(name: &str, default_from: &str) -> super::super::app::AccountState {
         super::super::app::AccountState {
             account_config: AccountConfig {
@@ -290,9 +276,7 @@ mod tests {
                 default_from: default_from.to_string(),
                 ..Default::default()
             },
-            imap_config: None,
-            smtp_config: None,
-            graph_config: None,
+            credentials: None,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             mailboxes: Vec::new(),
@@ -335,27 +319,6 @@ mod tests {
         path
     }
 
-    fn smtp() -> mp_core::config::SmtpConfig {
-        mp_core::config::SmtpConfig {
-            host: "smtp.example.com".to_string(),
-            port: 587,
-            username: "me@example.com".to_string(),
-            password: "secret".to_string(),
-            default_from: "me@example.com".to_string(),
-            accept_invalid_certs: false,
-            auth_method: mp_core::config::AuthMethod::Password,
-        }
-    }
-
-    fn graph() -> mp_core::config::GraphConfig {
-        mp_core::config::GraphConfig {
-            client_id: "cid".to_string(),
-            tenant_id: "tid".to_string(),
-            username: "me@example.com".to_string(),
-            account_name: "work".to_string(),
-        }
-    }
-
     fn account_config(auth_method: mp_core::config::AuthMethod) -> AccountConfig {
         AccountConfig {
             name: "work".to_string(),
@@ -369,51 +332,71 @@ mod tests {
     // resolve_send_transport (#0058 review)
     // -----------------------------------------------------------------------
 
-    /// A Graph account sends over Graph, and the SMTP config it also carries
-    /// is dropped rather than kept as a fallback.
+    /// A Graph account sends over Graph, and SMTP credentials it also has are
+    /// not a fallback.
     #[test]
     fn resolve_send_transport_sends_a_graph_account_over_graph_only() {
         let cfg = account_config(mp_core::config::AuthMethod::Graph);
-        // `SmtpConfig` holds a password and deliberately has no `Debug`, so
-        // these unwrap by hand rather than through `Result::unwrap`.
-        let Ok((g, s)) = resolve_send_transport(&cfg, Some(graph()), Some(smtp())) else {
-            panic!("a Graph account with a Graph config has a transport");
-        };
-        assert!(g.is_some());
-        assert!(
-            s.is_none(),
-            "the loaded SMTP config is not a Graph fallback"
-        );
+        assert_eq!(resolve_send_transport(&cfg, true, true), Ok(true));
     }
 
-    /// The regression this guard exists for: `AccountState::new` loads the
-    /// Graph config with `.ok()`, so a Graph account whose config fails to
-    /// load reaches the send path with `graph: None`. It must be refused, not
-    /// quietly sent over the SMTP config that did load.
+    /// The regression this guard exists for: a Graph account whose
+    /// registration is not configured must be refused, not quietly sent over
+    /// SMTP credentials that happen to be stored.
     #[test]
     fn resolve_send_transport_refuses_a_graph_account_with_no_graph_config() {
         let cfg = account_config(mp_core::config::AuthMethod::Graph);
-        let Err(missing) = resolve_send_transport(&cfg, None, Some(smtp())) else {
-            panic!("a Graph account with no Graph config fell back to SMTP");
-        };
-        assert_eq!(missing, "Graph not configured");
+        assert_eq!(
+            resolve_send_transport(&cfg, false, true),
+            Err("Graph not configured")
+        );
     }
 
-    /// A password account sends over SMTP, and a Graph config that somehow
-    /// loaded is not consulted.
+    /// A password account sends over SMTP, and a Graph registration is not
+    /// consulted.
     #[test]
     fn resolve_send_transport_sends_a_password_account_over_smtp_only() {
         let cfg = account_config(mp_core::config::AuthMethod::Password);
-        let Ok((g, s)) = resolve_send_transport(&cfg, Some(graph()), Some(smtp())) else {
-            panic!("a password account with an SMTP config has a transport");
-        };
-        assert!(g.is_none());
-        assert!(s.is_some());
+        assert_eq!(resolve_send_transport(&cfg, true, true), Ok(false));
+        assert_eq!(
+            resolve_send_transport(&cfg, true, false),
+            Err("SMTP not configured")
+        );
+    }
 
-        let Err(missing) = resolve_send_transport(&cfg, Some(graph()), None) else {
-            panic!("a password account with no SMTP config has no transport");
-        };
-        assert_eq!(missing, "SMTP not configured");
+    /// The transport check reads `account.credentials`' answer, never a
+    /// secret: an account the daemon reports without an SMTP password is
+    /// refused, one it has not answered for yet is left to the daemon, and a
+    /// Graph account's registration is read from its configuration.
+    #[test]
+    fn the_send_account_reads_the_daemon_credential_answer() {
+        use super::super::app::Credentials;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut known = account("work", "me@work.example");
+        known.credentials = Some(Credentials {
+            imap: true,
+            smtp: false,
+        });
+        let unknown = account("perso", "me@perso.example");
+        let mut graph = account("graph", "me@graph.example");
+        graph.account_config.auth_method = mp_core::config::AuthMethod::Graph;
+        graph.account_config.oauth2 = Some(mp_core::config::OAuth2Settings {
+            client_id: "cid".to_string(),
+            tenant_id: "tid".to_string(),
+        });
+        let app = app_with(vec![known, unknown, graph], 0);
+
+        let path = draft(tmp.path(), "w.md", Some("me@work.example"));
+        let (idx, has_graph, has_smtp, _) = resolve_send_account(&app, &path);
+        assert_eq!((idx, has_graph, has_smtp), (0, false, false));
+
+        let path = draft(tmp.path(), "p.md", Some("me@perso.example"));
+        let (idx, has_graph, has_smtp, _) = resolve_send_account(&app, &path);
+        assert_eq!((idx, has_graph, has_smtp), (1, false, true));
+
+        let path = draft(tmp.path(), "g.md", Some("me@graph.example"));
+        let (idx, has_graph, has_smtp, _) = resolve_send_account(&app, &path);
+        assert_eq!((idx, has_graph, has_smtp), (2, true, false));
     }
 
     fn fetched(date: &str) -> FetchedEmail {
@@ -460,7 +443,7 @@ mod tests {
             Some("Sylvain Hellin <SYLVAIN@Perso.Example>"),
         );
 
-        let (idx, _smtp, _imap, _graph, cfg) = resolve_send_account(&app, &path);
+        let (idx, _graph, _smtp, cfg) = resolve_send_account(&app, &path);
         assert_eq!(idx, 1);
         assert_eq!(cfg.name, "perso");
     }
@@ -503,7 +486,7 @@ mod tests {
             1,
         );
         let path = draft(tmp.path(), "d.md", Some("shared@example.com"));
-        let (idx, _, _, _, cfg) = resolve_send_account(&app, &path);
+        let (idx, _, _, cfg) = resolve_send_account(&app, &path);
         assert_eq!(idx, 0);
         assert_eq!(cfg.name, "first");
     }
@@ -526,7 +509,7 @@ mod tests {
             0,
         );
         let path = draft(tmp.path(), "d.md", Some("not-sylvain@work.example"));
-        let (idx, _, _, _, cfg) = resolve_send_account(&app, &path);
+        let (idx, _, _, cfg) = resolve_send_account(&app, &path);
         assert_eq!(idx, 1, "a different mailbox matched by substring");
         assert_eq!(cfg.name, "work");
     }
@@ -547,7 +530,7 @@ mod tests {
             1,
         );
         let path = draft(tmp.path(), "d.md", Some("sylvain@work.example"));
-        let (idx, _, _, _, cfg) = resolve_send_account(&app, &path);
+        let (idx, _, _, cfg) = resolve_send_account(&app, &path);
         assert_eq!(idx, 0);
         assert_eq!(cfg.name, "half-configured");
     }

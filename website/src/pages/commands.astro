@@ -99,6 +99,16 @@ const contactsCommands = [
   { command: 'mp contacts stats', description: 'Show contact index statistics' },
 ];
 
+const signatureCommands = [
+  { command: 'mp signature list [--json]', description: "List the signatures, the account's default marked" },
+  { command: 'mp signature show <name> [--path]', description: "Print a signature's content, or with --path the path of its file" },
+  { command: 'mp signature new <name>', description: 'Create an empty signature and print the path of its file' },
+  { command: 'mp signature edit <name>', description: 'Open a signature in $EDITOR' },
+  { command: 'mp signature rename <old> <new>', description: 'Rename a signature; an account default that named it follows' },
+  { command: 'mp signature delete <name>', description: 'Delete a signature, clearing any account default that named it' },
+  { command: 'mp signature default [<name>|--none]', description: "Print the account's default signature, set it, or clear it with --none" },
+];
+
 const syncOptions = [
   { command: '-n, --limit <N>', description: 'Max messages per mailbox (default: 50)' },
   { command: '--mailbox <name>...', description: 'Mailboxes to sync (default: INBOX, Archive, Sent)' },
@@ -107,7 +117,7 @@ const syncOptions = [
 ];
 
 const globalOptions = [
-  { command: '-A, --account <name>', description: 'Account to use, before or after the command (default: first in config; mp calendar rebuild, mp cutover and mp contacts rebuild cover every account unless it names one). Refused by the commands that act on no account: mp daemon, mp completions, mp dump-keys, mp account list, and mp config init, show, add-account, reset-secrets and path' },
+  { command: '-A, --account <name>', description: 'Account to use, before or after the command (default: first in config; mp calendar rebuild, mp cutover and mp contacts rebuild cover every account unless it names one; mp -A <name> with no command opens the TUI on that account). Refused by the commands that act on no account: mp daemon, mp completions, mp dump-keys, mp account list, and mp config init, show, add-account, reset-secrets and path' },
 ];
 
 const signatureOptions = [
@@ -185,6 +195,7 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
       <p>
         Running <code>mp</code> with no arguments launches a full-screen terminal interface
         built on <code>ratatui</code>: a mailbox sidebar, the message list, and the headers and body of the selected message.
+        <code>mp -A &lt;account&gt;</code> opens it on that account.
         The sidebar hides below 40 columns and the right panes below 80.
       </p>
       <p>
@@ -331,6 +342,16 @@ eval "$(mp completions bash)"`} lang="sh" theme={codeTheme} />
     <section>
       <h2 id="contacts-commands">Contacts Commands</h2>
       <CommandTable commands={contactsCommands} />
+    </section>
+
+    <section>
+      <h2 id="signature-commands">Signature Commands</h2>
+      <CommandTable commands={signatureCommands} />
+      <p>
+        A signature is one Markdown file under the configuration directory, and each account
+        has its own default; <code>-A</code> names the account. The TUI's <code>cs</code> overlay
+        and the Mac app's Signatures dialog manage the same files through the same daemon calls.
+      </p>
     </section>
 
     <section>

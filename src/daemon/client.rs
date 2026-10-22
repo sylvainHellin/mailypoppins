@@ -168,8 +168,8 @@ pub fn routed() -> bool {
 /// It cannot catch a command that leaves through `std::process::exit` or
 /// through an error, because neither returns here, and a command that failed
 /// proves nothing about routing anyway. A command that returns early from the
-/// dispatch owes this call on its own way out; `mp --daemon list-messages` is
-/// the one that does today.
+/// dispatch owes this call on its own way out; `mp list-messages` is the one
+/// that does today.
 pub fn enforce_routing(what: &str) {
     if !routing_required() || routed() {
         return;

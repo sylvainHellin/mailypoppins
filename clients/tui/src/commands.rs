@@ -100,7 +100,8 @@ pub fn route(action: &Action) -> ActionRoute {
             ActionRoute::ClientOnly("$EDITOR, over a rendition or a draft file this process opens")
         }
         Action::Reply(_) => ActionRoute::Daemon(&["draft.reply"]),
-        Action::Send => ActionRoute::Daemon(&["send.draft"]),
+        // Validated and approved first, the desktop's sequence (#0089).
+        Action::Send => ActionRoute::Daemon(&["draft.validate", "draft.approve", "send.draft"]),
         Action::SendApproved => ActionRoute::Daemon(&["send.approved"]),
         Action::CancelHeldSend => ActionRoute::Daemon(&["send.cancel_hold"]),
         Action::Approve | Action::BatchApprove(_) => ActionRoute::Daemon(&["draft.approve"]),
@@ -168,25 +169,24 @@ pub fn route(action: &Action) -> ActionRoute {
         Action::OpenComposeWizard(_) => ActionRoute::Local,
         Action::ComposeWizardSubmit => ActionRoute::Daemon(&["draft.create"]),
         Action::ComposeWizardCancel => ActionRoute::Local,
+        // The daemon names the file (and creates it when the selection went
+        // stale); the editor session is this process's.
         Action::ComposeEditSignature => {
-            ActionRoute::ClientOnly("$EDITOR, over a signature file or a temporary copy of one")
+            ActionRoute::Daemon(&["signature.read", "signature.create"])
         }
         Action::Rsvp { .. } => ActionRoute::Daemon(&["calendar.rsvp"]),
         Action::ComposeToContact { .. } => ActionRoute::Local,
-        Action::SendContactVcard { .. } => ActionRoute::Daemon(&["draft.create"]),
+        Action::SendContactVcard { .. } => ActionRoute::Daemon(&["contact.vcard_draft"]),
         Action::CopyContactEmail { .. } => ActionRoute::ClientOnly("the system clipboard"),
+        Action::LoadContacts { .. } => ActionRoute::Daemon(&["contact.search"]),
         Action::RefreshContacts => ActionRoute::Daemon(&["contact.rebuild"]),
         Action::OpenEventSource { .. } => {
             ActionRoute::ClientOnly("$EDITOR, over the invite the agenda row came from")
         }
         Action::EditSignatureFile { .. } => {
-            ActionRoute::ClientOnly("$EDITOR, over a signature file")
+            ActionRoute::Daemon(&["signature.read", "signature.create"])
         }
-        // ATT-03's `draft.attach` is not built; the append is a write to a file
-        // the user already picked.
-        Action::AttachFileToDraft { .. } => ActionRoute::ClientOnly(
-            "a frontmatter append to a file the user picked; draft.attach is not built",
-        ),
+        Action::AttachFileToDraft { .. } => ActionRoute::Daemon(&["draft.attach"]),
     }
 }
 
@@ -562,7 +562,7 @@ fn start_pass(app: &mut App, commands: &dyn Queries, method: &str, label: &str, 
     if super::actions::sync_is_blocked(app) {
         return super::actions::park_until_idle(app, action, label);
     }
-    if !app.is_graph() && app.imap_config.is_none() {
+    if !app.is_graph() && !app.has_imap() {
         return app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
     }
     let account = app.account_config.name.clone();
@@ -598,10 +598,10 @@ fn start_account_pass(app: &mut App, commands: &dyn Queries, index: usize) {
         return;
     };
     let graph = account.is_graph();
-    if graph && account.graph_config.is_none() {
+    if graph && !account.has_graph() {
         return;
     }
-    if !graph && account.imap_config.is_none() {
+    if !graph && !account.has_imap() {
         return;
     }
     let name = account.account_config.name.clone();
@@ -676,10 +676,10 @@ fn send_approved(app: &mut App, commands: &dyn Queries) {
     }
     let graph = match super::helpers::resolve_send_transport(
         &app.account_config,
-        app.graph_config.clone(),
-        app.smtp_config.clone(),
+        app.is_graph(),
+        app.has_smtp(),
     ) {
-        Ok((graph, _smtp)) => graph.is_some(),
+        Ok(graph) => graph,
         Err(missing) => return app.set_status_level(missing.to_string(), StatusLevel::Error),
     };
     let account = app.account_config.name.clone();
@@ -714,15 +714,13 @@ fn rsvp(app: &mut App, commands: &dyn Queries, msg: MessageRef, choice: RsvpChoi
             StatusLevel::Error,
         );
     }
-    if app.graph_config.is_some()
-        && app.account_config.auth_method == mp_core::config::AuthMethod::Graph
-    {
+    if app.is_graph() {
         return app.set_status_level(
             "RSVP is not supported for Graph accounts yet (#0036)".to_string(),
             StatusLevel::Error,
         );
     }
-    if app.smtp_config.is_none() {
+    if !app.has_smtp() {
         return app.set_status_level("SMTP not configured".to_string(), StatusLevel::Error);
     }
     // The three words `calendar.rsvp` takes, which are `mp invite

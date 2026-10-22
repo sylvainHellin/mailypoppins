@@ -1,5 +1,6 @@
 //! Contacts view rendering (#0033): read-only list + fuzzy search + detail
-//! pane over the local contacts index (`mp_core::contacts`).
+//! pane over the account's contact index, as the daemon's `contact.search`
+//! ranks it.
 //!
 //! Layout follows the mail spirit and the three width tiers. Given a single
 //! content `area`, this splits it into a list column (with an incremental
@@ -114,6 +115,15 @@ fn render_list(app: &App, frame: &mut Frame, area: Rect) {
     );
 
     // The list body.
+    if cv.index.is_none() && cv.loading {
+        let msg = Paragraph::new(Line::from(Span::styled(
+            "Loading contacts...",
+            Style::default().fg(theme::active().text_muted),
+        )))
+        .style(Style::default().bg(theme::active().bg));
+        frame.render_widget(msg, list_area);
+        return;
+    }
     if cv.index.is_none() {
         let msg = Paragraph::new(Line::from(Span::styled(
             "No contact cache yet — press r to build the index.",

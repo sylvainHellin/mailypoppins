@@ -76,10 +76,12 @@
 //!   "all" is spelled and a number may not mean the opposite of itself.
 //! - **An empty mailbox of a ready account is not an error**, matching
 //!   `mp list-messages` on the same store.
-//! - **`--daemon` does not fall back.** With no daemon listening, `mp --daemon
-//!   …` exits `4` (the "daemon unavailable" code of section 3.0) rather than
-//!   quietly running the in-process path. Without that, "the routed output
-//!   matches the direct output" would be satisfiable by ignoring the flag.
+//! - **`--daemon` does not fall back.** With no daemon listening, `mp account
+//!   list --daemon` exits `4` (the "daemon unavailable" code of section 3.0)
+//!   rather than quietly running the in-process path. Without that, "the
+//!   routed output matches the direct output" would be satisfiable by ignoring
+//!   the flag. The flag is `mp account list`'s alone since the daemon
+//!   leftovers' TUI follow-up; every other command reaches the daemon anyway.
 //! - **`mp account list` exists without `--daemon` too**, and is the oracle the
 //!   routed run must match byte for byte. It was `hide = true` like
 //!   `mp daemon` until the cutover shipped; both are listed now.
@@ -1009,8 +1011,9 @@ async fn a_configured_account_without_a_store_is_account_not_ready() {
 // The CLI routes
 // ---------------------------------------------------------------------------
 
-/// `mp --daemon account list` and `mp --daemon list-messages` print exactly
-/// what the same commands print without the flag, on the same fixture store.
+/// `mp account list --daemon` prints exactly what `mp account list` prints on
+/// the same fixture store, and `mp list-messages`, which reaches the daemon
+/// without a flag, lists the fixture and honours `-A`.
 #[tokio::test]
 async fn the_routed_cli_prints_what_the_direct_cli_prints() {
     let sandbox = Sandbox::new();
@@ -1019,10 +1022,10 @@ async fn the_routed_cli_prints_what_the_direct_cli_prints() {
     // `mp account list`: the routed run's oracle is the direct run, so this
     // pins the routing rather than a chosen output format.
     let direct_accounts = sandbox.run_ok(&["account", "list"]);
-    let routed_accounts = sandbox.run_ok(&["--daemon", "account", "list"]);
+    let routed_accounts = sandbox.run_ok(&["account", "list", "--daemon"]);
     assert_eq!(
         routed_accounts, direct_accounts,
-        "`mp --daemon account list` prints what `mp account list` prints"
+        "`mp account list --daemon` prints what `mp account list` prints"
     );
     for name in ["alpha", "beta", "gamma", "delta"] {
         assert!(
@@ -1032,53 +1035,36 @@ async fn the_routed_cli_prints_what_the_direct_cli_prints() {
     }
 
     // `mp list-messages --mailbox inbox`, on the default account.
-    let direct_inbox = sandbox.run_ok(&["list-messages", "--mailbox", "inbox"]);
-    let routed_inbox = sandbox.run_ok(&["--daemon", "list-messages", "--mailbox", "inbox"]);
-    assert_eq!(
-        routed_inbox, direct_inbox,
-        "`mp --daemon list-messages --mailbox inbox` prints what the direct command prints"
-    );
+    let inbox = sandbox.run_ok(&["list-messages", "--mailbox", "inbox"]);
     assert!(
-        direct_inbox.contains("Bericht") && direct_inbox.contains("Kickoff"),
-        "the listing is the fixture's inbox: {direct_inbox}"
+        inbox.contains("Bericht") && inbox.contains("Kickoff"),
+        "the listing is the fixture's inbox: {inbox}"
     );
 
-    // And `-A` still selects the account on the routed path, so a router that
+    // And `-A` selects the account on the routed path, so a router that
     // ignored it and always answered for the default account is caught.
-    let direct_beta = sandbox.run_ok(&["list-messages", "-A", "beta", "--mailbox", "inbox"]);
-    let routed_beta = sandbox.run_ok(&[
-        "--daemon",
-        "list-messages",
-        "-A",
-        "beta",
-        "--mailbox",
-        "inbox",
-    ]);
-    assert_eq!(
-        routed_beta, direct_beta,
-        "the routed listing honours -A like the direct one"
-    );
+    let beta = sandbox.run_ok(&["list-messages", "-A", "beta", "--mailbox", "inbox"]);
     assert!(
-        direct_beta.contains("Only-In-Beta"),
-        "the beta listing is beta's: {direct_beta}"
+        beta.contains("Only-In-Beta"),
+        "the beta listing is beta's: {beta}"
     );
     assert_ne!(
-        direct_beta, direct_inbox,
+        beta, inbox,
         "the fixture's two accounts do not print the same listing"
     );
 }
 
-/// `--daemon` means the daemon: with none listening, the run fails with the
-/// "daemon unavailable" exit code instead of silently taking the in-process
-/// path.
+/// `mp account list --daemon` means the daemon, and so does `mp
+/// list-messages`: with none listening, the run fails with the "daemon
+/// unavailable" exit code instead of silently taking the in-process path.
 #[tokio::test]
 async fn the_daemon_flag_does_not_fall_back_to_the_direct_path() {
     let sandbox = Sandbox::new();
     // Deliberately no daemon.
 
     for args in [
-        vec!["--daemon", "account", "list"],
-        vec!["--daemon", "list-messages", "--mailbox", "inbox"],
+        vec!["account", "list", "--daemon"],
+        vec!["list-messages", "--mailbox", "inbox"],
     ] {
         let out = sandbox.run(&args);
         assert_eq!(
@@ -1102,8 +1088,8 @@ async fn the_daemon_flag_does_not_fall_back_to_the_direct_path() {
 
 /// Every command of the pre-daemon help surface is still reachable in the
 /// `mp --help` walk, and the daemon-era surfaces are where they belong: the
-/// debug `--daemon` flag stays `hide = true`, while `mp daemon` and
-/// `mp account` are listed like any other subcommand.
+/// debug `--daemon` flag of `mp account list` stays `hide = true`, while
+/// `mp daemon` and `mp account` are listed like any other subcommand.
 ///
 /// Until the cutover shipped this compared the whole walk byte for byte with
 /// `docs/baselines/pre-daemon/cli-help.txt`. The CLI surface may evolve now
@@ -1163,7 +1149,21 @@ fn the_help_surface_still_offers_every_pre_daemon_command() {
     let top = sandbox.run_ok(&["--help"]);
     assert!(
         !top.contains("--daemon"),
-        "the --daemon flag is hidden from the top-level help: {top}"
+        "no --daemon flag in the top-level help: {top}"
+    );
+    let list = sandbox.run_ok(&["account", "list", "--help"]);
+    assert!(
+        !list.contains("--daemon"),
+        "the debug --daemon flag is hidden from `mp account list --help`: {list}"
+    );
+    // The flag is `mp account list`'s alone: a command that reaches the daemon
+    // anyway refuses it rather than accepting a flag it would ignore.
+    let elsewhere = sandbox.run(&["--daemon", "list-messages"]);
+    assert_eq!(
+        elsewhere.status.code(),
+        Some(2),
+        "--daemon outside `mp account list` is a usage error: {}",
+        String::from_utf8_lossy(&elsewhere.stderr)
     );
     for listed in ["\n  daemon ", "\n  account "] {
         assert!(
@@ -1228,8 +1228,8 @@ fn subcommand_names(help: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// A daemon that serves `message.list` takes no engine lock, and neither does a
-/// `mp --daemon` run: `<account_dir>/store.lock` stays free for whoever wants
-/// to be the account's engine.
+/// routed `mp list-messages`: `<account_dir>/store.lock` stays free for
+/// whoever wants to be the account's engine.
 ///
 /// This is the Phase 2 invariant that keeps the daemon out of the way of a
 /// running TUI or `mp sync`: reads go through the store, writes and queue
@@ -1290,7 +1290,7 @@ async fn serving_reads_holds_no_engine_lock() {
         "the daemon serves reads while another process is the engine, got {again}"
     );
 
-    let routed = sandbox.run_ok(&["--daemon", "list-messages", "--mailbox", "inbox"]);
+    let routed = sandbox.run_ok(&["list-messages", "--mailbox", "inbox"]);
     assert!(
         routed.contains("Bericht"),
         "a routed listing works while another process holds the engine lock: {routed}"

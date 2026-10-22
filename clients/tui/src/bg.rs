@@ -102,14 +102,11 @@ fn apply_contacts_rebuild(
              treating it as written"
         ),
     }
-    // The index does not travel: the daemon has just written the cache file
-    // both ends read, and loading it here is the read `ensure_contacts_loaded`
-    // already does (one JSON read).
+    // The index does not travel with the settle: the view asks the daemon for
+    // it again, as `contact.changed` makes it do for a rebuild another client
+    // ran. The cache file is the daemon's and is not read here.
     if account_index == app.active_account {
-        let root = mp_core::config::account_dir(&app.account_config.name);
-        app.contacts_view.index = mp_core::contacts::load_cache(&root).ok().flatten();
-        app.contacts_view.loaded = true;
-        app.recompute_contact_matches();
+        app.reload_contacts();
     }
     app.set_status(format!("Contacts refreshed ({contacts})"));
 }
@@ -410,6 +407,15 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             result,
         } => apply_contacts_rebuild(app, account_index, result),
 
+        BgResult::ContactsLoaded {
+            account_index,
+            generation,
+            result,
+        } => {
+            app.bg_count = app.bg_count.saturating_sub(1);
+            app.land_contacts(account_index, generation, result);
+        }
+
         BgResult::SearchHitFetched {
             generation,
             message_id,
@@ -424,15 +430,20 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
         BgResult::AccountOpened {
             account_index,
             counts,
+            credentials,
         } => {
             // Phase two of startup (#0003): this account's store opened on a
             // background thread, ran its integrity check (and, on failure, the
             // drop-and-rebuild path of #0066) and read the real counts. Fill
-            // them in and drop the loading marker.
+            // them in and drop the loading marker. The daemon's word on its
+            // credentials lands first, because the auto-fetch below reads it.
             let is_remote = if let Some(acct) = app.accounts.get_mut(account_index) {
                 acct.mailbox_counts = counts.clone();
                 acct.opening = false;
-                acct.imap_config.is_some() || acct.graph_config.is_some()
+                if credentials.is_some() {
+                    acct.credentials = credentials;
+                }
+                acct.has_imap() || acct.has_graph()
             } else {
                 false
             };
@@ -860,17 +871,14 @@ mod tests {
     }
 
     /// A minimal `AccountState` with one warm mailbox cache, for the account
-    /// that is not on screen. Built as a struct literal rather than through
-    /// `AccountState::new`, which reads the user's config and keyring.
+    /// that is not on screen, built as a struct literal.
     fn background_account(name: &str) -> crate::app::AccountState {
         crate::app::AccountState {
             account_config: mp_core::config::AccountConfig {
                 name: name.to_string(),
                 ..Default::default()
             },
-            imap_config: None,
-            smtp_config: None,
-            graph_config: None,
+            credentials: None,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             mailboxes: Vec::new(),
@@ -1082,7 +1090,8 @@ mod tests {
     /// A background account's store finishes opening: its real counts land,
     /// its outbox badge refreshes and the loading marker clears, while the
     /// active account and its on-screen list are left untouched. A local-only
-    /// account (no IMAP/Graph) queues no auto-fetch.
+    /// account (the daemon reports no IMAP credential and it is not Graph)
+    /// queues no auto-fetch.
     #[test]
     fn account_opened_fills_a_background_account_and_clears_its_loading_marker() {
         let _data = DataDir::new();
@@ -1097,6 +1106,7 @@ mod tests {
             BgResult::AccountOpened {
                 account_index: 1,
                 counts: vec![42],
+                credentials: Some(crate::app::Credentials::default()),
             },
         );
 
@@ -1130,31 +1140,30 @@ mod tests {
     fn account_opened_for_the_active_account_loads_its_mailbox_and_auto_fetches() {
         let _data = DataDir::new();
         let mut app = app_with_warm_caches();
-        let mut acct = background_account("alice");
-        // Give the active account a remote source so the auto-fetch fires.
-        acct.imap_config = Some(mp_core::config::ImapConfig {
-            host: "imap.example.com".to_string(),
-            port: 993,
-            username: "alice".to_string(),
-            password: String::new(),
-            accept_invalid_certs: false,
-            auth_method: mp_core::config::AuthMethod::Password,
-            fetch_concurrency: 4,
-            body_fetch_deadline_secs: 30,
-        });
-        app.accounts = vec![acct];
+        app.accounts = vec![background_account("alice")];
         app.active_account = 0;
         app.accounts[0].opening = true;
 
+        // The daemon reports an IMAP credential, so the auto-fetch fires.
+        let credentials = crate::app::Credentials {
+            imap: true,
+            smtp: true,
+        };
         handle_bg_result(
             &mut app,
             BgResult::AccountOpened {
                 account_index: 0,
                 counts: vec![5, 9],
+                credentials: Some(credentials),
             },
         );
 
         assert!(!app.accounts[0].opening);
+        assert_eq!(
+            app.accounts[0].credentials,
+            Some(credentials),
+            "the daemon's credential answer lands on the account"
+        );
         assert_eq!(
             app.mailbox_counts,
             vec![5, 9],

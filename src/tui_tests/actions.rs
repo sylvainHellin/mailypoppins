@@ -205,7 +205,12 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
         true,
     ),
     ("Reply", ActionRoute::Daemon(&["draft.reply"]), true),
-    ("Send", ActionRoute::Daemon(&["send.draft"]), false),
+    (
+        "Send",
+        // Validated and approved first, the desktop's sequence (#0089).
+        ActionRoute::Daemon(&["draft.validate", "draft.approve", "send.draft"]),
+        false,
+    ),
     (
         "SendApproved",
         ActionRoute::Daemon(&["send.approved"]),
@@ -395,19 +400,27 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
     ("ComposeWizardCancel", ActionRoute::Local, false),
     (
         "ComposeEditSignature",
-        ActionRoute::ClientOnly("$EDITOR, over a signature file or a temporary copy of one"),
+        // The daemon names the file, creating it when the selection went
+        // stale; the editor session is this process's.
+        ActionRoute::Daemon(&["signature.read", "signature.create"]),
         true,
     ),
     ("Rsvp", ActionRoute::Daemon(&["calendar.rsvp"]), false),
     ("ComposeToContact", ActionRoute::Local, false),
     (
         "SendContactVcard",
-        ActionRoute::Daemon(&["draft.create"]),
+        ActionRoute::Daemon(&["contact.vcard_draft"]),
         true,
     ),
     (
         "CopyContactEmail",
         ActionRoute::ClientOnly("the system clipboard"),
+        false,
+    ),
+    (
+        "LoadContacts",
+        // The whole index, ranked: `contact.search` with an empty query.
+        ActionRoute::Daemon(&["contact.search"]),
         false,
     ),
     (
@@ -422,16 +435,12 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
     ),
     (
         "EditSignatureFile",
-        ActionRoute::ClientOnly("$EDITOR, over a signature file"),
+        ActionRoute::Daemon(&["signature.read", "signature.create"]),
         true,
     ),
     (
         "AttachFileToDraft",
-        // ATT-03's `draft.attach` is not built; the append is a write to a
-        // file the user already picked.
-        ActionRoute::ClientOnly(
-            "a frontmatter append to a file the user picked; draft.attach is not built",
-        ),
+        ActionRoute::Daemon(&["draft.attach"]),
         false,
     ),
 ];
@@ -516,6 +525,7 @@ fn one_of_each_action() -> Vec<Action> {
         Action::CopyContactEmail {
             address: "a@example.com".to_string(),
         },
+        Action::LoadContacts { generation: 0 },
         Action::RefreshContacts,
         Action::OpenEventSource {
             msg: MessageRef::new(1),
@@ -591,6 +601,7 @@ fn variant_name(action: &Action) -> &'static str {
         Action::ComposeToContact { .. } => "ComposeToContact",
         Action::SendContactVcard { .. } => "SendContactVcard",
         Action::CopyContactEmail { .. } => "CopyContactEmail",
+        Action::LoadContacts { .. } => "LoadContacts",
         Action::RefreshContacts => "RefreshContacts",
         Action::OpenEventSource { .. } => "OpenEventSource",
         Action::EditSignatureFile { .. } => "EditSignatureFile",

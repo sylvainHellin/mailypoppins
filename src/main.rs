@@ -32,17 +32,6 @@ struct Cli {
     // hidden [`NoAccount`] and refuse it ([`refuse_account_where_meaningless`]).
     #[arg(short = 'A', long, global = true)]
     account: Option<String>,
-
-    /// Answer this command from the local daemon instead of in process.
-    ///
-    /// Debug reach while the migration is under way (P2-U11):
-    /// `mp account list` and `mp list-messages` are routed, everything else
-    /// still runs in process. Hidden, because `mp --help` may not move until
-    /// the cutover slices make the daemon the default. It never falls back: a
-    /// routed command that cannot reach a daemon exits 4 rather than answering
-    /// from this process.
-    #[arg(long, global = true, hide = true)]
-    daemon: bool,
 }
 
 /// The signature a draft writer splices into the new draft: `-s/--signature`
@@ -481,6 +470,21 @@ enum Commands {
         #[command(subcommand)]
         action: ContactsAction,
     },
+    /// Manage the signatures drafts carry, and each account's default
+    #[command(after_help = "\
+A signature is one Markdown file the daemon keeps under the configuration
+directory; `mp new -s <name>` and the TUI's and the desktop app's compose
+dialogs splice it into a draft. The default is per account: `-A` names the
+account, the first configured one otherwise.
+
+Examples:
+  mp signature list
+  mp signature new work && mp signature edit work
+  mp -A tum signature default work")]
+    Signature {
+        #[command(subcommand)]
+        action: SignatureAction,
+    },
     /// Calendar / iMIP invite operations
     Calendar {
         #[command(subcommand)]
@@ -591,7 +595,18 @@ Examples:
 #[derive(Clone, Debug, Subcommand)]
 enum AccountAction {
     /// List the configured accounts, their backend and their state
-    List,
+    List {
+        /// Answer from the daemon's `account.list` instead of in process.
+        ///
+        /// The parity oracle of P2-U11: `mp account list` reads the
+        /// configuration and probes each store read-only in this process, and
+        /// the flag asks the daemon the same question, so the two outputs can
+        /// be compared byte for byte. It never falls back: with no daemon to
+        /// reach it exits 4. Hidden, and scoped to the one command that reads
+        /// it, since every other command reaches the daemon regardless.
+        #[arg(long, hide = true)]
+        daemon: bool,
+    },
 }
 
 /// Operator commands for the durable outbox (#0037).
@@ -748,6 +763,55 @@ enum ContactsAction {
     Rebuild,
     /// Show index statistics
     Stats,
+}
+
+/// `mp signature <action>`, over the daemon's `signature.*` methods.
+#[derive(Subcommand)]
+enum SignatureAction {
+    /// List the signatures, marking the account's default
+    List {
+        /// Print the daemon's answer as JSON {account, names, default}
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a signature's content
+    Show {
+        /// The signature's name
+        name: String,
+        /// Print the path of its file instead
+        #[arg(long)]
+        path: bool,
+    },
+    /// Create an empty signature and print the path of its file
+    New {
+        /// The signature's name
+        name: String,
+    },
+    /// Open a signature in $EDITOR
+    Edit {
+        /// The signature's name
+        name: String,
+    },
+    /// Rename a signature
+    Rename {
+        /// The signature's current name
+        old: String,
+        /// Its new name
+        new: String,
+    },
+    /// Delete a signature
+    Delete {
+        /// The signature's name
+        name: String,
+    },
+    /// Print the account's default signature, or set it, or clear it with --none
+    Default {
+        /// The signature to make the default
+        name: Option<String>,
+        /// Clear the default, so drafts carry no signature unless one is named
+        #[arg(long, conflicts_with = "name")]
+        none: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1494,7 +1558,7 @@ fn render_accounts(entries: &[mailypoppins::daemon::methods::account::AccountEnt
     out
 }
 
-/// `mp --daemon account list`: the daemon's answer, rendered locally.
+/// `mp account list --daemon`: the daemon's answer, rendered locally.
 async fn routed_account_list() -> Vec<mailypoppins::daemon::methods::account::AccountEntry> {
     let mut connection = daemon_connection().await;
     let result = daemon_call(&mut connection, "account.list", serde_json::json!({})).await;
@@ -3580,6 +3644,165 @@ async fn routed_config_show() -> Result<()> {
     cmd_config_show(&config, &path, &credentials, &signatures, &folders)
 }
 
+/// One `signature.*` call, its refusal raised as the daemon worded it.
+async fn signature_call(
+    connection: &mut mp_client::Connection,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value> {
+    daemon_try_call(connection, method, params)
+        .await
+        .map_err(|error| anyhow!("{}", error.message))
+}
+
+/// `mp signature list`: the names, the account's default marked.
+fn render_signature_listing(listing: &mp_protocol::signature::SignatureListing) -> String {
+    if listing.names.is_empty() {
+        return "No signatures (create one with `mp signature new <name>`)\n".to_string();
+    }
+    let mut out = String::new();
+    for name in &listing.names {
+        let marker = if listing.default.as_deref() == Some(name.as_str()) {
+            "  (default)"
+        } else {
+            ""
+        };
+        out.push_str(&format!("{name}{marker}\n"));
+    }
+    out
+}
+
+/// `mp signature <action>`: every listing and every change is the daemon's
+/// `signature.*`, the family the TUI's `cs` overlay and the desktop's
+/// Signatures dialog call; this process only prints, and runs `$EDITOR` on
+/// the file the daemon names.
+async fn routed_signature(account: &str, action: SignatureAction) -> Result<()> {
+    use mp_protocol::signature::{SignatureFile, SignatureListing};
+    let mut connection = daemon_connection().await;
+    let listing = |answer: serde_json::Value| -> Result<SignatureListing> {
+        serde_json::from_value(answer).context("reading the signature listing the daemon reported")
+    };
+    let file = |answer: serde_json::Value| -> Result<SignatureFile> {
+        serde_json::from_value(answer).context("reading the signature the daemon reported")
+    };
+    match action {
+        SignatureAction::List { json } => {
+            let answer = signature_call(
+                &mut connection,
+                "signature.list",
+                serde_json::json!({"account": account}),
+            )
+            .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&answer)?);
+            } else {
+                print!("{}", render_signature_listing(&listing(answer)?));
+            }
+        }
+        SignatureAction::Show { name, path } => {
+            let read = file(
+                signature_call(
+                    &mut connection,
+                    "signature.read",
+                    serde_json::json!({"name": name}),
+                )
+                .await?,
+            )?;
+            if path {
+                println!("{}", read.path);
+            } else if read.content.ends_with('\n') || read.content.is_empty() {
+                print!("{}", read.content);
+            } else {
+                println!("{}", read.content);
+            }
+        }
+        SignatureAction::New { name } => {
+            let created = file(
+                signature_call(
+                    &mut connection,
+                    "signature.create",
+                    serde_json::json!({"name": name}),
+                )
+                .await?,
+            )?;
+            println!("{}", created.path);
+        }
+        SignatureAction::Edit { name } => {
+            // The daemon names the file and this process runs the editor on
+            // it, as `mp edit` does for a draft.
+            let read = file(
+                signature_call(
+                    &mut connection,
+                    "signature.read",
+                    serde_json::json!({"name": name}),
+                )
+                .await?,
+            )?;
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "hx".to_string());
+            let status = std::process::Command::new(&editor)
+                .arg(&read.path)
+                .status()
+                .with_context(|| format!("running {editor}"))?;
+            if !status.success() {
+                return Err(anyhow!("{editor} exited with {status}"));
+            }
+            println!("{} Signature '{name}' edited", "\u{2713}".green());
+        }
+        SignatureAction::Rename { old, new } => {
+            signature_call(
+                &mut connection,
+                "signature.rename",
+                serde_json::json!({"account": account, "old": old, "new": new}),
+            )
+            .await?;
+            println!(
+                "{} Renamed signature '{old}' to '{new}'",
+                "\u{2713}".green()
+            );
+        }
+        SignatureAction::Delete { name } => {
+            signature_call(
+                &mut connection,
+                "signature.delete",
+                serde_json::json!({"account": account, "name": name}),
+            )
+            .await?;
+            println!("{} Deleted signature '{name}'", "\u{2713}".green());
+        }
+        SignatureAction::Default {
+            name: None,
+            none: false,
+        } => {
+            let answer = signature_call(
+                &mut connection,
+                "signature.list",
+                serde_json::json!({"account": account}),
+            )
+            .await?;
+            match listing(answer)?.default {
+                Some(name) => println!("{name}"),
+                None => println!("(none)"),
+            }
+        }
+        SignatureAction::Default { name, .. } => {
+            signature_call(
+                &mut connection,
+                "signature.set_default",
+                serde_json::json!({"account": account, "name": name}),
+            )
+            .await?;
+            match name {
+                Some(name) => println!(
+                    "{} Default signature of {account}: '{name}'",
+                    "\u{2713}".green()
+                ),
+                None => println!("{} {account} has no default signature", "\u{2713}".green()),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `mp config set-password`: the prompt is this process's terminal's, the value
 /// crosses the socket once, and nothing else about it is written here.
 async fn routed_set_password(which: &str, account: &str) -> Result<()> {
@@ -4103,9 +4326,21 @@ async fn main() -> Result<()> {
         eprintln!("{} signature migration: {e:#}", "⚠".yellow());
     }
 
+    // The TUI opens no secret: whether an account has its passwords and token
+    // is the daemon's `account.credentials`, and every send and sync is a
+    // daemon call. So a launch of it skips the two secret reads below, the
+    // backend's opening and the SMTP credential load, which every other
+    // command still runs for the lines they print.
+    let launches_tui = cli.command.is_none() && cli.selector.is_none();
+
     // Initialize the secrets backend (encrypted file by default, or OS keyring
     // if the user opted in via `secrets_backend = "keyring"` in config.toml).
-    if let Err(e) = mailypoppins::config::init_secrets_backend(&global_config) {
+    let secrets = if launches_tui {
+        Ok(())
+    } else {
+        mailypoppins::config::init_secrets_backend(&global_config)
+    };
+    if let Err(e) = secrets {
         match &e {
             mailypoppins::secrets::SecretsError::NotInitialized(_) => {
                 // Empty store at startup is fine -- `mp config init` or
@@ -4149,7 +4384,7 @@ async fn main() -> Result<()> {
     // are no credentials are part of what every command has always printed.
     // A Graph account sends through Graph and has no SMTP transport by design,
     // so it skips the load and its warning.
-    let _smtp_config = if account_config.auth_method == AuthMethod::Graph {
+    let _smtp_config = if launches_tui || account_config.auth_method == AuthMethod::Graph {
         None
     } else {
         Some(SmtpConfig::load(&account_config).unwrap_or_else(|e| {
@@ -4864,6 +5099,14 @@ async fn main() -> Result<()> {
             }
         },
 
+        Some(Commands::Signature { action }) => {
+            let acct = cli.account.clone();
+            let account = pick_account_named(&global_config, acct.as_deref())?
+                .name
+                .clone();
+            routed_signature(&account, action).await?;
+        }
+
         Some(Commands::Calendar { action }) => match action {
             CalendarAction::Rebuild => {
                 let acct = cli.account.clone();
@@ -5018,13 +5261,23 @@ async fn main() -> Result<()> {
                 .await?;
                 print!("{}", mailypoppins::draft_cmd::render_preview(&preview));
             } else {
-                // No file, no subcommand -> launch TUI
-                mailypoppins::tui::run(mailypoppins::daemon::client::tui_connector())?;
+                // No selector, no subcommand: the TUI, on the account `-A`
+                // names when it names one.
+                let account = match cli.account.as_deref() {
+                    Some(name) => {
+                        Some(pick_account_named(&global_config, Some(name))?.name.clone())
+                    }
+                    None => None,
+                };
+                mailypoppins::tui::run(
+                    mailypoppins::daemon::client::tui_connector(),
+                    account.as_deref(),
+                )?;
             }
         }
         Some(Commands::Account { action, .. }) => match action {
-            AccountAction::List => {
-                let entries = if cli.daemon {
+            AccountAction::List { daemon } => {
+                let entries = if daemon {
                     routed_account_list().await
                 } else {
                     mailypoppins::daemon::methods::account::entries(&global_config.accounts)

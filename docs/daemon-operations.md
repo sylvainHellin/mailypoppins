@@ -4,7 +4,7 @@ How to start, inspect, stop and recover the local daemon, and what it leaves on 
 The wire contract is [daemon-protocol.md](daemon-protocol.md); this file is the operator's half of it.
 
 Everything here ships in every build: P4-U1 removed the `daemon` cargo feature, so `cargo install --path .` and a plain `cargo build` both contain the daemon and `--features daemon` no longer exists.
-`mp daemon` and `mp account` are listed in `mp --help`, which `tests/daemon_read_only_methods.rs` asserts and `tests/cli_help_snapshot.rs` pins; only the debug `--daemon` flag stays hidden.
+`mp daemon` and `mp account` are listed in `mp --help`, which `tests/daemon_read_only_methods.rs` asserts and `tests/cli_help_snapshot.rs` pins; only the debug `--daemon` flag of `mp account list` stays hidden.
 
 ## The lifecycle commands
 
@@ -130,7 +130,7 @@ The table is what routes and through what:
 | `mp hooks list [--json]` | one `hook.list` per account, in configuration order | #0135 |
 | `mp hooks test <hook> <selector> [--mailbox] [--json]` | `hook.test` | #0135 |
 | `mp hooks replay <hook> <selector> [--mailbox]` | `hook.replay` | #0135 |
-| `mp account list` | `account.list`, behind `--daemon` | P2-U11 |
+| `mp account list` | `account.list`, behind `mp account list --daemon` | P2-U11 |
 | `mp` (the TUI) | `state.bootstrap`, once at startup, on a session that stays open for the run | P5-U2 |
 | `mp`'s mailbox list, sidebar counts and preview body | `message.list_stream` / `draft.list` per mailbox open, `mailbox.list` per recount, `message.get` per cursor move | P5-U4 |
 | `mp`'s five message mutations (`a`, `d`, `u`, `*`, the quick move) | `message.archive`, `message.delete`, `message.set_read`, `message.set_flag`, `message.move`, all with `settle: false`; the daemon drains the queued ops 1.5 s after the account's last one (#0133) | P5-U6 |

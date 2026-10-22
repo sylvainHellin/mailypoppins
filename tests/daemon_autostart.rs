@@ -91,7 +91,7 @@ fn root() -> TempDir {
 
 /// The command every auto-start case runs: routed today, harmless on an empty
 /// config, and it exits 0 with `No accounts configured`.
-const ROUTED: [&str; 3] = ["--daemon", "account", "list"];
+const ROUTED: [&str; 3] = ["account", "list", "--daemon"];
 
 // ---------------------------------------------------------------------------
 // 1. It starts one

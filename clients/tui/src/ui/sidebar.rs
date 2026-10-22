@@ -267,9 +267,7 @@ mod tests {
                 name: name.to_string(),
                 ..Default::default()
             },
-            imap_config: None,
-            smtp_config: None,
-            graph_config: None,
+            credentials: None,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             mailboxes: Vec::new(),

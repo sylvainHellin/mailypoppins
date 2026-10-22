@@ -905,12 +905,76 @@ pub fn resolve_date(
 // App types
 // ---------------------------------------------------------------------------
 
+/// Whether an account can reach its server, as the daemon's
+/// `account.credentials` reports it: the presence of a password or a token,
+/// never its value.
+///
+/// The TUI loaded every account's IMAP and SMTP configuration itself before
+/// the daemon leftovers' follow-up, password and OAuth2 token included, only
+/// to ask whether the load succeeded. The secrets are the daemon's; this is
+/// the answer to that one question.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Credentials {
+    /// The account can log in to IMAP: an IMAP password, the SMTP password
+    /// it falls back to, or an OAuth2 token that is cached.
+    pub imap: bool,
+    /// The account can submit over SMTP: an SMTP password or a cached OAuth2
+    /// token.
+    pub smtp: bool,
+}
+
+impl Credentials {
+    /// What one `account.credentials` entry says the account can use.
+    ///
+    /// An expired token counts as present, because the daemon refreshes it on
+    /// its next use; a token that is not cached or does not read does not.
+    pub fn from_wire(entry: &mp_protocol::account::AccountCredential) -> Self {
+        use mp_protocol::account::TokenState;
+        match entry.auth_method.as_str() {
+            "password" => {
+                let smtp = entry.smtp_password.unwrap_or(false);
+                Self {
+                    imap: entry.imap_password.unwrap_or(false) || smtp,
+                    smtp,
+                }
+            }
+            "oauth2" => {
+                let usable = matches!(
+                    entry.token,
+                    Some(TokenState::Valid) | Some(TokenState::Expired)
+                );
+                Self {
+                    imap: usable,
+                    smtp: usable,
+                }
+            }
+            // A Graph account has neither transport; `graph_configured` is
+            // its question.
+            _ => Self::default(),
+        }
+    }
+}
+
+/// Whether a Graph account's configuration names the app registration it signs
+/// in with: `[accounts.oauth2]` with a client id and a tenant id. Read from the
+/// configuration alone, which is all the TUI's former `GraphConfig::load`
+/// looked at.
+pub fn graph_configured(account: &mp_core::config::AccountConfig) -> bool {
+    account.auth_method == mp_core::config::AuthMethod::Graph
+        && account
+            .oauth2
+            .as_ref()
+            .is_some_and(|o| !o.client_id.is_empty() && !o.tenant_id.is_empty())
+}
+
 /// Per-account TUI state (config, caches, cursor positions).
 pub struct AccountState {
     pub account_config: mp_core::config::AccountConfig,
-    pub imap_config: Option<mp_core::config::ImapConfig>,
-    pub smtp_config: Option<mp_core::config::SmtpConfig>,
-    pub graph_config: Option<mp_core::config::GraphConfig>,
+    /// What `account.credentials` answered for this account, `None` until it
+    /// lands (the account's background open asks for it, P5-U4's thread) or
+    /// when it could not be asked. Unknown is not refused client-side: the
+    /// daemon decides, and words its own refusal.
+    pub credentials: Option<Credentials>,
     pub archive_server_name: String,
     pub drafts_dir: Option<PathBuf>,
     pub mailboxes: Vec<MailboxInfo>,
@@ -961,10 +1025,6 @@ pub struct AccountState {
 
 impl AccountState {
     pub fn new(account_config: mp_core::config::AccountConfig) -> Self {
-        let imap_config = mp_core::config::ImapConfig::load(&account_config).ok();
-        let smtp_config = mp_core::config::SmtpConfig::load(&account_config).ok();
-        let graph_config = mp_core::config::GraphConfig::load(&account_config).ok();
-
         let archive_server_name = account_config
             .mailboxes
             .archive
@@ -994,9 +1054,7 @@ impl AccountState {
 
         Self {
             account_config,
-            imap_config,
-            smtp_config,
-            graph_config,
+            credentials: None,
             archive_server_name,
             drafts_dir,
             mailboxes,
@@ -1018,8 +1076,7 @@ impl AccountState {
     }
 
     /// A minimal account named `name` for tests: no backend, no mailboxes,
-    /// already open. A struct literal rather than [`AccountState::new`], which
-    /// reads the user's config and keyring.
+    /// already open. A struct literal rather than [`AccountState::new`].
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests(name: &str) -> Self {
         Self {
@@ -1027,9 +1084,7 @@ impl AccountState {
                 name: name.to_string(),
                 ..Default::default()
             },
-            imap_config: None,
-            smtp_config: None,
-            graph_config: None,
+            credentials: None,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             mailboxes: Vec::new(),
@@ -1052,6 +1107,25 @@ impl AccountState {
 
     pub fn is_graph(&self) -> bool {
         self.account_config.auth_method == mp_core::config::AuthMethod::Graph
+    }
+
+    /// Whether the account can sync over IMAP, as far as this client knows:
+    /// never for a Graph account, and yes while `account.credentials` has not
+    /// answered, since the daemon is the one that refuses.
+    pub fn has_imap(&self) -> bool {
+        !self.is_graph() && self.credentials.is_none_or(|c| c.imap)
+    }
+
+    /// Whether the account can submit over SMTP, on the same terms as
+    /// [`Self::has_imap`].
+    pub fn has_smtp(&self) -> bool {
+        !self.is_graph() && self.credentials.is_none_or(|c| c.smtp)
+    }
+
+    /// Whether the account is a Graph account whose app registration is
+    /// configured.
+    pub fn has_graph(&self) -> bool {
+        graph_configured(&self.account_config)
     }
 }
 
@@ -1107,8 +1181,8 @@ pub enum BgResult {
     ///
     /// The payload is `{account, contacts, kept, saved, cache_path}`, which is
     /// everything the pre-daemon `App::refresh_contacts` rendered: `saved`
-    /// decides between the refreshed line and the two refusals, and the
-    /// written cache is the file the view reloads. Carried raw rather than
+    /// decides between the refreshed line and the two refusals, and a written
+    /// index is what the view asks the daemon for again. Carried raw rather than
     /// pre-rendered because the three outcomes have three status levels and
     /// one of them also replaces the loaded index; `tui::bg` is where that
     /// presentation lives.
@@ -1118,6 +1192,14 @@ pub enum BgResult {
         /// correspondents into the view.
         account_index: usize,
         result: Result<serde_json::Value, String>,
+    },
+    /// The active account's contact index, as `contact.search` answered an
+    /// [`Action::LoadContacts`]. Dropped unless `generation` is the view's
+    /// latest request and `account_index` still the active account.
+    ContactsLoaded {
+        account_index: usize,
+        generation: u64,
+        result: Result<crate::queries::ContactsAnswer, String>,
     },
     /// A server-only search hit was fetched and ingested into the store
     /// (#0104). `message_id` names the hit (indices shift when another hit is
@@ -1156,9 +1238,15 @@ pub enum BgResult {
     /// every sync completion and read nowhere; what a badge would read today
     /// is the bootstrap snapshot's `outbox` section and
     /// `Change::OutboxCounts`, both of which are on the wire already.
+    ///
+    /// `credentials` is the account's `account.credentials` answer, asked on
+    /// the same thread before the counts, so it lands before the auto-fetch
+    /// decides whether the account has a server to reach; `None` when the
+    /// daemon could not be asked.
     AccountOpened {
         account_index: usize,
         counts: Vec<usize>,
+        credentials: Option<Credentials>,
     },
 }
 
@@ -1660,11 +1748,17 @@ pub struct MailView {
 /// indexes into `matches`; the detail pane shows `index.contacts[matches[list_index]]`.
 #[derive(Debug, Clone, Default)]
 pub struct ContactsView {
-    /// True once the on-disk cache load has been attempted (whether or not a
-    /// cache existed). Gates the lazy first-switch load.
+    /// True once the daemon has answered for the active account's index
+    /// (whether or not it held a contact). Gates the lazy first-switch load.
     pub loaded: bool,
-    /// The loaded contact index for the active account. `None` means no cache
-    /// yet (the pane shows a "run rebuild" hint).
+    /// True while a `contact.search` for the index is in flight.
+    pub loading: bool,
+    /// Bumped on every request; a `BgResult::ContactsLoaded` carrying another
+    /// value is stale and dropped. Kept across an account switch, so an answer
+    /// for the previous account cannot pass for a new request's.
+    pub generation: u64,
+    /// The active account's contact index, as `contact.search` ranked it.
+    /// `None` means no contact yet (the pane shows a "run rebuild" hint).
     pub index: Option<mp_core::contacts::ContactIndex>,
     /// Incremental fuzzy-filter query (edited while `searching`).
     pub query: String,
@@ -1965,6 +2059,13 @@ pub enum Action {
     CopyContactEmail {
         address: String,
     },
+    /// Read the active account's contact index off the UI thread, through
+    /// `contact.search` with an empty query: the Contacts view's first show,
+    /// a `contact.changed`, and a compose wizard that wants completion. The
+    /// answer lands as [`BgResult::ContactsLoaded`] carrying `generation`.
+    LoadContacts {
+        generation: u64,
+    },
     /// Rebuild the active account's contact index (#0033's `r` key), as the
     /// `contact.rebuild` operation it is since #0126.
     ///
@@ -2088,6 +2189,7 @@ impl Action {
             | Action::Rsvp { .. }
             | Action::ComposeToContact { .. }
             | Action::CopyContactEmail { .. }
+            | Action::LoadContacts { .. }
             | Action::RefreshContacts
             | Action::AttachFileToDraft { .. } => false,
         }

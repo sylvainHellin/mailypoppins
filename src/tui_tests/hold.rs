@@ -116,7 +116,7 @@ use mp_protocol::send::{HoldListing, HoldStatus};
 use mp_protocol::state::Bootstrap;
 use mp_protocol::EventEnvelope;
 
-use crate::config::{AccountConfig, SmtpConfig};
+use crate::config::AccountConfig;
 use crate::daemon::dispatch::{CancelScope, MethodKind};
 use crate::daemon::methods::send::SEND_METHOD_SPECS;
 use crate::tui::app::{build_mailboxes, Action, App, MailboxKind, Message, StatusLevel};
@@ -688,24 +688,15 @@ impl Fixture {
         Fixture { app, _data: data }
     }
 
-    /// Open the Drafts mailbox and give the account a transport, which is what
-    /// `send_approved` refuses without.
+    /// Open the Drafts mailbox. The account has no `account.credentials`
+    /// answer, which `send_approved` leaves to the daemon rather than refusing
+    /// as "SMTP not configured", so the transport check lets the call through.
     fn on_drafts(&mut self) {
         self.app.active_mailbox = self
             .app
             .find_mailbox_by_kind(MailboxKind::Drafts)
             .expect("the Drafts mailbox is one of the four roles");
-        // `SmtpConfig` holds a password and deliberately has no `Debug`, so it
-        // is built by hand rather than defaulted.
-        self.app.smtp_config = Some(SmtpConfig {
-            host: "smtp.example.com".to_string(),
-            port: 587,
-            username: "me@example.com".to_string(),
-            password: "secret".to_string(),
-            default_from: "me@example.com".to_string(),
-            accept_invalid_certs: false,
-            auth_method: crate::config::AuthMethod::Password,
-        });
+        assert!(self.app.has_smtp(), "an unanswered account is not refused");
     }
 }
 

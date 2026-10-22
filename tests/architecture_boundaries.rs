@@ -763,6 +763,213 @@ fn the_path_scanner_reads_calls_and_ignores_imports_comments_and_tests() {
 }
 
 // ---------------------------------------------------------------------------
+// The TUI's direct reaches (the daemon leftovers' TUI follow-up, 2026-10-22)
+// ---------------------------------------------------------------------------
+
+/// What a daemon client may not do in its own process, as the symbols that do
+/// it, scanned over the TUI crate's production code.
+///
+/// The crate boundary above keeps the engine modules out of `mp-tui`; it
+/// cannot keep out the parts of `mp-core` that read a secret or write a file
+/// the daemon owns, because a client links `mp-core` for its types. Four
+/// groups, each of which the TUI did until the daemon leftovers' review
+/// named them:
+///
+/// - **a secret, loaded**: the three transport configurations carry a
+///   password or an OAuth2 token, and whether an account has one is
+///   `account.credentials`' answer;
+/// - **the contact cache file**: the index is `contact.search`'s;
+/// - **the signature files and the default's state file**: `signature.*`;
+/// - **a draft file, written**: `draft.create`, `draft.approve`,
+///   `draft.attach` and the rest of the family. `fs::write(` is in this group
+///   because a draft is a file like any other, and the rows that write one
+///   that is not a draft say so in [`TUI_DIRECT_RESIDUE`].
+const TUI_DIRECT_REACHES: [&str; 22] = [
+    // a secret
+    "ImapConfig::load",
+    "SmtpConfig::load",
+    "GraphConfig::load",
+    "get_secret(",
+    "load_or_refresh_token",
+    // the contact cache
+    "load_cache(",
+    "save_cache(",
+    "save_rebuilt_cache(",
+    "cache_path(",
+    // the signature files
+    "signatures::",
+    // a draft file
+    "mark_as_approved(",
+    "mark_as_draft(",
+    "append_draft_attachment(",
+    "remove_draft_attachment(",
+    "attach_checked(",
+    "rewrite_draft_recipients(",
+    "rewrite_draft_signature(",
+    "set_draft_id(",
+    "set_draft_signature_name(",
+    "new_draft_with_body(",
+    "write_atomic(",
+    "fs::write(",
+];
+
+/// Every direct reach left in the TUI's production code, with the reason it
+/// is still there: `(file under clients/tui/src, needle, reason)`, sorted.
+///
+/// The daemon leftovers' follow-up struck the rest: the credential loads of
+/// `AccountState::new` (now `account.credentials`), the four contact-cache
+/// reads (`contact.search`), the compose wizard's signature listing and file
+/// creation (`signature.list`, `signature.read`, `signature.create`), the
+/// wizard's own draft writer (`draft.create`), `x`'s approval
+/// (`draft.validate`, `draft.approve`) and the attach prompt's append
+/// (`draft.attach`). A row that goes away is struck in the same commit.
+const TUI_DIRECT_RESIDUE: [(&str, &str, &str); 4] = [
+    (
+        "actions.rs",
+        "fs::write(",
+        "the HTML rendition and the invitation's .ics, written into this process's private \
+         temp area for a browser or a calendar app to open; neither is a draft",
+    ),
+    (
+        "actions.rs",
+        "rewrite_draft_recipients(",
+        "the compose wizard's header edit of an existing draft (ce): no daemon method rewrites \
+         a draft's headers yet, and the desktop's recipients dialog makes the same write",
+    ),
+    (
+        "actions.rs",
+        "rewrite_draft_signature(",
+        "the same header edit's signature re-splice, which goes with the method that takes \
+         over the header rewrite",
+    ),
+    (
+        "prefs.rs",
+        "write_atomic(",
+        "tui.json, the TUI's own per-account list-mode preferences, which no other process \
+         reads or owns",
+    ),
+];
+
+/// Every `(file, needle)` pair the TUI's production code carries.
+fn tui_direct_reaches(root: &Path) -> BTreeSet<(String, String)> {
+    let test_only = test_only_files(root);
+    let mut found = BTreeSet::new();
+    for file in rust_files(root) {
+        if test_only.contains(&file) {
+            continue;
+        }
+        let rel = relative(root, &file);
+        let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
+        let source = strip_test_modules(&strip_line_comments(&source));
+        for needle in TUI_DIRECT_REACHES {
+            if source.contains(needle) {
+                found.insert((rel.clone(), needle.to_string()));
+            }
+        }
+    }
+    found
+}
+
+/// The gate: the TUI loads no secret, reads no contact cache, touches no
+/// signature file and writes no draft, outside the rows of
+/// [`TUI_DIRECT_RESIDUE`], and every row there is still needed.
+#[test]
+fn the_tui_reaches_no_secret_cache_signature_or_draft_file_outside_the_residue() {
+    let root = repo_root().join(CLIENT_ROOT);
+    let actual = tui_direct_reaches(&root);
+    let expected: BTreeSet<(String, String)> = TUI_DIRECT_RESIDUE
+        .iter()
+        .map(|(file, needle, _)| (file.to_string(), needle.to_string()))
+        .collect();
+    let added: Vec<_> = actual.difference(&expected).collect();
+    let removed: Vec<_> = expected.difference(&actual).collect();
+    if added.is_empty() && removed.is_empty() {
+        return;
+    }
+    let mut report = String::new();
+    for (file, needle) in &added {
+        report.push_str(&format!(
+            "  new direct reach: {CLIENT_ROOT}/{file} uses `{needle}`\n"
+        ));
+    }
+    for (file, needle) in &removed {
+        report.push_str(&format!(
+            "  direct reach gone: {CLIENT_ROOT}/{file} no longer uses `{needle}`\n"
+        ));
+    }
+    panic!(
+        "the TUI's direct reaches moved ({} in the tree, {} in TUI_DIRECT_RESIDUE):\n{report}\n\
+         A secret, the contact cache, a signature file and a draft file are the daemon's: a \
+         new reach belongs behind its method, and a reach that went away belongs struck from \
+         TUI_DIRECT_RESIDUE in the same commit.",
+        actual.len(),
+        expected.len(),
+    );
+}
+
+/// The residue names scanned needles and real files, gives every row a
+/// reason, and is sorted.
+#[test]
+fn every_tui_direct_residue_row_names_a_scanned_needle_and_a_reason() {
+    let root = repo_root().join(CLIENT_ROOT);
+    let mut previous: Option<(&str, &str)> = None;
+    for (file, needle, reason) in TUI_DIRECT_RESIDUE {
+        assert!(
+            TUI_DIRECT_REACHES.contains(&needle),
+            "TUI_DIRECT_RESIDUE names `{needle}` (from {file}), which the scan does not look for"
+        );
+        assert!(
+            root.join(file).is_file(),
+            "TUI_DIRECT_RESIDUE names {file}, which is not under {CLIENT_ROOT}"
+        );
+        assert!(
+            reason.len() > 20,
+            "TUI_DIRECT_RESIDUE's entry for {file} `{needle}` has no usable reason: {reason:?}"
+        );
+        if let Some(previous) = previous {
+            assert!(
+                previous < (file, needle),
+                "TUI_DIRECT_RESIDUE is not sorted: {previous:?} precedes {:?}",
+                (file, needle)
+            );
+        }
+        previous = Some((file, needle));
+    }
+}
+
+/// The scanner reads a reach in production code and ignores one in a test
+/// module, a test-only file and a comment.
+#[test]
+fn the_direct_reach_scanner_ignores_tests_and_comments() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(
+        root.join("lib.rs"),
+        "mod real;\n#[cfg(test)]\nmod only_tests;\n",
+    )
+    .expect("write");
+    fs::write(
+        root.join("real.rs"),
+        "fn f(a: &A) { let _ = mp_core::config::SmtpConfig::load(a); }\n\
+         // mp_core::contacts::load_cache(root) is named in a comment\n\
+         #[cfg(test)]\n\
+         mod tests {\n    fn t() { mp_core::signatures::write(\"x\", \"\"); }\n}\n",
+    )
+    .expect("write");
+    fs::write(
+        root.join("only_tests.rs"),
+        "fn t() { std::fs::write(\"/tmp/x\", \"\").unwrap(); }\n",
+    )
+    .expect("write");
+    let found = tui_direct_reaches(root);
+    let expected: BTreeSet<(String, String)> = [("real.rs", "SmtpConfig::load")]
+        .into_iter()
+        .map(|(f, n)| (f.to_string(), n.to_string()))
+        .collect();
+    assert_eq!(found, expected);
+}
+
+// ---------------------------------------------------------------------------
 // The CLI's engine touches (#0123, P4-U15)
 // ---------------------------------------------------------------------------
 

@@ -124,9 +124,6 @@ pub struct App {
     /// pane is focused. `Some` means armed; the key handler and the list
     /// renderer both read exactly that.
     pub attach_file_input: Option<String>,
-    pub imap_config: Option<mp_core::config::ImapConfig>,
-    pub smtp_config: Option<mp_core::config::SmtpConfig>,
-    pub graph_config: Option<mp_core::config::GraphConfig>,
     pub archive_server_name: String,
     pub drafts_dir: Option<PathBuf>,
     pub account_config: mp_core::config::AccountConfig,
@@ -389,9 +386,6 @@ impl App {
             zoomed: false,
             jump_date_input: None,
             attach_file_input: None,
-            imap_config: None,
-            smtp_config: None,
-            graph_config: None,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             account_config: mp_core::config::AccountConfig::default(),
@@ -473,9 +467,6 @@ impl App {
             zoomed: false,
             jump_date_input: None,
             attach_file_input: None,
-            imap_config: None,
-            smtp_config: None,
-            graph_config: None,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             account_config: mp_core::config::AccountConfig::default(),
@@ -554,9 +545,6 @@ impl App {
             self.selection = acct.selection.clone();
             self.email_cache = acct.email_cache.clone();
             self.search_query = acct.search_query.clone();
-            self.imap_config = acct.imap_config.clone();
-            self.smtp_config = acct.smtp_config.clone();
-            self.graph_config = acct.graph_config.clone();
             self.archive_server_name = acct.archive_server_name.clone();
             self.drafts_dir = acct.drafts_dir.clone();
             self.account_config = acct.account_config.clone();
@@ -607,40 +595,100 @@ impl App {
 
     // -- Contacts view (#0033) -------------------------------------------
 
-    /// Lazily load the active account's contact index from the on-disk cache
-    /// the first time the Contacts view is shown. The cache load is a single
-    /// JSON read (instant); a full rebuild is only triggered by the manual
-    /// refresh key. Mirrors the compose wizard's `load_cache` precedent, so the
-    /// UI thread is never blocked by a mailbox walk here.
+    /// Ask the daemon for the active account's contact index the first time
+    /// the Contacts view is shown, off the UI thread ([`Action::LoadContacts`]).
+    /// The index is `contact.search`'s with an empty query: the cache file is
+    /// the daemon's, and a search with no index builds one there. A rebuild is
+    /// only triggered by the manual refresh key.
     pub fn ensure_contacts_loaded(&mut self) {
-        if self.contacts_view.loaded {
+        if self.contacts_view.loaded || self.contacts_view.loading {
             return;
         }
-        let root = mp_core::config::account_dir(&self.account_config.name);
-        self.contacts_view.index = mp_core::contacts::load_cache(&root).ok().flatten();
-        self.contacts_view.loaded = true;
         self.contacts_view.list_index = 0;
-        self.recompute_contact_matches();
+        self.request_contacts();
     }
 
-    /// The active account's index changed (`contact.changed`): read it again
-    /// now when the Contacts view is showing, keeping the query, and on the
-    /// next show otherwise.
+    /// Queue one [`Action::LoadContacts`] for the active account, superseding
+    /// any request still in flight.
+    pub fn request_contacts(&mut self) {
+        self.contacts_view.generation += 1;
+        self.contacts_view.loading = true;
+        let generation = self.contacts_view.generation;
+        self.push_action(Action::LoadContacts { generation });
+    }
+
+    /// The active account's index changed (`contact.changed`, or a rebuild
+    /// this client ran settled): ask for it again now when the Contacts view
+    /// or a compose wizard is showing, keeping the query, and on the next
+    /// show otherwise.
     pub fn reload_contacts(&mut self) {
         self.contacts_view.loaded = false;
-        if self.view == View::Contacts {
-            let root = mp_core::config::account_dir(&self.account_config.name);
-            self.contacts_view.index = mp_core::contacts::load_cache(&root).ok().flatten();
-            self.contacts_view.loaded = true;
-            self.recompute_contact_matches();
+        if self.view == View::Contacts || self.compose_wizard().is_some() {
+            self.request_contacts();
         }
     }
 
-    /// Force the contact index to reload from the active account's cache
-    /// (invoked when the account changes while Contacts state is already
-    /// loaded, so the pane never shows a stale account's contacts).
+    /// The index a compose wizard completes recipients from: the one the
+    /// Contacts view holds once the daemon has answered, else `None` with a
+    /// request queued, which fills the wizard when it lands.
+    pub fn compose_contacts(&mut self) -> Option<mp_core::contacts::ContactIndex> {
+        if self.contacts_view.loaded {
+            return self.contacts_view.index.clone();
+        }
+        if !self.contacts_view.loading {
+            self.request_contacts();
+        }
+        None
+    }
+
+    /// Land a `contact.search` answer for the active account: the view's
+    /// index and matches, an open compose wizard's completion, and the cache
+    /// guard's refusal of a build the search ran, on the status line as the
+    /// CLI prints it on stderr.
+    pub fn land_contacts(
+        &mut self,
+        account_index: usize,
+        generation: u64,
+        result: Result<crate::queries::ContactsAnswer, String>,
+    ) {
+        if account_index != self.active_account || generation != self.contacts_view.generation {
+            return;
+        }
+        self.contacts_view.loading = false;
+        self.contacts_view.loaded = true;
+        match result {
+            Ok(answer) => {
+                if let Some(line) = answer.refused.as_ref().and_then(|refused| {
+                    mp_client::format::refused_rebuild_line(
+                        &refused.saved,
+                        refused.contacts,
+                        refused.kept,
+                    )
+                }) {
+                    self.set_status_level(line, StatusLevel::Warning);
+                }
+                self.contacts_view.index = answer.index;
+            }
+            Err(e) => {
+                self.set_status_level(format!("Contacts: {e}"), StatusLevel::Error);
+            }
+        }
+        self.recompute_contact_matches();
+        let index = self.contacts_view.index.clone();
+        if let Some(wizard) = self.compose_wizard_mut() {
+            wizard.contacts = index;
+        }
+    }
+
+    /// Empty the Contacts view when the account changes, so the pane never
+    /// shows a stale account's contacts; the next show asks again. The request
+    /// counter survives, so an answer still in flight for the previous account
+    /// is dropped when it lands.
     pub fn reset_contacts_view(&mut self) {
-        self.contacts_view = ContactsView::default();
+        self.contacts_view = ContactsView {
+            generation: self.contacts_view.generation,
+            ..ContactsView::default()
+        };
     }
 
     // The manual refresh key's rebuild is `Action::RefreshContacts` and
@@ -943,9 +991,30 @@ impl App {
         &self.account_config.name
     }
 
+    /// Whether the active account is a Graph account with its app
+    /// registration configured.
     pub fn is_graph(&self) -> bool {
-        self.graph_config.is_some()
-            && self.account_config.auth_method == mp_core::config::AuthMethod::Graph
+        graph_configured(&self.account_config)
+    }
+
+    /// What `account.credentials` answered for the active account, `None`
+    /// until it lands.
+    pub fn active_credentials(&self) -> Option<Credentials> {
+        self.accounts
+            .get(self.active_account)
+            .and_then(|acct| acct.credentials)
+    }
+
+    /// [`AccountState::has_imap`] for the active account.
+    pub fn has_imap(&self) -> bool {
+        self.account_config.auth_method != mp_core::config::AuthMethod::Graph
+            && self.active_credentials().is_none_or(|c| c.imap)
+    }
+
+    /// [`AccountState::has_smtp`] for the active account.
+    pub fn has_smtp(&self) -> bool {
+        self.account_config.auth_method != mp_core::config::AuthMethod::Graph
+            && self.active_credentials().is_none_or(|c| c.smtp)
     }
 
     pub fn account_index_by_from(&self, from: &str) -> usize {
@@ -1004,6 +1073,24 @@ impl App {
 
     pub fn find_mailbox_by_kind(&self, kind: MailboxKind) -> Option<usize> {
         self.mailboxes.iter().position(|m| m.kind == kind)
+    }
+
+    /// Make the account named `name` the active one before the first frame,
+    /// which is `mp -A <account>` with no subcommand. The name is matched the
+    /// way the CLI matches `-A`, ignoring case; a name no account carries
+    /// leaves the first account active and answers `false`.
+    pub fn open_on_account(&mut self, name: &str) -> bool {
+        match self
+            .accounts
+            .iter()
+            .position(|acct| acct.account_config.name.eq_ignore_ascii_case(name))
+        {
+            Some(idx) => {
+                self.switch_account(idx);
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn switch_account(&mut self, idx: usize) {

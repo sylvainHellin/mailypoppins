@@ -5375,6 +5375,10 @@ mod tests {
         for view in [View::Contacts, View::Calendar] {
             let mut app = app_with_mailboxes();
             app.switch_view(view);
+            // The Contacts view's first show asks the daemon for its index;
+            // what is asserted below is what the keys queue after it.
+            app.pending_actions
+                .retain(|a| !matches!(a, Action::LoadContacts { .. }));
             let before = app.active_mailbox;
 
             // Digit jump (a Global mail action) is swallowed.
@@ -5460,6 +5464,133 @@ mod tests {
         app.view = View::Contacts;
         app.recompute_contact_matches();
         app
+    }
+
+    /// The generation of the one `LoadContacts` queued, failing if there is
+    /// none or more than one.
+    fn queued_contact_load(app: &App) -> u64 {
+        let loads: Vec<u64> = app
+            .pending_actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::LoadContacts { generation } => Some(*generation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(loads.len(), 1, "one contact.search queued: {loads:?}");
+        loads[0]
+    }
+
+    /// The Contacts view asks the daemon for the account's index on its first
+    /// show rather than reading the cache file: a file on disk is not what the
+    /// pane shows, the daemon's answer is, a stale answer is dropped, and an
+    /// answer for the account the user left does not land on the new one.
+    #[test]
+    fn the_contacts_view_shows_the_daemons_index_and_not_the_cache_file() {
+        let _data = mp_core::config::test_env::TestDataDir::new();
+        let mut app = app_with_mailboxes();
+        let root = mp_core::config::account_dir(&app.account_config.name);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut on_disk = std::collections::HashMap::new();
+        let cached = contact("cached@disk.example", "On Disk", 9);
+        on_disk.insert(cached.address.clone(), cached);
+        mp_core::contacts::save_cache(
+            &root,
+            &mp_core::contacts::ContactIndex {
+                account: app.account_config.name.clone(),
+                contacts: on_disk,
+                built_at: String::new(),
+            },
+        )
+        .unwrap();
+
+        app.switch_view(View::Contacts);
+        assert!(app.contacts_view.index.is_none(), "no file was read");
+        assert!(app.contacts_view.loading);
+        let first = queued_contact_load(&app);
+
+        let answer = |address: &str| {
+            crate::queries::decode_contacts(
+                "test",
+                &serde_json::json!({"contacts": [{
+                    "address": address, "display_name": "", "sent_to": 1,
+                    "sent_cc": 0, "received": 0, "first_seen": "", "last_seen": "",
+                    "score": 1,
+                }]}),
+            )
+        };
+        // A `contact.changed` supersedes the first request.
+        app.pending_actions.clear();
+        app.reload_contacts();
+        let second = queued_contact_load(&app);
+        assert!(second > first);
+        app.land_contacts(app.active_account, first, Ok(answer("old@daemon.example")));
+        assert!(
+            app.contacts_view.index.is_none(),
+            "a stale answer is dropped"
+        );
+        app.land_contacts(app.active_account, second, Ok(answer("ada@daemon.example")));
+        assert_eq!(
+            app.contacts_view.matches,
+            vec!["ada@daemon.example".to_string()]
+        );
+        assert!(app.contacts_view.loaded && !app.contacts_view.loading);
+
+        // An account switch empties the view; an answer still in flight for
+        // the account that was left is dropped.
+        app.pending_actions.clear();
+        app.reset_contacts_view();
+        app.ensure_contacts_loaded();
+        let third = queued_contact_load(&app);
+        assert!(third > second, "the request counter survives the reset");
+        app.land_contacts(
+            app.active_account,
+            second,
+            Ok(answer("late@daemon.example")),
+        );
+        assert!(app.contacts_view.index.is_none());
+    }
+
+    /// `mp -A <account>` opens the TUI on that account, matched as the CLI
+    /// matches `-A`; a name no account carries leaves the first one active.
+    #[test]
+    fn the_tui_opens_on_the_account_dash_a_names() {
+        let mut app = App::default_for_tests();
+        app.accounts = vec![
+            crate::app::AccountState::for_tests("home"),
+            crate::app::AccountState::for_tests("work"),
+        ];
+        app.load_from_account(0);
+        assert!(!app.open_on_account("nobody"));
+        assert_eq!(app.active_account, 0);
+        assert!(app.open_on_account("Work"));
+        assert_eq!(app.active_account, 1);
+        assert_eq!(app.account_config.name, "work");
+    }
+
+    /// The cache guard's refusal of the build a search ran is said on the
+    /// status line, as the CLI says it on stderr, and the kept index shows.
+    #[test]
+    fn a_refused_implicit_build_is_said_on_the_status_line() {
+        let mut app = app_with_mailboxes();
+        app.switch_view(View::Contacts);
+        let generation = queued_contact_load(&app);
+        let answer = crate::queries::decode_contacts(
+            "test",
+            &serde_json::json!({
+                "contacts": [{"address": "kept@example.com"}],
+                "rebuild": {"saved": "refused_shrunk", "contacts": 1, "kept": 10},
+            }),
+        );
+        app.land_contacts(app.active_account, generation, Ok(answer));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Contacts rebuild found only 1, kept 10 cached")
+        );
+        assert_eq!(
+            app.contacts_view.matches,
+            vec!["kept@example.com".to_string()]
+        );
     }
 
     /// The fuzzy-search input filters the contact list at the App level, and

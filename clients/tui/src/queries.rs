@@ -429,6 +429,94 @@ pub fn message_ics(q: &dyn Queries, account: &str, msg: MessageRef) -> Result<Op
 }
 
 // ---------------------------------------------------------------------------
+// Credentials and contacts (the daemon leftovers' TUI follow-up)
+// ---------------------------------------------------------------------------
+
+/// Whether `account` can reach its server, through `account.credentials`:
+/// the presence of its passwords and token, never their value.
+pub fn account_credentials(q: &dyn Queries, account: &str) -> Result<crate::app::Credentials> {
+    let answer = q.call(
+        "account.credentials",
+        serde_json::json!({ "account": account }),
+    )?;
+    let answer: mp_protocol::account::AccountCredentials = serde_json::from_value(answer)
+        .map_err(|e| anyhow::anyhow!("reading account.credentials: {e}"))?;
+    answer
+        .accounts
+        .iter()
+        .find(|entry| entry.account == account)
+        .map(crate::app::Credentials::from_wire)
+        .ok_or_else(|| anyhow::anyhow!("account.credentials did not name {account}"))
+}
+
+/// How many rows one `contact.search` asks for when the TUI lists an
+/// account's whole index: the Contacts view shows every contact, and the
+/// compose wizard's completion ranks over all of them.
+pub const CONTACT_INDEX_LIMIT: u64 = u32::MAX as u64;
+
+/// An account's contact index as the daemon ranks it, and the build the cache
+/// guard refused when the search had to build one.
+#[derive(Clone, Debug)]
+pub struct ContactsAnswer {
+    /// Every contact, keyed by address; `None` when the index holds none, which
+    /// the Contacts view renders as "press r to build the index".
+    pub index: Option<mp_core::contacts::ContactIndex>,
+    /// The implicit build `contact.search` ran and the guard refused.
+    pub refused: Option<mp_protocol::contact::RefusedRebuild>,
+}
+
+/// `account`'s whole contact index, through `contact.search` with an empty
+/// query.
+///
+/// The rows carry what the ranking reads (the three tier counts and the two
+/// timestamps), so the index rebuilt here ranks a typed query exactly as the
+/// daemon would, without a round trip per keystroke. The cache file is the
+/// daemon's; nothing here reads it.
+pub fn contact_index(q: &dyn Queries, account: &str) -> Result<ContactsAnswer> {
+    let answer = q.call(
+        "contact.search",
+        serde_json::json!({ "account": account, "query": "", "limit": CONTACT_INDEX_LIMIT }),
+    )?;
+    Ok(decode_contacts(account, &answer))
+}
+
+/// [`contact_index`]'s answer, decoded.
+pub fn decode_contacts(account: &str, answer: &Value) -> ContactsAnswer {
+    let refused = serde_json::from_value(answer["rebuild"].clone()).ok();
+    let text = |row: &Value, key: &str| row[key].as_str().unwrap_or_default().to_string();
+    let count = |row: &Value, key: &str| row[key].as_u64().unwrap_or(0) as u32;
+    let contacts: HashMap<String, mp_core::contacts::Contact> = answer["contacts"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let address = row["address"].as_str()?.to_string();
+                    Some((
+                        address.clone(),
+                        mp_core::contacts::Contact {
+                            address,
+                            display_name: text(row, "display_name"),
+                            sent_to: count(row, "sent_to"),
+                            sent_cc: count(row, "sent_cc"),
+                            received: count(row, "received"),
+                            first_seen: text(row, "first_seen"),
+                            last_seen: text(row, "last_seen"),
+                            source: mp_core::contacts::ContactSource::Local,
+                        },
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let index = (!contacts.is_empty()).then(|| mp_core::contacts::ContactIndex {
+        account: account.to_string(),
+        contacts,
+        built_at: String::new(),
+    });
+    ContactsAnswer { index, refused }
+}
+
+// ---------------------------------------------------------------------------
 // Row deltas
 // ---------------------------------------------------------------------------
 

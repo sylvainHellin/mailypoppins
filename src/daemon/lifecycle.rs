@@ -135,7 +135,7 @@ const EXIT_OK: i32 = 0;
 /// Generic failure, and `status` when no daemon runs.
 const EXIT_ERROR: i32 = 1;
 /// Daemon unavailable or failed to start (plan section 3.0). Public because a
-/// routed client command (`mp --daemon …`) exits with it too, and the two must
+/// routed client command (`mp list-messages`, say) exits with it too, and the two must
 /// not drift apart.
 pub const EXIT_UNAVAILABLE: i32 = 4;
 

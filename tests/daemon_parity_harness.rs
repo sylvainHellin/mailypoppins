@@ -400,7 +400,7 @@ fn the_no_daemon_helper_runs_a_command_and_starts_nothing() {
 #[test]
 fn the_no_daemon_helper_leaves_a_routed_command_at_exit_four() {
     let tmp = root();
-    let out = mp_no_daemon(&["--daemon", "account", "list"], tmp.path());
+    let out = mp_no_daemon(&["account", "list", "--daemon"], tmp.path());
 
     assert_eq!(
         out.status.code(),
@@ -423,8 +423,8 @@ fn a_daemon_started_from_root_answers_a_client_standing_elsewhere() {
     let elsewhere = root();
     let fixture = DaemonFixture::start_in(tmp.path(), Some(Path::new("/")));
 
-    let from_root = fixture.mp_in(Path::new("/"), &["--daemon", "account", "list"]);
-    let from_temp = fixture.mp_in(elsewhere.path(), &["--daemon", "account", "list"]);
+    let from_root = fixture.mp_in(Path::new("/"), &["account", "list", "--daemon"]);
+    let from_temp = fixture.mp_in(elsewhere.path(), &["account", "list", "--daemon"]);
     fixture.stop();
 
     assert_eq!(from_temp.status.code(), Some(0), "the routed command works");
@@ -442,7 +442,7 @@ fn the_require_hook_fails_a_command_that_answered_in_process() {
     // The same command twice, once in process and once over the socket, so the
     // only difference between the two runs is the thing being asserted.
     let unmigrated = fixture.mp_routed(&["account", "list"]);
-    let routed = fixture.mp_routed(&["--daemon", "account", "list"]);
+    let routed = fixture.mp_routed(&["account", "list", "--daemon"]);
     fixture.stop();
 
     assert_ne!(
@@ -460,7 +460,7 @@ fn the_require_hook_fails_a_command_that_answered_in_process() {
     assert_eq!(
         routed.status.code(),
         Some(0),
-        "`mp --daemon account list` does route, so the hook is satisfied\nstderr: {}",
+        "`mp account list --daemon` does route, so the hook is satisfied\nstderr: {}",
         String::from_utf8_lossy(&routed.stderr)
     );
 }

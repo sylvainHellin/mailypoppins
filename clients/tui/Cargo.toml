@@ -52,3 +52,7 @@ mp-protocol = { path = "../../crates/mp-protocol" }
 insta = "1.39"
 tempfile = "3"
 mp-core = { path = "../../crates/mp-core", features = ["test-support"] }
+# `Session::serving`, so a unit test hands an `App` a session answered by a
+# recorder in this process; `cargo test -p mp-tui` alone would not get it
+# from the root crate's feature unification.
+mp-client = { path = "../../crates/mp-client", features = ["test-support"] }

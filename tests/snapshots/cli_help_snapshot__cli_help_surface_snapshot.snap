@@ -33,6 +33,7 @@ Commands:
   search          Search emails on the mail server (IMAP or Exchange), or locally with --local
   config          Manage configuration
   contacts        Contact index operations
+  signature       Manage the signatures drafts carry, and each account's default
   calendar        Calendar / iMIP invite operations
   hooks           Inspect, dry-run and replay the mail hooks of `[[accounts.hooks]]`
   outbox          Inspect and unblock the durable send queue
@@ -614,6 +615,120 @@ Show index statistics
 Usage: mp contacts stats [OPTIONS]
 
 Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp signature --help
+Manage the signatures drafts carry, and each account's default
+
+Usage: mp signature [OPTIONS] <COMMAND>
+
+Commands:
+  list     List the signatures, marking the account's default
+  show     Print a signature's content
+  new      Create an empty signature and print the path of its file
+  edit     Open a signature in $EDITOR
+  rename   Rename a signature
+  delete   Delete a signature
+  default  Print the account's default signature, or set it, or clear it with --none
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+A signature is one Markdown file the daemon keeps under the configuration
+directory; `mp new -s <name>` and the TUI's and the desktop app's compose
+dialogs splice it into a draft. The default is per account: `-A` names the
+account, the first configured one otherwise.
+
+Examples:
+  mp signature list
+  mp signature new work && mp signature edit work
+  mp -A tum signature default work
+
+$ mp signature list --help
+List the signatures, marking the account's default
+
+Usage: mp signature list [OPTIONS]
+
+Options:
+      --json               Print the daemon's answer as JSON {account, names, default}
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp signature show --help
+Print a signature's content
+
+Usage: mp signature show [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  The signature's name
+
+Options:
+      --path               Print the path of its file instead
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp signature new --help
+Create an empty signature and print the path of its file
+
+Usage: mp signature new [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  The signature's name
+
+Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp signature edit --help
+Open a signature in $EDITOR
+
+Usage: mp signature edit [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  The signature's name
+
+Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp signature rename --help
+Rename a signature
+
+Usage: mp signature rename [OPTIONS] <OLD> <NEW>
+
+Arguments:
+  <OLD>  The signature's current name
+  <NEW>  Its new name
+
+Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp signature delete --help
+Delete a signature
+
+Usage: mp signature delete [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  The signature's name
+
+Options:
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp signature default --help
+Print the account's default signature, or set it, or clear it with --none
+
+Usage: mp signature default [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The signature to make the default
+
+Options:
+      --none               Clear the default, so drafts carry no signature unless one is named
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 
