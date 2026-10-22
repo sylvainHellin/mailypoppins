@@ -699,6 +699,21 @@ pub fn no_server_results(local_terms: &[String]) -> String {
     }
 }
 
+/// The text a server search with no hits prints: [`no_server_results`], then
+/// the [`more_results_line`] when the answer is cut (PERSO-175), which the
+/// attachment post-filter can leave empty while a mailbox held more.
+pub fn empty_server_search_lines(
+    local_terms: &[String],
+    truncated: bool,
+    limit: usize,
+) -> Vec<String> {
+    let mut lines = vec![no_server_results(local_terms)];
+    if truncated {
+        lines.push(more_results_line(limit));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1229,6 +1244,24 @@ mod tests {
         assert_eq!(
             more_results_line(1),
             "More results than the 1 shown: raise -n to see them."
+        );
+    }
+
+    /// The attachment post-filter can empty a cut answer: the text still
+    /// says to raise -n (PERSO-175).
+    #[test]
+    fn an_empty_cut_server_search_still_says_to_raise_the_limit() {
+        let local = vec!["has:attachment".to_string()];
+        assert_eq!(
+            empty_server_search_lines(&local, true, 50),
+            [
+                "No results found (local store only: has:attachment)",
+                "More results than the 50 shown: raise -n to see them."
+            ]
+        );
+        assert_eq!(
+            empty_server_search_lines(&[], false, 50),
+            ["No results found"]
         );
     }
 }

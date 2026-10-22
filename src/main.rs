@@ -4623,10 +4623,18 @@ async fn main() -> Result<()> {
                         full,
                     )?;
                 } else if all_emails.is_empty() {
-                    println!(
-                        "{}",
-                        mailypoppins::read_cmd::no_server_results(&local_terms).yellow()
+                    let lines = mailypoppins::read_cmd::empty_server_search_lines(
+                        &local_terms,
+                        truncated,
+                        limit,
                     );
+                    for (i, line) in lines.iter().enumerate() {
+                        if i == 0 {
+                            println!("{}", line.yellow());
+                        } else {
+                            println!("{line}");
+                        }
+                    }
                 } else {
                     let emails: Vec<FetchedEmail> =
                         all_emails.into_iter().map(|(_, e)| e).collect();
