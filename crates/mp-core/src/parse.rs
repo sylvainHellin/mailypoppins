@@ -1298,7 +1298,10 @@ pub struct InlineImage {
 }
 
 /// Normalise a `Content-ID` for comparison: angle brackets off, lowercased.
-fn normalize_cid(raw: &str) -> String {
+///
+/// The shape `message_blobs.content_id` stores (PERSO-165), so a stored id
+/// and a `cid:` URL lowered for the search compare as they are.
+pub fn normalize_cid(raw: &str) -> String {
     raw.trim()
         .trim_start_matches('<')
         .trim_end_matches('>')
@@ -1311,7 +1314,10 @@ fn normalize_cid(raw: &str) -> String {
 /// `src`, a `background`, a `style` `url()` or a CSS block, and every one of
 /// those spells it `cid:<id>`. What follows the id must not be an id character,
 /// so `cid:logo` does not match `cid:logo2`.
-fn html_references_cid(html_lower: &str, cid: &str) -> bool {
+///
+/// `html_lower` is the markup lowered with `to_ascii_lowercase` and `cid` a
+/// [`normalize_cid`] id.
+pub fn html_references_cid(html_lower: &str, cid: &str) -> bool {
     if cid.is_empty() {
         return false;
     }
@@ -1329,6 +1335,64 @@ fn html_references_cid(html_lower: &str, cid: &str) -> bool {
         from = end;
     }
     false
+}
+
+/// The image media type of an attachment, from its leading bytes and then
+/// from its file name's extension, or `None` when it is not an image a page
+/// can show.
+///
+/// The store keeps no MIME type per attachment, so this is how ingest tells
+/// an inline image from a `cid:`-referenced document (PERSO-165), and how the
+/// renderer labels the `data:` URI it builds from a stored blob. The bytes win
+/// over the name: an Outlook logo is sometimes named `image001` with no
+/// extension, and a `.png` that is really a PDF is not an image.
+pub fn image_media_type(filename: &str, content: &[u8]) -> Option<&'static str> {
+    let sniffed = match content {
+        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
+        [b'B', b'M', ..] => Some("image/bmp"),
+        _ => None,
+    };
+    if sniffed.is_some() {
+        return sniffed;
+    }
+    let ext = filename.rsplit_once('.')?.1.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" | "jpe" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        "svg" => Some("image/svg+xml"),
+        "ico" => Some("image/x-icon"),
+        "avif" => Some("image/avif"),
+        _ => None,
+    }
+}
+
+/// Whether one attachment is an inline image of the message: it carries a
+/// `Content-ID`, the HTML body references that id by `cid:` URL, and it is an
+/// image ([`image_media_type`]).
+///
+/// The rule PERSO-165 stores as `message_blobs.is_inline`, the same for both
+/// backends: Exchange gives every attachment a content id, a PDF included, so
+/// the id alone says nothing, and a `cid:` link to a document (`<a
+/// href="cid:...">`) is a link the reader can follow only through the
+/// attachment list, so it stays listed. `html_lower` is the body lowered with
+/// `to_ascii_lowercase`.
+pub fn is_inline_image(
+    html_lower: Option<&str>,
+    content_id: Option<&str>,
+    filename: &str,
+    content: &[u8],
+) -> bool {
+    let (Some(html_lower), Some(cid)) = (html_lower, content_id) else {
+        return false;
+    };
+    html_references_cid(html_lower, &normalize_cid(cid))
+        && image_media_type(filename, content).is_some()
 }
 
 /// `html` with every `cid:` reference to one of `images` replaced by a
@@ -2183,6 +2247,53 @@ Content-Type: multipart/related; boundary=\"B\"\r\n\r\n\
 --B\r\nContent-Type: image/png; name=\"logo.png\"\r\nContent-ID: <{cid}>\r\n\
 Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"logo.png\"\r\n\r\n{TINY_PNG_B64}\r\n{extra_part}--B--\r\n"
         )
+    }
+
+    /// PERSO-165: the bytes name the image type before the extension does,
+    /// and a document is no image whatever its name.
+    #[test]
+    fn image_media_type_sniffs_then_reads_the_extension() {
+        assert_eq!(
+            image_media_type("image001", b"\x89PNG\r\n\x1a\n"),
+            Some("image/png")
+        );
+        assert_eq!(
+            image_media_type("x.bin", b"\xFF\xD8\xFF\xE0"),
+            Some("image/jpeg")
+        );
+        assert_eq!(image_media_type("logo.GIF", b"??"), Some("image/gif"));
+        assert_eq!(image_media_type("a.svg", b"<svg"), Some("image/svg+xml"));
+        assert_eq!(image_media_type("report.pdf", b"%PDF"), None);
+        assert_eq!(image_media_type("noext", b"%PDF"), None);
+    }
+
+    /// An attachment is an inline image when its id is referenced by `cid:`,
+    /// case-insensitively and at an id boundary, and it is an image.
+    #[test]
+    fn is_inline_image_needs_a_referenced_id_and_an_image() {
+        let lowered = "<img src=\"CID:Logo@X\"><a href=\"cid:doc@x\">d</a>".to_ascii_lowercase();
+        let html = lowered.as_str();
+        let png = b"\x89PNG\r\n\x1a\n";
+        assert!(is_inline_image(
+            Some(html),
+            Some("<logo@x>"),
+            "logo.png",
+            png
+        ));
+        assert!(!is_inline_image(
+            Some(html),
+            Some("doc@x"),
+            "doc.pdf",
+            b"%PDF"
+        ));
+        assert!(!is_inline_image(
+            Some(html),
+            Some("logo@xy"),
+            "logo.png",
+            png
+        ));
+        assert!(!is_inline_image(Some(html), None, "logo.png", png));
+        assert!(!is_inline_image(None, Some("logo@x"), "logo.png", png));
     }
 
     #[test]

@@ -176,6 +176,85 @@ struct BlobRef {
     hash: BlobHash,
     filename: Option<String>,
     size: u64,
+    /// What an `attachment` reference records about its part (PERSO-165);
+    /// `None` for every other kind, which leaves both columns `NULL`.
+    inline: Option<InlineMark>,
+}
+
+/// The `content_id` and `is_inline` columns of one attachment reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InlineMark {
+    /// The part's `Content-ID`, normalised ([`crate::parse::normalize_cid`]).
+    content_id: Option<String>,
+    /// Whether the part is an inline image ([`crate::parse::is_inline_image`]).
+    is_inline: bool,
+}
+
+impl InlineMark {
+    /// The mark of one attachment of a message whose HTML body, lowered, is
+    /// `html_lower`.
+    fn of(html_lower: Option<&str>, att: &crate::parse::AttachmentData) -> Self {
+        InlineMark {
+            content_id: att
+                .content_id
+                .as_deref()
+                .map(crate::parse::normalize_cid)
+                .filter(|cid| !cid.is_empty()),
+            is_inline: crate::parse::is_inline_image(
+                html_lower,
+                att.content_id.as_deref(),
+                &att.filename,
+                &att.content,
+            ),
+        }
+    }
+
+    /// The mark of a reference that is no inline part: the iMIP sidecar, or
+    /// an attachment the server names with no id.
+    fn none() -> Self {
+        InlineMark {
+            content_id: None,
+            is_inline: false,
+        }
+    }
+}
+
+/// Insert one blob reference of `row_id`, with its inline columns.
+fn insert_blob_ref(tx: &Transaction<'_>, row_id: i64, r: &BlobRef) -> Result<()> {
+    tx.execute(
+        "INSERT INTO message_blobs
+            (message_row, kind, ordinal, hash, filename, size, content_id, is_inline)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            row_id,
+            r.kind,
+            r.ordinal,
+            r.hash.as_str(),
+            r.filename,
+            r.size as i64,
+            r.inline.as_ref().and_then(|m| m.content_id.as_deref()),
+            r.inline.as_ref().map(|m| m.is_inline as i64),
+        ],
+    )
+    .context("recording a blob reference")?;
+    Ok(())
+}
+
+/// Whether a message whose attachment references are `refs` has an
+/// attachment the user would call one, `claimed` being what the backend said
+/// before any attachment was stored.
+///
+/// An inline image is part of the body, so a message whose only parts are
+/// signature logos has none (PERSO-165). With no attachment reference at all
+/// the backend's claim stands: on the Graph path that is a fetch that failed
+/// or listed nothing storable, and the claim is what keeps the row an
+/// attachment repair candidate.
+fn has_real_attachments(claimed: bool, refs: &[BlobRef]) -> bool {
+    let mut attachments = refs.iter().filter(|r| r.kind == KIND_ATTACHMENT).peekable();
+    if attachments.peek().is_none() {
+        return claimed;
+    }
+    attachments.any(|r| !r.inline.as_ref().is_some_and(|m| m.is_inline))
 }
 
 /// Ingest one message into the store.
@@ -237,6 +316,7 @@ pub fn ingest_message_threaded(
         hash: blobs.write(body_bytes)?,
         filename: None,
         size: body_bytes.len() as u64,
+        inline: None,
     });
     match (input.raw, email.html_body.as_deref()) {
         (Some(raw), _) => {
@@ -246,6 +326,7 @@ pub fn ingest_message_threaded(
                 hash: blobs.write(raw)?,
                 filename: None,
                 size: raw.len() as u64,
+                inline: None,
             });
         }
         (None, Some(html)) => {
@@ -260,12 +341,14 @@ pub fn ingest_message_threaded(
                 hash: blobs.write(bytes)?,
                 filename: None,
                 size: bytes.len() as u64,
+                inline: None,
             });
         }
         (None, None) => {}
     }
     refs.extend(attachment_refs(
         blobs,
+        email.html_body.as_deref(),
         email.calendar_ics.as_deref(),
         &email.attachments,
     )?);
@@ -306,11 +389,15 @@ pub fn ingest_message_threaded(
 /// ordinals from 0: the iMIP sidecar first, then every attachment in order.
 /// Shared by [`ingest_message`] and [`attach_missing_attachments`], so a
 /// repaired message carries exactly the references a first ingest would have.
+/// `html` is the message's HTML body, which decides which attachments are its
+/// inline images (PERSO-165).
 fn attachment_refs(
     blobs: &BlobStore,
+    html: Option<&str>,
     calendar_ics: Option<&[u8]>,
     attachments: &[crate::parse::AttachmentData],
 ) -> Result<Vec<BlobRef>> {
+    let html_lower = html.map(str::to_ascii_lowercase);
     let mut refs = Vec::new();
     let mut ordinal = 0i64;
     if let Some(ics) = calendar_ics {
@@ -323,6 +410,7 @@ fn attachment_refs(
             hash: blobs.write(ics)?,
             filename: Some(crate::parse::CALENDAR_SIDECAR_NAME.to_string()),
             size: ics.len() as u64,
+            inline: Some(InlineMark::none()),
         });
         ordinal += 1;
     }
@@ -333,6 +421,7 @@ fn attachment_refs(
             hash: blobs.write(&att.content)?,
             filename: Some(att.filename.clone()),
             size: att.content.len() as u64,
+            inline: Some(InlineMark::of(html_lower.as_deref(), att)),
         });
         ordinal += 1;
     }
@@ -445,7 +534,7 @@ fn ingest_in_tx(
         .raw
         .map(|r| r.len() as i64)
         .unwrap_or_else(|| refs.iter().map(|r| r.size as i64).sum());
-    let has_attachments = email.has_attachments || refs.iter().any(|r| r.kind == KIND_ATTACHMENT);
+    let has_attachments = has_real_attachments(email.has_attachments, refs);
 
     // 3. Write the row.
     let row_id = match existing.as_ref() {
@@ -543,19 +632,7 @@ fn ingest_in_tx(
     tx.execute("DELETE FROM message_blobs WHERE message_row = ?1", [row_id])
         .context("clearing the previous blob references")?;
     for r in refs {
-        tx.execute(
-            "INSERT INTO message_blobs (message_row, kind, ordinal, hash, filename, size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                row_id,
-                r.kind,
-                r.ordinal,
-                r.hash.as_str(),
-                r.filename,
-                r.size as i64
-            ],
-        )
-        .context("recording a blob reference")?;
+        insert_blob_ref(tx, row_id, r)?;
     }
     for hash in previous {
         blobs.release(tx, &hash)?;
@@ -1525,6 +1602,10 @@ pub struct AttachmentRepairCandidate {
 /// fetch worked, so the gap between the two is exactly the messages whose
 /// attachment fetch failed. A row parked on a negative UID is skipped: it is
 /// waiting for its own message to come back and is rewritten when it does.
+///
+/// A row [`mark_inline_only_rows`] found owed its inline images is a candidate
+/// too, whatever its `has_attachments`: its repair row is due (`retry_at` not
+/// `NULL`) and it holds no attachment reference.
 pub fn attachment_repair_candidates(
     store: &Store,
     account: &str,
@@ -1534,7 +1615,10 @@ pub fn attachment_repair_candidates(
 ) -> Result<Vec<AttachmentRepairCandidate>> {
     let mut stmt = store.conn().prepare(
         "SELECT m.id, m.uid, m.message_id FROM messages m
-         WHERE m.account = ?1 AND m.mailbox = ?2 AND m.has_attachments = 1 AND m.uid > 0
+         WHERE m.account = ?1 AND m.mailbox = ?2 AND m.uid > 0
+           AND (m.has_attachments = 1
+                OR EXISTS (SELECT 1 FROM attachment_repairs r
+                           WHERE r.message_row = m.id AND r.retry_at IS NOT NULL))
            AND NOT EXISTS (SELECT 1 FROM message_blobs b
                            WHERE b.message_row = m.id AND b.kind = 'attachment')
            AND NOT EXISTS (SELECT 1 FROM attachment_repairs r
@@ -1574,7 +1658,8 @@ pub fn attach_missing_attachments(
     calendar_ics: Option<&[u8]>,
     attachments: &[crate::parse::AttachmentData],
 ) -> Result<usize> {
-    let refs = attachment_refs(blobs, calendar_ics, attachments)?;
+    let html = crate::store::read::load_html(store, blobs, row_id);
+    let refs = attachment_refs(blobs, html.as_deref(), calendar_ics, attachments)?;
     if refs.is_empty() {
         return Ok(0);
     }
@@ -1595,24 +1680,12 @@ pub fn attach_missing_attachments(
     }
     for r in &refs {
         blobs.acquire(&tx, &r.hash, r.size)?;
-        tx.execute(
-            "INSERT INTO message_blobs (message_row, kind, ordinal, hash, filename, size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                row_id,
-                r.kind,
-                r.ordinal,
-                r.hash.as_str(),
-                r.filename,
-                r.size as i64
-            ],
-        )
-        .context("recording a repaired attachment reference")?;
+        insert_blob_ref(&tx, row_id, r).context("recording a repaired attachment reference")?;
     }
     let added: i64 = refs.iter().map(|r| r.size as i64).sum();
     tx.execute(
-        "UPDATE messages SET has_attachments = 1, size = IFNULL(size, 0) + ?2 WHERE id = ?1",
-        rusqlite::params![row_id, added],
+        "UPDATE messages SET has_attachments = ?3, size = IFNULL(size, 0) + ?2 WHERE id = ?1",
+        rusqlite::params![row_id, added, has_real_attachments(true, &refs) as i64],
     )
     .context("updating the repaired row")?;
     tx.execute(
@@ -1676,6 +1749,349 @@ pub fn note_attachment_repair_failure(
     )
     .context("scheduling the next attachment repair")?;
     Ok(attempts)
+}
+
+// ---------------------------------------------------------------------------
+// Inline images of rows an older build stored (PERSO-165)
+// ---------------------------------------------------------------------------
+
+/// How many messages [`classify_inline_from_raw`] classifies in one pass. A
+/// local parse of the raw message each, so a store of a few thousand messages
+/// with attachments converges in a handful of passes without one of them
+/// stalling on it.
+pub const INLINE_CLASSIFICATIONS_PER_PASS: usize = 200;
+
+/// How many messages of one mailbox the Graph inline pass asks the server
+/// about in one pass: one attachment metadata request each, about 1.3 KB and
+/// 0.1 s (measured on evoqs, PERSO-165), so a pass spends about five seconds
+/// a mailbox on it until the rows an older build stored are through.
+pub const INLINE_LOOKUPS_PER_PASS: usize = 50;
+
+/// One `attachment` reference of a row the backfill classifies.
+struct StoredAttachment {
+    ordinal: i64,
+    hash: String,
+    filename: Option<String>,
+}
+
+/// The `attachment` references of `row_id` no build has classified yet, in
+/// ordinal order.
+fn unclassified_attachments(store: &Store, row_id: i64) -> Result<Vec<StoredAttachment>> {
+    let mut stmt = store.conn().prepare(
+        "SELECT ordinal, hash, filename FROM message_blobs
+         WHERE message_row = ?1 AND kind = 'attachment' AND is_inline IS NULL
+         ORDER BY ordinal",
+    )?;
+    let rows = stmt.query_map([row_id], |row| {
+        Ok(StoredAttachment {
+            ordinal: row.get(0)?,
+            hash: row.get(1)?,
+            filename: row.get(2)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("reading a row's unclassified attachments")
+}
+
+/// Whether a stored attachment is the iMIP sidecar, which is never inline.
+fn is_sidecar(att: &StoredAttachment) -> bool {
+    att.filename.as_deref() == Some(crate::parse::CALENDAR_SIDECAR_NAME)
+}
+
+/// Write the `marks` of `row_id`'s attachment references, keyed by ordinal,
+/// and recompute its `has_attachments` from them, in `tx`.
+///
+/// Only a reference still unclassified is written, so a concurrent ingest
+/// that rewrote the row keeps what it wrote. `has_attachments` is what
+/// [`has_real_attachments`] answers for the row's references as they now
+/// stand: a reference still unclassified counts as a real attachment, the
+/// listing it had before.
+fn write_inline_marks(
+    tx: &Transaction<'_>,
+    row_id: i64,
+    marks: &[(i64, InlineMark)],
+) -> Result<()> {
+    for (ordinal, mark) in marks {
+        tx.execute(
+            "UPDATE message_blobs SET content_id = ?3, is_inline = ?4
+             WHERE message_row = ?1 AND kind = 'attachment' AND ordinal = ?2
+               AND is_inline IS NULL",
+            rusqlite::params![row_id, ordinal, mark.content_id, mark.is_inline as i64],
+        )
+        .context("recording an attachment's inline mark")?;
+    }
+    tx.execute(
+        "UPDATE messages SET has_attachments = EXISTS (
+            SELECT 1 FROM message_blobs
+            WHERE message_row = ?1 AND kind = 'attachment' AND IFNULL(is_inline, 0) = 0)
+         WHERE id = ?1
+           AND EXISTS (SELECT 1 FROM message_blobs
+                       WHERE message_row = ?1 AND kind = 'attachment')",
+        [row_id],
+    )
+    .context("recomputing a row's attachment flag")?;
+    Ok(())
+}
+
+/// Classify the attachment references of up to `limit` rows of `account`
+/// that carry their raw message and that an older build stored without
+/// `is_inline`, newest rows first, returning how many rows were classified.
+///
+/// The backfill of PERSO-165 for every row with a raw message (IMAP, and the
+/// outbox's Sent copies on either backend): the raw is parsed as ingest
+/// parses it, every attachment is marked by the rule ingest applies, and each
+/// mark goes to the stored reference with the same bytes (a multiset match by
+/// content hash, so two parts with one name are told apart). A reference no
+/// parsed part matches, and every reference of a row whose raw is unreadable,
+/// is marked not inline, which is how it was listed before; the set therefore
+/// only shrinks and the pass converges. Local only: no server is asked.
+pub fn classify_inline_from_raw(
+    store: &Store,
+    blobs: &BlobStore,
+    account: &str,
+    limit: usize,
+) -> Result<usize> {
+    let rows: Vec<i64> = {
+        let mut stmt = store.conn().prepare(
+            "SELECT m.id FROM messages m
+             WHERE m.account = ?1 AND m.raw_blob IS NOT NULL
+               AND EXISTS (SELECT 1 FROM message_blobs b
+                           WHERE b.message_row = m.id AND b.kind = 'attachment'
+                             AND b.is_inline IS NULL)
+             ORDER BY m.id DESC
+             LIMIT ?2",
+        )?;
+        let ids = stmt.query_map(rusqlite::params![account, limit as i64], |row| row.get(0))?;
+        ids.collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading the rows owed an inline classification")?
+    };
+    let mut classified: Vec<(i64, Vec<(i64, InlineMark)>)> = Vec::with_capacity(rows.len());
+    for row_id in rows {
+        let stored = unclassified_attachments(store, row_id)?;
+        let parsed = crate::store::read::load_raw(store, blobs, row_id)
+            .and_then(|raw| crate::parse::parse_rfc822_to_fetched_email(&raw));
+        let mut by_hash: std::collections::HashMap<String, std::collections::VecDeque<InlineMark>> =
+            std::collections::HashMap::new();
+        if let Some(email) = parsed.as_ref() {
+            let html_lower = email.html_body.as_deref().map(str::to_ascii_lowercase);
+            for att in &email.attachments {
+                by_hash
+                    .entry(BlobHash::of(&att.content).as_str().to_string())
+                    .or_default()
+                    .push_back(InlineMark::of(html_lower.as_deref(), att));
+            }
+        }
+        let marks = stored
+            .iter()
+            .map(|att| {
+                let mark = if is_sidecar(att) {
+                    None
+                } else {
+                    by_hash.get_mut(&att.hash).and_then(|q| q.pop_front())
+                };
+                (att.ordinal, mark.unwrap_or_else(InlineMark::none))
+            })
+            .collect();
+        classified.push((row_id, marks));
+    }
+    let tx = store
+        .conn()
+        .unchecked_transaction()
+        .context("opening the inline classification transaction")?;
+    for (row_id, marks) in &classified {
+        write_inline_marks(&tx, *row_id, marks)?;
+    }
+    tx.commit()
+        .context("committing the inline classification")?;
+    Ok(classified.len())
+}
+
+/// A row without a raw message whose attachments the Graph inline pass owes
+/// a look (PERSO-165).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineLookupCandidate {
+    pub row_id: i64,
+    pub uid: i64,
+    pub message_id: String,
+}
+
+/// The rows of `(account, mailbox)` without a raw message that hold an
+/// attachment reference no build has classified, newest first, at most
+/// `limit` of them.
+///
+/// Every Graph ingest since PERSO-165 classifies what it stores, so these are
+/// the rows an older build wrote, and [`apply_inline_metadata`] classifies
+/// every reference it is handed: the set only shrinks. The iMIP sidecar alone
+/// does not make a row a candidate (it is never inline, and the readers serve
+/// it the same either way), and a row parked on a negative UID is skipped as
+/// the attachment repair skips it.
+pub fn inline_lookup_candidates(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    limit: usize,
+) -> Result<Vec<InlineLookupCandidate>> {
+    let mut stmt = store.conn().prepare(
+        "SELECT m.id, m.uid, m.message_id FROM messages m
+         WHERE m.account = ?1 AND m.mailbox = ?2 AND m.raw_blob IS NULL AND m.uid > 0
+           AND EXISTS (SELECT 1 FROM message_blobs b
+                       WHERE b.message_row = m.id AND b.kind = 'attachment'
+                         AND b.is_inline IS NULL AND b.filename IS NOT ?3)
+         ORDER BY m.date_sort DESC, m.id DESC
+         LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            account,
+            mailbox,
+            crate::parse::CALENDAR_SIDECAR_NAME,
+            limit as i64
+        ],
+        |row| {
+            Ok(InlineLookupCandidate {
+                row_id: row.get(0)?,
+                uid: row.get(1)?,
+                message_id: row.get(2)?,
+            })
+        },
+    )?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("reading the inline lookup candidates")
+}
+
+/// One file attachment of a Graph attachment metadata listing: its name as
+/// the server sends it and its `contentId`, in the server's order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerAttachment {
+    pub name: String,
+    pub content_id: Option<String>,
+}
+
+/// Classify the unclassified attachment references of `row_id` from the
+/// server's metadata listing of its file attachments (PERSO-165).
+///
+/// The stored references were written from the same listing, in its order,
+/// under the sanitised name, minus the zero-byte placeholders and the lifted
+/// invite, so each reference is paired with the next server entry of its
+/// name. The rule is ingest's ([`crate::parse::is_inline_image`]): the
+/// blob's bytes are read only for a reference whose id the HTML body
+/// references. `server` `None` says the server no longer lists the message:
+/// every reference is then marked not inline, which is how it was listed
+/// before, so the row leaves the candidate set either way.
+pub fn apply_inline_metadata(
+    store: &Store,
+    blobs: &BlobStore,
+    row_id: i64,
+    server: Option<&[ServerAttachment]>,
+) -> Result<()> {
+    let stored = unclassified_attachments(store, row_id)?;
+    let html_lower =
+        crate::store::read::load_html(store, blobs, row_id).map(|html| html.to_ascii_lowercase());
+    let server = server.unwrap_or_default();
+    let mut next = 0usize;
+    let mut marks = Vec::with_capacity(stored.len());
+    for att in &stored {
+        let filename = att.filename.as_deref().unwrap_or_default();
+        let matched = if is_sidecar(att) {
+            None
+        } else {
+            server[next..]
+                .iter()
+                .position(|s| crate::parse::sanitize_attachment_filename(&s.name) == filename)
+                .map(|at| {
+                    next += at + 1;
+                    &server[next - 1]
+                })
+        };
+        let mark = match matched {
+            None => InlineMark::none(),
+            Some(entry) => {
+                let content_id = entry
+                    .content_id
+                    .as_deref()
+                    .map(crate::parse::normalize_cid)
+                    .filter(|cid| !cid.is_empty());
+                let referenced = match (html_lower.as_deref(), content_id.as_deref()) {
+                    (Some(html), Some(cid)) => crate::parse::html_references_cid(html, cid),
+                    _ => false,
+                };
+                let is_inline = referenced
+                    && crate::store::read::read_blob(blobs, row_id, &att.hash).is_some_and(
+                        |bytes| crate::parse::image_media_type(filename, &bytes).is_some(),
+                    );
+                InlineMark {
+                    content_id,
+                    is_inline,
+                }
+            }
+        };
+        marks.push((att.ordinal, mark));
+    }
+    let tx = store
+        .conn()
+        .unchecked_transaction()
+        .context("opening the inline metadata transaction")?;
+    write_inline_marks(&tx, row_id, &marks)?;
+    tx.commit().context("committing the inline metadata")?;
+    Ok(())
+}
+
+/// Queue for the attachment repair, once per store, every row without a raw
+/// message whose HTML body references a `cid:` part and which holds no
+/// attachment reference, returning how many were queued.
+///
+/// Those are the inline-only Graph messages an older build stored: Graph's
+/// `hasAttachments` is false for them, so before 88342da1 their attachment
+/// list was never fetched and their images render broken. The repair
+/// ([`attachment_repair_candidates`]) is what fetches them; this gives each
+/// such row a due repair row (`retry_at` 0), which is what makes it a
+/// candidate without touching its `has_attachments`. A row the repair already
+/// knows is left to it. The sweep reads the HTML blob of every such row, so it
+/// is stamped in `meta` ([`crate::store::schema::META_INLINE_ONLY_SWEPT`])
+/// with the queue in one transaction and runs once per file; a store this
+/// build created is stamped at birth.
+pub fn mark_inline_only_rows(store: &Store, blobs: &BlobStore, account: &str) -> Result<usize> {
+    use crate::store::schema::{get_meta, set_meta, META_INLINE_ONLY_SWEPT};
+    if get_meta(store.conn(), META_INLINE_ONLY_SWEPT)?.is_some() {
+        return Ok(0);
+    }
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = store.conn().prepare(
+            "SELECT m.id, b.hash FROM messages m
+             JOIN message_blobs b ON b.message_row = m.id AND b.kind = 'html'
+             WHERE m.account = ?1 AND m.raw_blob IS NULL AND m.uid > 0
+               AND NOT EXISTS (SELECT 1 FROM message_blobs a
+                               WHERE a.message_row = m.id AND a.kind = 'attachment')
+               AND NOT EXISTS (SELECT 1 FROM attachment_repairs r
+                               WHERE r.message_row = m.id)",
+        )?;
+        let rows = stmt.query_map([account], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading the rows that may owe inline parts")?
+    };
+    let owed: Vec<i64> = rows
+        .into_iter()
+        .filter(|(row_id, hash)| {
+            crate::store::read::read_blob(blobs, *row_id, hash)
+                .is_some_and(|html| html.windows(4).any(|w| w.eq_ignore_ascii_case(b"cid:")))
+        })
+        .map(|(row_id, _)| row_id)
+        .collect();
+    let tx = store
+        .conn()
+        .unchecked_transaction()
+        .context("opening the inline-only sweep transaction")?;
+    for row_id in &owed {
+        tx.execute(
+            "INSERT OR IGNORE INTO attachment_repairs (message_row, attempts, retry_at)
+             VALUES (?1, 0, 0)",
+            [row_id],
+        )
+        .context("queueing an inline-only row for the attachment repair")?;
+    }
+    set_meta(&tx, META_INLINE_ONLY_SWEPT, "1")?;
+    tx.commit().context("committing the inline-only sweep")?;
+    Ok(owed.len())
 }
 
 /// A Graph row an older build ingested without its threading signals
@@ -2447,6 +2863,471 @@ mod tests {
             }
             let store = Store::open(&path).unwrap();
             assert!(attachment_repair_candidates(&store, "acct", "inbox", 0, 10)
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    /// PERSO-165: the inline mark ingest records on an attachment reference,
+    /// what the readers make of it, and the backfill of the rows an older
+    /// build stored without it.
+    mod inline {
+        use super::*;
+        use crate::parse::AttachmentData;
+        use crate::store::read;
+        use tempfile::TempDir;
+
+        struct Fixture {
+            dir: TempDir,
+            store: Store,
+            blobs: BlobStore,
+        }
+
+        fn fixture() -> Fixture {
+            let dir = TempDir::new().unwrap();
+            let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+            let blobs = BlobStore::new(dir.path().join("blobs"));
+            Fixture { dir, store, blobs }
+        }
+
+        /// The leading bytes of a PNG, which is all the image test reads.
+        const LOGO: &[u8] = b"\x89PNG\r\n\x1a\nlogo";
+        const PDF: &[u8] = b"%PDF-1.7 report";
+        const HTML: &str = "<p>See attached.</p><img src=\"CID:image001.png@01DA.0000\">\
+                            <a href=\"cid:doc@x\">doc</a>";
+
+        /// An Outlook-shaped IMAP message: a related HTML body with its logo,
+        /// a real PDF that carries a Content-ID too (Exchange gives every part
+        /// one), and a PDF the HTML links by `cid:`.
+        fn outlook_raw() -> String {
+            use base64::Engine as _;
+            let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+            format!(
+                "From: Alice <alice@example.com>\r\nTo: me@example.com\r\n\
+Subject: Signed\r\nMessage-ID: <signed@example.com>\r\n\
+Date: Mon, 01 Jan 2024 12:00:00 +0000\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"MIX\"\r\n\r\n\
+--MIX\r\nContent-Type: multipart/related; boundary=\"REL\"\r\n\r\n\
+--REL\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{HTML}\r\n\
+--REL\r\nContent-Type: image/png; name=\"image001.png\"\r\n\
+Content-ID: <image001.png@01DA.0000>\r\n\
+Content-Transfer-Encoding: base64\r\n\r\n{logo}\r\n\
+--REL--\r\n\
+--MIX\r\nContent-Type: application/pdf; name=\"report.pdf\"\r\n\
+Content-ID: <abc@outlook.com>\r\n\
+Content-Disposition: attachment; filename=\"report.pdf\"\r\n\
+Content-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n\
+--MIX\r\nContent-Type: application/pdf; name=\"doc.pdf\"\r\n\
+Content-ID: <doc@x>\r\n\
+Content-Disposition: attachment; filename=\"doc.pdf\"\r\n\
+Content-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n\
+--MIX--\r\n",
+                logo = b64(LOGO),
+                pdf = b64(PDF),
+            )
+        }
+
+        fn ingest_imap(fx: &Fixture, uid: i64) -> i64 {
+            let raw = outlook_raw();
+            let email = crate::parse::parse_rfc822_to_fetched_email(raw.as_bytes()).unwrap();
+            ingest_message(
+                &fx.store,
+                &fx.blobs,
+                &IngestInput {
+                    account: "acct",
+                    mailbox: "inbox",
+                    uid,
+                    email: &email,
+                    raw: Some(raw.as_bytes()),
+                },
+            )
+            .unwrap()
+            .row_id
+        }
+
+        fn att(filename: &str, content: &[u8], cid: &str) -> AttachmentData {
+            AttachmentData {
+                filename: filename.into(),
+                content: content.to_vec(),
+                content_id: Some(cid.into()),
+            }
+        }
+
+        /// The same message as Graph hands it over: no raw, the HTML body,
+        /// and the file attachments with their `contentId`.
+        fn graph_email(subject: &str, attachments: Vec<AttachmentData>) -> FetchedEmail {
+            let mut e = email(subject);
+            e.message_id = Some(format!("<{subject}@example.com>"));
+            e.html_body = Some(HTML.to_string());
+            e.has_attachments = true;
+            e.attachments = attachments;
+            e
+        }
+
+        fn ingest_graph(fx: &Fixture, e: &FetchedEmail) -> i64 {
+            ingest_message(
+                &fx.store,
+                &fx.blobs,
+                &IngestInput {
+                    account: "acct",
+                    mailbox: "inbox",
+                    uid: graph_uid(&resolve_message_id(e, None)),
+                    email: e,
+                    raw: None,
+                },
+            )
+            .unwrap()
+            .row_id
+        }
+
+        fn outlook_graph_attachments() -> Vec<AttachmentData> {
+            vec![
+                att("image001.png", LOGO, "image001.png@01DA.0000"),
+                att("report.pdf", PDF, "abc@outlook.com"),
+                att("doc.pdf", PDF, "doc@x"),
+            ]
+        }
+
+        /// `(filename, content_id, is_inline)` of every attachment reference.
+        fn marks(fx: &Fixture, row: i64) -> Vec<(String, Option<String>, Option<bool>)> {
+            fx.store
+                .conn()
+                .prepare(
+                    "SELECT filename, content_id, is_inline FROM message_blobs
+                     WHERE message_row = ?1 AND kind = 'attachment' ORDER BY ordinal",
+                )
+                .unwrap()
+                .query_map([row], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get::<_, Option<i64>>(2)?.map(|v| v != 0),
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+
+        fn expected_marks() -> Vec<(String, Option<String>, Option<bool>)> {
+            vec![
+                (
+                    "image001.png".into(),
+                    Some("image001.png@01da.0000".into()),
+                    Some(true),
+                ),
+                (
+                    "report.pdf".into(),
+                    Some("abc@outlook.com".into()),
+                    Some(false),
+                ),
+                ("doc.pdf".into(), Some("doc@x".into()), Some(false)),
+            ]
+        }
+
+        fn listed(fx: &Fixture, row: i64) -> Vec<String> {
+            read::attachments_for(&fx.store, row)
+                .unwrap()
+                .into_iter()
+                .map(|a| a.name)
+                .collect()
+        }
+
+        fn has_attachments(fx: &Fixture, row: i64) -> bool {
+            fx.store
+                .conn()
+                .query_row(
+                    "SELECT has_attachments FROM messages WHERE id = ?1",
+                    [row],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                != 0
+        }
+
+        /// Forget the marks, as a row an older build stored has none.
+        fn unmark(fx: &Fixture, row: i64) {
+            fx.store
+                .conn()
+                .execute(
+                    "UPDATE message_blobs SET content_id = NULL, is_inline = NULL
+                     WHERE message_row = ?1",
+                    [row],
+                )
+                .unwrap();
+        }
+
+        /// IMAP: the logo is marked inline with its id, both PDFs are not
+        /// (one carries an id the HTML never names, the other is a document
+        /// the HTML links), and the listings leave the logo out.
+        #[test]
+        fn imap_ingest_marks_the_referenced_image_inline() {
+            let fx = fixture();
+            let row = ingest_imap(&fx, 1);
+            assert_eq!(marks(&fx, row), expected_marks());
+            assert_eq!(listed(&fx, row), vec!["report.pdf", "doc.pdf"]);
+            assert!(has_attachments(&fx, row));
+        }
+
+        /// Graph: the same marks from `contentId` and the stored HTML.
+        #[test]
+        fn graph_ingest_marks_the_referenced_image_inline() {
+            let fx = fixture();
+            let row = ingest_graph(&fx, &graph_email("g", outlook_graph_attachments()));
+            assert_eq!(marks(&fx, row), expected_marks());
+            assert_eq!(listed(&fx, row), vec!["report.pdf", "doc.pdf"]);
+            assert!(has_attachments(&fx, row));
+        }
+
+        /// A message whose only parts are inline images has no attachment.
+        #[test]
+        fn an_inline_only_message_has_no_attachments() {
+            let fx = fixture();
+            let e = graph_email(
+                "logo-only",
+                vec![att("image001.png", LOGO, "<image001.png@01DA.0000>")],
+            );
+            let row = ingest_graph(&fx, &e);
+            assert!(listed(&fx, row).is_empty());
+            assert!(!has_attachments(&fx, row));
+            assert!(
+                attachment_repair_candidates(&fx.store, "acct", "inbox", 0, 10)
+                    .unwrap()
+                    .is_empty(),
+                "stored inline parts settle the server's claim"
+            );
+        }
+
+        /// The forward of a Graph row carries the real attachments only.
+        #[test]
+        fn a_graph_forward_keeps_the_real_attachments_only() {
+            let fx = fixture();
+            let row = ingest_graph(&fx, &graph_email("fwd", outlook_graph_attachments()));
+            let dest = fx.dir.path().join("fwd");
+            let written =
+                read::materialise_forward_attachments(&fx.store, &fx.blobs, row, &dest).unwrap();
+            let names: Vec<_> = written
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, vec!["report.pdf", "doc.pdf"]);
+        }
+
+        /// A Graph row's inline images come out of its blobs by content id,
+        /// and an unmarked row asks for the raw fallback.
+        #[test]
+        fn a_graph_row_serves_its_inline_images_from_the_blobs() {
+            let fx = fixture();
+            let row = ingest_graph(&fx, &graph_email("render", outlook_graph_attachments()));
+            let (images, hashes) = read::stored_inline_images(&fx.store, &fx.blobs, row)
+                .unwrap()
+                .expect("a marked row answers from its blobs");
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].content_id, "image001.png@01da.0000");
+            assert_eq!(images[0].media_type, "image/png");
+            assert_eq!(images[0].content, LOGO);
+            assert_eq!(hashes.len(), 1);
+            let page = crate::parse::embed_inline_images(HTML, &images);
+            assert!(page.contains("src=\"data:image/png;base64,"), "{page}");
+            assert!(
+                page.contains("cid:doc@x"),
+                "the document link stays: {page}"
+            );
+
+            unmark(&fx, row);
+            assert!(read::stored_inline_images(&fx.store, &fx.blobs, row)
+                .unwrap()
+                .is_none());
+        }
+
+        /// The raw backfill restores ingest's marks on a row an older build
+        /// stored, recomputes its flag, and is a no-op once done.
+        #[test]
+        fn the_raw_backfill_marks_an_old_row_once() {
+            let fx = fixture();
+            let row = ingest_imap(&fx, 7);
+            unmark(&fx, row);
+            assert_eq!(
+                listed(&fx, row).len(),
+                3,
+                "an unmarked row lists every part"
+            );
+
+            assert_eq!(
+                classify_inline_from_raw(&fx.store, &fx.blobs, "acct", 10).unwrap(),
+                1
+            );
+            assert_eq!(marks(&fx, row), expected_marks());
+            assert_eq!(listed(&fx, row), vec!["report.pdf", "doc.pdf"]);
+            assert_eq!(
+                classify_inline_from_raw(&fx.store, &fx.blobs, "acct", 10).unwrap(),
+                0
+            );
+        }
+
+        /// An old inline-only row with its raw message loses its paperclip.
+        #[test]
+        fn the_raw_backfill_recomputes_the_attachment_flag() {
+            let fx = fixture();
+            let raw = outlook_raw();
+            let mut email = crate::parse::parse_rfc822_to_fetched_email(raw.as_bytes()).unwrap();
+            email.attachments.truncate(1);
+            let row = ingest_message(
+                &fx.store,
+                &fx.blobs,
+                &IngestInput {
+                    account: "acct",
+                    mailbox: "inbox",
+                    uid: 3,
+                    email: &email,
+                    raw: Some(raw.as_bytes()),
+                },
+            )
+            .unwrap()
+            .row_id;
+            unmark(&fx, row);
+            fx.store
+                .conn()
+                .execute("UPDATE messages SET has_attachments = 1", [])
+                .unwrap();
+            classify_inline_from_raw(&fx.store, &fx.blobs, "acct", 10).unwrap();
+            assert!(!has_attachments(&fx, row));
+        }
+
+        /// The Graph metadata backfill pairs the server's listing with the
+        /// stored references by name and order, marks them as ingest would,
+        /// and leaves the candidate set; a second look changes nothing.
+        #[test]
+        fn the_metadata_backfill_marks_an_old_graph_row_once() {
+            let fx = fixture();
+            let row = ingest_graph(&fx, &graph_email("old", outlook_graph_attachments()));
+            unmark(&fx, row);
+            let candidates = inline_lookup_candidates(&fx.store, "acct", "inbox", 10).unwrap();
+            assert_eq!(
+                candidates.iter().map(|c| c.row_id).collect::<Vec<_>>(),
+                vec![row]
+            );
+            let server = |name: &str, cid: &str| ServerAttachment {
+                name: name.into(),
+                content_id: Some(cid.into()),
+            };
+            let listing = vec![
+                server("image001.png", "<image001.png@01DA.0000>"),
+                // A zero-byte placeholder ingest never stored.
+                server("empty.txt", "e@x"),
+                server("report.pdf", "abc@outlook.com"),
+                server("doc.pdf", "doc@x"),
+            ];
+            apply_inline_metadata(&fx.store, &fx.blobs, row, Some(&listing)).unwrap();
+            assert_eq!(marks(&fx, row), expected_marks());
+            assert!(inline_lookup_candidates(&fx.store, "acct", "inbox", 10)
+                .unwrap()
+                .is_empty());
+
+            apply_inline_metadata(&fx.store, &fx.blobs, row, Some(&[])).unwrap();
+            assert_eq!(
+                marks(&fx, row),
+                expected_marks(),
+                "a mark is never rewritten"
+            );
+        }
+
+        /// A row the server no longer lists is marked from what the store
+        /// holds: every reference listed, as before, and out of the set.
+        #[test]
+        fn the_metadata_backfill_settles_a_row_the_server_lost() {
+            let fx = fixture();
+            let row = ingest_graph(&fx, &graph_email("lost", outlook_graph_attachments()));
+            unmark(&fx, row);
+            apply_inline_metadata(&fx.store, &fx.blobs, row, None).unwrap();
+            assert_eq!(listed(&fx, row).len(), 3);
+            assert!(inline_lookup_candidates(&fx.store, "acct", "inbox", 10)
+                .unwrap()
+                .is_empty());
+        }
+
+        /// An inline-only Graph row stored before 88342da1, with no
+        /// attachment at all, is queued once for the attachment repair, which
+        /// then stores its logo inline and leaves it without a paperclip.
+        #[test]
+        fn an_old_inline_only_row_is_queued_for_the_repair_once() {
+            let fx = fixture();
+            let mut e = graph_email("bare", vec![]);
+            e.has_attachments = false;
+            let row = ingest_graph(&fx, &e);
+            ingest_graph(&fx, &email("no-html"));
+            assert_eq!(
+                mark_inline_only_rows(&fx.store, &fx.blobs, "acct").unwrap(),
+                0,
+                "a store this build created is stamped at birth"
+            );
+            crate::store::schema::clear_meta(
+                fx.store.conn(),
+                crate::store::schema::META_INLINE_ONLY_SWEPT,
+            )
+            .unwrap();
+
+            assert_eq!(
+                mark_inline_only_rows(&fx.store, &fx.blobs, "acct").unwrap(),
+                1
+            );
+            assert_eq!(
+                mark_inline_only_rows(&fx.store, &fx.blobs, "acct").unwrap(),
+                0
+            );
+            let due: Vec<i64> = attachment_repair_candidates(&fx.store, "acct", "inbox", 0, 10)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.row_id)
+                .collect();
+            assert_eq!(due, vec![row]);
+            assert!(!has_attachments(&fx, row), "no paperclip while it waits");
+
+            attach_missing_attachments(
+                &fx.store,
+                &fx.blobs,
+                row,
+                None,
+                &[att("image001.png", LOGO, "image001.png@01DA.0000")],
+            )
+            .unwrap();
+            assert!(listed(&fx, row).is_empty());
+            assert!(!has_attachments(&fx, row));
+            assert!(
+                attachment_repair_candidates(&fx.store, "acct", "inbox", i64::MAX, 10)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        /// A store written before the two columns gains them on its next
+        /// open, with no rebuild, and its references read as unmarked.
+        #[test]
+        fn an_older_store_gains_the_inline_columns_on_open() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("store.sqlite3");
+            {
+                let store = Store::open(&path).unwrap();
+                store
+                    .conn()
+                    .execute_batch(
+                        "ALTER TABLE message_blobs DROP COLUMN content_id;
+                         ALTER TABLE message_blobs DROP COLUMN is_inline;",
+                    )
+                    .unwrap();
+            }
+            let store = Store::open(&path).unwrap();
+            let columns: i64 = store
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('message_blobs')
+                     WHERE name IN ('content_id', 'is_inline')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(columns, 2);
+            assert!(inline_lookup_candidates(&store, "acct", "inbox", 10)
                 .unwrap()
                 .is_empty());
         }

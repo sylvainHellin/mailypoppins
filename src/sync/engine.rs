@@ -665,6 +665,23 @@ pub async fn run_sync(
     }
     span.mark("prune");
 
+    // The attachments an older build stored without their inline mark
+    // (PERSO-165), classified from the raw message every IMAP row keeps: local
+    // only, a bounded batch per pass, so the set converges over a few passes.
+    if !dry_run {
+        match ingest::classify_inline_from_raw(
+            store,
+            blobs,
+            account,
+            ingest::INLINE_CLASSIFICATIONS_PER_PASS,
+        ) {
+            Ok(0) => {}
+            Ok(n) => info!("[sync] {account}: classified the attachments of {n} stored message(s)"),
+            Err(e) => warn!("[sync] {account}: could not classify stored attachments: {e:#}"),
+        }
+        span.mark("inline");
+    }
+
     Ok(result)
 }
 

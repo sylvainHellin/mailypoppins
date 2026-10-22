@@ -2249,7 +2249,30 @@ fn html_rendition(
         .or_else(|| raw_hash.clone())
         .into_iter()
         .collect();
-    let markup = if markup.to_ascii_lowercase().contains("cid:") {
+    // The inline images come out of the stored attachment blobs, by the
+    // `Content-ID` ingest recorded (PERSO-165): a Graph row has no raw message
+    // to find them in. The raw is re-parsed only when the blobs gave nothing:
+    // a row an older build stored, whose references the backfill has not
+    // classified yet, or one whose references name no inline image.
+    let references_cid = markup.to_ascii_lowercase().contains("cid:");
+    let stored = if references_cid {
+        read::stored_inline_images(store, blobs, row)
+            .unwrap_or_else(|e| {
+                log::warn!("[daemon] reading the inline images of message {row}: {e:#}");
+                None
+            })
+            .filter(|(images, _)| !images.is_empty())
+    } else {
+        None
+    };
+    let markup = if let Some((images, hashes)) = stored {
+        for hash in hashes {
+            if !pinned.contains(&hash) {
+                pinned.push(hash);
+            }
+        }
+        crate::parse::embed_inline_images(&markup, &images)
+    } else if references_cid {
         match read::load_raw(store, blobs, row) {
             Some(raw) => {
                 // The inline-image scan parsed the raw message, so this handle

@@ -370,9 +370,10 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
             .into_iter()
             .map(|a| a.name)
             .collect();
-        assert!(
-            listed.contains(&"image001.png".to_string()),
-            "ingest lists the logo as an attachment, which is what the forward has to undo: {listed:?}"
+        assert_eq!(
+            listed,
+            vec!["report.pdf".to_string(), "photo.png".to_string()],
+            "ingest marks the logo inline, so no listing shows it (PERSO-165)"
         );
 
         let source = fx.source(&row, true);
@@ -401,11 +402,11 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
         assert!(!content.contains("image001.png"), "{content}");
     }
 
-    /// With no raw message (a Graph row) there is no MIME structure to tell a
-    /// signature logo from an attached image, so the forward keeps every
-    /// attachment rather than guess, even when the HTML names a `cid:`.
+    /// A row with no raw message (a Graph row) forwards only its real
+    /// attachments too: ingest marked the logo inline from its `Content-ID`
+    /// and the HTML, which is what the forward reads (PERSO-165).
     #[test]
-    fn forward_without_a_raw_message_keeps_every_attachment() {
+    fn forward_without_a_raw_message_drops_the_signature_logo_too() {
         let fx = Fixture::new();
         let raw = signature_logo_message();
         let email = crate::parse::parse_rfc822_to_fetched_email(raw.as_bytes()).unwrap();
@@ -414,6 +415,54 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
             .as_deref()
             .is_some_and(|h| h.contains("cid:image001.png")));
         let row = fx.ingest(&email);
+
+        let source = fx.source(&row, true);
+        let mut names = attachment_names(&source);
+        names.sort();
+        assert_eq!(names, vec!["photo.png", "report.pdf"]);
+    }
+
+    /// A row with a raw message an older build stored carries no inline mark,
+    /// and the forward re-parses the raw to drop the logo, as `b4209c44` did.
+    #[test]
+    fn forward_of_an_unmarked_row_re_parses_its_raw_message() {
+        let fx = Fixture::new();
+        let row = fx.ingest_raw(signature_logo_message().as_bytes());
+        fx.store()
+            .conn()
+            .execute(
+                "UPDATE message_blobs SET content_id = NULL, is_inline = NULL
+                 WHERE message_row = ?1",
+                [row.id],
+            )
+            .unwrap();
+        let listed = crate::store::read::attachments_for(&fx.store(), row.id).unwrap();
+        assert_eq!(listed.len(), 3, "an unmarked row lists every part");
+
+        let source = fx.source(&row, true);
+        assert_eq!(
+            attachment_names(&source),
+            vec!["report.pdf".to_string(), "photo.png".to_string()]
+        );
+    }
+
+    /// A Graph row an older build stored carries no inline mark and no raw
+    /// message to decide by, so until the backfill reaches it the forward
+    /// keeps every attachment rather than guess.
+    #[test]
+    fn forward_of_an_unmarked_row_without_a_raw_message_keeps_every_attachment() {
+        let fx = Fixture::new();
+        let raw = signature_logo_message();
+        let email = crate::parse::parse_rfc822_to_fetched_email(raw.as_bytes()).unwrap();
+        let row = fx.ingest(&email);
+        fx.store()
+            .conn()
+            .execute(
+                "UPDATE message_blobs SET content_id = NULL, is_inline = NULL
+                 WHERE message_row = ?1",
+                [row.id],
+            )
+            .unwrap();
 
         let source = fx.source(&row, true);
         let mut names = attachment_names(&source);

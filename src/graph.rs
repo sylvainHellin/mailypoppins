@@ -1026,6 +1026,67 @@ fn attachments_url(message_id: &str) -> String {
     format!("{}/me/messages/{}/attachments", GRAPH_BASE, message_id)
 }
 
+/// The URL listing a message's attachments as names and content ids only.
+///
+/// `contentId` is a property of the derived `fileAttachment` type, and Graph
+/// refuses it by its bare name in a `$select` on the base collection (HTTP
+/// 400, as it refuses `contentBytes`; a type-cast path segment is refused the
+/// same way), but accepts it qualified with its type. About 1.3 KB a message
+/// against the whole content of every attachment, often megabytes (measured
+/// on evoqs, PERSO-165).
+fn attachment_metadata_url(message_id: &str) -> String {
+    format!(
+        "{GRAPH_BASE}/me/messages/{message_id}/attachments?\
+         $select=id,name,isInline,microsoft.graph.fileAttachment/contentId"
+    )
+}
+
+/// The file attachments of a metadata listing, in order, as the inline
+/// backfill pairs them with the stored references: an item or reference
+/// attachment was never stored, so it is skipped as
+/// [`attachments_from_list`] skips it.
+fn server_attachments(att_list: GraphAttachmentList) -> Vec<crate::ingest::ServerAttachment> {
+    att_list
+        .value
+        .into_iter()
+        .filter(|att| {
+            att.odata_type
+                .as_deref()
+                .is_none_or(|t| t.eq_ignore_ascii_case("#microsoft.graph.fileAttachment"))
+        })
+        .map(|att| crate::ingest::ServerAttachment {
+            name: att.name.unwrap_or_else(|| "attachment".to_string()),
+            content_id: att.content_id,
+        })
+        .collect()
+}
+
+/// The local half of the PERSO-165 inline backfill of one Graph account:
+/// queue its inline-only rows for the attachment repair (once per store) and
+/// classify a batch of the rows that carry a raw message. Failures are logged
+/// and leave the work for the next pass.
+fn classify_stored_inline_locally(
+    store: &crate::store::Store,
+    blobs: &crate::store::BlobStore,
+    account: &str,
+) {
+    match crate::ingest::mark_inline_only_rows(store, blobs, account) {
+        Ok(0) => {}
+        Ok(n) => info!("Queued {n} inline-only message(s) for the attachment repair"),
+        Err(e) => warn!("Could not queue the inline-only messages: {e:#}"),
+    }
+    match crate::ingest::classify_inline_from_raw(
+        store,
+        blobs,
+        account,
+        crate::ingest::INLINE_CLASSIFICATIONS_PER_PASS,
+    ) {
+        Ok(0) => {}
+        Ok(n) => info!("Classified the attachments of {n} stored message(s) from their raw"),
+        Err(e) => warn!("Could not classify the stored attachments from their raw: {e:#}"),
+    }
+}
+
 /// Turn a parsed `/attachments` page into the attachments the store keeps.
 ///
 /// Only `fileAttachment` entries carry content; an item attachment (an
@@ -2196,6 +2257,122 @@ impl GraphClient {
         tally
     }
 
+    /// Mark the attachments an older build stored for the rows of `mailbox`
+    /// that have no raw message, from the server's attachment metadata
+    /// (PERSO-165).
+    ///
+    /// At most [`crate::ingest::INLINE_LOOKUPS_PER_PASS`] rows a pass, newest
+    /// first, one metadata request each (names and content ids, no content).
+    /// A row the server no longer lists is marked from what the store holds,
+    /// every reference not inline, so it leaves the set too. A failed request
+    /// ends the pass for this mailbox and leaves the rest for the next one:
+    /// a failure that persists would otherwise cost every candidate a request
+    /// on every pass.
+    async fn classify_stored_inline(
+        &self,
+        store: &crate::store::Store,
+        blobs: &crate::store::BlobStore,
+        account: &str,
+        mailbox: &str,
+        server: &HashMap<String, FolderEntry>,
+    ) -> usize {
+        let candidates = match crate::ingest::inline_lookup_candidates(
+            store,
+            account,
+            mailbox,
+            crate::ingest::INLINE_LOOKUPS_PER_PASS,
+        ) {
+            Ok(candidates) => candidates,
+            Err(e) => {
+                warn!("Could not list the rows of '{mailbox}' owed an inline mark: {e:#}");
+                return 0;
+            }
+        };
+        let mut classified = 0;
+        for candidate in &candidates {
+            let listing = match self.inline_metadata_for(candidate, server).await {
+                Ok(listing) => listing,
+                Err(e) => {
+                    warn!(
+                        "Inline mark of {} in '{mailbox}' failed, the rest wait for the next \
+                         pass: {e:#}",
+                        candidate.message_id
+                    );
+                    break;
+                }
+            };
+            match crate::ingest::apply_inline_metadata(
+                store,
+                blobs,
+                candidate.row_id,
+                listing.as_deref(),
+            ) {
+                Ok(()) => classified += 1,
+                Err(e) => {
+                    warn!(
+                        "Could not record the inline mark of {}: {e:#}",
+                        candidate.message_id
+                    );
+                    break;
+                }
+            }
+        }
+        if classified > 0 {
+            info!(
+                "Graph inline mark in '{mailbox}': {classified} of {} row(s) classified",
+                candidates.len()
+            );
+        }
+        classified
+    }
+
+    /// The attachment metadata of one inline candidate, `None` when the
+    /// server lists no message with its `Message-ID`.
+    async fn inline_metadata_for(
+        &self,
+        candidate: &crate::ingest::InlineLookupCandidate,
+        server: &HashMap<String, FolderEntry>,
+    ) -> Result<Option<Vec<crate::ingest::ServerAttachment>>> {
+        let graph_id = match server.get(&candidate.message_id) {
+            Some(entry) => entry.graph_id.clone(),
+            None => match self
+                .find_message_by_internet_id(&candidate.message_id)
+                .await?
+            {
+                Some(id) => id,
+                None => return Ok(None),
+            },
+        };
+        self.fetch_attachment_metadata(&graph_id).await.map(Some)
+    }
+
+    /// The file attachments of one message as names and content ids, in the
+    /// server's order, without their content (PERSO-165).
+    async fn fetch_attachment_metadata(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<crate::ingest::ServerAttachment>> {
+        let resp = self
+            .client
+            .get(attachment_metadata_url(message_id))
+            .bearer_auth(self.bearer())
+            .send()
+            .await
+            .context("Failed to fetch the attachment metadata")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Fetch attachment metadata failed (HTTP {status}): {body}"
+            ));
+        }
+        let list: GraphAttachmentList = resp
+            .json()
+            .await
+            .context("Failed to parse the attachment metadata")?;
+        Ok(server_attachments(list))
+    }
+
     /// Ask the server what attachments one repair candidate has.
     async fn repair_verdict_for(
         &self,
@@ -2418,6 +2595,15 @@ pub async fn sync_mailboxes_graph(
     // does not raise the bar for the inbox (see `ingest_window`).
     let newest_held = crate::ingest::newest_held_date(&store, account_name);
 
+    // The inline images of rows an older build stored (PERSO-165), the local
+    // half: the inline-only rows queued for the attachment repair once per
+    // store, and the rows that carry a raw message (the outbox's Sent copies)
+    // classified from it, a bounded batch per pass.
+    if !dry_run {
+        classify_stored_inline_locally(&store, &blobs, account_name);
+        span.mark("inline_local");
+    }
+
     for (index, target) in targets.iter().enumerate() {
         if stops_at(stop, StopPoint::Mailbox(index)) {
             info!(
@@ -2631,6 +2817,13 @@ pub async fn sync_mailboxes_graph(
         // Rows an older build stored without threading signals, once.
         client.rethread_stored(&store, account_name, target).await;
         span.mark(&format!("rethread:{}", target.role));
+
+        // Attachments an older build stored without their inline mark, a
+        // bounded batch per pass (PERSO-165).
+        client
+            .classify_stored_inline(&store, &blobs, account_name, mailbox, &server)
+            .await;
+        span.mark(&format!("inline:{}", target.role));
 
         // The other half of the same diff: what the store holds here and the
         // server does not. Held back until every target has been ingested (see
@@ -4349,6 +4542,42 @@ mod tests {
         assert_eq!(attachments[0].content, b"%PDF-1.4");
         assert!(!attachments[0].filename.contains('/'));
         assert!(attachments[0].filename.ends_with("report.pdf"));
+    }
+
+    /// The inline backfill's listing (PERSO-165): `contentId` qualified with
+    /// its derived type, which Graph accepts where the bare name is a 400, no
+    /// content; and only file attachments, in order, as ingest stored them.
+    #[test]
+    fn the_metadata_listing_names_file_attachments_and_their_ids() {
+        let url = attachment_metadata_url("AAA");
+        assert!(url.ends_with(
+            "/me/messages/AAA/attachments?\
+             $select=id,name,isInline,microsoft.graph.fileAttachment/contentId"
+        ));
+        assert!(!url.contains("contentBytes"));
+        let page = serde_json::json!({
+            "value": [
+                {"@odata.type": "#microsoft.graph.fileAttachment", "name": "image001.png",
+                 "isInline": true, "contentId": "image001.png@01DA"},
+                {"@odata.type": "#microsoft.graph.itemAttachment", "name": "Forwarded"},
+                {"@odata.type": "#microsoft.graph.fileAttachment", "name": "a/report.pdf",
+                 "isInline": false, "contentId": null},
+            ],
+        });
+        let list: GraphAttachmentList = serde_json::from_value(page).expect("page parses");
+        assert_eq!(
+            server_attachments(list),
+            vec![
+                crate::ingest::ServerAttachment {
+                    name: "image001.png".into(),
+                    content_id: Some("image001.png@01DA".into()),
+                },
+                crate::ingest::ServerAttachment {
+                    name: "a/report.pdf".into(),
+                    content_id: None,
+                },
+            ]
+        );
     }
 
     #[test]

@@ -941,9 +941,25 @@ pub struct AttachmentRow {
 /// pre-store build never listed it as an attachment either, and surfacing it
 /// as one would be a visible change rather than a storage detail. Use
 /// [`is_invite`] for that bit.
+///
+/// So are the body's inline images (`message_blobs.is_inline`, PERSO-165):
+/// an Outlook signature's `image001.png` is part of the body the reader
+/// renders, not a file the sender attached. A reference no build has
+/// classified yet (`is_inline` `NULL`) is listed, as it was before, until the
+/// backfill reaches its row.
 pub fn attachments_for(store: &Store, message_row: i64) -> Result<Vec<AttachmentRow>> {
+    Ok(attachment_rows(store, message_row)?
+        .into_iter()
+        .filter(|(_, inline)| *inline != Some(true))
+        .map(|(row, _)| row)
+        .collect())
+}
+
+/// Every attachment reference of one message but the iMIP sidecar, in ingest
+/// order, with its `is_inline` column.
+fn attachment_rows(store: &Store, message_row: i64) -> Result<Vec<(AttachmentRow, Option<bool>)>> {
     let mut stmt = store.conn().prepare(
-        "SELECT filename, size, hash FROM message_blobs
+        "SELECT filename, size, hash, is_inline FROM message_blobs
          WHERE message_row = ?1 AND kind = 'attachment'
          ORDER BY ordinal ASC",
     )?;
@@ -952,22 +968,90 @@ pub fn attachments_for(store: &Store, message_row: i64) -> Result<Vec<Attachment
             row.get::<_, Option<String>>(0)?,
             row.get::<_, Option<i64>>(1)?,
             row.get::<_, String>(2)?,
+            row.get::<_, Option<i64>>(3)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (name, size, hash) = row.context("reading an attachment reference")?;
+        let (name, size, hash, inline) = row.context("reading an attachment reference")?;
         let Some(name) = name else { continue };
         if name == CALENDAR_SIDECAR_NAME {
             continue;
         }
-        out.push(AttachmentRow {
-            name,
-            size: size.unwrap_or(0).max(0) as u64,
-            hash,
-        });
+        out.push((
+            AttachmentRow {
+                name,
+                size: size.unwrap_or(0).max(0) as u64,
+                hash,
+            },
+            inline.map(|v| v != 0),
+        ));
     }
     Ok(out)
+}
+
+/// The inline images of one message out of its stored attachment blobs, with
+/// the hashes read, or `None` when a reference has not been classified yet
+/// and the caller must fall back on the raw message (PERSO-165).
+///
+/// What lets the renderer show the inline images of a Graph row, which has no
+/// raw message to re-parse: every reference ingest marked `is_inline` carries
+/// its `Content-ID`, and its bytes are the part's. The media type is the
+/// blob's own ([`crate::parse::image_media_type`], the test ingest marked it
+/// by), and a blob above [`crate::parse::MAX_INLINE_IMAGE_BYTES`] or one that
+/// cannot be read is left out, as the raw path leaves it out.
+pub fn stored_inline_images(
+    store: &Store,
+    blobs: &BlobStore,
+    message_row: i64,
+) -> Result<Option<(Vec<crate::parse::InlineImage>, Vec<String>)>> {
+    let unclassified: bool = store.conn().query_row(
+        "SELECT EXISTS (SELECT 1 FROM message_blobs
+                        WHERE message_row = ?1 AND kind = 'attachment' AND is_inline IS NULL
+                          AND filename IS NOT ?2)",
+        rusqlite::params![message_row, CALENDAR_SIDECAR_NAME],
+        |row| row.get(0),
+    )?;
+    if unclassified {
+        return Ok(None);
+    }
+    let mut stmt = store.conn().prepare(
+        "SELECT filename, hash, content_id, size FROM message_blobs
+         WHERE message_row = ?1 AND kind = 'attachment' AND is_inline = 1
+           AND content_id IS NOT NULL
+         ORDER BY ordinal ASC",
+    )?;
+    let rows = stmt.query_map([message_row], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+        ))
+    })?;
+    let mut images = Vec::new();
+    let mut hashes = Vec::new();
+    for row in rows {
+        let (filename, hash, content_id, size) = row.context("reading an inline reference")?;
+        if size.unwrap_or(0) as u64 > crate::parse::MAX_INLINE_IMAGE_BYTES as u64 {
+            continue;
+        }
+        let Some(content) = read_blob(blobs, message_row, &hash) else {
+            continue;
+        };
+        let filename = filename.unwrap_or_default();
+        let Some(media_type) = crate::parse::image_media_type(&filename, &content) else {
+            continue;
+        };
+        hashes.push(hash);
+        images.push(crate::parse::InlineImage {
+            filename,
+            content_id,
+            media_type: media_type.to_string(),
+            content,
+        });
+    }
+    Ok(Some((images, hashes)))
 }
 
 /// Every invite of one account: the row plus the hash of its ics blob.
@@ -1104,20 +1188,33 @@ pub fn materialise_attachments(
 /// the one real PDF. An image the HTML does not point at (an attached photo)
 /// stays.
 ///
-/// The match is by content hash, not by filename: the referenced parts are
-/// decoded from the raw message and hashed the way the blob store hashes the
-/// attachment it stored, so a real attachment that happens to share a logo's
-/// name is not dropped. It is a multiset match, so a logo whose exact bytes
-/// are also attached a second time drops only one copy. With no raw message
-/// (a Graph row) or no HTML body there is nothing to decide by, and every
-/// attachment is kept, which is what a forward did before.
+/// Since PERSO-165 ingest marks those parts (`message_blobs.is_inline`) for
+/// both backends, so [`attachments_for`] has already left them out and a
+/// Graph row forwards only its real attachments too.
+///
+/// A row an older build stored has unmarked references until the backfill
+/// reaches it, and for those the raw message is re-parsed, as before the
+/// mark: the match is by content hash, not by filename, so a real attachment
+/// that happens to share a logo's name is not dropped, and it is a multiset
+/// match, so a logo whose exact bytes are also attached a second time drops
+/// only one copy. With no raw message (an unmarked Graph row) or no HTML
+/// body there is nothing to decide by, and every attachment is kept.
 pub fn materialise_forward_attachments(
     store: &Store,
     blobs: &BlobStore,
     row_id: i64,
     dest: &Path,
 ) -> Result<Vec<PathBuf>> {
-    let mut attachments = attachments_for(store, row_id)?;
+    let rows = attachment_rows(store, row_id)?;
+    let unclassified = rows.iter().any(|(_, inline)| inline.is_none());
+    let mut attachments: Vec<AttachmentRow> = rows
+        .into_iter()
+        .filter(|(_, inline)| *inline != Some(true))
+        .map(|(row, _)| row)
+        .collect();
+    if !unclassified {
+        return write_attachments(blobs, row_id, attachments, dest);
+    }
     let mut inline: HashMap<String, usize> = HashMap::new();
     if let (Some(raw), Some(html)) = (
         load_raw(store, blobs, row_id),

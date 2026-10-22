@@ -51,6 +51,13 @@ pub const META_APP_VERSION: &str = "app_version";
 /// sweep only ever touches a file an earlier build wrote.
 pub const META_ARRIVAL_MARK_SWEPT: &str = "arrival_mark_zero_swept";
 
+/// `meta` key recording that [`crate::ingest::mark_inline_only_rows`] has run
+/// against this file (PERSO-165). Present from creation on a store this build
+/// made: every Graph message it ingests fetches the inline parts its HTML
+/// references, so only a file an earlier build wrote can hold a row that lost
+/// them.
+pub const META_INLINE_ONLY_SWEPT: &str = "inline_only_swept";
+
 /// Tables that must exist for a store to count as a valid v4 file. Checked on
 /// open so that a file which is stamped v4 but structurally incomplete (a
 /// half-written create, a hand-edited database) is rebuilt rather than used.
@@ -356,6 +363,7 @@ pub fn create(conn: &Connection) -> Result<()> {
     // Nothing to sweep in a file that starts empty, and stamping it here is
     // what keeps the sweep to the one-shot it is meant to be.
     set_meta(conn, META_ARRIVAL_MARK_SWEPT, "1")?;
+    set_meta(conn, META_INLINE_ONLY_SWEPT, "1")?;
     Ok(())
 }
 
@@ -472,10 +480,28 @@ pub fn ensure_additive_indexes(conn: &Connection) -> Result<()> {
 /// ([`crate::ingest::rethread_candidates`]) reads that distinction, so a Graph
 /// row an older build wrote is re-threaded once and never again; a bump would
 /// instead have dropped every store and re-downloaded every body.
-const ADDITIVE_COLUMNS: [(&str, &str, &str); 3] = [
+///
+/// `message_blobs.content_id` and `message_blobs.is_inline` describe an
+/// `attachment` reference (PERSO-165): the part's `Content-ID`, normalised
+/// ([`crate::parse::normalize_cid`]), and whether it is an inline image of
+/// the message ([`crate::parse::is_inline_image`]: an image whose id the HTML
+/// body references by `cid:` URL). Two columns because they answer two
+/// readers: the attachment listings, the paperclip and the forward ask the
+/// flag, which no reader could afford to derive from the HTML per row, and the
+/// renderer asks the id, to turn a `cid:` URL into the blob behind it on a
+/// Graph row that has no raw message to re-parse. `is_inline` `NULL` means no
+/// build has classified the reference yet: a row an older build wrote, which
+/// the readers serve as they did before (listed, and the raw re-parsed for
+/// the forward and the render) until the backfill
+/// ([`crate::ingest::classify_inline_from_raw`] for a row with its raw
+/// message, the Graph metadata pass for one without) writes it. Every other
+/// blob kind leaves both `NULL`.
+const ADDITIVE_COLUMNS: [(&str, &str, &str); 5] = [
     ("drafts", "in_reply_to", "TEXT"),
     ("drafts", "forwarded_from", "TEXT"),
     ("messages", "conversation_id", "TEXT"),
+    ("message_blobs", "content_id", "TEXT"),
+    ("message_blobs", "is_inline", "INTEGER"),
 ];
 
 /// Add the columns created after [`SCHEMA_VERSION`] was last bumped, beside

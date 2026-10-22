@@ -42,6 +42,9 @@ const CID_UID: i64 = 90;
 /// The uid of the seeded message whose markup is over the inline limit.
 const HUGE_UID: i64 = 91;
 
+/// The uid of the seeded Graph-shaped message: a `cid:` image and no raw.
+const GRAPH_CID_UID: i64 = 92;
+
 /// A 1x1 PNG, base64, as the image part carries it.
 const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
@@ -57,6 +60,7 @@ impl Slice {
         fixture::seed(tmp.path());
         seed_cid_message(tmp.path());
         seed_huge_message(tmp.path());
+        seed_graph_cid_message(tmp.path());
         let daemon = DaemonFixture::start(tmp.path());
         Slice { daemon, tmp }
     }
@@ -124,6 +128,32 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
     email.html_body = Some(html.to_string());
     email.has_attachments = true;
     ingest_raw(root, CID_UID, &email, Some(raw.as_bytes()));
+}
+
+/// The logo message as Graph hands it over (PERSO-165): no raw message, the
+/// HTML body, and the image as a file attachment carrying its `contentId`,
+/// so the rendition has only the stored blob to resolve `cid:` against.
+fn seed_graph_cid_message(root: &Path) {
+    use base64::Engine as _;
+    let html = "<html><body><p>Signed</p><img src=\"cid:image001.png@01DA.0000\"></body></html>";
+    let mut email = fixture::email(
+        "outlook@example.com",
+        "sylvain@example.com",
+        "Signed",
+        "Mon, 6 Jul 2026 12:00:00 +0200",
+        "Signed\n",
+    );
+    email.message_id = Some("<graph-logo@example.com>".to_string());
+    email.html_body = Some(html.to_string());
+    email.has_attachments = true;
+    email.attachments = vec![mailypoppins::parse::AttachmentData {
+        filename: "image001.png".to_string(),
+        content: base64::engine::general_purpose::STANDARD
+            .decode(PNG_B64)
+            .expect("the fixture PNG decodes"),
+        content_id: Some("image001.png@01DA.0000".to_string()),
+    }];
+    ingest_raw(root, GRAPH_CID_UID, &email, None);
 }
 
 /// A message whose markup is one byte over the inline limit before the
@@ -280,6 +310,32 @@ async fn the_inline_rendition_is_byte_identical_to_the_materialised_file() {
     )
     .await;
     assert_eq!(released, json!({}));
+}
+
+/// A Graph row has no raw message, and its `cid:` image is inlined from the
+/// stored attachment blob by the content id ingest recorded (PERSO-165).
+#[tokio::test]
+async fn a_graph_row_s_cid_image_is_inlined_from_its_blob() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let row_id = slice.row_id("inbox", GRAPH_CID_UID);
+    let inline: MessageHtml = serde_json::from_value(
+        call(
+            &mut conn,
+            METHOD,
+            json!({"account": fixture::ACCOUNT, "row_id": row_id}),
+        )
+        .await,
+    )
+    .expect("the answer is a MessageHtml");
+    assert!(
+        inline
+            .html
+            .contains(&format!("src=\"data:image/png;base64,{PNG_B64}\"")),
+        "the cid: image is inlined as a data: URI, got {}",
+        inline.html
+    );
+    assert!(!inline.html.to_ascii_lowercase().contains("cid:"));
 }
 
 /// The three addresses `message.get` takes all reach the same rendition, and
