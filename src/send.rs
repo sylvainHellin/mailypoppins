@@ -1,7 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use lettre::{
     address::Envelope,
-    message::{header::ContentType, Attachment, Mailbox, MultiPart, SinglePart},
+    message::{
+        header::{ContentTransferEncoding, ContentType},
+        Attachment, Body, Mailbox, MultiPart, SinglePart,
+    },
     transport::smtp::authentication::Credentials,
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
@@ -463,6 +466,73 @@ mod tests {
         let (name, _bytes, content_type) = read_attachment(&path).unwrap();
         assert_eq!(name, "2026-10-21_Re DEAL.eml");
         assert_eq!(content_type, "message/rfc822");
+    }
+
+    /// A `message/rfc822` part's headers and body as they go on the wire.
+    fn rfc822_part(bytes: &[u8]) -> String {
+        let part = attachment_part("m.eml".to_string(), bytes.to_vec(), "message/rfc822");
+        String::from_utf8(part.formatted()).unwrap()
+    }
+
+    /// RFC 2046 §5.2.1: a `message/rfc822` part is `7bit`, `8bit` or `binary`,
+    /// never quoted-printable or base64, even with long 8-bit lines lettre
+    /// would have re-encoded, and its bytes go unchanged (PERSO-174).
+    #[test]
+    fn an_eml_with_long_8bit_lines_goes_8bit_byte_for_byte() {
+        let long = format!("Grüße, {}", "ä".repeat(300));
+        let raw = format!(
+            "Subject: Bericht\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{long}\r\n"
+        );
+        let wire = rfc822_part(raw.as_bytes());
+        assert!(wire.contains("Content-Type: message/rfc822"), "{wire}");
+        assert!(wire.contains("Content-Transfer-Encoding: 8bit"), "{wire}");
+        assert!(
+            wire.contains(&raw),
+            "the message is carried unchanged: {wire}"
+        );
+    }
+
+    #[test]
+    fn an_ascii_eml_goes_7bit_and_bare_line_feeds_become_crlf() {
+        let wire = rfc822_part(b"Subject: x\n\nbody\n");
+        assert!(wire.contains("Content-Type: message/rfc822"), "{wire}");
+        assert!(wire.contains("Content-Transfer-Encoding: 7bit"), "{wire}");
+        assert!(wire.contains("Subject: x\r\n\r\nbody\r\n"), "{wire}");
+    }
+
+    /// A line over 998 octets fits neither `7bit` nor `8bit`: the part goes
+    /// as `application/octet-stream` under its `.eml` name, encoded.
+    #[test]
+    fn an_eml_with_a_line_over_998_octets_goes_as_an_octet_stream() {
+        let raw = format!("Subject: x\r\n\r\n{}\r\n", "a".repeat(MAX_LINE_OCTETS + 1));
+        let wire = rfc822_part(raw.as_bytes());
+        assert!(
+            wire.contains("Content-Type: application/octet-stream"),
+            "{wire}"
+        );
+        assert!(!wire.contains("message/rfc822"), "{wire}");
+        assert!(wire.contains("filename=\"m.eml\""), "{wire}");
+        assert!(
+            wire.contains("Content-Transfer-Encoding: base64")
+                || wire.contains("Content-Transfer-Encoding: quoted-printable"),
+            "{wire}"
+        );
+        let exact = format!("Subject: x\r\n\r\n{}\r\n", "a".repeat(MAX_LINE_OCTETS));
+        assert!(rfc822_part(exact.as_bytes()).contains("Content-Transfer-Encoding: 7bit"));
+    }
+
+    #[test]
+    fn an_eml_with_a_nul_or_a_bare_cr_goes_as_an_octet_stream() {
+        for raw in [
+            &b"Subject: x\r\n\r\na\0b\r\n"[..],
+            b"Subject: x\r\n\r\na\rb\r\n",
+        ] {
+            let wire = rfc822_part(raw);
+            assert!(
+                wire.contains("Content-Type: application/octet-stream"),
+                "{wire}"
+            );
+        }
     }
 
     #[test]
@@ -2721,6 +2791,93 @@ fn read_attachment(path: &Path) -> Result<(String, Vec<u8>, String)> {
     Ok((filename, content, content_type))
 }
 
+/// The longest line RFC 5322 allows, CRLF excluded; `7bit` and `8bit` carry
+/// no longer one.
+const MAX_LINE_OCTETS: usize = 998;
+
+/// One file attachment as a MIME part, `content_type` as [`read_attachment`]
+/// guessed it.
+///
+/// Every type but `message/rfc822` takes lettre's own transfer encoding.
+/// RFC 2046 §5.2.1 allows a `message/rfc822` part only `7bit`, `8bit` or
+/// `binary`, where lettre would pick quoted-printable or base64 for any line
+/// over 76 octets, so that part is labelled by [`rfc822_body`] instead
+/// (PERSO-174). A message neither can carry, a line over 998 octets or a NUL,
+/// goes as `application/octet-stream` under the same `.eml` name, which a
+/// mail client still opens as a message, and the reason is logged.
+fn attachment_part(filename: String, bytes: Vec<u8>, content_type: &str) -> SinglePart {
+    let octet_stream = || {
+        "application/octet-stream"
+            .parse::<ContentType>()
+            .expect("static MIME type")
+    };
+    if content_type.eq_ignore_ascii_case("message/rfc822") {
+        match rfc822_body(bytes) {
+            Ok(body) => {
+                let message = "message/rfc822"
+                    .parse::<ContentType>()
+                    .expect("static MIME type");
+                return Attachment::new(filename).body(body, message);
+            }
+            Err((bytes, why)) => {
+                warn!(
+                    "[send] {filename} goes as application/octet-stream, not message/rfc822: {why}"
+                );
+                return Attachment::new(filename).body(bytes, octet_stream());
+            }
+        }
+    }
+    let parsed = content_type
+        .parse::<ContentType>()
+        .unwrap_or_else(|_| octet_stream());
+    Attachment::new(filename).body(bytes, parsed)
+}
+
+/// The body of a `message/rfc822` part: its lines ended by CRLF (a bare LF
+/// becomes one), labelled `7bit` when every octet is ASCII and `8bit`
+/// otherwise, and never re-encoded, so the forwarded message arrives byte for
+/// byte, signatures intact.
+///
+/// `Err` hands the bytes back with the reason neither label is true of them:
+/// a NUL, a bare CR, or a line over [`MAX_LINE_OCTETS`]. `binary` would carry
+/// those, but only to a server that offers `BINARYMIME`, which the send path
+/// does not ask for.
+fn rfc822_body(bytes: Vec<u8>) -> std::result::Result<Body, (Vec<u8>, String)> {
+    let mut canonical = Vec::with_capacity(bytes.len() + bytes.len() / 64);
+    let mut line = 0usize;
+    let mut longest = 0usize;
+    for (at, &byte) in bytes.iter().enumerate() {
+        match byte {
+            b'\0' => return Err((bytes, "it holds a NUL octet".to_string())),
+            // The LF that follows writes the CRLF.
+            b'\r' if bytes.get(at + 1) == Some(&b'\n') => {}
+            b'\r' => return Err((bytes, "it holds a CR outside a line break".to_string())),
+            b'\n' => {
+                canonical.extend_from_slice(b"\r\n");
+                longest = longest.max(line);
+                line = 0;
+            }
+            _ => {
+                canonical.push(byte);
+                line += 1;
+            }
+        }
+    }
+    longest = longest.max(line);
+    if longest > MAX_LINE_OCTETS {
+        return Err((
+            bytes,
+            format!("a line is {longest} octets, over the {MAX_LINE_OCTETS} 7bit and 8bit allow"),
+        ));
+    }
+    let encoding = if canonical.is_ascii() {
+        ContentTransferEncoding::SevenBit
+    } else {
+        ContentTransferEncoding::EightBit
+    };
+    Ok(Body::dangerous_pre_encoded(canonical, encoding))
+}
+
 /// The attachments a draft names, read off the paths in its frontmatter.
 ///
 /// Only the Graph path needs them separately: the SMTP path's bytes are built
@@ -3547,13 +3704,7 @@ pub fn build_draft_message(
         if let Some(attachments) = &draft.frontmatter.attachments {
             for path in resolve_attachment_paths(attachments, attachment_anchor(draft))? {
                 let (filename, file_content, content_type) = read_attachment(&path)?;
-                let content_type_parsed = content_type.parse().unwrap_or_else(|_| {
-                    "application/octet-stream"
-                        .parse()
-                        .expect("static MIME type")
-                });
-                mixed = mixed
-                    .singlepart(Attachment::new(filename).body(file_content, content_type_parsed));
+                mixed = mixed.singlepart(attachment_part(filename, file_content, &content_type));
             }
         }
         builder
@@ -3566,13 +3717,7 @@ pub fn build_draft_message(
 
             for path in files {
                 let (filename, file_content, content_type) = read_attachment(&path)?;
-                let content_type_parsed = content_type.parse().unwrap_or_else(|_| {
-                    "application/octet-stream"
-                        .parse()
-                        .expect("static MIME type")
-                });
-                let attachment = Attachment::new(filename).body(file_content, content_type_parsed);
-                mixed = mixed.singlepart(attachment);
+                mixed = mixed.singlepart(attachment_part(filename, file_content, &content_type));
             }
 
             builder
