@@ -3,50 +3,50 @@ source: clients/tui/src/ui/golden_frames.rs
 expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 ---
 == text 120x40 (trailing spaces trimmed) ==
-00 |╭ Mail ──────────────────────────────────╮╭ Headers ───────────────────────────────────────────────────────────────────╮
-01 |│> 󰅲 Inbox  5                      ╭ Help ──────────────────────────────────────────╮>                                 │
-02 |│  󰏫 Drafts  2                     │  GLOBAL                                        │                                  │
-03 |│  󰑫 Sent 41                       │  q           Quit                              │  ✓                               │
-04 |│  󰄼 Archive 128                   │  1-9         Jump to mailbox                   │                                  │
-05 |│                                  │  Tab         Cycle focus forward               │                                  │
-06 |╰──────────────────────────────────│  Shift+Tab   Cycle focus backward              │──────────────────────────────────╯
-07 |╭ Inbox ───────────────────────────│  ?           Toggle this help                  │──────────────────────────────────╮
-08 |│   DATE       SUBJECT             │  :           Command palette (run an action by │                                  │
-09 |│  2026-07-28 󰃭  Einladung: Baust│  Ctrl+p      Command palette (run an action by │8-03T10:30:00+02:00               │
-10 |│   2026-07-27 Re: Statusbericht KW│  z           Zoom / unzoom the focused pane    │                                  │
-11 |│  2026-07-26  Scan 2026-07-26 (3│  !           Toggle activity log               │                                  │
-12 |│   2026-07-24 Wochenrückblick: seh│  x           Send current draft (approve + send│                                  │
-13 |│   2026-07-21  Rechnung 2026-0714│  ff          Search all mail (sender, subject, │ed to Exchange (no Graph in v1).  │
-14 |│                                  │  cn          New draft                         │──────────────────────────────────╯
-15 |│                                  │  cs          Manage signatures                 │──────────────────────────────────╮
-16 |│                                  │  gm          Go to mailboxes (sidebar)         │                                  │
-17 |│                                  │  gl          Go to message list                │                                  │
-18 |│                                  │  gr          Go to reader (body)               │                                  │
-19 |│                                  │  ga          Switch account                    │                                  │
-20 |│                                  │  ss          Quick sync                        │                                  │
-21 |│                                  │  sS          Full sync                         │                                  │
-22 |│                                  │  sl          Activity log overlay              │                                  │
-23 |│                                  │  sc          Open config.toml in $EDITOR       │                                  │
-24 |│                                  │  sf          Open log file in $EDITOR          │                                  │
-25 |│                                  │  Space m     Switch to Mail view               │                                  │
-26 |│                                  │  Space c     Switch to Contacts view           │                                  │
-27 |╰──────────────────────────────────│  Space a     Switch to Calendar view           │                                  │
-28 |╭ Activity ────────────────────────│                                                │                                  │
-29 |│  No activity yet                 │  MESSAGE (list, headers, body)                 │                                  │
-30 |│                                  │  J / K       Next / previous message           │                                  │
-31 |│                                  │  Enter       Read (focus the body pane)        │                                  │
-32 |│                                  │  e           Open in editor (mail read-only)   │                                  │
-33 |╰──────────────────────────────────│  r           Reply                             │                                  │
-34 |╭ View ────────────────────────────│  a           Archive                           │                                  │
-35 |│     mail  |  contacts  |  calenda│  d           Delete                            │                                  │
-36 |╰──────────────────────────────────│  u           Toggle read/unread                │──────────────────────────────────╯
-37 |╭──────────────────────────────────│  *           Toggle flag/star                  │──────────────────────────────────╮
-38 |│ HELP                             ╰─────────────────── 1-36/124 ───────────────────╯                                  │
+00 |╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+01 |│╭ Mail ─────────────────────────────────╮╭ Headers ──────────────────────────────────────────────────────────────────╮│
+02 |││> 󰅲 Inbox  5                     ╭ Help ──────────────────────────────────────────╮>                                ││
+03 |││  󰏫 Drafts  2                    │  GLOBAL                                        │                                 ││
+04 |││  󰑫 Sent 41                      │  q           Quit                              │  ✓                              ││
+05 |││  󰄼 Archive 128                  │  1-9         Jump to mailbox                   │                                 ││
+06 |││                                 │  Tab         Cycle focus forward               │                                 ││
+07 |│╰─────────────────────────────────│  Shift+Tab   Cycle focus backward              │─────────────────────────────────╯│
+08 |│╭ Inbox ──────────────────────────│  ?           Toggle this help                  │─────────────────────────────────╮│
+09 |││   DATE       SUBJECT            │  :           Command palette (run an action by │                                 ││
+10 |││  2026-07-28 󰃭  Einladung: Baus│  Ctrl+p      Command palette (run an action by │8-03T10:30:00+02:00              ││
+11 |││   2026-07-27 Re: Statusbericht K│  z           Zoom / unzoom the focused pane    │                                 ││
+12 |││  2026-07-26  Scan 2026-07-26 (│  !           Toggle activity log               │                                 ││
+13 |││   2026-07-24 Wochenrückblick: se│  x           Send current draft (approve + send│                                 ││
+14 |││   2026-07-21  Rechnung 2026-071│  ff          Search all mail (sender, subject, │ed to Exchange (no Graph in v1). ││
+15 |││                                 │  cn          New draft                         │─────────────────────────────────╯│
+16 |││                                 │  cs          Manage signatures                 │─────────────────────────────────╮│
+17 |││                                 │  gm          Go to mailboxes (sidebar)         │                                 ││
+18 |││                                 │  gl          Go to message list                │                                 ││
+19 |││                                 │  gr          Go to reader (body)               │                                 ││
+20 |││                                 │  ga          Switch account                    │                                 ││
+21 |││                                 │  ss          Quick sync                        │                                 ││
+22 |││                                 │  sS          Full sync                         │                                 ││
+23 |││                                 │  sl          Activity log overlay              │                                 ││
+24 |││                                 │  sc          Open config.toml in $EDITOR       │                                 ││
+25 |││                                 │  sf          Open log file in $EDITOR          │                                 ││
+26 |│╰─────────────────────────────────│  Space m     Switch to Mail view               │                                 ││
+27 |│╭ Activity ───────────────────────│  Space c     Switch to Contacts view           │                                 ││
+28 |││  No activity yet                │  Space a     Switch to Calendar view           │                                 ││
+29 |││                                 │                                                │                                 ││
+30 |││                                 │  MESSAGE (list, headers, body)                 │                                 ││
+31 |││                                 │  J / K       Next / previous message           │                                 ││
+32 |│╰─────────────────────────────────│  Enter       Read (focus the body pane)        │                                 ││
+33 |│╭ View ───────────────────────────│  e           Open in editor (mail read-only)   │                                 ││
+34 |││    mail  |  contacts  |  calenda│  r           Reply                             │                                 ││
+35 |│╰─────────────────────────────────│  a           Archive                           │─────────────────────────────────╯│
+36 |│╭─────────────────────────────────│  d           Delete                            │─────────────────────────────────╮│
+37 |││ HELP                            ╰─────────────────── 1-34/124 ───────────────────╯                                 ││
+38 |│╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│
 39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
-02 |bold@36..44
-09 |bg:surface+fg:selection+bold@1..35
-11 |bold@1..35
-29 |bold@36..67
-35 |bold@5..11
-38 |bold@1..7
+03 |bold@36..44
+10 |bg:surface+fg:selection+bold@2..35
+12 |bold@2..35
+30 |bold@36..67
+34 |bold@5..11
+37 |bold@2..8

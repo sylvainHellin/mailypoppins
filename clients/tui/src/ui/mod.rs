@@ -20,10 +20,46 @@ mod util;
 mod views;
 mod widgets;
 
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Style};
+use ratatui::widgets::{Block, BorderType, Borders};
 use ratatui::Frame;
 
 use super::app::{App, Overlay, View};
+use super::theme::{self, Theme};
+
+/// Whether `theme` gets the outer frame around the whole TUI.
+///
+/// A theme that paints its own background would otherwise run straight into
+/// the terminal's, with no edge between the two designs; the frame is that
+/// edge. The `terminal` theme paints none (`bg` is `Color::Reset`), so there
+/// is no seam to mark and the frame would cost two columns and two rows for
+/// nothing.
+pub(crate) fn has_outer_frame(theme: &Theme) -> bool {
+    theme.bg != Color::Reset
+}
+
+/// Draw the outer frame for `theme` over `area` and return the area left
+/// inside it, where everything else lays out: panes, hint bar, overlays.
+///
+/// The frame is a rounded border like every pane's, in the theme's unfocused
+/// border colour, on the theme's ground; it carries no title. A theme without
+/// a frame ([`has_outer_frame`]) gets `area` back untouched and nothing drawn.
+/// The decision is read every frame, so the frame follows the active theme
+/// without a flag of its own.
+fn render_outer_frame(frame: &mut Frame, area: Rect, theme: &Theme) -> Rect {
+    if !has_outer_frame(theme) {
+        return area;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.bg));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
+}
 
 /// The stacked regions of the herdr-style left column.
 struct LeftColumn {
@@ -72,7 +108,13 @@ fn split_left_column(app: &App, area: ratatui::layout::Rect, sidebar_height: u16
 
 /// Render the entire UI from the current app state.
 pub fn view(app: &mut App, frame: &mut Frame) {
-    let area = frame.area();
+    // The outer frame (painted themes only) is drawn first, and from here on
+    // `area` is its inside: no pane, popup or overlay dim ever touches it.
+    // The width tiers below stay keyed on `app.terminal_width`, the
+    // terminal's own size, so a classic 80-column terminal keeps the full
+    // split with 78 columns inside the frame, and the key handler's own
+    // narrow-tier check (`terminal_width < 80`) agrees with the layout.
+    let area = render_outer_frame(frame, frame.area(), theme::active());
 
     // The preview body is not carried by the list entry; it is read from the
     // blob store for the selected message only (#0038 scope item 5). This is
@@ -349,4 +391,193 @@ fn render_prefix_popup(app: &App, frame: &mut Frame, area: ratatui::layout::Rect
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+#[cfg(test)]
+mod tests {
+    //! The outer frame (painted themes only): where it is drawn, what stays
+    //! inside it, and the small-terminal tiers it costs two columns of.
+
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::{Buffer, Cell};
+    use ratatui::style::Modifier;
+    use ratatui::Terminal;
+
+    use super::golden_frames::{self as gf, render_buffer};
+    use super::{has_outer_frame, render_outer_frame};
+    use crate::app::App;
+    use crate::theme::{self, Theme};
+
+    /// Every cell of the buffer's perimeter, paired with the glyph the frame
+    /// puts there.
+    fn perimeter(area: ratatui::layout::Rect) -> Vec<((u16, u16), &'static str)> {
+        let (right, bottom) = (area.width - 1, area.height - 1);
+        let mut cells = vec![
+            ((0, 0), "╭"),
+            ((right, 0), "╮"),
+            ((0, bottom), "╰"),
+            ((right, bottom), "╯"),
+        ];
+        for x in 1..right {
+            cells.push(((x, 0), "─"));
+            cells.push(((x, bottom), "─"));
+        }
+        for y in 1..bottom {
+            cells.push(((0, y), "│"));
+            cells.push(((right, y), "│"));
+        }
+        cells
+    }
+
+    /// Assert the perimeter of `buffer` is the outer frame, undimmed, in the
+    /// active theme's border colour on its ground.
+    fn assert_framed(buffer: &Buffer, what: &str) {
+        let theme = theme::active();
+        for ((x, y), glyph) in perimeter(*buffer.area()) {
+            let cell = &buffer[(x, y)];
+            assert_eq!(cell.symbol(), glyph, "{what}: frame glyph at ({x},{y})");
+            assert_eq!(cell.fg, theme.border, "{what}: frame colour at ({x},{y})");
+            assert_eq!(cell.bg, theme.bg, "{what}: frame ground at ({x},{y})");
+            assert!(
+                !cell.modifier.contains(Modifier::DIM),
+                "{what}: an overlay dimmed the frame at ({x},{y})"
+            );
+        }
+    }
+
+    fn row_text(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area().width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn only_the_terminal_theme_goes_without_a_frame() {
+        for name in theme::THEME_NAMES {
+            let theme = Theme::by_name(name).unwrap();
+            assert_eq!(has_outer_frame(&theme), *name != "terminal", "theme {name}");
+        }
+    }
+
+    #[test]
+    fn a_painted_theme_draws_the_four_rounded_corners() {
+        let mut app = gf::mail_fixture();
+        let buffer = render_buffer(&mut app, gf::WIDTH, gf::HEIGHT);
+        assert_framed(&buffer, "mail view");
+        // The panes moved inside: the sidebar's own corner and title now sit
+        // one cell in, and the hint bar closes one row above the frame.
+        assert_eq!(buffer[(1, 1)].symbol(), "╭");
+        assert!(row_text(&buffer, 1).contains(" Mail "));
+        assert_eq!(buffer[(1, gf::HEIGHT - 2)].symbol(), "╰");
+        assert_eq!(buffer[(gf::WIDTH - 2, gf::HEIGHT - 2)].symbol(), "╯");
+    }
+
+    #[test]
+    fn the_terminal_theme_draws_no_frame_and_keeps_the_whole_area() {
+        let terminal_theme = Theme::terminal();
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut inner = None;
+        terminal
+            .draw(|frame| {
+                inner = Some(render_outer_frame(frame, frame.area(), &terminal_theme));
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(inner, Some(*buffer.area()), "no frame, no lost cells");
+        for ((x, y), _) in perimeter(*buffer.area()) {
+            assert_eq!(
+                buffer[(x, y)],
+                Cell::default(),
+                "nothing drawn at ({x},{y})"
+            );
+        }
+
+        // A painted theme, on the same area, gives up one cell on each side.
+        let painted = Theme::mailypoppins();
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                inner = Some(render_outer_frame(frame, frame.area(), &painted));
+            })
+            .unwrap();
+        assert_eq!(inner, Some(ratatui::layout::Rect::new(1, 1, 38, 10)));
+        assert_eq!(terminal.backend().buffer()[(0, 0)].symbol(), "╭");
+        assert_eq!(terminal.backend().buffer()[(39, 11)].symbol(), "╯");
+    }
+
+    #[test]
+    fn overlays_and_popups_stay_inside_the_frame() {
+        type Fixture = fn() -> App;
+        let fixtures: [(&str, Fixture); 6] = [
+            ("help", gf::help_overlay_app),
+            ("palette", gf::command_palette_app),
+            ("account picker", gf::account_picker_app),
+            ("signatures", gf::signatures_overlay_app),
+            ("search", gf::search_form_filled_app),
+            ("compose", gf::compose_wizard_with_body_app),
+        ];
+        // The full size and a cramped one, where a modal sized from the area
+        // would reach the edge if it were given the whole terminal.
+        for (width, height) in [(gf::WIDTH, gf::HEIGHT), (50, 14)] {
+            for (name, fixture) in fixtures {
+                let mut app = fixture();
+                let buffer = render_buffer(&mut app, width, height);
+                assert_framed(&buffer, &format!("{name} at {width}x{height}"));
+            }
+            // The which-key popup, which floats without a modal overlay.
+            let mut app = gf::mail_fixture();
+            app.pending_prefix = Some('g');
+            let buffer = render_buffer(&mut app, width, height);
+            assert_framed(&buffer, &format!("which-key at {width}x{height}"));
+        }
+    }
+
+    /// The width tiers stay keyed on the terminal's own width, so an
+    /// 80-column terminal keeps the full split inside the frame and 79 drops
+    /// to the sidebar-and-list tier, as before the frame.
+    #[test]
+    fn the_width_tiers_survive_the_two_framed_columns() {
+        let mut app = gf::mail_fixture();
+        let wide = render_buffer(&mut app, 80, 24);
+        assert_framed(&wide, "80x24");
+        let wide_text: String = (0..24).map(|y| row_text(&wide, y)).collect();
+        assert!(wide_text.contains(" Headers "), "80 columns: full split");
+
+        let mut app = gf::mail_fixture();
+        let medium = render_buffer(&mut app, 79, 24);
+        assert_framed(&medium, "79x24");
+        let medium_text: String = (0..24).map(|y| row_text(&medium, y)).collect();
+        assert!(
+            !medium_text.contains(" Headers "),
+            "79 columns: no right column"
+        );
+        assert!(medium_text.contains(" Mail "), "79 columns: sidebar kept");
+
+        let mut app = gf::mail_fixture();
+        let narrow = render_buffer(&mut app, 39, 16);
+        assert_framed(&narrow, "39x16");
+        let narrow_text: String = (0..16).map(|y| row_text(&narrow, y)).collect();
+        assert!(!narrow_text.contains(" Mail "), "39 columns: list alone");
+        assert!(narrow_text.contains(" Inbox "), "39 columns: list kept");
+    }
+
+    /// No terminal is too small to paint: down to a single cell the frame and
+    /// the layout inside it render without a panic, with and without a modal.
+    #[test]
+    fn tiny_terminals_render_without_panicking() {
+        for width in 1..=8 {
+            for height in 1..=8 {
+                let mut app = gf::mail_fixture();
+                let _ = render_buffer(&mut app, width, height);
+                let mut app = gf::help_overlay_app();
+                let _ = render_buffer(&mut app, width, height);
+            }
+        }
+        // At three cells a side the frame is whole and the inside is one cell.
+        let mut app = gf::mail_fixture();
+        let buffer = render_buffer(&mut app, 3, 3);
+        assert_eq!(buffer[(0, 0)].symbol(), "╭");
+        assert_eq!(buffer[(2, 2)].symbol(), "╯");
+    }
 }

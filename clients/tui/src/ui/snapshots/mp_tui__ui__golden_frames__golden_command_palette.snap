@@ -3,54 +3,53 @@ source: clients/tui/src/ui/golden_frames.rs
 expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 ---
 == text 120x40 (trailing spaces trimmed) ==
-00 |╭ Mail ──────────────────────────────────╮╭ Headers ───────────────────────────────────────────────────────────────────╮
-01 |│> 󰅲 Inbox  5                            ││ From: Planung Muller <planung@example.org>                                 │
-02 |│  󰏫 Drafts  2                           ││ To: sylvain@example.org                                                    │
-03 |│  󰑫 Sent 41                             ││ Subj: Einladung: Baustellenübergabe — 会 議  ✓                               │
-04 |│  󰄼 Archive 128                         ││ Date: 2026-07-28  [inbox]                                                  │
-05 |│                                        ││ Attach:  yes                                                              │
-06 |╰────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────╯
-07 |╭ Inbox ─────────────────────────────────╮╭ 󰃭 Invitation ──────────────────────────────────────────────────────────────╮
-08 |│   DATE       SUBJECT                   ││Bauprojekt Ubergabe                                                         │
-09 |│  2026-07-28 󰃭  Einladung: Baustelle… ││When: 2026-08-03T09:00:00+02:00  →  2026-08-03T10:30:00+02:00               │
-10 |│   2026-07-27 Re: Statusberic╭ Command palette ─────────────────────────────────────────╮                             │
-11 |│  2026-07-26  Scan 2026-07-│> █                                                       │                             │
-12 |│   2026-07-24 Wochenrückblick│Quit                                                      │                             │
-13 |│   2026-07-21  Rechnung 2026│Cycle focus forward                                       │ Exchange (no Graph in v1).  │
-14 |│                             │Cycle focus backward                                      │─────────────────────────────╯
-15 |│                             │Toggle this help                                          │─────────────────────────────╮
-16 |│                             │Zoom / unzoom the focused pane                            │                             │
-17 |│                             │Toggle activity log                                       │                             │
-18 |│                             │Send current draft (approve + send)                       │                             │
-19 |│                             │Search all mail (sender, subject, body)                   │                             │
-20 |│                             │New draft                                                 │                             │
-21 |│                             │Manage signatures                                         │                             │
-22 |│                             │Go to mailboxes (sidebar)                                 │                             │
-23 |│                             │Go to message list                                        │                             │
-24 |│                             │Go to reader (body)                                       │                             │
-25 |│                             │Switch account                                            │                             │
-26 |│                             │Quick sync                                                │                             │
-27 |╰─────────────────────────────│Full sync                                                 │                             │
-28 |╭ Activity ───────────────────│type filter  ↑/↓ nav  Enter run  Esc cancel               │                             │
-29 |│  No activity yet            ╰──────────────────────────────────────────────────────────╯                             │
-30 |│                                        ││                                                                            │
-31 |│                                        ││                                                                            │
-32 |│                                        ││                                                                            │
-33 |╰────────────────────────────────────────╯│                                                                            │
-34 |╭ View ──────────────────────────────────╮│                                                                            │
-35 |│     mail  |  contacts  |  calendar     ││                                                                            │
-36 |╰────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────╯
-37 |╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-38 |│                                                                                                                      │
+00 |╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+01 |│╭ Mail ─────────────────────────────────╮╭ Headers ──────────────────────────────────────────────────────────────────╮│
+02 |││> 󰅲 Inbox  5                           ││ From: Planung Muller <planung@example.org>                                ││
+03 |││  󰏫 Drafts  2                          ││ To: sylvain@example.org                                                   ││
+04 |││  󰑫 Sent 41                            ││ Subj: Einladung: Baustellenübergabe — 会 議  ✓                              ││
+05 |││  󰄼 Archive 128                        ││ Date: 2026-07-28  [inbox]                                                 ││
+06 |││                                       ││ Attach:  yes                                                             ││
+07 |│╰───────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯│
+08 |│╭ Inbox ────────────────────────────────╮╭ 󰃭 Invitation ─────────────────────────────────────────────────────────────╮│
+09 |││   DATE       SUBJECT                  ││Bauprojekt Ubergabe                                                        ││
+10 |││  2026-07-28 󰃭  Einladung:╭ Command palette ─────────────────────────────────────────╮10:30:00+02:00              ││
+11 |││   2026-07-27 Re: Statusberi│> █                                                       │                            ││
+12 |││  2026-07-26  Scan 2026-07│Quit                                                      │                            ││
+13 |││   2026-07-24 Wochenrückblic│Cycle focus forward                                       │                            ││
+14 |││   2026-07-21  Rechnung 202│Cycle focus backward                                      │ Exchange (no Graph in v1). ││
+15 |││                            │Toggle this help                                          │────────────────────────────╯│
+16 |││                            │Zoom / unzoom the focused pane                            │────────────────────────────╮│
+17 |││                            │Toggle activity log                                       │                            ││
+18 |││                            │Send current draft (approve + send)                       │                            ││
+19 |││                            │Search all mail (sender, subject, body)                   │                            ││
+20 |││                            │New draft                                                 │                            ││
+21 |││                            │Manage signatures                                         │                            ││
+22 |││                            │Go to mailboxes (sidebar)                                 │                            ││
+23 |││                            │Go to message list                                        │                            ││
+24 |││                            │Go to reader (body)                                       │                            ││
+25 |││                            │Switch account                                            │                            ││
+26 |│╰────────────────────────────│Quick sync                                                │                            ││
+27 |│╭ Activity ──────────────────│Full sync                                                 │                            ││
+28 |││  No activity yet           │type filter  ↑/↓ nav  Enter run  Esc cancel               │                            ││
+29 |││                            ╰──────────────────────────────────────────────────────────╯                            ││
+30 |││                                       ││                                                                           ││
+31 |││                                       ││                                                                           ││
+32 |│╰───────────────────────────────────────╯│                                                                           ││
+33 |│╭ View ─────────────────────────────────╮│                                                                           ││
+34 |││    mail  |  contacts  |  calendar     ││                                                                           ││
+35 |│╰───────────────────────────────────────╯╰───────────────────────────────────────────────────────────────────────────╯│
+36 |│╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮│
+37 |││                                                                                                                    ││
+38 |│╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│
 39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
-01 |bold@43..50
-02 |bold@43..48
-03 |bold@43..50
+02 |bold@43..50
+03 |bold@43..48
 04 |bold@43..50
-05 |bold@43..52
-08 |bold@43..62
-09 |bg:surface+fg:selection+bold@1..41 bold@43..49
-11 |bold@1..30
-12 |bg:surface@31..35
-35 |bold@5..11
+05 |bold@43..50
+06 |bold@43..52
+09 |bold@43..62
+10 |bg:surface+fg:selection+bold@2..30
+12 |bold@2..30 bg:surface@31..35
+34 |bold@5..11

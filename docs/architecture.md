@@ -487,7 +487,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `keymap.rs` | The single `KEYMAP` table behind the help overlay, the hint bar and `mp dump-keys` |
 | `jump_date.rs` | The closed date grammar behind jump-to-date (`g t`, #0017): pure, clock-free, `parse_jump_date(input, today)` |
 | **`clients/tui/src/ui/`** | |
-| `mod.rs` | `view()`, the top-level layout dispatch, including the #TKT-0044 pane zoom (one pane over the whole content area, hint and status bars kept) and the shared overlay dispatch |
+| `mod.rs` | `view()`, the top-level layout dispatch, including the #TKT-0044 pane zoom (one pane over the whole content area, hint and status bars kept) and the shared overlay dispatch. A theme that paints its own background (every theme but `terminal`) first gets a rounded outer frame in its `border` colour, the edge between its ground and the terminal's; panes, hint bar, overlays and popups all lay out inside it, while the width tiers stay keyed on the terminal's own width so an 80-column terminal keeps the full split |
 | `views.rs` | View switcher chrome |
 | `sidebar.rs`, `list.rs`, `headers.rs`, `preview.rs`, `compose.rs`, `status.rs`, `activity.rs` | Mail view panes |
 | `calendar.rs`, `contacts.rs` | The other two views |

@@ -104,6 +104,12 @@ server = "Projects"`} />
         Names are case-insensitive. An unknown name does not fail: the TUI starts
         with the default theme and logs a warning to the activity log.
       </p>
+      <p>
+        Every theme except <code>terminal</code> paints its own background, so the TUI
+        draws a rounded frame around the whole screen in the theme's border colour to
+        mark where it ends and your terminal begins. <code>terminal</code> has no edge to
+        mark and uses the full window.
+      </p>
       <ConfigExample code={`theme = "catppuccin-mocha"`} />
 
       <!-- notifications -->

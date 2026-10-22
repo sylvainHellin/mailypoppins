@@ -1355,6 +1355,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Validation: `test_parse_config_with_theme` (`src/config.rs:1602`); `clients/desktop/src/app/theme.test.tsx` (`puts the light or dark class, color-scheme and its meta on the document`, `system paints the system's scheme and follows its changes until another theme is applied`, `the stored theme is painted at startup and kept in the store`, `Settings' Theme buttons paint at once and store the choice`, `the palette has Theme: dark, light and system, with no key`), `clients/desktop/src/design/contrast.test.ts` (`keeps every pair at or above its minimum`, per palette)
 - Status: GUI shipped (after M4, #0136)
 - Note: the TUI reads config.toml's `theme` once at startup, so a change needs a restart; the desktop does not read that key, and a theme chosen in its Settings paints at once.
+- Note: every TUI theme except `terminal` paints its own background, and the TUI then draws a rounded outer frame in the theme's border colour as the edge between its ground and the terminal's (`clients/tui/src/ui/mod.rs`, `has_outer_frame`); the desktop has no counterpart, since its window has its own chrome.
 
 ### OBS-08 Quit the client while leaving durable work in place
 
