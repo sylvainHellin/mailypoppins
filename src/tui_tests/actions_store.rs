@@ -327,7 +327,7 @@ mod store_backed_drafts {
     /// signature logo is a `cid:`-referenced image part, inside a
     /// multipart/mixed carrying a real PDF and an attached photo the HTML
     /// does not point at.
-    fn signature_logo_message() -> String {
+    pub(super) fn signature_logo_message() -> String {
         "From: Alice <alice@example.com>\r\nTo: me@example.com\r\n\
 Subject: Signed\r\nMessage-ID: <signed@example.com>\r\n\
 Date: Mon, 01 Jan 2024 12:00:00 +0000\r\nMIME-Version: 1.0\r\n\
@@ -366,15 +366,19 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
         let fx = Fixture::new();
         let row = fx.ingest_raw(signature_logo_message().as_bytes());
         let store = fx.store();
-        let listed: Vec<String> = crate::store::read::attachments_for(&store, row.id)
+        let listed: Vec<(String, bool)> = crate::store::read::attachments_for(&store, row.id)
             .unwrap()
             .into_iter()
-            .map(|a| a.name)
+            .map(|a| (a.name, a.inline))
             .collect();
         assert_eq!(
             listed,
-            vec!["report.pdf".to_string(), "photo.png".to_string()],
-            "ingest marks the logo inline, so no listing shows it (PERSO-165)"
+            vec![
+                ("image001.png".to_string(), true),
+                ("report.pdf".to_string(), false),
+                ("photo.png".to_string(), false),
+            ],
+            "ingest marks the logo inline and the listing keeps it, flagged (PERSO-165)"
         );
 
         let source = fx.source(&row, true);
@@ -913,7 +917,7 @@ mod store_backed_mutations {
 /// from the fetch rather than declined.
 #[cfg(test)]
 mod store_backed_files {
-    use super::store_backed_drafts::{fixture_email, Fixture};
+    use super::store_backed_drafts::{fixture_email, signature_logo_message, Fixture};
     use super::*;
     use crate::parse::{AttachmentData, FetchedEmail};
     use crate::store::read::MessageRow;
@@ -990,6 +994,8 @@ mod store_backed_files {
         let mut app = app_on_row(&fx, &row);
 
         let files = cursor_attachment_files(&mut app).unwrap();
+        assert_eq!(files.inline_from, 2, "no inline image: {files:?}");
+        let files = files.files;
 
         assert_eq!(files.len(), 2, "{files:?}");
         let handles = crate::daemon::runtime::runtime_dir().join("handles");
@@ -1022,6 +1028,26 @@ mod store_backed_files {
         assert_eq!(std::fs::read(&files[1]).unwrap(), b"%PDF-1.4");
     }
 
+    /// The body's inline image stays reachable from `o` and `O`: it is
+    /// materialised after the real attachments, which is where the picker
+    /// tags it (PERSO-165).
+    #[test]
+    fn the_inline_images_follow_the_real_attachments() {
+        let fx = Fixture::new();
+        let row = fx.ingest_raw(signature_logo_message().as_bytes());
+        let mut app = app_on_row(&fx, &row);
+
+        let files = cursor_attachment_files(&mut app).unwrap();
+        let names: Vec<String> = files
+            .files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["report.pdf", "photo.png", "image001.png"]);
+        assert_eq!(files.inline_from, 2);
+        assert_eq!(std::fs::read(&files.files[2]).unwrap(), b"logo-bytes");
+    }
+
     /// A message with no attachments is not an error: the empty list is what
     /// the picker turns into "No attachments".
     #[test]
@@ -1030,7 +1056,10 @@ mod store_backed_files {
         let row = fx.ingest(&fixture_email("Bare"));
         let mut app = app_on_row(&fx, &row);
 
-        assert_eq!(cursor_attachment_files(&mut app), Some(Vec::new()));
+        assert_eq!(
+            cursor_attachment_files(&mut app),
+            Some(crate::tui::app::AttachmentFiles::default())
+        );
         assert!(app.status_message.is_none(), "{:?}", app.status_message);
     }
 
@@ -1127,7 +1156,10 @@ mod store_backed_files {
         let listed = vec![one.display().to_string(), two.display().to_string()];
         let mut app = app_on_draft(&fx, &listed);
 
-        assert_eq!(cursor_attachment_files(&mut app), Some(vec![one, two]));
+        assert_eq!(
+            cursor_attachment_files(&mut app),
+            Some(crate::tui::app::AttachmentFiles::real(vec![one, two]))
+        );
         assert!(app.status_message.is_none(), "{:?}", app.status_message);
     }
 
@@ -1138,7 +1170,10 @@ mod store_backed_files {
         let fx = Fixture::new();
         let mut app = app_on_draft(&fx, &[]);
 
-        assert_eq!(cursor_attachment_files(&mut app), Some(Vec::new()));
+        assert_eq!(
+            cursor_attachment_files(&mut app),
+            Some(crate::tui::app::AttachmentFiles::default())
+        );
         assert!(app.status_message.is_none(), "{:?}", app.status_message);
     }
 
@@ -1154,7 +1189,10 @@ mod store_backed_files {
         let gone = files_dir.join("gone.txt").display().to_string();
 
         let mut app = app_on_draft(&fx, &[present.display().to_string(), gone.clone()]);
-        assert_eq!(cursor_attachment_files(&mut app), Some(vec![present]));
+        assert_eq!(
+            cursor_attachment_files(&mut app),
+            Some(crate::tui::app::AttachmentFiles::real(vec![present]))
+        );
         let status = app.status_message.clone().unwrap();
         assert!(status.starts_with("1 attachment missing: "), "{status}");
         assert!(status.contains(&gone), "{status}");
@@ -1177,7 +1215,7 @@ mod store_backed_files {
         email.attachments = vec![attachment("notes.txt", b"notes")];
         let row = fx.ingest(&email);
         let mut app = app_on_row(&fx, &row);
-        let files = cursor_attachment_files(&mut app).unwrap();
+        let files = cursor_attachment_files(&mut app).unwrap().files;
 
         let dest = tempfile::tempdir().unwrap();
         let first = crate::parse::save_attachment(&files[0], dest.path()).unwrap();

@@ -456,6 +456,7 @@ fn payload(
         "attachments": attachments.iter().enumerate().map(|(index, attachment)| json!({
             "name": attachment.name,
             "size": attachment.size,
+            "inline": attachment.inline,
             "path": written.get(index).map(|path| path.display().to_string()),
         })).collect::<Vec<_>>(),
         "replay": replay,

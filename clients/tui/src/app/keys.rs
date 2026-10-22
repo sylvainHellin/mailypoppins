@@ -2514,6 +2514,7 @@ impl App {
             (Some(msg), _) => crate::actions::row_attachment_files(self, msg.row_id()),
             (None, Some(fetched)) => {
                 crate::actions::fetched_attachment_files(self, &fetched, index)
+                    .map(crate::app::AttachmentFiles::real)
             }
             (None, None) => None,
         };
@@ -2531,7 +2532,16 @@ impl App {
     /// changed. `mp open`'s CLI shortcut of opening every attachment at once
     /// stays CLI-only, because a TUI that opened six windows on one keypress
     /// would be the surprising half of the two.
-    fn present_attachments(&mut self, files: Vec<PathBuf>, mode: AttachmentPickerMode) {
+    ///
+    /// The body's inline images come after the real attachments and the
+    /// picker tags them (PERSO-165), so a signed PDF opens the picker with its
+    /// logos below it, and an iPhone photo stays one keypress away.
+    fn present_attachments(
+        &mut self,
+        files: crate::app::AttachmentFiles,
+        mode: AttachmentPickerMode,
+    ) {
+        let crate::app::AttachmentFiles { files, inline_from } = files;
         match files.len() {
             0 => self.set_status("No attachments".to_string()),
             1 if mode == AttachmentPickerMode::Open => {
@@ -2541,6 +2551,7 @@ impl App {
             _ => {
                 self.overlay = Overlay::Attachment(AttachmentPicker {
                     files,
+                    inline_from,
                     selected: 0,
                     mode,
                     selected_set: HashSet::new(),
@@ -4974,6 +4985,7 @@ mod tests {
         // Simulate the attachment save picker with a queued error behind it.
         app.overlay = Overlay::Attachment(AttachmentPicker {
             files: vec![PathBuf::from("/tmp/a.pdf")],
+            inline_from: 1,
             selected: 0,
             mode: AttachmentPickerMode::Save,
             selected_set: std::collections::HashSet::new(),

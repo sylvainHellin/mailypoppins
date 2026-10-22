@@ -1444,6 +1444,32 @@ fn mp_save_disambiguates_two_parts_that_share_a_name() {
     );
 }
 
+/// A phone photo is an inline image of the body and `mp save` still writes
+/// it (PERSO-165): `mp show` lists it under "Inline images" and the paperclip
+/// stays off, but the file is reachable.
+#[test]
+fn mp_save_writes_an_inline_image() {
+    let slice = Slice::start();
+    let cwd = TempDir::new().expect("a temporary client directory");
+
+    let saved = slice.routed_in(cwd.path(), &["save", fixture::INLINE_PHOTO]);
+    assert_eq!(saved.status.code(), Some(0), "{saved:?}");
+    let (name, bytes) = fixture::INLINE_PHOTO_FILE;
+    assert_eq!(stdout(&saved), format!("./{name}\n"));
+    assert_eq!(
+        fs::read(cwd.path().join(name)).expect("the saved photo is there"),
+        bytes.to_vec()
+    );
+
+    let shown = slice.routed(&["show", "--json", fixture::INLINE_PHOTO]);
+    let value: serde_json::Value =
+        serde_json::from_slice(&shown.stdout).expect("mp show --json is JSON");
+    assert_eq!(
+        value["attachments"],
+        serde_json::json!([{"name": name, "size": bytes.len(), "inline": true}])
+    );
+}
+
 /// The refusals of `mp save`, which are the resolution's own and the
 /// message's.
 #[test]

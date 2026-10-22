@@ -492,8 +492,10 @@ Stdin carries the same JSON as `message.json`:
  "from", "authenticated_sender", "to", "cc", "reply_to", "subject", "date",
  "headers": [{"name", "value"}], "text",
  "dir", "eml_path", "markdown_path",
- "attachments": [{"name", "size", "path"}], "replay"}
+ "attachments": [{"name", "size", "inline", "path"}], "replay"}
 ```
+
+`attachments` lists the body's inline images too, `inline: true`, so a hook that wants only the files the sender attached skips those.
 
 The command's stdout and stderr are captured, so it must not leave a background child holding them open, or the daemon waits for that child until the timeout: redirect a detached child's output, or use a launcher that closes it.
 Commands of one account run one at a time, so a slow hook delays the next.

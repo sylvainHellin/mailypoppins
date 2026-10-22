@@ -879,21 +879,33 @@ fn rsvp_line(settled: &Value) -> Result<String, String> {
 /// handle expires (ten minutes by default) where a materialised copy survived
 /// until the temp directory was swept.
 ///
-/// An empty vector is a message with no attachments, which is the caller's
+/// The real attachments come first and the body's inline images after them
+/// (PERSO-165), each group in the row's own order; `part` stays the index in
+/// the daemon's full list, which is what addresses it.
+///
+/// An empty list is a message with no attachments, which is the caller's
 /// status line to write; `Err` is a sentence for it to print.
 pub(super) fn attachment_files(
     commands: &dyn Queries,
     account: &str,
     row_id: i64,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<crate::app::AttachmentFiles, String> {
     let shown = commands
         .call(
             "message.get",
             json!({"account": account, "row_id": row_id, "body": false}),
         )
         .map_err(|e| format!("{e:#}"))?;
-    let parts = shown["attachments"].as_array().map_or(0, Vec::len);
-    (0..parts)
+    let parts = shown["attachments"].as_array().cloned().unwrap_or_default();
+    let is_inline = |part: &Value| part["inline"].as_bool().unwrap_or(false);
+    let real: Vec<usize> = (0..parts.len())
+        .filter(|&p| !is_inline(&parts[p]))
+        .collect();
+    let inline_from = real.len();
+    let order = real
+        .into_iter()
+        .chain((0..parts.len()).filter(|&p| is_inline(&parts[p])));
+    let files = order
         .map(|part| {
             commands
                 .call(
@@ -908,7 +920,8 @@ pub(super) fn attachment_files(
                         .ok_or_else(|| format!("part {part} was materialised without a path"))
                 })
         })
-        .collect()
+        .collect::<Result<Vec<PathBuf>, String>>()?;
+    Ok(crate::app::AttachmentFiles { files, inline_from })
 }
 
 /// The `Fwd:` subject the forward wizard opens with, built from the row's own

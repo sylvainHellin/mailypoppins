@@ -55,7 +55,7 @@ import type {
   VersionInfo,
 } from "@/lib/gui-types";
 
-type FixtureRow = MessageListRow & { body?: string; attachments?: { name: string; size: number }[] };
+type FixtureRow = MessageListRow & { body?: string; attachments?: { name: string; size: number; inline?: boolean }[] };
 
 export const fixtures = {
   bootstrap: bootstrapFx as unknown as Bootstrap,
@@ -1281,7 +1281,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
           (f): f is string => f !== null,
         ),
         invite: r.is_invite,
-        attachments: r.attachments ?? [],
+        attachments: (r.attachments ?? []).map((a) => ({ ...a, inline: a.inline ?? false })),
       } satisfies MessageMeta;
     }
     case "intercepted_urls": {

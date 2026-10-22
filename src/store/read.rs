@@ -932,6 +932,11 @@ pub struct AttachmentRow {
     pub name: String,
     pub size: u64,
     pub hash: String,
+    /// Whether ingest marked it an inline image of the body
+    /// (`message_blobs.is_inline`, PERSO-165): a signature logo, a pasted
+    /// screenshot, a photo the body shows by `cid:` URL. A reference no build
+    /// has classified yet reads `false`.
+    pub inline: bool,
 }
 
 /// The user-facing attachments of one message, in ingest order.
@@ -942,15 +947,18 @@ pub struct AttachmentRow {
 /// as one would be a visible change rather than a storage detail. Use
 /// [`is_invite`] for that bit.
 ///
-/// So are the body's inline images (`message_blobs.is_inline`, PERSO-165):
-/// an Outlook signature's `image001.png` is part of the body the reader
-/// renders, not a file the sender attached. A reference no build has
-/// classified yet (`is_inline` `NULL`) is listed, as it was before, until the
-/// backfill reaches its row.
+/// The body's inline images (`message_blobs.is_inline`, PERSO-165) are
+/// listed too, each carrying [`AttachmentRow::inline`]: an Outlook
+/// signature's `image001.png` is part of the body rather than a file the
+/// sender attached, but an iPhone photo or a pasted screenshot is sent the
+/// same way and has to stay reachable for saving, opening and hooks. The
+/// readers show the inline ones in their own group; the forward and the
+/// paperclip leave them out. The position in this list is the `part` index
+/// the daemon addresses an attachment by, so it covers every row in stored
+/// order and does not move when the backfill classifies a row.
 pub fn attachments_for(store: &Store, message_row: i64) -> Result<Vec<AttachmentRow>> {
     Ok(attachment_rows(store, message_row)?
         .into_iter()
-        .filter(|(_, inline)| *inline != Some(true))
         .map(|(row, _)| row)
         .collect())
 }
@@ -978,13 +986,15 @@ fn attachment_rows(store: &Store, message_row: i64) -> Result<Vec<(AttachmentRow
         if name == CALENDAR_SIDECAR_NAME {
             continue;
         }
+        let inline = inline.map(|v| v != 0);
         out.push((
             AttachmentRow {
                 name,
                 size: size.unwrap_or(0).max(0) as u64,
                 hash,
+                inline: inline == Some(true),
             },
-            inline.map(|v| v != 0),
+            inline,
         ));
     }
     Ok(out)
@@ -1189,8 +1199,9 @@ pub fn materialise_attachments(
 /// stays.
 ///
 /// Since PERSO-165 ingest marks those parts (`message_blobs.is_inline`) for
-/// both backends, so [`attachments_for`] has already left them out and a
-/// Graph row forwards only its real attachments too.
+/// both backends, so the forward leaves out every row [`attachments_for`]
+/// flags [`AttachmentRow::inline`] and a Graph row forwards only its real
+/// attachments too.
 ///
 /// A row an older build stored has unmarked references until the backfill
 /// reaches it, and for those the raw message is re-parsed, as before the

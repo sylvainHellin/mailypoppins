@@ -72,6 +72,15 @@ function BrowseButton({
   );
 }
 
+/** The tag an inline image of the body carries after the real attachments (PERSO-165). */
+export function InlineTag({ item }: { item: AttachmentItem }) {
+  return item.inline ? (
+    <span data-slot="inline-tag" className="shrink-0 text-xs text-muted-foreground group-data-selected/button:text-selection-foreground">
+      inline
+    </span>
+  ) : null;
+}
+
 function Size({ item }: { item: AttachmentItem }) {
   if (item.missing) return <span className="text-destructive">missing</span>;
   return item.size === null ? null : (
@@ -159,6 +168,7 @@ function OpenList({
           >
             {item.missing ? <FileWarning aria-hidden="true" /> : <Paperclip aria-hidden="true" />}
             <span className="min-w-0 flex-1 truncate text-left">{item.name}</span>
+            <InlineTag item={item} />
             <Size item={item} />
           </Button>
         </li>
@@ -209,6 +219,7 @@ function SaveForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "save
                 }}
               />
               <span className="min-w-0 flex-1 truncate">{item.name}</span>
+              <InlineTag item={item} />
               <Size item={item} />
             </label>
           ))}

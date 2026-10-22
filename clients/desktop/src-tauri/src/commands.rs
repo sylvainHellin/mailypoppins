@@ -222,6 +222,10 @@ pub struct Attachment {
     pub name: String,
     #[serde(default)]
     pub size: u64,
+    /// An image the body shows by `cid:` URL (PERSO-165): listed after the
+    /// real attachments with an `inline` tag, and still openable and saveable.
+    #[serde(default)]
+    pub inline: bool,
 }
 
 /// The headers of one message (the `message.get` record without its body)

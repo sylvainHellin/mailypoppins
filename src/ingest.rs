@@ -3054,10 +3054,13 @@ Content-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n\
             ]
         }
 
+        /// The names the readers list as real attachments, the inline
+        /// images left for their own group.
         fn listed(fx: &Fixture, row: i64) -> Vec<String> {
             read::attachments_for(&fx.store, row)
                 .unwrap()
                 .into_iter()
+                .filter(|a| !a.inline)
                 .map(|a| a.name)
                 .collect()
         }
@@ -3106,6 +3109,31 @@ Content-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n\
             assert_eq!(marks(&fx, row), expected_marks());
             assert_eq!(listed(&fx, row), vec!["report.pdf", "doc.pdf"]);
             assert!(has_attachments(&fx, row));
+        }
+
+        /// The full listing keeps the inline image, flagged, in stored
+        /// order: it stays reachable for saving, opening and hooks.
+        #[test]
+        fn attachments_for_lists_the_inline_images_with_their_flag() {
+            let fx = fixture();
+            for row in [
+                ingest_imap(&fx, 1),
+                ingest_graph(&fx, &graph_email("g", outlook_graph_attachments())),
+            ] {
+                let all: Vec<(String, bool)> = read::attachments_for(&fx.store, row)
+                    .unwrap()
+                    .into_iter()
+                    .map(|a| (a.name, a.inline))
+                    .collect();
+                assert_eq!(
+                    all,
+                    vec![
+                        ("image001.png".to_string(), true),
+                        ("report.pdf".to_string(), false),
+                        ("doc.pdf".to_string(), false),
+                    ]
+                );
+            }
         }
 
         /// A Graph message whose real attachment is an attached Outlook item
@@ -3172,6 +3200,31 @@ Content-Transfer-Encoding: base64\r\n\r\n{pdf}\r\n\
             unmark(&fx, logo_only);
             apply_inline_metadata(&fx.store, &fx.blobs, logo_only, Some(&listing[..1])).unwrap();
             assert!(!has_attachments(&fx, logo_only));
+        }
+
+        /// The `part` index a client addresses an attachment by is its
+        /// position in the full listing, so it is the same before and after
+        /// the backfill classifies the row.
+        #[test]
+        fn the_part_indexes_survive_the_classification() {
+            let fx = fixture();
+            let row = ingest_imap(&fx, 5);
+            unmark(&fx, row);
+            let parts = |fx: &Fixture| -> Vec<(String, String)> {
+                read::attachments_for(&fx.store, row)
+                    .unwrap()
+                    .into_iter()
+                    .map(|a| (a.name, a.hash))
+                    .collect()
+            };
+            let before = parts(&fx);
+            assert!(read::attachments_for(&fx.store, row)
+                .unwrap()
+                .iter()
+                .all(|a| !a.inline));
+            classify_inline_from_raw(&fx.store, &fx.blobs, "acct", 10).unwrap();
+            assert_eq!(parts(&fx), before);
+            assert!(read::attachments_for(&fx.store, row).unwrap()[0].inline);
         }
 
         /// A message whose only parts are inline images has no attachment.

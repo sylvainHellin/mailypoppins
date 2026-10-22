@@ -57,10 +57,50 @@ pub struct ShownMessage {
 }
 
 /// One attachment of a shown message.
+///
+/// The list is every stored attachment in stored order, and the position in
+/// it is the `part` `message.materialise_attachment` takes. `inline` marks an
+/// image the body shows by `cid:` URL (PERSO-165): a reader lists it in its
+/// own group after the real attachments, and it stays saveable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShownAttachment {
     pub name: String,
     pub size: u64,
+    /// Written only when true, so the record of a message without inline
+    /// images stays byte-identical to the one the pre-daemon binary prints
+    /// (the read-slice parity); `#[serde(default)]` reads its absence, and an
+    /// answer from a daemon older than the field, as a real attachment.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inline: bool,
+}
+
+/// `skip_serializing_if` for a flag written only when set.
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
+/// The `part` indexes of `attachments` in the order a reader shows them: the
+/// real attachments, then the inline images, each in stored order. `mp save`
+/// writes them in this order, so a real attachment that shares its name with
+/// an inline image keeps the plain name.
+pub fn parts_in_reading_order(attachments: &[ShownAttachment]) -> Vec<usize> {
+    let (inline, real): (Vec<usize>, Vec<usize>) =
+        (0..attachments.len()).partition(|&part| attachments[part].inline);
+    real.into_iter().chain(inline).collect()
+}
+
+/// The `part` indexes `mp open` opens: the real attachments, or the inline
+/// images when the message has none, so a mail whose one photo is inline (an
+/// iPhone picture) still opens it and a signed PDF does not open its logos.
+pub fn parts_to_open(attachments: &[ShownAttachment]) -> Vec<usize> {
+    let real: Vec<usize> = (0..attachments.len())
+        .filter(|&part| !attachments[part].inline)
+        .collect();
+    if real.is_empty() {
+        (0..attachments.len()).collect()
+    } else {
+        real
+    }
 }
 
 /// A stored header with the empty string read as absent, the rule ingest's
@@ -112,6 +152,7 @@ pub fn shown_message(
         .map(|att| ShownAttachment {
             name: att.name,
             size: att.size,
+            inline: att.inline,
         })
         .collect();
     ShownMessage {
@@ -179,9 +220,21 @@ pub fn render_show(message: &ShownMessage) -> String {
     if message.invite {
         line("[calendar invitation]".yellow().to_string());
     }
-    if !message.attachments.is_empty() {
-        line(format!("{}:", "Attachments".bold()));
-        for att in &message.attachments {
+    // The real attachments first, then the body's inline images in a group
+    // of their own (PERSO-165): a signature logo is not a file the sender
+    // attached, but a pasted screenshot or a phone photo is sent the same
+    // way and `mp save` writes both groups.
+    for (inline, label) in [(false, "Attachments"), (true, "Inline images")] {
+        let group: Vec<&ShownAttachment> = message
+            .attachments
+            .iter()
+            .filter(|att| att.inline == inline)
+            .collect();
+        if group.is_empty() {
+            continue;
+        }
+        line(format!("{}:", label.bold()));
+        for att in group {
             line(format!("  {} ({})", att.name, human_size(att.size)));
         }
     }
@@ -628,6 +681,87 @@ mod tests {
         read::find_by_id(&fx.store, outcome.row_id)
             .unwrap()
             .unwrap()
+    }
+
+    /// The WZT shape (PERSO-165): a real PDF and an Outlook signature logo.
+    /// `mp show` lists the PDF under "Attachments" and the logo under
+    /// "Inline images" after it; the JSON keeps the stored order with the
+    /// flag, which is the `part` order.
+    #[test]
+    fn show_lists_the_inline_images_in_their_own_group() {
+        colored::control::set_override(false);
+        let fx = fixture();
+        let mut e = email("signed", "See attached.\n");
+        e.html_body = Some("<p>See attached.</p><img src=\"cid:image001.png@01DA\">".into());
+        e.has_attachments = true;
+        e.attachments = vec![
+            crate::parse::AttachmentData {
+                filename: "image001.png".into(),
+                content: b"\x89PNG\r\n\x1a\nlogo".to_vec(),
+                content_id: Some("image001.png@01DA".into()),
+            },
+            crate::parse::AttachmentData {
+                filename: "Rechnung.pdf".into(),
+                content: b"%PDF-1.7".to_vec(),
+                content_id: None,
+            },
+        ];
+        let row = ingest(&fx, "inbox", 1, &e);
+        let shown = shown_message(&fx.store, &fx.blobs, "acct", &row);
+
+        assert_eq!(
+            shown
+                .attachments
+                .iter()
+                .map(|a| (a.name.as_str(), a.inline))
+                .collect::<Vec<_>>(),
+            vec![("image001.png", true), ("Rechnung.pdf", false)]
+        );
+        let text = render_show(&shown);
+        assert!(
+            text.contains(
+                "Attachments:\n  Rechnung.pdf (8 B)\nInline images:\n  image001.png (12 B)\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(parts_in_reading_order(&shown.attachments), vec![1, 0]);
+        assert_eq!(parts_to_open(&shown.attachments), vec![1]);
+    }
+
+    /// A mail whose one photo is inline (an iPhone picture) lists it under
+    /// "Inline images" alone, and `mp open` falls back to it.
+    #[test]
+    fn an_inline_only_message_opens_its_inline_images() {
+        let only = |inline: bool| ShownAttachment {
+            name: "IMG_1234.jpeg".into(),
+            size: 3,
+            inline,
+        };
+        assert_eq!(parts_to_open(&[only(true), only(true)]), vec![0, 1]);
+        assert_eq!(parts_to_open(&[only(true), only(false)]), vec![1]);
+        assert!(parts_to_open(&[]).is_empty());
+        let shown = ShownMessage {
+            selector: "mp://acct/inbox/x".into(),
+            account: "acct".into(),
+            mailbox: "inbox".into(),
+            message_id: "<x>".into(),
+            from: None,
+            to: None,
+            cc: None,
+            subject: None,
+            date: None,
+            flags: Vec::new(),
+            invite: false,
+            attachments: vec![only(true)],
+            body: None,
+        };
+        colored::control::set_override(false);
+        let text = render_show(&shown);
+        assert!(!text.contains("Attachments:"), "{text}");
+        assert!(
+            text.contains("Inline images:\n  IMG_1234.jpeg (3 B)\n"),
+            "{text}"
+        );
     }
 
     /// The acceptance criterion: `mp show` prints the body the TUI shows, which

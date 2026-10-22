@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatSize } from "@/components/list/format";
 import { messageItems, openItem } from "@/app/attachments";
+import { InlineTag } from "@/components/attachments/AttachmentsDialog";
 import { useDispatch } from "@/app/store";
 import type { MessageMeta } from "@/lib/gui-types";
 
@@ -61,6 +62,7 @@ export function ReaderHeader({ meta }: { meta: MessageMeta }) {
             >
               <Paperclip aria-hidden="true" className="size-3.5 text-muted-foreground" />
               <span className="max-w-60 truncate">{item.name}</span>
+              <InlineTag item={item} />
               <span className="text-muted-foreground tabular-nums">{formatSize(item.size ?? 0)}</span>
               <Button
                 size="icon-xs"

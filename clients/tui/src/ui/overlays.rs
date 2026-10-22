@@ -164,14 +164,27 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
         inner_width
     };
 
+    // The body's inline images follow the real attachments, tagged as such
+    // (PERSO-165): a signature logo is reachable without reading as a file
+    // the sender attached.
+    const INLINE_TAG: &str = "  inline";
+    let tag_style = Style::default().fg(theme::active().text_faint);
+
     for (i, path) in picker.files.iter().enumerate() {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.display().to_string());
+        let inline = i >= picker.inline_from;
+        let width = if inline {
+            name_width.saturating_sub(INLINE_TAG.len())
+        } else {
+            name_width
+        };
         // Cut on display cells, never on bytes: a byte cut lands mid-char on
         // any non-ASCII filename and panics the draw.
-        let display = truncate(&name, name_width);
+        let display = truncate(&name, width);
+        let tag = inline.then(|| Span::styled(INLINE_TAG, tag_style));
         let cursor_style = if i == picker.selected {
             Style::default()
                 .fg(theme::active().heading)
@@ -191,12 +204,16 @@ pub(super) fn render_attachment_picker(picker: &AttachmentPicker, frame: &mut Fr
             } else {
                 Style::default().fg(theme::active().text_faint)
             };
-            lines.push(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(check, check_style),
                 Span::styled(display, cursor_style),
-            ]));
+            ];
+            spans.extend(tag);
+            lines.push(Line::from(spans));
         } else {
-            lines.push(Line::from(Span::styled(display, cursor_style)));
+            let mut spans = vec![Span::styled(display, cursor_style)];
+            spans.extend(tag);
+            lines.push(Line::from(spans));
         }
     }
 
@@ -1040,6 +1057,7 @@ mod tests {
                     PathBuf::from(format!("/tmp/{name}")),
                     PathBuf::from("/tmp/\u{65e5}\u{672c}\u{8a9e}.txt"),
                 ],
+                inline_from: 1,
                 selected: 0,
                 mode,
                 selected_set: HashSet::from([0]),
@@ -1051,5 +1069,37 @@ mod tests {
                     .unwrap();
             }
         }
+    }
+
+    /// The body's inline images follow the real attachments with an
+    /// `inline` tag, and a real attachment carries none (PERSO-165).
+    #[test]
+    fn attachment_picker_tags_the_inline_images() {
+        let picker = AttachmentPicker {
+            files: vec![
+                PathBuf::from("/tmp/report.pdf"),
+                PathBuf::from("/tmp/image001.png"),
+            ],
+            inline_from: 1,
+            selected: 0,
+            mode: AttachmentPickerMode::Open,
+            selected_set: HashSet::new(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|f| render_attachment_picker(&picker, f, f.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        let pdf = rows.iter().find(|r| r.contains("report.pdf")).unwrap();
+        let png = rows.iter().find(|r| r.contains("image001.png")).unwrap();
+        assert!(!pdf.contains("inline"), "{pdf}");
+        assert!(png.contains("image001.png  inline"), "{png}");
     }
 }

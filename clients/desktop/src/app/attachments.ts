@@ -69,8 +69,10 @@ async function partsOf(s: AppState, account: string, row_id: number): Promise<At
   return (await cmd.messageHtmlMeta(account, row_id)).attachments;
 }
 
+/** The real attachments first, then the body's inline images; `part` stays the daemon's index. */
 export function messageItems(parts: Attachment[]): AttachmentItem[] {
-  return parts.map((p, part) => ({ part, name: p.name, size: p.size, missing: false }));
+  const items = parts.map((p, part) => ({ part, name: p.name, size: p.size, missing: false, inline: p.inline }));
+  return [...items.filter((i) => !i.inline), ...items.filter((i) => i.inline)];
 }
 
 export function draftItemsOf(list: DraftAttachments): AttachmentItem[] {

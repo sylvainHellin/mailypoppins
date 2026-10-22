@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { openHtml } from "@/app/attachments";
+import { messageItems, openHtml } from "@/app/attachments";
 import type { Action } from "@/app/reducer";
 import { initialState, type AppState } from "@/app/state";
 import { fixtures, mock, resetMock } from "@/test/tauri-mock";
@@ -52,5 +52,18 @@ describe("tb on a draft (PERSO-136)", () => {
     await openHtml(onDraft("broken", listing), dispatch);
     expect(calls("draft_html_open")).toEqual([]);
     expect(dispatch).toHaveBeenCalledWith({ type: "notice", text: "This draft does not parse; fix it in the editor first" });
+  });
+});
+
+describe("a message's inline images (PERSO-165)", () => {
+  it("follow the real attachments, tagged, each keeping the daemon's part index", () => {
+    const items = messageItems([
+      { name: "image001.png", size: 12, inline: true },
+      { name: "Rechnung.pdf", size: 8, inline: false },
+    ]);
+    expect(items).toEqual([
+      { part: 1, name: "Rechnung.pdf", size: 8, missing: false, inline: false },
+      { part: 0, name: "image001.png", size: 12, missing: false, inline: true },
+    ]);
   });
 });

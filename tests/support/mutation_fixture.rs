@@ -90,6 +90,13 @@ pub const TWO_PARTS_FILES: [(&str, &[u8]); 2] = [
     ("report_1.pdf", b"second part"),
 ];
 
+/// The phone mail whose one photo is an inline image of its HTML body
+/// (PERSO-165), stored as Graph hands it over.
+pub const INLINE_PHOTO: &str = "iphone@example.com";
+
+/// The photo of [`INLINE_PHOTO`] and its bytes (a JPEG's leading bytes).
+pub const INLINE_PHOTO_FILE: (&str, &[u8]) = ("IMG_1234.jpeg", b"\xff\xd8\xff\xe0photo");
+
 /// A message-id nothing in the fixture holds.
 pub const UNKNOWN_MESSAGE: &str = "nope@example.com";
 
@@ -151,7 +158,34 @@ pub fn seed(root: &Path) {
     draft_fixture::seed(root);
     seed_ambiguous(root);
     seed_two_parts(root);
+    seed_inline_photo(root);
     seed_shared_draft(root);
+}
+
+/// A phone mail: the photo is an inline image the HTML body shows by `cid:`
+/// URL, the only part, as Graph lists it (no raw message).
+fn seed_inline_photo(root: &Path) {
+    let mut photo = read_fixture::email(
+        "phone@example.com",
+        "sylvain@example.com",
+        "Photo",
+        "Thu, 25 Jun 2026 06:00:00 +0000",
+        "Sent from my iPhone\n",
+    );
+    photo.message_id = Some(format!("<{INLINE_PHOTO}>"));
+    photo.flags = mailypoppins::types::MessageFlags::seen(true);
+    photo.html_body = Some(
+        "<div><img src=\"cid:F1E2D3C4-0000@apple.com\"></div><div>Sent from my iPhone</div>"
+            .to_string(),
+    );
+    photo.has_attachments = true;
+    photo.server_has_attachments = Some(false);
+    photo.attachments = vec![AttachmentData {
+        filename: INLINE_PHOTO_FILE.0.to_string(),
+        content: INLINE_PHOTO_FILE.1.to_vec(),
+        content_id: Some("<F1E2D3C4-0000@apple.com>".to_string()),
+    }];
+    read_fixture::ingest(root, ACCOUNT, "inbox", 7, &photo);
 }
 
 /// The same message-id in two mailboxes, with no attachments, so an ambiguity

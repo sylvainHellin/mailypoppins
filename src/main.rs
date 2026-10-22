@@ -4248,8 +4248,10 @@ async fn main() -> Result<()> {
             // the client launches the opener - the one half of this only the
             // user's own session can do (ANO-15). The handles are deliberately
             // not released: the viewer just started is holding the file, and
-            // the handle's own lifetime is what ends it.
-            for part in 0..message.attachments.len() {
+            // the handle's own lifetime is what ends it. The body's inline
+            // images open only when the message has no other attachment
+            // (PERSO-165), so a signed PDF does not open its logos too.
+            for part in mailypoppins::read_cmd::parts_to_open(&message.attachments) {
                 let (_handle, path, _name) = routed_materialise(
                     &mut connection,
                     &account_config.name,
@@ -4294,9 +4296,11 @@ async fn main() -> Result<()> {
             // that one name, and the `_1` rule that makes them two files is
             // applied here, where the names become paths. Within this call
             // only: saving the same message twice writes the same two names
-            // rather than growing a copy per run.
+            // rather than growing a copy per run. The body's inline images
+            // are saved too, after the real attachments (PERSO-165): a
+            // pasted screenshot or a phone photo is sent as one.
             let mut written: Vec<String> = Vec::new();
-            for part in 0..message.attachments.len() {
+            for part in mailypoppins::read_cmd::parts_in_reading_order(&message.attachments) {
                 let (handle, path, name) = routed_materialise(
                     &mut connection,
                     &account_config.name,

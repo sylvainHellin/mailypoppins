@@ -2169,7 +2169,9 @@ fn message_param(params: &Value) -> Result<(String, i64), RpcError> {
 /// list, which is [`read::attachments_for`]'s order with the iMIP sidecar
 /// excluded: it is the index of the row a client is looking at, and addressing
 /// by the store's raw `ordinal` would leak the hidden sidecar's position into a
-/// list it is deliberately absent from.
+/// list it is deliberately absent from. The list holds the inline images too
+/// (PERSO-165), so an index does not move when the backfill classifies a row
+/// while a client holds it.
 fn attachment_file(
     params: &Value,
     store: &Store,

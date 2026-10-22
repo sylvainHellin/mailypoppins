@@ -3,4 +3,9 @@
 /**
  * One attachment of a message.
  */
-export type Attachment = { name: string, size: number, };
+export type Attachment = { name: string, size: number,
+/**
+ * An image the body shows by `cid:` URL (PERSO-165): listed after the
+ * real attachments with an `inline` tag, and still openable and saveable.
+ */
+inline: boolean, };

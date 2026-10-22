@@ -2244,9 +2244,30 @@ pub enum AttachmentPickerMode {
     Save,
 }
 
+/// The attachments of one message as files, in the order the picker shows
+/// them: the real attachments, then the body's inline images (PERSO-165).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttachmentFiles {
+    pub files: Vec<PathBuf>,
+    /// The index of the first inline image in `files`, `files.len()` when
+    /// there is none.
+    pub inline_from: usize,
+}
+
+impl AttachmentFiles {
+    /// Files that are all real attachments: a draft's, a server hit's.
+    pub fn real(files: Vec<PathBuf>) -> Self {
+        let inline_from = files.len();
+        AttachmentFiles { files, inline_from }
+    }
+}
+
 /// Overlay state for choosing among multiple attachments.
 pub struct AttachmentPicker {
     pub files: Vec<PathBuf>,
+    /// The index of the first of the body's inline images in `files`, which
+    /// the picker tags as such (PERSO-165); `files.len()` when there is none.
+    pub inline_from: usize,
     pub selected: usize,
     pub mode: AttachmentPickerMode,
     /// Set of selected indices (used in Save mode for multi-select).

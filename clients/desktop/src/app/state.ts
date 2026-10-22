@@ -582,7 +582,8 @@ export type ComposeDialog =
   | { kind: "recipients"; account: string; draftId: string; to: string; cc: string; bcc: string; subject: string };
 
 /** One attachment a dialog lists: a message's part, or a draft's entry by its index. */
-export type AttachmentItem = { part: number; name: string; size: number | null; missing: boolean };
+/** `inline`: an image the body shows by `cid:` URL, listed after the real attachments with a tag (PERSO-165). */
+export type AttachmentItem = { part: number; name: string; size: number | null; missing: boolean; inline?: boolean };
 
 /** Whose attachments an open dialog lists. */
 export type AttachmentOwner =

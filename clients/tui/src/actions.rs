@@ -112,13 +112,13 @@ fn cursor_message_for_files(app: &mut App, what: &str) -> Option<MessageRef> {
 /// back the paths. The picker and the save pipeline above it still address
 /// files, which they always did; what changed is where the bytes come from.
 ///
-/// An empty vector is a message with no attachments, which is the caller's
+/// An empty list is a message with no attachments, which is the caller's
 /// status line to write. `None` is a failure already on the status line.
-pub fn cursor_attachment_files(app: &mut App) -> Option<Vec<PathBuf>> {
+pub fn cursor_attachment_files(app: &mut App) -> Option<crate::app::AttachmentFiles> {
     // A draft names its attachments itself, so it answers from its own
     // frontmatter rather than from blobs it has none of (#0016).
     if app.selected_email().is_some_and(|e| e.draft_id.is_some()) {
-        return draft_attachment_files(app);
+        return draft_attachment_files(app).map(crate::app::AttachmentFiles::real);
     }
     let msg = cursor_message_for_files(app, "Attachments")?;
     row_attachment_files(app, msg.row_id())
@@ -217,7 +217,10 @@ fn attach_file_to_draft(app: &mut App, path: &str) {
 /// directory rather than in `parse::materialisation_dir`, which is where `mp
 /// open` still puts its own; the picker and the save pipeline address files
 /// either way.
-pub(super) fn row_attachment_files(app: &mut App, row_id: i64) -> Option<Vec<PathBuf>> {
+pub(super) fn row_attachment_files(
+    app: &mut App,
+    row_id: i64,
+) -> Option<crate::app::AttachmentFiles> {
     let account = app.account_config.name.clone();
     match commands::attachment_files(&daemon_door(app), &account, row_id) {
         Ok(files) => Some(files),
