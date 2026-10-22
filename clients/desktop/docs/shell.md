@@ -1195,4 +1195,7 @@ An open dialog hides it, and a prefix re-renders the popup alone (`src/keymap/pe
 `pnpm test` runs vitest under jsdom with `src/lib/tauri.ts` replaced by `src/test/tauri-mock.ts`, the fixture backend (`src/fixture/backend.ts`) with its entry points wrapped in `vi.fn`, which answers every command from `fixtures/*.json` and lets a test push GuiEvents and menu items.
 `pnpm preview:browser` runs the same backend behind the frontend in a browser ([browser-preview.md](browser-preview.md)).
 `pnpm build` type-checks, bundles and checks that the bundle holds no fixture code; `pnpm contrast` rewrites the contrast table.
+The type-check is `tsc -b`: `tsconfig.json` covers `src/`, and the project it references, `tsconfig.node.json`, covers `vite.config.ts` and `scripts/` under Node's types.
+The Node project is composite, which `tsc -b` requires of a referenced project, so it emits declarations, and they go to `node_modules/.tmp/` with both build-info files; nothing lands beside the sources.
+`pnpm exec tsc --noEmit -p .` checks `src/` alone.
 A fixture run of the real app is `MP_DESKTOP_FIXTURE=1 pnpm tauri dev`, and `MP_DESKTOP_WINDOW_SIZE=950x800` or `600x820` opens it in the medium or narrow layout.

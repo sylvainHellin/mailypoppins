@@ -68,7 +68,8 @@ The browser preview needs no Rust build and serves the same fixtures through the
 
 ```sh
 pnpm test                               # vitest under jsdom, the Tauri API mocked from the fixtures
-pnpm build                              # type-check and bundle the frontend, then check that no fixture code is in it
+pnpm exec tsc -b                        # type-check the frontend and the Node side (vite.config.ts, scripts/), writing only under node_modules/.tmp
+pnpm build                              # the same type-check, bundle the frontend, then check that no fixture code is in it
 pnpm gen:keymap                         # regenerate src/keymap/keymap.json from `mp dump-keys --json` (MP_BIN or `mp` on PATH)
 pnpm gen:types                          # regenerate src/protocol/generated/ from the Rust types with ts-rs (runs cargo)
 pnpm contrast                           # rewrite the contrast table in docs/design-tokens.md

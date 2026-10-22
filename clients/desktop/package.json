@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "preview:browser": "vite --mode browser",
-    "build": "tsc && vite build && node scripts/check-bundle.ts",
+    "build": "tsc -b && vite build && node scripts/check-bundle.ts",
     "prebuild": "node scripts/gen-keymap.ts --if-bin",
     "preview": "vite preview",
     "tauri": "tauri",
