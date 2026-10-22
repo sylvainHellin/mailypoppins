@@ -17,6 +17,11 @@
 //! spans, and it knows when the answer is cut: a mailbox matched more than it
 //! listed, or the merge dropped stubs.
 //!
+//! A survivor the second pass cannot download (Graph throttled it past its
+//! retries, the message moved or was expunged between the passes) is not
+//! dropped without a word: the mailbox is reported as having fallen short,
+//! with how many and why, beside the hits that did land.
+//!
 //! The backend is a [`SearchBackend`]: one IMAP session ([`ImapSearch`]) or
 //! one Graph client ([`GraphSearch`]). What the hits become is the caller's
 //! [`SearchSink`], which is where the daemon's dedup, attachment post-filter
@@ -55,6 +60,24 @@ pub struct MailboxStubs<K> {
     pub capped: bool,
 }
 
+/// What a second pass brought back.
+#[derive(Debug)]
+pub struct Fetched<K> {
+    /// Each downloaded message, with the key it was asked for by.
+    pub emails: Vec<(K, FetchedEmail)>,
+    /// Each key that did not come back, with why.
+    pub missing: Vec<(K, String)>,
+}
+
+impl<K> Default for Fetched<K> {
+    fn default() -> Self {
+        Fetched {
+            emails: Vec::new(),
+            missing: Vec::new(),
+        }
+    }
+}
+
 /// Whether the answer is cut, and by what.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Cut {
@@ -76,12 +99,13 @@ pub trait SearchBackend {
         limit: usize,
     ) -> impl Future<Output = Result<MailboxStubs<Self::Key>>> + Send;
 
-    /// The whole messages behind `keys` in `mailbox`.
+    /// The whole messages behind `keys` in `mailbox`, and the keys that did
+    /// not come back. An error is the whole download failing.
     fn fetch(
         &mut self,
         mailbox: &str,
         keys: &[Self::Key],
-    ) -> impl Future<Output = Result<Vec<FetchedEmail>>> + Send;
+    ) -> impl Future<Output = Result<Fetched<Self::Key>>> + Send;
 }
 
 /// What the caller does with a search's hits.
@@ -92,7 +116,8 @@ pub trait SearchSink {
     fn admit(&mut self, message_id: Option<&str>) -> bool;
     /// The downloaded hits of the `mailbox`-th mailbox.
     fn land(&mut self, mailbox: usize, emails: Vec<FetchedEmail>);
-    /// The `mailbox`-th mailbox failed, which does not fail the search.
+    /// The `mailbox`-th mailbox failed, or some of its hits could not be
+    /// downloaded, which does not fail the search.
     fn refused(&mut self, mailbox: usize, error: &anyhow::Error);
 }
 
@@ -131,11 +156,41 @@ pub async fn two_phase<B: SearchBackend, S: SearchSink>(
     cut.truncated |= dropped;
     for (index, keys) in picked {
         match backend.fetch(&mailboxes[index], &keys).await {
-            Ok(emails) => sink.land(index, emails),
+            Ok(fetched) => {
+                sink.land(
+                    index,
+                    fetched.emails.into_iter().map(|(_, email)| email).collect(),
+                );
+                if !fetched.missing.is_empty() {
+                    sink.refused(index, &shortfall(&fetched.missing, keys.len()));
+                }
+            }
             Err(error) => sink.refused(index, &error),
         }
     }
     cut
+}
+
+/// The error a mailbox whose second pass fell short is reported with: how
+/// many of the `asked` hits did not come back, and why, each reason once with
+/// its count.
+fn shortfall<K>(missing: &[(K, String)], asked: usize) -> anyhow::Error {
+    let mut reasons: Vec<(&str, usize)> = Vec::new();
+    for (_, why) in missing {
+        match reasons.iter_mut().find(|(seen, _)| *seen == why.as_str()) {
+            Some((_, count)) => *count += 1,
+            None => reasons.push((why, 1)),
+        }
+    }
+    let reasons = reasons
+        .iter()
+        .map(|(why, count)| format!("{count} {why}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::anyhow!(
+        "{} of {asked} hits could not be downloaded ({reasons})",
+        missing.len()
+    )
 }
 
 /// The keys each mailbox downloads whole, and whether the cut dropped any.
@@ -200,7 +255,7 @@ impl SearchBackend for ImapSearch<'_> {
         .await
     }
 
-    async fn fetch(&mut self, mailbox: &str, uids: &[u32]) -> Result<Vec<FetchedEmail>> {
+    async fn fetch(&mut self, mailbox: &str, uids: &[u32]) -> Result<Fetched<u32>> {
         crate::imap_client::fetch_uids_on_session(self.session, mailbox, uids).await
     }
 }
@@ -222,7 +277,7 @@ impl SearchBackend for GraphSearch<'_> {
 
     /// The ids are Graph's own and name a message in whichever folder it
     /// sits, so `folder` only says whose hits these are.
-    async fn fetch(&mut self, _folder: &str, ids: &[String]) -> Result<Vec<FetchedEmail>> {
+    async fn fetch(&mut self, _folder: &str, ids: &[String]) -> Result<Fetched<String>> {
         self.client.fetch_search_hits(ids).await
     }
 }
@@ -282,6 +337,8 @@ mod tests {
     struct Script {
         matches: HashMap<String, Vec<SearchStub<u32>>>,
         refuse: HashSet<String>,
+        /// UIDs the second pass does not bring back, and why.
+        vanish: HashMap<u32, &'static str>,
         asked: Vec<(String, usize)>,
         fetched: Vec<(String, Vec<u32>)>,
     }
@@ -302,14 +359,20 @@ mod tests {
             })
         }
 
-        async fn fetch(&mut self, mailbox: &str, uids: &[u32]) -> Result<Vec<FetchedEmail>> {
+        async fn fetch(&mut self, mailbox: &str, uids: &[u32]) -> Result<Fetched<u32>> {
             self.fetched.push((mailbox.to_string(), uids.to_vec()));
             let stubs = &self.matches[mailbox];
-            Ok(uids
-                .iter()
+            let (gone, here): (Vec<u32>, Vec<u32>) =
+                uids.iter().partition(|uid| self.vanish.contains_key(uid));
+            let missing = gone
+                .into_iter()
+                .map(|uid| (uid, self.vanish[&uid].to_string()))
+                .collect();
+            let emails = here
+                .into_iter()
                 .map(|uid| {
-                    let stub = stubs.iter().find(|s| s.key == *uid).unwrap();
-                    FetchedEmail {
+                    let stub = stubs.iter().find(|s| s.key == uid).unwrap();
+                    let email = FetchedEmail {
                         from: String::new(),
                         to: String::new(),
                         cc: None,
@@ -326,9 +389,11 @@ mod tests {
                         flags: Default::default(),
                         calendar_ics: None,
                         event: None,
-                    }
+                    };
+                    (uid, email)
                 })
-                .collect())
+                .collect();
+            Ok(Fetched { emails, missing })
         }
     }
 
@@ -338,6 +403,7 @@ mod tests {
         drop: Option<String>,
         landed: Vec<(usize, Vec<String>)>,
         refused: Vec<usize>,
+        errors: Vec<String>,
     }
 
     impl SearchSink for Collect {
@@ -348,9 +414,39 @@ mod tests {
             let ids = emails.into_iter().filter_map(|e| e.message_id).collect();
             self.landed.push((mailbox, ids));
         }
-        fn refused(&mut self, mailbox: usize, _error: &anyhow::Error) {
+        fn refused(&mut self, mailbox: usize, error: &anyhow::Error) {
             self.refused.push(mailbox);
+            self.errors.push(format!("{error}"));
         }
+    }
+
+    /// A survivor the second pass could not download is reported against its
+    /// mailbox with how many and why, and the hits that did download still
+    /// land: a throttled or moved hit never just goes missing (PERSO-175).
+    #[tokio::test]
+    async fn a_hit_the_second_pass_cannot_download_is_reported_not_dropped() {
+        let mut script = Script::default();
+        script.matches.insert(
+            "INBOX".into(),
+            (0..4)
+                .map(|i| stub(10 - i, &day(10 - i), &format!("<m{i}@x>")))
+                .collect(),
+        );
+        script.vanish.insert(9, "throttled by the server 3 times");
+        script.vanish.insert(8, "throttled by the server 3 times");
+        script.vanish.insert(7, "HTTP 404");
+        let mut sink = Collect::default();
+
+        let cut = two_phase(&mut script, &["INBOX".to_string()], 4, &mut sink).await;
+
+        assert_eq!(sink.landed, vec![(0, vec!["<m0@x>".to_string()])]);
+        assert_eq!(sink.refused, vec![0]);
+        assert_eq!(
+            sink.errors,
+            ["3 of 4 hits could not be downloaded \
+              (2 throttled by the server 3 times, 1 HTTP 404)"]
+        );
+        assert_eq!(cut, Cut::default(), "a shortfall is a failure, not a cut");
     }
 
     fn day(n: u32) -> String {

@@ -892,6 +892,7 @@ A hit that resolves to a local row is not dropped: it arrives with its `row_id` 
 
 **A mailbox that fails does not fail the search.**
 Four folders of answers are worth having when the fifth is refused, so `unreachable` lists the refused ones and the operation still `succeeded`; `mp search` prints one `Search in <mailbox> failed: <error>` line per entry on stderr after its results.
+A mailbox whose second pass fell short is an entry too, `N of M hits could not be downloaded (<count> <why>, ...)`, beside the hits that did land: a hit expunged or moved between the passes, or one Graph still throttled after three requests paced by its `Retry-After`, is reported rather than dropped.
 What does fail the operation is a credential that cannot be resolved, which happens once, before any mailbox is selected.
 An account that configures no server at all is `-32006` with `{account, state: "local_only"}` at the call, the same refusal a sync of it makes.
 

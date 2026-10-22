@@ -13,7 +13,7 @@ use super::{
 use crate::config::ImapConfig;
 use crate::ingest::KnownUids;
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
-use crate::server_search::{MailboxStubs, SearchStub};
+use crate::server_search::{Fetched, MailboxStubs, SearchStub};
 use crate::sync::{stops_at, FetchedRaw, MailboxFetch, MailboxState, Stop, StopPoint};
 use crate::timing::TimingSpan;
 use crate::types::MessageFlags;
@@ -216,13 +216,17 @@ pub async fn search_stubs_on_session(
 
 /// The second pass of a server search (PERSO-175): the full messages behind
 /// `uids` in `mailbox`, with their flags, in one `UID FETCH`.
+///
+/// A UID the answer does not carry, expunged since the first pass, and one
+/// whose bytes do not parse come back in `missing` with why, so the search
+/// reports them rather than listing fewer hits without a word.
 pub async fn fetch_uids_on_session(
     session: &mut ImapSession,
     mailbox: &str,
     uids: &[u32],
-) -> Result<Vec<FetchedEmail>> {
+) -> Result<Fetched<u32>> {
     if uids.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Fetched::default());
     }
     session
         .select(mailbox)
@@ -235,14 +239,25 @@ pub async fn fetch_uids_on_session(
         .try_collect()
         .await
         .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
-    Ok(fetched
-        .iter()
-        .filter_map(|msg| {
-            let mut email = parse_rfc822_to_fetched_email(msg.body().unwrap_or_default())?;
-            email.flags = flags_of(msg);
-            Some(email)
-        })
-        .collect())
+    let mut answer = Fetched::default();
+    let mut answered = std::collections::HashSet::new();
+    for msg in fetched.iter() {
+        let Some(uid) = msg.uid else { continue };
+        answered.insert(uid);
+        match parse_rfc822_to_fetched_email(msg.body().unwrap_or_default()) {
+            Some(mut email) => {
+                email.flags = flags_of(msg);
+                answer.emails.push((uid, email));
+            }
+            None => answer.missing.push((uid, "did not parse".to_string())),
+        }
+    }
+    answer.missing.extend(
+        uids.iter()
+            .filter(|uid| !answered.contains(uid))
+            .map(|uid| (*uid, "no longer in the mailbox".to_string())),
+    );
+    Ok(answer)
 }
 
 /// Fetch one message's raw RFC822 bytes by Message-ID (#0104).

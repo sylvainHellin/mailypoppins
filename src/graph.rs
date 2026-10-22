@@ -17,7 +17,7 @@ use serde::Deserialize;
 use crate::config::GraphConfig;
 use crate::ingest::pass_may_prune;
 use crate::parse::{sanitize_attachment_filename, AttachmentData, FetchedEmail};
-use crate::server_search::{MailboxStubs, SearchStub};
+use crate::server_search::{Fetched, MailboxStubs, SearchStub};
 use crate::sync::{stops_at, FreshObservation, Stop, StopPoint, SyncResult, SyncTarget};
 use crate::timing::TimingSpan;
 use crate::types::MailboxRole;
@@ -189,6 +189,14 @@ const BATCH_FAILURE_WARN_LIMIT: usize = 5;
 /// Ceiling on a `Retry-After` a throttled sub-response asks for, so a hostile
 /// or mistaken header cannot park a sync for hours.
 const MAX_RETRY_AFTER_SECS: u64 = 120;
+
+/// How many times a server search's second pass asks for one hit Graph keeps
+/// throttling before it reports the hit as not downloaded (PERSO-175).
+const SEARCH_FETCH_ATTEMPTS: u32 = 3;
+
+/// The pause before asking again for a hit Graph throttled without a
+/// `Retry-After`.
+const SEARCH_THROTTLE_PAUSE_SECS: u64 = 2;
 
 /// Pages the folder enumeration will walk before giving up.
 ///
@@ -700,6 +708,115 @@ impl GraphBatchEntry {
     fn is_throttled(&self) -> bool {
         self.status == 429 || (self.status == 503 && self.retry_after_header().is_some())
     }
+
+    /// What this sub-response says about the message it asked for.
+    fn into_sub_response(self) -> SubResponse<GraphMessage> {
+        if self.is_throttled() {
+            return SubResponse::Throttled(self.retry_after_secs());
+        }
+        if self.status != 200 {
+            return SubResponse::Failed(match &self.body {
+                Some(body) => format!("HTTP {}: {}", self.status, graph_error_text(body)),
+                None => format!("HTTP {}", self.status),
+            });
+        }
+        let Some(body) = self.body else {
+            return SubResponse::Failed("an empty answer".to_string());
+        };
+        match serde_json::from_value::<GraphMessage>(body) {
+            Ok(msg) => SubResponse::Message(msg),
+            Err(e) => SubResponse::Failed(format!("did not parse: {e}")),
+        }
+    }
+}
+
+/// One `/$batch` sub-response, classified.
+#[derive(Debug)]
+enum SubResponse<T> {
+    /// The message asked for.
+    Message(T),
+    /// Graph asked to slow down, with the pause its `Retry-After` named.
+    Throttled(Option<u64>),
+    /// A failure that asking again does not mend, and why.
+    Failed(String),
+}
+
+/// A Graph error body as one line: its `error.code` and `error.message` when
+/// it carries them, the raw JSON otherwise.
+fn graph_error_text(body: &serde_json::Value) -> String {
+    let error = &body["error"];
+    match (error["code"].as_str(), error["message"].as_str()) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (Some(code), None) => code.to_string(),
+        _ => body.to_string(),
+    }
+}
+
+/// What a batch download with retries brought back.
+struct Retried<T> {
+    /// Each message downloaded, with the id it was asked for by.
+    landed: Vec<(String, T)>,
+    /// Each id that did not come back, with why.
+    missing: Vec<(String, String)>,
+}
+
+/// Download `ids` a [`BATCH_MAX_REQUESTS`] chunk at a time through `round`,
+/// asking again for an id Graph throttled, up to `attempts` times in all.
+///
+/// A throttle's `Retry-After` (else [`SEARCH_THROTTLE_PAUSE_SECS`]) paces the
+/// next chunk, and the throttled ids go to the back of the queue. Every id
+/// ends either landed or missing with its reason: a failure that is not a
+/// throttle is not asked again, an id the batch did not answer at all is
+/// missing, and one still throttled after `attempts` is missing as such. An
+/// error from `round` is the whole download failing.
+async fn fetch_with_retries<T, F, Fut>(
+    ids: &[String],
+    attempts: u32,
+    mut round: F,
+) -> Result<Retried<T>>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<(usize, SubResponse<T>)>>>,
+{
+    let mut queue: std::collections::VecDeque<(String, u32)> =
+        ids.iter().map(|id| (id.clone(), 1)).collect();
+    let mut retried = Retried {
+        landed: Vec::new(),
+        missing: Vec::new(),
+    };
+    let mut pause: Option<u64> = None;
+    while !queue.is_empty() {
+        if let Some(secs) = pause.take() {
+            info!("Graph asked for {secs}s before the next search download");
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        }
+        let take = queue.len().min(BATCH_MAX_REQUESTS);
+        let chunk: Vec<(String, u32)> = queue.drain(..take).collect();
+        let mut answers: Vec<Option<SubResponse<T>>> = chunk.iter().map(|_| None).collect();
+        for (index, answer) in round(chunk.iter().map(|(id, _)| id.clone()).collect()).await? {
+            if let Some(slot) = answers.get_mut(index) {
+                *slot = Some(answer);
+            }
+        }
+        for ((id, attempt), answer) in chunk.into_iter().zip(answers) {
+            match answer {
+                Some(SubResponse::Message(msg)) => retried.landed.push((id, msg)),
+                Some(SubResponse::Throttled(secs)) if attempt < attempts => {
+                    let secs = secs.unwrap_or(SEARCH_THROTTLE_PAUSE_SECS);
+                    pause = Some(pause.map_or(secs, |held| held.max(secs)));
+                    queue.push_back((id, attempt + 1));
+                }
+                Some(SubResponse::Throttled(_)) => retried
+                    .missing
+                    .push((id, format!("throttled by Microsoft Graph {attempts} times"))),
+                Some(SubResponse::Failed(why)) => retried.missing.push((id, why)),
+                None => retried
+                    .missing
+                    .push((id, "not answered by the batch".to_string())),
+            }
+        }
+    }
+    Ok(retried)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1054,47 +1171,27 @@ impl GraphClient {
                     .ok()
                     .and_then(|i| chunk.get(i).copied())
                     .unwrap_or("<unknown>");
-                if entry.is_throttled() {
-                    pending_retry_after = pending_retry_after.max(entry.retry_after_secs());
-                    debug!(
-                        "Graph throttled the batch fetch of message {} (HTTP {})",
-                        requested, entry.status,
-                    );
-                    continue;
-                }
-                if entry.status != 200 {
-                    failures += 1;
-                    if failures <= BATCH_FAILURE_WARN_LIMIT {
-                        warn!(
-                            "Batch fetch of message {} failed (HTTP {}): {}",
-                            requested,
-                            entry.status,
-                            entry.body.map(|b| b.to_string()).unwrap_or_default(),
+                let status = entry.status;
+                match entry.into_sub_response() {
+                    SubResponse::Throttled(secs) => {
+                        pending_retry_after = pending_retry_after.max(secs);
+                        debug!(
+                            "Graph throttled the batch fetch of message {requested} (HTTP {status})"
                         );
                     }
-                    continue;
-                }
-                let Some(body) = entry.body else {
-                    failures += 1;
-                    if failures <= BATCH_FAILURE_WARN_LIMIT {
-                        warn!("Batch fetch of message {requested} returned no body");
+                    SubResponse::Failed(why) => {
+                        failures += 1;
+                        if failures <= BATCH_FAILURE_WARN_LIMIT {
+                            warn!("Batch fetch of message {requested} failed: {why}");
+                        }
                     }
-                    continue;
-                };
-                match serde_json::from_value::<GraphMessage>(body) {
-                    Ok(msg) => emails.push(GraphFetched {
+                    SubResponse::Message(msg) => emails.push(GraphFetched {
                         threading: thread_hints(
                             msg.conversation_id.as_deref(),
                             &msg.single_value_extended_properties,
                         ),
                         email: self.hydrate(&msg).await,
                     }),
-                    Err(e) => {
-                        failures += 1;
-                        if failures <= BATCH_FAILURE_WARN_LIMIT {
-                            warn!("Batch fetch of message {requested} did not parse: {e}");
-                        }
-                    }
                 }
             }
         }
@@ -3769,11 +3866,63 @@ impl GraphClient {
 
     /// The second pass of a server search (PERSO-175): the messages behind
     /// the Graph ids [`Self::search_stubs`] kept, downloaded whole in
-    /// `/$batch` chunks ([`Self::fetch_messages_by_ids`]).
-    pub async fn fetch_search_hits(&self, ids: &[String]) -> Result<Vec<FetchedEmail>> {
+    /// `/$batch` chunks.
+    ///
+    /// Not [`Self::fetch_messages_by_ids`], the sync's download, which skips
+    /// a throttled message for the next pass to find again: a search has no
+    /// next pass, so a throttled hit is asked for again after its
+    /// `Retry-After`, up to [`SEARCH_FETCH_ATTEMPTS`] times, and a hit that
+    /// still did not come back, throttled, moved since the first pass or
+    /// refused, is handed back in `missing` with why ([`fetch_with_retries`]).
+    pub async fn fetch_search_hits(&self, ids: &[String]) -> Result<Fetched<String>> {
+        let retried =
+            fetch_with_retries(ids, SEARCH_FETCH_ATTEMPTS, |chunk| self.batch_round(chunk)).await?;
+        let mut emails = Vec::with_capacity(retried.landed.len());
+        for (id, msg) in &retried.landed {
+            emails.push((id.clone(), self.hydrate(msg).await));
+        }
+        Ok(Fetched {
+            emails,
+            missing: retried.missing,
+        })
+    }
+
+    /// One `/$batch` call for the messages behind `ids`, each sub-response
+    /// classified and keyed by its index into `ids`.
+    async fn batch_round(
+        &self,
+        ids: Vec<String>,
+    ) -> Result<Vec<(usize, SubResponse<GraphMessage>)>> {
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-        let fetched = self.fetch_messages_by_ids(&ids).await?;
-        Ok(fetched.emails.into_iter().map(|hit| hit.email).collect())
+        let resp = self
+            .client
+            .post(format!("{GRAPH_BASE}/$batch"))
+            .bearer_auth(self.bearer())
+            .json(&batch_request_body(&ids))
+            .send()
+            .await
+            .context("Failed to fetch the search hits")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Batch fetch of the search hits failed (HTTP {status}): {body}"
+            ));
+        }
+        let batch: GraphBatchResponse = resp
+            .json()
+            .await
+            .context("Failed to parse the batch response")?;
+        Ok(batch
+            .responses
+            .into_iter()
+            .filter_map(|entry| {
+                // Graph is free to reorder the responses, so the request id
+                // (the index into `ids`) is the only correlation.
+                let index = entry.id.parse::<usize>().ok()?;
+                Some((index, entry.into_sub_response()))
+            })
+            .collect())
     }
 
     /// The messages matching `query` in `folder`, whole and with each hit's
@@ -5027,6 +5176,112 @@ mod tests {
         assert!(!batch_entry(503, &[]).is_throttled());
         assert!(!batch_entry(404, &[("Retry-After", "7")]).is_throttled());
         assert!(!batch_entry(200, &[]).is_throttled());
+    }
+
+    /// A sub-response is a throttle with its pause, or a failure naming
+    /// Graph's own code and message, never a silent skip.
+    #[test]
+    fn a_sub_response_is_classified_with_its_reason() {
+        assert!(matches!(
+            batch_entry(429, &[("Retry-After", "7")]).into_sub_response(),
+            SubResponse::Throttled(Some(7))
+        ));
+        let mut moved = batch_entry(404, &[]);
+        moved.body = Some(serde_json::json!({
+            "error": {"code": "ErrorItemNotFound", "message": "The specified object was not found."}
+        }));
+        match moved.into_sub_response() {
+            SubResponse::Failed(why) => assert_eq!(
+                why,
+                "HTTP 404: ErrorItemNotFound: The specified object was not found."
+            ),
+            other => panic!("a 404 is a failure, got {other:?}"),
+        }
+        assert!(matches!(
+            batch_entry(200, &[]).into_sub_response(),
+            SubResponse::Failed(why) if why == "an empty answer"
+        ));
+    }
+
+    /// A scripted `/$batch` round for [`fetch_with_retries`]: each id answers
+    /// with what `answer` says on its `n`-th request, and every chunk asked
+    /// for is recorded.
+    async fn run_retries(
+        ids: &[&str],
+        answer: impl Fn(&str, usize) -> Option<SubResponse<String>>,
+    ) -> (Retried<String>, Vec<Vec<String>>) {
+        let asked = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+        let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        let retried = fetch_with_retries(&ids, SEARCH_FETCH_ATTEMPTS, |chunk: Vec<String>| {
+            let mut asked = asked.borrow_mut();
+            let answers: Vec<(usize, SubResponse<String>)> = chunk
+                .iter()
+                .enumerate()
+                .filter_map(|(index, id)| {
+                    let nth = asked.iter().filter(|c| c.contains(id)).count() + 1;
+                    answer(id, nth).map(|a| (index, a))
+                })
+                .collect();
+            asked.push(chunk);
+            async move { Ok(answers) }
+        })
+        .await
+        .expect("no round fails outright");
+        (retried, asked.into_inner())
+    }
+
+    /// A hit Graph throttled is asked for again after the pause and lands,
+    /// where the sync's download would have skipped it for a next pass a
+    /// search does not have (PERSO-175).
+    #[tokio::test]
+    async fn a_throttled_search_hit_is_asked_again_and_lands() {
+        let (retried, asked) = run_retries(&["a", "b"], |id, nth| {
+            Some(match (id, nth) {
+                ("b", 1) => SubResponse::Throttled(Some(0)),
+                _ => SubResponse::Message(format!("msg {id}")),
+            })
+        })
+        .await;
+        assert_eq!(asked, [vec!["a", "b"], vec!["b"]]);
+        let landed: Vec<&str> = retried.landed.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(landed, ["a", "b"]);
+        assert!(retried.missing.is_empty());
+    }
+
+    /// Every hit ends landed or missing with why: one throttled on every
+    /// attempt, one Graph refused, and one the batch never answered.
+    #[tokio::test]
+    async fn a_hit_that_never_comes_back_is_missing_with_why() {
+        let (retried, asked) = run_retries(&["busy", "moved", "silent", "ok"], |id, _| match id {
+            "busy" => Some(SubResponse::Throttled(Some(0))),
+            "moved" => Some(SubResponse::Failed("HTTP 404".into())),
+            "silent" => None,
+            _ => Some(SubResponse::Message(id.to_string())),
+        })
+        .await;
+        assert_eq!(
+            asked
+                .iter()
+                .filter(|chunk| chunk.contains(&"busy".to_string()))
+                .count(),
+            SEARCH_FETCH_ATTEMPTS as usize,
+            "a throttled hit is asked for a bounded number of times"
+        );
+        assert_eq!(retried.landed.len(), 1);
+        assert_eq!(
+            retried.missing,
+            [
+                ("moved".to_string(), "HTTP 404".to_string()),
+                (
+                    "silent".to_string(),
+                    "not answered by the batch".to_string()
+                ),
+                (
+                    "busy".to_string(),
+                    "throttled by Microsoft Graph 3 times".to_string()
+                ),
+            ]
+        );
     }
 
     /// The gap #0065 shipped with: `download_incomplete` was derived from
