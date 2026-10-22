@@ -147,11 +147,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### ACC-09 Account and signature selection on every command
 
 - Classification: GUI parity
-- Source anchor: the global arguments `-A/--account`, `-s/--signature`, `--no-signature` in `src/main.rs` (`no_signature`, `src/main.rs:41`), `src/signatures.rs`
+- Source anchor: the global `-A/--account`, refused on the commands that act on no account (`refuse_account_where_meaningless`), and `-s/--signature` and `--no-signature` on `mp new`, `mp reply`, `mp forward` and `mp send --invite` (`SignatureFlags`), in `src/main.rs`; `crates/mp-core/src/signatures.rs`
 - Daemon surface: an account parameter on every domain method, `signature.list`, `state.bootstrap`
 - GUI location: clients/desktop: the sidebar lists every account, the selected one expanded, and the `ga` account picker or a mailbox chosen in the sidebar selects the active account (M1, #0129; #0147); a new draft's signature is chosen in the `cn` wizard's Signature select, filled from `signature_list` with the account's default preselected and "none" last (M3, #0131)
-- Validation: `tests/cli_help_snapshot.rs` pins the global arguments; `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`), `clients/desktop/src/components/compose/compose.test.tsx` (`has the TUI's fields, the default signature preselected, and a none option`, `none carries no signature`)
-- Status: GUI shipped (M1, #0129) for the account selector and (M3, #0131) for a new draft's signature; a reply or a forward has no signature choice, since `draft.reply` and `draft.forward` take no signature argument
+- Validation: `tests/cli_help_snapshot.rs` pins where each flag is offered, and `src/main.rs`'s unit tests (`the_account_selector_is_refused_where_it_names_no_account`, `the_signature_flags_are_only_on_the_draft_writers`) where each is refused; `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`), `clients/desktop/src/components/compose/compose.test.tsx` (`has the TUI's fields, the default signature preselected, and a none option`, `none carries no signature`)
+- Status: GUI shipped (M1, #0129) for the account selector and (M3, #0131) for a new draft's signature; the forward wizard has one too (`ACC-11`), and a reply carries the account's default with no choice, although `draft.reply` takes `signature` and `no_signature` as the CLI's `mp reply -s` uses them
 - Note: the GUI equivalent is the active-account selector plus a per-composition signature choice.
 
 ### ACC-10 Signature file management

@@ -149,6 +149,8 @@ The sync and send slices (`tests/daemon_sync_slice.rs`, `tests/daemon_send_slice
 - `mp completions <shell>` is new: it prints a clap_complete script and is on the no-daemon list.
 - `mp daemon` and `mp account` are listed in `mp --help` (both carried `hide = true` in the capture); the debug `--daemon` flag stays hidden.
 - `mp hooks list|test|replay` is new (#0135): it inspects, dry-runs and replays the mail hooks of `[[accounts.hooks]]` through the `hook.*` methods.
+- `-s, --signature` and `--no-signature` are no longer global: only `mp new`, `mp reply`, `mp forward` and `mp send --invite` take them, so the two flag-set tests of the send and sync slices leave them out of the subset check (decided 2026-10-22).
+  `-A, --account` stays global and is refused, and hidden, on the commands that act on no account: `mp daemon`, `mp completions`, `mp dump-keys`, `mp account list` and `mp config init|show|add-account|reset-secrets|path`.
 
 ## What is deliberately absent
 

@@ -25,15 +25,11 @@ struct Cli {
     #[arg(value_name = "SELECTOR")]
     selector: Option<String>,
 
-    /// Signature to use (overrides config default)
-    #[arg(short, long, global = true)]
-    signature: Option<String>,
-
-    /// Skip signature entirely
-    #[arg(long, global = true)]
-    no_signature: bool,
-
     /// Account to use
+    //
+    // Global, because `mp -A proton contacts search` before the subcommand is
+    // how it is written. The commands it means nothing for shadow it with a
+    // hidden [`NoAccount`] and refuse it ([`refuse_account_where_meaningless`]).
     #[arg(short = 'A', long, global = true)]
     account: Option<String>,
 
@@ -47,6 +43,41 @@ struct Cli {
     /// from this process.
     #[arg(long, global = true, hide = true)]
     daemon: bool,
+}
+
+/// The signature a draft writer splices into the new draft: `-s/--signature`
+/// and `--no-signature`, on the four commands that write one (`mp new`,
+/// `mp reply`, `mp forward`, and `mp send --invite`, whose invitation has no
+/// draft body to carry it).
+#[derive(clap::Args, Clone, Debug, Default)]
+struct SignatureFlags {
+    /// Signature to use (overrides config default)
+    #[arg(short, long)]
+    signature: Option<String>,
+
+    /// Skip signature entirely
+    #[arg(long)]
+    no_signature: bool,
+}
+
+/// The global `-A` shadowed on a command that names no account, hidden from
+/// its help and refused by [`refuse_account_where_meaningless`], so
+/// `mp daemon status -A work` is an error rather than an account nobody reads.
+///
+/// It shares the id `account` with the global flag, which is what makes clap
+/// skip propagating the global one here, and what carries a value written
+/// after the subcommand up into [`Cli::account`].
+#[derive(clap::Args, Clone, Debug, Default)]
+struct NoAccount {
+    #[arg(
+        short = 'A',
+        long = "account",
+        id = "account",
+        value_name = "ACCOUNT",
+        global = true,
+        hide = true
+    )]
+    account: Option<String>,
 }
 
 /// The long help for `mp search`: one grammar, every backend, with examples.
@@ -143,6 +174,12 @@ enum Commands {
         /// Needs --uid.
         #[arg(long, value_name = "N", requires = "uid")]
         sequence: Option<u32>,
+        /// Signature to use in the invitation (overrides config default)
+        #[arg(short, long, requires = "invite")]
+        signature: Option<String>,
+        /// Skip the signature in the invitation
+        #[arg(long, requires = "invite")]
+        no_signature: bool,
     },
     /// Send every approved draft of the account
     SendApproved {
@@ -184,6 +221,8 @@ enum Commands {
     New {
         /// Name for the new draft file
         name: String,
+        #[command(flatten)]
+        signature: SignatureFlags,
     },
     /// Print the filesystem path of a draft (the only selector-to-path edge)
     Path {
@@ -209,6 +248,8 @@ enum Commands {
         /// Mailbox to resolve the selector in
         #[arg(long)]
         mailbox: Option<String>,
+        #[command(flatten)]
+        signature: SignatureFlags,
     },
     /// Forward an email to new recipients
     Forward {
@@ -222,6 +263,8 @@ enum Commands {
         /// Attach the original as an .eml (message/rfc822) instead of its attachments
         #[arg(long)]
         as_attachment: bool,
+        #[command(flatten)]
+        signature: SignatureFlags,
     },
     /// RSVP to a received calendar invitation (iMIP REPLY over SMTP)
     Invite {
@@ -520,6 +563,8 @@ Examples:
         /// Emit JSON grouped by section instead of Markdown.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        no_account: NoAccount,
     },
     /// Dump message envelopes from the local message store as NDJSON.
     ///
@@ -553,16 +598,22 @@ Examples:
         /// Shell to generate the script for
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+        #[command(flatten)]
+        no_account: NoAccount,
     },
     /// Inspect the configured accounts
     Account {
         #[command(subcommand)]
         action: AccountAction,
+        #[command(flatten)]
+        no_account: NoAccount,
     },
     /// Manage the local mailypoppins daemon (run, start, status, stop, restart)
     Daemon {
         #[command(subcommand)]
         action: mailypoppins::daemon::lifecycle::DaemonAction,
+        #[command(flatten)]
+        no_account: NoAccount,
     },
 }
 
@@ -732,9 +783,15 @@ enum ContactsAction {
 #[derive(Subcommand)]
 enum ConfigAction {
     /// Interactive setup wizard
-    Init,
+    Init {
+        #[command(flatten)]
+        no_account: NoAccount,
+    },
     /// Show current configuration
-    Show,
+    Show {
+        #[command(flatten)]
+        no_account: NoAccount,
+    },
     /// Store a password in the active secrets backend (for the first account
     /// unless `-A` names one)
     SetPassword {
@@ -744,14 +801,23 @@ enum ConfigAction {
     /// Wipe the encrypted secrets file (and OAuth2 token caches) and re-prompt
     /// for credentials. Use this after a Time Machine restore to a new
     /// machine, or whenever the secrets file can no longer be decrypted.
-    ResetSecrets,
+    ResetSecrets {
+        #[command(flatten)]
+        no_account: NoAccount,
+    },
     /// Add a new account to the existing config
-    AddAccount,
+    AddAccount {
+        #[command(flatten)]
+        no_account: NoAccount,
+    },
     /// Run OAuth2 device code flow to acquire and cache a token (for the
     /// first OAuth2 account unless `-A` names one)
     Oauth2Login,
     /// Print config file path
-    Path,
+    Path {
+        #[command(flatten)]
+        no_account: NoAccount,
+    },
 }
 
 fn prompt_confirmation(message: &str) -> bool {
@@ -2046,13 +2112,20 @@ async fn draft_call<T: serde::de::DeserializeOwned>(
 /// The two signature flags, as the `draft.*` writers take them.
 ///
 /// They travel rather than being resolved here: the daemon writes the file, so
-/// the daemon splices the signature into the body, from the same configuration
-/// [`resolve_body_signature`] reads.
+/// the daemon splices the signature into the body, from the signatures
+/// directory and the account's default.
 fn signature_params(no_signature: bool, signature: Option<&str>) -> serde_json::Value {
     serde_json::json!({
         "no_signature": no_signature,
         "signature": signature,
     })
+}
+
+impl SignatureFlags {
+    /// The flags as the `draft.*` writers take them.
+    fn params(&self) -> serde_json::Value {
+        signature_params(self.no_signature, self.signature.as_deref())
+    }
 }
 
 /// Merge `extra`'s keys into `params`, which is how a call adds the signature
@@ -2371,19 +2444,6 @@ fn ensure_selector_account_matches(selector: &str, bound: &AccountConfig) -> Res
         }
     }
     Ok(())
-}
-
-/// The account's Markdown signature for a draft body (#0099), honouring the
-/// global `--no-signature` / `--signature <name>` flags and the
-/// `include_signature` config. Returns `None` (no signature block) when the
-/// user opted out or nothing is configured.
-fn resolve_body_signature(
-    account: &AccountConfig,
-    no_signature: bool,
-    signature_name: Option<&str>,
-    email: &EmailSettings,
-) -> Option<String> {
-    mailypoppins::config::body_signature(account, no_signature, signature_name, email)
 }
 
 // ---------------------------------------------------------------------------
@@ -3858,10 +3918,55 @@ fn refuse_all_accounts_with_selector(cli: &Cli) -> std::result::Result<(), clap:
         _ => false,
     };
     if all_accounts && cli.account.is_some() {
-        return Err(<Cli as clap::CommandFactory>::command().error(
-            clap::error::ErrorKind::ArgumentConflict,
+        return Err(conflict(
             "the argument '--all-accounts' cannot be used with '--account <ACCOUNT>'",
         ));
+    }
+    Ok(())
+}
+
+/// A usage conflict clap's own checks cannot see, reported the way clap
+/// reports one, under the binary's name rather than the crate's.
+fn conflict(message: impl std::fmt::Display) -> clap::Error {
+    <Cli as clap::CommandFactory>::command()
+        .bin_name("mp")
+        .error(clap::error::ErrorKind::ArgumentConflict, message)
+}
+
+/// `-A` on a command that names no account, wherever `-A` was written.
+///
+/// The daemon's lifecycle, the shell completions, the key dump, the account
+/// listing and the five `mp config` commands that are about the whole file
+/// (`init`, `show`, `add-account`, `reset-secrets`, `path`) act on no account,
+/// so an `-A` there is a mistake to report rather than a value to ignore:
+/// `mp daemon status -A alpha` used to be accepted and mean nothing. Each of
+/// them shadows the global flag with a hidden [`NoAccount`], which keeps it
+/// out of their help, and this refuses it, whether it was written before the
+/// subcommand or after it.
+fn refuse_account_where_meaningless(
+    cli: &Cli,
+    command_label: &str,
+) -> std::result::Result<(), clap::Error> {
+    let shadowed = match &cli.command {
+        Some(Commands::Daemon { no_account, .. })
+        | Some(Commands::Completions { no_account, .. })
+        | Some(Commands::DumpKeys { no_account, .. })
+        | Some(Commands::Account { no_account, .. }) => no_account,
+        Some(Commands::Config { action }) => match action {
+            ConfigAction::Init { no_account }
+            | ConfigAction::Show { no_account }
+            | ConfigAction::ResetSecrets { no_account }
+            | ConfigAction::AddAccount { no_account }
+            | ConfigAction::Path { no_account } => no_account,
+            ConfigAction::SetPassword { .. } | ConfigAction::Oauth2Login => return Ok(()),
+        },
+        _ => return Ok(()),
+    };
+    if shadowed.account.is_some() || cli.account.is_some() {
+        return Err(conflict(format!(
+            "the argument '--account <ACCOUNT>' cannot be used with 'mp {command_label}', \
+             which acts on no account"
+        )));
     }
     Ok(())
 }
@@ -3890,6 +3995,7 @@ async fn main() -> Result<()> {
         (Some(command), None) => command.to_string(),
         _ => "(no subcommand)".to_string(),
     };
+    refuse_account_where_meaningless(&cli, &command_label).unwrap_or_else(|e| e.exit());
 
     // Asking a command that can never reach the daemon to prove it did is a
     // mistake in the test, not a failure of the command, and saying so here
@@ -3913,14 +4019,14 @@ async fn main() -> Result<()> {
     // The daemon commands own their startup order (MIG-04, config load, socket)
     // and must not run the client preamble below, which loads secrets and SMTP
     // credentials this process has no use for.
-    if let Some(Commands::Daemon { action }) = &cli.command {
+    if let Some(Commands::Daemon { action, .. }) = &cli.command {
         let code = mailypoppins::daemon::lifecycle::dispatch(action.clone()).await;
         std::process::exit(code);
     }
 
     // A completion script is generated from the clap definition alone: no
     // config, no secrets, no daemon, and nothing on stderr to pollute an eval.
-    if let Some(Commands::Completions { shell }) = &cli.command {
+    if let Some(Commands::Completions { shell, .. }) = &cli.command {
         // Rendered into a buffer first: clap_complete panics on a write error,
         // and `mp completions zsh | head` closing the pipe is not one.
         let mut script = Vec::new();
@@ -4030,25 +4136,6 @@ async fn main() -> Result<()> {
         }))
     };
 
-    // Signature for direct sends and invites, which have no editable draft to
-    // carry it in the body (#0099). Draft sends (`mp send`) take None: their
-    // signature was appended to the body at `mp reply`/`mp forward`/`mp new`
-    // time.
-    // Unused from P4-U12, when `mp send --invite` started resolving its
-    // signature in the daemon, and deleted with the rest of the direct engine
-    // paths by P4-U15.
-    let _signature_content: Option<String> = resolve_body_signature(
-        &account_config,
-        cli.no_signature,
-        cli.signature.as_deref(),
-        &global_config.email,
-    );
-
-    // The same two flags, unresolved, for the draft writers the daemon owns:
-    // it writes the file, so it splices the signature (P4-U6). Taken before the
-    // match, which moves the command out of `cli`.
-    let draft_signature = signature_params(cli.no_signature, cli.signature.as_deref());
-
     match cli.command {
         Some(Commands::Send {
             selector,
@@ -4064,11 +4151,15 @@ async fn main() -> Result<()> {
             description,
             uid,
             sequence,
+            signature,
+            no_signature,
         }) => {
             if invite {
+                // The daemon resolves and splices the signature, since an
+                // invitation has no draft body the user could have edited.
                 run_send_invite(
                     &account_config,
-                    draft_signature.clone(),
+                    signature_params(no_signature, signature.as_deref()),
                     InviteArgs {
                         to,
                         cc,
@@ -4179,7 +4270,7 @@ async fn main() -> Result<()> {
             routed_mark(&account_config.name, &selector, false).await?;
         }
 
-        Some(Commands::New { name }) => {
+        Some(Commands::New { name, signature }) => {
             // The `.md` suffixing rule is the daemon's, because the daemon owns
             // the directory the file lands in.
             let created: mp_protocol::draft::DraftCreated = draft_call(
@@ -4187,7 +4278,7 @@ async fn main() -> Result<()> {
                 "draft.create",
                 with_params(
                     serde_json::json!({"account": account_config.name, "name": name}),
-                    draft_signature,
+                    signature.params(),
                 ),
             )
             .await?;
@@ -4236,6 +4327,7 @@ async fn main() -> Result<()> {
             selector,
             all,
             mailbox,
+            signature,
         }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
             let created = fetch_on_miss(
@@ -4251,7 +4343,7 @@ async fn main() -> Result<()> {
                         mailbox,
                         all,
                         false,
-                        draft_signature.clone(),
+                        signature.params(),
                     )
                     .await
                 },
@@ -4272,6 +4364,7 @@ async fn main() -> Result<()> {
             selector,
             mailbox,
             as_attachment,
+            signature,
         }) => {
             let account_config = account_for_selector(&selector, &account_config, &global_config)?;
             let created = fetch_on_miss(
@@ -4287,7 +4380,7 @@ async fn main() -> Result<()> {
                         mailbox,
                         false,
                         as_attachment,
-                        draft_signature.clone(),
+                        signature.params(),
                     )
                     .await
                 },
@@ -4846,7 +4939,7 @@ async fn main() -> Result<()> {
             routed_cutover(&accounts_for(&global_config, acct.as_deref())?, dry_run).await?;
         }
 
-        Some(Commands::DumpKeys { json }) => {
+        Some(Commands::DumpKeys { json, .. }) => {
             if json {
                 print!("{}", mailypoppins::tui::dump_keys_json());
             } else {
@@ -4882,12 +4975,12 @@ async fn main() -> Result<()> {
                 // whether there is one *before* they prompt, which is the pair
                 // of facts their first line prints and what lets the declined
                 // branch prove it routed (P4-U14).
-                ConfigAction::Init => {
+                ConfigAction::Init { .. } => {
                     let (path, exists, _) = routed_config_state().await?;
                     cmd_config_init(&path, exists)?;
                     reload_config_quietly().await;
                 }
-                ConfigAction::Show => routed_config_show().await?,
+                ConfigAction::Show { .. } => routed_config_show().await?,
                 ConfigAction::SetPassword { which } => {
                     let acct_name = cli
                         .account
@@ -4896,7 +4989,7 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|| "main".to_string());
                     routed_set_password(&which, &acct_name).await?;
                 }
-                ConfigAction::AddAccount => {
+                ConfigAction::AddAccount { .. } => {
                     let (path, exists, config) = routed_config_state().await?;
                     let names: Vec<String> =
                         config.accounts.iter().map(|a| a.name.clone()).collect();
@@ -4908,8 +5001,8 @@ async fn main() -> Result<()> {
                     routed_oauth2_login(&global_config, acct_name.as_deref()).await?;
                 }
 
-                ConfigAction::ResetSecrets => routed_reset_secrets().await?,
-                ConfigAction::Path => cmd_config_path(),
+                ConfigAction::ResetSecrets { .. } => routed_reset_secrets().await?,
+                ConfigAction::Path { .. } => cmd_config_path(),
             }
         }
 
@@ -4932,7 +5025,7 @@ async fn main() -> Result<()> {
                 mailypoppins::tui::run(mailypoppins::daemon::client::tui_connector())?;
             }
         }
-        Some(Commands::Account { action }) => match action {
+        Some(Commands::Account { action, .. }) => match action {
             AccountAction::List => {
                 let entries = if cli.daemon {
                     routed_account_list().await
@@ -5054,6 +5147,87 @@ mod tests {
         );
     }
 
+    /// `-A` on a command that acts on no account is refused, written before or
+    /// after the subcommand, and is not in that command's help; on a command
+    /// that takes an account it still parses either way (2026-10-22).
+    #[test]
+    fn the_account_selector_is_refused_where_it_names_no_account() {
+        use clap::{CommandFactory, Parser};
+        for (args, label) in [
+            (&["mp", "daemon", "status", "-A", "x"][..], "daemon status"),
+            (&["mp", "-A", "x", "daemon", "stop"][..], "daemon stop"),
+            (&["mp", "daemon", "-A", "x", "status"][..], "daemon status"),
+            (&["mp", "completions", "zsh", "-A", "x"][..], "completions"),
+            (&["mp", "--account", "x", "dump-keys"][..], "dump-keys"),
+            (&["mp", "account", "list", "-A", "x"][..], "account list"),
+            (&["mp", "config", "path", "-A", "x"][..], "config path"),
+            (&["mp", "-A", "x", "config", "show"][..], "config show"),
+            (&["mp", "config", "init", "-A", "x"][..], "config init"),
+            (
+                &["mp", "config", "add-account", "-A", "x"][..],
+                "config add-account",
+            ),
+            (
+                &["mp", "config", "reset-secrets", "-A", "x"][..],
+                "config reset-secrets",
+            ),
+        ] {
+            let cli = super::Cli::try_parse_from(args)
+                .unwrap_or_else(|e| panic!("{args:?} must parse before the refusal: {e}"));
+            let err = super::refuse_account_where_meaningless(&cli, label).err();
+            assert_eq!(
+                err.map(|e| e.kind()),
+                Some(clap::error::ErrorKind::ArgumentConflict),
+                "{args:?} must be refused"
+            );
+        }
+        for args in [
+            &["mp", "daemon", "status"][..],
+            &["mp", "-A", "x", "config", "set-password", "smtp"][..],
+            &["mp", "contacts", "stats", "-A", "x"][..],
+        ] {
+            let cli = super::Cli::try_parse_from(args).expect("parses");
+            assert!(
+                super::refuse_account_where_meaningless(&cli, "x").is_ok(),
+                "{args:?} is accepted"
+            );
+        }
+        let mut command = super::Cli::command();
+        let status = command
+            .find_subcommand_mut("daemon")
+            .and_then(|daemon| daemon.find_subcommand_mut("status"))
+            .expect("mp daemon status")
+            .render_help()
+            .to_string();
+        assert!(!status.contains("--account"), "{status}");
+    }
+
+    /// `-s` and `--no-signature` belong to the commands that write a
+    /// signature: `new`, `reply`, `forward`, and `send` with `--invite`.
+    #[test]
+    fn the_signature_flags_are_only_on_the_draft_writers() {
+        use clap::Parser;
+        for args in [
+            &["mp", "new", "memo", "-s", "work"][..],
+            &["mp", "reply", "msg@example.com", "--no-signature"][..],
+            &["mp", "forward", "msg@example.com", "--signature", "work"][..],
+            &["mp", "send", "--invite", "-s", "work"][..],
+        ] {
+            assert!(super::Cli::try_parse_from(args).is_ok(), "{args:?} parses");
+        }
+        for args in [
+            &["mp", "-s", "work", "new", "memo"][..],
+            &["mp", "list", "--no-signature"][..],
+            &["mp", "sync", "-s", "work"][..],
+            &["mp", "send", "memo", "-s", "work"][..],
+        ] {
+            assert!(
+                super::Cli::try_parse_from(args).is_err(),
+                "{args:?} is refused"
+            );
+        }
+    }
+
     /// `mp completions zsh` renders the whole command tree as a zsh completion
     /// function named for the `mp` binary, not the clap `mailypoppins` name.
     #[test]
@@ -5063,7 +5237,8 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(super::Commands::Completions {
-                shell: clap_complete::Shell::Zsh
+                shell: clap_complete::Shell::Zsh,
+                ..
             })
         ));
         let mut out = Vec::new();

@@ -2152,6 +2152,10 @@ fn mp_send_approved_all_accounts_walks_them_in_configuration_order() {
     });
 }
 
+/// The pre-daemon global signature flags, offered since 2026-10-22 only by the
+/// commands that write a signature.
+const SCOPED_SIGNATURE_FLAGS: [&str; 2] = ["-s, --signature <SIGNATURE>", "--no-signature"];
+
 /// The subcommand helps still offer every flag the pre-daemon binary did.
 ///
 /// This is where `-y`, `--invite`, `--all-accounts` and the invitation's eight
@@ -2191,7 +2195,13 @@ fn the_subcommand_helps_keep_the_pre_daemon_flag_set() {
             theirs.len() > 2,
             "the oracle's `mp {command}` lists its flags"
         );
-        let missing: Vec<&String> = theirs.difference(&ours).collect();
+        // `-s` and `--no-signature` left every command but the four that
+        // write a signature (decided 2026-10-22); `mp send` keeps them for
+        // `--invite`.
+        let missing: Vec<&String> = theirs
+            .difference(&ours)
+            .filter(|flag| !SCOPED_SIGNATURE_FLAGS.contains(&flag.as_str()))
+            .collect();
         assert!(
             missing.is_empty(),
             "`mp {command}` lost pre-daemon flags {missing:?}\n{}",

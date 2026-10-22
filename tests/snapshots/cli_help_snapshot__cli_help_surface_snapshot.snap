@@ -50,11 +50,9 @@ Arguments:
   [SELECTOR]  Draft selector to preview (dry-run mode)
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
-  -V, --version                Print version
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+  -V, --version            Print version
 
 $ mp send --help
 Send a single approved email, or (with --invite) a calendar invitation
@@ -77,8 +75,8 @@ Options:
       --description <DESCRIPTION>  Optional event description / body (invite mode)
       --uid <UID>                  Re-send an invitation already sent, as an update: give its UID (the `UID:` line of its preview or its invite.ics) and a higher --sequence. Calendar clients replace the event only when the UID is the same and the SEQUENCE is higher than the one they hold; without --uid a fresh UID is minted (a new event)
       --sequence <N>               The update's SEQUENCE, higher than the last one sent for this UID (the first invitation goes out as 0, so a first update is 1). Needs --uid
-  -s, --signature <SIGNATURE>      Signature to use (overrides config default)
-      --no-signature               Skip signature entirely
+  -s, --signature <SIGNATURE>      Signature to use in the invitation (overrides config default)
+      --no-signature               Skip the signature in the invitation
   -A, --account <ACCOUNT>          Account to use
   -h, --help                       Print help
 
@@ -88,12 +86,10 @@ Send every approved draft of the account
 Usage: mp send-approved [OPTIONS]
 
 Options:
-      --all-accounts           Send the approved drafts of every configured account
-  -y, --yes                    Skip confirmation prompt
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --all-accounts       Send the approved drafts of every configured account
+  -y, --yes                Skip confirmation prompt
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp list --help
 List the account's drafts from the drafts index
@@ -101,12 +97,10 @@ List the account's drafts from the drafts index
 Usage: mp list [OPTIONS]
 
 Options:
-      --status <STATUS>        Only list drafts with this status [possible values: draft, approved, sent]
-      --json                   Print the listing as JSON on stdout (warnings stay on stderr)
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --status <STATUS>    Only list drafts with this status [possible values: draft, approved, sent]
+      --json               Print the listing as JSON on stdout (warnings stay on stderr)
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp validate --help
 Validate a draft's frontmatter (default: every draft of the account)
@@ -117,10 +111,8 @@ Arguments:
   [SELECTOR]  Draft selector: mp://<account>/drafts/<id>, drafts/<id> or <id>
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp mark-approved --help
 Mark a draft as approved
@@ -131,10 +123,8 @@ Arguments:
   <SELECTOR>  Draft selector: mp://<account>/drafts/<id>, drafts/<id> or <id>
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp mark-draft --help
 Demote an approved draft back to `draft` status (reverse of `mark-approved`)
@@ -145,10 +135,8 @@ Arguments:
   <SELECTOR>  Draft selector: mp://<account>/drafts/<id>, drafts/<id> or <id>
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp new --help
 Create a new email draft from template and print its selector
@@ -173,10 +161,8 @@ Arguments:
   <SELECTOR>  Draft selector: mp://<account>/drafts/<id>, drafts/<id> or <id>
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp edit --help
 Open a draft in $EDITOR
@@ -187,10 +173,8 @@ Arguments:
   <SELECTOR>  Draft selector: mp://<account>/drafts/<id>, drafts/<id> or <id>
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp reply --help
 Create a reply draft from a received email
@@ -236,10 +220,8 @@ Commands:
   help       Print this message or the help of the given subcommand(s)
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp invite accept --help
 Accept the invitation (PARTSTAT=ACCEPTED)
@@ -250,11 +232,9 @@ Arguments:
   <SELECTOR>  Received selector of the invitation: mp://<account>/<mailbox>/<message-id>
 
 Options:
-      --mailbox <MAILBOX>      Mailbox to resolve the selector in
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp invite tentative --help
 Tentatively accept the invitation (PARTSTAT=TENTATIVE)
@@ -265,11 +245,9 @@ Arguments:
   <SELECTOR>  Received selector of the invitation: mp://<account>/<mailbox>/<message-id>
 
 Options:
-      --mailbox <MAILBOX>      Mailbox to resolve the selector in
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp invite decline --help
 Decline the invitation (PARTSTAT=DECLINED)
@@ -280,11 +258,9 @@ Arguments:
   <SELECTOR>  Received selector of the invitation: mp://<account>/<mailbox>/<message-id>
 
 Options:
-      --mailbox <MAILBOX>      Mailbox to resolve the selector in
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp list-mailboxes --help
 List available IMAP mailboxes/folders
@@ -292,11 +268,9 @@ List available IMAP mailboxes/folders
 Usage: mp list-mailboxes [OPTIONS]
 
 Options:
-      --json                   Print the listing as JSON on stdout
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --json               Print the listing as JSON on stdout
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp fetch --help
 Fetch emails from IMAP server
@@ -304,20 +278,18 @@ Fetch emails from IMAP server
 Usage: mp fetch [OPTIONS]
 
 Options:
-      --from <FROM>            Filter by sender address
-      --to <TO>                Filter by recipient address
-      --cc <CC>                Filter by CC address
-      --subject <SUBJECT>      Subject contains
-      --body <BODY>            Body contains
-      --since <SINCE>          Emails since date (YYYY-MM-DD)
-      --before <BEFORE>        Emails before date (YYYY-MM-DD)
-  -n, --limit <LIMIT>          Max results [default: 10]
-      --full                   Show full body instead of preview
-      --mailbox <MAILBOX>      Mailbox name [default: INBOX]
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --from <FROM>        Filter by sender address
+      --to <TO>            Filter by recipient address
+      --cc <CC>            Filter by CC address
+      --subject <SUBJECT>  Subject contains
+      --body <BODY>        Body contains
+      --since <SINCE>      Emails since date (YYYY-MM-DD)
+      --before <BEFORE>    Emails before date (YYYY-MM-DD)
+  -n, --limit <LIMIT>      Max results [default: 10]
+      --full               Show full body instead of preview
+      --mailbox <MAILBOX>  Mailbox name [default: INBOX]
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp sync --help
 Sync mailboxes from the server into the local store
@@ -325,14 +297,12 @@ Sync mailboxes from the server into the local store
 Usage: mp sync [OPTIONS]
 
 Options:
-  -n, --limit <LIMIT>          Max messages per mailbox [default: 50]
-      --mailbox <MAILBOX>      Mailboxes to sync (default: INBOX, Archive, Sent)
-      --dry-run                Show what would be ingested without writing anything
-      --all-accounts           Sync every configured account (failures are named at the end; exit code 1 if any account failed)
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -n, --limit <LIMIT>      Max messages per mailbox [default: 50]
+      --mailbox <MAILBOX>  Mailboxes to sync (default: INBOX, Archive, Sent)
+      --dry-run            Show what would be ingested without writing anything
+      --all-accounts       Sync every configured account (failures are named at the end; exit code 1 if any account failed)
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp watch --help
 Watch a mailbox for changes using IMAP IDLE
@@ -340,12 +310,10 @@ Watch a mailbox for changes using IMAP IDLE
 Usage: mp watch [OPTIONS]
 
 Options:
-      --mailbox <MAILBOX>      Mailbox to watch [default: INBOX]
-      --timeout <TIMEOUT>      Timeout in seconds (exits with code 2 on timeout)
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --mailbox <MAILBOX>  Mailbox to watch [default: INBOX]
+      --timeout <TIMEOUT>  Timeout in seconds (exits with code 2 on timeout)
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp archive --help
 Archive a received email (server + local)
@@ -356,11 +324,9 @@ Arguments:
   <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>
 
 Options:
-      --mailbox <MAILBOX>      Mailbox to resolve the selector in
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp delete --help
 Delete a received email (server + local) or a local draft
@@ -371,13 +337,11 @@ Arguments:
   [SELECTOR]  Received (mp://<acct>/<mbox>/<id>) or drafts (mp://<acct>/drafts/<id>) selector; omit with --sent
 
 Options:
-      --mailbox <MAILBOX>      Mailbox to resolve the selector in
-      --force                  Delete an approved draft (a queued send) anyway
-      --sent                   Clear every sent draft of the account (takes no selector)
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+      --force              Delete an approved draft (a queued send) anyway
+      --sent               Clear every sent draft of the account (takes no selector)
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp open --help
 Open a received email's attachment in the default application
@@ -388,11 +352,9 @@ Arguments:
   <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>
 
 Options:
-      --mailbox <MAILBOX>      Mailbox to resolve the selector in
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp save --help
 Save a received email's attachment(s) to a directory
@@ -403,12 +365,10 @@ Arguments:
   <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>
 
 Options:
-  -o, --output <OUTPUT>        Output directory (default: current directory)
-      --mailbox <MAILBOX>      Mailbox to resolve the selector in
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -o, --output <OUTPUT>    Output directory (default: current directory)
+      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp export --help
 Write a received email's raw RFC 822 message to <date>_<subject>.eml
@@ -435,12 +395,10 @@ Arguments:
   <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>, <mailbox>/<message-id> or <message-id>
 
 Options:
-      --mailbox <MAILBOX>      Mailbox to resolve the selector in
-      --json                   Emit one JSON object (headers, attachments and body) instead
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+      --json               Emit one JSON object (headers, attachments and body) instead
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp list-messages --help
 List received messages from the local store (offline)
@@ -448,13 +406,11 @@ List received messages from the local store (offline)
 Usage: mp list-messages [OPTIONS]
 
 Options:
-      --mailbox <MAILBOX>      Mailbox to list (role, slug or sidebar label). Default: every mailbox of the account, grouped
-  -n, --limit <LIMIT>          Max messages per mailbox listed [default: 20]
-      --json                   Emit one JSON object {account, mailboxes: [{mailbox, label, total, shown}], messages: [...]} on stdout; each message carries selector, mailbox, message_id, from, to, cc, subject, date (ISO 8601, UTC), date_header, flags, has_attachments, invite
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --mailbox <MAILBOX>  Mailbox to list (role, slug or sidebar label). Default: every mailbox of the account, grouped
+  -n, --limit <LIMIT>      Max messages per mailbox listed [default: 20]
+      --json               Emit one JSON object {account, mailboxes: [{mailbox, label, total, shown}], messages: [...]} on stdout; each message carries selector, mailbox, message_id, from, to, cc, subject, date (ISO 8601, UTC), date_header, flags, has_attachments, invite
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp search --help
 Search emails with one grammar that every backend speaks.
@@ -542,12 +498,6 @@ Options:
       --json
           Emit one JSON object {account, query, source: local|server, coverage: server|local, local_terms: [...], truncated: bool, messages: [...]} on stdout, messages as in `mp list-messages --json` plus body (--full) or preview (server hit); coverage is local when the store answered any term, which local_terms names (empty under --local, where the store answered the whole query); truncated is true when more matched than --limit let through; warnings stay on stderr
 
-  -s, --signature <SIGNATURE>
-          Signature to use (overrides config default)
-
-      --no-signature
-          Skip signature entirely
-
   -A, --account <ACCOUNT>
           Account to use
 
@@ -570,32 +520,24 @@ Commands:
   help           Print this message or the help of the given subcommand(s)
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp config init --help
 Interactive setup wizard
 
-Usage: mp config init [OPTIONS]
+Usage: mp config init
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -h, --help  Print help
 
 $ mp config show --help
 Show current configuration
 
-Usage: mp config show [OPTIONS]
+Usage: mp config show
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -h, --help  Print help
 
 $ mp config set-password --help
 Store a password in the active secrets backend (for the first account unless `-A` names one)
@@ -606,32 +548,24 @@ Arguments:
   <WHICH>  Which password to set: "smtp" or "imap"
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp config reset-secrets --help
 Wipe the encrypted secrets file (and OAuth2 token caches) and re-prompt for credentials. Use this after a Time Machine restore to a new machine, or whenever the secrets file can no longer be decrypted
 
-Usage: mp config reset-secrets [OPTIONS]
+Usage: mp config reset-secrets
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -h, --help  Print help
 
 $ mp config add-account --help
 Add a new account to the existing config
 
-Usage: mp config add-account [OPTIONS]
+Usage: mp config add-account
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -h, --help  Print help
 
 $ mp config oauth2-login --help
 Run OAuth2 device code flow to acquire and cache a token (for the first OAuth2 account unless `-A` names one)
@@ -639,21 +573,16 @@ Run OAuth2 device code flow to acquire and cache a token (for the first OAuth2 a
 Usage: mp config oauth2-login [OPTIONS]
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp config path --help
 Print config file path
 
-Usage: mp config path [OPTIONS]
+Usage: mp config path
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -h, --help  Print help
 
 $ mp contacts --help
 Contact index operations
@@ -667,10 +596,8 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp contacts search --help
 Search the contact index
@@ -681,13 +608,11 @@ Arguments:
   [QUERY]  Query string (fuzzy-matched against name and email)
 
 Options:
-      --parsable               Emit tab-delimited `email\tname` lines (for mutt/aerc/vim integration)
-      --json                   Emit one JSON object {account, query, contacts: [{address, display_name, sent_to, sent_cc, received}]}, best match first
-  -n, --limit <LIMIT>          Max number of results [default: 20]
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --parsable           Emit tab-delimited `email\tname` lines (for mutt/aerc/vim integration)
+      --json               Emit one JSON object {account, query, contacts: [{address, display_name, sent_to, sent_cc, received}]}, best match first
+  -n, --limit <LIMIT>      Max number of results [default: 20]
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp contacts rebuild --help
 Rebuild the contact index from the local message store (every configured account unless `-A` names one)
@@ -695,10 +620,8 @@ Rebuild the contact index from the local message store (every configured account
 Usage: mp contacts rebuild [OPTIONS]
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp contacts stats --help
 Show index statistics
@@ -706,10 +629,8 @@ Show index statistics
 Usage: mp contacts stats [OPTIONS]
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp calendar --help
 Calendar / iMIP invite operations
@@ -721,10 +642,8 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp calendar rebuild --help
 Report what the stored attendee REPLY emails resolve on the stored invitations. Writes nothing: attendee statuses are derived from the `invite.ics` payloads wherever they are displayed, so there is no cached copy to rebuild. Covers every configured account unless `-A` names one
@@ -732,10 +651,8 @@ Report what the stored attendee REPLY emails resolve on the stored invitations. 
 Usage: mp calendar rebuild [OPTIONS]
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp hooks --help
 Inspect, dry-run and replay the mail hooks of `[[accounts.hooks]]`
@@ -749,10 +666,8 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 The daemon runs a hook's command once for every message that arrives after
 the hook was first seen and passes its `match` table. See
@@ -769,11 +684,9 @@ List the hooks with their cursor and last run (every configured account unless `
 Usage: mp hooks list [OPTIONS]
 
 Options:
-      --json                   Print the daemon's answer as JSON
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --json               Print the daemon's answer as JSON
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp hooks test --help
 Check a hook against a stored message; runs nothing, moves no cursor
@@ -785,12 +698,10 @@ Arguments:
   <SELECTOR>  The message: an `mp://` selector or a Message-ID
 
 Options:
-      --mailbox <MAILBOX>      Narrow the selector to one mailbox
-      --json                   Print the verdict and the payload the command would read, as JSON
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --mailbox <MAILBOX>  Narrow the selector to one mailbox
+      --json               Print the verdict and the payload the command would read, as JSON
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp hooks replay --help
 Run a hook for a stored message now, whatever its cursor says (the `match` table still has to pass)
@@ -802,11 +713,9 @@ Arguments:
   <SELECTOR>  The message: an `mp://` selector or a Message-ID
 
 Options:
-      --mailbox <MAILBOX>      Narrow the selector to one mailbox
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --mailbox <MAILBOX>  Narrow the selector to one mailbox
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp outbox --help
 Inspect and unblock the durable send queue
@@ -820,10 +729,8 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp outbox list --help
 List every queued, retrying, failed or partly delivered submission
@@ -831,11 +738,9 @@ List every queued, retrying, failed or partly delivered submission
 Usage: mp outbox list [OPTIONS]
 
 Options:
-      --json                   Print the listing as JSON on stdout
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --json               Print the listing as JSON on stdout
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp outbox retry --help
 Send a failed submission again (only after checking it did not arrive)
@@ -846,10 +751,8 @@ Arguments:
   <ID>  Outbox row id, as shown by `mp outbox list`
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp outbox discard --help
 Drop a submission and release the message bytes it holds
@@ -860,10 +763,8 @@ Arguments:
   <ID>  Outbox row id, as shown by `mp outbox list`
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp store --help
 Local store maintenance (retention garbage collection)
@@ -875,10 +776,8 @@ Commands:
   help  Print this message or the help of the given subcommand(s)
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
 
 $ mp store gc --help
 Run the retention sweep now: evict cached blobs over the disk cap.
@@ -897,12 +796,6 @@ Options:
       --all-accounts
           Sweep every configured account rather than just the default / `-A`
 
-  -s, --signature <SIGNATURE>
-          Signature to use (overrides config default)
-
-      --no-signature
-          Skip signature entirely
-
   -A, --account <ACCOUNT>
           Account to use
 
@@ -920,12 +813,6 @@ Options:
       --dry-run
           Report only; write nothing at all
 
-  -s, --signature <SIGNATURE>
-          Signature to use (overrides config default)
-
-      --no-signature
-          Skip signature entirely
-
   -A, --account <ACCOUNT>
           Account to use
 
@@ -942,15 +829,6 @@ Usage: mp dump-keys [OPTIONS]
 Options:
       --json
           Emit JSON grouped by section instead of Markdown
-
-  -s, --signature <SIGNATURE>
-          Signature to use (overrides config default)
-
-      --no-signature
-          Skip signature entirely
-
-  -A, --account <ACCOUNT>
-          Account to use
 
   -h, --help
           Print help (see a summary with '-h')
@@ -973,12 +851,6 @@ Options:
       --mailbox <MAILBOX>
           Mailbox to dump (role, slug or sidebar label; repeatable). Default: every mailbox of every selected account
 
-  -s, --signature <SIGNATURE>
-          Signature to use (overrides config default)
-
-      --no-signature
-          Skip signature entirely
-
   -A, --account <ACCOUNT>
           Account to use
 
@@ -988,16 +860,13 @@ Options:
 $ mp completions --help
 Print a shell completion script (eval or save under the shell's completion dir)
 
-Usage: mp completions [OPTIONS] <SHELL>
+Usage: mp completions <SHELL>
 
 Arguments:
   <SHELL>  Shell to generate the script for [possible values: bash, elvish, fish, powershell, zsh]
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -h, --help  Print help
 
 Examples:
   mp completions zsh > "${fpath[1]}/_mp"
@@ -1006,33 +875,27 @@ Examples:
 $ mp account --help
 Inspect the configured accounts
 
-Usage: mp account [OPTIONS] <COMMAND>
+Usage: mp account <COMMAND>
 
 Commands:
   list  List the configured accounts, their backend and their state
   help  Print this message or the help of the given subcommand(s)
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -h, --help  Print help
 
 $ mp account list --help
 List the configured accounts, their backend and their state
 
-Usage: mp account list [OPTIONS]
+Usage: mp account list
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -h, --help  Print help
 
 $ mp daemon --help
 Manage the local mailypoppins daemon (run, start, status, stop, restart)
 
-Usage: mp daemon [OPTIONS] <COMMAND>
+Usage: mp daemon <COMMAND>
 
 Commands:
   run                Run the daemon in the foreground; never connects to another daemon
@@ -1048,10 +911,7 @@ Commands:
   help               Print this message or the help of the given subcommand(s)
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -h, --help  Print help
 
 $ mp daemon run --help
 Run the daemon in the foreground; never connects to another daemon
@@ -1059,11 +919,8 @@ Run the daemon in the foreground; never connects to another daemon
 Usage: mp daemon run [OPTIONS]
 
 Options:
-      --foreground-logs        Echo lifecycle logs to stderr as well as to the log directory
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --foreground-logs  Echo lifecycle logs to stderr as well as to the log directory
+  -h, --help             Print help
 
 $ mp daemon start --help
 Start the daemon (via the login service if installed) and return once it answers
@@ -1072,9 +929,6 @@ Usage: mp daemon start [OPTIONS]
 
 Options:
       --timeout-secs <TIMEOUT_SECS>  Seconds to wait for the daemon to become ready [default: 10]
-  -s, --signature <SIGNATURE>        Signature to use (overrides config default)
-      --no-signature                 Skip signature entirely
-  -A, --account <ACCOUNT>            Account to use
   -h, --help                         Print help
 
 $ mp daemon status --help
@@ -1083,11 +937,8 @@ Report whether a daemon is running against this data directory
 Usage: mp daemon status [OPTIONS]
 
 Options:
-      --json                   Print one JSON object instead of a human-readable summary
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --json  Print one JSON object instead of a human-readable summary
+  -h, --help  Print help
 
 $ mp daemon stop --help
 Ask the running daemon to shut down
@@ -1097,9 +948,6 @@ Usage: mp daemon stop [OPTIONS]
 Options:
       --timeout-secs <TIMEOUT_SECS>  Seconds to wait for the daemon to go away, counted after the grace [default: 10]
       --grace-secs <GRACE_SECS>      Seconds the daemon may spend settling work in flight (0 waits none)
-  -s, --signature <SIGNATURE>        Signature to use (overrides config default)
-      --no-signature                 Skip signature entirely
-  -A, --account <ACCOUNT>            Account to use
   -h, --help                         Print help
 
 $ mp daemon restart --help
@@ -1109,9 +957,6 @@ Usage: mp daemon restart [OPTIONS]
 
 Options:
       --grace-secs <GRACE_SECS>  Seconds the daemon may spend settling work in flight (0 waits none)
-  -s, --signature <SIGNATURE>    Signature to use (overrides config default)
-      --no-signature             Skip signature entirely
-  -A, --account <ACCOUNT>        Account to use
   -h, --help                     Print help
 
 $ mp daemon install-service --help
@@ -1120,23 +965,17 @@ Install the login-start service for this user and enable it
 Usage: mp daemon install-service [OPTIONS]
 
 Options:
-      --force                  Replace a service file whose content differs from this version's
-      --check                  Report whether a service is installed, and write nothing
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --force  Replace a service file whose content differs from this version's
+      --check  Report whether a service is installed, and write nothing
+  -h, --help   Print help
 
 $ mp daemon uninstall-service --help
 Disable the login-start service and remove its file
 
-Usage: mp daemon uninstall-service [OPTIONS]
+Usage: mp daemon uninstall-service
 
 Options:
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+  -h, --help  Print help
 
 $ mp daemon health --help
 Report the running daemon's health, its counters and its checks
@@ -1144,11 +983,8 @@ Report the running daemon's health, its counters and its checks
 Usage: mp daemon health [OPTIONS]
 
 Options:
-      --json                   Print one JSON object instead of a human-readable block
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --json  Print one JSON object instead of a human-readable block
+  -h, --help  Print help
 
 $ mp daemon logs --help
 Print the tail of the daemon's own structured log
@@ -1156,13 +992,10 @@ Print the tail of the daemon's own structured log
 Usage: mp daemon logs [OPTIONS]
 
 Options:
-      --lines <LINES>          How many lines to print, at most 5000 [default: 200]
-      --level <LEVEL>          Print only lines at or above this level (trace, debug, info, warn, error)
-      --json                   Print the wire answer as one JSON object instead of the lines
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --lines <LINES>  How many lines to print, at most 5000 [default: 200]
+      --level <LEVEL>  Print only lines at or above this level (trace, debug, info, warn, error)
+      --json           Print the wire answer as one JSON object instead of the lines
+  -h, --help           Print help
 
 $ mp daemon support-bundle --help
 Write a redacted support bundle and say what went into it
@@ -1173,8 +1006,5 @@ Arguments:
   [OUT]  Where the bundle directory goes; below the data directory by default
 
 Options:
-      --no-redact              Copy every value verbatim, credentials included
-  -s, --signature <SIGNATURE>  Signature to use (overrides config default)
-      --no-signature           Skip signature entirely
-  -A, --account <ACCOUNT>      Account to use
-  -h, --help                   Print help
+      --no-redact  Copy every value verbatim, credentials included
+  -h, --help       Print help

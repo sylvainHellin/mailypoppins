@@ -1682,7 +1682,12 @@ fn the_subcommand_helps_keep_the_pre_daemon_flag_set() {
             theirs.len() > 2,
             "the oracle's `mp {command} --help` lists its flags"
         );
-        let missing: Vec<&String> = theirs.difference(&ours).collect();
+        // `-s` and `--no-signature` left every command but the four that
+        // write a signature (decided 2026-10-22).
+        let missing: Vec<&String> = theirs
+            .difference(&ours)
+            .filter(|flag| *flag != "-s, --signature <SIGNATURE>" && *flag != "--no-signature")
+            .collect();
         assert!(
             missing.is_empty(),
             "`mp {command} --help` lost pre-daemon flags {missing:?}\n{}",
