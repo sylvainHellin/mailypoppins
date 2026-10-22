@@ -730,7 +730,7 @@ The bytes are `message.materialise_eml`'s, so a Graph row is fetched from the se
 The body is the usual forward's, quoted header block included; `mp_core::draft::ATTACHED_FORWARD_BODY` is the one line that would make it Outlook's, the signature alone.
 A source whose bytes cannot be had is `-32603` with `{account}` and writes no draft.
 The source of a forward may also be a server-search hit with no row, `{hit: {message_id, mailbox}}`: with `as_attachment` the `.eml` is `message.materialise_eml`'s for that hit, and the forward's headers and quoted body are parsed out of it by the same builder.
-An inline forward of a hit (PERSO-155) is the held row's forward when the store has caught up with it, and otherwise is built from the server's copy, carrying its parts, which `draft.create_from_message` cannot; `headers` applies to both, so a client's forward wizard asks for the recipients of a hit as it does for a stored row.
+An inline forward of a hit (PERSO-155) is the held row's forward when the store has caught up with it, and otherwise is built from the server's copy, carrying its parts as a stored row's forward carries them (an inline image the HTML shows by `cid:` left out, a repeated name written as `name_1`), which `draft.create_from_message` cannot; `headers` applies to both, so a client's forward wizard asks for the recipients of a hit as it does for a stored row.
 A reply to a hit goes through `draft.create_from_message`, and a hit source on `draft.reply` is `-32602`.
 
 **`draft.create_from_message` is the one draft built from a message rather than from a row.**

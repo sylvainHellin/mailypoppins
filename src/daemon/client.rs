@@ -224,7 +224,7 @@ pub fn absolutise(path: &Path) -> PathBuf {
 /// Within one call only, deliberately: a rule that looked at what is already on
 /// disk would grow a `_1` copy on every run of the same save.
 pub fn unique_name(name: String, used: &[String]) -> String {
-    crate::store::read::unique_in(name, used)
+    crate::parse::unique_in(name, used)
 }
 
 /// [`absolutise`] against an explicit base, for a path whose anchor is not the

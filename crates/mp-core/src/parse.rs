@@ -847,6 +847,39 @@ pub fn sanitize_attachment_filename(name: &str) -> String {
     }
 }
 
+/// `name`, or the first `name_1`, `name_2`, ... this call has not used yet.
+///
+/// Every writer of a message's parts into one directory runs its names
+/// through this, a stored row's and a server copy's alike: two parts sent
+/// under one name (two `Scan.pdf`, Outlook's `image001.png` from different
+/// parts) are two files, not one file written twice.
+///
+/// Collisions are resolved against the names written by this call only, not
+/// against what is on disk: the temp directory a row is materialised into is
+/// rewritten before every open, and a disk-based rule would grow a `_1` copy
+/// on each one.
+pub fn unique_in(name: String, used: &[String]) -> String {
+    if !used.contains(&name) {
+        return name;
+    }
+    let path = Path::new(&name);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for counter in 1u32.. {
+        let candidate = format!("{stem}_{counter}{ext}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("the counter is exhausted only after 4 billion identical names")
+}
+
 /// The file name of an export: `<YYYY-MM-DD>_<subject>.eml`.
 ///
 /// The date is the `Date:` header's own calendar day, as a reader of the

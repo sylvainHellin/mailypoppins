@@ -419,6 +419,12 @@ pub struct SourceMessage {
 /// showed. A hit with no Message-ID has no stable key for its attachments, so
 /// it forwards its body without them rather than inventing one; the forwarded
 /// header block still names the message.
+///
+/// The parts carried are the ones a stored row's forward carries
+/// (`store::read::materialise_forward_attachments`): an inline image the HTML
+/// body shows by `cid:` ([`crate::parse::is_inline_image`], the rule ingest
+/// marks a stored part with) stays out, and two parts under one name are
+/// written as two files ([`crate::parse::unique_in`]).
 pub fn source_from_fetched(
     account_dir: &Path,
     fetched: &crate::parse::FetchedEmail,
@@ -429,9 +435,24 @@ pub fn source_from_fetched(
             let dest = stable_attachments_dir(account_dir, message_id);
             crate::config::create_private_dir_all(&dest)
                 .with_context(|| format!("creating {}", dest.display()))?;
+            let html_lower = fetched.html_body.as_deref().map(str::to_ascii_lowercase);
             let mut written = Vec::new();
+            let mut used: Vec<String> = Vec::new();
             for att in &fetched.attachments {
-                let out = dest.join(crate::parse::sanitize_attachment_filename(&att.filename));
+                if crate::parse::is_inline_image(
+                    html_lower.as_deref(),
+                    att.content_id.as_deref(),
+                    &att.filename,
+                    &att.content,
+                ) {
+                    continue;
+                }
+                let name = crate::parse::unique_in(
+                    crate::parse::sanitize_attachment_filename(&att.filename),
+                    &used,
+                );
+                let out = dest.join(&name);
+                used.push(name);
                 fs::write(&out, &att.content)
                     .with_context(|| format!("writing {}", out.display()))?;
                 written.push(out);
@@ -3837,5 +3858,64 @@ mod tests {
         )
         .unwrap();
         assert!(fs::read_to_string(bare).unwrap().ends_with("---\n\n"));
+    }
+
+    /// A forward built from a server copy carries the parts a stored row's
+    /// forward carries: two parts sent under one name land as two files, and
+    /// the logo the HTML body shows by `cid:` stays out (PERSO-155).
+    #[test]
+    fn a_forward_of_a_server_copy_keeps_same_named_parts_and_drops_inline_images() {
+        let raw = b"From: Alice <alice@example.com>\r\n\
+To: me@example.com\r\n\
+Subject: Scans\r\n\
+Date: Wed, 12 Nov 2025 09:00:00 +0100\r\n\
+Message-ID: <scans@example.com>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"outer\"\r\n\
+\r\n\
+--outer\r\n\
+Content-Type: multipart/related; boundary=\"inner\"\r\n\
+\r\n\
+--inner\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<p>Two scans</p><img src=\"cid:logo@x\">\r\n\
+--inner\r\n\
+Content-Type: image/png\r\n\
+Content-ID: <logo@x>\r\n\
+Content-Disposition: inline; filename=\"logo.png\"\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+iVBORw0KGgo=\r\n\
+--inner--\r\n\
+--outer\r\n\
+Content-Type: application/pdf\r\n\
+Content-Disposition: attachment; filename=\"Scan.pdf\"\r\n\
+\r\n\
+first\r\n\
+--outer\r\n\
+Content-Type: application/pdf\r\n\
+Content-Disposition: attachment; filename=\"Scan.pdf\"\r\n\
+\r\n\
+second\r\n\
+--outer--\r\n";
+        let fetched = crate::parse::parse_rfc822_to_fetched_email(raw).expect("the raw parses");
+        assert_eq!(fetched.attachments.len(), 3, "{:?}", fetched.attachments);
+        let tmp = tempfile::tempdir().unwrap();
+
+        let source = source_from_fetched(tmp.path(), &fetched, true).unwrap();
+
+        let names: Vec<String> = source
+            .attachments
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["Scan.pdf", "Scan_1.pdf"]);
+        let contents: Vec<String> = source
+            .attachments
+            .iter()
+            .map(|p| fs::read_to_string(p).unwrap().trim().to_string())
+            .collect();
+        assert_eq!(contents, ["first", "second"]);
     }
 }

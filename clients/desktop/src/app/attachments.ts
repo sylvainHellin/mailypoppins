@@ -152,9 +152,9 @@ export async function saveAttachment(s: AppState, dispatch: Dispatch<Action>): P
 /**
  * `te` (PERSO-174): the Save dialog's directory field for the message
  * itself, written as `<date>_<subject>.eml` by `message_export`, `mp
- * export`'s copy. A hit the store holds is that row; a server-only one goes
- * through `hit_export`, the daemon downloading the server's copy without
- * ingesting it. A draft is a file already.
+ * export`'s copy. Its `MessageSource` is a row or a hit: a hit the store
+ * holds is that row, and for a server-only one the daemon downloads the
+ * server's copy without ingesting it. A draft is a file already.
  */
 export function exportMessage(s: AppState, dispatch: Dispatch<Action>): void {
   const subj = cursorSubject(s, dispatch);

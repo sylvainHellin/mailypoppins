@@ -1266,41 +1266,14 @@ fn write_attachments(
                 att.name
             ));
         };
-        let name = unique_in(crate::parse::sanitize_attachment_filename(&att.name), &used);
+        let name =
+            crate::parse::unique_in(crate::parse::sanitize_attachment_filename(&att.name), &used);
         let out = dest.join(&name);
         used.push(name);
         std::fs::write(&out, &bytes).with_context(|| format!("writing {}", out.display()))?;
         written.push(out);
     }
     Ok(written)
-}
-
-/// `name`, or the first `name_1`, `name_2`, ... this call has not used yet.
-///
-/// Collisions are resolved against the names written by this call only, not
-/// against what is on disk: the temp directory a row is materialised into is
-/// rewritten before every open, and a disk-based rule would grow a `_1` copy
-/// on each one.
-pub fn unique_in(name: String, used: &[String]) -> String {
-    if !used.contains(&name) {
-        return name;
-    }
-    let path = Path::new(&name);
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let ext = path
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    for counter in 1u32.. {
-        let candidate = format!("{stem}_{counter}{ext}");
-        if !used.contains(&candidate) {
-            return candidate;
-        }
-    }
-    unreachable!("the counter is exhausted only after 4 billion identical names")
 }
 
 /// The body of one message, or `None` when the row itself is gone.
