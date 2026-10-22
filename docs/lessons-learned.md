@@ -2843,3 +2843,8 @@ The scheduler's spawn line said `[scheduler] ticking <account> after 900s withou
 Both watchers deliberately record only on their first look, so nothing synced at daemon start unless a client asked; IMAP hid it behind IDLE events, a Graph account showed it.
 The scheduler now fires `STARTUP_TICK` (10 s) after start while no tick has finished, and logs `ticking` only right before a tick that runs.
 "No tick has finished yet" cannot be read from the `watch` value alone: a client's tick that finishes before the scheduler task is first polled makes the record look like the start, which a unit test hit at once, so the runtime keeps its start `Instant` (`AccountRuntime::started`) to compare against.
+
+## A test config with keys the load ignores makes `config_loaded` warn, and `serde_ignored` is blind inside a flattened map (PERSO-118, 2026-10-22)
+
+Since config.toml warns on every key the load ignores, a test config that keeps old secret fields for the redaction tests now turns `config_loaded` amber, so a test that expects a healthy daemon needs a config with only known keys.
+`serde_ignored` reports nothing inside a `#[serde(flatten)]` HashMap, which takes every key it is given, so a typo there stays silent.

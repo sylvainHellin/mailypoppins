@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Config: any key config.toml does not know, anywhere in the file (a typo like `sync_intervall_secs`, a stray `[accounts.mailboxes.spesen]` table that belongs in `[[accounts.mailboxes.extra]]`), now warns, naming the key and its account: on stderr, in the TUI activity log, in the daemon log and as a `config_loaded` health warning, instead of being dropped silently; the config still loads (PERSO-118).
+- Desktop: the daemon's health checks that are not ok now show as calm, dismissible lines under the connection banner and in the activity log, from startup and live as they change; each line clears when its check recovers, and the config.toml line offers Open config.toml.
+
+### Fixed
+- A second warning in config.toml while one is already shown now reaches the TUI and the desktop, and the TUI no longer logs a held warning again after reconnecting.
+
 ## [0.12.0] - 2026-10-22
 
 ### Added
