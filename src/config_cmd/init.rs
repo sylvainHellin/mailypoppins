@@ -391,9 +391,7 @@ async fn imap_flow(
         a.imap_port = prompt_input("IMAP port", imap_port)?.parse().unwrap_or(993);
         a.imap_username = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
         println!();
-        println!("{} Running OAuth2 device code flow...", "\u{2139}".blue());
-        daemon.sign_in(&imap_candidate(&a)).await?;
-        println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
+        sign_in_and_test_smtp(daemon, &imap_candidate(&a)).await?;
         imap_password = None;
     } else {
         let smtp_password = tested_password(daemon, &a, "smtp", "SMTP password").await?;
@@ -464,6 +462,40 @@ async fn imap_flow(
         );
     }
     Ok(())
+}
+
+/// What the user reads when an OAuth2 account's SMTP test fails; the desktop
+/// wizard says the same (`OAUTH2_SMTP_WARNING` in
+/// clients/desktop/src/app/wizard.ts).
+pub const OAUTH2_SMTP_WARNING: &str =
+    "The sign-in may lack SMTP access: a tenant that disables SMTP AUTH refuses it. \
+     Setup goes on, and sending fails until an administrator enables SMTP AUTH for the mailbox.";
+
+/// Sign an OAuth2 candidate in, then test its SMTP login with the staged
+/// token, as the desktop wizard does. A refused SMTP login is a warning and
+/// the wizard goes on: the mailbox list that follows tests IMAP, and only
+/// sending needs the SMTP scope a tenant may withhold.
+pub(super) async fn sign_in_and_test_smtp(
+    daemon: &mut impl WizardDaemon,
+    candidate: &Value,
+) -> Result<Probe> {
+    println!("{} Running OAuth2 device code flow...", "\u{2139}".blue());
+    daemon.sign_in(candidate).await?;
+    println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
+    print!("  Testing SMTP connection... ");
+    io::stdout().flush()?;
+    let probe = daemon.probe(candidate, "smtp", None).await?;
+    if probe.ok {
+        println!("{}", "OK".green());
+    } else {
+        println!("{}", "FAILED".red());
+        eprintln!(
+            "  Error: {}",
+            probe.error.as_deref().unwrap_or("no reason given")
+        );
+        eprintln!("  {} {OAUTH2_SMTP_WARNING}", "\u{26a0}".yellow());
+    }
+    Ok(probe)
 }
 
 /// Store each password the probes accepted, now that the account exists.
@@ -730,24 +762,15 @@ async fn choose_mailboxes(
         });
     }
 
+    // Each role is offered what the roles before did not take, and a name to
+    // type besides, so a server that lists fewer mailboxes than there are
+    // roles still gets every role.
     let mut available = listed.clone();
-    let inbox = select_mailbox(
-        &format!("Which {noun} is your Inbox?"),
-        &available,
-        labels.inbox.1,
-    )?;
+    let inbox = select_mailbox(noun, "Inbox", &available, labels.inbox)?;
     available.retain(|m| m != &inbox);
-    let archive = select_mailbox(
-        &format!("Which {noun} is your Archive?"),
-        &available,
-        labels.archive.1,
-    )?;
+    let archive = select_mailbox(noun, "Archive", &available, labels.archive)?;
     available.retain(|m| m != &archive);
-    let sent = select_mailbox(
-        &format!("Which {noun} is your Sent folder?"),
-        &available,
-        labels.sent.1,
-    )?;
+    let sent = select_mailbox(noun, "Sent", &available, labels.sent)?;
     available.retain(|m| m != &sent);
 
     let (drafts, trash, junk) = marked_roles(noun, &available)?;
@@ -782,13 +805,23 @@ fn marked_roles(
         }
         let mut items = vec!["The one the server marks".to_string()];
         items.extend(available.iter().cloned());
+        items.push(TYPE_ANOTHER.to_string());
         let selection = dialoguer::FuzzySelect::new()
             .with_prompt(format!("Which {noun} is your {role}?"))
             .items(&items)
             .default(0)
             .interact()
             .context("Selection cancelled")?;
-        Ok((selection > 0).then(|| items[selection].clone()))
+        if selection == 0 {
+            return Ok(None);
+        }
+        match picked(&items, selection) {
+            Some(name) => Ok(Some(name)),
+            None => Ok(role_answer(&prompt_input(
+                &format!("{role} {noun} name (Enter: the one the server marks)"),
+                "",
+            )?)),
+        }
     };
     Ok((pick("Drafts")?, pick("Trash")?, pick("Junk")?))
 }
@@ -928,17 +961,71 @@ fn yes_no(default: bool) -> Result<bool> {
     })
 }
 
-/// One of `options`, the first `preferred` match preselected.
-fn select_mailbox(prompt: &str, options: &[String], preferred: &[&str]) -> Result<String> {
+/// The last item of every mailbox picker: a name the server did not list.
+pub(super) const TYPE_ANOTHER: &str = "Type another name";
+
+/// What a mailbox prompt offers for one role.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum MailboxPrompt {
+    /// The names left to pick, then [`TYPE_ANOTHER`]; `default` is the first
+    /// preferred name, else the first left.
+    Pick { items: Vec<String>, default: usize },
+    /// Nothing is left to pick: a typed name, Enter taking `default`.
+    Type { default: String },
+}
+
+/// The prompt for a role, given the names the roles before did not take and
+/// the role's `(usual name, preferred names)`.
+pub(super) fn mailbox_prompt(
+    options: &[String],
+    (usual, preferred): (&str, &[&str]),
+) -> MailboxPrompt {
+    if options.is_empty() {
+        return MailboxPrompt::Type {
+            default: usual.to_string(),
+        };
+    }
     let default = preferred
         .iter()
         .find_map(|pref| options.iter().position(|o| o.eq_ignore_ascii_case(pref)))
         .unwrap_or(0);
-    let selection = dialoguer::FuzzySelect::new()
-        .with_prompt(prompt)
-        .items(options)
-        .default(default)
-        .interact()
-        .context("Selection cancelled")?;
-    Ok(options[selection].clone())
+    let mut items = options.to_vec();
+    items.push(TYPE_ANOTHER.to_string());
+    MailboxPrompt::Pick { items, default }
+}
+
+/// The name a picker's `selection` stands for, `None` for [`TYPE_ANOTHER`].
+pub(super) fn picked(items: &[String], selection: usize) -> Option<String> {
+    (selection + 1 < items.len()).then(|| items[selection].clone())
+}
+
+/// The mailbox of `role`: one of `options`, the first preferred match
+/// preselected, or a typed name, which is all there is when the server
+/// listed nothing the roles before did not take.
+fn select_mailbox(
+    noun: &str,
+    role: &str,
+    options: &[String],
+    label: (&str, &[&str]),
+) -> Result<String> {
+    let typed = |default: &str| prompt_input(&format!("{role} {noun} name"), default);
+    match mailbox_prompt(options, label) {
+        MailboxPrompt::Type { default } => typed(&default),
+        MailboxPrompt::Pick { items, default } => {
+            let question = match role {
+                "Sent" => format!("Which {noun} is your Sent folder?"),
+                _ => format!("Which {noun} is your {role}?"),
+            };
+            let selection = dialoguer::FuzzySelect::new()
+                .with_prompt(question)
+                .items(&items)
+                .default(default)
+                .interact()
+                .context("Selection cancelled")?;
+            match picked(&items, selection) {
+                Some(name) => Ok(name),
+                None => typed(label.0),
+            }
+        }
+    }
 }

@@ -339,8 +339,10 @@ const PREFERRED: Record<"imap" | "graph", Record<(typeof STANDARD_ROLES)[number]
  * The mailbox defaults the CLI picks from the server's list: for the inbox,
  * the archive and the sent folder in turn, the first preferred name the
  * server lists (case-insensitively), else the first mailbox the roles before
- * did not take; drafts, trash and junk are left to the folder the server
- * marks. The overrides are kept.
+ * did not take, else, when the server listed fewer mailboxes than there are
+ * roles, the provider's usual name, typed rather than picked, as the CLI's
+ * typed prompt offers it; drafts, trash and junk are left to the folder the
+ * server marks. The overrides are kept.
  */
 export function withListing(form: WizardForm, listed: readonly string[]): WizardForm {
   const preferred = PREFERRED[form.preset === "graph" ? "graph" : "imap"];
@@ -348,7 +350,7 @@ export function withListing(form: WizardForm, listed: readonly string[]): Wizard
   const picked: Partial<WizardForm> = { drafts: "", trash: "", junk: "" };
   for (const role of STANDARD_ROLES) {
     const match = preferred[role].map((p) => available.find((o) => o.toLowerCase() === p.toLowerCase())).find((o) => o !== undefined);
-    const choice = match ?? available[0] ?? "";
+    const choice = match ?? available[0] ?? PRESETS[form.preset][role];
     picked[role] = choice;
     available = available.filter((o) => o !== choice);
   }
@@ -382,10 +384,12 @@ export type PlannedCheck = { check: ProbeCheck; password: SecretKind | null; req
  * The CLI wizard's probes, in its order. A password preset tests the SMTP
  * login, which must pass; then the IMAP login, which must pass with a
  * password of its own and is a warning with the SMTP one; then lists the
- * mailboxes with the IMAP password. An OAuth2 preset, once signed in, lists
- * the mailboxes; a Graph one tests the Graph client first. Only a password
- * login stops the wizard: the CLI asks again for those, and goes on past a
- * failed Graph test or mailbox list, the names then typed.
+ * mailboxes with the IMAP password. An OAuth2 preset, once signed in, tests
+ * the SMTP login with the staged token, a warning since a tenant may withhold
+ * SMTP AUTH, then lists the mailboxes; a Graph one tests the Graph client
+ * first. Only a password login stops the wizard: the CLI asks again for
+ * those, and goes on past a failed token test or mailbox list, the names
+ * then typed.
  */
 export function probePlan(preset: Preset, sameImap: boolean): PlannedCheck[] {
   const auth = PRESETS[preset].auth;
@@ -395,7 +399,12 @@ export function probePlan(preset: Preset, sameImap: boolean): PlannedCheck[] {
       { check: "mailboxes", password: null, required: false },
     ];
   }
-  if (auth === "oauth2") return [{ check: "mailboxes", password: null, required: false }];
+  if (auth === "oauth2") {
+    return [
+      { check: "smtp", password: null, required: false },
+      { check: "mailboxes", password: null, required: false },
+    ];
+  }
   const imap: SecretKind = sameImap ? "smtp" : "imap";
   return [
     { check: "smtp", password: "smtp", required: true },
@@ -423,16 +432,20 @@ export function probeRefusalLine(name: string, message: string): string {
 /**
  * Run the test: each planned probe in turn through `config.probe`, until a
  * login that must pass does not. Answers the result, or the daemon's refusal
- * of the call in plain words.
+ * of the call in plain words. `live` is asked before each probe: once the
+ * wizard is gone, the test stops, and the typed passwords go to no server
+ * after that.
  */
 export async function runConnectionTest(
   form: WizardForm,
   secrets: WizardSecrets,
-): Promise<{ result: ConnectionResult } | { refusal: string }> {
+  live: () => boolean = () => true,
+): Promise<{ result: ConnectionResult } | { refusal: string } | { stopped: true }> {
   const candidate = candidateDraft(form);
   const runs: CheckRun[] = [];
   let listed: string[] | null = null;
   for (const planned of probePlan(form.preset, secrets.sameImap)) {
+    if (!live()) return { stopped: true };
     const password = planned.password === null ? undefined : secrets[planned.password];
     let answer;
     try {
@@ -448,21 +461,38 @@ export async function runConnectionTest(
   return { result: { key: connectionKey(form, secrets.sameImap), runs, listed, passed } };
 }
 
-/** What one probe found, in plain words. */
-export function checkLine(run: CheckRun, sameImap: boolean): string {
-  const why = run.error ?? "no reason given";
+/**
+ * What the user reads when an OAuth2 account's SMTP test fails; the CLI
+ * wizard says the same (`OAUTH2_SMTP_WARNING` in src/config_cmd/init.rs).
+ */
+export const OAUTH2_SMTP_WARNING =
+  "The sign-in may lack SMTP access: a tenant that disables SMTP AUTH refuses it. Setup goes on, and sending fails until an administrator enables SMTP AUTH for the mailbox.";
+
+/** A server's reason as a sentence: a period added only when it ends in none. */
+export function asSentence(text: string): string {
+  const t = text.trim();
+  return /[.!?]$/.test(t) ? t : `${t}.`;
+}
+
+/**
+ * What one probe found, in plain words. `token` says the account signs in
+ * rather than sending a password, whose failed SMTP test is a warning.
+ */
+export function checkLine(run: CheckRun, sameImap: boolean, token = false): string {
+  const why = asSentence(run.error ?? "no reason given");
   switch (run.check) {
     case "smtp":
-      return run.ok ? "SMTP: the server accepted the login." : `SMTP: the login failed. ${why}`;
+      if (run.ok) return "SMTP: the server accepted the login.";
+      return token ? `SMTP: the test failed. ${why} ${OAUTH2_SMTP_WARNING}` : `SMTP: the login failed. ${why}`;
     case "imap":
       if (run.ok) return "IMAP: the server accepted the login.";
       return sameImap
-        ? `IMAP: the SMTP password did not work for IMAP. ${why}. Untick "IMAP uses the SMTP password" to give IMAP its own, or set it in Settings later.`
+        ? `IMAP: the SMTP password did not work for IMAP. ${why} Untick "IMAP uses the SMTP password" to give IMAP its own, or set it in Settings later.`
         : `IMAP: the login failed. ${why}`;
     case "graph":
-      return run.ok ? "Graph: the sign-in reaches the mailbox." : `Graph: the test failed. ${why}. You can sign in again from Settings later.`;
+      return run.ok ? "Graph: the sign-in reaches the mailbox." : `Graph: the test failed. ${why} You can sign in again from Settings later.`;
     case "mailboxes": {
-      if (!run.ok) return `Mailboxes: the server's list could not be read. ${why}. Type the names on the next step.`;
+      if (!run.ok) return `Mailboxes: the server's list could not be read. ${why} Type the names on the next step.`;
       const n = run.mailboxes.length;
       return n === 0 ? "Mailboxes: the server listed none; type the names on the next step." : `Mailboxes: the server listed ${n}.`;
     }

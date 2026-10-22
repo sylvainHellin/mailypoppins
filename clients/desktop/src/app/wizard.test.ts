@@ -6,6 +6,7 @@ import {
   connectionKey,
   mailboxTwice,
   missingPasswordsLine,
+  OAUTH2_SMTP_WARNING,
   passwordKinds,
   probePlan,
   probeRefusalLine,
@@ -203,7 +204,10 @@ describe("the account wizard's connection test", () => {
       { check: "imap", password: "imap", required: true },
       { check: "mailboxes", password: "imap", required: false },
     ]);
-    expect(probePlan("microsoft365", true)).toEqual([{ check: "mailboxes", password: null, required: false }]);
+    expect(probePlan("microsoft365", true)).toEqual([
+      { check: "smtp", password: null, required: false },
+      { check: "mailboxes", password: null, required: false },
+    ]);
     expect(probePlan("graph", true).map((c) => [c.check, c.required])).toEqual([
       ["graph", false],
       ["mailboxes", false],
@@ -248,6 +252,49 @@ describe("the account wizard's connection test", () => {
     expect(checkLine(list, true)).toBe("Mailboxes: the server's list could not be read. IMAP login failed: no. Type the names on the next step.");
   });
 
+  it("ends a server's reason with one period, whether or not it brought its own", () => {
+    const imap = { check: "imap" as const, required: false, ok: false, error: probeRefused("imap"), mailboxes: [] };
+    expect(probeRefused("imap")).toMatch(/\.$/);
+    expect(checkLine(imap, true)).toBe(
+      `IMAP: the SMTP password did not work for IMAP. ${probeRefused("imap")} Untick "IMAP uses the SMTP password" to give IMAP its own, or set it in Settings later.`,
+    );
+    expect(checkLine({ ...imap, check: "mailboxes" }, true)).not.toContain("..");
+    expect(checkLine({ ...imap, check: "graph" }, true)).not.toContain("..");
+    expect(checkLine({ ...imap, check: "smtp", error: probeRefused("smtp") }, true)).toBe(`SMTP: the login failed. ${probeRefused("smtp")}.`);
+  });
+
+  it("a Microsoft 365 account's refused SMTP test is a warning that names SMTP AUTH, as in the CLI", async () => {
+    resetMock();
+    vi.mocked(invoke)
+      .mockImplementationOnce(async () => ({ ok: false, error: "535 5.7.139 SmtpClientAuthentication is disabled for the Tenant", mailboxes: [] }))
+      .mockImplementationOnce(async () => ({ ok: true, error: null, mailboxes: ["INBOX"] }));
+    const outcome = await runConnectionTest(filled("microsoft365"), secrets);
+    if (!("result" in outcome)) throw new Error("a result");
+    expect(outcome.result.passed).toBe(true);
+    expect(outcome.result.runs.map((r) => [r.check, r.ok, r.required])).toEqual([
+      ["smtp", false, false],
+      ["mailboxes", true, false],
+    ]);
+    expect(checkLine(outcome.result.runs[0], true, true)).toBe(
+      `SMTP: the test failed. 535 5.7.139 SmtpClientAuthentication is disabled for the Tenant. ${OAUTH2_SMTP_WARNING}`,
+    );
+    expect(OAUTH2_SMTP_WARNING).toContain("SMTP AUTH");
+  });
+
+  it("stops before the next probe once the wizard is gone", async () => {
+    resetMock();
+    let live = true;
+    let probes = 0;
+    vi.mocked(invoke).mockImplementationOnce(async () => {
+      probes += 1;
+      live = false;
+      return { ok: true, error: null, mailboxes: [] };
+    });
+    expect(await runConnectionTest(filled("imap"), secrets, () => live)).toEqual({ stopped: true });
+    expect(probes).toBe(1);
+    expect(mock.calls.filter((c) => c.cmd === "config_probe")).toEqual([]);
+  });
+
   it("names the daemon's refusal of a configured name as a taken name", async () => {
     expect(probeRefusalLine("work", probeConfiguredRefusal("work"))).toBe("An account named work is already configured. Go back to Identity and choose another name.");
     expect(probeRefusalLine("work", "something else")).toBe("something else");
@@ -269,6 +316,9 @@ describe("the account wizard's mailbox defaults", () => {
     // No preferred name: the first mailbox the roles before did not take.
     expect(withListing(form, ["Posteingang", "Gesendet", "Archiv"])).toMatchObject({ inbox: "Posteingang", archive: "Gesendet", sent: "Archiv" });
     expect(withListing(filled("graph"), ["Inbox", "Sent Items", "Archive"])).toMatchObject({ inbox: "Inbox", archive: "Archive", sent: "Sent Items" });
+    // A server listing fewer than the roles: the rest take the provider's usual names, to be typed over.
+    expect(withListing(form, ["INBOX"])).toMatchObject({ inbox: "INBOX", archive: "Archive", sent: "Sent" });
+    expect(withListing(filled("graph"), ["Inbox"])).toMatchObject({ inbox: "Inbox", archive: "Archive", sent: "Sent Items" });
   });
 
   it("refuses one mailbox for two roles, but lets the marked roles share one", () => {

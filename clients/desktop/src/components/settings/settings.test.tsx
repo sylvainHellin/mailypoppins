@@ -8,7 +8,7 @@ import { PREFS_KEY } from "@/app/prefs";
 import type { AppState } from "@/app/state";
 import { shellReady } from "@/test/render";
 import { setWidth } from "@/test/setup";
-import { CONFIG_INVALID_AT, CONFIG_INVALID_MESSAGE, emitEnvelope, mock, MOCK_CONFIG_PATH, resetMock, simulateConfigAbsent } from "@/test/tauri-mock";
+import { CONFIG_INVALID_AT, CONFIG_INVALID_MESSAGE, emitEnvelope, mock, MOCK_CONFIG_PATH, REDACTED, resetMock, simulateConfigAbsent } from "@/test/tauri-mock";
 
 const SECRET = "hunter2-correct-horse";
 
@@ -233,8 +233,10 @@ describe("the password dialog", () => {
     expect(JSON.stringify(probe.state)).not.toContain(SECRET);
     await user.keyboard("{Enter}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Set IMAP password" })).toBeNull());
-    expect(callsOf("config_set_password")).toEqual([{ account: "work", kind: "imap", value: SECRET }]);
-    expect(mock.passwords).toEqual([{ account: "work", kind: "imap", value: "<redacted>" }]);
+    // Recorded as fixture.rs records it: the value redacted, so the browser preview journals no password.
+    expect(callsOf("config_set_password")).toEqual([{ account: "work", kind: "imap", value: REDACTED }]);
+    expect(JSON.stringify(mock.calls)).not.toContain(SECRET);
+    expect(mock.passwords).toEqual([{ account: "work", kind: "imap", value: REDACTED }]);
     expect(probe.state.notice).toBe("Stored the IMAP password for work");
     expect(JSON.stringify(probe.state)).not.toContain(SECRET);
     expect(document.body.innerHTML).not.toContain(SECRET);

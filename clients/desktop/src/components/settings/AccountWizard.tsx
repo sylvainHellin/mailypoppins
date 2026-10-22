@@ -5,7 +5,8 @@
 // passwords typed there, a Microsoft 365 preset once the candidate signed in
 // with a device code (`config_oauth2_login` with the draft), whose token the
 // daemon keeps aside until the write promotes it. The Mailboxes step offers
-// the server's list with the CLI's defaults. The review writes through
+// the server's list with the CLI's defaults, and a typed name besides for
+// a server that lists fewer than it has roles. The review writes through
 // `config_add_account` (or `config_init` on a daemon with no config.toml),
 // then stores the passwords. The form and the passwords are the component's
 // own state, never the store's; the same form runs in the `account_wizard`
@@ -114,8 +115,11 @@ function Field({
 const SELECT_CLASS =
   "h-8 rounded-lg border border-input bg-transparent px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50";
 
+/** A role picker's last option: a name the server did not list, typed in the field below it. */
+const TYPE_NAME = "\u0000type";
+
 /** The test's lines: a check mark, a cross for a failure that stops the wizard, a warning sign for one that does not. */
-function ConnectionLines({ result, sameImap }: { result: ConnectionResult; sameImap: boolean }) {
+function ConnectionLines({ result, sameImap, token }: { result: ConnectionResult; sameImap: boolean; token: boolean }) {
   return (
     <ul aria-label="Connection test" data-slot="connection-results" className="flex flex-col gap-1 text-sm">
       {result.runs.map((r) => (
@@ -126,7 +130,7 @@ function ConnectionLines({ result, sameImap }: { result: ConnectionResult; sameI
           className={r.ok ? "flex gap-2" : r.required ? "flex gap-2 text-destructive" : "flex gap-2 text-muted-foreground"}
         >
           <span aria-hidden="true">{r.ok ? "\u2713" : r.required ? "\u2717" : "\u26a0"}</span>
-          <span className="min-w-0 break-words">{checkLine(r, sameImap)}</span>
+          <span className="min-w-0 break-words">{checkLine(r, sameImap, token)}</span>
         </li>
       ))}
     </ul>
@@ -157,6 +161,8 @@ export function AccountWizardForm({ preset, init, taken, onCancel, onDone, first
   // The server listing the mailbox defaults were last taken from, so a
   // test that lists the same again keeps the user's picks.
   const [applied, setApplied] = useState<string | null>(null);
+  // The roles the user chose to type a name for rather than pick one.
+  const [typing, setTyping] = useState<Partial<Record<Role, boolean>>>({});
   const bodyRef = useRef<HTMLDivElement>(null);
   const moved = useRef(false);
   // The dialog's form unmounts once the wizard closes, so a write that
@@ -188,8 +194,10 @@ export function AccountWizardForm({ preset, init, taken, onCancel, onDone, first
   const test = async () => {
     setBusy(true);
     setRefusal(null);
-    const outcome = await runConnectionTest(form, secrets);
-    if (!mounted.current) return;
+    // A wizard cancelled mid-test stops it, so no probe after the cancel
+    // carries the typed password.
+    const outcome = await runConnectionTest(form, secrets, () => mounted.current);
+    if (!mounted.current || "stopped" in outcome) return;
     setBusy(false);
     if ("refusal" in outcome) {
       setRefusal(outcome.refusal);
@@ -199,6 +207,7 @@ export function AccountWizardForm({ preset, init, taken, onCancel, onDone, first
     if (listed !== null && JSON.stringify(listed) !== applied) {
       setForm((f) => withListing(f, listed));
       setApplied(JSON.stringify(listed));
+      setTyping({});
     }
     setResult(outcome.result);
   };
@@ -377,30 +386,55 @@ export function AccountWizardForm({ preset, init, taken, onCancel, onDone, first
     );
   };
 
-  /** A role picked from the server's list; a marked role may stay with the folder the server marks. */
+  /**
+   * A role picked from the server's list, or typed: "Another name" opens a
+   * field for a name the server did not list, which a standard role whose
+   * list ran out (a server listing only INBOX) starts with. A marked role
+   * may stay with the folder the server marks.
+   */
   const pick = (role: Role, label: string, listed: readonly string[], marked: boolean) => {
     const fid = `${id}-${role}`;
     const value = form[role];
-    const options = value !== "" && !listed.includes(value) ? [value, ...listed] : listed;
+    const typed = typing[role] === true || (value !== "" && !listed.includes(value)) || (!marked && value === "");
     return (
-      <Field id={fid} label={label} error={errors[role]}>
+      <Field id={fid} label={label} hint={typed && marked ? "Empty: the folder the server marks." : undefined} error={errors[role]}>
         {(describedBy) => (
-          <select
-            id={fid}
-            data-field={role}
-            value={value}
-            aria-invalid={errors[role] ? true : undefined}
-            aria-describedby={describedBy}
-            onChange={(e) => set(role, e.currentTarget.value)}
-            className={SELECT_CLASS}
-          >
-            {marked ? <option value="">The one the server marks</option> : null}
-            {options.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
+          <>
+            <select
+              id={fid}
+              data-field={role}
+              value={typed ? TYPE_NAME : value}
+              aria-invalid={!typed && errors[role] ? true : undefined}
+              aria-describedby={typed ? undefined : describedBy}
+              onChange={(e) => {
+                const v = e.currentTarget.value;
+                setTyping((t) => ({ ...t, [role]: v === TYPE_NAME }));
+                set(role, v === TYPE_NAME ? "" : v);
+              }}
+              className={SELECT_CLASS}
+            >
+              {marked ? <option value="">The one the server marks</option> : null}
+              {listed.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+              <option value={TYPE_NAME}>Another name…</option>
+            </select>
+            {typed ? (
+              <Input
+                data-field={`${role}_name`}
+                aria-label={`${label} name`}
+                type="text"
+                value={value}
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={errors[role] ? true : undefined}
+                aria-describedby={describedBy}
+                onChange={(e) => set(role, e.currentTarget.value)}
+              />
+            ) : null}
+          </>
         )}
       </Field>
     );
@@ -539,7 +573,7 @@ export function AccountWizardForm({ preset, init, taken, onCancel, onDone, first
             Testing the connection…
           </p>
         ) : null}
-        {fresh && !busy ? <ConnectionLines result={fresh} sameImap={secrets.sameImap} /> : null}
+        {fresh && !busy ? <ConnectionLines result={fresh} sameImap={secrets.sameImap} token={signing} /> : null}
       </>
     );
   } else if (step === "mailboxes") {
@@ -549,7 +583,10 @@ export function AccountWizardForm({ preset, init, taken, onCancel, onDone, first
       <>
         {listed ? (
           <>
-            <p className="text-xs text-muted-foreground">The server's mailboxes for the three standard roles; the preselected ones are those the CLI picks.</p>
+            <p className="text-xs text-muted-foreground">
+              The server's mailboxes for the three standard roles; the preselected ones are those the CLI picks. Another name takes one the server did
+              not list.
+            </p>
             {pick("inbox", "Inbox", listed, false)}
             {pick("archive", "Archive", listed, false)}
             {pick("sent", "Sent", listed, false)}

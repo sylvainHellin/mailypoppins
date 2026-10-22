@@ -20,6 +20,7 @@ import {
   PROBE_WRONG_PASSWORD,
   probeConfiguredRefusal,
   probeRefused,
+  REDACTED,
   reportDeviceCode,
   resetMock,
   settleSignIn,
@@ -157,7 +158,7 @@ describe("the account wizard", () => {
     await testWith(user, dialog, PROBE_WRONG_PASSWORD);
     const results = await within(dialog).findByRole("list", { name: "Connection test" });
     expect(results).toHaveTextContent(`SMTP: the login failed. ${probeRefused("smtp")}`);
-    expect(callsOf("config_probe")).toEqual([{ account: FASTMAIL, check: "smtp", password: PROBE_WRONG_PASSWORD }]);
+    expect(callsOf("config_probe")).toEqual([{ account: FASTMAIL, check: "smtp", password: REDACTED }]);
     expect(within(dialog).queryByRole("button", { name: "Next" })).toBeNull();
 
     // The right one: SMTP, IMAP with the same password, the mailbox list.
@@ -170,10 +171,10 @@ describe("the account wizard", () => {
       "\u2713IMAP: the server accepted the login.",
       "\u2713Mailboxes: the server listed 7.",
     ]);
-    expect(callsOf("config_probe").map((c) => [c?.check, c?.password === SECRET])).toEqual([
-      ["smtp", true],
-      ["imap", true],
-      ["mailboxes", true],
+    expect(callsOf("config_probe").map((c) => [c?.check, c?.password])).toEqual([
+      ["smtp", REDACTED],
+      ["imap", REDACTED],
+      ["mailboxes", REDACTED],
     ]);
     expect(callsOf("config_add_account")).toEqual([]);
     expect(callsOf("config_set_password")).toEqual([]);
@@ -183,7 +184,7 @@ describe("the account wizard", () => {
     // The server's mailboxes, the CLI's picks preselected, the marked roles left to the server.
     const inbox = within(dialog).getByLabelText("Inbox");
     expect(inbox.tagName).toBe("SELECT");
-    expect(within(inbox).getAllByRole("option").map((o) => o.textContent)).toEqual(PROBE_IMAP_MAILBOXES);
+    expect(within(inbox).getAllByRole("option").map((o) => o.textContent)).toEqual([...PROBE_IMAP_MAILBOXES, "Another name\u2026"]);
     expect(inbox).toHaveValue("INBOX");
     expect(within(dialog).getByLabelText("Archive")).toHaveValue("Archive");
     expect(within(dialog).getByLabelText("Sent")).toHaveValue("Sent");
@@ -213,13 +214,15 @@ describe("the account wizard", () => {
     expect(callsOf("config_init")).toEqual([]);
     // The password the test used, stored now that the account exists; IMAP falls back to it.
     await waitFor(() => expect(mock.passwords).toEqual([{ account: "fastmail", kind: "smtp", value: "<redacted>" }]));
-    expect(callsOf("config_set_password")).toEqual([{ account: "fastmail", kind: "smtp", value: SECRET }]);
+    expect(callsOf("config_set_password")).toEqual([{ account: "fastmail", kind: "smtp", value: REDACTED }]);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add account" })).toBeNull());
     expect(screen.queryByRole("dialog", { name: /password/ })).toBeNull();
     expect(probe.state.notice).toBe("Added the account fastmail; its password is stored");
     await waitFor(() => expect(document.getElementById("account-fastmail")).toHaveTextContent("fastmail"));
     expect(JSON.stringify(probe.state)).not.toContain(SECRET);
     expect(document.body.innerHTML).not.toContain(SECRET);
+    // The browser preview's journal of calls holds no password either.
+    expect(JSON.stringify(mock.calls)).not.toContain(SECRET);
   });
 
   it("an IMAP password of its own must pass its own login, and is stored too", async () => {
@@ -365,7 +368,12 @@ describe("the account wizard", () => {
     });
     // Stored: the test runs at once, with the staged token.
     await waitFor(() => expect(within(dialog).getByRole("list", { name: "Connection test" })).toHaveTextContent("Mailboxes: the server listed 7."));
-    expect(callsOf("config_probe")).toEqual([{ account: (callsOf("config_oauth2_login")[0] as { candidate: unknown }).candidate, check: "mailboxes" }]);
+    const candidate = (callsOf("config_oauth2_login")[0] as { candidate: unknown }).candidate;
+    expect(callsOf("config_probe")).toEqual([
+      { account: candidate, check: "smtp" },
+      { account: candidate, check: "mailboxes" },
+    ]);
+    expect(within(dialog).getByRole("list", { name: "Connection test" })).toHaveTextContent("SMTP: the server accepted the login.");
     expect(within(dialog).getByText("Signed in. The token waits for the account to be written.")).toBeInTheDocument();
     expect(probe.state.signIn).toBeNull();
     expect(probe.state.activityLog.map((e) => e.text).join("\n")).not.toMatch(/OAuth2 token acquired/);
@@ -401,7 +409,7 @@ describe("the account wizard", () => {
     await waitFor(() => expect(within(dialog).getByRole("list", { name: "Connection test" })).toHaveTextContent("Graph: the sign-in reaches the mailbox."));
     expect(callsOf("config_probe").map((c) => c?.check)).toEqual(["graph", "mailboxes"]);
     await next(user, dialog);
-    expect(within(within(dialog).getByLabelText("Sent")).getAllByRole("option").map((o) => o.textContent)).toEqual(PROBE_GRAPH_FOLDERS);
+    expect(within(within(dialog).getByLabelText("Sent")).getAllByRole("option").map((o) => o.textContent)).toEqual([...PROBE_GRAPH_FOLDERS, "Another name\u2026"]);
     expect(within(dialog).getByLabelText("Inbox")).toHaveValue("Inbox");
     expect(within(dialog).getByLabelText("Sent")).toHaveValue("Sent Items");
     await next(user, dialog);
@@ -456,6 +464,52 @@ describe("the account wizard", () => {
     await waitFor(() => expect(probe.state.signIn).toBeNull());
     expect(callsOf("config_add_account")).toEqual([]);
     expect(mock.stagedSignIns.size).toBe(0);
+  });
+
+  it("a server that lists only INBOX still gets every role: the archive and the sent folder are typed", async () => {
+    const { user, dialog } = await openWizard();
+    mock.probeListing = ["INBOX"];
+    await toConnection(user, dialog, "fastmail");
+    await testWith(user, dialog, SECRET);
+    await waitFor(() => expect(within(dialog).getByRole("list", { name: "Connection test" })).toHaveTextContent("Mailboxes: the server listed 1."));
+    await next(user, dialog);
+    expect(stepOf(dialog)).toBe("mailboxes");
+    expect(within(dialog).getByLabelText("Inbox")).toHaveValue("INBOX");
+    expect(within(dialog).queryByLabelText("Inbox name")).toBeNull();
+    // Nothing left to pick: the provider's usual names, typed, as the CLI's prompt offers them.
+    expect(within(dialog).getByLabelText("Archive name")).toHaveValue("Archive");
+    await fill(user, dialog, "Archive name", "");
+    await next(user, dialog);
+    expect(within(dialog).getByLabelText("Archive name")).toHaveAttribute("aria-invalid", "true");
+    await fill(user, dialog, "Archive name", "Archiv");
+    await fill(user, dialog, "Sent name", "Gesendet");
+    // A marked role takes a typed name too.
+    await user.selectOptions(within(dialog).getByLabelText("Trash"), "Another name\u2026");
+    await fill(user, dialog, "Trash name", "Papierkorb");
+    await next(user, dialog);
+    expect(stepOf(dialog)).toBe("review");
+    await user.click(within(dialog).getByRole("button", { name: "Add account" }));
+    await waitFor(() => expect(callsOf("config_add_account")).toHaveLength(1));
+    expect((callsOf("config_add_account")[0]?.account as { mailboxes: unknown }).mailboxes).toEqual({
+      inbox: "INBOX",
+      archive: "Archiv",
+      sent: "Gesendet",
+      trash: "Papierkorb",
+    });
+  });
+
+  it("a wizard cancelled while it tests the connection sends the password to no further probe", async () => {
+    const { user, dialog } = await openWizard();
+    await toConnection(user, dialog, "fastmail");
+    let release = () => {};
+    mock.gates.set("config_probe", new Promise<void>((r) => (release = r)));
+    await testWith(user, dialog, SECRET);
+    await waitFor(() => expect(callsOf("config_probe")).toHaveLength(1));
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add account" })).toBeNull());
+    await act(async () => release());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(callsOf("config_probe").map((c) => c?.check)).toEqual(["smtp"]);
   });
 
   it("a change of the servers after a test makes it stale, so the Connection step tests again", async () => {
@@ -563,7 +617,7 @@ describe("the first run", () => {
         imap: { host: "127.0.0.1", port: 1143, accept_invalid_certs: true },
       },
       check: "smtp",
-      password: SECRET,
+      password: REDACTED,
     });
     await next(user, form);
     await next(user, form);

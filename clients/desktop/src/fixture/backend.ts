@@ -138,6 +138,7 @@ export const mock = {
   menu: null as ((e: { payload: string }) => void) | null,
   /** Every app event handler `listen` registered, by event name. */
   listeners: new Map<string, (e: { payload: unknown }) => void>(),
+  /** Every `invoke`, oldest first; a password `config_probe` or `config_set_password` carried is recorded as `REDACTED`. */
   calls: [] as { cmd: string; args: Record<string, unknown> | undefined }[],
   /** Fail a command with a GuiError-shaped rejection. */
   failing: new Map<string, unknown>(),
@@ -249,6 +250,8 @@ export const mock = {
   configInvalid: false,
   /** Every `config_set_password`, as fixture.rs journals it: the value redacted. */
   passwords: [] as { account: string; kind: string; value: string }[],
+  /** What a fixture IMAP server's `config_probe` lists, null for `PROBE_IMAP_MAILBOXES`. */
+  probeListing: null as string[] | null,
   /** What `subscribe_events` and `bootstrap` answer; `config_add_account` and `config_init` add to it. */
   bootstrap: clone(fixtures.bootstrap),
   /** What `account_list` lists. */
@@ -486,6 +489,7 @@ export function resetMock(): void {
   mock.configRevision = 0;
   mock.configInvalid = false;
   mock.passwords = [];
+  mock.probeListing = null;
   mock.bootstrap = clone(fixtures.bootstrap);
   mock.accounts = clone(fixtures.accounts);
   mock.config = clone(fixtures.config);
@@ -1846,7 +1850,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       }
       if (password === PROBE_WRONG_PASSWORD) return { ok: false, error: probeRefused(check), mailboxes: [] };
       if (check === "mailboxes") {
-        return { ok: true, error: null, mailboxes: auth === "graph" ? [...PROBE_GRAPH_FOLDERS] : [...PROBE_IMAP_MAILBOXES] };
+        return { ok: true, error: null, mailboxes: auth === "graph" ? [...PROBE_GRAPH_FOLDERS] : [...(mock.probeListing ?? PROBE_IMAP_MAILBOXES)] };
       }
       return { ok: true, error: null, mailboxes: [] };
     }
@@ -1881,7 +1885,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (!mock.config.accounts.some((a) => a.name === account)) {
         throw { kind: "not_found", message: `no account named ${account} is configured`, code: -32005 };
       }
-      mock.passwords.push({ account, kind, value: "<redacted>" });
+      mock.passwords.push({ account, kind, value: REDACTED });
       return { stored: true, account, kind, key: `${kind}-password-${account}` };
     }
     case "editor_setting_get":
@@ -2178,8 +2182,16 @@ export const fixtureWindow = {
 
 export const getCurrentWindow = () => fixtureWindow;
 
+/** What stands for a password in a recorded call, as fixture.rs's `REDACTED`. */
+export const REDACTED = "<redacted>";
+
+/** The fields of a call that carry a password, recorded redacted as fixture.rs records them. */
+const SECRET_ARGS: Record<string, string> = { config_probe: "password", config_set_password: "value" };
+
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  mock.calls.push({ cmd, args });
+  const secret = SECRET_ARGS[cmd];
+  const recorded = args !== undefined && secret !== undefined && args[secret] !== undefined ? { ...args, [secret]: REDACTED } : args;
+  mock.calls.push({ cmd, args: recorded });
   const failure = mock.failing.get(cmd);
   if (failure !== undefined) throw failure;
   const result = await (terminalAnswer(cmd, args ?? {}) ?? answer(cmd, args));

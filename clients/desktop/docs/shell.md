@@ -1005,8 +1005,10 @@ The pure half is `app/wizard.ts`: the presets, the per-step checks, the probes t
 3. Servers: SMTP host, port and username, IMAP host, port and username, then for both Microsoft 365 presets the client ID and the tenant ID; Graph shows only the last two.
 4. Connection: the test, before anything is written (see "The connection test").
 5. Mailboxes: the server names of Inbox, Archive and Sent, then Drafts, Trash and Junk, and the policy overrides, one `<pattern> <sync|status-only|ignore>` per line (#0141).
-   When the test listed the server's mailboxes, each role is a select over that list, preselected as the CLI does: for Inbox, Archive and Sent in turn, the first of the CLI's preferred names the server lists, compared without case (INBOX; Archive, archive, All Mail; Sent, Sent Items, Sent Messages, INBOX.Sent; for Graph Inbox, Archive, Sent Items), else the first mailbox the roles before did not take.
+   When the test listed the server's mailboxes, each role is a select over that list, preselected as the CLI does: for Inbox, Archive and Sent in turn, the first of the CLI's preferred names the server lists, compared without case (INBOX; Archive, archive, All Mail; Sent, Sent Items, Sent Messages, INBOX.Sent; for Graph Inbox, Archive, Sent Items), else the first mailbox the roles before did not take, else the provider's usual name.
    Drafts, Trash and Junk start on "The one the server marks" and offer the list too.
+   Every select ends in "Another name…", which opens a field below it (labelled "<role> name") for a name the server did not list, as the CLI's "Type another name" does.
+   A standard role whose name is not in the list, such as Archive and Sent on a server that lists only INBOX, starts on that field with the provider's usual name, so any server can finish the step.
    A test that lists the same mailboxes again keeps the user's picks.
    When the list could not be read, the roles are text fields with the provider's usual names, and Drafts, Trash and Junk are left empty for the folder the server marks.
    There is no list of extra mailboxes: the daemon finds and syncs every other folder the server lists.
@@ -1035,10 +1037,13 @@ The passwords stay in the component and are sent to `config_probe` only; an edit
 A Microsoft 365 preset says Microsoft signs the account in first, and its button is "Sign in": `config_oauth2_login` with the draft as `candidate`, which the daemon signs in under a staged token (`candidates/<name>`) and no configured account's.
 The sign-in is a candidate one in `state.signIn`: it opens no `device_code` overlay and leaves no notice, and the wizard shows its code inline with the device-code dialog's view (verification page, code, "Copy code", "Open verification page") and "Cancel sign-in".
 Back and the button wait while it runs.
-Stored, it says "Signed in. The token waits for the account to be written." and the test runs at once: `mailboxes` for the OAuth2 preset, `graph` then `mailboxes` for Graph, neither of which stops the wizard, as in the CLI.
+Stored, it says "Signed in. The token waits for the account to be written." and the test runs at once: `smtp` then `mailboxes` for the OAuth2 preset, `graph` then `mailboxes` for Graph, none of which stops the wizard, as in the CLI.
+A refused SMTP test of the OAuth2 preset is a warning, since a tenant that disables SMTP AUTH leaves the sign-in without SMTP access; its line says so and that sending fails until an administrator enables it, the CLI's `OAUTH2_SMTP_WARNING` word for word.
 Failed, the alert says "The sign-in of <name> failed: <why>" and the button signs in again; cancelled, the sign-in is forgotten.
 
-Each probe the test ran is one line in the list "Connection test", with a check mark when it passed, a cross for a failure that stops the wizard and a warning sign for one that does not, in plain words with the server's sentence: "SMTP: the server accepted the login.", "SMTP: the login failed. <the server's sentence>", "Mailboxes: the server listed 7.", "Mailboxes: the server's list could not be read. <why>. Type the names on the next step.".
+Each probe the test ran is one line in the list "Connection test", with a check mark when it passed, a cross for a failure that stops the wizard and a warning sign for one that does not, in plain words with the server's sentence: "SMTP: the server accepted the login.", "SMTP: the login failed. <the server's sentence>", "Mailboxes: the server listed 7.", "Mailboxes: the server's list could not be read. <why> Type the names on the next step.".
+The server's sentence gets a closing period only when it ends without one.
+A wizard cancelled while the test runs stops it before the next probe, so the typed password reaches no server after the cancel.
 Once it passed, the button is Next.
 The daemon refusing the probe itself shows in the alert: a token candidate named like a configured account (the daemon's refusal since its security fix, so no configured account's token travels to the host a candidate names) reads "An account named <name> is already configured. Go back to Identity and choose another name.".
 

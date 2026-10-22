@@ -188,7 +188,7 @@ Decisions taken in M4, each the breakdown's default:
 - New invitation is a minimal form with no preview and no UID of its own, disabled on a Graph account (D5).
 - The past and upcoming filter is client-side, the TUI's rule (D6).
 - `Space m`, `Space c` and `Space a`, the sidebar and the palette switch the views, and Settings is a fourth view (D7).
-- The wizard offers the CLI's four presets, writes through `config.add_account`, or `config.init` on first run, then stores a password or signs in, with no connection test and no server mailbox pick (D8).
+- The wizard offers the CLI's four presets, tests the connection through `config.probe` (a Microsoft 365 account after a staged candidate sign-in), offers the server's mailboxes with a typed name besides, writes through `config.add_account`, or `config.init` on first run, then stores the passwords, as the CLI does (D8; shell.md, "Account wizard").
 - No secret reaches the clipboard; the device-code dialog's Copy copies the user code (D9).
 - Of the stale status lines outside M4, the matrix corrects `RD-07`, `RD-08`, `OBS-02`, `OBS-03` and `INT-06` only (D10).
 - Settings has no key (D11).

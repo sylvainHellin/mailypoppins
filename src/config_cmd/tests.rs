@@ -226,6 +226,87 @@ fn a_probe_answer_reads_its_verdict_reason_and_names() {
     assert_eq!(listed.mailboxes, ["INBOX", "Sent"]);
 }
 
+/// A server that lists only INBOX still gets every role: the inbox is picked
+/// from the list, with a name to type besides, and the archive and the sent
+/// folder, with nothing left to pick, are typed, Enter taking the usual name.
+#[test]
+fn a_server_listing_only_inbox_lets_the_other_roles_be_typed() {
+    use super::init::{mailbox_prompt, picked, MailboxPrompt, TYPE_ANOTHER};
+    let mut available = vec!["INBOX".to_string()];
+    let MailboxPrompt::Pick { items, default } = mailbox_prompt(&available, ("INBOX", &["INBOX"]))
+    else {
+        panic!("a listed inbox is picked");
+    };
+    assert_eq!(items, ["INBOX", TYPE_ANOTHER]);
+    assert_eq!(picked(&items, default).as_deref(), Some("INBOX"));
+    assert_eq!(picked(&items, 1), None, "the last item asks for a name");
+    available.retain(|m| m != "INBOX");
+    assert_eq!(
+        mailbox_prompt(&available, ("Archive", &["Archive", "All Mail"])),
+        MailboxPrompt::Type {
+            default: "Archive".into()
+        }
+    );
+    assert_eq!(
+        mailbox_prompt(&available, ("Sent", &["Sent"])),
+        MailboxPrompt::Type {
+            default: "Sent".into()
+        }
+    );
+}
+
+/// A daemon double that records its calls and refuses every SMTP login.
+#[derive(Default)]
+struct SmtpRefused {
+    calls: Vec<String>,
+}
+
+impl super::WizardDaemon for SmtpRefused {
+    async fn probe(
+        &mut self,
+        _: &Value,
+        check: &str,
+        password: Option<&str>,
+    ) -> anyhow::Result<Probe> {
+        self.calls.push(format!("probe {check} {password:?}"));
+        Ok(Probe {
+            ok: check != "smtp",
+            error: (check == "smtp")
+                .then(|| "535 5.7.139 SmtpClientAuthentication is disabled for the Tenant.".into()),
+            mailboxes: Vec::new(),
+        })
+    }
+    async fn sign_in(&mut self, _: &Value) -> anyhow::Result<()> {
+        self.calls.push("sign_in".into());
+        Ok(())
+    }
+    async fn init(&mut self, _: &Value, _: bool) -> anyhow::Result<std::path::PathBuf> {
+        unreachable!("no write in this test")
+    }
+    async fn add_account(&mut self, _: &Value) -> anyhow::Result<()> {
+        unreachable!("no write in this test")
+    }
+    async fn set_password(&mut self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+        unreachable!("no password in this test")
+    }
+}
+
+/// A Microsoft 365 account is signed in, then its SMTP login is tested with
+/// the staged token, as the desktop wizard does; a refusal is a warning, not
+/// the end of the wizard, since a tenant may withhold SMTP AUTH.
+#[tokio::test]
+async fn an_oauth2_account_tests_smtp_after_the_sign_in_and_goes_on_when_it_fails() {
+    let mut daemon = SmtpRefused::default();
+    let mut a = answers();
+    a.oauth2 = Some(("client".into(), "tenant".into()));
+    let probe = super::init::sign_in_and_test_smtp(&mut daemon, &imap_candidate(&a))
+        .await
+        .expect("a refused SMTP login does not end the wizard");
+    assert!(!probe.ok);
+    assert_eq!(daemon.calls, ["sign_in", "probe smtp None"]);
+    assert!(super::init::OAUTH2_SMTP_WARNING.contains("SMTP AUTH"));
+}
+
 /// A daemon double whose `config.set_password` refuses one kind.
 struct RefusingSetPassword {
     refuse: &'static str,

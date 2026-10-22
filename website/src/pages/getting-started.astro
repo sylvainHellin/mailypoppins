@@ -107,7 +107,7 @@ cargo install --path .`}
         <li>Choose a provider: standard IMAP/SMTP, Microsoft 365 with OAuth2, or Graph API (Graph signs in through the built-in mailypoppins app, so press Enter at the client ID and tenant prompts; until the mailypoppins publisher is verified with Microsoft, an administrator of your organisation has to approve the app at the first sign-in, which personal Microsoft accounts do not need).</li>
         <li>Enter credentials (server host, port, username, email address).</li>
         <li>Automatic connection test to verify everything works.</li>
-        <li>Mailbox discovery: the wizard lists server mailboxes and lets you assign the inbox, archive, and sent roles.</li>
+        <li>Mailbox discovery: the wizard lists server mailboxes and lets you assign the inbox, archive, and sent roles; "Type another name" takes a mailbox the server did not list, and a role with nothing left to pick asks for the name directly.</li>
         <li>Drafts, trash and junk: left empty, the daemon uses the folders the server marks; name one only when the server does not.</li>
         <li>Policy overrides: optional lines such as <code>Labels/* ignore</code>, one per prompt, until an empty answer. Every other folder is found and synced without being listed here.</li>
         <li>Config is written to <code>~/.config/mailypoppins/config.toml</code>.</li>
@@ -117,6 +117,8 @@ cargo install --path .`}
         For Microsoft 365 accounts, the wizard runs the OAuth2 device code flow: it
         displays a URL and a code, you sign in via your browser, and the token is
         cached locally.
+        It then tests the SMTP login with that token: a tenant that disables SMTP AUTH
+        refuses it, and the wizard warns and goes on, since only sending needs it.
       </p>
       <p>
         The wizard does not ask about signatures. A signature is a Markdown file in
