@@ -40,7 +40,7 @@ The catalogue and the folder roles come first, because the server drafts of #014
 
 ## Choices made in the implementation
 
-- The server drafts folder is catalogued with the `drafts` role and ignored until #0143 adds its reconcile and its own key, so the sidebar does not list two Drafts.
+- The server drafts folder is catalogued with the `drafts` role and ignored, whatever an override says: #0143 mirrors it into the Drafts view and its reconcile reads it directly, without a store key, so the sidebar does not list two Drafts.
 - `status-only` means server counts for every such folder, plus the newest 50 messages for the trash and junk folders, which is what keeps a moved message's row (pitfall 2); a label folder downloads nothing.
 - No fetch-on-open of a `status-only` folder: an explicit `mp sync --mailbox <folder>` downloads one in full.
 - The provider exclude lists apply to the provider the listing looks like, never to every account.

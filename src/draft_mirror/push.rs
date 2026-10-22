@@ -99,14 +99,19 @@ pub async fn push<F: DraftsFolder>(
     let row_current = row
         .as_ref()
         .is_some_and(|row| row.mailbox == mailbox && row.uidvalidity == info.uidvalidity);
-    if !row_current && !before.is_empty() {
-        // A draft with copies and no row of this folder: the store was
-        // rebuilt, or a push died before its row. Which side changed is the
-        // reconcile's to decide, and a push here would replace a copy edited
-        // elsewhere; the reconcile records or pulls, and a push still owed
-        // after it is queued again.
+    let unseen = before
+        .iter()
+        .any(|uid| !(row_current && row.as_ref().is_some_and(|row| row.uid == *uid)));
+    if unseen {
+        // A copy the row does not name: an edit in Outlook or a push from the
+        // other machine since the last reconcile, or a draft with copies and
+        // no row (a rebuilt store, a push that died before its row). A push
+        // here would bury it under the local text; the reconcile pulls it or
+        // keeps a conflict copy, and a push still owed after it is queued
+        // again.
         info!(
-            "[drafts] {account}/{draft_id} has copies and no row; reconciling instead of pushing"
+            "[drafts] {account}/{draft_id} has a copy this machine has not seen; reconciling \
+             instead of pushing"
         );
         super::reconcile::reconcile(mirror, folder).await?;
         return Ok(());

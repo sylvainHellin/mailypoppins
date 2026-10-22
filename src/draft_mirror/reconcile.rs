@@ -238,7 +238,7 @@ pub async fn reconcile<F: DraftsFolder>(
                 // anything, is a push, which the owed-push scan queues. Older
                 // copies are leftovers of a crash between an APPEND and its
                 // delete.
-                doomed.extend(older);
+                settle_older(folder, local, &older, &mut doomed, &mut report).await?;
             }
             Some(row) if older.contains(&row.uid) => {
                 // Another machine pushed over the copy this one wrote.
@@ -250,7 +250,7 @@ pub async fn reconcile<F: DraftsFolder>(
                 pull_into(mirror, local, &raw)?;
                 record(mirror, local, newest.uid, info.uidvalidity, &mailbox)?;
                 report.pulled += 1;
-                doomed.extend(older);
+                settle_older(folder, local, &older, &mut doomed, &mut report).await?;
             }
             Some(row) => {
                 let moved = local.hash != row.synced_hash;
@@ -265,7 +265,7 @@ pub async fn reconcile<F: DraftsFolder>(
                     &mut report,
                 )
                 .await?;
-                doomed.extend(older);
+                settle_older(folder, local, &older, &mut doomed, &mut report).await?;
             }
             None => {
                 // No row: a rebuilt store or a crash before the row was
@@ -280,7 +280,7 @@ pub async fn reconcile<F: DraftsFolder>(
                     record(mirror, local, newest.uid, info.uidvalidity, &mailbox)?;
                     report.pulled += 1;
                 }
-                doomed.extend(older);
+                settle_older(folder, local, &older, &mut doomed, &mut report).await?;
             }
         }
     }
@@ -340,6 +340,45 @@ pub async fn reconcile<F: DraftsFolder>(
         info!("[drafts] reconciled {account} against {mailbox}: {report:?}");
     }
     Ok(report)
+}
+
+/// The copies of a draft older than the one it is linked to.
+///
+/// A copy mp wrote (it carries its source) is a leftover of a crash between
+/// an APPEND and its delete, or of a push another copy superseded, and goes.
+/// A copy edited elsewhere is text nobody here has seen: it is kept as a
+/// conflict copy of the draft before it goes, so nothing typed anywhere is
+/// lost.
+async fn settle_older<F: DraftsFolder>(
+    folder: &mut F,
+    local: &LocalDraft,
+    older: &[u32],
+    doomed: &mut Vec<u32>,
+    report: &mut ReconcileReport,
+) -> Result<()> {
+    for &uid in older {
+        let Some(raw) = folder.fetch(uid).await? else {
+            continue;
+        };
+        if source_of(&raw).is_none() {
+            let email = crate::parse::parse_rfc822_to_fetched_email(&raw)
+                .context("an older copy does not parse as a message")?;
+            let target = conflict_path(local);
+            let staging = staging_path(&target);
+            std::fs::copy(&local.path, &staging)?;
+            apply_foreign(&staging, &email, &raw, Some(&local.draft.body_markdown))?;
+            crate::draft::mark_conflict_copy(&staging, &crate::store::drafts::new_id(), &local.id)?;
+            std::fs::rename(&staging, &target)?;
+            warn!(
+                "[drafts] an older copy of {} edited elsewhere is kept in {}",
+                local.id,
+                target.display()
+            );
+            report.conflicts += 1;
+        }
+        doomed.push(uid);
+    }
+    Ok(())
 }
 
 /// Whether a send of `local` is in flight, which no pull may change under it.
@@ -465,18 +504,7 @@ fn record_path(
 /// Keep the local text of `local` as a conflict copy beside it: a fresh id,
 /// `conflict_of` naming the draft, no `server_message_id`.
 fn write_conflict_copy(local: &LocalDraft, report: &mut ReconcileReport) -> Result<()> {
-    let stem = local
-        .path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| local.id.clone());
-    let dir = local.path.parent().unwrap_or(Path::new("."));
-    let mut target = dir.join(format!("{stem}.conflict.md"));
-    let mut n = 2;
-    while target.exists() {
-        target = dir.join(format!("{stem}.conflict-{n}.md"));
-        n += 1;
-    }
+    let target = conflict_path(local);
     let staging = staging_path(&target);
     std::fs::copy(&local.path, &staging)
         .with_context(|| format!("copying {} aside", local.path.display()))?;
@@ -489,6 +517,24 @@ fn write_conflict_copy(local: &LocalDraft, report: &mut ReconcileReport) -> Resu
     );
     report.conflicts += 1;
     Ok(())
+}
+
+/// Where the next conflict copy of `local` goes: `<stem>.conflict.md`, then
+/// `<stem>.conflict-2.md` and on, never over one that exists.
+fn conflict_path(local: &LocalDraft) -> PathBuf {
+    let stem = local
+        .path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| local.id.clone());
+    let dir = local.path.parent().unwrap_or(Path::new("."));
+    let mut target = dir.join(format!("{stem}.conflict.md"));
+    let mut n = 2;
+    while target.exists() {
+        target = dir.join(format!("{stem}.conflict-{n}.md"));
+        n += 1;
+    }
+    target
 }
 
 /// A name in the drafts directory the watcher does not read, for a file
@@ -705,8 +751,8 @@ fn keep_in_retired(mirror: &Mirror<'_>, id: &str, raw: &[u8]) -> Result<()> {
 ///
 /// A copy carrying its source is a draft mp pushed on the other machine: it
 /// is written under its own id, unless a file here already holds that id. A
-/// copy edited elsewhere is imported by [`import_foreign`] when
-/// [`IMPORT_FOREIGN`] says so.
+/// copy that carries none was started or last edited in another client and
+/// is imported by [`import_foreign`].
 fn imported(
     mirror: &Mirror<'_>,
     copy: &Copy,
@@ -749,16 +795,71 @@ fn imported(
     Ok(Some(id))
 }
 
-/// Whether a draft started in another client is imported (slice 2).
-const IMPORT_FOREIGN: bool = false;
-
-/// Import a draft started in Outlook, Apple Mail or the Proton app.
+/// Import a draft started in Outlook, Apple Mail or the Proton app (slice 2):
+/// a new file under a fresh id, linked to the copy by its own `Message-ID`.
+///
+/// The recipients, the subject and the reply target come from the copy's
+/// headers, the body from its HTML in Markdown, with a quoted thread below a
+/// quote marker so a later pull keeps it, and the attachments as files. The
+/// row records the file as written, so the draft is not pushed until it is
+/// edited here, and a draft only read in mp keeps the HTML its client wrote.
+/// A copy with no `Message-ID` has nothing to link by and is left alone.
 fn import_foreign(mirror: &Mirror<'_>, copy: &Copy, raw: &[u8]) -> Result<Option<String>> {
-    if !IMPORT_FOREIGN {
-        let _ = (mirror, copy, raw);
+    let Some(message_id) = copy.message_id.clone() else {
         return Ok(None);
+    };
+    let Some(email) = crate::parse::parse_rfc822_to_fetched_email(raw) else {
+        return Ok(None);
+    };
+    let body = match email.html_body.as_deref() {
+        Some(html) => {
+            let own = crate::parse::draft_html_to_markdown(html);
+            match crate::parse::draft_reply_boundary(html) {
+                Some(at) => format!(
+                    "{own}\n\n{}\n\n{}",
+                    crate::draft::QUOTE_MARKER,
+                    crate::parse::html_fragment_to_markdown(&html[at..])
+                ),
+                None => own,
+            }
+        }
+        None => email.body_text.trim().to_string(),
+    };
+    let dir = crate::config::drafts_dir(&mirror.account.name);
+    crate::config::create_private_dir_all(&dir)?;
+    let id = crate::store::drafts::new_id();
+    let staging = dir.join(format!(".import-{}.mp-staging", copy.uid));
+    std::fs::write(
+        &staging,
+        crate::draft::new_draft_with_body(
+            &mirror.account.default_from,
+            &chrono::Utc::now().to_rfc2822(),
+            &id,
+            &body,
+            None,
+        ),
+    )?;
+    crate::draft::rewrite_draft_recipients(
+        &staging,
+        &crate::draft::DraftRecipientEdit {
+            to: email.to.clone(),
+            cc: email.cc.clone().unwrap_or_default(),
+            bcc: header_value(raw, "Bcc").unwrap_or_default(),
+            subject: email.subject.clone(),
+        },
+    )?;
+    crate::draft::set_draft_server_message_id(&staging, &format!("<{message_id}>"))?;
+    if let Some(parent) = &copy.in_reply_to {
+        crate::draft::set_draft_in_reply_to(&staging, &format!("<{parent}>"))?;
     }
-    Ok(None)
+    attach_parts(mirror, &staging, &email, false)?;
+    let target = unique_draft_path(&dir, &crate::parse::slugify_subject(&copy.subject), &id);
+    std::fs::rename(&staging, &target)?;
+    info!(
+        "[drafts] imported {}/{id}, a draft started in another client",
+        mirror.account.name
+    );
+    Ok(Some(id))
 }
 
 /// A draft file name the directory does not hold yet.

@@ -364,7 +364,7 @@ fn a_folder_named_like_a_role_never_shadows_it() {
     assert_eq!(policy_of(&catalogue, "Archive"), FolderPolicy::Ignore);
     assert_eq!(policy_of(&catalogue, "Old/Archive"), FolderPolicy::Sync);
     // `drafts` is the name the server gives its drafts folder here, so it
-    // holds the role, and stays out of the sidebar until #0143.
+    // holds the role, and stays out of the sidebar: #0143 mirrors it.
     assert_eq!(catalogue.role(FolderRole::Drafts).unwrap().server, "drafts");
     assert_eq!(policy_of(&catalogue, "drafts"), FolderPolicy::Ignore);
     assert!(catalogue
@@ -419,6 +419,36 @@ fn overrides_change_the_policy_except_of_pins_and_unselectable_folders() {
         .find(|t| t.server_name == "Spam")
         .unwrap();
     assert_eq!(spam.window, None, "a synced junk folder downloads in full");
+}
+
+/// The server Drafts folder is the drafts mirror's (#0143): mirrored into the
+/// Drafts view and read by the reconcile, never a received mailbox, so an
+/// override cannot sync it into the sidebar either.
+#[test]
+fn the_server_drafts_folder_is_the_mirrors_and_never_a_received_mailbox() {
+    let mut account = proton_account();
+    account.mailboxes.overrides = vec![MailboxOverride {
+        pattern: "Drafts".to_string(),
+        policy: FolderPolicy::Sync,
+    }];
+    let catalogue = Catalogue::resolve(&account, &proton_listing());
+    let drafts = catalogue.role(FolderRole::Drafts).expect("the role folder");
+    assert_eq!(drafts.policy, FolderPolicy::Ignore);
+    assert_eq!(
+        drafts.reason,
+        Some("mirrored into the Drafts view, read by the drafts mirror")
+    );
+    assert!(catalogue
+        .targets()
+        .iter()
+        .all(|t| t.server_name != "Drafts"));
+    let rows = sidebar(&account, &catalogue);
+    let drafts_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.label == "Drafts" || row.server.as_deref() == Some("Drafts"))
+        .collect();
+    assert_eq!(drafts_rows.len(), 1, "the local view only: {rows:?}");
+    assert_eq!(drafts_rows[0].server, None);
 }
 
 /// A folder the server stopped listing keeps its rows but is neither synced

@@ -775,3 +775,157 @@ fn a_crash_between_append_and_delete_leaves_one_copy_after_the_reconcile() {
     assert_eq!(fx.row("d1").unwrap().uid, newer);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
 }
+
+// ---------------------------------------------------------------------------
+// Foreign drafts (#0143 step 6)
+// ---------------------------------------------------------------------------
+
+/// A draft started in Outlook, as it saves one: a single `text/html` part in
+/// Latin-1 and a PDF beside it.
+fn outlook_new_draft() -> Vec<u8> {
+    let mut raw = b"Message-ID: <AM0PR-outlook-1@tum.de>\r\nSubject: Termin\r\n\
+From: me@tum.de\r\nTo: Robin <robin@example.com>\r\nCc: kim@example.com\r\n\
+Bcc: chef@example.com\r\nIn-Reply-To: <parent@example.com>\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"b1\"\r\n\r\n--b1\r\n\
+Content-Type: text/html; charset=iso-8859-1\r\nContent-Transfer-Encoding: 8bit\r\n\r\n\
+<html><body><p>Gr\xfc\xdfe, <i>morgen</i>?</p></body></html>\r\n--b1\r\n\
+Content-Type: application/pdf; name=\"plan.pdf\"\r\n\
+Content-Disposition: attachment; filename=\"plan.pdf\"\r\n\
+Content-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQ=\r\n--b1--\r\n"
+        .to_vec();
+    raw.shrink_to_fit();
+    raw
+}
+
+/// A draft started in another client becomes a Markdown file under a fresh
+/// id, linked by its own Message-ID, with its recipients, its reply target
+/// and its attachment as a file; it is not pushed until it is edited here,
+/// and a second reconcile changes nothing.
+#[test]
+fn a_draft_started_in_outlook_is_imported_as_a_markdown_file() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    let uid = folder.put(&outlook_new_draft());
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(report.imported, 1, "{report:?}");
+    let local = local_drafts("tum").pop().expect("one draft");
+    let fm = &local.draft.frontmatter;
+    assert_eq!(
+        fm.server_message_id.as_deref(),
+        Some("<AM0PR-outlook-1@tum.de>")
+    );
+    assert_eq!(fm.to.as_deref(), Some("Robin <robin@example.com>"));
+    assert_eq!(fm.cc.as_deref(), Some("kim@example.com"));
+    assert_eq!(fm.bcc.as_deref(), Some("chef@example.com"));
+    assert_eq!(fm.subject, "Termin");
+    assert_eq!(fm.in_reply_to.as_deref(), Some("<parent@example.com>"));
+    assert_eq!(fm.status, crate::types::EmailStatus::Draft);
+    assert!(
+        local.draft.body_markdown.contains("Grüße, *morgen*?"),
+        "{}",
+        local.draft.body_markdown
+    );
+    let attachments = fm.attachments.clone().unwrap_or_default();
+    assert_eq!(attachments.len(), 1, "{attachments:?}");
+    assert!(attachments[0].ends_with("plan.pdf") && std::path::Path::new(&attachments[0]).exists());
+    assert_eq!(fx.row(&local.id).unwrap().uid, uid);
+    assert_eq!(
+        push::enqueue_owed(&fx.store, &fx.account).unwrap(),
+        0,
+        "not pushed yet"
+    );
+    assert_eq!(reconciled(&fx, &mut folder), ReconcileReport::default());
+
+    // The first edit here replaces Outlook's copy with mp's rendering.
+    let edited = std::fs::read_to_string(&local.path)
+        .unwrap()
+        .replace("morgen", "übermorgen");
+    std::fs::write(&local.path, edited).unwrap();
+    assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 1);
+    block_on(push::push(&fx.mirror(2), &mut folder, &local.id)).unwrap();
+    assert_eq!(folder.live().len(), 1);
+    assert!(String::from_utf8_lossy(&folder.live()[0].raw).contains("mp:source"));
+}
+
+/// A reply started in Apple Mail keeps its quoted thread below a quote
+/// marker, so a later pull of an edit keeps the thread as the file has it.
+#[test]
+fn a_foreign_reply_keeps_its_quote_below_a_marker() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    folder.put(
+        b"Message-ID: <APPLE-2@icloud.com>\r\nSubject: Re: Plan\r\nTo: robin@example.com\r\n\
+MIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+<html><body><div>Klingt gut.</div><blockquote type=\"cite\"><div>Der Plan</div></blockquote>\
+</body></html>\r\n",
+    );
+    reconciled(&fx, &mut folder);
+    let local = local_drafts("tum").pop().expect("imported");
+    let body = &local.draft.body_markdown;
+    let marker = body
+        .find(crate::draft::QUOTE_MARKER)
+        .expect("a quote marker");
+    assert!(body[..marker].contains("Klingt gut."), "{body}");
+    assert!(body[marker..].contains("Der Plan"), "{body}");
+}
+
+/// A local edit pushed before the reconcile has seen an Outlook edit does not
+/// bury it: the push reconciles instead, so the draft takes Outlook's text
+/// and the local text is a conflict copy, and only then is a push owed.
+#[test]
+fn a_push_over_an_unseen_outlook_edit_reconciles_first() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Original");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let mid = mid_of(&path);
+    folder.remove(folder.live()[0].uid);
+    folder.put(&outlook_copy(
+        &mid,
+        "robin@example.com",
+        "Angebot",
+        "<p>Outlook text</p>",
+    ));
+    let local = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("Original", "Local text");
+    std::fs::write(&path, local).unwrap();
+
+    block_on(push::push(&fx.mirror(2), &mut folder, "d1")).unwrap();
+    assert!(crate::draft::parse_email_draft(&path)
+        .unwrap()
+        .body_markdown
+        .contains("Outlook text"));
+    let copy = path.with_file_name("angebot.conflict.md");
+    assert!(std::fs::read_to_string(copy)
+        .unwrap()
+        .contains("Local text"));
+    assert_eq!(folder.live().len(), 1, "Outlook's copy is the draft's now");
+}
+
+/// An older copy edited elsewhere that a newer copy superseded is kept as a
+/// conflict copy before it goes, never deleted unread.
+#[test]
+fn an_older_foreign_copy_is_kept_as_a_conflict_copy() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let mid = mid_of(&path);
+    let ours = folder.live()[0].uid;
+    // A foreign copy older than ours, which only a race can leave.
+    folder.copies.insert(
+        0,
+        super::folder::fake::Copy {
+            uid: ours - 50,
+            raw: outlook_copy(&mid, "robin@example.com", "Angebot", "<p>Fremd</p>"),
+            deleted: false,
+        },
+    );
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!((report.conflicts, report.deleted), (1, 1), "{report:?}");
+    let copy = path.with_file_name("angebot.conflict.md");
+    assert!(std::fs::read_to_string(copy).unwrap().contains("Fremd"));
+    assert_eq!(folder.live().len(), 1);
+}

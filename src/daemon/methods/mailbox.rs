@@ -258,6 +258,41 @@ mod tests {
     use crate::catalogue::{listing, ListedFolder};
     use crate::config::{MailboxMapping, MailboxesConfig};
 
+    /// The received list both clients render never holds the server Drafts
+    /// folder (#0143): its drafts reach the Drafts view through the mirror,
+    /// so the one Drafts row is the local view, with no server folder.
+    #[test]
+    fn mailbox_list_never_serves_the_server_drafts_folder() {
+        let data = tempfile::tempdir().unwrap();
+        let _data = crate::config::test_env::DataDirOverride::set(data.path());
+        let account = AccountConfig {
+            name: "tum".to_string(),
+            ..Default::default()
+        };
+        crate::config::create_private_dir_all(crate::config::account_dir("tum")).unwrap();
+        let store = Store::open_account("tum").unwrap();
+        listing::replace(
+            &store,
+            "tum",
+            &[
+                ListedFolder::named("INBOX"),
+                ListedFolder::named("Drafts").with_attributes(&["\\Drafts"]),
+                ListedFolder::named("Entwürfe alt"),
+            ],
+        )
+        .unwrap();
+        drop(store);
+        let answer = list(&json!({"account": "tum"}), std::slice::from_ref(&account)).unwrap();
+        let rows = answer["mailboxes"].as_array().unwrap();
+        let drafts: Vec<&Value> = rows
+            .iter()
+            .filter(|row| row["label"] == "Drafts" || row["server"] == "Drafts")
+            .collect();
+        assert_eq!(drafts.len(), 1, "{rows:?}");
+        assert_eq!(drafts[0]["role"], "drafts");
+        assert_eq!(drafts[0]["server"], Value::Null);
+    }
+
     /// `mailbox.list` serves the catalogue's sidebar (#0141): the fixed rows,
     /// then every folder the server listed, each with its server name and
     /// policy; a synced folder's counts are the store's and a counts-only

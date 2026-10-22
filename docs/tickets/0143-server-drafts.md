@@ -472,6 +472,8 @@ No `state.invalidate` scope changes: drafts never travelled as invalidations, an
 Open for Sylvain:
 
 - Whether `approved` travels to the server and the other machine.
+  Provisional default, as built: it does not. A push writes no status header, and a pull or an import keeps the local status, demoting an approved draft whose content changed.
+  The whole decision is one function, `draft_mirror::approval_travels()`; flipping it to `true` makes the push write `X-Mailypoppins-Draft-Status` and the pull and the import take the status of a copy mp pushed elsewhere.
 
 ## Rollout steps
 
@@ -490,9 +492,28 @@ Open for Sylvain:
    - The pull waits for an open outbox row but not for an armed undo-send hold, which lives in the daemon: a pull into an approved draft demotes it, so a hold that fires afterwards is refused as not approved rather than sending what nobody approved.
    A push that finds copies and no row of its folder runs the reconcile instead of pushing, so a rebuilt store never replaces a copy edited elsewhere. Two copies under one draft where the row's is the older is another machine pushing over this one: the newer wins and the local text becomes a conflict copy unless the two are the same file. Word's fake list bullets are turned into `- ` items after the conversion rather than by an `htmd` handler.
 6. Foreign drafts: the import, and the received list hiding the `drafts`-role folder in the TUI and the desktop.
+   Done: `reconcile::import_foreign`; a push that finds a copy its row does not name (an edit in Outlook or another machine's push since the last reconcile) runs the reconcile instead, and an older copy edited elsewhere is kept as a conflict copy before it is deleted, so no text typed in another client is buried under a local push; a reply started elsewhere keeps its quoted thread below a quote marker, so a later pull keeps it. The `drafts`-role folder was already out of both clients' received lists, since #0141 ignores it and both render `mailbox.list`; it now stays ignored whatever an override says, with the reason "mirrored into the Drafts view, read by the drafts mirror".
 7. Graph, once an account uses it.
 
 Each step lands on its own and leaves the tree green; until step 3 nothing reaches the server.
+
+## Live checks for Sylvain
+
+The build was verified offline only, against an in-memory Drafts folder; nothing reached a live account.
+Installing it turns the mirror on for `tum` and `proton` at once, so the first drain pushes every draft in each account's drafts directory; set `[accounts.drafts] mirror = false` on an account first to hold it back.
+
+- [ ] `mp new` a draft on the Mac; within a few seconds it is in Outlook's and Apple Mail's Drafts with its To, Cc, Bcc, subject, body and attachment, and the Drafts list shows it `synced`.
+- [ ] Edit it in Neovim and save; the Drafts folder holds one copy afterwards, and Neovim shows no "file changed" prompt.
+- [ ] Edit it in Outlook (a word and a recipient); after the next quick tick the file has both, and the quote below `<!-- mp:quote -->` is unchanged.
+- [ ] Edit it in Neovim and in Outlook between two ticks; the draft takes Outlook's text and `<name>.conflict.md` holds yours.
+- [ ] Edit it in Apple Mail (a new `Message-ID`); the file follows the edit rather than a second draft appearing.
+- [ ] Approve a draft, edit it in Outlook; after the tick it is `status: draft` again.
+- [ ] `mp send` a draft; its copy leaves Outlook's Drafts and the file is in `drafts/.retired/`.
+- [ ] Send a draft from Outlook, and delete one in Apple Mail; after the tick both files are in `drafts/.retired/` and neither comes back.
+- [ ] Start a draft in Outlook and one in the Proton app; both appear in mp's Drafts view as Markdown files, and no server Drafts mailbox is listed.
+- [ ] On the home server, the Mac's draft appears under the same id after a tick there, and an edit there reaches the Mac.
+- [ ] Stop the daemon, delete `accounts/tum/store.sqlite3`, start it and let it sync; every draft is `synced` again, with no second copy and no conflict copy.
+- [ ] Delete the probe's leftovers listed under "Leftovers to delete", or confirm the first reconcile imported them as drafts and discard them in mp.
 
 ## Acceptance criteria
 

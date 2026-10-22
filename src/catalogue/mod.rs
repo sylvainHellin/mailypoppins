@@ -27,8 +27,9 @@
 //! user folder are `sync`; the trash and junk folders and Proton's label
 //! folders are `status-only`; Exchange's non-mail folders, virtual views
 //! (`\All`, `\Flagged`, Proton's `All Mail` and `Starred`) and `\Noselect`
-//! parents are `ignore`. The drafts folder is `ignore` too until #0143 mirrors
-//! it, because the Drafts view is the local drafts directory and a second
+//! parents are `ignore`. The drafts folder is `ignore` too, whatever an
+//! override says: #0143 mirrors it into the Drafts view, which is the local
+//! drafts directory, and its reconcile reads the folder directly, so a second
 //! "Drafts" in the sidebar would be the server copy of the same thing. An
 //! `[[accounts.mailboxes.override]]` entry changes any of that except a pin, a
 //! folder that cannot be selected, and a name that would shadow a role.
@@ -799,7 +800,7 @@ fn decide(account: &AccountConfig, provider: Provider, folder: &mut Folder) {
     if folder.role == Some(FolderRole::Drafts) {
         return ignore(
             folder,
-            "the Drafts view is local until #0143 mirrors the server's",
+            "mirrored into the Drafts view, read by the drafts mirror",
         );
     }
     if !folder.keyed_by_role() && shadows_reserved_key(&folder.key) {

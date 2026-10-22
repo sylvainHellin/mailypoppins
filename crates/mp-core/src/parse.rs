@@ -569,6 +569,13 @@ pub fn draft_html_to_markdown(html: &str) -> String {
         Some(at) => &html[..at],
         None => html,
     };
+    html_fragment_to_markdown(own)
+}
+
+/// [`draft_html_to_markdown`] of the whole of `html`, quote and all: what
+/// the quoted thread of a draft started in another client becomes below its
+/// quote marker when the draft is imported.
+pub fn html_fragment_to_markdown(own: &str) -> String {
     // The list and rule markers a draft written in mp uses: `- ` items with
     // one space, as a person types them.
     let options = htmd::options::Options {
