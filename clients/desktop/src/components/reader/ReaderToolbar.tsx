@@ -79,7 +79,7 @@ export function ReaderToolbar({ meta }: { meta: MessageMeta }) {
             variant="outline"
             title={`${mode === "html" ? "Show the HTML version" : "Show the plain text"} (t t)`}
             aria-pressed={s.readerMode === mode}
-            className={`aria-pressed:border-framing aria-pressed:bg-selection aria-pressed:text-selection-foreground ${i === 0 ? "rounded-r-none" : "-ml-px rounded-l-none"}`}
+            className={i === 0 ? "rounded-r-none" : "-ml-px rounded-l-none"}
             onClick={() => void saveReaderMode(dispatch, mode)}
           >
             {READER_MODE_LABELS[mode]}

@@ -208,7 +208,6 @@ function ThemeField() {
               size="sm"
               variant="outline"
               aria-pressed={theme === t}
-              className="aria-pressed:border-framing aria-pressed:bg-selection aria-pressed:text-selection-foreground"
               onClick={() => void saveTheme(dispatch, t)}
             >
               <Icon aria-hidden="true" />
@@ -239,7 +238,6 @@ function ReaderModeField() {
             size="sm"
             variant="outline"
             aria-pressed={readerMode === mode}
-            className="aria-pressed:border-framing aria-pressed:bg-selection aria-pressed:text-selection-foreground"
             onClick={() => void saveReaderMode(dispatch, mode)}
           >
             {READER_MODE_LABELS[mode]}
@@ -348,7 +346,6 @@ function EditorColorsField() {
             size="sm"
             variant="outline"
             aria-pressed={colors === choice}
-            className="aria-pressed:border-framing aria-pressed:bg-selection aria-pressed:text-selection-foreground"
             onClick={() => void choose(choice)}
           >
             {EDITOR_COLORS_LABELS[choice]}
