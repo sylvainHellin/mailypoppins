@@ -19,6 +19,9 @@ All notable changes to this project are documented in this file.
 - Server search: a result the local store does not hold exports and forwards as attachment without a fetch first; the daemon downloads its `.eml` from the server and leaves it out of the store (PERSO-174).
 - Desktop: after an update installed with Later, the next launch restarts the old daemon by itself instead of showing the version-mismatch screen; any other version mismatch still shows it (#0139, PERSO-107).
 - TUI and desktop: the g pane jumps are the same in both, `gm` the sidebar, `gl` the message list and `gr` the reader. `gl` is new in both, and `gr` is new in the TUI, where it marks the message read as Tab into the body pane does.
+- `mp config show` and the desktop Settings say whether each password and OAuth token is stored, from the new daemon method `account.credentials`; no client reads a secret to say so.
+- Signatures are managed through the daemon (`signature.read`, `create`, `rename`, `delete`, `set_default`), and another client's delete shows at once (`signature.removed`).
+- Sending a contact as a vCard is one daemon call (`contact.vcard_draft`), contact lists refresh when any client or a sync changes the index (`contact.changed`), and a contact search whose index build was refused says so.
 
 ### Changed
 - Server search: `mp search`, the TUI search overlay and the desktop search bar get the newest `--limit` results across every mailbox from one daemon search; each mailbox is asked for its newest N and only the N newest overall are downloaded (PERSO-175).
@@ -37,6 +40,9 @@ All notable changes to this project are documented in this file.
 - TUI: a server search over all mailboxes is one account-wide query on Microsoft Graph, as in the desktop app and `mp search`, instead of one query per mailbox (PERSO-155).
 - `mp <selector>` and the other draft commands still refuse a received-mail selector, and the refusal now names `mp show <selector>` (PERSO-155).
 - Desktop: prefix keys wait for the second key, as in the TUI (#0148). After g, f, c, t, s or Space the which-key list stays until the next key; Escape cancels it and does nothing else, and a click drops it.
+- `-s/--signature` and `--no-signature` are taken only by `mp new`, `mp reply`, `mp forward` and `mp send --invite`; `-A` is refused by the commands that act on no account (`mp daemon`, `completions`, `dump-keys`, `account list`, `config init|show|add-account|reset-secrets|path`).
+- `mp config init` and `mp config add-account` test the login, list the mailboxes, sign in, write `config.toml` and store the passwords through the daemon (`config.probe`, `config.oauth2_login` with `candidate`, `config.init` with `replace`); nothing is written until the last answer.
+  A password the daemon fails to store once the file is written is named, with the `mp config set-password <smtp|imap> --account <name>` that sets it, and the wizard ends in an error.
 
 ### Fixed
 - Sending over Microsoft Graph: a message too large for one sendMail (a reply with a big attachment) is sent as a draft built from its own MIME, with the attachments uploaded separately, so it stays in its Outlook conversation; an interrupted Graph send, or one Graph answered with a server error after it may have taken it, is resumed on the next start against Drafts and Sent Items, never sent twice and leaving no draft behind (#0063).
@@ -60,9 +66,12 @@ All notable changes to this project are documented in this file.
 - Daemon: a client that bootstraps while the daemon commits a long run of changes is answered at once instead of after the run, and queueing an event for a slow client no longer copies every queued event to look for a duplicate.
 - `mp reply`, `forward`, `invite`, `archive` and `delete` now fetch a message the store does not hold, as `mp show`, `save` and `open` already did, so the Sent selectors `mp search` prints work with every command (PERSO-155).
   `archive` and `delete` refuse to act on a copy the store holds in another mailbox and name that copy's selector, and `mp invite` answers from the selector's own account instead of the default one.
+- Setup wizards: a Microsoft 365 sign-in for an account being set up is staged under `tokens/candidates/` and becomes the account's token only when `config.init` or `config.add_account` writes the account, so an abandoned `mp config init` leaves a configured account of the same name signed in as it was.
+  A connection test of an account being set up never uses a configured account's token, so a candidate named like a configured account cannot carry that token to the servers it names.
 
 ### Removed
 - The obsolete `spikes/ipc-bench` benchmark.
+- `mp fetch`: use `mp search --mailbox <name>` with the same filters (`--from`, `--to`, `--cc`, `--subject`, `--body`, `--after`/`--before`, `-n`, `--full`); the daemon's `message.list_server` went with it.
 
 ## [0.12.0] - 2026-10-22
 

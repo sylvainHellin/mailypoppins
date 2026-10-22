@@ -3011,3 +3011,30 @@ Box the variant's payload, as `ComposeMode::SearchForward(Box<SearchForward>)` d
 
 No test server exists for IMAP or Graph, so a test of a server-only search hit used to reach only the `-32603` refusal.
 The daemon's `ServerCopies` takes its downloader as a `Fetcher`, and a test that hands it a counting fetcher answering fixed RFC 822 bytes runs `message.get`, the materialisers and the export of a hit end to end and counts the downloads.
+
+## A hidden copy of a global clap flag takes it off one subcommand (2026-10-22)
+
+A clap subcommand that defines an argument with a global argument's id stops clap from propagating the global one into it, and a value written there still lands in the parent's field.
+A hidden copy plus a runtime refusal therefore takes a global flag off chosen subcommands, wherever on the line it is written, which is how `-A` is refused on the commands that act on no account.
+
+## A removed subcommand's bare name becomes a draft selector (2026-10-22)
+
+When a subcommand is removed, its bare name falls through to `mp`'s positional SELECTOR and becomes a draft preview.
+Test the retirement with a flag of the old command (`unexpected argument`), not with the bare word.
+
+## TestDaemon carries the config-directory override too (2026-10-22)
+
+`TestDaemon` has to carry the test thread's config-directory override onto its runtime threads and its session thread, not only the data root.
+Otherwise the signature methods resolve `~/.config/mailypoppins/signatures` on the developer's machine.
+
+## An operation's second event goes through OperationHandle::announce (2026-10-22)
+
+An operation that causes a second event, such as a send that bumps the contact index, publishes it through `OperationHandle::announce`, which queues it with the operation's own events.
+Threading the shared state into the engine function instead couples the engine to the daemon.
+
+## A candidate account never borrows a configured account's token (2026-10-22)
+
+The setup wizards describe an account before it exists, and the daemon dials the servers that description names (`config.probe`) and signs it in (`config.oauth2_login` with `candidate`).
+Token caches are keyed by account name, so a candidate named like a configured account read that account's cached token and sent it to whatever SMTP or IMAP host the candidate named, and its sign-in overwrote that account's token even when the wizard was then abandoned.
+A candidate's sign-in is now staged under `tokens/candidates/<name>.enc`, which no account name can reach since names never contain a path separator; a probe reads only the staged token, and `config.init` or `config.add_account` renames it over the real cache after the file is written and before the runtime starts.
+Anything a client describes but the configuration does not yet hold gets its own key space, never the configured one.
