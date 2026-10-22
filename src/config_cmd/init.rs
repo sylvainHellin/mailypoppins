@@ -746,34 +746,23 @@ async fn choose_mailboxes(
         Vec::new()
     };
 
-    if listed.is_empty() {
-        let inbox = prompt_input(&format!("Inbox {noun} name"), labels.inbox.0)?;
-        let archive = prompt_input(&format!("Archive {noun} name"), labels.archive.0)?;
-        let sent = prompt_input(&format!("Sent {noun} name"), labels.sent.0)?;
-        let (drafts, trash, junk) = marked_roles(noun, &[])?;
-        return Ok(Mailboxes {
-            inbox,
-            archive,
-            sent,
-            drafts,
-            trash,
-            junk,
-            overrides: ask_overrides(noun)?,
-        });
-    }
-
     // Each role is offered what the roles before did not take, and a name to
     // type besides, so a server that lists fewer mailboxes than there are
-    // roles still gets every role.
-    let mut available = listed.clone();
-    let inbox = select_mailbox(noun, "Inbox", &available, labels.inbox)?;
+    // roles, or none, still gets every role. A typed name an inbox, archive
+    // or sent role already holds is refused and asked again.
+    let mut available = listed;
+    let mut taken: Vec<(&str, String)> = Vec::new();
+    let inbox = select_mailbox(noun, "Inbox", &available, labels.inbox, &taken)?;
     available.retain(|m| m != &inbox);
-    let archive = select_mailbox(noun, "Archive", &available, labels.archive)?;
+    taken.push(("Inbox", inbox.clone()));
+    let archive = select_mailbox(noun, "Archive", &available, labels.archive, &taken)?;
     available.retain(|m| m != &archive);
-    let sent = select_mailbox(noun, "Sent", &available, labels.sent)?;
+    taken.push(("Archive", archive.clone()));
+    let sent = select_mailbox(noun, "Sent", &available, labels.sent, &taken)?;
     available.retain(|m| m != &sent);
+    taken.push(("Sent", sent.clone()));
 
-    let (drafts, trash, junk) = marked_roles(noun, &available)?;
+    let (drafts, trash, junk) = marked_roles(noun, &available, &taken)?;
     Ok(Mailboxes {
         inbox,
         archive,
@@ -788,20 +777,28 @@ async fn choose_mailboxes(
 /// The drafts, trash and junk folders, each `None` to let the daemon find the
 /// one the server marks (#0141). The daemon syncs every other folder the
 /// server lists on its own, so nothing here asks for extra folders.
+/// They may share one folder, but not one the inbox, archive or sent role in
+/// `taken` holds.
 fn marked_roles(
     noun: &str,
     available: &[String],
+    taken: &[(&str, String)],
 ) -> Result<(Option<String>, Option<String>, Option<String>)> {
     println!(
         "  The server marks its drafts, trash and junk {noun}s; name one only if it does not."
     );
-    let pick = |role: &str| -> Result<Option<String>> {
-        if available.is_empty() {
-            let typed = prompt_input(
+    let typed = |role: &str| -> Result<Option<String>> {
+        let name = untaken(noun, taken, || {
+            prompt_input(
                 &format!("{role} {noun} name (Enter: the one the server marks)"),
                 "",
-            )?;
-            return Ok(role_answer(&typed));
+            )
+        })?;
+        Ok(role_answer(&name))
+    };
+    let pick = |role: &str| -> Result<Option<String>> {
+        if available.is_empty() {
+            return typed(role);
         }
         let mut items = vec!["The one the server marks".to_string()];
         items.extend(available.iter().cloned());
@@ -817,10 +814,7 @@ fn marked_roles(
         }
         match picked(&items, selection) {
             Some(name) => Ok(Some(name)),
-            None => Ok(role_answer(&prompt_input(
-                &format!("{role} {noun} name (Enter: the one the server marks)"),
-                "",
-            )?)),
+            None => typed(role),
         }
     };
     Ok((pick("Drafts")?, pick("Trash")?, pick("Junk")?))
@@ -994,6 +988,34 @@ pub(super) fn mailbox_prompt(
     MailboxPrompt::Pick { items, default }
 }
 
+/// Why `name` cannot take another role: the inbox, archive and sent roles in
+/// `taken`, as `(role, name)`, each hold a mailbox of their own. `None` when
+/// no such role holds it; the drafts, trash and junk roles may share one, so
+/// they are never in `taken`. The desktop wizard's words.
+pub(super) fn mailbox_twice(noun: &str, taken: &[(&str, String)], name: &str) -> Option<String> {
+    let name = name.trim();
+    taken
+        .iter()
+        .find(|(_, held)| !name.is_empty() && held == name)
+        .map(|(role, _)| format!("{name} is already the {} {noun}", role.to_lowercase()))
+}
+
+/// The first answer of `ask` no role in `taken` holds, each refused one
+/// answered with the reason before asking again.
+pub(super) fn untaken(
+    noun: &str,
+    taken: &[(&str, String)],
+    mut ask: impl FnMut() -> Result<String>,
+) -> Result<String> {
+    loop {
+        let name = ask()?;
+        match mailbox_twice(noun, taken, &name) {
+            Some(why) => eprintln!("  {} {why}", "\u{26a0}".yellow()),
+            None => return Ok(name),
+        }
+    }
+}
+
 /// The name a picker's `selection` stands for, `None` for [`TYPE_ANOTHER`].
 pub(super) fn picked(items: &[String], selection: usize) -> Option<String> {
     (selection + 1 < items.len()).then(|| items[selection].clone())
@@ -1001,14 +1023,20 @@ pub(super) fn picked(items: &[String], selection: usize) -> Option<String> {
 
 /// The mailbox of `role`: one of `options`, the first preferred match
 /// preselected, or a typed name, which is all there is when the server
-/// listed nothing the roles before did not take.
+/// listed nothing the roles before did not take. A typed name a role in
+/// `taken` holds is asked again.
 fn select_mailbox(
     noun: &str,
     role: &str,
     options: &[String],
     label: (&str, &[&str]),
+    taken: &[(&str, String)],
 ) -> Result<String> {
-    let typed = |default: &str| prompt_input(&format!("{role} {noun} name"), default);
+    let typed = |default: &str| {
+        untaken(noun, taken, || {
+            prompt_input(&format!("{role} {noun} name"), default)
+        })
+    };
     match mailbox_prompt(options, label) {
         MailboxPrompt::Type { default } => typed(&default),
         MailboxPrompt::Pick { items, default } => {

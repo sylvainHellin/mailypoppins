@@ -255,6 +255,53 @@ fn a_server_listing_only_inbox_lets_the_other_roles_be_typed() {
     );
 }
 
+/// One mailbox plays one of the inbox, archive and sent roles, and none of
+/// them besides drafts, trash or junk, which may share one, as the desktop
+/// wizard rules: a typed name a role holds is refused with the desktop's
+/// words and asked again instead of ending the wizard.
+#[test]
+fn a_typed_mailbox_another_role_holds_is_asked_again() {
+    use super::init::{mailbox_twice, untaken};
+    let taken = vec![
+        ("Inbox", "INBOX".to_string()),
+        ("Archive", "Archive".to_string()),
+    ];
+    assert_eq!(
+        mailbox_twice("mailbox", &taken, "INBOX").as_deref(),
+        Some("INBOX is already the inbox mailbox")
+    );
+    assert_eq!(
+        mailbox_twice("folder", &taken, " Archive ").as_deref(),
+        Some("Archive is already the archive folder")
+    );
+    assert_eq!(mailbox_twice("mailbox", &taken, "Sent"), None);
+    assert_eq!(
+        mailbox_twice("mailbox", &taken, ""),
+        None,
+        "an empty answer leaves a marked role to the server"
+    );
+
+    let mut answers = vec!["INBOX", "Archive", "Sent"].into_iter();
+    let mut asked = 0;
+    let sent = untaken("mailbox", &taken, || {
+        asked += 1;
+        Ok(answers.next().expect("asked once too often").to_string())
+    })
+    .unwrap();
+    assert_eq!((sent.as_str(), asked), ("Sent", 3));
+
+    // Drafts, trash and junk never enter `taken`, so each of them may name
+    // the folder another of them named, but none the sent folder.
+    let all = vec![
+        ("Inbox", "INBOX".to_string()),
+        ("Archive", "Archive".to_string()),
+        ("Sent", "Sent".to_string()),
+    ];
+    let mut answers = vec!["Sent", "Bin"].into_iter();
+    let junk = untaken("mailbox", &all, || Ok(answers.next().unwrap().into())).unwrap();
+    assert_eq!(junk, "Bin", "the trash folder named Bin before");
+}
+
 /// A daemon double that records its calls and refuses every SMTP login.
 #[derive(Default)]
 struct SmtpRefused {

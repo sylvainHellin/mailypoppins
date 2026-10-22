@@ -72,6 +72,7 @@ All notable changes to this project are documented in this file.
 - Setup wizards no longer offer extra mailboxes to sync: the daemon finds and syncs every folder on its own (#0141).
 
 ### Fixed
+- `mp config init` and `mp config add-account` no longer let one mailbox take two of the inbox, archive and sent roles, or one of them and the drafts, trash or junk role; a typed name another role holds is refused with the desktop wizard's words ("INBOX is already the inbox mailbox") and asked again, while drafts, trash and junk may still share one.
 - Daemon: a start with two or more accounts no longer announces "account:<name> is warn: still opening its store" and then its recovery in the TUI activity log, the desktop health line and the daemon log.
   An account whose start is in flight is ok for its first 30 seconds; a start that fails still fails, and one that takes longer warns.
 - Sending over Microsoft Graph: a message too large for one sendMail (a reply with a big attachment) is sent as a draft built from its own MIME, with the attachments uploaded separately, so it stays in its Outlook conversation; an interrupted Graph send, or one Graph answered with a server error after it may have taken it, is resumed on the next start against Drafts and Sent Items, never sent twice and leaving no draft behind (#0063).
