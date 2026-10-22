@@ -220,7 +220,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `ga`, the KEYMAP row of `KeyAction::SwitchAccount` in `clients/tui/src/app/keymap.rs`, guarded by `Guard::MultiAccount` so it appears only with more than one configured account; it opens the account picker, `Overlay::Account` (#0147)
 - Daemon surface: `account.list`, a second `state.bootstrap`
 - GUI location: clients/desktop: `ga` and the palette's "Switch account" open the account picker, which lists every account with its inbox's unread count; `j`/`k` move, Enter switches and opens the account's inbox, `1` to `9` switch directly, Escape and `q` cancel; a mailbox chosen in the sidebar selects the account it belongs to (M1, #0129; #0147)
-- Validation: TUI golden frame `golden_account_picker` and the account picker tests in `clients/tui/src/app/keys.rs`; `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`, `open_account_picker opens the overlay with two accounts and is a no-op with one`), `clients/desktop/src/components/sidebar/accountPicker.test.tsx`
+- Validation: the account picker tests in `clients/tui/src/app/keys.rs` and `clients/tui/src/ui/overlays.rs`; `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`, `open_account_picker opens the overlay with two accounts and is a no-op with one`), `clients/desktop/src/components/sidebar/accountPicker.test.tsx`
 - Status: GUI shipped (M1, #0129; picker #0147)
 
 ### MBX-05 Switch between the Mail, Contacts, and Calendar views

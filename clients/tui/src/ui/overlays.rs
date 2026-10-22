@@ -1213,4 +1213,71 @@ mod tests {
         assert!(!pdf.contains("inline"), "{pdf}");
         assert!(png.contains("image001.png  inline"), "{png}");
     }
+
+    /// The account picker (`ga`, #0147): one row per account in config order
+    /// with its digit, `current` on the active account, the dot on a
+    /// background account with new mail, and the cursor row in the selection
+    /// style; past the ninth account the digit column is blank.
+    #[test]
+    fn account_picker_lists_the_accounts_with_digit_current_and_new_mail_dot() {
+        let mut accounts: Vec<AccountState> = ["work", "home", "club"]
+            .into_iter()
+            .map(AccountState::for_tests)
+            .collect();
+        accounts[1].has_unseen = true;
+        let picker = AccountPicker { selected: 1 };
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|f| render_account_picker(&picker, &accounts, 0, f, f.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        let row = |needle: &str| {
+            rows.iter()
+                .position(|r| r.contains(needle))
+                .unwrap_or_else(|| panic!("no row with {needle:?}:\n{}", rows.join("\n")))
+        };
+        assert!(rows[row("Switch account")].contains("esc close"));
+        assert!(rows[row("1  work")].contains("1  work  current"));
+        assert!(rows[row("2  home")].contains("2  home  \u{25cf}"));
+        let club = &rows[row("3  club")];
+        assert!(
+            !club.contains("current") && !club.contains('\u{25cf}'),
+            "{club}"
+        );
+        assert!(rows[row("j/k nav")].contains("1-9 jump  Enter switch  Esc cancel"));
+
+        // The cursor row's name carries the selection style, the others not.
+        let home_y = row("2  home") as u16;
+        let home_x = rows[home_y as usize].find("home").unwrap();
+        let home_x = rows[home_y as usize][..home_x].chars().count() as u16;
+        assert_eq!(buffer[(home_x, home_y)].bg, theme::active().surface);
+        let work_y = row("1  work") as u16;
+        assert_ne!(buffer[(home_x, work_y)].bg, theme::active().surface);
+
+        let many: Vec<AccountState> = (1..=10)
+            .map(|i| AccountState::for_tests(&format!("acct{i}")))
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|f| render_account_picker(&picker, &many, 0, f, f.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let tenth = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|r| r.contains("acct10"))
+            .unwrap();
+        assert!(tenth.contains("   acct10"), "{tenth}");
+        assert!(!tenth.contains("10  acct10"), "{tenth}");
+    }
 }

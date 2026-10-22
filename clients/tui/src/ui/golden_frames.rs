@@ -47,9 +47,9 @@ use ratatui::style::Modifier;
 use ratatui::Terminal;
 
 use crate::app::{
-    AccountPicker, AccountState, App, CalendarEvent, CommandPalette, ComposeField, ComposeMode,
-    ComposeWizard, EmailEntry, EntryKey, MailboxInfo, MailboxKind, MessageRef, Overlay,
-    SearchField, SearchOverlayFocus, SignaturesMode, SignaturesOverlay, View,
+    App, CalendarEvent, CommandPalette, ComposeField, ComposeMode, ComposeWizard, EmailEntry,
+    EntryKey, MailboxInfo, MailboxKind, MessageRef, Overlay, SearchField, SearchOverlayFocus,
+    SignaturesMode, SignaturesOverlay, View,
 };
 use crate::theme::{self, Theme};
 use mp_core::types::EventFrontmatter;
@@ -769,28 +769,6 @@ pub fn command_palette_app() -> App {
 #[test]
 pub fn golden_command_palette() {
     let mut app = command_palette_app();
-    assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
-}
-
-/// The account picker (`ga`, #0147) floating over the dimmed mail view: three
-/// accounts in config order, `work` current, the cursor on `home`, which has
-/// new mail and so carries the dot.
-pub fn account_picker_app() -> App {
-    let mut app = mail_fixture();
-    app.accounts = ["work", "home", "club"]
-        .into_iter()
-        .map(AccountState::for_tests)
-        .collect();
-    app.accounts[1].has_unseen = true;
-    app.active_account = 0;
-    app.account_config.name = "work".to_string();
-    app.overlay = Overlay::Account(AccountPicker { selected: 1 });
-    app
-}
-
-#[test]
-pub fn golden_account_picker() {
-    let mut app = account_picker_app();
     assert_snapshot!(frame_snapshot(&mut app, WIDTH, HEIGHT));
 }
 

@@ -36,7 +36,7 @@ The keybinding redesign already described `ga` as "Switch account (picker)" ([ke
 - `render_account_picker` in `clients/tui/src/ui/overlays.rs` draws it through `render_modal_shell`, with the `esc close` chip and the footer `j/k nav  1-9 jump  Enter switch  Esc cancel`.
 - `App::prefix_popup_rows` leaves out a `Guard::MultiAccount` row with one account; the other guards stay advisory there.
 - `KeyAction::JumpAccount`, its executor arm and `Chord::CtrlDigit` are gone: no KEYMAP row reached them since the keybinding redesign.
-- `AccountState::for_tests(name)` is the one minimal account the tests and golden frames build.
+- `AccountState::for_tests(name)` is the minimal account the picker's tests build.
 - The sidebar does not change: it draws only the active account.
 
 ### Desktop picker
@@ -68,7 +68,8 @@ The keybinding redesign already described `ga` as "Switch account (picker)" ([ke
 ## Tests
 
 - TUI, `clients/tui/src/app/keys.rs`: `ga` opens the picker on the active account; `j`/`k` clamp and Enter switches; Esc and `q` change nothing; a digit switches and one past the end does nothing; Enter on the active account only closes; a switch clears the new account's dot; with one account `ga` and the palette open nothing and the popup omits `ga`; with two the palette opens the picker.
-- TUI golden frame `golden_account_picker` in `clients/tui/src/ui/golden_frames.rs`.
+- TUI render test `account_picker_lists_the_accounts_with_digit_current_and_new_mail_dot` in `clients/tui/src/ui/overlays.rs`: the rows, the current marker, the dot, the cursor style and the blank digit past the ninth account.
+  It is a render test rather than a golden frame: every golden frame needs a daemon twin (`tests/phase5_parity_gate.rs`), whose fixture has one account.
 - Desktop, `src/app/reducer.test.ts`: the overlay with two accounts and a no-op with one; the expansion defaults, the toggle, a hand-expanded account kept after a switch away, a hand-collapsed account opened on selection, and the cursor walk over expanded accounts.
 - Desktop, `src/components/sidebar/accountPicker.test.tsx`: the picker's keys, click, Escape, `q`, digits, the search kept on the current account, the palette entry, one account; the collapsed headers, their unread count, the header toggle.
 - Desktop, `src/components/palette/prefixPopup.test.tsx`: `g` without `ga` with one account.
