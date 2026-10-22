@@ -65,10 +65,13 @@ export function CommandPalette({ open, onOpenChange, onRun, extra = NO_EXTRA, hi
  * best match first. cmdk 1.1 ranks the rows inside a group but not the
  * groups themselves (it looks a group up by its React id where it stored its
  * value), so grouped rows left the best match under a later section, and
- * Enter ran the first row of an earlier one.
+ * Enter ran the first row of an earlier one. Out of their groups, the rows
+ * name their section, so the same label in two sections (Archive, Forward,
+ * Jump to top) reads as two actions.
  */
 function PaletteBody({ all, onRun }: { all: [string, PaletteEntry[]][]; onRun: (id: ActionId) => void }) {
   const [search, setSearch] = useState("");
+  const searching = search.trim() !== "";
   const row = (section: string, e: PaletteEntry) => (
     <CommandItem
       key={`${section}:${e.label}`}
@@ -82,6 +85,14 @@ function PaletteBody({ all, onRun }: { all: [string, PaletteEntry[]][]; onRun: (
       className="data-[disabled=true]:opacity-100 data-[disabled=true]:text-disabled-foreground"
     >
       <span className="min-w-0 flex-1 truncate">{e.label}</span>
+      {searching ? (
+        <span
+          data-slot="palette-section"
+          className="max-w-[40%] truncate text-xs text-muted-foreground group-data-selected/command-item:text-selection-foreground"
+        >
+          {section}
+        </span>
+      ) : null}
       {e.badge ? <BadgeFor badge={e.badge} /> : null}
       <Keys keys={e.keys} />
     </CommandItem>
@@ -91,7 +102,7 @@ function PaletteBody({ all, onRun }: { all: [string, PaletteEntry[]][]; onRun: (
       <CommandInput placeholder="Run an action by name…" aria-label="Action name" value={search} onValueChange={setSearch} />
       <CommandList className="max-h-[60vh]">
         <CommandEmpty>No action matches.</CommandEmpty>
-        {search.trim() === ""
+        {!searching
           ? all.map(([section, entries]) => (
               <CommandGroup key={section} heading={section}>
                 {entries.map((e) => row(section, e))}

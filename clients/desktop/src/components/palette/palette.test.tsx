@@ -45,6 +45,22 @@ describe("the command palette", () => {
     expect(await screen.findByRole("dialog", { name: "Add account" })).toBeInTheDocument();
   });
 
+  it("names each row's section while a search runs, so a label in two sections reads as two actions", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard(":");
+    const dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    expect(dialog.querySelector("[data-slot='palette-section']")).toBeNull();
+    await user.keyboard("Archive");
+    await waitFor(() => {
+      const rows = [...dialog.querySelectorAll("[data-testid='palette-item'][data-label='Archive']")];
+      expect(rows.length).toBeGreaterThan(1);
+      const sections = rows.map((r) => r.querySelector("[data-slot='palette-section']")?.textContent);
+      for (const s of sections) expect(s).toBeTruthy();
+      expect(new Set(sections).size).toBe(rows.length);
+    });
+  });
+
   it("Add account runs: it opens the account wizard", async () => {
     const { user } = renderApp();
     await shellReady();
