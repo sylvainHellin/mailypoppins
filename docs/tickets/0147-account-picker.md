@@ -42,4 +42,4 @@ Research:
 
 ## Status
 
-Done in both clients: the TUI's `Overlay::Account` with its render test in `clients/tui/src/ui/overlays.rs`, and the desktop's `AccountPicker` dialog with the collapsed sidebar accounts.
+Done in both clients: the TUI's `Overlay::Account` with its golden frame `golden_account_picker` and daemon twin, plus a render test in `clients/tui/src/ui/overlays.rs`, and the desktop's `AccountPicker` dialog with the collapsed sidebar accounts.

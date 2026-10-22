@@ -102,21 +102,23 @@ use crate::daemon::server::DaemonState;
 use crate::daemon::state::Change;
 use crate::tui::app::App;
 use crate::tui::ui::golden_frames::{
-    calendar_fixture, calendar_view_cancelled_event_detail_app, command_palette_app,
-    compose_wizard_with_body_app, contacts_fixture, drafts_fixture, drafts_view_attach_prompt_app,
-    frame_snapshot, help_overlay_app, mail_fixture, mail_view_flagged_filter_app,
-    mail_view_jump_date_prompt_app, mail_view_with_selection_app,
+    account_picker_app, calendar_fixture, calendar_view_cancelled_event_detail_app,
+    command_palette_app, compose_wizard_with_body_app, contacts_fixture, drafts_fixture,
+    drafts_view_attach_prompt_app, frame_snapshot, help_overlay_app, mail_fixture,
+    mail_view_flagged_filter_app, mail_view_jump_date_prompt_app, mail_view_with_selection_app,
     mail_view_with_the_status_axis_app, mail_view_zoomed_list_app, mail_view_zoomed_preview_app,
     pin_theme, search_form_empty_app, search_form_filled_app, signatures_overlay_app, HEIGHT,
     WIDTH,
 };
 
-/// The one account the fixture configures, and the one every frame shows.
+/// The one account the fixture configures for a hand-built app that names none,
+/// which is every frame but the account picker's.
 ///
 /// One, not two: the sidebar titles itself after the account only when there is
 /// more than one (`ui::sidebar`), and a second account would change the chrome
 /// the hand-built frames were reviewed against without testing anything about a
-/// bootstrap.
+/// bootstrap. A hand-built app that does name its accounts (the account picker,
+/// #0147) gets those instead, through [`hand_accounts`].
 const ACCOUNT: &str = "fixture";
 
 /// The per-mailbox totals the fixture commits before it bootstraps, keyed by
@@ -156,8 +158,17 @@ impl Bootstrapped {
     /// The message rows, the cursor, the overlays and the preview memos stay
     /// the frozen fixture's - a bootstrap carries no message, so replacing them
     /// from one is P5-U3's query layer, not this unit's.
+    ///
+    /// `has_unseen` is the watcher's, not the bootstrap's, so it is carried
+    /// over from the hand-built account of the same name.
     fn variant(&self, mut hand: App) -> App {
-        let built = App::from_bootstrap(self.config.clone(), &self.bootstrap);
+        let mut built = App::from_bootstrap(self.config.clone(), &self.bootstrap);
+        for acct in &mut built.accounts {
+            acct.has_unseen = hand
+                .accounts
+                .iter()
+                .any(|h| h.account_config.name == acct.account_config.name && h.has_unseen);
+        }
         hand.accounts = built.accounts;
         hand.account_config = built.account_config;
         hand.mailboxes = built.mailboxes;
@@ -171,26 +182,45 @@ impl Bootstrapped {
     }
 }
 
-/// The configuration the fixture daemon is seeded from: one account, plus one
-/// extra mailbox per entry in `extra`.
-fn fixture_config(extra: &[&str]) -> GlobalConfig {
+/// The configuration the fixture daemon is seeded from: `accounts` in order,
+/// the first with one extra mailbox per entry in `extra`.
+fn fixture_config(accounts: &[String], extra: &[&str]) -> GlobalConfig {
     GlobalConfig {
-        accounts: vec![AccountConfig {
-            name: ACCOUNT.to_string(),
-            mailboxes: MailboxesConfig {
-                extra: (!extra.is_empty()).then(|| {
-                    extra
-                        .iter()
-                        .map(|server| MailboxMapping {
-                            server: (*server).to_string(),
-                        })
-                        .collect()
-                }),
+        accounts: accounts
+            .iter()
+            .enumerate()
+            .map(|(i, name)| AccountConfig {
+                name: name.clone(),
+                mailboxes: MailboxesConfig {
+                    extra: (i == 0 && !extra.is_empty()).then(|| {
+                        extra
+                            .iter()
+                            .map(|server| MailboxMapping {
+                                server: (*server).to_string(),
+                            })
+                            .collect()
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        }],
+            })
+            .collect(),
         ..Default::default()
+    }
+}
+
+/// The accounts the daemon fixture configures for `hand`: the hand-built app's
+/// own, in order, or [`ACCOUNT`] alone when it names none.
+fn hand_accounts(hand: &App) -> Vec<String> {
+    let names: Vec<String> = hand
+        .accounts
+        .iter()
+        .map(|a| a.account_config.name.clone())
+        .collect();
+    if names.is_empty() {
+        vec![ACCOUNT.to_string()]
+    } else {
+        names
     }
 }
 
@@ -234,9 +264,21 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
-/// Assemble a daemon over a fixture data root, commit `totals`, optionally
-/// report the account ready, and return what `state.bootstrap` answers.
+/// Assemble a daemon over a fixture data root with the one [`ACCOUNT`], commit
+/// `totals`, optionally report the account ready, and return what
+/// `state.bootstrap` answers.
 fn bootstrap_over_daemon(ready: bool, totals: &[(&str, u64)], extra: &[&str]) -> Bootstrapped {
+    bootstrap_over_accounts(&[ACCOUNT.to_string()], ready, totals, extra)
+}
+
+/// [`bootstrap_over_daemon`] over `accounts`: `totals` and `extra` go to the
+/// first, which is the active one, and `ready` reports every account ready.
+fn bootstrap_over_accounts(
+    accounts: &[String],
+    ready: bool,
+    totals: &[(&str, u64)],
+    extra: &[&str],
+) -> Bootstrapped {
     // Before the first `App` exists: `App::from_bootstrap` selects a theme the
     // way `App::new` does, and `theme::init` is a `OnceLock` whose first caller
     // wins for the whole binary.
@@ -244,7 +286,7 @@ fn bootstrap_over_daemon(ready: bool, totals: &[(&str, u64)], extra: &[&str]) ->
 
     let data = crate::config::test_env::TestDataDir::new();
     let root = crate::config::mailypoppins_data_dir();
-    let config = fixture_config(extra);
+    let config = fixture_config(accounts, extra);
     let store = Arc::new(ConfigStore::new(
         root.join("config.toml"),
         ConfigState::Ok,
@@ -263,7 +305,7 @@ fn bootstrap_over_daemon(ready: bool, totals: &[(&str, u64)], extra: &[&str]) ->
     // account, the numbers are about the mailboxes).
     for (slug, total) in totals {
         daemon.canonical.apply(Change::MailboxCounts {
-            account: ACCOUNT.to_string(),
+            account: accounts[0].clone(),
             mailbox: (*slug).to_string(),
             total: *total,
             unread: 0,
@@ -271,9 +313,11 @@ fn bootstrap_over_daemon(ready: bool, totals: &[(&str, u64)], extra: &[&str]) ->
         });
     }
     if ready {
-        daemon.canonical.apply(Change::AccountReady {
-            account: ACCOUNT.to_string(),
-        });
+        for account in accounts {
+            daemon.canonical.apply(Change::AccountReady {
+                account: account.clone(),
+            });
+        }
     }
 
     let request = Request {
@@ -310,9 +354,13 @@ fn ready_fixture() -> Bootstrapped {
 ///
 /// `App` is not `Clone`, so the builder is passed rather than an app, and the
 /// failure names the first line that differs rather than printing two 40-row
-/// frames, because the thing a reader needs is which row moved.
+/// frames, because the thing a reader needs is which row moved. The daemon is
+/// configured with the hand-built app's accounts ([`hand_accounts`]), so a
+/// frame that shows several is built from a bootstrap that carries several.
 fn same_frame(build: fn() -> App, label: &str) {
-    let fixture = ready_fixture();
+    pin_theme();
+    let accounts = hand_accounts(&build());
+    let fixture = bootstrap_over_accounts(&accounts, true, &TOTALS, &[]);
     let daemon = fixture.frame(build());
     let expected = frame_snapshot(&mut build(), WIDTH, HEIGHT);
     if daemon == expected {
@@ -449,6 +497,14 @@ fn golden_search_form_filled_daemon() {
 #[test]
 fn golden_compose_wizard_with_body_daemon() {
     same_frame(compose_wizard_with_body_app, "compose wizard with body");
+}
+
+/// The account picker (#0147) over a bootstrap of three accounts: the rows,
+/// the sidebar title and each account's readiness come from the daemon, the
+/// new-mail dot from the hand-built app's watcher state.
+#[test]
+fn golden_account_picker_daemon() {
+    same_frame(account_picker_app, "account picker");
 }
 
 // ---------------------------------------------------------------------------
