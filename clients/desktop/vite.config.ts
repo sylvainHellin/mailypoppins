@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 import process from "node:process";
+import { fixtureGuard } from "./scripts/fixture-guard.ts";
 const host = process.env.TAURI_DEV_HOST;
 
 /**
@@ -21,7 +22,7 @@ export default defineConfig(({ command, mode }) => {
   }
   const src = path.resolve(import.meta.dirname, "./src");
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [react(), tailwindcss(), fixtureGuard(src)],
     resolve: {
       alias: [
         ...(preview ? [{ find: /^@\/lib\/tauri$/, replacement: path.join(src, "fixture/preview.ts") }] : []),
@@ -57,7 +58,7 @@ export default defineConfig(({ command, mode }) => {
       environment: "jsdom",
       setupFiles: ["./src/test/setup.ts"],
       css: false,
-      include: ["src/**/*.test.{ts,tsx}"],
+      include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.ts"],
       // vitest's 5 s default times out dozens of tests at once when parallel
       // cargo builds push the load average past about 30; 20 s still catches a
       // real hang.

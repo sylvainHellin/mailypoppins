@@ -25,8 +25,8 @@ The reader frame loads a blob of what the backend serves for the `mpmsg` URL, un
 Three guards keep the backend out of the app:
 
 - the alias exists only in the `browser` mode, and vite.config.ts refuses `vite build` in that mode;
-- nothing outside `src/fixture/` and `src/test/` imports the backend;
-- `pnpm build`, which `tauri build` runs, ends with `scripts/check-bundle.ts`, which fails when `dist/` holds a string only the backend carries.
+- `scripts/fixture-guard.ts`, a build-only plugin in vite.config.ts, fails `vite build` when any module under `src/fixture/` is loaded, an import of a single export included;
+- `pnpm build`, which `tauri build` runs, ends with `scripts/check-bundle.ts`, which fails when `dist/` holds a string only the backend carries, a backstop for what the plugin misses.
 
 ## Driving the fixture
 

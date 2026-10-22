@@ -1,6 +1,8 @@
 // Fail the build when the bundle in dist/ carries the fixture backend
 // (src/fixture/), which only the tests and the browser preview may load.
 // `pnpm build` runs it after `vite build`, and `tauri build` runs `pnpm build`.
+// The build's own guard is scripts/fixture-guard.ts, which fails `vite build`
+// on any module under src/fixture/; this scan is the backstop behind it.
 //
 //   node scripts/check-bundle.ts          checks dist/, fails without a build
 
