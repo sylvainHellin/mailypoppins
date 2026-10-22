@@ -268,7 +268,9 @@ impl Method for ConfigMethod {
                 "config.add_account" => add_account(&family, &params).await,
                 "config.init" => init(&family, &params).await,
                 "config.probe" => {
-                    let params = super::config_probe::ProbeParams::from_params(&params)?;
+                    let snapshot = family.store.snapshot();
+                    let params =
+                        super::config_probe::ProbeParams::from_params(&params, &snapshot.accounts)?;
                     Ok(Outcome::query(super::config_probe::probe(params).await))
                 }
                 "config.reset_secrets" => reset_secrets(&family, &params),
@@ -277,7 +279,7 @@ impl Method for ConfigMethod {
                     Ok(self.operation(ctx, move |handle| cutover(work, handle)))
                 }
                 "config.oauth2_login" => {
-                    let work = plan_oauth2(&family, &params)?;
+                    let work = plan_oauth2(&family.store.snapshot().accounts, &params)?;
                     Ok(self.operation(ctx, move |handle| oauth2_login(work, handle)))
                 }
                 other => Err(DomainError::method_not_found(other)),
@@ -412,7 +414,8 @@ async fn add_account(family: &ConfigFamily, params: &Value) -> Result<Outcome, D
     let existing = fs::read_to_string(&path)
         .map_err(|e| DomainError::internal(format!("reading {}: {e}", path.display())))?;
     let document = format!("{existing}\n{}", account_block(account)?);
-    let (plan, _) = swap(family, Source::Document(document)).await?;
+    let promote = staged_sign_in(account, &name);
+    let (plan, _) = swap(family, Source::Document { document, promote }).await?;
     Ok(command(family, plan.to_json(), plan.affected()))
 }
 
@@ -461,10 +464,28 @@ async fn init(family: &ConfigFamily, params: &Value) -> Result<Outcome, DomainEr
     }
     document.push_str(&account_block(account)?);
 
-    let (plan, _) = swap(family, Source::Document(document)).await?;
+    let promote = staged_sign_in(account, &string_param(account, "name")?);
+    let (plan, _) = swap(family, Source::Document { document, promote }).await?;
     let mut result = plan.to_json();
     result["path"] = json!(path.display().to_string());
     Ok(command(family, result, plan.affected()))
+}
+
+/// The account whose staged sign-in a write promotes: the block's own name,
+/// when the block authenticates with a token at all.
+///
+/// The setup wizard signs a candidate in before it writes the account
+/// (`config.oauth2_login` with a `candidate`), and that sign-in is staged
+/// ([`crate::oauth2::staged_token_name`]) so an abandoned wizard leaves the
+/// token of a configured account of that name untouched. The write that
+/// commits the account is the one moment the staged token becomes the
+/// account's.
+fn staged_sign_in(account: &Value, name: &str) -> Option<String> {
+    matches!(
+        account.get("auth_method").and_then(Value::as_str),
+        Some("oauth2" | "graph")
+    )
+    .then(|| name.to_string())
 }
 
 /// The account a candidate `[[accounts]]` block describes, read through the
@@ -590,8 +611,12 @@ fn quote(value: &str) -> String {
 enum Source {
     /// `config.toml` as it is on disk, which is `config.reload`.
     Disk,
-    /// A document to validate and, if it loads, write to `config.toml`.
-    Document(String),
+    /// A document to validate and, if it loads, write to `config.toml`, and
+    /// the account whose staged sign-in becomes its token once it is written.
+    Document {
+        document: String,
+        promote: Option<String>,
+    },
 }
 
 /// Validate a candidate, install it, reconcile the runtimes, and announce it.
@@ -612,12 +637,16 @@ async fn swap(family: &ConfigFamily, source: Source) -> Result<(Reconcile, u64),
                 .map_err(|e| DomainError::internal(format!("reading {}: {e}", path.display())))?;
             (ConfigState::Ok, load(family, &path, &text)?)
         }
-        Source::Document(text) => (ConfigState::Ok, load(family, &path, text)?),
+        Source::Document { document, .. } => (ConfigState::Ok, load(family, &path, document)?),
     };
 
     // Written only now: a candidate that does not load never reaches the file,
     // so a refusal leaves it byte-identical.
-    if let Source::Document(text) = &source {
+    if let Source::Document {
+        document: text,
+        promote,
+    } = &source
+    {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| {
                 DomainError::internal(format!("creating {}: {e}", parent.display()))
@@ -627,6 +656,13 @@ async fn swap(family: &ConfigFamily, source: Source) -> Result<(Reconcile, u64),
         // file whole, and a config the user chmod'ed stays that way.
         crate::draft::write_atomic(&path, text.as_bytes())
             .map_err(|e| DomainError::internal(format!("writing {}: {e:#}", path.display())))?;
+        // After the file and before the runtimes: the account's first sync
+        // finds the token its wizard signed in with, and a write that was
+        // refused above promoted nothing.
+        if let Some(account) = promote {
+            crate::oauth2::promote_staged_token(account)
+                .map_err(|e| DomainError::internal(format!("{e:#}")))?;
+        }
     }
 
     let plan = reconcile(
@@ -832,12 +868,21 @@ fn reset_secrets(family: &ConfigFamily, params: &Value) -> Result<Outcome, Domai
         removed.push(secrets_file.display().to_string());
     }
 
+    // The configured accounts' caches, then the sign-ins a wizard staged and
+    // never committed, which are tokens as much as the others.
     let token_dir = crate::config::tokens_dir();
-    if token_dir.exists() {
-        let mut caches: Vec<std::path::PathBuf> = fs::read_dir(&token_dir)
-            .map_err(|e| DomainError::internal(format!("reading {}: {e}", token_dir.display())))?
+    for dir in [
+        token_dir.clone(),
+        token_dir.join(crate::oauth2::STAGED_TOKEN_DIR),
+    ] {
+        if !dir.exists() {
+            continue;
+        }
+        let mut caches: Vec<std::path::PathBuf> = fs::read_dir(&dir)
+            .map_err(|e| DomainError::internal(format!("reading {}: {e}", dir.display())))?
             .flatten()
             .map(|entry| entry.path())
+            .filter(|path| path.is_file())
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("enc"))
             .collect();
         caches.sort();
@@ -865,6 +910,11 @@ fn reset_secrets(family: &ConfigFamily, params: &Value) -> Result<Outcome, Domai
 /// One validated device-code login.
 struct OAuth2Work {
     account: String,
+    /// The token-cache name the sign-in is written under: the account's own,
+    /// or the staged one of a candidate.
+    token: String,
+    /// Whether this is a candidate's sign-in, staged until the write.
+    staged: bool,
     client_id: String,
     tenant_id: String,
     scopes: &'static str,
@@ -881,12 +931,17 @@ struct OAuth2Work {
 ///
 /// `candidate` signs in an account that is not configured yet: the setup
 /// wizard's `[[accounts]]` block, read through the loader, used instead of the
-/// configured account of that name, and named `account` like it. The token is
-/// cached under that name, so the account the wizard then writes finds it.
-fn plan_oauth2(family: &ConfigFamily, params: &Value) -> Result<OAuth2Work, DomainError> {
+/// configured account of that name, and named `account` like it. Its token is
+/// staged ([`crate::oauth2::staged_token_name`]) rather than cached under that
+/// name, and `config.init` or `config.add_account` promotes it when it writes
+/// the account: a wizard abandoned after its sign-in, or one whose candidate
+/// is named like a configured account, leaves that account's token untouched.
+fn plan_oauth2(
+    accounts: &[crate::config::AccountConfig],
+    params: &Value,
+) -> Result<OAuth2Work, DomainError> {
     guard("config.oauth2_login", params, &["account", "candidate"])?;
     let name = string_param(params, "account")?;
-    let snapshot = family.store.snapshot();
     let candidate = match params.get("candidate") {
         None | Some(Value::Null) => None,
         Some(block) => {
@@ -902,8 +957,7 @@ fn plan_oauth2(family: &ConfigFamily, params: &Value) -> Result<OAuth2Work, Doma
     };
     let account = match &candidate {
         Some(account) => account,
-        None => snapshot
-            .accounts
+        None => accounts
             .iter()
             .find(|account| account.name == name)
             .ok_or_else(|| {
@@ -933,7 +987,14 @@ fn plan_oauth2(family: &ConfigFamily, params: &Value) -> Result<OAuth2Work, Doma
         )));
     }
 
+    let staged = candidate.is_some();
     Ok(OAuth2Work {
+        token: if staged {
+            crate::oauth2::staged_token_name(&name)
+        } else {
+            name.clone()
+        },
+        staged,
         account: name,
         client_id: settings.client_id.clone(),
         tenant_id: settings.tenant_id.clone(),
@@ -961,7 +1022,7 @@ async fn oauth2_login(work: OAuth2Work, handle: crate::daemon::operations::Opera
     let acquired = crate::oauth2::device_code_flow_reporting(
         &work.client_id,
         &work.tenant_id,
-        &work.account,
+        &work.token,
         work.scopes,
         &report,
     )
@@ -969,6 +1030,7 @@ async fn oauth2_login(work: OAuth2Work, handle: crate::daemon::operations::Opera
     match acquired {
         Ok(_) => handle.succeed(json!({
             "stored": true,
+            "staged": work.staged,
             "account": work.account,
             "kind": work.kind,
             "key": format!("oauth2-token-{}", work.account),
@@ -1034,6 +1096,53 @@ mod tests {
                 .expect("one extra mailbox")[0]
                 .server,
             "News"
+        );
+    }
+
+    /// A candidate's sign-in is staged, a configured account's is not: a
+    /// wizard whose candidate is named like a configured account, then
+    /// abandoned, leaves that account's token where it was. Before the fix the
+    /// candidate's token went to the configured account's own cache.
+    #[test]
+    fn a_candidate_sign_in_is_staged_and_a_configured_one_is_not() {
+        let block = json!({
+            "name": "work", "default_from": "me@example.com", "auth_method": "graph",
+            "oauth2": {"client_id": "c", "tenant_id": "common"},
+        });
+        let configured = candidate_account(&block).expect("the account loads");
+        let accounts = vec![configured];
+
+        let candidate = plan_oauth2(&accounts, &json!({"account": "work", "candidate": block}))
+            .expect("a candidate named like a configured account signs in");
+        assert_eq!(candidate.token, "candidates/work");
+        assert!(candidate.staged);
+        assert_ne!(
+            crate::oauth2::token_cache_path(&candidate.token),
+            crate::oauth2::token_cache_path("work"),
+            "the staged cache is not the configured account's"
+        );
+
+        let login = plan_oauth2(&accounts, &json!({"account": "work"}))
+            .expect("the configured account signs in");
+        assert_eq!(login.token, "work");
+        assert!(!login.staged);
+    }
+
+    /// Only a block that authenticates with a token promotes a staged one.
+    #[test]
+    fn only_a_token_account_promotes_a_staged_sign_in() {
+        assert_eq!(
+            staged_sign_in(&json!({"auth_method": "oauth2"}), "work").as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            staged_sign_in(&json!({"auth_method": "graph"}), "work").as_deref(),
+            Some("work")
+        );
+        assert_eq!(staged_sign_in(&json!({}), "work"), None);
+        assert_eq!(
+            staged_sign_in(&json!({"auth_method": "password"}), "work"),
+            None
         );
     }
 

@@ -205,3 +205,65 @@ fn a_probe_answer_reads_its_verdict_reason_and_names() {
     assert!(listed.ok);
     assert_eq!(listed.mailboxes, ["INBOX", "Sent"]);
 }
+
+/// A daemon double whose `config.set_password` refuses one kind.
+struct RefusingSetPassword {
+    refuse: &'static str,
+    stored: Vec<String>,
+}
+
+impl super::WizardDaemon for RefusingSetPassword {
+    async fn probe(&mut self, _: &Value, _: &str, _: Option<&str>) -> anyhow::Result<Probe> {
+        unreachable!("no probe in this test")
+    }
+    async fn sign_in(&mut self, _: &Value) -> anyhow::Result<()> {
+        unreachable!("no sign-in in this test")
+    }
+    async fn init(&mut self, _: &Value, _: bool) -> anyhow::Result<std::path::PathBuf> {
+        unreachable!("no write in this test")
+    }
+    async fn add_account(&mut self, _: &Value) -> anyhow::Result<()> {
+        unreachable!("no write in this test")
+    }
+    async fn set_password(&mut self, _: &str, kind: &str, _: &str) -> anyhow::Result<()> {
+        if kind == self.refuse {
+            anyhow::bail!("the backend is locked");
+        }
+        self.stored.push(kind.to_string());
+        Ok(())
+    }
+}
+
+/// A password the daemon fails to store after the file is written is not
+/// silent: the wizard tries the others, then fails naming the account, the
+/// password and the command that sets it.
+#[tokio::test]
+async fn a_password_that_was_not_stored_is_named_with_its_command() {
+    let mut daemon = RefusingSetPassword {
+        refuse: "smtp",
+        stored: Vec::new(),
+    };
+    let passwords = [("smtp", "a".to_string()), ("imap", "b".to_string())];
+    let error = super::init::store_passwords(&mut daemon, "work", &passwords)
+        .await
+        .expect_err("a refused password fails the wizard");
+    assert_eq!(
+        daemon.stored,
+        ["imap"],
+        "the other password is still stored"
+    );
+    let message = error.to_string();
+    assert!(message.contains("Account 'work'"), "{message}");
+    assert!(message.contains("SMTP password is not stored"), "{message}");
+    assert!(
+        message.contains("mp config set-password smtp --account work"),
+        "{message}"
+    );
+    assert!(!message.contains("set-password imap"), "{message}");
+
+    let both = super::init::missing_passwords_message("work", &["smtp", "imap"]);
+    assert!(
+        both.contains("SMTP and IMAP passwords are not stored"),
+        "{both}"
+    );
+}

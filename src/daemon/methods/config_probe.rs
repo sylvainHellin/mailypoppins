@@ -22,8 +22,13 @@
 //!   folder names (Graph), in the server's order.
 //!
 //! A password account sends `password` for `smtp` and `imap`; an `oauth2` or
-//! `graph` account is probed with the token cached under its name, so a wizard
-//! signs in (`config.oauth2_login` with a `candidate`) first. The password is
+//! `graph` account is probed with the token its own sign-in staged
+//! (`config.oauth2_login` with a `candidate`,
+//! [`crate::oauth2::staged_token_name`]), so a wizard signs in first. Never
+//! with the token of a configured account: the candidate names its own
+//! servers, and a candidate named like a configured account would otherwise
+//! carry that account's token to whatever host it names. A candidate whose
+//! name is configured and which has no staged sign-in is refused. The password is
 //! used for the one session and dropped: it is never stored, logged or echoed,
 //! and [`ProbeParams`]'s `Debug` prints [`REDACTED`] for it.
 //!
@@ -83,8 +88,12 @@ impl std::fmt::Debug for ProbeParams {
 
 impl ProbeParams {
     /// The parameters off the wire, or `-32602` naming what is wrong and
-    /// echoing no value.
-    pub fn from_params(params: &Value) -> Result<ProbeParams, DomainError> {
+    /// echoing no value. `configured` is the live configuration's accounts,
+    /// whose tokens a candidate never borrows.
+    pub fn from_params(
+        params: &Value,
+        configured: &[AccountConfig],
+    ) -> Result<ProbeParams, DomainError> {
         super::only_params("config.probe", params, &["account", "check", "password"])?;
         let candidate = params
             .get("account")
@@ -132,6 +141,18 @@ impl ProbeParams {
             return Err(DomainError::invalid_params(
                 "a password account is probed with its password",
             ));
+        }
+        if account.auth_method != AuthMethod::Password
+            && configured.iter().any(|c| c.name == account.name)
+            && !crate::oauth2::staged_token_exists(&account.name)
+        {
+            return Err(DomainError::invalid_params(format!(
+                "{name} is a configured account: a candidate of that name is probed only with \
+                 the token its own sign-in staged, never with the configured account's; sign \
+                 the candidate in first (config.oauth2_login with candidate), or probe the \
+                 configured account through its configured settings",
+                name = account.name
+            )));
         }
         Ok(ProbeParams {
             account,
@@ -189,19 +210,26 @@ pub async fn probe(params: ProbeParams) -> Value {
 }
 
 /// What the session authenticates with: the password the wizard sent for a
-/// password account, the cached access token for an OAuth2 one.
+/// password account, the access token the candidate's own sign-in staged for
+/// an OAuth2 one.
 fn secret(params: &ProbeParams) -> anyhow::Result<String> {
     match params.account.auth_method {
         AuthMethod::Password => Ok(params.password.clone().unwrap_or_default()),
-        _ => crate::oauth2::load_token_cache(&params.account.name)
+        _ => crate::oauth2::load_token_cache(&token_name(&params.account))
             .map(|cache| cache.access_token)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "no OAuth2 token is cached for {}; sign in first",
+                    "no OAuth2 sign-in is staged for the candidate {}; sign in first",
                     params.account.name
                 )
             }),
     }
+}
+
+/// The token cache a candidate is probed with: always the staged one, whether
+/// or not an account of that name is configured.
+fn token_name(account: &AccountConfig) -> String {
+    crate::oauth2::staged_token_name(&account.name)
 }
 
 /// The SMTP settings of the candidate.
@@ -239,15 +267,15 @@ fn imap_config(account: &AccountConfig, password: String) -> ImapConfig {
     }
 }
 
-/// The Graph settings of the candidate; the token is the one cached under its
-/// name.
+/// The Graph settings of the candidate; the token is the one its sign-in
+/// staged, which a refresh rewrites in place.
 fn graph_config(account: &AccountConfig) -> GraphConfig {
     let oauth2 = account.oauth2.clone().unwrap_or_default();
     GraphConfig {
         client_id: oauth2.client_id,
         tenant_id: oauth2.tenant_id,
         username: account.default_from.clone(),
-        account_name: account.name.clone(),
+        account_name: token_name(account),
     }
 }
 
@@ -267,11 +295,14 @@ mod tests {
     /// The password reaches the probe and nothing that prints it.
     #[test]
     fn the_debug_of_the_params_never_prints_the_password() {
-        let params = ProbeParams::from_params(&json!({
-            "account": password_account(),
-            "check": "imap",
-            "password": "hunter2",
-        }))
+        let params = ProbeParams::from_params(
+            &json!({
+                "account": password_account(),
+                "check": "imap",
+                "password": "hunter2",
+            }),
+            &[],
+        )
         .expect("valid");
         let debug = format!("{params:?}");
         assert!(!debug.contains("hunter2"), "{debug}");
@@ -282,11 +313,14 @@ mod tests {
     /// loader's defaults apply to the candidate as they will to the file.
     #[test]
     fn the_candidate_reads_through_the_loader_with_its_fallbacks() {
-        let params = ProbeParams::from_params(&json!({
-            "account": password_account(),
-            "check": "imap",
-            "password": "pw",
-        }))
+        let params = ProbeParams::from_params(
+            &json!({
+                "account": password_account(),
+                "check": "imap",
+                "password": "pw",
+            }),
+            &[],
+        )
         .expect("valid");
         let imap = imap_config(&params.account, "pw".into());
         assert_eq!(imap.host, "smtp.example.com");
@@ -299,7 +333,7 @@ mod tests {
     #[test]
     fn a_probe_that_cannot_run_is_refused_before_it_dials() {
         let refused = |params: Value| {
-            ProbeParams::from_params(&params)
+            ProbeParams::from_params(&params, &[])
                 .expect_err("refused")
                 .to_string()
         };
@@ -316,5 +350,55 @@ mod tests {
             refused(json!({"account": password_account(), "check": "imap", "pw": "x"}))
                 .contains("pw")
         );
+    }
+
+    /// A candidate named like a configured account never borrows that
+    /// account's token: it is refused while no sign-in of its own is staged,
+    /// and the token it would be probed with is the staged one, whatever is
+    /// cached under the configured name. Before the fix the probe read the
+    /// configured account's cache and sent it to the candidate's host.
+    #[test]
+    fn a_candidate_named_like_a_configured_account_never_reads_its_token() {
+        let configured = candidate_account(&json!({
+            "name": "work", "default_from": "me@example.com", "auth_method": "oauth2",
+            "oauth2": {"client_id": "c", "tenant_id": "common"},
+            "smtp": {"host": "smtp.office365.com", "port": 587, "username": "me@example.com"},
+        }))
+        .expect("the configured account loads");
+        let impostor = json!({
+            "name": "work", "default_from": "me@example.com", "auth_method": "oauth2",
+            "oauth2": {"client_id": "c", "tenant_id": "common"},
+            "smtp": {"host": "smtp.attacker.example", "port": 587, "username": "me@example.com"},
+        });
+        let refused = ProbeParams::from_params(
+            &json!({"account": impostor, "check": "smtp"}),
+            std::slice::from_ref(&configured),
+        )
+        .expect_err("a configured name with no staged sign-in is refused")
+        .to_string();
+        assert!(refused.contains("configured account"), "{refused}");
+
+        // Not configured: accepted, and probed with the staged cache only.
+        let params = ProbeParams::from_params(&json!({"account": impostor, "check": "smtp"}), &[])
+            .expect("an unconfigured candidate is probed");
+        assert_eq!(token_name(&params.account), "candidates/work");
+        assert_ne!(token_name(&params.account), configured.name);
+        let graph = json!({
+            "name": "work", "default_from": "me@example.com", "auth_method": "graph",
+            "oauth2": {"client_id": "c", "tenant_id": "common"},
+        });
+        let params = ProbeParams::from_params(&json!({"account": graph, "check": "graph"}), &[])
+            .expect("a graph candidate is probed");
+        assert_eq!(
+            graph_config(&params.account).account_name,
+            "candidates/work"
+        );
+        let refused = ProbeParams::from_params(
+            &json!({"account": graph, "check": "mailboxes"}),
+            std::slice::from_ref(&configured),
+        )
+        .expect_err("refused for a graph candidate too")
+        .to_string();
+        assert!(refused.contains("configured account"), "{refused}");
     }
 }

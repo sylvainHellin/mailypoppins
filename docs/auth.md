@@ -57,7 +57,7 @@ Auth method is set per account; one config can mix all three.
 
 - Scopes: `GRAPH_SCOPES` constant in `oauth2.rs` (`Mail.ReadWrite`, `Mail.Send`, `User.Read`, `offline_access`).
 - `SmtpConfig::load()` and `ImapConfig::load()` return errors for Graph accounts. Use `GraphConfig::load()` instead.
-- All mail operations route through `src/graph.rs`: `list_folders`, `fetch_messages`, `fetch_new_messages`, `sync_mailboxes_graph`, `send_mail`, `archive_email_graph`, `delete_email_graph`, `mark_read_graph`, `search_messages`.
+- All mail operations route through `src/graph.rs`: `list_folders`, `fetch_new_messages`, `sync_mailboxes_graph`, `send_mail`, `move_message_graph`, `delete_message_graph`, `mark_read_graph`, `search_messages_threaded`.
 - TUI actions branch on `app.is_graph()` in `tui/actions.rs::handle_action()` and dispatch to Graph helpers (`graph::archive_email_graph`, etc.) instead of IMAP/SMTP.
 - No IMAP IDLE -- the watcher is a 60-second timer that polls inbox message count and emits `WatchEvent::Changed` on delta.
 - `mp config oauth2-login --account <name>` tests Graph accounts via the `/me` endpoint. `mp config show` displays "graph (Microsoft Graph API)" and hides SMTP/IMAP details.

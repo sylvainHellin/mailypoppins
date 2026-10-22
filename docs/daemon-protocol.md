@@ -703,12 +703,15 @@ The daemon-era equivalent of the wizard's password prompt is a second call to `c
 Nothing is written until the last prompt is answered, so an abandoned wizard leaves `config.toml` and the secrets backend as they were.
 
 **`config.probe` dials an account the configuration does not hold yet.** `account` is the block `config.init` and `config.add_account` take, read through the same loader, so a probe and the write that follows agree about every default; `check` is `smtp` (log in and hang up, sending nothing), `imap` (log in and out), `graph` (acquire the Graph client) or `mailboxes` (the server's mailbox names, or a Graph account's folder names, in the server's order).
-A password account sends `password` for `smtp`, `imap` and `mailboxes`; an `oauth2` or `graph` account is probed with the token cached under its name.
+A password account sends `password` for `smtp`, `imap` and `mailboxes`; an `oauth2` or `graph` account is probed with the token its own `config.oauth2_login` with a `candidate` staged under `tokens/candidates/`, never with a configured account's.
+A token candidate named like a configured account is `-32602` while it has no staged sign-in: it names its own servers, and the configured account's token must not reach them.
 A server that refuses is an answer, `{ok: false, error}`, rather than a refusal of the call, because the wizard prints it and asks again; a check that cannot run (an unknown `check`, a password account with no password, SMTP on a Graph account) is `-32602`.
 The password is used for the one session and dropped: never stored, logged or echoed, and the parameters' `Debug` prints `<redacted>` for it.
 It is a query, as `mailbox.list_server` is: it writes nothing here or on the server.
 
-**`config.oauth2_login` takes a `candidate`.** The block is read through the loader and used instead of the configured account of the same name, with the same three refusals, so the wizard signs an account in before writing it; the token is cached under `account`, where the account it then writes finds it.
+**`config.oauth2_login` takes a `candidate`.** The block is read through the loader and used instead of the configured account of the same name, with the same three refusals, so the wizard signs an account in before writing it.
+The token is staged under `tokens/candidates/<account>.enc` rather than cached under `account`, and `config.init` or `config.add_account` moves it to `tokens/<account>.enc` when it writes an `oauth2` or `graph` account of that name, after the file and before the account's runtime starts.
+An abandoned wizard, or one whose candidate is named like a configured account, leaves that account's token untouched; `config.reset_secrets` removes staged sign-ins with the other caches.
 A candidate named other than `account` is `-32602`.
 
 **`config.set_password` publishes no event.**

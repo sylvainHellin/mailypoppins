@@ -419,14 +419,7 @@ async fn imap_flow(
 
     let candidate = imap_candidate(&a);
     let path = write(daemon, mode, &candidate, path).await?;
-    for (kind, value) in &passwords {
-        daemon.set_password(&a.name, kind, value).await?;
-        println!(
-            "{} {} password stored",
-            "\u{2713}".green(),
-            kind.to_uppercase()
-        );
-    }
+    store_passwords(daemon, &a.name, &passwords).await?;
     println!();
     print_account_data_paths(&a.name);
     println!();
@@ -444,6 +437,65 @@ async fn imap_flow(
         );
     }
     Ok(())
+}
+
+/// Store each password the probes accepted, now that the account exists.
+///
+/// The file is written by then, so a password the daemon fails to store
+/// leaves an account that is configured and cannot log in. Each failure is
+/// named with the command that sets it, every password is attempted, and the
+/// wizard ends in an error rather than in its success lines.
+pub(super) async fn store_passwords(
+    daemon: &mut impl WizardDaemon,
+    account: &str,
+    passwords: &[(&str, String)],
+) -> Result<()> {
+    let mut missing: Vec<&str> = Vec::new();
+    for (kind, value) in passwords {
+        match daemon.set_password(account, kind, value).await {
+            Ok(()) => println!(
+                "{} {} password stored",
+                "\u{2713}".green(),
+                kind.to_uppercase()
+            ),
+            Err(e) => {
+                eprintln!(
+                    "{} The {} password of account '{account}' was not stored: {e:#}",
+                    "\u{2717}".red(),
+                    kind.to_uppercase()
+                );
+                missing.push(kind);
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!("{}", missing_passwords_message(account, &missing)))
+}
+
+/// What the user reads when the account was written and some of its
+/// passwords were not: which ones, and the command that sets each.
+pub(super) fn missing_passwords_message(account: &str, missing: &[&str]) -> String {
+    let kinds = missing
+        .iter()
+        .map(|kind| kind.to_uppercase())
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let (noun, verb, pronoun) = if missing.len() == 1 {
+        ("password", "is", "it")
+    } else {
+        ("passwords", "are", "them")
+    };
+    let commands: Vec<String> = missing
+        .iter()
+        .map(|kind| format!("  mp config set-password {kind} --account {account}"))
+        .collect();
+    format!(
+        "Account '{account}' is configured, but its {kinds} {noun} {verb} not stored, \
+         so it cannot log in yet. Set {pronoun} with:\n{}",
+        commands.join("\n")
+    )
 }
 
 /// The Graph flow: no SMTP or IMAP, a sign-in, then the folders.

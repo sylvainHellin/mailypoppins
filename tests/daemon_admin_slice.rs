@@ -1949,6 +1949,101 @@ async fn config_reset_secrets_removes_the_secret_file_and_the_token_caches() {
     );
 }
 
+/// A `config.probe` candidate named like a configured account is refused while
+/// no sign-in of its own is staged, before anything is dialled: the candidate
+/// names its own servers, and the configured account's token must never reach
+/// them. Before the fix the probe loaded the configured account's cache and
+/// answered `{ok: false}` about the host it had tried to send it to.
+#[tokio::test]
+async fn config_probe_never_lends_a_configured_accounts_token_to_a_candidate() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local listener");
+    listener.set_nonblocking(true).expect("non-blocking");
+    let port = listener.local_addr().expect("its address").port();
+    let candidate = json!({
+        "name": fixture::GRAPH_ACCOUNT,
+        "default_from": "graph@example.com",
+        "auth_method": "oauth2",
+        "oauth2": {"client_id": "c", "tenant_id": "common"},
+        "smtp": {"host": "127.0.0.1", "port": port, "username": "graph@example.com"},
+        "imap": {"host": "127.0.0.1", "port": port},
+    });
+    for check in ["smtp", "imap", "mailboxes"] {
+        let refused = call_err(
+            &mut conn,
+            "config.probe",
+            json!({"account": candidate, "check": check}),
+        )
+        .await;
+        assert_eq!(refused.code, -32602, "{check}: {refused:?}");
+        assert!(
+            refused.message.contains("configured account"),
+            "{check}: the refusal says why: {}",
+            refused.message
+        );
+    }
+    assert!(
+        listener.accept().is_err(),
+        "nothing dialled the candidate's host"
+    );
+    assert_eq!(
+        std::fs::read(fixture::token_cache(slice.root(), fixture::GRAPH_ACCOUNT))
+            .expect("the configured token is still there"),
+        b"opaque-token"
+    );
+}
+
+/// A candidate's sign-in is staged under `tokens/candidates/` and becomes the
+/// account's token only when `config.init` commits the account: until then the
+/// configured account of that name keeps its own, which is what an abandoned
+/// `mp config init` (overwrite answered yes) leaves behind.
+#[tokio::test]
+async fn only_the_committed_write_promotes_a_staged_sign_in() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let staged = slice
+        .root()
+        .join("tokens")
+        .join("candidates")
+        .join(format!("{}.enc", fixture::GRAPH_ACCOUNT));
+    std::fs::create_dir_all(staged.parent().expect("a parent")).expect("the staging dir");
+    std::fs::write(&staged, b"staged-token").expect("a staged sign-in");
+    let configured = fixture::token_cache(slice.root(), fixture::GRAPH_ACCOUNT);
+
+    // The wizard abandoned: nothing commits, and the configured token stays.
+    let refused = call_err(
+        &mut conn,
+        "config.init",
+        json!({"account": {"name": fixture::GRAPH_ACCOUNT, "auth_method": "graph"}}),
+    )
+    .await;
+    assert_eq!(refused.code, -32602, "no replace, no write: {refused:?}");
+    assert_eq!(std::fs::read(&configured).expect("kept"), b"opaque-token");
+    assert!(staged.is_file(), "a refused write promotes nothing");
+
+    // The wizard committed: the staged sign-in is the account's now.
+    call(
+        &mut conn,
+        "config.init",
+        json!({
+            "replace": true,
+            "account": {
+                "name": fixture::GRAPH_ACCOUNT,
+                "default_from": "graph@example.com",
+                "auth_method": "graph",
+                "oauth2": {"client_id": "c", "tenant_id": "common"},
+            },
+        }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(&configured).expect("promoted"),
+        b"staged-token"
+    );
+    assert!(!staged.exists(), "the staged sign-in moved, not copied");
+}
+
 /// `mp config oauth2-login` on an account that cannot do it: three refusals,
 /// each in the sentence the CLI prints today.
 #[tokio::test]

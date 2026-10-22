@@ -113,11 +113,60 @@ pub fn token_cache_path(account_name: &str) -> PathBuf {
     crate::config::tokens_dir().join(format!("{}.enc", account_name))
 }
 
+/// The subdirectory of the token directory a setup wizard's sign-in is staged
+/// in. An account name never contains a path separator
+/// (`validate_account_names`), so no configured account's cache can be a
+/// staged one and no staged sign-in can overwrite a configured account's.
+pub const STAGED_TOKEN_DIR: &str = "candidates";
+
+/// The token-cache name a candidate account's sign-in is written under until
+/// the configuration that names the account is committed.
+///
+/// A wizard signs a candidate in before `config.init` or `config.add_account`
+/// writes it, and may be abandoned after the sign-in: a token cached under the
+/// account's own name would by then have replaced the one of a configured
+/// account of that name. Staged here, it replaces nothing until
+/// [`promote_staged_token`] moves it, and a probe of the candidate reads it
+/// rather than whatever a configured account of that name has cached.
+pub fn staged_token_name(account_name: &str) -> String {
+    format!("{STAGED_TOKEN_DIR}/{account_name}")
+}
+
+/// Whether a sign-in is staged for `account_name`.
+pub fn staged_token_exists(account_name: &str) -> bool {
+    token_cache_path(&staged_token_name(account_name)).is_file()
+}
+
+/// Move the staged sign-in of `account_name` over its token cache, once the
+/// configuration that names the account is written. `Ok(false)` when nothing
+/// is staged; a rename, so the cache is never half written.
+pub fn promote_staged_token(account_name: &str) -> Result<bool> {
+    let staged = token_cache_path(&staged_token_name(account_name));
+    if !staged.is_file() {
+        return Ok(false);
+    }
+    let path = token_cache_path(account_name);
+    fs::rename(&staged, &path).with_context(|| {
+        format!(
+            "Failed to promote the staged token {} to {}",
+            staged.display(),
+            path.display()
+        )
+    })?;
+    info!("OAuth2 token of the candidate '{account_name}' promoted");
+    Ok(true)
+}
+
 fn save_token_cache(account_name: &str, cache: &TokenCache) -> Result<()> {
-    let dir = crate::config::tokens_dir();
+    let path = token_cache_path(account_name);
+    // The parent rather than the token directory: a staged sign-in lives one
+    // level below it.
+    let dir = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(crate::config::tokens_dir);
     crate::config::create_private_dir_all(&dir)
         .with_context(|| format!("Failed to create token cache dir: {}", dir.display()))?;
-    let path = token_cache_path(account_name);
     let json = serde_json::to_vec(cache).context("Failed to serialize token cache")?;
     let blob = crate::secrets::encrypt_blob(&json).context("Failed to encrypt token cache")?;
     // Atomic write, created with 0600 from the start (no umask window).

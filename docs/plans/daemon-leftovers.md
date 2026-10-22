@@ -32,8 +32,10 @@ Each item lands as one or more commits on the `daemon-leftovers` branch, in this
 
 - The prompts stay in the client and every engine step becomes a daemon call, in an order that writes nothing until the user has answered everything, as today.
 - A new query `config.probe {account, check, password?}` takes a candidate `[[accounts]]` block (the `AccountDraft` the desktop wizard already sends) and `check` of `smtp`, `imap`, `graph` or `mailboxes`; it answers `{ok: true, mailboxes?}` or `{ok: false, error}`, writes nothing and never echoes the password.
-- An OAuth2 or Graph candidate is probed with the token cached under its name, so the wizard signs in first.
+- An OAuth2 or Graph candidate is probed with the token its own sign-in staged under `tokens/candidates/`, so the wizard signs in first.
+- A probe never reads a configured account's token: a candidate named like a configured account names its own servers, and is refused while it has no staged sign-in of its own.
 - `config.oauth2_login` accepts an optional `candidate` block, used instead of the configured account of that name, so the wizard signs in before the account exists.
+- The candidate's token is staged, and `config.init` or `config.add_account` promotes it to the account's cache when it writes the account, so an abandoned wizard leaves a configured account's token untouched.
 - `config.init` accepts `replace: true`, which is the wizard's "Overwrite? [y/N]" answered yes.
 - The file is written by `config.init` or `config.add_account`, and each password the user typed is then stored by `config.set_password`.
 - The TOML builders and their comments leave the client; `account_block` writes the file, and the `[email]` table the wizard wrote is left to its serde defaults, which are the same values.
@@ -51,7 +53,8 @@ Each item lands as one or more commits on the `daemon-leftovers` branch, in this
 ## 5. The five daemon gaps the desktop works around
 
 - `signature.removed {name}`: the watcher publishes it when a signature file it announced is gone, as it publishes `draft.removed` for a draft.
-- `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default` on the daemon, answering what the desktop's commands answer today; the TUI's `cs` overlay, the desktop's Signatures dialog and `mp config show` call them, and no client calls `mp_core::signatures` for a write or a read any more.
+- `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default` on the daemon, answering what the desktop's commands answer today; the TUI's `cs` overlay, the desktop's Signatures dialog and `mp config show` call them.
+- The TUI compose wizard still calls `mp_core::signatures` to list the signatures it offers and to create and open the one it edits; a follow-up lane moves it onto the daemon methods.
 - `contact.vcard_draft {account, name, address, display_name}`: the daemon writes the draft, the `.vcf` under `_vcards/` and the attachment, and answers the draft and the `.vcf` path; the TUI's `v` and the desktop's `v` call it.
 - `contact.changed {account}`: a lifecycle event the daemon publishes whenever an account's contact index is written (a rebuild, the implicit build of a search, the bump after a sync or a send); the desktop re-reads its list on it instead of after its own rebuild only, and the TUI re-reads its contacts view.
 - The implicit build's refusal: `contact.search` answers a `rebuild` object `{saved, contacts, kept}` when its implicit build was refused by the cache guard, and every client says so (the CLI on stderr, the TUI on the status line, the desktop as a notice).
