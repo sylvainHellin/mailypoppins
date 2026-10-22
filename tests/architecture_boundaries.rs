@@ -825,9 +825,10 @@ const ENGINE_SYMBOLS: [&str; 23] = [
 /// is still there.
 ///
 /// `(file, symbol, reason)`, sorted by file then symbol. Read it as the answer
-/// to "why is the Phase 4 gate not at literal zero": four groups, each with a
-/// cause that outlives this unit.
-const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 17] = [
+/// to "why is the Phase 4 gate not at literal zero": three groups, each with a
+/// cause that outlives this unit. The fourth, the server leg of `mp search`
+/// (`LST-06`), went when it moved onto `message.search_server` (PERSO-175).
+const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 12] = [
     // (d) The two wizards. They call `config.get` (`routed_config_state` in
     //     `src/main.rs`) for the path, whether the file exists and the account
     //     names, and do the rest themselves: the prompting, the connection
@@ -887,32 +888,6 @@ const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 17] = [
         "token_cache_path(",
         "mp config show's token = not cached line; the same contract",
     ),
-    // (a) The server leg of `mp search` (LST-06). The method it wants exists
-    //     since P5-U10c - `message.search_server`, which the TUI's overlay is
-    //     routed through - and three differences stand between this leg and
-    //     it, each user-visible and none of them a call-site change:
-    //     `mp search` prints `Search in <mailbox> failed` to stderr per
-    //     mailbox as it goes, where the operation reports `unreachable` at the
-    //     settle; `--mailbox` here names the server mailbox directly, so a
-    //     name the account does not configure is searched rather than refused;
-    //     and the plain-IMAP `has:attachment` warning is a sentence about a
-    //     post-filter the daemon now applies itself. Routing it is a unit of
-    //     its own, recorded in `docs/tickets/0126-tui-crate-move.md`.
-    (
-        "src/main.rs",
-        "GraphClient::",
-        "mp search (server leg): message.search_server exists, but routing this leg moves three user-visible behaviours",
-    ),
-    (
-        "src/main.rs",
-        "GraphConfig::load",
-        "mp search (server leg): message.search_server exists, but routing this leg moves three user-visible behaviours",
-    ),
-    (
-        "src/main.rs",
-        "ImapConfig::load",
-        "mp search (server leg): message.search_server exists, but routing this leg moves three user-visible behaviours",
-    ),
     // (b) The startup preamble, which runs before any socket and on the
     //     no-daemon list too (`mp config path`, `mp daemon *`). Routing it would
     //     move bytes on commands that must never need a daemon.
@@ -920,16 +895,6 @@ const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 17] = [
         "src/main.rs",
         "SmtpConfig::load",
         "the preamble's `Could not load SMTP config` pair, and mp send-approved's, print before any daemon call",
-    ),
-    (
-        "src/main.rs",
-        "Store::open",
-        "mp search (server leg): the plain-IMAP has:attachment post-filter reads the local index",
-    ),
-    (
-        "src/main.rs",
-        "imap_client::",
-        "mp search (server leg): message.search_server exists, but routing this leg moves three user-visible behaviours",
     ),
     (
         "src/main.rs",

@@ -1,10 +1,7 @@
 use mailypoppins::config::*;
 use mailypoppins::config_cmd::*;
-use mailypoppins::graph;
-use mailypoppins::imap_client;
 use mailypoppins::parse::*;
 use mailypoppins::selector::Namespace;
-use mailypoppins::store::Store;
 use mailypoppins::types::*;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -78,7 +75,13 @@ Backend honesty: on Gmail and Exchange every term runs server-side. On plain
 IMAP has:attachment has no server key, so it is answered from the local store
 (synced mail only): the run warns on stderr, the result header on stdout says
 \"local store only: has:attachment\", and --json sets coverage to \"local\" with
-the term in local_terms. filename: is Gmail/Exchange/--local only.";
+the term in local_terms. filename: is Gmail/Exchange/--local only.
+
+The daemon runs a server search, the same one the TUI and the desktop app run:
+each mailbox is asked for its newest --limit matches, those are merged newest
+first and cut to --limit, and only the survivors are downloaded. A mailbox the
+server refuses does not stop the others; a \"Search in <mailbox> failed\" line
+on stderr follows the results.";
 
 #[derive(Subcommand)]
 enum Commands {
@@ -372,7 +375,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Search emails on the IMAP server, or locally with --local
+    /// Search emails on the mail server (IMAP or Exchange), or locally with --local
     #[command(long_about = SEARCH_LONG_ABOUT)]
     Search {
         /// Search query. One grammar for every backend: fields from: to: cc:
@@ -382,7 +385,9 @@ enum Commands {
         /// Combine with the flags below; they build the same query.
         #[arg(default_value = "")]
         query: String,
-        /// Mailbox to search (default: all the account's mailboxes)
+        /// Mailbox to search: a configured one by role or label, or any folder
+        /// the server lists by its server name (default: all the account's
+        /// mailboxes; --local: configured ones only)
         #[arg(long)]
         mailbox: Option<String>,
         /// Match the sender (from:)
@@ -414,7 +419,8 @@ enum Commands {
         before: Option<String>,
         /// Max results across every searched mailbox, the newest winning
         /// wherever they sit; a server search cut by it ends with a
-        /// "raise -n" line. Exchange stops a search at 1000 results
+        /// "raise -n" line. Exchange stops a search at 1000 results per
+        /// mailbox, which a line says instead
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
         /// Show full body instead of preview
@@ -729,43 +735,6 @@ enum ConfigAction {
     Oauth2Login,
     /// Print config file path
     Path,
-}
-
-/// Sort fetched emails by date descending (newest first).
-fn sort_fetched_by_date(emails: &mut [FetchedEmail]) {
-    emails.sort_by(mailypoppins::read_cmd::fetched_newest_first);
-}
-
-/// `mp search --json` for a server search: each hit with the store's id of the
-/// mailbox it was found in, when the search knows it, the terms the local
-/// store answered because the server had no key for them, and whether
-/// `--limit` cut the answer.
-fn print_server_search_json(
-    account: &str,
-    query: &str,
-    local_terms: &[String],
-    truncated: bool,
-    hits: &[(Option<String>, FetchedEmail)],
-    full: bool,
-) -> Result<()> {
-    let results = mailypoppins::read_cmd::SearchResultsJson::server(
-        account,
-        query,
-        local_terms,
-        truncated,
-        hits.iter()
-            .map(|(mailbox, email)| {
-                mailypoppins::read_cmd::ListedMessage::from_fetched(
-                    account,
-                    mailbox.as_deref(),
-                    email,
-                    full,
-                )
-            })
-            .collect(),
-    );
-    println!("{}", serde_json::to_string_pretty(&results)?);
-    Ok(())
 }
 
 fn prompt_confirmation(message: &str) -> bool {
@@ -1265,25 +1234,8 @@ impl DraftStatusFilter {
     }
 }
 
-/// Open the account's store for a *received* lookup.
-///
-/// A missing file means the account has never synced, which is a different
-/// answer from "no such message" and is worth saying: resolving a selector
-/// against an empty index would otherwise report the message as unknown.
-fn received_store(account: &str) -> Result<Store> {
-    let path = mailypoppins::config::store_path(account);
-    if !path.exists() {
-        return Err(no_received_store(account));
-    }
-    Store::open(&path).with_context(|| format!("opening the store of {account}"))
-}
-
-/// The refusal of a read against an account with nothing to read.
-///
-/// One sentence for the two routes: [`received_store`] raises it when it finds
-/// no store file, and a routed command raises the identical one when the daemon
-/// answers `account_not_ready`, because a user may not be able to tell which
-/// process looked.
+/// The refusal of a read against an account with nothing to read, which a
+/// routed command raises when the daemon answers `account_not_ready`.
 fn no_received_store(account: &str) -> anyhow::Error {
     anyhow!(
         "{account} has no local store yet, so no received mail can be addressed; \
@@ -1833,27 +1785,10 @@ async fn routed_search(
     limit: usize,
     full: bool,
 ) -> Result<Vec<mp_client::queries::SearchHit>> {
-    let mut params = serde_json::json!({
-        "account": account,
-        "query": query,
-        "limit": limit,
-        "body": full,
-        "has_attachment": flags.has_attachment,
-    });
-    for (key, value) in [
-        ("mailbox", mailbox.map(str::to_string)),
-        ("from", flags.from.clone()),
-        ("to", flags.to.clone()),
-        ("cc", flags.cc.clone()),
-        ("subject", flags.subject.clone()),
-        ("body_query", flags.body.clone()),
-        ("filename", flags.filename.clone()),
-        ("after", flags.after.clone()),
-        ("before", flags.before.clone()),
-    ] {
-        if let Some(value) = value {
-            params[key] = serde_json::json!(value);
-        }
+    let mut params = search_params(account, query, flags, limit);
+    params["body"] = serde_json::json!(full);
+    if let Some(mailbox) = mailbox {
+        params["mailbox"] = serde_json::json!(mailbox);
     }
 
     let mut connection = daemon_connection().await;
@@ -1861,6 +1796,150 @@ async fn routed_search(
         .await
         .map_err(|e| refusal(account, e))?;
     Ok(mp_client::queries::decode_search_hits(&result))
+}
+
+/// The parameters `message.search` and `message.search_server` share: the
+/// query as typed, `mp search`'s flags under their wire names, and the limit.
+fn search_params(
+    account: &str,
+    query: &str,
+    flags: &mailypoppins::search::Flags,
+    limit: usize,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "account": account,
+        "query": query,
+        "limit": limit,
+        "has_attachment": flags.has_attachment,
+    });
+    for (key, value) in [
+        ("from", &flags.from),
+        ("to", &flags.to),
+        ("cc", &flags.cc),
+        ("subject", &flags.subject),
+        ("body_query", &flags.body),
+        ("filename", &flags.filename),
+        ("after", &flags.after),
+        ("before", &flags.before),
+    ] {
+        if let Some(value) = value {
+            params[key] = serde_json::json!(value);
+        }
+    }
+    params
+}
+
+/// The event kind one hit of a `message.search_server` streams as.
+const KIND_SERVER_SEARCH_HIT: &str = "message.server_hit";
+
+/// `mp search` without `--local`: the daemon's `message.search_server`, which
+/// the TUI overlay and the desktop search bar call too (`LST-06`, PERSO-175).
+///
+/// `--limit` is the number of hits the whole search answers with: the daemon
+/// asks every mailbox for its newest `limit`, merges them newest first, cuts
+/// them to `limit` and downloads only those. The hits stream as events and
+/// are listed newest first once the search settles; what the settle says
+/// (the store-coverage warning, the cut, the mailboxes the server refused)
+/// is printed around them by [`mailypoppins::read_cmd::server_search_lines`].
+///
+/// `--mailbox` names a configured mailbox or any folder the server lists;
+/// without it the daemon reads the query's own `in:` and then searches every
+/// configured mailbox.
+async fn routed_server_search(
+    account_config: &AccountConfig,
+    query: &str,
+    mailbox: Option<&str>,
+    flags: &mailypoppins::search::Flags,
+    limit: usize,
+    full: bool,
+    json: bool,
+) -> Result<()> {
+    let account = account_config.name.as_str();
+    let mut params = search_params(account, query, flags, limit);
+    if let Some(mailbox) = mailbox {
+        params["mailboxes"] = serde_json::json!([mailbox]);
+    }
+
+    let mut connection = daemon_connection().await;
+    // A client that follows its own operation has to be a subscriber first:
+    // the hits and the finish reach bootstrapped connections only.
+    daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
+    // The daemon's words: a server search refuses an account with no server
+    // as a sync of it does, which is not the store-less read `refusal` names.
+    let started = daemon_try_call(&mut connection, "message.search_server", params)
+        .await
+        .map_err(|e| anyhow!("{}", e.message))?;
+
+    let id = wire_str(&started["operation_id"]).to_string();
+    let mut hits: Vec<mp_protocol::listing::ServerSearchHit> = Vec::new();
+    let settled = connection
+        .await_operation_events(&id, |kind, payload| {
+            if kind != KIND_SERVER_SEARCH_HIT {
+                return;
+            }
+            match serde_json::from_value(payload["hit"].clone()) {
+                Ok(hit) => hits.push(hit),
+                Err(e) => warn!("[search] a message.server_hit did not decode: {e}"),
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            daemon_unavailable("the daemon closed the connection with a search still running")
+        });
+    let settled: mp_protocol::listing::ServerSearchSettled = match settled {
+        Settled::Done(result) => serde_json::from_value(result)
+            .context("reading the daemon's message.search_server settle")?,
+        Settled::Failed(message) => bail!("{message}"),
+    };
+
+    let hits = mailypoppins::read_cmd::server_hits_newest_first(hits);
+    let lines = mailypoppins::read_cmd::server_search_lines(&settled, limit, json);
+    for line in &lines.before {
+        eprintln!("{} {line}", "\u{26a0}".yellow());
+    }
+    if json {
+        let results = mailypoppins::read_cmd::SearchResultsJson::server(
+            account,
+            query,
+            &settled.local_terms,
+            settled.truncated,
+            hits.iter()
+                .map(|hit| {
+                    // The hit names the mailbox by its sidebar label; the
+                    // selector wants the store's id, which a folder the
+                    // account does not configure has none of.
+                    let key = resolve_mailbox_key(account_config, &hit.mailbox).ok();
+                    mailypoppins::read_cmd::ListedMessage::from_server_hit(
+                        account,
+                        key.as_deref(),
+                        hit,
+                        full,
+                    )
+                })
+                .collect(),
+        );
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else if hits.is_empty() {
+        println!(
+            "{}",
+            mailypoppins::read_cmd::no_server_results(&settled).yellow()
+        );
+    } else {
+        let emails: Vec<FetchedEmail> = hits
+            .iter()
+            .map(mailypoppins::read_cmd::fetched_from_hit)
+            .collect();
+        display_fetched_emails_with_note(&emails, full, settled.local_store_note().as_deref());
+    }
+    if !json {
+        if let Some(trailer) = &lines.trailer {
+            println!("{trailer}");
+        }
+    }
+    for line in &lines.after {
+        eprintln!("{} {line}", "\u{26a0}".yellow());
+    }
+    Ok(())
 }
 
 /// One typed answer from the daemon, on an existing connection.
@@ -4394,10 +4473,9 @@ async fn main() -> Result<()> {
             let query_ast =
                 mailypoppins::search::from_cli(&query, &flags).map_err(|e| anyhow!("{e}"))?;
 
-            // Resolve mailbox scope: --mailbox flag > in: directive > all.
-            let mailbox_name = mailbox.or_else(|| query_ast.in_mailbox.clone());
-
             if local {
+                // Resolve mailbox scope: --mailbox flag > in: directive > all.
+                let mailbox_name = mailbox.or_else(|| query_ast.in_mailbox.clone());
                 // The mailbox is resolved here, as it was before the daemon
                 // answered the search: the names come from the configuration
                 // the client already holds, so an unknown one is refused in the
@@ -4453,197 +4531,16 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            if account_config.auth_method == AuthMethod::Graph {
-                let graph_config = GraphConfig::load(&account_config)?;
-                let client = graph::GraphClient::new_async(&graph_config).await?;
-                // A role or label (`in:sent`) names the configured server
-                // folder, as the daemon's `pick_target` resolves it; passed
-                // through raw, Graph read `sent` as a malformed folder id
-                // (PERSO-173).
-                let server_folder = mailbox_name
-                    .as_deref()
-                    .map(|mb| find_server_name_for_role(&account_config, mb));
-                let search = client
-                    .search_messages_counted(&query_ast, server_folder.as_deref(), limit)
-                    .await?;
-                // Graph stops a `$search` at its cap however it is paged, so
-                // raising -n cannot help: stderr says so beside --json, the
-                // text listing's last line otherwise.
-                let capped = search.capped;
-                if capped && json {
-                    eprintln!(
-                        "{} {}",
-                        "\u{26a0}".yellow(),
-                        mailypoppins::read_cmd::graph_search_cap_line(graph::GRAPH_SEARCH_CAP)
-                    );
-                }
-                let truncated = search.truncated;
-                let mut emails = search.hits;
-                sort_fetched_by_date(&mut emails);
-                if json {
-                    // Graph names no folder per hit, so only a scoped search
-                    // knows the mailbox a selector needs.
-                    let key = mailbox_name
-                        .as_deref()
-                        .and_then(|mb| resolve_mailbox_key(&account_config, mb).ok());
-                    let tagged: Vec<_> = emails.into_iter().map(|e| (key.clone(), e)).collect();
-                    print_server_search_json(
-                        &account_config.name,
-                        &query,
-                        &[],
-                        truncated,
-                        &tagged,
-                        full,
-                    )?;
-                } else if emails.is_empty() {
-                    println!("{}", "No results found".yellow());
-                } else {
-                    display_fetched_emails(&emails, full);
-                    if capped {
-                        println!(
-                            "{}",
-                            mailypoppins::read_cmd::graph_search_cap_line(graph::GRAPH_SEARCH_CAP)
-                        );
-                    } else if truncated {
-                        println!("{}", mailypoppins::read_cmd::more_results_line(limit));
-                    }
-                }
-            } else {
-                let imap_config = ImapConfig::load(&account_config)?;
-                // Gmail is the only IMAP server with an attachment key
-                // (`X-GM-RAW has:attachment`); a plain server has none, so its
-                // has:attachment residue is post-filtered from the store below.
-                let host_lc = imap_config.host.to_ascii_lowercase();
-                let gmail = host_lc == "imap.gmail.com"
-                    || host_lc.ends_with(".gmail.com")
-                    || host_lc.ends_with("googlemail.com");
-                let (imap_search, attachment_postfilter, local_terms) = if gmail {
-                    (
-                        mailypoppins::search::to_gmail_search_command(&query_ast)
-                            .map_err(|e| anyhow!("{e}"))?,
-                        false,
-                        Vec::new(),
-                    )
-                } else {
-                    let r =
-                        mailypoppins::search::to_imap(&query_ast).map_err(|e| anyhow!("{e}"))?;
-                    let local_terms = r.local_terms();
-                    (r.search, r.attachment_postfilter, local_terms)
-                };
-                let msg_id = query_ast.message_id.clone();
-
-                // The target mailboxes: the scoped one, or all the account's,
-                // each with the store's id for it when it has one, which is
-                // the mailbox a `--json` hit's selector names.
-                let targets: Vec<(String, String, Option<String>)> = match mailbox_name {
-                    Some(ref mb) => vec![(
-                        mb.clone(),
-                        mb.clone(),
-                        resolve_mailbox_key(&account_config, mb).ok(),
-                    )],
-                    None => all_configured_mailboxes(&account_config)
-                        .iter()
-                        .map(|(role, mapping)| {
-                            (
-                                role.to_string(),
-                                mapping.server.clone(),
-                                Some(role.to_string()),
-                            )
-                        })
-                        .collect(),
-                };
-
-                // Every mailbox is searched for the whole limit and the hits
-                // are merged newest first and cut to it below, so `--limit` is
-                // the number of results, as documented, and the newest win
-                // wherever they sit. Splitting it across the mailboxes dropped
-                // a busy mailbox's hits silently (PERSO-175).
-                let mut session = imap_client::open_imap_session(&imap_config).await?;
-                let mut groups: Vec<mailypoppins::read_cmd::MailboxHits> = Vec::new();
-                for (label, server, key) in &targets {
-                    match imap_client::search_on_session_counted(
-                        &mut session,
-                        &imap_search,
-                        msg_id.as_deref(),
-                        server,
-                        Some(limit),
-                    )
-                    .await
-                    {
-                        Ok((emails, matched)) => groups.push(mailypoppins::read_cmd::MailboxHits {
-                            mailbox: key.clone(),
-                            emails,
-                            more: matched > limit,
-                        }),
-                        Err(e) => {
-                            eprintln!("{} Search in {} failed: {}", "\u{26a0}".yellow(), label, e);
-                        }
-                    }
-                }
-                session.logout().await.ok();
-
-                // Plain-IMAP has:attachment (#0086a, option b): keep only hits
-                // the local store marks as carrying an attachment, and say that
-                // un-synced mail is not covered.
-                if attachment_postfilter {
-                    let store = received_store(&account_config.name)?;
-                    let with_att = mailypoppins::store::read::message_ids_with_attachments(
-                        &store,
-                        &account_config.name,
-                    )?;
-                    for group in &mut groups {
-                        group.emails.retain(|e| {
-                            e.message_id.as_deref().is_some_and(|m| {
-                                with_att.contains(
-                                    &mailypoppins::store::read::normalize_message_id_key(m),
-                                )
-                            })
-                        });
-                    }
-                    eprintln!(
-                        "{} {} on plain IMAP is answered from the local store, so \
-                         un-synced mail is not covered. Run `mp sync` for full coverage.",
-                        "\u{26a0}".yellow(),
-                        local_terms.join(", ")
-                    );
-                }
-
-                // The stderr warning is lost to a caller that pipes stdout, so
-                // the header repeats it (PERSO-122).
-                let note = mailypoppins::read_cmd::local_store_note(&local_terms);
-                let (all_emails, truncated) =
-                    mailypoppins::read_cmd::merge_server_hits(groups, limit);
-                if json {
-                    print_server_search_json(
-                        &account_config.name,
-                        &query,
-                        &local_terms,
-                        truncated,
-                        &all_emails,
-                        full,
-                    )?;
-                } else if all_emails.is_empty() {
-                    let lines = mailypoppins::read_cmd::empty_server_search_lines(
-                        &local_terms,
-                        truncated,
-                        limit,
-                    );
-                    for (i, line) in lines.iter().enumerate() {
-                        if i == 0 {
-                            println!("{}", line.yellow());
-                        } else {
-                            println!("{line}");
-                        }
-                    }
-                } else {
-                    let emails: Vec<FetchedEmail> =
-                        all_emails.into_iter().map(|(_, e)| e).collect();
-                    display_fetched_emails_with_note(&emails, full, note.as_deref());
-                    if truncated {
-                        println!("{}", mailypoppins::read_cmd::more_results_line(limit));
-                    }
-                }
-            }
+            routed_server_search(
+                &account_config,
+                &query,
+                mailbox.as_deref(),
+                &flags,
+                limit,
+                full,
+                json,
+            )
+            .await?;
         }
 
         // The index, the ranking and the cache are all the daemon's from

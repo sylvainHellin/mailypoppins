@@ -557,15 +557,22 @@ pub struct UnreachableMailbox {
     pub error: String,
 }
 
+/// The most results a Microsoft Graph `$search` on messages answers across
+/// all its pages: "A `$search` request returns up to 1,000 results" (Microsoft
+/// Learn, "Use the $search query parameter"). A `$filter` pages on past it.
+/// [`ServerSearchSettled::capped`] says a search ran into it.
+pub const GRAPH_SEARCH_CAP: usize = 1000;
+
 /// What a `message.search_server` settles with (P5-U10c, `LST-08`).
 ///
 /// The hits are not here: each streamed as a `message.server_hit` event while
 /// the search ran. What settles is the count, the hits dropped because the
-/// local pass was already showing them, the mailboxes that refused, and the
+/// local pass was already showing them, the mailboxes that refused, the
 /// coverage (PERSO-131): on a plain IMAP server `has:attachment` has no search
 /// key, so the daemon keeps only the hits the local store marks as carrying an
-/// attachment, and an un-synced message cannot be among them. The two fields
-/// mean what `mp search --json`'s do (PERSO-122).
+/// attachment, and an un-synced message cannot be among them; the two fields
+/// mean what `mp search --json`'s do (PERSO-122). Last, whether the limit cut
+/// the answer and whether Graph's cap did (PERSO-175).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ServerSearchSettled {
@@ -591,6 +598,16 @@ pub struct ServerSearchSettled {
     /// (`has:attachment`), and `[]` when the server answered every term.
     #[serde(default)]
     pub local_terms: Vec<String>,
+    /// More matched than the hits hold: a mailbox matched more than the
+    /// limit, or the merge of every mailbox's newest hits cut some
+    /// (PERSO-175). Absent from an older daemon, which reads as `false`.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Microsoft Graph's [`GRAPH_SEARCH_CAP`] stopped a mailbox's search short
+    /// of the limit, which no larger limit gets past: only a narrower query
+    /// reaches the rest.
+    #[serde(default)]
+    pub capped: bool,
 }
 
 impl ServerSearchSettled {
@@ -624,8 +641,12 @@ mod tests {
             }],
             coverage: SearchCoverage::Local,
             local_terms: vec!["has:attachment".to_string()],
+            truncated: true,
+            capped: false,
         };
         let encoded = serde_json::to_value(&settled).expect("it serialises");
+        assert_eq!(encoded["truncated"], json!(true));
+        assert_eq!(encoded["capped"], json!(false));
         assert_eq!(encoded["coverage"], json!("local"));
         assert_eq!(encoded["local_terms"], json!(["has:attachment"]));
         assert_eq!(
@@ -646,6 +667,7 @@ mod tests {
         .expect("a settle without the two fields decodes");
         assert_eq!(older.coverage, SearchCoverage::Server);
         assert!(older.local_terms.is_empty());
+        assert!(!older.truncated && !older.capped);
         assert_eq!(older.local_store_note(), None);
     }
 

@@ -13,17 +13,22 @@
 //! message.fetch         {account, mailbox, message_id}      -> {operation_id}
 //!   settles with        {account, mailbox, uid, row_id, selector, already_present}
 //!
-//! message.search_server {account, query, mailboxes?, limit?, exclude_message_ids?}
+//! message.search_server {account, query, mailboxes?, limit?, exclude_message_ids?,
+//!                        from?, to?, cc?, subject?, body_query?, filename?,
+//!                        has_attachment?, after?, before?}
 //!                                                           -> {operation_id}
 //!   streams             state.event kind `message.server_hit`
 //!                       payload {operation_id, hit: ServerSearchHit}
 //!   settles with        {account, query, hits, deduplicated, unreachable: [{mailbox, error}],
-//!                        coverage: server|local, local_terms}
+//!                        coverage: server|local, local_terms, truncated, capped}
 //! ```
 //!
 //! `coverage` and `local_terms` joined the settle in PERSO-131: on a plain IMAP
 //! server `has:attachment` is answered from the local store, and the settle
-//! names it as `mp search --json` does.
+//! names it as `mp search --json` does. PERSO-175 made `limit` the number of
+//! hits the whole search answers with, added `truncated` and `capped`, the
+//! field filters `mp search` takes as flags, and took any folder the server
+//! lists as a mailbox, when `mp search` moved onto this method.
 //!
 //! # Why `message.search_server` and not `message.list_server`
 //!
@@ -139,7 +144,7 @@ const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
 /// `LST-09`.
 const FETCH: &str = "message.fetch";
 
-/// `LST-08`, and with it `LST-06`'s unmigrated `CLI_ENGINE_RESIDUE` group.
+/// `LST-08`, and since PERSO-175 `LST-06`, the server leg of `mp search`.
 const SEARCH_SERVER: &str = "message.search_server";
 
 /// The keys a settled `message.fetch` answers with.
@@ -153,13 +158,15 @@ const FETCH_RESULT: [&str; 6] = [
 ];
 
 /// The keys a settled `message.search_server` answers with.
-const SEARCH_RESULT: [&str; 7] = [
+const SEARCH_RESULT: [&str; 9] = [
     "account",
+    "capped",
     "coverage",
     "deduplicated",
     "hits",
     "local_terms",
     "query",
+    "truncated",
     "unreachable",
 ];
 
@@ -578,11 +585,11 @@ async fn the_server_search_validates_its_parameters() {
             json!({"account": fixture::SERVER_ACCOUNT, "query": "from:\""}),
         ),
         (
-            "a mailbox the account does not have",
+            "an empty mailbox name",
             json!({
                 "account": fixture::SERVER_ACCOUNT,
                 "query": "ledger",
-                "mailboxes": [fixture::UNKNOWN_MAILBOX],
+                "mailboxes": [""],
             }),
         ),
         (
@@ -608,6 +615,21 @@ async fn the_server_search_validates_its_parameters() {
             "{what} is invalid params, got {error:?}"
         );
     }
+
+    // A mailbox the account does not configure is a folder on the server,
+    // searched under its own name (PERSO-175): the call is taken, and a name
+    // the server does not list fails that one mailbox, not the call.
+    let unconfigured = call(
+        &mut conn,
+        SEARCH_SERVER,
+        json!({
+            "account": fixture::SERVER_ACCOUNT,
+            "query": "ledger",
+            "mailboxes": [fixture::UNKNOWN_MAILBOX],
+        }),
+    )
+    .await;
+    operation_id(&unconfigured);
 
     let unknown = call_err(
         &mut conn,

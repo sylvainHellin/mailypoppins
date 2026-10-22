@@ -1,0 +1,449 @@
+//! The two passes of a server search over several mailboxes (PERSO-175).
+//!
+//! `limit` is the number of hits the whole search answers with, not a slice of
+//! it per mailbox. Splitting it dropped a busy mailbox's newest hits for an
+//! idle one's older ones, and asking every mailbox for `limit` whole messages
+//! downloaded as many times the answer as there are mailboxes. So the search
+//! runs in two passes:
+//!
+//! 1. Each mailbox is asked for its newest `limit` matches as
+//!    [`SearchStub`]s: the key the second pass downloads by, the `Date` the
+//!    merge orders by and the `Message-ID` the caller filters on.
+//! 2. Every mailbox's stubs are merged newest first and cut to `limit`
+//!    ([`select`]), and only the survivors are downloaded whole, mailbox by
+//!    mailbox.
+//!
+//! So a search downloads at most `limit` messages however many mailboxes it
+//! spans, and it knows when the answer is cut: a mailbox matched more than it
+//! listed, or the merge dropped stubs.
+//!
+//! The backend is a [`SearchBackend`]: one IMAP session ([`ImapSearch`]) or
+//! one Graph client ([`GraphSearch`]). What the hits become is the caller's
+//! [`SearchSink`], which is where the daemon's dedup, attachment post-filter
+//! and event stream live (`src/daemon/methods/message_server.rs`).
+
+use std::future::Future;
+
+use anyhow::Result;
+
+use crate::graph::GraphClient;
+use crate::imap_client::ImapSession;
+use crate::parse::FetchedEmail;
+
+/// One hit of a search's first pass: what the merge across mailboxes reads,
+/// and the key the second pass downloads the message by.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchStub<K> {
+    /// The UID (IMAP) or the message id (Graph) the second pass fetches.
+    pub key: K,
+    /// The `Date` header, parsed as the downloaded message's is, so the merge
+    /// orders the stubs the way the hits sort.
+    pub date: String,
+    /// The `Message-ID` header, which the dedup and the attachment
+    /// post-filter read.
+    pub message_id: Option<String>,
+}
+
+/// One mailbox's first-pass answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MailboxStubs<K> {
+    /// Its newest matches, at most the limit it was asked for.
+    pub stubs: Vec<SearchStub<K>>,
+    /// The server matched more than `stubs` holds.
+    pub more: bool,
+    /// Microsoft Graph's `$search` cap stopped it short of the limit.
+    pub capped: bool,
+}
+
+/// Whether the answer is cut, and by what.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cut {
+    /// More matched than the hits hold.
+    pub truncated: bool,
+    /// Graph's cap stopped a mailbox, which no larger limit gets past.
+    pub capped: bool,
+}
+
+/// One server a search runs against.
+pub trait SearchBackend {
+    /// What a stub names its message by.
+    type Key: Send + Sync;
+
+    /// The newest `limit` matches of `mailbox` (a server name) as stubs.
+    fn stubs(
+        &mut self,
+        mailbox: &str,
+        limit: usize,
+    ) -> impl Future<Output = Result<MailboxStubs<Self::Key>>> + Send;
+
+    /// The whole messages behind `keys` in `mailbox`.
+    fn fetch(
+        &mut self,
+        mailbox: &str,
+        keys: &[Self::Key],
+    ) -> impl Future<Output = Result<Vec<FetchedEmail>>> + Send;
+}
+
+/// What the caller does with a search's hits.
+pub trait SearchSink {
+    /// Whether a first-pass hit carrying `message_id` competes for the limit:
+    /// the caller's dedup and its store post-filter run here, before anything
+    /// is downloaded.
+    fn admit(&mut self, message_id: Option<&str>) -> bool;
+    /// The downloaded hits of the `mailbox`-th mailbox.
+    fn land(&mut self, mailbox: usize, emails: Vec<FetchedEmail>);
+    /// The `mailbox`-th mailbox failed, which does not fail the search.
+    fn refused(&mut self, mailbox: usize, error: &anyhow::Error);
+}
+
+/// Search `mailboxes` (server names) for the newest `limit` hits across all of
+/// them, handing each mailbox's downloaded hits to `sink` in mailbox order.
+pub async fn two_phase<B: SearchBackend, S: SearchSink>(
+    backend: &mut B,
+    mailboxes: &[String],
+    limit: usize,
+    sink: &mut S,
+) -> Cut {
+    let mut cut = Cut::default();
+    let mut groups: Vec<(usize, Vec<SearchStub<B::Key>>)> = Vec::new();
+    for (index, mailbox) in mailboxes.iter().enumerate() {
+        match backend.stubs(mailbox, limit).await {
+            Ok(found) => {
+                log::info!(
+                    "[server_search] '{mailbox}' matched {}{}",
+                    found.stubs.len(),
+                    if found.more { " and more" } else { "" }
+                );
+                cut.truncated |= found.more;
+                cut.capped |= found.capped;
+                let admitted = found
+                    .stubs
+                    .into_iter()
+                    .filter(|stub| sink.admit(stub.message_id.as_deref()))
+                    .collect();
+                groups.push((index, admitted));
+            }
+            Err(error) => sink.refused(index, &error),
+        }
+    }
+
+    let (picked, dropped) = select(groups, limit);
+    cut.truncated |= dropped;
+    for (index, keys) in picked {
+        match backend.fetch(&mailboxes[index], &keys).await {
+            Ok(emails) => sink.land(index, emails),
+            Err(error) => sink.refused(index, &error),
+        }
+    }
+    cut
+}
+
+/// The keys each mailbox downloads whole, and whether the cut dropped any.
+///
+/// Every mailbox's stubs are merged newest first by `Date`, an unparsable
+/// date last, and cut to `limit`. The survivors are handed back grouped by
+/// the mailbox index they came with, in that order, newest first within each;
+/// a mailbox none of whose stubs survived is left out, so the second pass
+/// selects nothing it downloads nothing from.
+pub fn select<K>(
+    groups: Vec<(usize, Vec<SearchStub<K>>)>,
+    limit: usize,
+) -> (Vec<(usize, Vec<K>)>, bool) {
+    let mut all: Vec<(usize, SearchStub<K>)> = groups
+        .into_iter()
+        .flat_map(|(index, stubs)| stubs.into_iter().map(move |stub| (index, stub)))
+        .collect();
+    all.sort_by(|(_, a), (_, b)| newest_first(&a.date, &b.date));
+    let dropped = all.len() > limit;
+    all.truncate(limit);
+
+    let mut picked: Vec<(usize, Vec<K>)> = Vec::new();
+    all.sort_by_key(|(index, _)| *index);
+    for (index, stub) in all {
+        match picked.last_mut() {
+            Some((last, keys)) if *last == index => keys.push(stub.key),
+            _ => picked.push((index, vec![stub.key])),
+        }
+    }
+    (picked, dropped)
+}
+
+/// Two `Date` header values, newest first, an unparsable one last.
+fn newest_first(a: &str, b: &str) -> std::cmp::Ordering {
+    let a = chrono::DateTime::parse_from_rfc2822(a).ok();
+    let b = chrono::DateTime::parse_from_rfc2822(b).ok();
+    b.cmp(&a)
+}
+
+/// One IMAP session, searching with one rendered `SEARCH`.
+pub struct ImapSearch<'a> {
+    pub session: &'a mut ImapSession,
+    /// The `SEARCH` this server runs (`crate::search::to_imap`, or
+    /// `to_gmail_search_command` for Gmail's `X-GM-RAW`).
+    pub search: String,
+    /// The Message-ID the query named, which the server matches as a
+    /// substring and the stubs then match exactly.
+    pub message_id: Option<String>,
+}
+
+impl SearchBackend for ImapSearch<'_> {
+    type Key = u32;
+
+    async fn stubs(&mut self, mailbox: &str, limit: usize) -> Result<MailboxStubs<u32>> {
+        crate::imap_client::search_stubs_on_session(
+            self.session,
+            &self.search,
+            self.message_id.as_deref(),
+            mailbox,
+            limit,
+        )
+        .await
+    }
+
+    async fn fetch(&mut self, mailbox: &str, uids: &[u32]) -> Result<Vec<FetchedEmail>> {
+        crate::imap_client::fetch_uids_on_session(self.session, mailbox, uids).await
+    }
+}
+
+/// One Graph client, searching a folder at a time over HTTP.
+pub struct GraphSearch<'a> {
+    pub client: &'a GraphClient,
+    pub query: &'a crate::search::Query,
+}
+
+impl SearchBackend for GraphSearch<'_> {
+    type Key = String;
+
+    async fn stubs(&mut self, folder: &str, limit: usize) -> Result<MailboxStubs<String>> {
+        self.client
+            .search_stubs(self.query, Some(folder), limit)
+            .await
+    }
+
+    /// The ids are Graph's own and name a message in whichever folder it
+    /// sits, so `folder` only says whose hits these are.
+    async fn fetch(&mut self, _folder: &str, ids: &[String]) -> Result<Vec<FetchedEmail>> {
+        self.client.fetch_search_hits(ids).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    fn stub(key: u32, date: &str, message_id: &str) -> SearchStub<u32> {
+        SearchStub {
+            key,
+            date: date.to_string(),
+            message_id: Some(message_id.to_string()),
+        }
+    }
+
+    /// The merge picks the `limit` newest by `Date` across every mailbox,
+    /// whatever their UIDs say, and each survivor stays with its mailbox.
+    #[test]
+    fn the_newest_stubs_across_mailboxes_survive_the_cut() {
+        let groups = vec![
+            (
+                0,
+                vec![
+                    stub(90, "1 Feb 2026 10:00:00 +0000", "<a@x>"),
+                    stub(80, "20 Feb 2026 10:00:00 +0000", "<b@x>"),
+                ],
+            ),
+            (
+                1,
+                vec![
+                    stub(7, "25 Feb 2026 10:00:00 +0000", "<c@x>"),
+                    stub(6, "24 Feb 2026 10:00:00 +0000", "<d@x>"),
+                    stub(5, "3 Feb 2026 10:00:00 +0000", "<e@x>"),
+                ],
+            ),
+            (2, vec![]),
+            (3, vec![stub(1, "not a date", "<f@x>")]),
+        ];
+        let (picked, dropped) = select(groups.clone(), 3);
+        assert_eq!(picked, vec![(0, vec![80]), (1, vec![7, 6])]);
+        assert!(dropped, "three of six were cut");
+
+        let (picked, dropped) = select(groups, 6);
+        assert_eq!(
+            picked,
+            vec![(0, vec![80, 90]), (1, vec![7, 6, 5]), (3, vec![1])],
+            "an unparsable date sorts last"
+        );
+        assert!(!dropped, "every stub fits");
+    }
+
+    /// A scripted server: each mailbox's matches newest first, and a record
+    /// of what each pass asked for.
+    #[derive(Default)]
+    struct Script {
+        matches: HashMap<String, Vec<SearchStub<u32>>>,
+        refuse: HashSet<String>,
+        asked: Vec<(String, usize)>,
+        fetched: Vec<(String, Vec<u32>)>,
+    }
+
+    impl SearchBackend for Script {
+        type Key = u32;
+
+        async fn stubs(&mut self, mailbox: &str, limit: usize) -> Result<MailboxStubs<u32>> {
+            self.asked.push((mailbox.to_string(), limit));
+            if self.refuse.contains(mailbox) {
+                anyhow::bail!("NO no such mailbox");
+            }
+            let all = self.matches.get(mailbox).cloned().unwrap_or_default();
+            Ok(MailboxStubs {
+                more: all.len() > limit,
+                stubs: all.into_iter().take(limit).collect(),
+                capped: false,
+            })
+        }
+
+        async fn fetch(&mut self, mailbox: &str, uids: &[u32]) -> Result<Vec<FetchedEmail>> {
+            self.fetched.push((mailbox.to_string(), uids.to_vec()));
+            let stubs = &self.matches[mailbox];
+            Ok(uids
+                .iter()
+                .map(|uid| {
+                    let stub = stubs.iter().find(|s| s.key == *uid).unwrap();
+                    FetchedEmail {
+                        from: String::new(),
+                        to: String::new(),
+                        cc: None,
+                        reply_to: None,
+                        bcc: None,
+                        subject: String::new(),
+                        date: stub.date.clone(),
+                        body_text: String::new(),
+                        html_body: None,
+                        has_attachments: false,
+                        server_has_attachments: None,
+                        message_id: stub.message_id.clone(),
+                        attachments: Vec::new(),
+                        flags: Default::default(),
+                        calendar_ics: None,
+                        event: None,
+                    }
+                })
+                .collect())
+        }
+    }
+
+    /// A sink that drops one Message-ID and records the rest.
+    #[derive(Default)]
+    struct Collect {
+        drop: Option<String>,
+        landed: Vec<(usize, Vec<String>)>,
+        refused: Vec<usize>,
+    }
+
+    impl SearchSink for Collect {
+        fn admit(&mut self, message_id: Option<&str>) -> bool {
+            message_id != self.drop.as_deref()
+        }
+        fn land(&mut self, mailbox: usize, emails: Vec<FetchedEmail>) {
+            let ids = emails.into_iter().filter_map(|e| e.message_id).collect();
+            self.landed.push((mailbox, ids));
+        }
+        fn refused(&mut self, mailbox: usize, _error: &anyhow::Error) {
+            self.refused.push(mailbox);
+        }
+    }
+
+    fn day(n: u32) -> String {
+        format!("{n} Mar 2026 10:00:00 +0000")
+    }
+
+    /// Every mailbox is asked for the whole limit, only the merged newest
+    /// `limit` are downloaded, and the answer says it was cut (PERSO-175).
+    #[tokio::test]
+    async fn every_mailbox_is_asked_for_the_whole_limit_and_only_the_survivors_download() {
+        let mut script = Script::default();
+        // A busy inbox with the five newest, and an idle archive.
+        script.matches.insert(
+            "INBOX".into(),
+            (0..8)
+                .map(|i| stub(100 - i, &day(30 - i), &format!("<in{i}@x>")))
+                .collect(),
+        );
+        script.matches.insert(
+            "Archive".into(),
+            (0..3)
+                .map(|i| stub(10 - i, &day(20 - i), &format!("<ar{i}@x>")))
+                .collect(),
+        );
+        let mailboxes = vec!["INBOX".to_string(), "Archive".to_string()];
+        let mut sink = Collect::default();
+
+        let cut = two_phase(&mut script, &mailboxes, 5, &mut sink).await;
+
+        assert_eq!(
+            script.asked,
+            vec![("INBOX".to_string(), 5), ("Archive".to_string(), 5)],
+            "the limit is not split across the mailboxes"
+        );
+        assert_eq!(
+            script.fetched,
+            vec![("INBOX".to_string(), vec![100, 99, 98, 97, 96])],
+            "the archive's older hits lost the merge and were never downloaded"
+        );
+        assert_eq!(sink.landed.len(), 1);
+        assert_eq!(sink.landed[0].1.len(), 5);
+        assert_eq!(
+            cut,
+            Cut {
+                truncated: true,
+                capped: false
+            }
+        );
+    }
+
+    /// A search that fits its limit is not cut, a refused mailbox goes to the
+    /// sink and does not stop the others, and a hit the sink does not admit
+    /// is neither counted nor downloaded.
+    #[tokio::test]
+    async fn a_refused_mailbox_and_a_dropped_hit_leave_the_rest_alone() {
+        let mut script = Script::default();
+        script.matches.insert(
+            "INBOX".into(),
+            vec![stub(2, &day(2), "<keep@x>"), stub(1, &day(1), "<shown@x>")],
+        );
+        script.refuse.insert("Spesen".into());
+        let mailboxes = vec!["Spesen".to_string(), "INBOX".to_string()];
+        let mut sink = Collect {
+            drop: Some("<shown@x>".into()),
+            ..Collect::default()
+        };
+
+        let cut = two_phase(&mut script, &mailboxes, 50, &mut sink).await;
+
+        assert_eq!(sink.refused, vec![0]);
+        assert_eq!(script.fetched, vec![("INBOX".to_string(), vec![2])]);
+        assert_eq!(sink.landed, vec![(1, vec!["<keep@x>".to_string()])]);
+        assert_eq!(cut, Cut::default(), "nothing was cut");
+    }
+
+    /// A mailbox that matched more than it listed cuts the answer even when
+    /// every stub it listed survives the merge.
+    #[tokio::test]
+    async fn a_mailbox_holding_more_than_it_listed_cuts_the_answer() {
+        let mut script = Script::default();
+        script.matches.insert(
+            "INBOX".into(),
+            (0..3)
+                .map(|i| stub(10 - i, &day(10 - i), &format!("<m{i}@x>")))
+                .collect(),
+        );
+        let mut sink = Collect {
+            // The post-filter drops one of the two the mailbox listed.
+            drop: Some("<m0@x>".into()),
+            ..Collect::default()
+        };
+        let cut = two_phase(&mut script, &["INBOX".to_string()], 2, &mut sink).await;
+        assert_eq!(script.fetched, vec![("INBOX".to_string(), vec![9])]);
+        assert!(cut.truncated);
+    }
+}

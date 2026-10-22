@@ -10,11 +10,14 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info, warn};
+use mp_protocol::listing::GRAPH_SEARCH_CAP;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use crate::config::GraphConfig;
 use crate::ingest::pass_may_prune;
 use crate::parse::{sanitize_attachment_filename, AttachmentData, FetchedEmail};
+use crate::server_search::{MailboxStubs, SearchStub};
 use crate::sync::{stops_at, FreshObservation, Stop, StopPoint, SyncResult, SyncTarget};
 use crate::timing::TimingSpan;
 use crate::types::MailboxRole;
@@ -464,12 +467,26 @@ struct GraphBody {
     content: Option<String>,
 }
 
+/// One page of a message collection: a folder listing, or a search page of
+/// whole messages or of [`GraphSearchStub`]s.
 #[derive(Debug, Deserialize)]
-struct GraphMessageList {
-    value: Vec<GraphMessage>,
+struct GraphPage<T> {
+    value: Vec<T>,
     /// The next page, which a search follows up to its limit.
     #[serde(rename = "@odata.nextLink", default)]
     next_link: Option<String>,
+}
+
+/// One hit of a search's first pass (PERSO-175): what the merge across
+/// mailboxes reads, and the id the second pass downloads it by.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphSearchStub {
+    id: String,
+    #[serde(default)]
+    internet_message_id: Option<String>,
+    #[serde(default)]
+    received_date_time: Option<String>,
 }
 
 /// One entry of a message's `/attachments` collection.
@@ -946,7 +963,7 @@ impl GraphClient {
             ));
         }
 
-        let msg_list: GraphMessageList =
+        let msg_list: GraphPage<GraphMessage> =
             resp.json().await.context("Failed to parse message list")?;
 
         let mut emails = Vec::with_capacity(msg_list.value.len());
@@ -3527,11 +3544,10 @@ const QUERY_VALUE_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::N
 /// The most messages one Graph page returns: `$top` takes 1 to 1000.
 const GRAPH_MAX_TOP: usize = 1000;
 
-/// The most results a `$search` on messages answers across all its pages:
-/// "A `$search` request returns up to 1,000 results" (Microsoft Learn, "Use
-/// the $search query parameter"). A `$filter` or a plain listing pages on
-/// past it.
-pub const GRAPH_SEARCH_CAP: usize = 1000;
+/// The `$select` of a search's first pass: the id the second pass downloads
+/// by, the Message-ID the dedup and the attachment post-filter read, and the
+/// date the merge orders by (PERSO-175).
+const STUB_SELECT: &str = "id,internetMessageId,receivedDateTime";
 
 /// What a search does after one page of hits.
 #[derive(Debug, PartialEq)]
@@ -3580,15 +3596,25 @@ fn after_search_page(
     }
 }
 
-/// A Graph search's hits, newest first as Graph orders them, and whether
-/// more matched than they hold (PERSO-175).
-pub struct GraphSearch<T> {
-    pub hits: Vec<T>,
+/// A Graph search's hits, in Graph's order, and whether more matched than
+/// they hold (PERSO-175).
+struct SearchPages<T> {
+    hits: Vec<T>,
     /// More matched than `hits` holds.
-    pub truncated: bool,
+    truncated: bool,
     /// Graph's [`GRAPH_SEARCH_CAP`] stopped the search short of its limit,
     /// which no paging gets past: a narrower query is the only way on.
-    pub capped: bool,
+    capped: bool,
+}
+
+/// What a search asks Graph for per hit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchShape {
+    /// The whole message and its threading signals, for the hit
+    /// `message.fetch` ingests.
+    Whole,
+    /// A [`GraphSearchStub`], the first pass of a server search.
+    Stub,
 }
 
 /// The query parameter a [`crate::search::GraphQuery`] travels as, for the URL
@@ -3614,15 +3640,27 @@ fn graph_query_param(query: &crate::search::GraphQuery) -> Option<(&'static str,
 /// `$search` comes back newest first on its own, and the Message-ID filter
 /// matches a handful of copies at most.
 ///
-/// Every search asks for the threading signals the sync download asks for,
-/// `conversationId` and [`MESSAGE_EXPAND`] (PERSO-147), so a hit
-/// `message.fetch` ingests threads at once instead of waiting for a re-thread
-/// that lists its whole folder for it. Graph accepts the `$expand` beside a
-/// `$search` and beside a `$filter`.
-fn search_url(base: &str, limit: usize, query: &crate::search::GraphQuery) -> Result<reqwest::Url> {
+/// A [`SearchShape::Whole`] search asks for the threading signals the sync
+/// download asks for, `conversationId` and [`MESSAGE_EXPAND`] (PERSO-147), so
+/// a hit `message.fetch` ingests threads at once instead of waiting for a
+/// re-thread that lists its whole folder for it. Graph accepts the `$expand`
+/// beside a `$search` and beside a `$filter`. A [`SearchShape::Stub`] search
+/// asks for [`STUB_SELECT`] alone.
+fn search_url(
+    base: &str,
+    limit: usize,
+    query: &crate::search::GraphQuery,
+    shape: SearchShape,
+) -> Result<reqwest::Url> {
     let mut pairs: Vec<(&str, String)> = Vec::new();
     pairs.push(("$top", limit.clamp(1, GRAPH_MAX_TOP).to_string()));
-    pairs.push(("$select", format!("{MESSAGE_SELECT},conversationId")));
+    pairs.push((
+        "$select",
+        match shape {
+            SearchShape::Whole => format!("{MESSAGE_SELECT},conversationId"),
+            SearchShape::Stub => STUB_SELECT.to_string(),
+        },
+    ));
     match graph_query_param(query) {
         Some(param) => pairs.push(param),
         None => pairs.push(("$orderby", "receivedDateTime desc".to_string())),
@@ -3638,7 +3676,10 @@ fn search_url(base: &str, limit: usize, query: &crate::search::GraphQuery) -> Re
         .collect::<Vec<_>>()
         .join("&");
     // Already percent-encoded, so it joins the query as it is.
-    let query = format!("{query}&{MESSAGE_EXPAND}");
+    let query = match shape {
+        SearchShape::Whole => format!("{query}&{MESSAGE_EXPAND}"),
+        SearchShape::Stub => query,
+    };
     let mut url = reqwest::Url::parse(base).with_context(|| format!("parsing {base}"))?;
     url.set_query(Some(&query));
     Ok(url)
@@ -3677,63 +3718,107 @@ fn search_refused(
 }
 
 impl GraphClient {
-    /// Search messages: a KQL `$search` for every match term, or the
-    /// `$filter` of an exact Message-ID lookup, paged through
+    /// The first pass of a server search (PERSO-175): the newest `limit` hits
+    /// of a KQL `$search` for every match term, or of the `$filter` of an
+    /// exact Message-ID lookup, as [`STUB_SELECT`] stubs, paged through
     /// `@odata.nextLink` up to `limit`.
+    ///
+    /// The caller merges every folder's stubs and cuts them to `limit` before
+    /// downloading anything, then downloads the survivors whole with
+    /// [`Self::fetch_search_hits`] ([`crate::server_search`]). The stub date
+    /// is the one [`graph_message_to_fetched_email`] writes, so the merge
+    /// orders the stubs as the downloaded hits sort.
     ///
     /// A refused request is an error naming what was sent. There is no
     /// fallback: the one this replaced dropped the `$search` half and listed
     /// the folder's newest messages as if they were the hits (PERSO-173).
-    pub async fn search_messages(
+    pub async fn search_stubs(
         &self,
         query: &crate::search::Query,
         folder: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<FetchedEmail>> {
-        Ok(self
-            .search_messages_counted(query, folder, limit)
-            .await?
-            .hits)
-    }
-
-    /// [`Self::search_messages`], saying whether more matched than it
-    /// returns, for `mp search` to report the cut (PERSO-175).
-    pub async fn search_messages_counted(
-        &self,
-        query: &crate::search::Query,
-        folder: Option<&str>,
-        limit: usize,
-    ) -> Result<GraphSearch<FetchedEmail>> {
-        let search = self.search_messages_paged(query, folder, limit).await?;
-        Ok(GraphSearch {
-            hits: search.hits.into_iter().map(|hit| hit.email).collect(),
-            truncated: search.truncated,
-            capped: search.capped,
+    ) -> Result<MailboxStubs<String>> {
+        let pages: SearchPages<GraphSearchStub> = self
+            .search_pages(query, folder, limit, SearchShape::Stub)
+            .await?;
+        let stubs = pages
+            .hits
+            .into_iter()
+            .filter(|stub| {
+                is_exact_message_id(
+                    stub.internet_message_id.as_deref(),
+                    query.message_id.as_deref(),
+                )
+            })
+            .map(|stub| SearchStub {
+                key: stub.id,
+                date: stub
+                    .received_date_time
+                    .as_deref()
+                    .map(iso_to_rfc2822)
+                    .unwrap_or_default(),
+                message_id: stub.internet_message_id,
+            })
+            .collect();
+        Ok(MailboxStubs {
+            stubs,
+            more: pages.truncated,
+            capped: pages.capped,
         })
     }
 
-    /// [`Self::search_messages`], with each hit's threading signals beside it
-    /// (PERSO-147), for the caller that ingests a hit: `message.fetch`.
+    /// The second pass of a server search (PERSO-175): the messages behind
+    /// the Graph ids [`Self::search_stubs`] kept, downloaded whole in
+    /// `/$batch` chunks ([`Self::fetch_messages_by_ids`]).
+    pub async fn fetch_search_hits(&self, ids: &[String]) -> Result<Vec<FetchedEmail>> {
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let fetched = self.fetch_messages_by_ids(&ids).await?;
+        Ok(fetched.emails.into_iter().map(|hit| hit.email).collect())
+    }
+
+    /// The messages matching `query` in `folder`, whole and with each hit's
+    /// threading signals beside it (PERSO-147), for the caller that ingests a
+    /// hit: `message.fetch`.
     pub async fn search_messages_threaded(
         &self,
         query: &crate::search::Query,
         folder: Option<&str>,
         limit: usize,
     ) -> Result<Vec<GraphFetched>> {
-        Ok(self.search_messages_paged(query, folder, limit).await?.hits)
+        let pages: SearchPages<GraphMessage> = self
+            .search_pages(query, folder, limit, SearchShape::Whole)
+            .await?;
+        let mut hits = Vec::with_capacity(pages.hits.len());
+        for msg in &pages.hits {
+            if !is_exact_message_id(
+                msg.internet_message_id.as_deref(),
+                query.message_id.as_deref(),
+            ) {
+                continue;
+            }
+            hits.push(GraphFetched {
+                email: self.hydrate(msg).await,
+                threading: thread_hints(
+                    msg.conversation_id.as_deref(),
+                    &msg.single_value_extended_properties,
+                ),
+            });
+        }
+        Ok(hits)
     }
 
-    /// The one search all three entry points run.
+    /// The pages one search reads, in `shape`, cut to `limit`.
     ///
     /// One page used to be all a search read, with `$top` clamped to 1000,
     /// so `--limit 2500` quietly answered 1000; it now follows
     /// `@odata.nextLink` until the limit (see [`after_search_page`]).
-    async fn search_messages_paged(
+    async fn search_pages<T: DeserializeOwned>(
         &self,
         query: &crate::search::Query,
         folder: Option<&str>,
         limit: usize,
-    ) -> Result<GraphSearch<GraphFetched>> {
+        shape: SearchShape,
+    ) -> Result<SearchPages<T>> {
         let graph_query = crate::search::to_graph(query).map_err(|e| anyhow!("{e}"))?;
 
         let base = if let Some(f) = folder {
@@ -3744,8 +3829,8 @@ impl GraphClient {
         };
 
         let is_search = matches!(graph_query, crate::search::GraphQuery::Search(_));
-        let mut url = search_url(&base, limit, &graph_query)?;
-        let mut messages: Vec<GraphMessage> = Vec::new();
+        let mut url = search_url(&base, limit, &graph_query, shape)?;
+        let mut hits: Vec<T> = Vec::new();
         let mut pages = 0usize;
         let (truncated, capped) = loop {
             debug!("Graph search URL: {}", url);
@@ -3765,13 +3850,13 @@ impl GraphClient {
                 return Err(search_refused(&graph_query, status, &body));
             }
 
-            let page: GraphMessageList = resp
+            let page: GraphPage<T> = resp
                 .json()
                 .await
                 .context("Failed to parse search results")?;
             pages += 1;
-            messages.extend(page.value);
-            match after_search_page(messages.len(), limit, page.next_link, is_search, pages) {
+            hits.extend(page.value);
+            match after_search_page(hits.len(), limit, page.next_link, is_search, pages) {
                 // The whole link, as Graph hands it: its `$skip` counts items
                 // Graph walked, not hits, and is not ours to rebuild.
                 SearchStep::Next(next) => {
@@ -3781,48 +3866,25 @@ impl GraphClient {
                 SearchStep::Done { truncated, capped } => break (truncated, capped),
             }
         };
-        messages.truncate(limit);
-
-        let mut emails = Vec::with_capacity(messages.len());
-        for msg in &messages {
-            let mut email = graph_message_to_fetched_email(msg);
-            if lists_attachments(msg) {
-                if let Ok(att) = self.fetch_attachments(&msg.id).await {
-                    email.attachments = att;
-                }
-            }
-            populate_calendar_from_attachments(&mut email);
-            emails.push(GraphFetched {
-                email,
-                threading: thread_hints(
-                    msg.conversation_id.as_deref(),
-                    &msg.single_value_extended_properties,
-                ),
-            });
-        }
-
-        retain_exact_message_id_graph(&mut emails, query.message_id.as_deref());
-
-        Ok(GraphSearch {
-            hits: emails,
+        hits.truncate(limit);
+        Ok(SearchPages {
+            hits,
             truncated,
             capped,
         })
     }
 }
 
-/// Tighten the fuzzy `$search` / `$filter` match to an exact Message-ID one,
-/// case- and bracket-insensitively, when the query named a Message-ID.
-fn retain_exact_message_id_graph(emails: &mut Vec<GraphFetched>, message_id: Option<&str>) {
-    let Some(mid) = message_id else {
-        return;
+/// Whether a hit's `Message-ID` is the one the query named, case- and
+/// bracket-insensitively: the `$search` and `$filter` matches are fuzzy, and
+/// a query that named no Message-ID keeps every hit.
+fn is_exact_message_id(candidate: Option<&str>, wanted: Option<&str>) -> bool {
+    let Some(wanted) = wanted else {
+        return true;
     };
-    let wanted = crate::imap_client::normalize_message_id(mid).to_string();
-    emails.retain(|GraphFetched { email, .. }| {
-        email.message_id.as_deref().is_some_and(|m| {
-            crate::imap_client::normalize_message_id(m).eq_ignore_ascii_case(&wanted)
-        })
-    });
+    let wanted = crate::imap_client::normalize_message_id(wanted);
+    candidate
+        .is_some_and(|m| crate::imap_client::normalize_message_id(m).eq_ignore_ascii_case(wanted))
 }
 
 // ---------------------------------------------------------------------------
@@ -5248,6 +5310,7 @@ mod tests {
             "https://graph.microsoft.com/v1.0/me/messages",
             10,
             &graph_query,
+            SearchShape::Whole,
         )
         .unwrap();
         let raw = url.as_str();
@@ -5264,11 +5327,35 @@ mod tests {
         assert_eq!(pairs["$top"], "10");
     }
 
+    /// A server search's first pass asks Graph for the stub fields alone,
+    /// without the bodies and the threading `$expand` a whole hit carries
+    /// (PERSO-175).
+    #[test]
+    fn a_stub_search_asks_for_the_stub_fields_alone() {
+        let query = crate::search::parse("from:ivana ledger").unwrap();
+        let graph_query = crate::search::to_graph(&query).unwrap();
+        let base = "https://graph.microsoft.com/v1.0/me/messages";
+        let pairs = |shape| -> std::collections::HashMap<String, String> {
+            search_url(base, 50, &graph_query, shape)
+                .unwrap()
+                .query_pairs()
+                .into_owned()
+                .collect()
+        };
+        let stub = pairs(SearchShape::Stub);
+        assert_eq!(stub["$select"], STUB_SELECT);
+        assert!(!stub.contains_key("$expand"), "{stub:?}");
+        assert_eq!(stub["$top"], "50");
+        let whole = pairs(SearchShape::Whole);
+        assert!(whole["$select"].contains("body"), "{whole:?}");
+        assert!(whole.contains_key("$expand"), "{whole:?}");
+    }
+
     /// A search page carries Graph's `@odata.nextLink`, which the search
     /// follows; the list used to drop it, so one page was all a search read.
     #[test]
     fn a_search_page_keeps_its_next_link() {
-        let page: GraphMessageList = serde_json::from_value(serde_json::json!({
+        let page: GraphPage<GraphMessage> = serde_json::from_value(serde_json::json!({
             "value": [],
             "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skip=1000"
         }))
@@ -5277,7 +5364,7 @@ mod tests {
             page.next_link.as_deref(),
             Some("https://graph.microsoft.com/v1.0/me/messages?$skip=1000")
         );
-        let last: GraphMessageList =
+        let last: GraphPage<GraphMessage> =
             serde_json::from_value(serde_json::json!({"value": []})).unwrap();
         assert_eq!(last.next_link, None);
     }
@@ -5378,6 +5465,7 @@ mod tests {
             "https://graph.microsoft.com/v1.0/me/messages",
             limit,
             &graph_query,
+            SearchShape::Whole,
         )
         .unwrap()
         .query_pairs()

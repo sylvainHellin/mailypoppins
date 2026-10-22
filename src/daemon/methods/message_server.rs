@@ -2,12 +2,11 @@
 //! server: `message.search_server` and `message.fetch` (P5-U10c, #0126,
 //! `LST-08` and `LST-09`).
 //!
-//! They are the TUI search overlay's server leg, moved off the client's own
-//! background thread. `src/tui/helpers.rs`'s `lib_do_multi_search` opened one
-//! IMAP session, searched each target mailbox with a slice of a total budget
-//! and handed the whole batch back at the end; `src/tui/actions.rs`'s `f` key
-//! asked the server for the uid of one Message-ID and ingested the bytes it
-//! got back. Both are here now, unchanged in what they ask the server for.
+//! They were the TUI search overlay's server leg, moved off the client's own
+//! background thread: `src/tui/helpers.rs`'s `lib_do_multi_search` and the
+//! `f` key of `src/tui/actions.rs`, which asked the server for the uid of one
+//! Message-ID and ingested the bytes it got back. The search is `mp search`'s
+//! and the desktop's server leg too (`LST-06`).
 //!
 //! `message.list_server` stays in [`super::message`] and is a different
 //! method: P4-U10 registered that name for `mp fetch`'s one-mailbox query over
@@ -40,6 +39,16 @@
 //! that cannot be resolved, which happens once, before any mailbox is
 //! selected.
 //!
+//! # What the limit means
+//!
+//! `limit` is the number of hits the whole search answers with (PERSO-175):
+//! every mailbox is asked for its newest `limit` matches as stubs, the stubs
+//! are merged newest first and cut to `limit`, and only the survivors are
+//! downloaded whole, mailbox by mailbox ([`crate::server_search`]). The settle
+//! says when the answer is cut, `truncated`, and when Microsoft Graph's
+//! `$search` cap cut it, `capped`. `mp search`, the TUI overlay and the
+//! desktop search bar all read the answer from this one call.
+//!
 //! # What the settle says about coverage
 //!
 //! A plain IMAP server has no search key for `has:attachment`, so the leg
@@ -58,13 +67,14 @@ use serde_json::{json, Value};
 use mp_protocol::listing::{
     MessageFlags, SearchCoverage, ServerSearchHit, ServerSearchSettled, UnreachableMailbox,
 };
-use mp_protocol::{ErrorCode, RpcError};
+use mp_protocol::RpcError;
 
 use crate::config::{AccountConfig, AuthMethod};
 use crate::daemon::state::events::Event;
 use crate::daemon::state::{CanonicalState, Change};
 use crate::parse::FetchedEmail;
 use crate::selector::Selector;
+use crate::server_search::{two_phase, Cut, GraphSearch, ImapSearch, SearchSink};
 use crate::store::{read, BlobStore, Store};
 use crate::tui::app::{build_mailboxes, resolve_date};
 
@@ -83,14 +93,8 @@ use super::{internal, invalid_params, only_params, string_param};
 /// `operation.progress` report does not.
 const KIND_SERVER_SEARCH_HIT: &str = "message.server_hit";
 
-/// The total hit budget a search spends across its mailboxes when the caller
-/// names none, which is what the in-process leg spent.
+/// The number of hits a search answers with when the caller names none.
 const DEFAULT_SEARCH_LIMIT: usize = 50;
-
-/// The floor under a per-mailbox slice of that budget: five mailboxes sharing
-/// fifty hits is ten each, and a client that asked for twelve across five
-/// would otherwise get two apiece and see nothing.
-const MIN_PER_MAILBOX: usize = 5;
 
 /// The two methods, in method-name order.
 pub const MESSAGE_SERVER_LEG_METHOD_SPECS: [MethodSpec; 2] = [
@@ -461,7 +465,7 @@ fn ingest_into(
 
 /// One mailbox a search runs against: the sidebar label the hits are reported
 /// under, and the server name the session selects.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchTarget {
     label: String,
     server_name: String,
@@ -474,7 +478,7 @@ struct SearchRequest {
     query: String,
     parsed: crate::search::Query,
     targets: Vec<SearchTarget>,
-    /// The total hit budget across every target.
+    /// The number of hits the whole search answers with (PERSO-175).
     limit: usize,
     /// The normalised Message-IDs the local pass is already showing.
     excluded: HashSet<String>,
@@ -486,26 +490,25 @@ struct SearchRequest {
 /// `query` is the grammar a user types rather than an engine enum: the overlay
 /// holds a parsed `search::Query` and renders it back with
 /// `search::to_query_string`, so one parser serves every backend, which is
-/// `LST-06`'s whole point.
+/// `LST-06`'s whole point. The field filters `mp search` takes as flags travel
+/// under `message.search`'s names and build the same query.
 fn search_request(
     params: &Value,
     snapshot: &super::super::config::Snapshot,
 ) -> Result<SearchRequest, RpcError> {
-    only_params(
-        "message.search_server",
-        params,
-        &[
-            "account",
-            "query",
-            "mailboxes",
-            "limit",
-            "exclude_message_ids",
-        ],
-    )?;
+    let mut known = vec![
+        "account",
+        "query",
+        "mailboxes",
+        "limit",
+        "exclude_message_ids",
+    ];
+    known.extend(super::message::SEARCH_FLAG_PARAMS);
+    only_params("message.search_server", params, &known)?;
     let name = string_param(params, "account")?;
     let account = super::sync::syncable_account(&snapshot.accounts, &name)?;
     let query = string_param(params, "query")?;
-    let parsed = crate::search::from_cli(&query, &crate::search::Flags::default())
+    let parsed = crate::search::from_cli(&query, &super::message::search_flags(params)?)
         .map_err(invalid_params)?;
 
     let configured: Vec<SearchTarget> = build_mailboxes(account)
@@ -517,15 +520,20 @@ fn search_request(
             })
         })
         .collect();
+    // `mailboxes` first, then the query's own `in:` directive, which is the
+    // precedence `mp search` gives `--mailbox` over `in:`.
     let targets = match params.get("mailboxes") {
-        None | Some(Value::Null) => configured,
+        None | Some(Value::Null) => match parsed.in_mailbox.as_deref() {
+            Some(wanted) => vec![pick_target(&configured, wanted)?],
+            None => configured,
+        },
         Some(Value::Array(names)) => names
             .iter()
             .map(|name| {
                 let wanted = name
                     .as_str()
                     .ok_or_else(|| invalid_params("mailboxes is an array of mailbox names"))?;
-                pick_target(&configured, wanted, &name_of(account))
+                pick_target(&configured, wanted)
             })
             .collect::<Result<Vec<SearchTarget>, RpcError>>()?,
         Some(_) => {
@@ -572,43 +580,34 @@ fn search_request(
     })
 }
 
-/// The account's name, for the refusal sentence below.
-fn name_of(account: &AccountConfig) -> String {
-    account.name.clone()
-}
-
-/// The configured target `wanted` names.
+/// The target `wanted` names.
 ///
-/// Role, slug, sidebar label **or server name**, which is one spelling more
-/// than [`super::message::resolve_mailbox`] accepts: the overlay holds a
-/// target of `(label, server_name)` and the CLI's `in:` directive is matched
-/// against both (`App::search_target_by_name`), so the wire takes whichever
-/// the caller has in hand rather than making it re-derive the other.
-fn pick_target(
-    configured: &[SearchTarget],
-    wanted: &str,
-    account: &str,
-) -> Result<SearchTarget, RpcError> {
-    configured
+/// A configured mailbox by its sidebar label **or its server name**, which is
+/// one spelling more than [`super::message::resolve_mailbox`] accepts: the
+/// overlay holds a target of `(label, server_name)` and the search grammar's
+/// `in:` directive is matched against both, so the wire takes whichever the
+/// caller has in hand rather than making it re-derive the other.
+///
+/// Any other name is a folder on the server, searched under its own name
+/// (Sylvain, 2026-10-22): the rule mailbox discovery (#0141) brings, where
+/// every folder the server lists is a mailbox. A name the server does not
+/// list fails that one mailbox, as a refused SELECT, and lands in the settle's
+/// `unreachable`; it does not fail the call.
+fn pick_target(configured: &[SearchTarget], wanted: &str) -> Result<SearchTarget, RpcError> {
+    if wanted.trim().is_empty() {
+        return Err(invalid_params("a mailbox name is not empty"));
+    }
+    Ok(configured
         .iter()
         .find(|target| {
             wanted.eq_ignore_ascii_case(&target.label)
                 || wanted.eq_ignore_ascii_case(&target.server_name)
         })
-        .map(|target| SearchTarget {
-            label: target.label.clone(),
-            server_name: target.server_name.clone(),
-        })
-        .ok_or_else(|| {
-            let known: Vec<&str> = configured
-                .iter()
-                .map(|target| target.server_name.as_str())
-                .collect();
-            invalid_params(format!(
-                "'{wanted}' is not a searchable mailbox of {account} (known: {})",
-                known.join(", ")
-            ))
-        })
+        .cloned()
+        .unwrap_or_else(|| SearchTarget {
+            label: wanted.to_string(),
+            server_name: wanted.to_string(),
+        }))
 }
 
 /// One server search, from the credential resolution to the settle.
@@ -637,17 +636,16 @@ async fn run_search(
     }
 }
 
-/// How many hits one mailbox of a `targets.len()`-mailbox search may take.
-///
-/// `limit` is a total budget split per mailbox, which is what the in-process
-/// leg spent and what the protocol document says; a per-mailbox limit would
-/// make a five-folder search cost five times what a one-folder search costs
-/// for the same number.
-fn per_mailbox(limit: usize, targets: usize) -> usize {
-    (limit / targets.max(1)).max(MIN_PER_MAILBOX)
+/// The server names of the request's targets, in search order.
+fn server_names(request: &SearchRequest) -> Vec<String> {
+    request
+        .targets
+        .iter()
+        .map(|target| target.server_name.clone())
+        .collect()
 }
 
-/// The plain-IMAP leg: one session, one `SEARCH` per mailbox.
+/// The plain-IMAP leg: one session, both passes on it.
 async fn search_imap(
     request: &SearchRequest,
     handle: &OperationHandle,
@@ -664,11 +662,7 @@ async fn search_imap(
         || host.ends_with(".gmail.com")
         || host.ends_with("googlemail.com");
     let (imap_search, attachment_postfilter, local_terms) = imap_lowering(&request.parsed, gmail)?;
-    let message_id = request.parsed.message_id.clone();
-
-    let mut session = crate::imap_client::open_imap_session(&imap).await?;
-    let per_mailbox = per_mailbox(request.limit, request.targets.len());
-    let mut state = Stream::new(
+    let mut stream = Stream::new(
         request,
         handle,
         canonical,
@@ -676,39 +670,29 @@ async fn search_imap(
         local_terms,
     );
 
-    for target in &request.targets {
-        if state.spent >= request.limit {
-            break;
-        }
-        let budget = per_mailbox.min(request.limit - state.spent);
-        log::info!(
-            "[search_server] querying mailbox '{}' (label={})",
-            target.server_name,
-            target.label,
-        );
-        match crate::imap_client::search_on_session(
-            &mut session,
-            &imap_search,
-            message_id.as_deref(),
-            &target.server_name,
-            Some(budget),
-        )
-        .await
-        {
-            Ok(emails) => state.land(&target.label, emails),
-            Err(e) => state.refused(&target.label, &e),
-        }
-    }
+    let mut session = crate::imap_client::open_imap_session(&imap).await?;
+    let mut backend = ImapSearch {
+        session: &mut session,
+        search: imap_search,
+        message_id: request.parsed.message_id.clone(),
+    };
+    let cut = two_phase(
+        &mut backend,
+        &server_names(request),
+        request.limit,
+        &mut stream,
+    )
+    .await;
     session.logout().await.ok();
-    Ok(state.settle())
+    Ok(stream.settle(cut))
 }
 
-/// The `SEARCH` command one IMAP server runs for `parsed`, whether the hits
+/// The SEARCH command one IMAP server runs for `parsed`, whether the hits
 /// must be post-filtered against the store's attachment index, and the terms
 /// that post-filter answers, which is the settle's `local_terms`.
 ///
-/// The same lowering `mp search` runs on a server search: Gmail runs every
-/// term through `X-GM-RAW`, and a plain server has no attachment key.
+/// Gmail runs every term through `X-GM-RAW`, and a plain server has no
+/// attachment key.
 fn imap_lowering(
     parsed: &crate::search::Query,
     gmail: bool,
@@ -740,55 +724,61 @@ async fn search_graph(
 ) -> anyhow::Result<ServerSearchSettled> {
     let config = crate::config::GraphConfig::load(&request.account)?;
     let client = crate::graph::GraphClient::new_async(&config).await?;
-    let per_mailbox = per_mailbox(request.limit, request.targets.len());
-    let mut state = Stream::new(request, handle, canonical, false, Vec::new());
-
-    for target in &request.targets {
-        if state.spent >= request.limit {
-            break;
-        }
-        let budget = per_mailbox.min(request.limit - state.spent);
-        match client
-            .search_messages(&request.parsed, Some(&target.server_name), budget)
-            .await
-        {
-            Ok(emails) => state.land(&target.label, emails),
-            Err(e) => state.refused(&target.label, &e),
-        }
-    }
-    Ok(state.settle())
+    let mut stream = Stream::new(request, handle, canonical, false, Vec::new());
+    let mut backend = GraphSearch {
+        client: &client,
+        query: &request.parsed,
+    };
+    let cut = two_phase(
+        &mut backend,
+        &server_names(request),
+        request.limit,
+        &mut stream,
+    )
+    .await;
+    Ok(stream.settle(cut))
 }
 
-/// What a running search has spent, dropped and published so far.
+/// What a running search has dropped and published so far.
 ///
-/// One type for both legs because the difference between them is the call that
-/// produces a mailbox's emails and nothing else: the budget arithmetic, the
-/// dedup, the store resolution and the event are the same fact either way.
+/// One type for both legs because the difference between them is the backend
+/// that answers the two passes and nothing else: the dedup, the attachment
+/// post-filter, the store resolution and the event are the same fact either
+/// way.
 struct Stream<'a> {
     request: &'a SearchRequest,
     handle: &'a OperationHandle,
     canonical: &'a CanonicalState,
-    /// Whether a plain-IMAP `has:attachment` residue must be post-filtered
-    /// against the store, which is #0086a option (b).
-    attachment_postfilter: bool,
+    /// The normalised Message-IDs the store marks as carrying an attachment,
+    /// when a plain-IMAP `has:attachment` residue is post-filtered against
+    /// the store (#0086a option b). `None` when nothing is post-filtered.
+    with_attachments: Option<HashSet<String>>,
     /// The terms the store answered rather than the server, which the settle
     /// reports so a client can say un-synced mail is not covered (PERSO-131).
     local_terms: Vec<String>,
-    /// Hits taken against the budget, dropped ones included: the budget is
-    /// what the server was asked for, not what survived the dedup.
-    spent: usize,
     /// Hits published.
     published: usize,
     /// Hits the local pass was already showing.
     deduplicated: usize,
     /// One `{mailbox, error}` per mailbox that refused.
     unreachable: Vec<UnreachableMailbox>,
-    /// Message-IDs this search has already published, so two mailboxes holding
+    /// Message-IDs this search has already admitted, so two mailboxes holding
     /// one message report it once.
     seen: HashSet<String>,
 }
 
 impl<'a> Stream<'a> {
+    /// A stream for `request`, reading the store's attachment index once
+    /// when the post-filter needs it.
+    ///
+    /// [`crate::store::open_store`] and never [`Store::open`]: this method's
+    /// gate is [`super::sync::syncable_account`], which admits an account that
+    /// has never synced, and `Store::open` *creates* the file it is handed. A
+    /// search against such an account would therefore hand it an empty store,
+    /// after which [`super::account::state_of_path`] reports it `ready` and
+    /// every read method answers an empty listing where `-32006` is owed. An
+    /// account with no store has no hit carrying an attachment, which is the
+    /// truth: un-synced mail is what `local_terms` says is not covered.
     fn new(
         request: &'a SearchRequest,
         handle: &'a OperationHandle,
@@ -796,13 +786,22 @@ impl<'a> Stream<'a> {
         attachment_postfilter: bool,
         local_terms: Vec<String>,
     ) -> Stream<'a> {
+        let account = &request.account.name;
+        let with_attachments = attachment_postfilter.then(|| {
+            let Some(store) = crate::store::open_store(account) else {
+                return HashSet::new();
+            };
+            read::message_ids_with_attachments(&store, account).unwrap_or_else(|e| {
+                log::warn!("[search_server] reading the attachment index of {account}: {e:#}");
+                HashSet::new()
+            })
+        });
         Stream {
             request,
             handle,
             canonical,
-            attachment_postfilter,
+            with_attachments,
             local_terms,
-            spent: 0,
             published: 0,
             deduplicated: 0,
             unreachable: Vec::new(),
@@ -810,59 +809,56 @@ impl<'a> Stream<'a> {
         }
     }
 
-    /// One mailbox's answer: resolve, dedup and publish.
+    /// What the operation settles with.
+    fn settle(self, cut: Cut) -> ServerSearchSettled {
+        let coverage = coverage_of(&self.local_terms);
+        ServerSearchSettled {
+            account: self.request.account.name.clone(),
+            query: self.request.query.clone(),
+            hits: self.published as u64,
+            deduplicated: self.deduplicated as u64,
+            unreachable: self.unreachable,
+            coverage,
+            local_terms: self.local_terms,
+            truncated: cut.truncated,
+            capped: cut.capped,
+        }
+    }
+}
+
+impl SearchSink for Stream<'_> {
+    /// The attachment post-filter, the local pass's exclusions and the
+    /// cross-mailbox dedup, all on the first pass, so a hit any of them drops
+    /// neither takes a place under the limit nor is downloaded.
+    fn admit(&mut self, message_id: Option<&str>) -> bool {
+        match admission(
+            message_id,
+            self.with_attachments.as_ref(),
+            &self.request.excluded,
+            &mut self.seen,
+        ) {
+            Admission::Admitted => true,
+            Admission::Excluded => {
+                self.deduplicated += 1;
+                false
+            }
+            Admission::NoAttachment | Admission::Duplicate => false,
+        }
+    }
+
+    /// One mailbox's downloaded hits: resolve against the store and publish.
     ///
     /// The store is opened and dropped inside this call and never held across
-    /// an `.await`, which is what keeps the search future `Send`.
-    ///
-    /// [`crate::store::open_store`] and never [`Store::open`]: this method's
-    /// gate is [`super::sync::syncable_account`], which admits an account that
-    /// has never synced, and `Store::open` *creates* the file it is handed. A
-    /// search against such an account would therefore hand it an empty store,
-    /// after which [`super::account::state_of_path`] reports it `ready` and
-    /// every read method answers an empty listing where `-32006` is owed. The
-    /// resolution is optional for exactly that reason: `to_hit` and the
-    /// attachment post-filter both already take a `None` store as "the local
-    /// store knows nothing about this hit", which is the truth here.
-    fn land(&mut self, label: &str, emails: Vec<FetchedEmail>) {
-        log::info!(
-            "[search_server] '{label}' returned {} result(s)",
-            emails.len()
-        );
-        self.spent += emails.len();
-        let account = self.request.account.name.clone();
-        let store = crate::store::open_store(&account);
-        let with_attachments = self
-            .attachment_postfilter
-            .then(|| {
-                store
-                    .as_ref()
-                    .and_then(|store| read::message_ids_with_attachments(store, &account).ok())
-            })
-            .flatten();
-
+    /// an `.await`, which is what keeps the search future `Send`; it is
+    /// optional for the reason [`Stream::new`] gives, and `to_hit` takes a
+    /// `None` store as "the local store knows nothing about this hit".
+    fn land(&mut self, mailbox: usize, emails: Vec<FetchedEmail>) {
+        let label = &self.request.targets[mailbox].label;
+        log::info!("[search_server] '{label}' landed {} hit(s)", emails.len());
+        let account = &self.request.account.name;
+        let store = crate::store::open_store(account);
         for email in emails {
-            let key = email
-                .message_id
-                .as_deref()
-                .map(read::normalize_message_id_key);
-            // Plain-IMAP `has:attachment` (#0086a option b): keep only hits
-            // the local store marks as carrying an attachment.
-            if let (Some(with_attachments), Some(key)) = (with_attachments.as_ref(), key.as_ref()) {
-                if !with_attachments.contains(key) {
-                    continue;
-                }
-            }
-            if let Some(key) = key.as_ref() {
-                if self.request.excluded.contains(key) {
-                    self.deduplicated += 1;
-                    continue;
-                }
-                if !self.seen.insert(key.clone()) {
-                    continue;
-                }
-            }
-            let hit = to_hit(store.as_ref(), &account, label, &email);
+            let hit = to_hit(store.as_ref(), account, label, &email);
             self.canonical.publish(Event::Lifecycle {
                 kind: KIND_SERVER_SEARCH_HIT,
                 payload: json!({
@@ -875,26 +871,61 @@ impl<'a> Stream<'a> {
     }
 
     /// One mailbox the server refused, which does not fail the search.
-    fn refused(&mut self, label: &str, error: &anyhow::Error) {
+    fn refused(&mut self, mailbox: usize, error: &anyhow::Error) {
+        let label = &self.request.targets[mailbox].label;
         log::warn!("[search_server] search in {label} failed: {error}");
         self.unreachable.push(UnreachableMailbox {
-            mailbox: label.to_string(),
+            mailbox: label.clone(),
             error: format!("{error}"),
         });
     }
+}
 
-    /// What the operation settles with.
-    fn settle(self) -> ServerSearchSettled {
-        let coverage = coverage_of(&self.local_terms);
-        ServerSearchSettled {
-            account: self.request.account.name.clone(),
-            query: self.request.query.clone(),
-            hits: self.published as u64,
-            deduplicated: self.deduplicated as u64,
-            unreachable: self.unreachable,
-            coverage,
-            local_terms: self.local_terms,
+/// What the first pass does with one hit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Admission {
+    /// It competes for the limit.
+    Admitted,
+    /// The store marks no attachment on it, under a plain-IMAP
+    /// `has:attachment`; a hit without a Message-ID has no mark to read.
+    NoAttachment,
+    /// The local pass is already showing it, which the settle counts.
+    Excluded,
+    /// Another mailbox already admitted it.
+    Duplicate,
+}
+
+/// The [`Admission`] of a hit carrying `message_id`, recording it in `seen`
+/// when admitted.
+///
+/// Plain-IMAP `has:attachment` (#0086a option b) keeps only hits the local
+/// store marks as carrying an attachment, `with_attachments` being that set;
+/// the exclusions and the dedup are by normalised Message-ID, so a hit
+/// without one is never a duplicate.
+fn admission(
+    message_id: Option<&str>,
+    with_attachments: Option<&HashSet<String>>,
+    excluded: &HashSet<String>,
+    seen: &mut HashSet<String>,
+) -> Admission {
+    let key = message_id.map(read::normalize_message_id_key);
+    if let Some(with_attachments) = with_attachments {
+        if !key
+            .as_ref()
+            .is_some_and(|key| with_attachments.contains(key))
+        {
+            return Admission::NoAttachment;
         }
+    }
+    let Some(key) = key else {
+        return Admission::Admitted;
+    };
+    if excluded.contains(&key) {
+        Admission::Excluded
+    } else if seen.insert(key) {
+        Admission::Admitted
+    } else {
+        Admission::Duplicate
     }
 }
 
@@ -955,34 +986,9 @@ fn to_hit(
     }
 }
 
-/// `-32006` for an account that configures no server at all, which is the same
-/// refusal a sync of it makes.
-#[allow(dead_code)]
-fn local_only(name: &str) -> RpcError {
-    RpcError {
-        code: ErrorCode::AccountNotReady.code(),
-        message: format!("{name} configures no server, so it cannot be searched"),
-        data: Some(json!({"account": name, "state": "local_only"})),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The budget is a total split across the mailboxes, with a floor so a
-    /// narrow one still shows something.
-    #[test]
-    fn the_budget_is_split_across_the_mailboxes_with_a_floor() {
-        assert_eq!(per_mailbox(50, 5), 10);
-        assert_eq!(per_mailbox(50, 1), 50);
-        assert_eq!(per_mailbox(12, 5), MIN_PER_MAILBOX);
-        assert_eq!(
-            per_mailbox(50, 0),
-            50,
-            "a search with no target spends none"
-        );
-    }
 
     /// A plain IMAP server answers `has:attachment` from the store and the
     /// settle says so; Gmail answers it itself (PERSO-131).
@@ -1010,10 +1016,12 @@ mod tests {
         assert_eq!(coverage_of(&local_terms), SearchCoverage::Server);
     }
 
-    /// A target is named by its label or by its server name, and anything else
-    /// is `-32602` naming what the account has.
+    /// A target is named by its label or by its server name, and any other
+    /// name is a folder on the server, searched under that name (PERSO-175):
+    /// `mp search --mailbox Spesen` reaches a folder the account does not
+    /// configure. Only an empty name is refused.
     #[test]
-    fn a_target_is_named_by_its_label_or_its_server_name() {
+    fn a_target_is_a_configured_mailbox_or_any_server_folder() {
         let configured = vec![
             SearchTarget {
                 label: "Inbox".to_string(),
@@ -1025,20 +1033,51 @@ mod tests {
             },
         ];
         assert_eq!(
-            pick_target(&configured, "inbox", "gamma")
-                .unwrap()
-                .server_name,
+            pick_target(&configured, "inbox").unwrap().server_name,
             "INBOX"
         );
         assert_eq!(
-            pick_target(&configured, "Team/Reports", "gamma")
-                .unwrap()
-                .label,
+            pick_target(&configured, "Team/Reports").unwrap().label,
             "Extra"
         );
-        let refused = pick_target(&configured, "nosuch", "gamma").expect_err("no such mailbox");
+        assert_eq!(
+            pick_target(&configured, "Spesen").unwrap(),
+            SearchTarget {
+                label: "Spesen".to_string(),
+                server_name: "Spesen".to_string(),
+            }
+        );
+        let refused = pick_target(&configured, " ").expect_err("an empty name");
         assert_eq!(refused.code, -32602);
-        assert!(refused.message.contains("INBOX"), "{}", refused.message);
+    }
+
+    /// The first pass drops a hit the store marks no attachment on under a
+    /// plain-IMAP `has:attachment`, one the local pass is showing, and the
+    /// second copy of one another mailbox holds, before any of them takes a
+    /// place under the limit (PERSO-175).
+    #[test]
+    fn the_first_pass_filters_before_the_limit_is_spent() {
+        let key = |mid: &str| read::normalize_message_id_key(mid);
+        let with_attachments: HashSet<String> =
+            ["<pdf@x>", "<shown@x>"].into_iter().map(key).collect();
+        let excluded: HashSet<String> = [key("<shown@x>")].into_iter().collect();
+        let mut seen = HashSet::new();
+        let mut admit = |mid: Option<&str>, attachments: bool| {
+            admission(
+                mid,
+                attachments.then_some(&with_attachments),
+                &excluded,
+                &mut seen,
+            )
+        };
+
+        assert_eq!(admit(Some("<pdf@x>"), true), Admission::Admitted);
+        assert_eq!(admit(Some("<PDF@x>"), true), Admission::Duplicate);
+        assert_eq!(admit(Some("<plain@x>"), true), Admission::NoAttachment);
+        assert_eq!(admit(None, true), Admission::NoAttachment);
+        assert_eq!(admit(Some("<shown@x>"), true), Admission::Excluded);
+        assert_eq!(admit(Some("<plain@x>"), false), Admission::Admitted);
+        assert_eq!(admit(None, false), Admission::Admitted);
     }
 
     fn email(mid: &str) -> FetchedEmail {

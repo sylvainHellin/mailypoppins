@@ -29,6 +29,7 @@ pub mod read_cmd;
 pub mod reconcile;
 pub mod selector;
 pub mod send;
+pub mod server_search;
 pub mod store;
 pub mod sync;
 /// The terminal client, a crate of its own since #0126 (P5-U10f) and

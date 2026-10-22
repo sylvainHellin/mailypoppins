@@ -13,6 +13,7 @@ use super::{
 use crate::config::ImapConfig;
 use crate::ingest::KnownUids;
 use crate::parse::{compress_uid_set, parse_rfc822_to_fetched_email, FetchedEmail};
+use crate::server_search::{MailboxStubs, SearchStub};
 use crate::sync::{stops_at, FetchedRaw, MailboxFetch, MailboxState, Stop, StopPoint};
 use crate::timing::TimingSpan;
 use crate::types::MessageFlags;
@@ -58,37 +59,18 @@ pub async fn fetch_emails_on_session(
     .await
 }
 
-/// Run a pre-rendered IMAP `SEARCH` on an existing session and fetch the hits.
+/// Run a rendered IMAP `SEARCH` on an existing session and fetch the hits
+/// whole, which is what [`fetch_emails_on_session`] answers with.
 ///
-/// This is the seam the unified search grammar (#0086a) lowers to: the caller
-/// renders `imap_search` from the shared AST (`crate::search::to_imap` for a
-/// plain server, `to_gmail_search_command` for a Gmail `X-GM-RAW` string), so
-/// nested `OR` and every other grammar feature reaches the wire without this
-/// function knowing the grammar. `message_id`, when set, tightens the server's
-/// substring `HEADER` match to an exact one after the fetch, the same guarantee
-/// [`fetch_emails_on_session`] gives.
-pub async fn search_on_session(
+/// `message_id`, when set, tightens the server's substring `HEADER` match to
+/// an exact one after the fetch.
+async fn search_on_session(
     session: &mut ImapSession,
     imap_search: &str,
     message_id: Option<&str>,
     mailbox: &str,
     limit: Option<usize>,
 ) -> Result<Vec<FetchedEmail>> {
-    search_on_session_counted(session, imap_search, message_id, mailbox, limit)
-        .await
-        .map(|(emails, _)| emails)
-}
-
-/// [`search_on_session`], with the number of UIDs the server matched beside
-/// the hits, so a caller can tell a mailbox that filled `limit` and held more
-/// from one that had exactly that many (PERSO-175).
-pub async fn search_on_session_counted(
-    session: &mut ImapSession,
-    imap_search: &str,
-    message_id: Option<&str>,
-    mailbox: &str,
-    limit: Option<usize>,
-) -> Result<(Vec<FetchedEmail>, usize)> {
     session
         .select(mailbox)
         .await
@@ -100,10 +82,9 @@ pub async fn search_on_session_counted(
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
-        return Ok((Vec::new(), 0));
+        return Ok(Vec::new());
     }
 
-    let matched = uids.len();
     let mut uid_list: Vec<u32> = uids.into_iter().collect();
     uid_list.sort();
     let selected_uids: Vec<u32> = match limit {
@@ -141,7 +122,127 @@ pub async fn search_on_session_counted(
         });
     }
 
-    Ok((emails, matched))
+    Ok(emails)
+}
+
+/// The first pass of a server search (PERSO-175): the newest `limit` UIDs
+/// `mailbox` matches for a rendered `SEARCH`, each with only its `Date` and
+/// `Message-ID` headers, and whether the server matched more.
+///
+/// This is the seam the unified search grammar (#0086a) lowers to: the caller
+/// renders `imap_search` from the shared AST (`crate::search::to_imap` for a
+/// plain server, `to_gmail_search_command` for a Gmail `X-GM-RAW` string), so
+/// every grammar feature reaches the wire without this function knowing the
+/// grammar. `message_id`, when set, tightens the server's substring `HEADER`
+/// match to an exact one.
+///
+/// The caller merges every mailbox's stubs and cuts them to `limit` before
+/// downloading anything, then fetches the survivors whole with
+/// [`fetch_uids_on_session`] ([`crate::server_search`]). `INTERNALDATE` would
+/// be cheaper still but is the arrival time, not the `Date` the hits sort by.
+pub async fn search_stubs_on_session(
+    session: &mut ImapSession,
+    imap_search: &str,
+    message_id: Option<&str>,
+    mailbox: &str,
+    limit: usize,
+) -> Result<MailboxStubs<u32>> {
+    session
+        .select(mailbox)
+        .await
+        .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+
+    let uids = session
+        .uid_search(imap_search)
+        .await
+        .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
+
+    let matched = uids.len();
+    let mut uid_list: Vec<u32> = uids.into_iter().collect();
+    uid_list.sort_unstable();
+    let selected_uids: Vec<u32> = uid_list.into_iter().rev().take(limit).collect();
+    let more = matched > limit;
+    if selected_uids.is_empty() {
+        return Ok(MailboxStubs {
+            stubs: Vec::new(),
+            more,
+            capped: false,
+        });
+    }
+
+    let fetched: Vec<_> = session
+        .uid_fetch(
+            &compress_uid_set(&selected_uids),
+            "(UID BODY.PEEK[HEADER.FIELDS (DATE MESSAGE-ID)])",
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to fetch headers: {}", e))?
+        .try_collect()
+        .await
+        .map_err(|e| anyhow!("Failed to collect headers: {}", e))?;
+
+    let wanted = message_id.map(|mid| super::search::normalize_message_id(mid).to_string());
+    let mut stubs = Vec::new();
+    for msg in fetched.iter() {
+        let Some(uid) = msg.uid else { continue };
+        // The same parse the full message gets, so `date` and `message_id`
+        // are the values the output carries.
+        let (date, mid) = match parse_rfc822_to_fetched_email(msg.header().unwrap_or_default()) {
+            Some(email) => (email.date, email.message_id),
+            None => ("(unknown date)".to_string(), None),
+        };
+        // `HEADER "Message-ID"` is a substring match on the server side, made
+        // exact here.
+        if let Some(wanted) = &wanted {
+            let exact = mid.as_deref().is_some_and(|m| {
+                super::search::normalize_message_id(m).eq_ignore_ascii_case(wanted)
+            });
+            if !exact {
+                continue;
+            }
+        }
+        stubs.push(SearchStub {
+            key: uid,
+            date,
+            message_id: mid,
+        });
+    }
+    Ok(MailboxStubs {
+        stubs,
+        more,
+        capped: false,
+    })
+}
+
+/// The second pass of a server search (PERSO-175): the full messages behind
+/// `uids` in `mailbox`, with their flags, in one `UID FETCH`.
+pub async fn fetch_uids_on_session(
+    session: &mut ImapSession,
+    mailbox: &str,
+    uids: &[u32],
+) -> Result<Vec<FetchedEmail>> {
+    if uids.is_empty() {
+        return Ok(Vec::new());
+    }
+    session
+        .select(mailbox)
+        .await
+        .map_err(|e| anyhow!("Failed to select mailbox '{}': {}", mailbox, e))?;
+    let fetched: Vec<_> = session
+        .uid_fetch(&compress_uid_set(uids), "(BODY.PEEK[] FLAGS)")
+        .await
+        .map_err(|e| anyhow!("Failed to fetch emails: {}", e))?
+        .try_collect()
+        .await
+        .map_err(|e| anyhow!("Failed to collect emails: {}", e))?;
+    Ok(fetched
+        .iter()
+        .filter_map(|msg| {
+            let mut email = parse_rfc822_to_fetched_email(msg.body().unwrap_or_default())?;
+            email.flags = flags_of(msg);
+            Some(email)
+        })
+        .collect())
 }
 
 /// Fetch one message's raw RFC822 bytes by Message-ID (#0104).
@@ -150,7 +251,8 @@ pub async fn search_on_session_counted(
 /// holds the message under, which the plain search path discards, and the raw
 /// bytes ingest wants for the `raw` blob and the threading headers. The
 /// server's `HEADER "Message-ID"` match is a substring match, so the hits are
-/// filtered to an exact one, the same guarantee [`search_on_session`] gives.
+/// filtered to an exact one, the same guarantee [`search_stubs_on_session`]
+/// gives.
 pub async fn fetch_raw_by_message_id(
     session: &mut ImapSession,
     mailbox: &str,

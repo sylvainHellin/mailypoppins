@@ -1281,6 +1281,38 @@ fn join_drafts(
     Ok(())
 }
 
+/// The field filters `message.search` and `message.search_server` take beside
+/// `query`, which are `mp search`'s flags under their wire names.
+///
+/// `body_query` is the wire name of `--body`: `body` is already the "send me
+/// the bodies" switch, and one key may not mean two things.
+pub(super) fn search_flags(params: &Value) -> Result<crate::search::Flags, RpcError> {
+    Ok(crate::search::Flags {
+        from: opt_string_param(params, "from")?,
+        to: opt_string_param(params, "to")?,
+        cc: opt_string_param(params, "cc")?,
+        subject: opt_string_param(params, "subject")?,
+        body: opt_string_param(params, "body_query")?,
+        filename: opt_string_param(params, "filename")?,
+        has_attachment: flag_param(params, "has_attachment", false)?,
+        after: opt_string_param(params, "after")?,
+        before: opt_string_param(params, "before")?,
+    })
+}
+
+/// The wire names of [`search_flags`], for a method's own parameter list.
+pub(super) const SEARCH_FLAG_PARAMS: [&str; 9] = [
+    "from",
+    "to",
+    "cc",
+    "subject",
+    "body_query",
+    "filename",
+    "has_attachment",
+    "after",
+    "before",
+];
+
 /// The `result` of `message.search`: the ranked hits of the local index.
 ///
 /// The params mirror `mp search --local`'s flags and the query is built with
@@ -1291,21 +1323,7 @@ pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?;
     let query = string_param(params, "query")?;
-
-    let flags = crate::search::Flags {
-        from: opt_string_param(params, "from")?,
-        to: opt_string_param(params, "to")?,
-        cc: opt_string_param(params, "cc")?,
-        subject: opt_string_param(params, "subject")?,
-        // `body_query` is the wire name of `--body`: `body` is already the
-        // "send me the bodies" switch, and one key may not mean two things.
-        body: opt_string_param(params, "body_query")?,
-        filename: opt_string_param(params, "filename")?,
-        has_attachment: flag_param(params, "has_attachment", false)?,
-        after: opt_string_param(params, "after")?,
-        before: opt_string_param(params, "before")?,
-    };
-    let ast = crate::search::from_cli(&query, &flags).map_err(invalid_params)?;
+    let ast = crate::search::from_cli(&query, &search_flags(params)?).map_err(invalid_params)?;
 
     // `--mailbox` first, then the query's own `in:` directive, which is the
     // precedence `mp search` applies.

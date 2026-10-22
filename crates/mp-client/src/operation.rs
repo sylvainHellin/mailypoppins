@@ -103,6 +103,23 @@ impl Connection {
         id: &str,
         mut on_progress: impl FnMut(&Value),
     ) -> Result<Settled, ClientError> {
+        self.await_operation_events(id, |kind, payload| {
+            if kind == KIND_OPERATION_PROGRESS {
+                on_progress(payload);
+            }
+        })
+        .await
+    }
+
+    /// [`Connection::await_operation`], handing `on_event` every event the
+    /// operation `id` publishes before it finishes, as `(kind, payload)`:
+    /// its progress reports and what it streams, such as the hits of a
+    /// `message.search_server` (`message.server_hit`).
+    pub async fn await_operation_events(
+        &mut self,
+        id: &str,
+        mut on_event: impl FnMut(&str, &Value),
+    ) -> Result<Settled, ClientError> {
         loop {
             let Some(notification) = self.next_notification().await else {
                 return Err(ClientError::Closed);
@@ -112,7 +129,6 @@ impl Connection {
                 continue;
             }
             match params["kind"].as_str() {
-                Some(KIND_OPERATION_PROGRESS) => on_progress(&params["payload"]),
                 Some(KIND_OPERATION_FINISHED) => {
                     let payload = &params["payload"];
                     return Ok(match payload["state"].as_str() {
@@ -125,7 +141,8 @@ impl Connection {
                         ),
                     });
                 }
-                _ => {}
+                Some(kind) => on_event(kind, &params["payload"]),
+                None => {}
             }
         }
     }
@@ -213,6 +230,10 @@ mod tests {
                 json!({"operation_id": "op-1", "done": 1}),
             ),
             event(
+                "message.server_hit",
+                json!({"operation_id": "op-1", "hit": {"subject": "ledger"}}),
+            ),
+            event(
                 "operation.finished",
                 json!({"operation_id": "op-1", "state": "succeeded", "result": {"n": 3}}),
             ),
@@ -247,6 +268,36 @@ mod tests {
             vec![json!(1)],
             "another operation's events are skipped"
         );
+        daemon.await.expect("the script ran");
+    }
+
+    /// What an operation streams reaches the caller beside its progress, and
+    /// another operation's and a stateless event's do not.
+    #[tokio::test]
+    async fn every_event_of_the_operation_reaches_the_event_handler() {
+        let path = socket("events");
+        let daemon = tokio::spawn(scripted(UnixListener::bind(&path).expect("bind")));
+        let mut conn = Connection::connect(&path).await.expect("connect");
+        conn.subscribe_within(Duration::from_secs(5))
+            .await
+            .expect("bootstrap");
+        let started = conn
+            .call_within("message.search_server", json!({}), Duration::from_secs(5))
+            .await
+            .expect("started");
+        assert_eq!(started["operation_id"], json!("op-1"));
+
+        let mut seen = Vec::new();
+        let settled = conn
+            .await_operation_events("op-1", |kind, payload| {
+                seen.push((kind.to_string(), payload.clone()))
+            })
+            .await
+            .expect("settled");
+        assert_eq!(settled, Settled::Done(json!({"n": 3})));
+        let kinds: Vec<&str> = seen.iter().map(|(kind, _)| kind.as_str()).collect();
+        assert_eq!(kinds, ["operation.progress", "message.server_hit"]);
+        assert_eq!(seen[1].1["hit"]["subject"], json!("ledger"));
         daemon.await.expect("the script ran");
     }
 

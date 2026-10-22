@@ -406,8 +406,8 @@ pub fn to_json(message: &ShownMessage) -> Result<String> {
 /// as `date_header`; and a listing knows only whether attachments exist, not
 /// their names, so it carries `has_attachments` instead of `attachments`.
 ///
-/// `selector` and `mailbox` are `null` only for a server search hit whose
-/// mailbox the server did not name (an unscoped Graph search); `message_id`
+/// `selector` and `mailbox` are `null` only for a server search hit from a
+/// folder the account does not configure (`--mailbox Spesen`); `message_id`
 /// then still addresses it, since `mp show` and friends take a bare key.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ListedMessage {
@@ -490,37 +490,42 @@ impl ListedMessage {
         }
     }
 
-    /// A message a server search fetched, found in `mailbox` (the store's id
-    /// for it) when the search knows which one.
-    pub fn from_fetched(
+    /// A hit of a server search, found in `mailbox`, the store's id for the
+    /// mailbox the hit came from, when the account configures it.
+    pub fn from_server_hit(
         account: &str,
         mailbox: Option<&str>,
-        email: &crate::parse::FetchedEmail,
+        hit: &mp_protocol::listing::ServerSearchHit,
         full: bool,
     ) -> ListedMessage {
-        let message_id = email.message_id.clone().unwrap_or_default();
+        let message_id = hit.message_id.clone().unwrap_or_default();
         let selector = mailbox.filter(|_| !message_id.is_empty()).map(|mailbox| {
             Selector::new(account, mailbox, crate::selector::message_key(&message_id)).to_string()
         });
         let (body, preview) = if full {
-            (Some(email.body_text.clone()), None)
+            (Some(hit.body_text.clone()), None)
         } else {
-            (None, Some(email.body_text.chars().take(300).collect()))
+            (None, Some(hit.body_text.chars().take(300).collect()))
         };
         ListedMessage {
             selector,
             account: account.to_string(),
             mailbox: mailbox.map(str::to_string),
             message_id,
-            from: present(Some(&email.from)),
-            to: present(Some(&email.to)),
-            cc: present(email.cc.as_deref()),
-            subject: present(Some(&email.subject)),
-            date: iso_date(&email.date, ""),
-            date_header: present(Some(&email.date)),
-            flags: flag_tokens(email.flags),
-            has_attachments: email.has_attachments,
-            invite: email.calendar_ics.is_some(),
+            from: present(Some(&hit.from)),
+            to: present(Some(&hit.to)),
+            cc: present(hit.cc.as_deref()),
+            subject: present(Some(&hit.subject)),
+            date: iso_date(&hit.date_display, &hit.date_sort),
+            date_header: present(Some(&hit.date_display)),
+            flags: flag_tokens(crate::types::MessageFlags {
+                seen: hit.flags.seen,
+                answered: hit.flags.answered,
+                forwarded: hit.flags.forwarded,
+                flagged: hit.flags.flagged,
+            }),
+            has_attachments: hit.has_attachments,
+            invite: hit.is_invite,
             body,
             preview,
         }
@@ -614,103 +619,115 @@ impl SearchResultsJson {
     }
 }
 
-/// The order a server search lists its hits in: newest first, an unparsable
-/// date last.
-pub fn fetched_newest_first(
-    a: &crate::parse::FetchedEmail,
-    b: &crate::parse::FetchedEmail,
-) -> std::cmp::Ordering {
-    let da = chrono::DateTime::parse_from_rfc2822(&a.date).ok();
-    let db = chrono::DateTime::parse_from_rfc2822(&b.date).ok();
-    db.cmp(&da)
-}
-
-/// One mailbox's answer to a server search.
-pub struct MailboxHits {
-    /// The store's id of the mailbox, which a `--json` hit's selector names.
-    pub mailbox: Option<String>,
-    pub emails: Vec<crate::parse::FetchedEmail>,
-    /// The server matched more than it returned.
-    pub more: bool,
-}
-
-/// The hits of a server search over several mailboxes as one answer
-/// (PERSO-175).
-///
-/// Every mailbox was asked for the whole `limit`, so the merge, newest first
-/// and cut to `limit`, keeps the newest hits wherever they sit; splitting the
-/// limit across the mailboxes instead dropped a busy mailbox's hits for an
-/// idle one's older ones. The flag is true when a mailbox held more than it
-/// returned or the cut dropped hits, which is the `truncated` of `--json`.
-pub fn merge_server_hits(
-    groups: Vec<MailboxHits>,
-    limit: usize,
-) -> (Vec<(Option<String>, crate::parse::FetchedEmail)>, bool) {
-    let mut truncated = groups.iter().any(|group| group.more);
-    let mut hits: Vec<_> = groups
-        .into_iter()
-        .flat_map(|group| {
-            let mailbox = group.mailbox;
-            group
-                .emails
-                .into_iter()
-                .map(move |email| (mailbox.clone(), email))
-        })
-        .collect();
-    hits.sort_by(|(_, a), (_, b)| fetched_newest_first(a, b));
-    if hits.len() > limit {
-        hits.truncate(limit);
-        truncated = true;
-    }
-    (hits, truncated)
-}
-
 /// The stdout line under a search `--limit` cut, the text twin of `--json`'s
 /// `truncated`.
 pub fn more_results_line(limit: usize) -> String {
-    format!("More results than the {limit} shown: raise -n to see them.")
+    mp_client::format::more_results_line(limit, "raise -n to see them")
 }
 
-/// The line a Graph search stopped by Microsoft's `$search` cap prints, where
-/// raising `-n` cannot help.
-pub fn graph_search_cap_line(cap: usize) -> String {
-    format!(
-        "Microsoft Graph stops a search at {cap} results: narrow the query \
-         (after:, before:, in:) to reach the rest."
-    )
-}
-
-/// The coverage caveat of a server search's stdout header, `local store only:
-/// has:attachment`, or `None` when the server answered every term.
+/// A server search's hits in the order `mp search` lists them, newest first
+/// by the daemon's UTC sort key, an unparsable date last.
 ///
-/// The stderr warning says the same at length; this is the copy that survives
-/// a caller piping stdout and dropping stderr, where an empty result would
-/// otherwise read as "no such mail" rather than "none synced".
-pub fn local_store_note(local_terms: &[String]) -> Option<String> {
-    (!local_terms.is_empty()).then(|| format!("local store only: {}", local_terms.join(", ")))
+/// The daemon streams them mailbox by mailbox, as each mailbox's survivors
+/// download; it already cut them to the limit (PERSO-175).
+pub fn server_hits_newest_first(
+    mut hits: Vec<mp_protocol::listing::ServerSearchHit>,
+) -> Vec<mp_protocol::listing::ServerSearchHit> {
+    hits.sort_by(|a, b| b.date_sort.cmp(&a.date_sort));
+    hits
+}
+
+/// A server search hit as the record the text listing prints.
+///
+/// The fields left empty are the ones the listing never reads, as for
+/// `mp fetch`'s: it prints the headers, the attachment marker and the body.
+pub fn fetched_from_hit(hit: &mp_protocol::listing::ServerSearchHit) -> crate::parse::FetchedEmail {
+    crate::parse::FetchedEmail {
+        from: hit.from.clone(),
+        to: hit.to.clone(),
+        cc: hit.cc.clone(),
+        reply_to: hit.reply_to.clone(),
+        bcc: hit.bcc.clone(),
+        subject: hit.subject.clone(),
+        date: hit.date_display.clone(),
+        body_text: hit.body_text.clone(),
+        html_body: None,
+        has_attachments: hit.has_attachments,
+        server_has_attachments: None,
+        message_id: hit.message_id.clone(),
+        attachments: Vec::new(),
+        flags: crate::types::MessageFlags {
+            seen: hit.flags.seen,
+            answered: hit.flags.answered,
+            forwarded: hit.flags.forwarded,
+            flagged: hit.flags.flagged,
+        },
+        calendar_ics: None,
+        event: None,
+    }
 }
 
 /// The line a server search with no hits prints, carrying the coverage caveat
 /// when the store answered a term.
-pub fn no_server_results(local_terms: &[String]) -> String {
-    match local_store_note(local_terms) {
+pub fn no_server_results(settled: &mp_protocol::listing::ServerSearchSettled) -> String {
+    match settled.local_store_note() {
         Some(note) => format!("No results found ({note})"),
         None => "No results found".to_string(),
     }
 }
 
-/// The text a server search with no hits prints: [`no_server_results`], then
-/// the [`more_results_line`] when the answer is cut (PERSO-175), which the
-/// attachment post-filter can leave empty while a mailbox held more.
-pub fn empty_server_search_lines(
-    local_terms: &[String],
-    truncated: bool,
+/// The lines a server search prints around its hits, all decided from the
+/// daemon's settle (`LST-06`, PERSO-175).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ServerSearchLines {
+    /// Warnings on stderr ahead of the answer: the store-coverage sentence,
+    /// and Graph's cap beside `--json`, where no text trailer goes.
+    pub before: Vec<String>,
+    /// The stdout line under the text answer: Graph's cap, or the
+    /// [`more_results_line`] when the limit cut it.
+    pub trailer: Option<String>,
+    /// Warnings on stderr after the answer: one `Search in <mailbox> failed`
+    /// per mailbox the server refused, which did not fail the search.
+    pub after: Vec<String>,
+}
+
+/// [`ServerSearchLines`] of one settle, for a `--limit` of `limit`.
+///
+/// A mailbox that failed is reported at the end, from the settle's
+/// `unreachable` (Sylvain, 2026-10-22): the search no longer prints as it
+/// goes, so the failure lines follow the answer rather than interleaving it.
+pub fn server_search_lines(
+    settled: &mp_protocol::listing::ServerSearchSettled,
     limit: usize,
-) -> Vec<String> {
-    let mut lines = vec![no_server_results(local_terms)];
-    if truncated {
-        lines.push(more_results_line(limit));
+    json: bool,
+) -> ServerSearchLines {
+    let mut lines = ServerSearchLines::default();
+    if settled.local_store_note().is_some() {
+        lines.before.push(format!(
+            "{} on plain IMAP is answered from the local store, so un-synced mail is not \
+             covered. Run `mp sync` for full coverage.",
+            settled.local_terms.join(", ")
+        ));
     }
+    let cut = if settled.capped {
+        Some(mp_client::format::graph_search_cap_line())
+    } else if settled.truncated {
+        Some(more_results_line(limit))
+    } else {
+        None
+    };
+    match cut {
+        // `truncated` rides in the JSON; only the cap, which raising -n
+        // cannot help, is worth a stderr line beside it.
+        Some(cap) if json && settled.capped => lines.before.push(cap),
+        Some(_) if json => {}
+        cut => lines.trailer = cut,
+    }
+    lines.after = settled
+        .unreachable
+        .iter()
+        .map(|refused| format!("Search in {} failed: {}", refused.mailbox, refused.error))
+        .collect();
     lines
 }
 
@@ -1051,17 +1068,30 @@ mod tests {
         assert_eq!(iso_date("not a date", ""), None);
     }
 
-    /// A server hit carries the preview its text layout prints, or the whole
-    /// body with `--full`, and no selector when the mailbox is unknown.
-    #[test]
-    fn a_fetched_hit_carries_a_preview_or_the_body() {
-        let mut e = email("hit", &"x".repeat(400));
-        // The fixture's weekday is wrong for the date, which RFC 2822 parsing
-        // refuses, and a server hit has no sort key to fall back to.
-        e.date = "Fri, 7 Aug 2026 10:00:00 +0000".into();
-        e.flags = crate::types::MessageFlags::seen(true);
+    fn server_hit(subject: &str, date: &str, body: &str) -> mp_protocol::listing::ServerSearchHit {
+        let (_, date_sort) =
+            crate::tui::app::resolve_date(&Some(date.to_string()), &None, std::path::Path::new(""));
+        mp_protocol::listing::ServerSearchHit {
+            account: "acct".into(),
+            mailbox: "Archive".into(),
+            message_id: Some(format!("<{subject}@example.com>")),
+            subject: subject.into(),
+            date_display: date.into(),
+            date_sort,
+            body_text: body.into(),
+            ..Default::default()
+        }
+    }
 
-        let short = ListedMessage::from_fetched("acct", Some("archive"), &e, false);
+    /// A server hit carries the preview its text layout prints, or the whole
+    /// body with `--full`, and no selector from a folder the account does not
+    /// configure.
+    #[test]
+    fn a_server_hit_carries_a_preview_or_the_body() {
+        let mut hit = server_hit("hit", "Fri, 7 Aug 2026 10:00:00 +0000", &"x".repeat(400));
+        hit.flags.seen = true;
+
+        let short = ListedMessage::from_server_hit("acct", Some("archive"), &hit, false);
         assert_eq!(
             short.selector.as_deref(),
             Some("mp://acct/archive/hit@example.com")
@@ -1071,12 +1101,120 @@ mod tests {
         assert_eq!(short.date.as_deref(), Some("2026-08-07T10:00:00Z"));
         assert_eq!(short.flags, vec!["read"]);
 
-        let full = ListedMessage::from_fetched("acct", None, &e, true);
+        let full = ListedMessage::from_server_hit("acct", None, &hit, true);
         assert_eq!(full.selector, None);
         assert_eq!(full.mailbox, None);
         assert_eq!(full.message_id, "<hit@example.com>");
         assert_eq!(full.body.as_ref().map(String::len), Some(400));
         assert_eq!(full.preview, None);
+
+        let printed = fetched_from_hit(&hit);
+        assert_eq!(printed.date, "Fri, 7 Aug 2026 10:00:00 +0000");
+        assert_eq!(printed.body_text.len(), 400);
+        assert!(printed.flags.seen);
+    }
+
+    /// The hits stream mailbox by mailbox; `mp search` lists them newest
+    /// first wherever they came from, an unparsable date last.
+    #[test]
+    fn server_hits_list_newest_first() {
+        let hits = vec![
+            server_hit("old", "1 Feb 2026 10:00:00 +0000", ""),
+            server_hit("undated", "not a date", ""),
+            server_hit("new", "3 Feb 2026 10:00:00 +0000", ""),
+        ];
+        let subjects: Vec<String> = server_hits_newest_first(hits)
+            .into_iter()
+            .map(|hit| hit.subject)
+            .collect();
+        assert_eq!(subjects, ["new", "old", "undated"]);
+    }
+
+    fn settle(
+        local: bool,
+        truncated: bool,
+        capped: bool,
+    ) -> mp_protocol::listing::ServerSearchSettled {
+        mp_protocol::listing::ServerSearchSettled {
+            account: "tum".into(),
+            query: "has:attachment".into(),
+            coverage: if local {
+                mp_protocol::listing::SearchCoverage::Local
+            } else {
+                mp_protocol::listing::SearchCoverage::Server
+            },
+            local_terms: if local {
+                vec!["has:attachment".into()]
+            } else {
+                Vec::new()
+            },
+            truncated,
+            capped,
+            ..Default::default()
+        }
+    }
+
+    /// A plain-IMAP `has:attachment` answered from the store keeps its
+    /// stderr warning ahead of the answer, and a cut answer its trailer,
+    /// both read off the daemon's settle (PERSO-175).
+    #[test]
+    fn the_store_coverage_warning_and_the_cut_come_from_the_settle() {
+        let lines = server_search_lines(&settle(true, true, false), 50, false);
+        assert_eq!(
+            lines.before,
+            [
+                "has:attachment on plain IMAP is answered from the local store, so un-synced \
+              mail is not covered. Run `mp sync` for full coverage."
+            ]
+        );
+        assert_eq!(
+            lines.trailer.as_deref(),
+            Some("More results than the 50 shown: raise -n to see them.")
+        );
+        assert!(lines.after.is_empty());
+
+        // `--json` carries `truncated` itself and prints no trailer.
+        let json = server_search_lines(&settle(true, true, false), 50, true);
+        assert_eq!(json.before.len(), 1);
+        assert_eq!(json.trailer, None);
+
+        assert_eq!(
+            server_search_lines(&settle(false, false, false), 50, false),
+            ServerSearchLines::default(),
+            "a search the server answered whole, and not cut, prints nothing around it"
+        );
+    }
+
+    /// Graph's cap replaces the raise -n line, and goes to stderr beside
+    /// `--json`, since raising the limit cannot get past it.
+    #[test]
+    fn graph_s_cap_is_named_where_raising_the_limit_cannot_help() {
+        let cap = "Microsoft Graph stops a search at 1000 results: narrow the query \
+                   (after:, before:, in:) to reach the rest.";
+        let text = server_search_lines(&settle(false, true, true), 2500, false);
+        assert_eq!(text.trailer.as_deref(), Some(cap));
+        assert!(text.before.is_empty());
+        let json = server_search_lines(&settle(false, true, true), 2500, true);
+        assert_eq!(json.before, [cap]);
+        assert_eq!(json.trailer, None);
+    }
+
+    /// A mailbox the server refused is reported after the answer, in the
+    /// words `mp search` always used, from the settle's `unreachable`.
+    #[test]
+    fn a_failed_mailbox_is_reported_after_the_answer() {
+        let mut settled = settle(false, false, false);
+        settled.unreachable = vec![mp_protocol::listing::UnreachableMailbox {
+            mailbox: "Spesen".into(),
+            error: "Failed to select mailbox 'Spesen': NO no such mailbox".into(),
+        }];
+        let lines = server_search_lines(&settled, 50, false);
+        assert!(lines.before.is_empty());
+        assert_eq!(
+            lines.after,
+            ["Search in Spesen failed: Failed to select mailbox 'Spesen': NO no such mailbox"]
+        );
+        assert_eq!(server_search_lines(&settled, 50, true).after.len(), 1);
     }
 
     /// An account with rows in no listed mailbox says so instead of printing an
@@ -1093,13 +1231,9 @@ mod tests {
     /// stdout never sees the stderr warning (PERSO-122).
     #[test]
     fn a_locally_answered_term_is_named_on_stdout() {
-        let local = vec!["has:attachment".to_string()];
-        let note = local_store_note(&local);
+        let local = settle(true, false, false);
+        let note = local.local_store_note();
         assert_eq!(note.as_deref(), Some("local store only: has:attachment"));
-        assert_eq!(
-            crate::parse::fetched_emails_count(0, note.as_deref()),
-            "(0 results, local store only: has:attachment)"
-        );
         assert_eq!(
             crate::parse::fetched_emails_count(1, note.as_deref()),
             "(1 result, local store only: has:attachment)"
@@ -1110,9 +1244,10 @@ mod tests {
         );
 
         // A search the server answered in full keeps the old header.
-        assert_eq!(local_store_note(&[]), None);
+        let server = settle(false, false, false);
+        assert_eq!(server.local_store_note(), None);
         assert_eq!(crate::parse::fetched_emails_count(20, None), "(20 results)");
-        assert_eq!(no_server_results(&[]), "No results found");
+        assert_eq!(no_server_results(&server), "No results found");
     }
 
     /// `mp search --json` carries the coverage a script tests before trusting
@@ -1147,121 +1282,5 @@ mod tests {
         assert_eq!(json["coverage"], "local");
         assert_eq!(json["local_terms"], serde_json::json!([]));
         assert_eq!(json["truncated"], false);
-    }
-
-    fn dated(subject: &str, date: &str) -> FetchedEmail {
-        FetchedEmail {
-            date: date.into(),
-            ..email(subject, "")
-        }
-    }
-
-    fn subjects(hits: &[(Option<String>, FetchedEmail)]) -> Vec<String> {
-        hits.iter().map(|(_, e)| e.subject.clone()).collect()
-    }
-
-    /// The PERSO-175 case: an archive holding most of the hits and an inbox
-    /// holding two old ones. Each mailbox answered the whole limit, so the
-    /// newest hits win wherever they sit, and the cut says so.
-    #[test]
-    fn the_newest_hits_win_whichever_mailbox_holds_them() {
-        let archive: Vec<_> = (10..=26)
-            .map(|day| {
-                dated(
-                    &format!("archive-{day}"),
-                    &format!("{day} Feb 2026 10:00:00 +0000"),
-                )
-            })
-            .rev()
-            .collect();
-        let inbox = vec![
-            dated("inbox-2", "2 Feb 2026 10:00:00 +0000"),
-            dated("inbox-1", "1 Feb 2026 10:00:00 +0000"),
-        ];
-        let groups = vec![
-            MailboxHits {
-                mailbox: Some("inbox".into()),
-                emails: inbox,
-                more: false,
-            },
-            MailboxHits {
-                mailbox: Some("archive".into()),
-                emails: archive,
-                more: false,
-            },
-        ];
-        let (hits, truncated) = merge_server_hits(groups, 7);
-        assert_eq!(
-            subjects(&hits),
-            [
-                "archive-26",
-                "archive-25",
-                "archive-24",
-                "archive-23",
-                "archive-22",
-                "archive-21",
-                "archive-20"
-            ]
-        );
-        assert!(hits.iter().all(|(mb, _)| mb.as_deref() == Some("archive")));
-        assert!(truncated, "twelve hits were cut");
-    }
-
-    /// Everything fits: no cut, every mailbox keeps its id, newest first.
-    #[test]
-    fn a_search_that_fits_its_limit_is_not_truncated() {
-        let groups = vec![
-            MailboxHits {
-                mailbox: Some("inbox".into()),
-                emails: vec![dated("old", "1 Feb 2026 10:00:00 +0000")],
-                more: false,
-            },
-            MailboxHits {
-                mailbox: None,
-                emails: vec![dated("new", "2 Feb 2026 10:00:00 +0000")],
-                more: false,
-            },
-        ];
-        let (hits, truncated) = merge_server_hits(groups, 2);
-        assert_eq!(subjects(&hits), ["new", "old"]);
-        assert_eq!(hits[0].0, None);
-        assert_eq!(hits[1].0.as_deref(), Some("inbox"));
-        assert!(!truncated);
-    }
-
-    /// A mailbox that filled its quota and held more truncates the answer
-    /// even when the merge itself drops nothing.
-    #[test]
-    fn a_mailbox_holding_more_than_it_returned_truncates_the_answer() {
-        let groups = vec![MailboxHits {
-            mailbox: Some("inbox".into()),
-            emails: vec![dated("only", "1 Feb 2026 10:00:00 +0000")],
-            more: true,
-        }];
-        let (hits, truncated) = merge_server_hits(groups, 1);
-        assert_eq!(hits.len(), 1);
-        assert!(truncated);
-        assert_eq!(
-            more_results_line(1),
-            "More results than the 1 shown: raise -n to see them."
-        );
-    }
-
-    /// The attachment post-filter can empty a cut answer: the text still
-    /// says to raise -n (PERSO-175).
-    #[test]
-    fn an_empty_cut_server_search_still_says_to_raise_the_limit() {
-        let local = vec!["has:attachment".to_string()];
-        assert_eq!(
-            empty_server_search_lines(&local, true, 50),
-            [
-                "No results found (local store only: has:attachment)",
-                "More results than the 50 shown: raise -n to see them."
-            ]
-        );
-        assert_eq!(
-            empty_server_search_lines(&[], false, 50),
-            ["No results found"]
-        );
     }
 }

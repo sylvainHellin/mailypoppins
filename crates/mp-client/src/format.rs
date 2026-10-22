@@ -72,6 +72,24 @@ pub fn mutations_rolled_back_line(failed: u64) -> String {
     format!("{failed} mutation(s) failed and were rolled back (see the log)")
 }
 
+/// The line under a server search the limit cut (PERSO-175): more matched
+/// than the `shown` hits, and `remedy`, the client's own way to see them
+/// (`raise -n to see them` in `mp search`, a narrower search in the TUI and
+/// the desktop, which take no limit).
+pub fn more_results_line(shown: usize, remedy: &str) -> String {
+    format!("More results than the {shown} shown: {remedy}.")
+}
+
+/// The line under a server search Microsoft Graph's `$search` cap cut
+/// (`ServerSearchSettled::capped`), where no larger limit helps.
+pub fn graph_search_cap_line() -> String {
+    format!(
+        "Microsoft Graph stops a search at {} results: narrow the query \
+         (after:, before:, in:) to reach the rest.",
+        mp_protocol::listing::GRAPH_SEARCH_CAP
+    )
+}
+
 /// [`TAIL_LABEL`] for a tail phase, nothing for the head's.
 fn label(tail: bool) -> &'static str {
     if tail {

@@ -30,7 +30,7 @@ Commands:
   save            Save a received email's attachment(s) to a directory
   show            Print one received message from the local store, fetched first if missing
   list-messages   List received messages from the local store (offline)
-  search          Search emails on the IMAP server, or locally with --local
+  search          Search emails on the mail server (IMAP or Exchange), or locally with --local
   config          Manage configuration
   contacts        Contact index operations
   calendar        Calendar / iMIP invite operations
@@ -465,6 +465,12 @@ IMAP has:attachment has no server key, so it is answered from the local store
 "local store only: has:attachment", and --json sets coverage to "local" with
 the term in local_terms. filename: is Gmail/Exchange/--local only.
 
+The daemon runs a server search, the same one the TUI and the desktop app run:
+each mailbox is asked for its newest --limit matches, those are merged newest
+first and cut to --limit, and only the survivors are downloaded. A mailbox the
+server refuses does not stop the others; a "Search in <mailbox> failed" line
+on stderr follows the results.
+
 Usage: mp search [OPTIONS] [QUERY]
 
 Arguments:
@@ -475,7 +481,7 @@ Arguments:
 
 Options:
       --mailbox <MAILBOX>
-          Mailbox to search (default: all the account's mailboxes)
+          Mailbox to search: a configured one by role or label, or any folder the server lists by its server name (default: all the account's mailboxes; --local: configured ones only)
 
       --from <FROM>
           Match the sender (from:)
@@ -505,7 +511,7 @@ Options:
           Strictly before this date, YYYY-MM-DD (before:)
 
   -n, --limit <LIMIT>
-          Max results across every searched mailbox, the newest winning wherever they sit; a server search cut by it ends with a "raise -n" line. Exchange stops a search at 1000 results
+          Max results across every searched mailbox, the newest winning wherever they sit; a server search cut by it ends with a "raise -n" line. Exchange stops a search at 1000 results per mailbox, which a line says instead
           
           [default: 20]
 
