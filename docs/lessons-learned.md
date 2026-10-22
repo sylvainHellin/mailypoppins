@@ -3114,3 +3114,15 @@ A second resync proves the poison was cleared, since a poisoned queue drops ever
 
 `tokio::task::spawn_blocking` around the bootstrap's capture doubled its median latency under load (1.6 to 3.4 ms, p99 206 to 410 ms in the whole `daemon_events` binary), because the hop to a pool thread and back needs two more threads scheduled on a saturated machine.
 `block_in_place` kept the latency at the baseline, but it panics on a current-thread runtime, which the TUI tests' in-process daemon runs on, so the bootstrap checks the runtime flavour first.
+
+## The device-code dialog sends every sign-in cancel (2026-10-22)
+
+The device-code dialog (`clients/desktop/src/components/settings/DeviceCodeDialog.tsx`) is always mounted and sends `operation_cancel` whenever the sign-in in `state.signIn` is marked as cancelling and has an operation id.
+Another component that cancels a sign-in, such as the account wizard, should only dispatch `sign_in_cancelling`.
+Calling `cancelSignIn` with an id as well sends the cancel twice, since the dialog's guard knows only the cancels it sent itself.
+
+## The first-run wizard unmounts before its passwords are stored (2026-10-22)
+
+On the first-run screen the account wizard unmounts as soon as `config.changed` lists the new account, which happens before `writeAccount` has stored the account's passwords.
+Any work after the write must therefore not depend on the component still being mounted: `writeAccount` stores the passwords whatever the component's state, and only the overlay changes (the password dialog, the close) wait for the `shown` check.
+The same holds for a connection test, which takes a still-mounted check so a wizard cancelled mid-test sends the typed password to no further probe.

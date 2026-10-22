@@ -30,6 +30,9 @@ All notable changes to this project are documented in this file.
 - TUI and desktop: `gf` opens a fuzzy picker over every mailbox of the account, matching label or server name (#0141).
 - `mp config show` lists every folder the server listed with its policy, ignored ones included (#0141).
 - Setup wizards: `mp config init`, `mp config add-account` and the desktop account wizard ask for the drafts, trash and junk folders, each left empty for the one the server marks, and for policy overrides (#0141).
+- Setup wizards: the desktop account wizard tests the connection through the daemon and offers the server's mailboxes before it writes anything, as `mp config init` and `mp config add-account` do.
+  In both, every mailbox role also takes a typed name, so a server that lists only INBOX can be set up, and a Microsoft 365 OAuth2 account's SMTP login is tested after the sign-in, a warning rather than a stop when the tenant disables SMTP AUTH.
+  A sign-in a wizard staged and then abandoned is dropped by the next wizard sign-in once it is a day old.
 - Microsoft Graph: a folder renamed on the server keeps its messages and its sync state under the new name (#0141).
 - `mp signature list|show|new|edit|rename|delete|default` manages the signatures and each account's default from the CLI, over the same daemon methods as the TUI's `cs` overlay and the desktop's Signatures dialog.
 - `mp -A <account>` with no subcommand opens the TUI on that account; a name no account carries is refused before the TUI starts.
