@@ -426,6 +426,34 @@ fn search_local_json_prints_the_hits_as_one_object() {
     assert_eq!(results["messages"][0]["body"], "kickoff\n", "{stdout}");
 }
 
+/// `mp search --local --json` says when `--limit` cut the answer, and only
+/// then (PERSO-175): alpha holds three messages after the date.
+#[test]
+fn search_local_json_says_when_the_limit_cut_the_answer() {
+    let tmp = fixture_tree();
+    for (limit, shown, truncated) in [("2", 2, true), ("3", 3, false), ("20", 3, false)] {
+        let (ok, stdout, stderr) = run(
+            &tmp,
+            &[
+                "search",
+                "--local",
+                "--json",
+                "-n",
+                limit,
+                "after:2026-06-01",
+            ],
+        );
+        assert!(ok, "mp search --local --json -n {limit} failed: {stderr}");
+        let results: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+        assert_eq!(
+            results["messages"].as_array().map(Vec::len),
+            Some(shown),
+            "-n {limit}: {stdout}"
+        );
+        assert_eq!(results["truncated"], truncated, "-n {limit}: {stdout}");
+    }
+}
+
 /// `mp search --local` answers `filename:` and `--filename` from the stored
 /// attachment names (PERSO-130), case-insensitively, instead of refusing them.
 #[test]

@@ -871,7 +871,8 @@ A server-only hit carries no row and says so with `null` rather than with an emp
 **`query` is the grammar a user types**, not an engine enum: the overlay holds a parsed `search::Query` and renders it back with `search::to_query_string`, so one parser serves every backend, which is `LST-06`'s whole point.
 `mailboxes` is the sidebar mailboxes the overlay asked for and defaults to every one of the account's that has a server name.
 A mailbox is named by its sidebar label **or** by its server name, which is one spelling more than `message.list` accepts: the overlay holds a target of `(label, server_name)` and the search grammar's own `in:` directive is matched against both, so the wire takes whichever the caller has in hand rather than making it re-derive the other.
-`limit` is the total hit budget across the mailboxes, defaulting to 50 and split per mailbox with a floor of five, which is what the in-process leg spent: a per-mailbox limit would make a five-folder search cost five times what a one-folder search costs for the same number.
+`limit` is the total hit budget across the mailboxes, defaulting to 50 and split per mailbox with a floor of five: a per-mailbox limit would make a five-folder search cost five times what a one-folder search costs for the same number.
+`mp search` no longer splits it (PERSO-175): the CLI asks every mailbox for the whole limit, merges newest first and cuts to it, so routing the CLI onto this method needs that budget too.
 A query the grammar cannot parse is `-32602`, and so is a mailbox the account does not have.
 
 **Deduplication is by `Message-ID` and it is the daemon's.**

@@ -556,6 +556,10 @@ pub struct MessageListingJson {
 /// them (`--local`). `local_terms` names the terms a server search had to
 /// answer from the store; a `--local` search answers the whole query there and
 /// leaves it empty.
+///
+/// `truncated` says the query matched more than `messages` holds, because
+/// `--limit` cut it (PERSO-175): `coverage` alone read as completeness when a
+/// mailbox had filled its quota.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SearchResultsJson {
     pub account: String,
@@ -563,18 +567,25 @@ pub struct SearchResultsJson {
     pub source: &'static str,
     pub coverage: &'static str,
     pub local_terms: Vec<String>,
+    pub truncated: bool,
     pub messages: Vec<ListedMessage>,
 }
 
 impl SearchResultsJson {
     /// A `--local` search: the store answered everything.
-    pub fn local(account: &str, query: &str, messages: Vec<ListedMessage>) -> SearchResultsJson {
+    pub fn local(
+        account: &str,
+        query: &str,
+        truncated: bool,
+        messages: Vec<ListedMessage>,
+    ) -> SearchResultsJson {
         SearchResultsJson {
             account: account.to_string(),
             query: query.to_string(),
             source: "local",
             coverage: "local",
             local_terms: Vec::new(),
+            truncated,
             messages,
         }
     }
@@ -584,6 +595,7 @@ impl SearchResultsJson {
         account: &str,
         query: &str,
         local_terms: &[String],
+        truncated: bool,
         messages: Vec<ListedMessage>,
     ) -> SearchResultsJson {
         SearchResultsJson {
@@ -596,9 +608,67 @@ impl SearchResultsJson {
                 "local"
             },
             local_terms: local_terms.to_vec(),
+            truncated,
             messages,
         }
     }
+}
+
+/// The order a server search lists its hits in: newest first, an unparsable
+/// date last.
+pub fn fetched_newest_first(
+    a: &crate::parse::FetchedEmail,
+    b: &crate::parse::FetchedEmail,
+) -> std::cmp::Ordering {
+    let da = chrono::DateTime::parse_from_rfc2822(&a.date).ok();
+    let db = chrono::DateTime::parse_from_rfc2822(&b.date).ok();
+    db.cmp(&da)
+}
+
+/// One mailbox's answer to a server search.
+pub struct MailboxHits {
+    /// The store's id of the mailbox, which a `--json` hit's selector names.
+    pub mailbox: Option<String>,
+    pub emails: Vec<crate::parse::FetchedEmail>,
+    /// The server matched more than it returned.
+    pub more: bool,
+}
+
+/// The hits of a server search over several mailboxes as one answer
+/// (PERSO-175).
+///
+/// Every mailbox was asked for the whole `limit`, so the merge, newest first
+/// and cut to `limit`, keeps the newest hits wherever they sit; splitting the
+/// limit across the mailboxes instead dropped a busy mailbox's hits for an
+/// idle one's older ones. The flag is true when a mailbox held more than it
+/// returned or the cut dropped hits, which is the `truncated` of `--json`.
+pub fn merge_server_hits(
+    groups: Vec<MailboxHits>,
+    limit: usize,
+) -> (Vec<(Option<String>, crate::parse::FetchedEmail)>, bool) {
+    let mut truncated = groups.iter().any(|group| group.more);
+    let mut hits: Vec<_> = groups
+        .into_iter()
+        .flat_map(|group| {
+            let mailbox = group.mailbox;
+            group
+                .emails
+                .into_iter()
+                .map(move |email| (mailbox.clone(), email))
+        })
+        .collect();
+    hits.sort_by(|(_, a), (_, b)| fetched_newest_first(a, b));
+    if hits.len() > limit {
+        hits.truncate(limit);
+        truncated = true;
+    }
+    (hits, truncated)
+}
+
+/// The stdout line under a search `--limit` cut, the text twin of `--json`'s
+/// `truncated`.
+pub fn more_results_line(limit: usize) -> String {
+    format!("More results than the {limit} shown: raise -n to see them.")
 }
 
 /// The coverage caveat of a server search's stdout header, `local store only:
@@ -1027,23 +1097,129 @@ mod tests {
     fn the_search_json_carries_its_coverage() {
         let render = crate::search::to_imap(&crate::search::parse("has:attachment").unwrap())
             .expect("plain IMAP renders has:attachment as a post-filter");
-        let fallback =
-            SearchResultsJson::server("tum", "has:attachment", &render.local_terms(), Vec::new());
+        let fallback = SearchResultsJson::server(
+            "tum",
+            "has:attachment",
+            &render.local_terms(),
+            false,
+            Vec::new(),
+        );
         let json = serde_json::to_value(&fallback).unwrap();
         assert_eq!(json["source"], "server");
         assert_eq!(json["coverage"], "local");
         assert_eq!(json["local_terms"], serde_json::json!(["has:attachment"]));
+        assert_eq!(json["truncated"], false);
         assert_eq!(json["messages"], serde_json::json!([]));
 
-        let full = SearchResultsJson::server("tum", "from:borrmann", &[], Vec::new());
+        let full = SearchResultsJson::server("tum", "from:borrmann", &[], true, Vec::new());
         let json = serde_json::to_value(&full).unwrap();
         assert_eq!(json["coverage"], "server");
         assert_eq!(json["local_terms"], serde_json::json!([]));
+        assert_eq!(json["truncated"], true);
 
-        let offline = SearchResultsJson::local("tum", "ledger", Vec::new());
+        let offline = SearchResultsJson::local("tum", "ledger", false, Vec::new());
         let json = serde_json::to_value(&offline).unwrap();
         assert_eq!(json["source"], "local");
         assert_eq!(json["coverage"], "local");
         assert_eq!(json["local_terms"], serde_json::json!([]));
+        assert_eq!(json["truncated"], false);
+    }
+
+    fn dated(subject: &str, date: &str) -> FetchedEmail {
+        FetchedEmail {
+            date: date.into(),
+            ..email(subject, "")
+        }
+    }
+
+    fn subjects(hits: &[(Option<String>, FetchedEmail)]) -> Vec<String> {
+        hits.iter().map(|(_, e)| e.subject.clone()).collect()
+    }
+
+    /// The PERSO-175 case: an archive holding most of the hits and an inbox
+    /// holding two old ones. Each mailbox answered the whole limit, so the
+    /// newest hits win wherever they sit, and the cut says so.
+    #[test]
+    fn the_newest_hits_win_whichever_mailbox_holds_them() {
+        let archive: Vec<_> = (10..=26)
+            .map(|day| {
+                dated(
+                    &format!("archive-{day}"),
+                    &format!("{day} Feb 2026 10:00:00 +0000"),
+                )
+            })
+            .rev()
+            .collect();
+        let inbox = vec![
+            dated("inbox-2", "2 Feb 2026 10:00:00 +0000"),
+            dated("inbox-1", "1 Feb 2026 10:00:00 +0000"),
+        ];
+        let groups = vec![
+            MailboxHits {
+                mailbox: Some("inbox".into()),
+                emails: inbox,
+                more: false,
+            },
+            MailboxHits {
+                mailbox: Some("archive".into()),
+                emails: archive,
+                more: false,
+            },
+        ];
+        let (hits, truncated) = merge_server_hits(groups, 7);
+        assert_eq!(
+            subjects(&hits),
+            [
+                "archive-26",
+                "archive-25",
+                "archive-24",
+                "archive-23",
+                "archive-22",
+                "archive-21",
+                "archive-20"
+            ]
+        );
+        assert!(hits.iter().all(|(mb, _)| mb.as_deref() == Some("archive")));
+        assert!(truncated, "twelve hits were cut");
+    }
+
+    /// Everything fits: no cut, every mailbox keeps its id, newest first.
+    #[test]
+    fn a_search_that_fits_its_limit_is_not_truncated() {
+        let groups = vec![
+            MailboxHits {
+                mailbox: Some("inbox".into()),
+                emails: vec![dated("old", "1 Feb 2026 10:00:00 +0000")],
+                more: false,
+            },
+            MailboxHits {
+                mailbox: None,
+                emails: vec![dated("new", "2 Feb 2026 10:00:00 +0000")],
+                more: false,
+            },
+        ];
+        let (hits, truncated) = merge_server_hits(groups, 2);
+        assert_eq!(subjects(&hits), ["new", "old"]);
+        assert_eq!(hits[0].0, None);
+        assert_eq!(hits[1].0.as_deref(), Some("inbox"));
+        assert!(!truncated);
+    }
+
+    /// A mailbox that filled its quota and held more truncates the answer
+    /// even when the merge itself drops nothing.
+    #[test]
+    fn a_mailbox_holding_more_than_it_returned_truncates_the_answer() {
+        let groups = vec![MailboxHits {
+            mailbox: Some("inbox".into()),
+            emails: vec![dated("only", "1 Feb 2026 10:00:00 +0000")],
+            more: true,
+        }];
+        let (hits, truncated) = merge_server_hits(groups, 1);
+        assert_eq!(hits.len(), 1);
+        assert!(truncated);
+        assert_eq!(
+            more_results_line(1),
+            "More results than the 1 shown: raise -n to see them."
+        );
     }
 }

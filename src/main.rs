@@ -412,7 +412,9 @@ enum Commands {
         /// Strictly before this date, YYYY-MM-DD (before:)
         #[arg(long)]
         before: Option<String>,
-        /// Max results
+        /// Max results across every searched mailbox, the newest winning
+        /// wherever they sit; a server search cut by it ends with a
+        /// "raise -n" line
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
         /// Show full body instead of preview
@@ -423,11 +425,13 @@ enum Commands {
         #[arg(long)]
         local: bool,
         /// Emit one JSON object {account, query, source: local|server,
-        /// coverage: server|local, local_terms: [...], messages: [...]} on
-        /// stdout, messages as in `mp list-messages --json` plus body (--full)
-        /// or preview (server hit); coverage is local when the store answered
-        /// any term, which local_terms names (empty under --local, where the
-        /// store answered the whole query); warnings stay on stderr
+        /// coverage: server|local, local_terms: [...], truncated: bool,
+        /// messages: [...]} on stdout, messages as in `mp list-messages
+        /// --json` plus body (--full) or preview (server hit); coverage is
+        /// local when the store answered any term, which local_terms names
+        /// (empty under --local, where the store answered the whole query);
+        /// truncated is true when more matched than --limit let through;
+        /// warnings stay on stderr
         #[arg(long)]
         json: bool,
     },
@@ -729,24 +733,18 @@ enum ConfigAction {
 
 /// Sort fetched emails by date descending (newest first).
 fn sort_fetched_by_date(emails: &mut [FetchedEmail]) {
-    emails.sort_by(fetched_newest_first);
-}
-
-/// The order [`sort_fetched_by_date`] sorts in: newest first, an unparsable
-/// date last.
-fn fetched_newest_first(a: &FetchedEmail, b: &FetchedEmail) -> std::cmp::Ordering {
-    let da = chrono::DateTime::parse_from_rfc2822(&a.date).ok();
-    let db = chrono::DateTime::parse_from_rfc2822(&b.date).ok();
-    db.cmp(&da)
+    emails.sort_by(mailypoppins::read_cmd::fetched_newest_first);
 }
 
 /// `mp search --json` for a server search: each hit with the store's id of the
-/// mailbox it was found in, when the search knows it, and the terms the local
-/// store answered because the server had no key for them.
+/// mailbox it was found in, when the search knows it, the terms the local
+/// store answered because the server had no key for them, and whether
+/// `--limit` cut the answer.
 fn print_server_search_json(
     account: &str,
     query: &str,
     local_terms: &[String],
+    truncated: bool,
     hits: &[(Option<String>, FetchedEmail)],
     full: bool,
 ) -> Result<()> {
@@ -754,6 +752,7 @@ fn print_server_search_json(
         account,
         query,
         local_terms,
+        truncated,
         hits.iter()
             .map(|(mailbox, email)| {
                 mailypoppins::read_cmd::ListedMessage::from_fetched(
@@ -4407,19 +4406,24 @@ async fn main() -> Result<()> {
                     Some(want) => Some(resolve_mailbox_key(&account_config, want)?),
                     None => None,
                 };
-                let hits = routed_search(
+                // One hit past the limit tells a cut answer from one that
+                // had exactly `limit` hits (PERSO-175).
+                let mut hits = routed_search(
                     &account_config.name,
                     &query,
                     mailbox_key.as_deref(),
                     &flags,
-                    limit,
+                    limit.saturating_add(1),
                     full,
                 )
                 .await?;
+                let truncated = hits.len() > limit;
+                hits.truncate(limit);
                 if json {
                     let results = mailypoppins::read_cmd::SearchResultsJson::local(
                         &account_config.name,
                         &query,
+                        truncated,
                         hits.iter()
                             .map(|hit| {
                                 mailypoppins::read_cmd::ListedMessage::from_wire(
@@ -4470,7 +4474,14 @@ async fn main() -> Result<()> {
                         .as_deref()
                         .and_then(|mb| resolve_mailbox_key(&account_config, mb).ok());
                     let tagged: Vec<_> = emails.into_iter().map(|e| (key.clone(), e)).collect();
-                    print_server_search_json(&account_config.name, &query, &[], &tagged, full)?;
+                    print_server_search_json(
+                        &account_config.name,
+                        &query,
+                        &[],
+                        false,
+                        &tagged,
+                        full,
+                    )?;
                 } else if emails.is_empty() {
                     println!("{}", "No results found".yellow());
                 } else {
@@ -4521,32 +4532,28 @@ async fn main() -> Result<()> {
                         .collect(),
                 };
 
+                // Every mailbox is searched for the whole limit and the hits
+                // are merged newest first and cut to it below, so `--limit` is
+                // the number of results, as documented, and the newest win
+                // wherever they sit. Splitting it across the mailboxes dropped
+                // a busy mailbox's hits silently (PERSO-175).
                 let mut session = imap_client::open_imap_session(&imap_config).await?;
-                let per_mb = (limit / targets.len().max(1)).max(5);
-                let mut total = 0usize;
-                let mut all_emails: Vec<(Option<String>, FetchedEmail)> = Vec::new();
+                let mut groups: Vec<mailypoppins::read_cmd::MailboxHits> = Vec::new();
                 for (label, server, key) in &targets {
-                    if total >= limit {
-                        break;
-                    }
-                    let budget = if targets.len() == 1 {
-                        limit
-                    } else {
-                        per_mb.min(limit - total)
-                    };
-                    match imap_client::search_on_session(
+                    match imap_client::search_on_session_counted(
                         &mut session,
                         &imap_search,
                         msg_id.as_deref(),
                         server,
-                        Some(budget),
+                        Some(limit),
                     )
                     .await
                     {
-                        Ok(emails) => {
-                            total += emails.len();
-                            all_emails.extend(emails.into_iter().map(|e| (key.clone(), e)));
-                        }
+                        Ok((emails, matched)) => groups.push(mailypoppins::read_cmd::MailboxHits {
+                            mailbox: key.clone(),
+                            emails,
+                            more: matched > limit,
+                        }),
                         Err(e) => {
                             eprintln!("{} Search in {} failed: {}", "\u{26a0}".yellow(), label, e);
                         }
@@ -4563,12 +4570,15 @@ async fn main() -> Result<()> {
                         &store,
                         &account_config.name,
                     )?;
-                    all_emails.retain(|(_, e)| {
-                        e.message_id.as_deref().is_some_and(|m| {
-                            with_att
-                                .contains(&mailypoppins::store::read::normalize_message_id_key(m))
-                        })
-                    });
+                    for group in &mut groups {
+                        group.emails.retain(|e| {
+                            e.message_id.as_deref().is_some_and(|m| {
+                                with_att.contains(
+                                    &mailypoppins::store::read::normalize_message_id_key(m),
+                                )
+                            })
+                        });
+                    }
                     eprintln!(
                         "{} {} on plain IMAP is answered from the local store, so \
                          un-synced mail is not covered. Run `mp sync` for full coverage.",
@@ -4580,12 +4590,14 @@ async fn main() -> Result<()> {
                 // The stderr warning is lost to a caller that pipes stdout, so
                 // the header repeats it (PERSO-122).
                 let note = mailypoppins::read_cmd::local_store_note(&local_terms);
-                all_emails.sort_by(|(_, a), (_, b)| fetched_newest_first(a, b));
+                let (all_emails, truncated) =
+                    mailypoppins::read_cmd::merge_server_hits(groups, limit);
                 if json {
                     print_server_search_json(
                         &account_config.name,
                         &query,
                         &local_terms,
+                        truncated,
                         &all_emails,
                         full,
                     )?;
@@ -4598,6 +4610,9 @@ async fn main() -> Result<()> {
                     let emails: Vec<FetchedEmail> =
                         all_emails.into_iter().map(|(_, e)| e).collect();
                     display_fetched_emails_with_note(&emails, full, note.as_deref());
+                    if truncated {
+                        println!("{}", mailypoppins::read_cmd::more_results_line(limit));
+                    }
                 }
             }
         }

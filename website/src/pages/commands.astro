@@ -171,10 +171,10 @@ const searchFlags = [
   { command: '--has-attachment', description: 'Only mail carrying an attachment (has:attachment)' },
   { command: '--after / --before <YYYY-MM-DD>', description: 'The date range as flags' },
   { command: '--mailbox <name>', description: 'Scope to one mailbox (per-account only)' },
-  { command: '-n, --limit <N>', description: 'Max results (default: 20)' },
+  { command: '-n, --limit <N>', description: 'Max results across every searched mailbox, newest first (default: 20); a server search cut by it ends with a "raise -n" line' },
   { command: '--full', description: 'Show full body instead of preview' },
   { command: '--local', description: 'Search the local FTS index offline instead of the server' },
-  { command: '--json', description: 'Print the hits as one JSON object on stdout; warnings stay on stderr' },
+  { command: '--json', description: 'Print the hits as one JSON object on stdout, with "truncated": true when more matched than --limit let through; warnings stay on stderr' },
 ];
 
 // Slugify a section title for the heading anchor id.

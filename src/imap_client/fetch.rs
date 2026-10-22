@@ -74,6 +74,21 @@ pub async fn search_on_session(
     mailbox: &str,
     limit: Option<usize>,
 ) -> Result<Vec<FetchedEmail>> {
+    search_on_session_counted(session, imap_search, message_id, mailbox, limit)
+        .await
+        .map(|(emails, _)| emails)
+}
+
+/// [`search_on_session`], with the number of UIDs the server matched beside
+/// the hits, so a caller can tell a mailbox that filled `limit` and held more
+/// from one that had exactly that many (PERSO-175).
+pub async fn search_on_session_counted(
+    session: &mut ImapSession,
+    imap_search: &str,
+    message_id: Option<&str>,
+    mailbox: &str,
+    limit: Option<usize>,
+) -> Result<(Vec<FetchedEmail>, usize)> {
     session
         .select(mailbox)
         .await
@@ -85,9 +100,10 @@ pub async fn search_on_session(
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
 
     if uids.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
 
+    let matched = uids.len();
     let mut uid_list: Vec<u32> = uids.into_iter().collect();
     uid_list.sort();
     let selected_uids: Vec<u32> = match limit {
@@ -125,7 +141,7 @@ pub async fn search_on_session(
         });
     }
 
-    Ok(emails)
+    Ok((emails, matched))
 }
 
 /// Fetch one message's raw RFC822 bytes by Message-ID (#0104).
