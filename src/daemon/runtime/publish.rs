@@ -12,11 +12,16 @@
 //! between two of its own runs, and would republish on its first run what the
 //! state already holds.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use log::warn;
 
+use crate::catalogue::SidebarRow;
+use crate::config::AccountConfig;
+use crate::daemon::dispatch::ResourceId;
 use crate::daemon::server::commit_tick;
+use crate::daemon::state::events::Event;
 use crate::daemon::state::{CanonicalState, Change};
 
 use super::account::{AccountRuntime, TickKind, TickOutcome};
@@ -43,7 +48,7 @@ pub async fn tick_and_publish(
         warn!("{line}");
     }
     if !outcome.blocked {
-        publish_changed_counts(canonical, runtime.account()).await;
+        publish_changed_counts(canonical, runtime.config()).await;
     }
     outcome
 }
@@ -65,38 +70,81 @@ fn failure_line(account: &str, outcome: &TickOutcome) -> Option<String> {
         .map(|error| format!("[daemon] a background {kind} tick of {account} failed: {error}"))
 }
 
-/// Commit one [`Change::MailboxCounts`] per mailbox whose store counts differ
-/// from what `canonical` holds for it.
-pub async fn publish_changed_counts(canonical: &Arc<CanonicalState>, account: &str) {
-    let name = account.to_string();
-    let read = tokio::task::spawn_blocking(move || {
-        let store = crate::store::Store::open(crate::config::store_path(&name))?;
-        crate::store::read::mailbox_read_counts(&store, &name)
+/// Bring the canonical state's view of `account` up to date after a pass:
+/// the sidebar hierarchy its catalogue now resolves to, then one
+/// [`Change::MailboxCounts`] per mailbox whose counts differ from what the
+/// state holds.
+///
+/// The hierarchy comes first (#0141): a pass that listed a folder the server
+/// just created re-seeds the account, announces every new or changed row as
+/// a counts change (which is what makes both clients re-read the sidebar,
+/// even for an empty folder whose counts did not move from zero), and every
+/// row that went as a `state.remove`.
+///
+/// A `status-only` folder's counts are the server's, read by the tick's
+/// `STATUS`; every other mailbox's are the store's.
+pub async fn publish_changed_counts(canonical: &Arc<CanonicalState>, account: &AccountConfig) {
+    let cfg = account.clone();
+    let read = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let store = crate::store::Store::open(crate::config::store_path(&cfg.name))?;
+        let stored = crate::store::read::mailbox_read_counts(&store, &cfg.name)?;
+        let listed = crate::catalogue::listing::load(&store, &cfg.name)?;
+        let catalogue = crate::catalogue::Catalogue::resolve(&cfg, &listed);
+        let seed = crate::daemon::state::seed_with(&cfg, &catalogue);
+        let rows = crate::catalogue::sidebar(&cfg, &catalogue);
+        let stored: HashMap<String, (u64, u64)> = stored
+            .into_iter()
+            .map(|(mailbox, counts)| (mailbox, (counts.total as u64, counts.unread as u64)))
+            .collect();
+        Ok((seed, effective_counts(&rows, stored)))
     })
     .await;
-    let fresh = match read {
-        Ok(Ok(fresh)) => fresh,
-        Ok(Err(e)) => return warn!("[daemon] counting the mailboxes of {account}: {e:#}"),
-        Err(e) => return warn!("[daemon] the count task for {account} {e}"),
+    let name = &account.name;
+    let (seed, fresh) = match read {
+        Ok(Ok(read)) => read,
+        Ok(Err(e)) => return warn!("[daemon] counting the mailboxes of {name}: {e:#}"),
+        Err(e) => return warn!("[daemon] the count task for {name} {e}"),
     };
-    commit_changed_counts(
-        canonical,
-        account,
-        fresh
-            .into_iter()
-            .map(|(mailbox, counts)| (mailbox, (counts.total as u64, counts.unread as u64))),
-    );
+    let (touched, removed) = canonical.reseed_account(seed);
+    for slug in removed {
+        canonical.publish(Event::Remove {
+            resource: ResourceId::new(format!("mailbox:{name}/{slug}")),
+        });
+    }
+    commit_changed_counts(canonical, name, fresh, &touched);
+}
+
+/// The counts the sidebar shows per slug: each row's ([`SidebarRow::counts`])
+/// but the local Drafts view's, which no store row counts, then every other
+/// mailbox the store holds rows under, by its store counts.
+fn effective_counts(
+    rows: &[SidebarRow],
+    mut stored: HashMap<String, (u64, u64)>,
+) -> Vec<(String, (u64, u64))> {
+    let mut fresh: Vec<(String, (u64, u64))> = rows
+        .iter()
+        .filter(|row| row.slug != crate::selector::DRAFTS_MAILBOX)
+        .map(|row| (row.slug.clone(), row.counts(stored.remove(&row.slug))))
+        .collect();
+    let mut rest: Vec<(String, (u64, u64))> = stored.into_iter().collect();
+    rest.sort();
+    fresh.extend(rest);
+    fresh
 }
 
 /// The comparison and the commits of [`publish_changed_counts`], apart from
-/// the store read so a test can drive it.
+/// the store read so a test can drive it. A slug in `touched` is committed
+/// even when its counts did not move: it is a row the hierarchy just gained
+/// or changed, and the commit is what tells a client to read it.
 fn commit_changed_counts(
     canonical: &CanonicalState,
     account: &str,
     fresh: impl IntoIterator<Item = (String, (u64, u64))>,
+    touched: &[String],
 ) {
     for (mailbox, pair) in fresh {
-        if canonical.mailbox_counts(account, &mailbox) == Some(pair) {
+        if canonical.mailbox_counts(account, &mailbox) == Some(pair) && !touched.contains(&mailbox)
+        {
             continue;
         }
         canonical.apply(Change::MailboxCounts {
@@ -127,6 +175,7 @@ mod tests {
                         role: slug.to_string(),
                         slug: slug.to_string(),
                         label: slug.to_string(),
+                        ..Default::default()
                     })
                     .collect(),
             }],
@@ -144,6 +193,63 @@ mod tests {
             error: error.map(str::to_string),
             sync: None,
         }
+    }
+
+    /// A tick that listed a new folder re-seeds the account's hierarchy and
+    /// announces the new row even at 0/0, which is what makes both clients
+    /// read the sidebar again; a folder the server stopped listing is
+    /// reported as dropped, and the counts of a slug that stays are kept
+    /// (#0141).
+    #[test]
+    fn a_new_folder_reseeds_the_account_and_is_announced() {
+        use crate::daemon::state::{AccountSeed, MailboxSeed};
+        let state = seeded_state();
+        commit_changed_counts(&state, "alpha", vec![("inbox".to_string(), (4, 1))], &[]);
+        let seed = |slugs: &[&str]| AccountSeed {
+            name: "alpha".to_string(),
+            mailboxes: slugs
+                .iter()
+                .map(|slug| MailboxSeed {
+                    role: slug.to_string(),
+                    slug: slug.to_string(),
+                    label: slug.to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+        };
+
+        let (touched, removed) = state.reseed_account(seed(&["inbox", "archive", "Spesen"]));
+        assert_eq!(touched, ["Spesen"]);
+        assert!(removed.is_empty());
+        assert_eq!(
+            state.mailbox_counts("alpha", "inbox"),
+            Some((4, 1)),
+            "carried"
+        );
+        let before = state.revision().get();
+        commit_changed_counts(
+            &state,
+            "alpha",
+            vec![
+                ("inbox".to_string(), (4, 1)),
+                ("Spesen".to_string(), (0, 0)),
+            ],
+            &touched,
+        );
+        assert_eq!(
+            state.revision().get(),
+            before + 1,
+            "only the new row is announced"
+        );
+
+        let (touched, removed) = state.reseed_account(seed(&["inbox", "Spesen"]));
+        assert!(touched.is_empty());
+        assert_eq!(removed, ["archive"]);
+        assert_eq!(
+            state.reseed_account(seed(&["inbox", "Spesen"])),
+            (Vec::new(), Vec::new()),
+            "an unchanged hierarchy is no change"
+        );
     }
 
     /// A failed tick's warning names the account and carries the error
@@ -184,7 +290,7 @@ mod tests {
                 ("archive".to_string(), (0, 0)),
             ]
         };
-        commit_changed_counts(&state, "alpha", fresh());
+        commit_changed_counts(&state, "alpha", fresh(), &[]);
         assert_eq!(
             state.revision().get(),
             before + 1,
@@ -192,11 +298,18 @@ mod tests {
         );
         assert_eq!(state.mailbox_counts("alpha", "inbox"), Some((4, 1)));
 
-        commit_changed_counts(&state, "alpha", fresh());
+        commit_changed_counts(&state, "alpha", fresh(), &[]);
         assert_eq!(
             state.revision().get(),
             before + 1,
             "nothing moved the second time"
+        );
+
+        commit_changed_counts(&state, "alpha", fresh(), &["archive".to_string()]);
+        assert_eq!(
+            state.revision().get(),
+            before + 2,
+            "a row the hierarchy just gained is announced even at 0/0"
         );
     }
 }

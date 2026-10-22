@@ -162,6 +162,7 @@ fn open(account: &str) -> Result<Store, RpcError> {
 fn list(account: &AccountConfig) -> Result<Value, RpcError> {
     let state = hooks::load_state(&state::state_path(&account.name))
         .map_err(|e| internal(format!("{e:#}")))?;
+    let catalogue = crate::catalogue::Catalogue::load(account);
     let entries: Vec<Value> = account
         .hooks
         .iter()
@@ -170,7 +171,7 @@ fn list(account: &AccountConfig) -> Result<Value, RpcError> {
             json!({
                 "name": hook.name,
                 "mailbox": hook.mailbox,
-                "mailbox_key": hooks::mailbox_key(account, hook),
+                "mailbox_key": hooks::mailbox_key(&catalogue, account, hook),
                 "exec": hook.exec,
                 "timeout_secs": hook.timeout_secs,
                 "match": {

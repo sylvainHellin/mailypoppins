@@ -61,10 +61,17 @@ pub struct Claimed {
 }
 
 /// The store key of the mailbox `hook` watches, or `None` when the account
-/// does not configure it.
-pub fn mailbox_key(account: &AccountConfig, hook: &HookConfig) -> Option<String> {
-    crate::config::find_sync_target(account, &hook.mailbox)
-        .map(|(role, _)| role.as_str().to_string())
+/// has no such folder: one it configures, or since #0141 any folder its
+/// server lists, resolved as `mp sync --mailbox` resolves it.
+pub fn mailbox_key(
+    catalogue: &crate::catalogue::Catalogue,
+    account: &AccountConfig,
+    hook: &HookConfig,
+) -> Option<String> {
+    catalogue
+        .sync_target(account, &hook.mailbox)
+        .ok()
+        .map(|target| target.role.as_str().to_string())
 }
 
 /// Consider every row that arrived above each hook's cursor, claim the ones
@@ -90,11 +97,12 @@ pub fn scan(
             .any(|configured| &configured.name == hook)
     });
 
+    let catalogue = crate::catalogue::Catalogue::from_store(store, account);
     let mut claimed = Vec::new();
     for hook in &account.hooks {
-        let Some(key) = mailbox_key(account, hook) else {
+        let Some(key) = mailbox_key(&catalogue, account, hook) else {
             warn!(
-                "[hooks] {name}/{}: mailbox {:?} is not configured for {name}; the hook is idle",
+                "[hooks] {name}/{}: {name} has no mailbox {:?}; the hook is idle",
                 hook.name, hook.mailbox
             );
             continue;

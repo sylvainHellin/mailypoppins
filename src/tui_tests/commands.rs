@@ -201,10 +201,11 @@ fn an_open_marks_the_row_it_resolved_and_queues_one_server_op() {
         queued[0].op,
         crate::ops::ServerOp::SetRead {
             message_id: "<inbox-1@example.com>".to_string(),
-            // The row's own mailbox as `find_server_name_for_role` spells
-            // it, which for an account with no `[[mailboxes]]` mapping is
-            // the role verbatim. It is the daemon's spelling since P4-U8
-            // and it addresses the row's mailbox rather than the open one.
+            // The row's own mailbox as the daemon's catalogue spells it
+            // (`Catalogue::server_for_key`, #0141), which for an account the
+            // server was never listed for and with no mapping is the role
+            // verbatim. It is the daemon's spelling since P4-U8 and it
+            // addresses the row's mailbox rather than the open one.
             mailbox: "inbox".to_string(),
             read: true,
         }

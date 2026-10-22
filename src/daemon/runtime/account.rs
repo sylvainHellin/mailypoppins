@@ -300,6 +300,10 @@ impl TickReport {
 pub struct AccountRuntime {
     /// The configured account name.
     account: String,
+    /// The configuration it started with, which is what its mailbox
+    /// catalogue resolves against (#0141): a swap that edits the account
+    /// replaces the runtime.
+    config: Arc<AccountConfig>,
     /// Resolved by `start` before it returned.
     readiness: Readiness,
     /// Held for the runtime's lifetime, `None` when another engine has it.
@@ -425,6 +429,7 @@ impl AccountRuntime {
         let started = tokio::time::Instant::now();
         Ok(AccountRuntime {
             account,
+            config: Arc::new(cfg.clone()),
             readiness,
             engine_lock: Mutex::new(held),
             retired: watch::channel(false).0,
@@ -445,6 +450,11 @@ impl AccountRuntime {
     /// The account this runtime serves.
     pub fn account(&self) -> &str {
         &self.account
+    }
+
+    /// The configuration this runtime started with.
+    pub fn config(&self) -> &AccountConfig {
+        &self.config
     }
 
     /// Whether this runtime can serve, resolved at start and fixed afterwards.
@@ -925,12 +935,16 @@ fn mutations_hook(cfg: Arc<AccountConfig>, report: TickReport) -> DrainHook {
 /// drains queues. A failed load is the body's `Err`, which the tail drain runs
 /// after and the outcome carries.
 fn body_hook(cfg: Arc<AccountConfig>, report: TickReport) -> BodyHook {
+    // Whether this runtime has listed the server's folders yet: the first tick
+    // lists, and so does every full one (#0141).
+    let listed = Arc::new(AtomicBool::new(false));
     Arc::new(move |ctx: TickContext| {
         let cfg = Arc::clone(&cfg);
         let report = report.clone();
+        let listed = Arc::clone(&listed);
         async move {
             let result = off_thread("the sync body", move || async move {
-                sync_once(&cfg, &ctx).await
+                sync_once(&cfg, &ctx, &listed).await
             })
             .await
             .and_then(|inner| inner)?;
@@ -986,24 +1000,66 @@ fn tick_limit(kind: TickKind) -> usize {
     }
 }
 
-/// The mailboxes a tick covers: every configured one, in config order.
-fn tick_targets(cfg: &AccountConfig) -> Vec<crate::sync::SyncTarget> {
-    crate::config::all_configured_mailboxes(cfg)
-        .iter()
-        .map(|(role, mapping)| crate::sync::SyncTarget::new(role.clone(), mapping.server.clone()))
-        .collect()
+/// Bring the account's folder list up to date before a tick picks its
+/// targets (#0141): the server is listed on the runtime's first tick and on
+/// every full one, so a folder created since appears within a full-sync
+/// interval, and a quick tick costs no `LIST`.
+///
+/// A failed listing is logged and the tick syncs what the stored listing
+/// holds: the folders the account had a tick ago, or its configured
+/// mailboxes when it was never listed. It is never the tick's error, since
+/// the mail it can reach is still worth fetching.
+async fn refresh_catalogue(cfg: &AccountConfig, kind: TickKind, listed: &AtomicBool) {
+    if kind == TickKind::Quick && listed.load(Ordering::SeqCst) {
+        return;
+    }
+    match crate::catalogue::discover::refresh(cfg).await {
+        Ok(_) => listed.store(true, Ordering::SeqCst),
+        Err(e) => warn!(
+            "[catalogue] listing the folders of {} failed; this tick syncs the ones it knew: {e:#}",
+            cfg.name
+        ),
+    }
 }
 
-/// One sync pass over every configured mailbox of `cfg`.
-async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<SyncResult> {
+/// Read the server's counts of the `status-only` folders after a tick, which
+/// is what their sidebar rows show. Logged and skipped on failure, like the
+/// listing.
+async fn refresh_status_counts(cfg: &AccountConfig) {
+    if let Err(e) = crate::catalogue::discover::refresh_counts(cfg).await {
+        warn!(
+            "[catalogue] counting the folders of {} failed: {e:#}",
+            cfg.name
+        );
+    }
+}
+
+/// One sync pass over every folder of the catalogue a tick syncs.
+async fn sync_once(
+    cfg: &AccountConfig,
+    ctx: &TickContext,
+    listed: &AtomicBool,
+) -> Result<SyncResult> {
+    refresh_catalogue(cfg, ctx.kind, listed).await;
+    let targets = crate::catalogue::Catalogue::load(cfg).targets();
+    let result = if cfg.auth_method == crate::config::AuthMethod::Graph {
+        sync_once_graph(cfg, ctx, &targets).await
+    } else {
+        sync_once_imap(cfg, ctx, &targets).await
+    };
+    refresh_status_counts(cfg).await;
+    result
+}
+
+/// The IMAP body of a tick: the engine over the account's targets.
+async fn sync_once_imap(
+    cfg: &AccountConfig,
+    ctx: &TickContext,
+    targets: &[crate::sync::SyncTarget],
+) -> Result<SyncResult> {
     use crate::config::ImapConfig;
     use crate::store::{BlobStore, Store};
     use crate::sync::engine::{run_sync, SyncRun};
-
-    let targets = tick_targets(cfg);
-    if cfg.auth_method == crate::config::AuthMethod::Graph {
-        return sync_once_graph(cfg, ctx, &targets).await;
-    }
 
     let imap_config = ImapConfig::load(cfg)?;
 
@@ -1025,7 +1081,7 @@ async fn sync_once(cfg: &AccountConfig, ctx: &TickContext) -> Result<SyncResult>
             store: &store,
             blobs: &blobs,
             account: &cfg.name,
-            targets: &targets,
+            targets,
             limit: tick_limit(ctx.kind),
             dry_run: false,
             stop: ctx.stop.as_ref(),
@@ -1177,7 +1233,7 @@ mod tests {
     #[tokio::test]
     async fn a_graph_tick_body_runs_the_graph_backend() {
         for kind in [TickKind::Quick, TickKind::Full] {
-            let err = sync_once(&graph_config(), &tick_context(kind))
+            let err = sync_once(&graph_config(), &tick_context(kind), &AtomicBool::new(true))
                 .await
                 .expect_err("no oauth2 settings, so the Graph config cannot load");
             let text = format!("{err:#}");
@@ -1293,11 +1349,12 @@ mod tests {
         assert_eq!(runtime.readiness(), Readiness::Ready);
     }
 
-    /// Both transports tick over every configured mailbox, with the quick
-    /// bound on a quick tick and none on a full one.
+    /// Both transports tick over every configured mailbox when the server was
+    /// never listed, with the quick bound on a quick tick and none on a full
+    /// one.
     #[test]
     fn a_tick_covers_every_configured_mailbox_with_its_kinds_bound() {
-        let targets = tick_targets(&graph_config());
+        let targets = crate::catalogue::Catalogue::resolve(&graph_config(), &[]).targets();
         let servers: Vec<&str> = targets.iter().map(|t| t.server_name.as_str()).collect();
         assert_eq!(servers, vec!["Inbox", "Sent Items", "Junk Email"]);
         assert_eq!(tick_limit(TickKind::Quick), QUICK_TICK_LIMIT);

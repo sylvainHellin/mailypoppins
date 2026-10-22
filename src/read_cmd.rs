@@ -791,6 +791,41 @@ pub fn server_search_lines(
     lines
 }
 
+/// The lines `mp list-mailboxes` prints for a `mailbox.list_server` answer
+/// (#0141): one per folder, its name, the policy the daemon keeps it by, and
+/// its role or, for an ignored folder, why; Graph's counts after them.
+pub fn server_mailbox_lines(answer: &serde_json::Value) -> Vec<String> {
+    let rows = answer["mailboxes"].as_array().cloned().unwrap_or_default();
+    let text =
+        |row: &serde_json::Value, key: &str| row[key].as_str().unwrap_or_default().to_string();
+    let width = rows
+        .iter()
+        .map(|row| text(row, "name").chars().count())
+        .max()
+        .unwrap_or(0);
+    rows.iter()
+        .map(|row| {
+            let name = text(row, "name");
+            let pad = " ".repeat(width.saturating_sub(name.chars().count()));
+            let policy = text(row, "policy");
+            let why = row["role"]
+                .as_str()
+                .or_else(|| row["reason"].as_str())
+                .unwrap_or_default();
+            let counts = match (row["total"].as_u64(), row["unread"].as_u64()) {
+                (Some(total), Some(unread)) if unread > 0 => {
+                    format!("  {total} total, {unread} unread")
+                }
+                (Some(total), _) => format!("  {total} total"),
+                _ => String::new(),
+            };
+            format!("  {name}{pad}  {policy:<11}  {why}{counts}")
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1374,5 +1409,25 @@ mod tests {
         assert_eq!(json["coverage"], "local");
         assert_eq!(json["local_terms"], serde_json::json!([]));
         assert_eq!(json["truncated"], false);
+    }
+    /// `mp list-mailboxes` says, per folder, how the daemon keeps it and why
+    /// (#0141).
+    #[test]
+    fn server_mailbox_lines_name_the_policy_and_the_role_or_reason() {
+        let answer = serde_json::json!({"mailboxes": [
+            {"name": "INBOX", "policy": "sync", "role": "inbox", "reason": null, "total": null, "unread": null},
+            {"name": "Junk Email", "policy": "status-only", "role": "junk", "reason": null, "total": 12, "unread": 3},
+            {"name": "Calendar", "policy": "ignore", "role": null, "reason": "not a mail folder", "total": 0, "unread": 0},
+            {"name": "Spesen", "policy": "sync", "role": null, "reason": null, "total": null, "unread": null},
+        ]});
+        assert_eq!(
+            server_mailbox_lines(&answer),
+            [
+                "  INBOX       sync         inbox",
+                "  Junk Email  status-only  junk  12 total, 3 unread",
+                "  Calendar    ignore       not a mail folder  0 total",
+                "  Spesen      sync",
+            ]
+        );
     }
 }

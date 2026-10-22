@@ -271,7 +271,10 @@ enum Commands {
         #[command(subcommand)]
         action: InviteAction,
     },
-    /// List available IMAP mailboxes/folders
+    /// List every folder on the server with its sync policy and role
+    ///
+    /// The policy is how the daemon keeps the folder: sync, status-only or
+    /// ignore; an ignored folder says why.
     ListMailboxes {
         /// Print the listing as JSON on stdout
         #[arg(long)]
@@ -283,7 +286,8 @@ enum Commands {
         /// Max messages per mailbox
         #[arg(short = 'n', long, default_value = "50")]
         limit: usize,
-        /// Mailboxes to sync (default: INBOX, Archive, Sent)
+        /// Mailboxes to sync, by role, label or server name; any folder the
+        /// server lists is accepted (default: every folder the account syncs)
         #[arg(long)]
         mailbox: Option<Vec<String>>,
         /// Show what would be ingested without writing anything
@@ -411,10 +415,9 @@ enum Commands {
         /// Combine with the flags below; they build the same query.
         #[arg(default_value = "")]
         query: String,
-        /// Mailbox to search: a configured one by role or label, or any folder
-        /// the server lists by its server name (default: all the account's
-        /// mailboxes, and on Exchange every folder; --local: configured ones
-        /// only)
+        /// Mailbox to search: by role, label or server name, any folder the
+        /// server lists (default: every folder the account syncs, and on
+        /// Exchange every folder; --local: every mailbox the store holds)
         #[arg(long)]
         mailbox: Option<String>,
         /// Match the sender (from:)
@@ -1308,70 +1311,59 @@ fn is_drafts_selector(selector: &str, mailbox: Option<&str>) -> Result<bool> {
     Ok(parts.mailbox.as_deref() == Some(mailypoppins::selector::DRAFTS_MAILBOX))
 }
 
-/// Resolve a received selector to its message row plus the canonical selector.
-/// The mailbox key (`MailboxRole` id) a `--mailbox` argument names.
-///
-/// Matches a role id or a sidebar label case-insensitively, the same rule
-/// `mp dump-mailbox` and `mp list-messages` apply, and an unknown name is an
-/// error naming what it could have been rather than an empty result.
-fn resolve_mailbox_key(account: &AccountConfig, want: &str) -> Result<String> {
-    let mailboxes: Vec<_> = mailypoppins::tui::app::build_mailboxes(account)
-        .into_iter()
-        .filter(|m| m.id != mailypoppins::selector::DRAFTS_MAILBOX)
-        .collect();
-    if let Some(hit) = mailboxes
-        .iter()
-        .find(|m| want.eq_ignore_ascii_case(&m.id) || want.eq_ignore_ascii_case(&m.label))
-    {
-        return Ok(hit.id.clone());
-    }
-    let known = mailboxes
-        .iter()
-        .map(|m| m.id.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(anyhow!(
-        "'{want}' is not a mailbox of {} (known: {known})",
-        account.name
-    ))
+/// The account's mailboxes as the daemon's `mailbox.list` answers them: the
+/// sidebar hierarchy every client reads, with every folder the server lists
+/// (#0141), so a `--mailbox` the config never names still resolves.
+async fn daemon_mailboxes(
+    connection: &mut mp_client::Connection,
+    account: &str,
+) -> Result<Vec<mp_protocol::state::MailboxRow>> {
+    let answer = daemon_try_call(
+        connection,
+        "mailbox.list",
+        mp_client::queries::mailbox_list_params(account),
+    )
+    .await
+    .map_err(|e| refusal(account, e))?;
+    Ok(mp_client::queries::decode_mailbox_rows(&answer))
 }
 
 /// The mailboxes a listing covers: the one `--mailbox` names, or every mailbox
 /// of the account but drafts.
 ///
-/// Split out of [`list_message_groups`] so the in-process listing and the one
-/// routed through the daemon resolve a mailbox name, and refuse an unknown one,
-/// through the same code and with the same message.
+/// A name matches a store key, a sidebar label or a server name,
+/// case-insensitively, and an unknown one is an error naming what it could
+/// have been rather than an empty result.
 fn select_mailboxes(
-    account: &AccountConfig,
+    account: &str,
+    rows: Vec<mp_protocol::state::MailboxRow>,
     mailbox: Option<&str>,
-) -> Result<Vec<mailypoppins::tui::app::MailboxInfo>> {
-    let mailboxes: Vec<_> = mailypoppins::tui::app::build_mailboxes(account)
+) -> Result<Vec<mp_protocol::state::MailboxRow>> {
+    let mailboxes: Vec<_> = rows
         .into_iter()
-        .filter(|m| m.id != mailypoppins::selector::DRAFTS_MAILBOX)
+        .filter(|m| m.slug != mailypoppins::selector::DRAFTS_MAILBOX)
         .collect();
-    match mailbox {
-        Some(want) => {
-            let hit: Vec<_> = mailboxes
-                .iter()
-                .filter(|m| want.eq_ignore_ascii_case(&m.id) || want.eq_ignore_ascii_case(&m.label))
-                .cloned()
-                .collect();
-            if hit.is_empty() {
-                let known = mailboxes
-                    .iter()
-                    .map(|m| m.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(anyhow!(
-                    "'{want}' is not a mailbox of {} (known: {known})",
-                    account.name
-                ));
-            }
-            Ok(hit)
-        }
-        None => Ok(mailboxes),
+    let Some(want) = mailbox else {
+        return Ok(mailboxes);
+    };
+    let names = |m: &mp_protocol::state::MailboxRow| {
+        want.eq_ignore_ascii_case(&m.slug)
+            || want.eq_ignore_ascii_case(&m.label)
+            || m.server
+                .as_deref()
+                .is_some_and(|server| want.eq_ignore_ascii_case(server))
+    };
+    if let Some(hit) = mailboxes.iter().find(|m| names(m)) {
+        return Ok(vec![hit.clone()]);
     }
+    let known = mailboxes
+        .iter()
+        .map(|m| m.slug.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(anyhow!(
+        "'{want}' is not a mailbox of {account} (known: {known})"
+    ))
 }
 
 /// How long a routed command waits for the daemon, per call; the same budget as
@@ -1526,17 +1518,18 @@ async fn routed_account_list() -> Vec<mailypoppins::daemon::methods::account::Ac
 ///
 /// One `message.list` per listed mailbox, because the method answers about one
 /// mailbox and the grouping is the client's presentation. The mailbox name is
-/// resolved here, through the same [`select_mailboxes`] the in-process listing
-/// used, so an unknown one is refused in the words it has always been refused
-/// in and without a round trip.
+/// resolved through [`select_mailboxes`] over the daemon's `mailbox.list`, so
+/// every folder the server lists is reachable (#0141) and an unknown one is
+/// refused in the words it has always been refused in.
 async fn routed_list_messages(
     account: &AccountConfig,
     mailbox: Option<&str>,
     limit: usize,
     json: bool,
 ) -> Result<()> {
-    let selected = select_mailboxes(account, mailbox)?;
     let mut connection = daemon_connection().await;
+    let rows = daemon_mailboxes(&mut connection, &account.name).await?;
+    let selected = select_mailboxes(&account.name, rows, mailbox)?;
     let mut groups = Vec::new();
     let mut listing = mailypoppins::read_cmd::MessageListingJson {
         account: account.name.clone(),
@@ -1549,7 +1542,7 @@ async fn routed_list_messages(
             "message.list",
             serde_json::json!({
                 "account": account.name,
-                "mailbox": info.id,
+                "mailbox": info.slug,
                 "limit": limit,
             }),
         )
@@ -1561,7 +1554,7 @@ async fn routed_list_messages(
             listing
                 .mailboxes
                 .push(mailypoppins::read_cmd::ListedMailbox {
-                    mailbox: info.id.clone(),
+                    mailbox: info.slug.clone(),
                     label: info.label.clone(),
                     total,
                     shown: messages.len(),
@@ -1569,7 +1562,7 @@ async fn routed_list_messages(
             listing.messages.extend(messages.iter().map(|message| {
                 mailypoppins::read_cmd::ListedMessage::from_wire(
                     &account.name,
-                    &info.id,
+                    &info.slug,
                     &mp_client::queries::row_from_wire(message),
                     None,
                 )
@@ -1581,7 +1574,7 @@ async fn routed_list_messages(
             .map(|messages| {
                 messages
                     .iter()
-                    .map(|message| row_from_wire(message, &info.id))
+                    .map(|message| row_from_wire(message, &info.slug))
                     .collect()
             })
             .unwrap_or_default();
@@ -1807,9 +1800,11 @@ fn missing_from_store(
     if refused != mailypoppins::selector::not_found(&query).to_string() {
         return None;
     }
-    let mailbox_key = resolve_mailbox_key(account, query.mailbox.as_deref()?).ok()?;
+    // The selector's mailbox segment as typed: `message.fetch` resolves it on
+    // the daemon, against the same catalogue a sync does (#0141).
+    let mailbox = query.mailbox.clone()?;
     let key = mailypoppins::selector::message_key(&query.key);
-    Some((mailbox_key, format!("<{key}>")))
+    Some((mailbox, format!("<{key}>")))
 }
 
 /// `mp dump-mailbox --json`: every selected account's envelope records, in the
@@ -1951,10 +1946,10 @@ const KIND_SERVER_SEARCH_HIT: &str = "message.server_hit";
 /// (the store-coverage warning, the cut, the mailboxes the server refused)
 /// is printed around them by [`mailypoppins::read_cmd::server_search_lines`].
 ///
-/// `--mailbox` names a configured mailbox or any folder the server lists;
-/// without it the daemon reads the query's own `in:`, and without that
-/// searches every configured mailbox on IMAP and every folder at once on
-/// Graph, each hit listed under its folder.
+/// `--mailbox` names any folder the server lists; without it the daemon
+/// reads the query's own `in:`, and without that searches every folder the
+/// account syncs on IMAP (#0141) and every folder at once on Graph, each hit
+/// listed under its folder.
 async fn routed_server_search(
     account_config: &AccountConfig,
     query: &str,
@@ -1968,6 +1963,16 @@ async fn routed_server_search(
     let params = server_search_params(account, query, mailbox, flags, limit);
 
     let mut connection = daemon_connection().await;
+    // What a hit's mailbox label resolves to for its selector; an account
+    // with no store yet has no sidebar to resolve against, and its hits are
+    // listed without one.
+    let rows = if json {
+        daemon_mailboxes(&mut connection, account)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     // A client that follows its own operation has to be a subscriber first:
     // the hits and the finish reach bootstrapped connections only.
     daemon_call(&mut connection, "state.bootstrap", serde_json::json!({})).await;
@@ -2013,9 +2018,12 @@ async fn routed_server_search(
             hits.iter()
                 .map(|hit| {
                     // The hit names the mailbox by its sidebar label; the
-                    // selector wants the store's id, which a folder the
-                    // account does not configure has none of.
-                    let key = resolve_mailbox_key(account_config, &hit.mailbox).ok();
+                    // selector wants the store's id, which every folder the
+                    // sidebar lists has since #0141.
+                    let key = select_mailboxes(account, rows.clone(), Some(&hit.mailbox))
+                        .ok()
+                        .and_then(|hit| hit.into_iter().next())
+                        .map(|row| row.slug);
                     mailypoppins::read_cmd::ListedMessage::from_server_hit(
                         account,
                         key.as_deref(),
@@ -2737,8 +2745,9 @@ async fn routed_list_mailboxes(account: &AccountConfig, json: bool) -> Result<()
     .map_err(|e| refusal(&account.name, e))?;
     if json {
         // The daemon's own result shape: `account`, `source` and the
-        // `mailboxes` rows (`name`, `delimiter`, `attributes`, `total`,
-        // `unread`, `null` where the transport says nothing).
+        // `mailboxes` rows (`name`, `label`, `delimiter`, `attributes`,
+        // `total`, `unread`, `role`, `policy`, `key`, `reason`, `null` where
+        // the transport or the catalogue says nothing).
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
@@ -2749,23 +2758,8 @@ async fn routed_list_mailboxes(account: &AccountConfig, json: bool) -> Result<()
         "ℹ".blue(),
         if graph { "folders" } else { "mailboxes" }
     );
-    let empty = Vec::new();
-    for mailbox in result["mailboxes"].as_array().unwrap_or(&empty) {
-        let name = wire_str(&mailbox["name"]);
-        if !graph {
-            println!("  {}", name);
-            continue;
-        }
-        let unread = match mailbox["unread"].as_u64() {
-            Some(unread) if unread > 0 => format!(" ({})", format!("{unread} unread").yellow()),
-            _ => String::new(),
-        };
-        println!(
-            "  {} {} total{}",
-            name.green(),
-            mailbox["total"].as_u64().unwrap_or_default(),
-            unread,
-        );
+    for line in mailypoppins::read_cmd::server_mailbox_lines(&result) {
+        println!("{line}");
     }
     Ok(())
 }
@@ -4742,14 +4736,10 @@ async fn main() -> Result<()> {
             if local {
                 // Resolve mailbox scope: --mailbox flag > in: directive > all.
                 let mailbox_name = mailbox.or_else(|| query_ast.in_mailbox.clone());
-                // The mailbox is resolved here, as it was before the daemon
-                // answered the search: the names come from the configuration
-                // the client already holds, so an unknown one is refused in the
-                // same words and without a round trip.
-                let mailbox_key = match mailbox_name.as_deref() {
-                    Some(want) => Some(resolve_mailbox_key(&account_config, want)?),
-                    None => None,
-                };
+                // The daemon's `message.search` resolves the name against the
+                // account's sidebar (#0141), so a folder only the server names
+                // is found and an unknown one is refused in its words.
+                let mailbox_key = mailbox_name;
                 // One hit past the limit tells a cut answer from one that
                 // had exactly `limit` hits (PERSO-175).
                 let mut hits = routed_search(

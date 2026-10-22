@@ -286,14 +286,20 @@ The types are `mp_protocol::account::{AccountCredentials, AccountCredential, Tok
 {
   "account": "work",
   "mailboxes": [
-    {"role": "inbox", "slug": "inbox", "label": "Inbox", "total": 214, "unread": 7, "badge": 214},
-    {"role": "drafts", "slug": "drafts", "label": "Drafts", "total": 2, "unread": 0, "badge": 2}
+    {"role": "inbox", "slug": "inbox", "label": "Inbox", "server": "INBOX", "policy": "sync", "total": 214, "unread": 7, "badge": 214},
+    {"role": "drafts", "slug": "drafts", "label": "Drafts", "server": null, "policy": "sync", "total": 2, "unread": 0, "badge": 2},
+    {"role": "junk", "slug": "Junk Email", "label": "Junk", "server": "Junk Email", "policy": "status-only", "total": 120, "unread": 7, "badge": 120}
   ]
 }
 ```
 
-The order, the roles, the slugs and the labels are the bootstrap snapshot's `mailboxes` entry for that account, from the one hierarchy the TUI sidebar also builds, so two answers about one account cannot disagree about which mailboxes it has.
-`role` is one of `inbox`, `drafts`, `sent`, `archive`, `other`; `slug` is the store key a client addresses in `message.list`; `label` is what a sidebar prints.
+The order, the roles, the slugs and the labels are the bootstrap snapshot's `mailboxes` entry for that account, from the one hierarchy every client reads (`crate::catalogue::sidebar`), so two answers about one account cannot disagree about which mailboxes it has.
+The hierarchy is the account's mailbox catalogue (#0141): the four fixed rows Inbox, Drafts, Sent and Archive, then every folder the server lists that the daemon does not ignore, in the order trash, junk, the configured `extra` folders, the other synced folders by name, the counts-only folders by name.
+`role` is one of `inbox`, `drafts`, `sent`, `archive`, `trash`, `junk`, `other`; `slug` is the store key a client addresses in `message.list`; `label` is what a sidebar prints.
+`server` is the folder's name on the server, `null` for the local Drafts view and for a role the account has no folder for.
+`policy` is `sync` or `status-only` (an `ignore` folder is not a row): a `status-only` folder's `total` and `unread` are the counts the last tick's `STATUS` read from the server, since its store holds at most the newest few messages, and a client that sums an account's mail counts the `sync` rows alone.
+Both members default when absent, `null` and `sync`, so a client reads an older daemon's answer.
+A tick that lists a folder the server just created re-seeds the account's hierarchy and announces the new row with a `state.invalidate` of `mailbox:<account>/<slug>` even at zero counts, and a folder the server stopped listing goes with a `state.remove` of the same resource; a client re-reads the hierarchy on either.
 Drafts are listed here and refused by `message.list`, exactly as the sidebar lists them and the message listing does not.
 `total` is every message the mailbox holds, the count the sidebar shows, with the Drafts row counted from the draft index because drafts are not message rows.
 `unread` is how many of them the server has not flagged `\Seen`, and is `0` for Drafts, which have no read state.
@@ -841,7 +847,8 @@ sync.quick          {account, limit?, mailbox?: [str], dry_run?}  -> {operation_
 sync.full           {account, mailbox?: [str], dry_run?}          -> {operation_id}
 sync.watch          {account, mailbox?}                           -> {operation_id}
 mailbox.list_server {account}
-        -> {account, source, mailboxes: [{name, delimiter, attributes, total, unread}]}
+        -> {account, source, mailboxes: [{name, label, delimiter, attributes, total, unread,
+                                          role, policy, key, reason}]}
 ```
 
 `sync.quick` is the newest UIDs per mailbox and takes a `limit`; `sync.full` is everything the mailbox lists and takes none, because a bounded full pass is a quick pass under another name and a caller who sent one is told rather than quietly given a different pass.
@@ -853,7 +860,9 @@ An account that configures neither IMAP nor SMTP is `-32006` with `{account, sta
 An unknown account is `-32005` with `{account}`.
 Neither pass requires a local store: a sync is what gives an account one.
 
-A `mailbox` a pass cannot resolve fails the **operation** with `-32602`, naming the account and listing the mailboxes it does know, so a client renders it beside every other per-account failure rather than through a second path.
+A `mailbox` resolves to a configured mailbox as it always did, and otherwise to any folder the account's catalogue holds, by store key, server name or label, whatever its policy (#0141): `mp sync --mailbox Spesen` needs no config entry, and a named folder downloads in full.
+Without `mailbox` a pass covers every folder the catalogue syncs, after listing the server once.
+A `mailbox` a pass cannot resolve (one the server does not list, a `\Noselect` parent, a name that would shadow a role or the local Drafts) fails the **operation** with `-32602`, naming the account and listing the folders it does know, so a client renders it beside every other per-account failure rather than through a second path.
 The refusal arrives before anything opens a socket, and before either drain runs.
 
 A pass whose account is already another engine's *succeeds* and answers `{blocked: true, outcome: null}`: the holder is doing the work, so nothing ran, no session was opened and that is not this operation's failure (#0122).
@@ -869,6 +878,8 @@ A client that labels a tail report derives the label from the phase name and fro
 
 `mailbox.list_server` is a query against the server, so it takes no engine lock and reads no store.
 `source` is `imap` or `graph`, because the two transports report different things about a mailbox: Graph's folder list carries `total` and `unread`, and IMAP's `LIST` carries `delimiter` and `attributes` and no counts, so the members the server said nothing about are `null` rather than a number nobody measured.
+Graph lists the whole folder tree, a child folder as `Parent/Child`, and gives each well-known folder the attribute of its role (`\Inbox`, `\Sent`, `\Drafts`, `\Trash`, `\Junk`, `\Archive`).
+`label`, `role`, `policy`, `key` and `reason` are what the daemon's catalogue makes of this very listing against the live config (#0141): the decoded name a sidebar shows, the role the folder holds, how a tick keeps it, the store key its rows carry (`null` for an `ignore` folder) and, for an `ignore` folder, why in words.
 Its answer names no file.
 
 This build's watcher is INBOX-only.
@@ -958,7 +969,9 @@ A message the account's store already holds answers with that row and `already_p
 A client that raced a sync would otherwise be handed an error for the state it wanted, and the short-circuit runs before the backend is resolved, which is what makes it reachable for an account with no credentials.
 
 The address is `{account, mailbox, message_id}`, which is what a server-only hit has in hand: not a uid, because the store has none for it, and not a selector, because a selector names a row and the point is that there is not one yet.
-`mailbox` is the sidebar mailbox the hit came from, resolved by role, slug or label as `message.list` resolves one, and the daemon maps it to the server name itself.
+`mailbox` is the mailbox the hit came from, resolved by role, slug, label or server name as `message.list` resolves one, and the daemon maps it to the server name itself.
+Since #0141 it is any folder the server lists, whatever its policy: a hit from a counts-only folder (the trash, a Proton label) or an ignored one (Proton's `All Mail`, an Exchange non-mail folder) is stored under that folder's own key, where its selector and the local search find it, and nothing syncs an ignored folder, so such a row stays as fetched.
+A folder the last listing did not have, and one whose name would read back as a role key or the local Drafts (a plain `Sent` beside the folder marked `\Sent`, a server `Drafts`), are `-32602`.
 Graph already carries the whole payload and ingests under the synthetic uid derived from the Message-ID; plain IMAP needs the uid the mailbox holds the message under, since a made-up one would be pruned or duplicated by the next sync, so the fetch asks the server for it by `Message-ID` and ingests the raw bytes it got back.
 
 A fetch that ingested a row publishes the mailbox's counts change, so a listing update rides on the `state.invalidate` of `mailbox:<account>/<slug>` with `{"query": "counts"}` that every other ingest travels as.
@@ -1587,3 +1600,9 @@ The daemon leftovers (2026-10-22) added nine methods, three optional parameters,
 `contact.vcard_draft` `{account, name, address, display_name}` -> `{draft, vcf}` (`mp_protocol::contact::VcardDraft`) is a command; `contact.search` gained `rebuild`, `null` or the `mp_protocol::contact::RefusedRebuild` of a build the cache guard refused; and every write of a contact index publishes `contact.changed` `{account, contacts}` (`mp_protocol::events::ContactChanged`).
 `message.list_server`, `mp fetch`'s one-mailbox query, was retired with the command as a duplicate of `mp search --mailbox` on `message.search_server`; a client that still calls it gets `-32601`, and the capability list lost its name.
 The capability list grew by the new names, which is the derivation working rather than a change to it.
+
+#0141 (PERSO-119) added two members to a mailbox row, five to a `mailbox.list_server` row and two roles, all additively; no field was renamed, none was dropped, and no method was added.
+`MailboxRow` gained `server`, the folder's server name, and `policy`, `mp_protocol::state::FolderPolicy` (`sync`, `status-only` or `ignore`), both `default` on the way in, so a row from an older daemon reads as a synced mailbox with no server name; the bootstrap snapshot's `mailboxes` rows carry the same two members.
+`role` may now be `trash` or `junk`, which a client that does not know them reads as `other`.
+`mailbox.list_server` rows gained `label`, `role`, `policy`, `key` and `reason`, and its Graph answer lists the whole folder tree with `Parent/Child` names rather than the top level.
+`sync.quick`, `sync.full`, a hook's `mailbox`, `message.list`, `message.search`, the move destination and `message.fetch` accept any folder the server lists, not only a configured one; `mp list-mailboxes` prints each folder's policy and role.

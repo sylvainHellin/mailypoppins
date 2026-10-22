@@ -27,14 +27,19 @@ use mp_protocol::state::SyncHealth;
 use crate::config::AccountConfig;
 
 /// One mailbox of a seeded account, as the sidebar hierarchy names it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MailboxSeed {
-    /// The product role: `inbox`, `drafts`, `sent`, `archive`, or `other`.
+    /// The product role: `inbox`, `drafts`, `sent`, `archive`, `trash`,
+    /// `junk`, or `other`.
     pub role: String,
     /// The store key and selector segment, which is what a client addresses.
     pub slug: String,
     /// What the sidebar shows.
     pub label: String,
+    /// The server folder, `None` for the local Drafts view (#0141).
+    pub server: Option<String>,
+    /// How the daemon keeps the folder (#0141).
+    pub policy: mp_protocol::state::FolderPolicy,
 }
 
 /// One account the daemon knows about, with the mailboxes it will have.
@@ -46,36 +51,39 @@ pub struct AccountSeed {
     pub mailboxes: Vec<MailboxSeed>,
 }
 
-/// The seeds behind `config.toml`, in the file's order.
+/// The seeds behind `config.toml` and each account's mailbox catalogue, in
+/// the file's order.
 ///
-/// Derived from [`build_mailboxes`](crate::tui::app::build_mailboxes), the same
-/// sidebar hierarchy the TUI and `message.list` resolve against, so the daemon
-/// cannot disagree with them about which mailboxes an account has. It opens no
-/// store: Phase 3a starts no runtimes, and asking which accounts exist may not
-/// create a cache.
+/// Derived from [`crate::catalogue::sidebar`], the same hierarchy
+/// `mailbox.list`, `message.list` and a move resolve against, so the daemon
+/// cannot disagree with itself about which mailboxes an account has (#0141).
+/// It creates no store: the catalogue is read from a store that exists, and an
+/// account without one is seeded from its config alone, which is what Phase 3a
+/// did before a runtime came up.
 pub fn seeds_from_config(accounts: &[AccountConfig]) -> Vec<AccountSeed> {
-    use crate::tui::app::MailboxKind;
-    accounts
-        .iter()
-        .map(|account| AccountSeed {
-            name: account.name.clone(),
-            mailboxes: crate::tui::app::build_mailboxes(account)
-                .into_iter()
-                .map(|mailbox| MailboxSeed {
-                    role: match mailbox.kind {
-                        MailboxKind::Inbox => "inbox",
-                        MailboxKind::Drafts => "drafts",
-                        MailboxKind::Sent => "sent",
-                        MailboxKind::Archive => "archive",
-                        MailboxKind::Extra => "other",
-                    }
-                    .to_string(),
-                    slug: mailbox.id,
-                    label: mailbox.label,
-                })
-                .collect(),
-        })
-        .collect()
+    accounts.iter().map(seed_of).collect()
+}
+
+/// One account's seed, from its catalogue as the store holds it.
+pub fn seed_of(account: &AccountConfig) -> AccountSeed {
+    seed_with(account, &crate::catalogue::Catalogue::load(account))
+}
+
+/// One account's seed, from a catalogue already in hand.
+pub fn seed_with(account: &AccountConfig, catalogue: &crate::catalogue::Catalogue) -> AccountSeed {
+    AccountSeed {
+        name: account.name.clone(),
+        mailboxes: crate::catalogue::sidebar(account, catalogue)
+            .into_iter()
+            .map(|row| MailboxSeed {
+                role: row.role,
+                slug: row.slug,
+                label: row.label,
+                server: row.server,
+                policy: row.policy,
+            })
+            .collect(),
+    }
 }
 
 /// One thing that moved, as the daemon commits it.
@@ -375,6 +383,8 @@ impl Snapshot {
                         "role": mailbox.seed.role,
                         "slug": mailbox.seed.slug,
                         "label": mailbox.seed.label,
+                        "server": mailbox.seed.server,
+                        "policy": mailbox.seed.policy,
                         "total": mailbox.total,
                         "unread": mailbox.unread,
                         "badge": mailbox.badge,

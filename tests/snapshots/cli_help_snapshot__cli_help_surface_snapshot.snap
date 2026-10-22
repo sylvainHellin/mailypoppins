@@ -21,7 +21,7 @@ Commands:
   reply           Create a reply draft from a received email
   forward         Forward an email to new recipients
   invite          RSVP to a received calendar invitation (iMIP REPLY over SMTP)
-  list-mailboxes  List available IMAP mailboxes/folders
+  list-mailboxes  List every folder on the server with its sync policy and role
   sync            Sync mailboxes from the server into the local store
   watch           Watch a mailbox for changes using IMAP IDLE
   archive         Archive a received email (server + local)
@@ -263,7 +263,9 @@ Options:
   -h, --help               Print help
 
 $ mp list-mailboxes --help
-List available IMAP mailboxes/folders
+List every folder on the server with its sync policy and role
+
+The policy is how the daemon keeps the folder: sync, status-only or ignore; an ignored folder says why.
 
 Usage: mp list-mailboxes [OPTIONS]
 

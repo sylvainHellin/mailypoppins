@@ -55,7 +55,7 @@ use crate::pending_ops;
 use crate::selector::{Namespace, Selector, DRAFTS_MAILBOX};
 use crate::store::read::{self, MessageRow};
 use crate::store::{BlobStore, Store};
-use crate::tui::app::{build_mailboxes, resolve_date};
+use crate::tui::app::resolve_date;
 
 use super::super::dispatch::{
     CancelToken, ClientCtx, Dispatcher, DomainError, Method, MethodKind, MethodSpec, Outcome,
@@ -1703,7 +1703,11 @@ async fn mutate(
     let selector = Selector::for_message(&name, &row).to_string();
     let id = format!("{}/{}", row.mailbox, row.uid);
     let resource = format!("message:{name}/{}/{}", row.mailbox, row.uid);
-    let source_server = crate::config::find_server_name_for_role(account, &row.mailbox);
+    // The server folder behind each store key from the account's catalogue
+    // (#0141), so a discovered folder and a role found on the server resolve
+    // as a configured one does.
+    let catalogue = crate::catalogue::Catalogue::load(account);
+    let source_server = catalogue.server_for_key(&row.mailbox);
 
     let backend = if settle_owed {
         // Startup opened the secrets backend if a configuration had loaded;
@@ -1729,7 +1733,7 @@ async fn mutate(
     let (queued, result) = match kind {
         Kind::Archive | Kind::Move => {
             let destination = destination.expect("an archive and a move both name a mailbox");
-            let dest_server = crate::config::find_server_name_for_role(account, &destination);
+            let dest_server = catalogue.server_for_key(&destination);
             let queued = crate::mutations::queue_move(
                 &store,
                 &name,
@@ -2440,17 +2444,31 @@ fn limit_param(params: &Value) -> Result<Option<usize>, RpcError> {
 /// caller asked for something that does not exist rather than for something the
 /// daemon refuses.
 pub(super) fn resolve_mailbox(account: &AccountConfig, wanted: &str) -> Result<String, RpcError> {
-    let mailboxes: Vec<_> = build_mailboxes(account)
+    resolve_in(account, &crate::catalogue::Catalogue::load(account), wanted)
+}
+
+/// [`resolve_mailbox`] against a catalogue already in hand, which is the part
+/// a test drives. The mailboxes are the sidebar's (#0141): the fixed rows and
+/// every listed folder, matched by store key, label or server name.
+pub(super) fn resolve_in(
+    account: &AccountConfig,
+    catalogue: &crate::catalogue::Catalogue,
+    wanted: &str,
+) -> Result<String, RpcError> {
+    let mailboxes: Vec<_> = crate::catalogue::sidebar(account, catalogue)
         .into_iter()
-        .filter(|mailbox| mailbox.id != DRAFTS_MAILBOX)
+        .filter(|mailbox| mailbox.slug != DRAFTS_MAILBOX)
         .collect();
-    if let Some(hit) = mailboxes
-        .iter()
-        .find(|m| wanted.eq_ignore_ascii_case(&m.id) || wanted.eq_ignore_ascii_case(&m.label))
-    {
-        return Ok(hit.id.clone());
+    if let Some(hit) = mailboxes.iter().find(|m| {
+        wanted.eq_ignore_ascii_case(&m.slug)
+            || wanted.eq_ignore_ascii_case(&m.label)
+            || m.server
+                .as_deref()
+                .is_some_and(|server| wanted.eq_ignore_ascii_case(server))
+    }) {
+        return Ok(hit.slug.clone());
     }
-    let known: Vec<&str> = mailboxes.iter().map(|m| m.id.as_str()).collect();
+    let known: Vec<&str> = mailboxes.iter().map(|m| m.slug.as_str()).collect();
     Err(invalid_params(format!(
         "'{wanted}' is not a mailbox of {} (known: {})",
         account.name,

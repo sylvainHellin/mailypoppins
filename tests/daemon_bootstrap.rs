@@ -40,7 +40,8 @@
 //! impl InstanceId { pub fn new(id: impl Into<String>) -> Self; pub fn as_str(&self) -> &str; }
 //! pub struct ConnectionId(pub u64);      // Copy + Eq + Hash + Debug
 //!
-//! pub struct MailboxSeed { pub role: String, pub slug: String, pub label: String }
+//! pub struct MailboxSeed { pub role: String, pub slug: String, pub label: String,
+//!                          pub server: Option<String>, pub policy: FolderPolicy }
 //! pub struct AccountSeed { pub name: String, pub mailboxes: Vec<MailboxSeed> }
 //!
 //! pub enum Change {                      // Clone + Debug + PartialEq + Eq
@@ -274,11 +275,13 @@ fn seed_accounts() -> Vec<AccountSeed> {
                     role: "inbox".to_string(),
                     slug: "inbox".to_string(),
                     label: "Inbox".to_string(),
+                    ..Default::default()
                 },
                 MailboxSeed {
                     role: "sent".to_string(),
                     slug: "sent".to_string(),
                     label: "Sent".to_string(),
+                    ..Default::default()
                 },
             ],
         },
@@ -288,6 +291,7 @@ fn seed_accounts() -> Vec<AccountSeed> {
                 role: "inbox".to_string(),
                 slug: "inbox".to_string(),
                 label: "Inbox".to_string(),
+                ..Default::default()
             }],
         },
     ]
@@ -648,7 +652,9 @@ fn assert_snapshot_shape(snapshot: &Value, label: &str) {
         {
             assert_keys(
                 mailbox,
-                &["role", "slug", "label", "total", "unread", "badge"],
+                &[
+                    "role", "slug", "label", "server", "policy", "total", "unread", "badge",
+                ],
                 &format!("{label}: a mailbox of {name}"),
             );
         }

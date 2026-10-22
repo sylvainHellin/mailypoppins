@@ -2691,8 +2691,14 @@ impl DurableSend {
         // `None` when the server files its own copy (Gmail, Graph, Proton) or
         // the user said `save_to_sent = "never"`: the row then goes straight
         // from `pending_send` to `done` on a 250, with no APPEND ever.
-        let target = crate::config::appends_to_sent(account)
-            .then(|| crate::config::resolve_sent_mailbox(account));
+        // The Sent folder config names, else the one the server marks `\Sent`
+        // (#0141), else the literal `Sent`.
+        let target = crate::config::appends_to_sent(account).then(|| {
+            crate::catalogue::Catalogue::from_store(&store, account)
+                .role(crate::catalogue::FolderRole::Sent)
+                .map(|folder| folder.server.clone())
+                .unwrap_or_else(|| crate::config::resolve_sent_mailbox(account))
+        });
         let row_id = crate::outbox::enqueue(
             &store,
             &blobs,
@@ -3665,10 +3671,11 @@ fn server_mailboxes_of(
     account: &crate::config::AccountConfig,
     rows: &[crate::store::read::MessageRow],
 ) -> Vec<String> {
+    let catalogue = crate::catalogue::Catalogue::load(account);
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     for row in rows {
-        let server_mailbox = crate::config::find_server_name_for_role(account, &row.mailbox);
+        let server_mailbox = catalogue.server_for_key(&row.mailbox);
         if seen.insert(server_mailbox.clone()) {
             out.push(server_mailbox);
         }

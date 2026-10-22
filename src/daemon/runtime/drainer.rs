@@ -123,7 +123,7 @@ pub fn spawn(
         },
         Arc::new(move |runtime: &AccountRuntime, outcome: DrainOutcome| {
             let canonical = Arc::clone(&canonical);
-            let account = runtime.account().to_string();
+            let account = runtime.config().clone();
             Box::pin(async move { publish(&canonical, &account, &outcome).await })
                 as futures::future::BoxFuture<'static, ()>
         }),
@@ -229,8 +229,12 @@ fn finish(account: &str) {
 }
 
 /// Commit what a drain that ran changed.
-async fn publish(canonical: &Arc<CanonicalState>, account: &str, outcome: &DrainOutcome) {
-    commit_rollback(canonical, account, outcome.failed_mutations);
+async fn publish(
+    canonical: &Arc<CanonicalState>,
+    account: &crate::config::AccountConfig,
+    outcome: &DrainOutcome,
+) {
+    commit_rollback(canonical, &account.name, outcome.failed_mutations);
     super::publish::publish_changed_counts(canonical, account).await;
 }
 
@@ -295,6 +299,7 @@ mod tests {
                         role: slug.to_string(),
                         slug: slug.to_string(),
                         label: slug.to_string(),
+                        ..Default::default()
                     })
                     .collect(),
             }],

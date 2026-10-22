@@ -613,7 +613,7 @@ async fn run_pass_to_end(
 /// publishes nothing.
 async fn publish_cancelled(request: &PassRequest, canonical: &Arc<CanonicalState>) {
     if !request.dry_run {
-        publish_changed_counts(canonical, &request.account.name).await;
+        publish_changed_counts(canonical, &request.account).await;
     }
 }
 
@@ -744,7 +744,42 @@ async fn body(
     let account = Arc::new(request.account.clone());
     let targets = targets.to_vec();
     let (limit, dry_run) = (pass_limit(request.kind, request.limit), request.dry_run);
+    // A pass over the whole account lists the server first, as a runtime's
+    // first tick does (#0141): an account's first sync, which runs before
+    // its runtime exists, then covers every folder it will keep rather than
+    // only the configured ones. A dry run writes nothing, the listing
+    // included, and a `--mailbox` pass has its folders already.
+    // The listing writes the store, so it takes the engine's turn first and
+    // lists nothing while another engine holds it: the pass that follows then
+    // reports itself blocked, having opened no session at all (#0122).
+    // An account whose transport cannot even be configured (no password yet)
+    // takes no turn either: the pass fails on the same load a moment later,
+    // and the lock stays free for whoever fixes the account.
+    let discover = request.mailbox.is_none() && !dry_run;
     off_thread("the sync body", move || async move {
+        let configured = if account.auth_method == AuthMethod::Graph {
+            crate::config::GraphConfig::load(&account).is_ok()
+        } else {
+            ImapConfig::load(&account).is_ok()
+        };
+        let targets = if discover && configured {
+            match crate::engine_lock::EngineLock::take_turn(&account.name) {
+                Ok(Some(_turn)) => {
+                    if let Err(e) = crate::catalogue::discover::refresh(&account).await {
+                        log::warn!(
+                            "[catalogue] listing the folders of {} failed; syncing the ones it \
+                             knew: {e:#}",
+                            account.name
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("[catalogue] the engine lock of {}: {e:#}", account.name),
+            }
+            crate::catalogue::Catalogue::load(&account).targets()
+        } else {
+            targets
+        };
         if account.auth_method == AuthMethod::Graph {
             let graph = crate::config::GraphConfig::load(&account)?;
             // The Graph path is not guarded yet (#0122 covers the IMAP ingest),
@@ -791,35 +826,24 @@ fn pass_limit(kind: TickKind, limit: usize) -> usize {
     }
 }
 
-/// The mailboxes one pass covers: the ones `--mailbox` named, or every
-/// configured one.
+/// The mailboxes one pass covers: the ones `--mailbox` named, or every folder
+/// the account's catalogue syncs (#0141).
 ///
-/// Both halves of a target come from one configured mapping: building the role
-/// from the typed string files an extra mailbox's rows under `projects` while
-/// the rest of the product reads `Projects` (#0064).
+/// A named mailbox resolves through [`Catalogue::sync_target`]: a configured
+/// one through its configured mapping, so both halves of the target come
+/// from one place (#0064), and any other folder the server lists under its
+/// own name.
 fn resolve_targets(
     account: &AccountConfig,
     wanted: Option<&[String]>,
 ) -> Result<Vec<SyncTarget>, RpcError> {
+    let catalogue = crate::catalogue::Catalogue::load(account);
     let Some(wanted) = wanted else {
-        return Ok(crate::config::all_configured_mailboxes(account)
-            .iter()
-            .map(|(role, mapping)| SyncTarget::new(role.clone(), mapping.server.clone()))
-            .collect());
+        return Ok(catalogue.targets());
     };
     wanted
         .iter()
-        .map(|name| {
-            crate::config::find_sync_target(account, name)
-                .map(|(role, server_name)| SyncTarget::new(role, server_name))
-                .ok_or_else(|| {
-                    invalid_params(format!(
-                        "account '{}' has no mailbox '{name}' configured; it knows {}",
-                        account.name,
-                        crate::config::configured_mailbox_names(account)
-                    ))
-                })
-        })
+        .map(|name| catalogue.sync_target(account, name).map_err(invalid_params))
         .collect()
 }
 

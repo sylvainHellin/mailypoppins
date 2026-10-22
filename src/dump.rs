@@ -72,7 +72,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::AccountConfig;
 use crate::store::read::{self, MessageRow};
 use crate::store::{open_store, Store};
-use crate::tui::app::{build_mailboxes, resolve_date};
+use crate::tui::app::resolve_date;
 
 /// One attachment, name and size only.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -118,14 +118,16 @@ pub fn collect_records(
         let Some(store) = open_store(&account.name) else {
             continue;
         };
-        // The configured mailboxes decide what the filter can name and what a
-        // label means; the rows themselves come from the store. A mailbox the
-        // store has no rows for contributes nothing, exactly as a missing
-        // directory did.
-        let selected: Vec<String> = build_mailboxes(account)
+        // The sidebar's mailboxes (#0141) decide what the filter can name and
+        // what a label means; the rows themselves come from the store. A
+        // mailbox the store has no rows for contributes nothing, exactly as a
+        // missing directory did.
+        let catalogue = crate::catalogue::Catalogue::from_store(&store, account);
+        let selected: Vec<String> = crate::catalogue::sidebar(account, &catalogue)
             .into_iter()
             .filter_map(|mailbox| {
-                mailbox_selected(&mailbox.id, &mailbox.label, mailbox_filter).then_some(mailbox.id)
+                mailbox_selected(&mailbox.slug, &mailbox.label, mailbox_filter)
+                    .then_some(mailbox.slug)
             })
             .collect();
 

@@ -43,7 +43,9 @@ use tokio::sync::Notify;
 use mp_protocol::state::{SyncHealth, SyncHealthState};
 
 pub use revision::{ConnectionId, InstanceId, Revision};
-pub use snapshot::{seeds_from_config, AccountSeed, AccountState, Change, MailboxSeed, Snapshot};
+pub use snapshot::{
+    seed_of, seed_with, seeds_from_config, AccountSeed, AccountState, Change, MailboxSeed, Snapshot,
+};
 
 use snapshot::{AccountView, DraftView, MailboxView, OutboxView};
 
@@ -554,19 +556,7 @@ impl CanonicalState {
             // swap that touched another account leaves this one's numbers
             // alone because every slug survives.
             let previous = inner.mailboxes.remove(&seed.name).unwrap_or_default();
-            let mailboxes: Vec<MailboxView> = seed
-                .mailboxes
-                .into_iter()
-                .map(|seed| {
-                    let carried = previous.iter().find(|view| view.seed.slug == seed.slug);
-                    MailboxView {
-                        seed,
-                        total: carried.map_or(0, |view| view.total),
-                        unread: carried.map_or(0, |view| view.unread),
-                        badge: carried.map_or(0, |view| view.badge),
-                    }
-                })
-                .collect();
+            let mailboxes = carry_counts(&previous, seed.mailboxes);
             inner.mailboxes.insert(seed.name.clone(), mailboxes);
             if kept {
                 continue;
@@ -584,6 +574,49 @@ impl CanonicalState {
         inner
             .accounts
             .sort_by_key(|view| names.iter().position(|name| name == &view.name));
+    }
+
+    /// Replace one account's mailbox hierarchy, carrying the counts of every
+    /// slug that stays (#0141).
+    ///
+    /// What a tick that listed a new or a vanished server folder calls before
+    /// it publishes: a count change naming a mailbox the state does not hold
+    /// would describe a row no client can find. Answers the slugs it added or
+    /// whose row changed (a label, a policy) and the ones it dropped, which the
+    /// caller announces; an account the state does not hold is left alone.
+    pub fn reseed_account(&self, seed: AccountSeed) -> (Vec<String>, Vec<String>) {
+        let _gate = self.gate.enter();
+        let mut inner = lock(&self.inner);
+        let Some(previous) = inner.mailboxes.get(&seed.name) else {
+            return (Vec::new(), Vec::new());
+        };
+        let unchanged = previous.len() == seed.mailboxes.len()
+            && previous
+                .iter()
+                .zip(&seed.mailboxes)
+                .all(|(view, fresh)| view.seed == *fresh);
+        if unchanged {
+            return (Vec::new(), Vec::new());
+        }
+        let touched: Vec<String> = seed
+            .mailboxes
+            .iter()
+            .filter(|fresh| !previous.iter().any(|view| view.seed == **fresh))
+            .map(|fresh| fresh.slug.clone())
+            .collect();
+        let removed: Vec<String> = previous
+            .iter()
+            .filter(|view| {
+                !seed
+                    .mailboxes
+                    .iter()
+                    .any(|fresh| fresh.slug == view.seed.slug)
+            })
+            .map(|view| view.seed.slug.clone())
+            .collect();
+        let mailboxes = carry_counts(previous, seed.mailboxes);
+        inner.mailboxes.insert(seed.name, mailboxes);
+        (touched, removed)
     }
 
     /// Create this connection's queue endpoint, which nothing writes to until
@@ -921,6 +954,24 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The views of `fresh`, each keeping the counts its slug had in `previous`:
+/// a swap that changed an account's mailboxes must show the new hierarchy,
+/// and a slug that survives keeps its numbers.
+fn carry_counts(previous: &[MailboxView], fresh: Vec<MailboxSeed>) -> Vec<MailboxView> {
+    fresh
+        .into_iter()
+        .map(|seed| {
+            let carried = previous.iter().find(|view| view.seed.slug == seed.slug);
+            MailboxView {
+                seed,
+                total: carried.map_or(0, |view| view.total),
+                unread: carried.map_or(0, |view| view.unread),
+                badge: carried.map_or(0, |view| view.badge),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,6 +985,7 @@ mod tests {
                     role: "inbox".to_string(),
                     slug: "inbox".to_string(),
                     label: "Inbox".to_string(),
+                    ..Default::default()
                 }],
             }],
         )
@@ -1135,6 +1187,7 @@ mod tests {
             role: slug.to_string(),
             slug: slug.to_string(),
             label: slug.to_string(),
+            ..Default::default()
         };
         let state = CanonicalState::new(
             InstanceId::new("test"),

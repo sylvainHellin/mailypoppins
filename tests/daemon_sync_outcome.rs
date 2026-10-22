@@ -400,6 +400,7 @@ fn fresh_state() -> Arc<CanonicalState> {
                 role: "inbox".to_string(),
                 slug: "inbox".to_string(),
                 label: "Inbox".to_string(),
+                ..Default::default()
             }],
         }],
     ))

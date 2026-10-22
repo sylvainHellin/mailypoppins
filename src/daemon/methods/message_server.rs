@@ -75,7 +75,7 @@ use crate::parse::FetchedEmail;
 use crate::selector::Selector;
 use crate::server_search::{two_phase, Cut, GraphSearch, ImapSearch, Scope, SearchSink};
 use crate::store::{read, BlobStore, Store};
-use crate::tui::app::{build_mailboxes, resolve_date};
+use crate::tui::app::resolve_date;
 
 use super::super::config::ConfigStore;
 use super::super::dispatch::{
@@ -211,14 +211,14 @@ fn fetch_request(
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(&snapshot.accounts, &name)?;
     let wanted = string_param(params, "mailbox")?;
-    let mailbox = super::message::resolve_mailbox(account, &wanted)?;
+    let catalogue = crate::catalogue::Catalogue::load(account);
+    let (mailbox, server_name) = fetch_storage(account, &catalogue, &wanted)?;
     let message_id = string_param(params, "message_id")?;
     if message_id.trim().is_empty() {
         return Err(invalid_params(
             "message_id is the Message-ID header of the message to fetch",
         ));
     }
-    let server_name = crate::config::find_server_name_for_role(account, &mailbox);
     Ok(FetchRequest {
         account: account.clone(),
         mailbox,
@@ -226,6 +226,42 @@ fn fetch_request(
         message_id,
         secrets: snapshot.config.secrets_backend,
     })
+}
+
+/// The store key a fetched hit is filed under and the server folder it is
+/// fetched from, for the mailbox name the hit was reported under (#0141).
+///
+/// A sidebar mailbox first, by key, label or server name, which is what a hit
+/// from a configured or a synced folder carries. Then any folder the server
+/// lists, whatever its policy: a hit from a `status-only` folder (a Proton
+/// label, the trash) or an `ignore` one (Proton's All Mail, an Exchange
+/// non-mail folder) is stored under that folder's own key, where its selector
+/// and the local search find it; nothing syncs an `ignore` folder, so such a
+/// row stays as fetched. Refused: a name the last listing did not have, and
+/// one that would land the row in a role's or the local Drafts' mailbox.
+fn fetch_storage(
+    account: &AccountConfig,
+    catalogue: &crate::catalogue::Catalogue,
+    wanted: &str,
+) -> Result<(String, String), RpcError> {
+    if wanted.trim().is_empty() {
+        return Err(invalid_params("mailbox names the folder the hit came from"));
+    }
+    // A folder the server spells exactly so first: a hit is reported under
+    // its server name when the sidebar does not list it, and that name may
+    // repeat a sidebar label (a plain `Sent` beside the `\Sent` folder).
+    if catalogue
+        .folders
+        .iter()
+        .any(|f| f.server == wanted && !f.listed())
+    {
+        return catalogue.storage_for(wanted).map_err(invalid_params);
+    }
+    if let Ok(key) = super::message::resolve_in(account, catalogue, wanted) {
+        let server = catalogue.server_for_key(&key);
+        return Ok((key, server));
+    }
+    catalogue.storage_for(wanted).map_err(invalid_params)
 }
 
 /// One fetch, from the idempotence check to the ingested row.
@@ -530,20 +566,31 @@ fn search_request(
     let parsed = crate::search::from_cli(&query, &super::message::search_flags(params)?)
         .map_err(invalid_params)?;
 
-    let configured: Vec<SearchTarget> = build_mailboxes(account)
-        .into_iter()
-        .filter_map(|mailbox| {
-            mailbox.server_name.map(|server_name| SearchTarget {
-                label: mailbox.label,
-                server_name,
+    // The sidebar's folders (#0141). A search that names no mailbox runs over
+    // the `sync` ones, the received mail; a `status-only` folder is searched
+    // when it is named, since a Proton label repeats a real folder's messages
+    // and the trash holds what the user threw away.
+    let catalogue = crate::catalogue::Catalogue::load(account);
+    let rows = crate::catalogue::sidebar(account, &catalogue);
+    let searchable = |default_only: bool| -> Vec<SearchTarget> {
+        rows.iter()
+            .filter(|row| !default_only || row.policy == crate::config::FolderPolicy::Sync)
+            .filter_map(|row| {
+                row.server.clone().map(|server_name| SearchTarget {
+                    label: row.label.clone(),
+                    server_name,
+                })
             })
-        })
-        .collect();
+            .collect()
+    };
+    let configured = searchable(false);
+    let default_targets = searchable(true);
     let targets = search_targets(
         params.get("mailboxes"),
         parsed.in_mailbox.as_deref(),
         account.auth_method == AuthMethod::Graph,
         &configured,
+        &default_targets,
     )?;
 
     let limit = match params.get("limit") {
@@ -591,7 +638,7 @@ fn search_request(
 /// `in:` directive, and whether the account is on Graph.
 ///
 /// `mailboxes` first, then `in:`, which is the precedence `mp search` gives
-/// `--mailbox` over `in:`. Naming neither searches every configured mailbox
+/// `--mailbox` over `in:`. Naming neither searches every `sync` folder
 /// on IMAP, which has no query across mailboxes, and every folder at once on
 /// Graph (PERSO-175).
 fn search_targets(
@@ -599,12 +646,13 @@ fn search_targets(
     in_mailbox: Option<&str>,
     graph: bool,
     configured: &[SearchTarget],
+    default_targets: &[SearchTarget],
 ) -> Result<Targets, RpcError> {
     match mailboxes {
         None | Some(Value::Null) => Ok(match in_mailbox {
             Some(wanted) => Targets::Mailboxes(vec![pick_target(configured, wanted)?]),
             None if graph => Targets::EveryFolder,
-            None => Targets::Mailboxes(configured.to_vec()),
+            None => Targets::Mailboxes(default_targets.to_vec()),
         }),
         Some(Value::Array(names)) => names
             .iter()
@@ -1091,35 +1139,57 @@ mod tests {
 
     /// A search that names no mailbox and no `in:` runs across every folder
     /// in one query on Graph, which reaches a folder the account does not
-    /// configure, and per configured mailbox on IMAP; a named one is searched
-    /// alone on either (PERSO-175).
+    /// configure, and over the `sync` folders on IMAP, leaving a counts-only
+    /// label or trash out (#0141); a named one is searched alone on either,
+    /// counts-only included (PERSO-175).
     #[test]
     fn graph_searches_every_folder_at_once_when_no_mailbox_is_named() {
-        let configured = vec![
-            SearchTarget {
-                label: "Inbox".to_string(),
-                server_name: "Inbox".to_string(),
-            },
-            SearchTarget {
-                label: "Archive".to_string(),
-                server_name: "Archive".to_string(),
-            },
-        ];
+        let target = |name: &str| SearchTarget {
+            label: name.to_string(),
+            server_name: name.to_string(),
+        };
+        let configured = vec![target("Inbox"), target("Archive"), target("Labels/AI")];
+        let default_targets = configured[..2].to_vec();
         assert_eq!(
-            search_targets(None, None, true, &configured).unwrap(),
+            search_targets(None, None, true, &configured, &default_targets).unwrap(),
             Targets::EveryFolder
         );
         assert_eq!(
-            search_targets(Some(&Value::Null), None, false, &configured).unwrap(),
-            Targets::Mailboxes(configured.clone())
+            search_targets(
+                Some(&Value::Null),
+                None,
+                false,
+                &configured,
+                &default_targets
+            )
+            .unwrap(),
+            Targets::Mailboxes(default_targets.clone())
         );
         assert_eq!(
-            search_targets(None, Some("archive"), true, &configured).unwrap(),
+            search_targets(None, Some("archive"), true, &configured, &default_targets).unwrap(),
             Targets::Mailboxes(vec![configured[1].clone()])
         );
         assert_eq!(
-            search_targets(Some(&json!(["Inbox"])), None, true, &configured).unwrap(),
+            search_targets(
+                Some(&json!(["Inbox"])),
+                None,
+                true,
+                &configured,
+                &default_targets
+            )
+            .unwrap(),
             Targets::Mailboxes(vec![configured[0].clone()])
+        );
+        assert_eq!(
+            search_targets(
+                None,
+                Some("labels/ai"),
+                false,
+                &configured,
+                &default_targets
+            )
+            .unwrap(),
+            Targets::Mailboxes(vec![configured[2].clone()])
         );
     }
 
@@ -1224,5 +1294,90 @@ mod tests {
                 .any(|c| c.row_id == hit),
             "the fetched hit is not a re-thread candidate"
         );
+    }
+
+    /// A server-search hit from any folder the server lists is fetchable
+    /// through `message.fetch` (#0141): a folder the config never names, a
+    /// counts-only label and an ignored union view are each stored under the
+    /// folder's own key; a name the server does not list, and one that would
+    /// land the row in a role's or the local Drafts' mailbox, are refused.
+    /// Before the catalogue, every one of these but the Inbox was "not a
+    /// mailbox of" the account.
+    #[test]
+    fn a_hit_from_any_server_folder_is_fetchable() {
+        use crate::catalogue::{Catalogue, ListedFolder};
+        let account = AccountConfig {
+            name: "proton".to_string(),
+            mailboxes: crate::config::MailboxesConfig {
+                inbox: Some(crate::config::MailboxMapping {
+                    server: "INBOX".to_string(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let listed =
+            |name: &str, attributes: &[&str]| ListedFolder::named(name).with_attributes(attributes);
+        let catalogue = Catalogue::resolve(
+            &account,
+            &[
+                listed("INBOX", &[]),
+                listed("Folders", &["\\Noselect"]),
+                listed("Labels", &["\\Noselect"]),
+                listed("Projects", &[]),
+                listed("Labels/AI", &[]),
+                listed("All Mail", &["\\All"]),
+                listed("Drafts", &["\\Drafts"]),
+                listed("Sent", &["\\Sent"]),
+                listed("sent", &[]),
+            ],
+        );
+        let stored = |wanted: &str| fetch_storage(&account, &catalogue, wanted);
+        let pair = |key: &str, server: &str| Ok((key.to_string(), server.to_string()));
+
+        assert_eq!(stored("Inbox"), pair("inbox", "INBOX"));
+        assert_eq!(
+            stored("Projects"),
+            pair("Projects", "Projects"),
+            "never configured"
+        );
+        assert_eq!(
+            stored("Labels/AI"),
+            pair("Labels/AI", "Labels/AI"),
+            "counts only"
+        );
+        assert_eq!(stored("All Mail"), pair("All Mail", "All Mail"), "ignored");
+        assert_eq!(
+            stored("Sent"),
+            pair("sent", "Sent"),
+            "the role's own folder"
+        );
+        for refused in ["Drafts", "sent", "Never Listed"] {
+            let error = stored(refused).expect_err(refused);
+            assert_eq!(error.code, -32602, "{refused}");
+        }
+
+        // The row lands under the folder's key, where its selector names it.
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        let (key, _) = stored("Labels/AI").unwrap();
+        let (row, selector, counts) = ingest_into(
+            &store,
+            &blobs,
+            "proton",
+            &key,
+            7,
+            &email("<l@x>"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(row > 0);
+        assert_eq!(selector, "mp://proton/Labels%2FAI/l@x");
+        assert!(matches!(
+            counts,
+            Some(Change::MailboxCounts { ref mailbox, total: 1, .. }) if mailbox == "Labels/AI"
+        ));
     }
 }
