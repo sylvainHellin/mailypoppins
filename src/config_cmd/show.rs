@@ -13,6 +13,7 @@ use crate::config::{
     retention_for, store_path, AuthMethod, GlobalConfig,
 };
 use crate::store::sweep::human_bytes;
+use mp_protocol::state::MailboxRow;
 
 /// A horizon in days, with `0` spelled as the keep-all it means.
 fn horizon_label(days: u32) -> String {
@@ -79,6 +80,34 @@ pub fn cmd_config_path() {
     println!("{}", config_path().display());
 }
 
+/// What the daemon said about each account's folders, for `[folders]`: the
+/// rows of `mailbox.list` with `ignored: true`, or why there are none.
+pub type AccountFolders = std::collections::HashMap<String, Result<Vec<MailboxRow>, String>>;
+
+/// The `[folders]` lines of one account: every folder of the last listing
+/// with its policy and, for a role folder, the role (#0141).
+pub fn folder_lines(rows: &[MailboxRow]) -> Vec<String> {
+    let rows: Vec<(&str, &MailboxRow)> = rows
+        .iter()
+        .filter_map(|row| Some((row.server.as_deref()?, row)))
+        .collect();
+    let width = rows
+        .iter()
+        .map(|(server, _)| server.len())
+        .max()
+        .unwrap_or(0);
+    rows.iter()
+        .map(|(server, row)| {
+            let line = format!("{server:width$}  {}", row.policy);
+            if row.role == "other" {
+                line
+            } else {
+                format!("{line:width2$}  {}", row.role, width2 = width + 2 + 11)
+            }
+        })
+        .collect()
+}
+
 /// Display the resolved config with masked passwords.
 ///
 /// The configuration and the path it came from are the caller's, because since
@@ -87,11 +116,13 @@ pub fn cmd_config_path() {
 /// (`docs/daemon-protocol.md`), rather than re-reading the file the daemon owns.
 /// Whether each password and token is there is `account.credentials`'s answer,
 /// so this process reads no secret and no token cache of its own.
+/// `folders` is each account's folder list the same way, from `mailbox.list`.
 pub fn cmd_config_show(
     config: &GlobalConfig,
     path: &Path,
     credentials: &AccountCredentials,
     signatures: &Signatures,
+    folders: &AccountFolders,
 ) -> Result<()> {
     println!("{}", "=== mailypoppins configuration ===".bold().cyan());
     println!("{}: {}", "Config file".bold(), path.display());
@@ -212,6 +243,41 @@ pub fn cmd_config_show(
                 println!("    {} -> {}", format!("[{}]", role).bold(), mapping.server);
             }
         }
+        let roles = [
+            ("drafts", &account.mailboxes.drafts),
+            ("trash", &account.mailboxes.trash),
+            ("junk", &account.mailboxes.junk),
+        ];
+        for (role, mapping) in roles {
+            if let Some(mapping) = mapping {
+                println!("    {} -> {}", format!("[{role}]").bold(), mapping.server);
+            }
+        }
+        for rule in &account.mailboxes.overrides {
+            println!(
+                "    {} {} -> {}",
+                "[override]".bold(),
+                rule.pattern,
+                rule.policy
+            );
+        }
+
+        // Every folder the server listed with the policy the daemon keeps it
+        // by (#0141), configured or not.
+        println!("\n  {}", "[folders]".bold());
+        match folders.get(&account.name) {
+            Some(Ok(rows)) => {
+                let lines = folder_lines(rows);
+                if lines.is_empty() {
+                    println!("    (none listed yet: the first sync lists the server)");
+                }
+                for line in lines {
+                    println!("    {line}");
+                }
+            }
+            Some(Err(why)) => println!("    {}", format!("(not available: {why})").dimmed()),
+            None => println!("    {}", "(not available)".dimmed()),
+        }
 
         // Retention is enforced as of #0060: the sweep runs after every sync
         // and via `mp store gc`. This block used to (and must no longer) label
@@ -285,4 +351,38 @@ pub fn cmd_config_show(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::folder_lines;
+    use mp_protocol::state::{FolderPolicy, MailboxRow};
+
+    /// #0141 follow-up: `[folders]` lists every folder the server listed,
+    /// configured or not, ignored ones included, with its policy and role.
+    #[test]
+    fn every_listed_folder_is_shown_with_its_policy() {
+        let row = |role: &str, server: Option<&str>, policy: FolderPolicy| MailboxRow {
+            role: role.to_string(),
+            server: server.map(str::to_string),
+            policy,
+            ..Default::default()
+        };
+        let lines = folder_lines(&[
+            row("inbox", Some("INBOX"), FolderPolicy::Sync),
+            row("drafts", None, FolderPolicy::Sync),
+            row("trash", Some("Deleted Items"), FolderPolicy::StatusOnly),
+            row("other", Some("Spesen"), FolderPolicy::Sync),
+            row("other", Some("Calendar"), FolderPolicy::Ignore),
+        ]);
+        assert_eq!(
+            lines,
+            vec![
+                "INBOX          sync         inbox",
+                "Deleted Items  status-only  trash",
+                "Spesen         sync",
+                "Calendar       ignore",
+            ]
+        );
+    }
 }

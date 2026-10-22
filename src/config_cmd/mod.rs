@@ -10,7 +10,7 @@
 
 mod init;
 pub mod password;
-mod show;
+pub mod show;
 
 pub use init::{
     cmd_config_add_account, cmd_config_init, graph_candidate, imap_candidate, ImapAnswers,

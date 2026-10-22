@@ -3521,6 +3521,10 @@ async fn routed_config_state() -> Result<(PathBuf, bool, GlobalConfig)> {
 
 /// `mp config show`: the effective configuration, rendered from `config.get`,
 /// and whether each password and token is stored, from `account.credentials`.
+///
+/// Each account's `[folders]` come from `mailbox.list` with `ignored: true`,
+/// every folder the server last listed with its policy (#0141); an account
+/// the daemon cannot list yet says why instead.
 async fn routed_config_show() -> Result<()> {
     let (path, _, config) = routed_config_state().await?;
     let mut connection = daemon_connection().await;
@@ -3563,7 +3567,17 @@ async fn routed_config_show() -> Result<()> {
             .defaults
             .insert(account.name.clone(), listing.default);
     }
-    cmd_config_show(&config, &path, &credentials, &signatures)
+    let mut folders = mailypoppins::config_cmd::show::AccountFolders::new();
+    for account in &config.accounts {
+        let mut params = mp_client::queries::mailbox_list_params(&account.name);
+        params["ignored"] = serde_json::json!(true);
+        let rows = daemon_try_call(&mut connection, "mailbox.list", params)
+            .await
+            .map(|answer| mp_client::queries::decode_mailbox_rows(&answer))
+            .map_err(|error| error.message);
+        folders.insert(account.name.clone(), rows);
+    }
+    cmd_config_show(&config, &path, &credentials, &signatures, &folders)
 }
 
 /// `mp config set-password`: the prompt is this process's terminal's, the value

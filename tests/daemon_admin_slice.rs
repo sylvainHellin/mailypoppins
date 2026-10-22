@@ -2375,10 +2375,45 @@ fn mp_invite_refusals_match_the_oracle() {
 /// with routing. `docs/daemon-protocol.md` chose that default deliberately
 /// ("effective means after serde defaults"), so it is not the admin slice's to
 /// undo; [`admin_fixture`]'s header records it.
+///
+/// The `[folders]` block is the one part the oracle cannot print: it lists
+/// the folders the daemon discovered on the server (#0141), which no
+/// pre-daemon binary knew of. It is cut from the routed output before the
+/// comparison and checked on its own.
 #[test]
 fn mp_config_show_matches_the_oracle() {
     let slice = Slice::start();
-    slice.both(&["config", "show"]);
+    let args = ["config", "show"];
+    let mut routed = slice.routed(&args);
+    let stdout = String::from_utf8_lossy(&routed.stdout).into_owned();
+    assert!(
+        stdout.contains("[folders]"),
+        "every account lists its discovered folders: {stdout}"
+    );
+    routed.stdout = without_folders_blocks(&stdout).into_bytes();
+    assert_byte_identical(&routed, &slice.oracle(&args));
+}
+
+/// `mp config show`'s output without its `[folders]` blocks, each with the
+/// blank line that opens it.
+fn without_folders_blocks(stdout: &str) -> String {
+    let lines: Vec<&str> = stdout.lines().collect();
+    let mut kept = Vec::new();
+    let mut skipping = false;
+    for line in &lines {
+        if line.contains("[folders]") {
+            skipping = true;
+            kept.pop();
+            continue;
+        }
+        if skipping && line.trim().is_empty() {
+            skipping = false;
+        }
+        if !skipping {
+            kept.push(*line);
+        }
+    }
+    kept.iter().map(|line| format!("{line}\n")).collect()
 }
 
 /// `ACC-04`: the one command of this slice that never needs a daemon, and

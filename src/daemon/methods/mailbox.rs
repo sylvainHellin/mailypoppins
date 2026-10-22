@@ -81,9 +81,19 @@ impl Method for MailboxList {
 }
 
 /// The `result` of `mailbox.list`.
+///
+/// `ignored: true` appends every folder the last listing holds that the
+/// daemon ignores, as rows with policy `ignore` and no counts, after the
+/// sidebar's: what `mp config show` prints so every discovered folder is
+/// shown with its policy, not only the configured ones.
 pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?;
+    let ignored = match params.get("ignored") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(ignored)) => *ignored,
+        Some(_) => return Err(super::invalid_params("ignored is a boolean")),
+    };
 
     // The hierarchy the bootstrap seeds come from too (#0141): the four fixed
     // rows, then every listed folder of the account's catalogue. The counts
@@ -93,7 +103,7 @@ pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErro
     let rows = sidebar(account, &catalogue);
     let counts = counts_by_mailbox(&name)?;
 
-    let mailboxes: Vec<Value> = rows
+    let mut mailboxes: Vec<Value> = rows
         .iter()
         .map(|row| {
             // Drafts are local files and not `messages` rows, so the grouped
@@ -121,6 +131,26 @@ pub fn list(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcErro
             })
         })
         .collect();
+    if ignored {
+        mailboxes.extend(
+            catalogue
+                .folders
+                .iter()
+                .filter(|f| !f.missing && f.policy == FolderPolicy::Ignore)
+                .map(|f| {
+                    json!({
+                        "role": "other",
+                        "slug": f.key,
+                        "label": f.label,
+                        "server": f.server,
+                        "policy": f.policy,
+                        "total": 0,
+                        "unread": 0,
+                        "badge": 0,
+                    })
+                }),
+        );
+    }
     Ok(json!({"account": name, "mailboxes": mailboxes}))
 }
 
@@ -339,5 +369,39 @@ mod tests {
                 row("Spesen", "other", Some("Spesen"), "sync", 1, 1),
             ]
         );
+
+        // `ignored: true` adds the folders the daemon ignores, after the
+        // sidebar's, which is what `mp config show` prints.
+        let answer = list(
+            &json!({"account": "tum", "ignored": true}),
+            std::slice::from_ref(&account),
+        )
+        .unwrap();
+        let ignored: Vec<(&str, &str)> = answer["mailboxes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip(rows.len())
+            .map(|row| {
+                (
+                    row["server"].as_str().unwrap(),
+                    row["policy"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ignored,
+            vec![
+                ("Calendar", "ignore"),
+                ("Contacts", "ignore"),
+                ("Tasks", "ignore")
+            ]
+        );
+        let refused = list(
+            &json!({"account": "tum", "ignored": "yes"}),
+            std::slice::from_ref(&account),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, -32602);
     }
 }
