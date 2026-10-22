@@ -1473,7 +1473,8 @@ async fn a_reading_client_receives_the_whole_burst_in_revision_order() {
 
     let bootstrap = bootstrap_revision(&mut conn).await;
     let mut watermark = bootstrap;
-    for index in 0..SMALL_BURST {
+    let mut index = 0;
+    while index < SMALL_BURST {
         match within("a burst event", next_observed(&mut conn)).await {
             Observed::Event(event) => {
                 assert_eq!(
@@ -1483,9 +1484,18 @@ async fn a_reading_client_receives_the_whole_burst_in_revision_order() {
                 assert_eq!(
                     event.revision,
                     watermark + 1,
-                    "the burst commits one revision per change, with no gap"
+                    "every commit reaches a reading client, in revision order, with no gap"
                 );
                 watermark = event.revision;
+                // The daemon's own startup commits beside the burst: the
+                // account runtime is started off the startup path, so its
+                // `account.state_changed` and the `diagnostic.check_changed`
+                // of the health check it flips can land after the bootstrap,
+                // between two burst revisions on a loaded machine. They are
+                // this client's to receive in order, and not the burst's.
+                if !is_burst_event(&event) {
+                    continue;
+                }
                 assert_eq!(
                     event.kind, KIND_INVALIDATE,
                     "a counts change invalidates a cached query, got {event:?}"
@@ -1498,6 +1508,7 @@ async fn a_reading_client_receives_the_whole_burst_in_revision_order() {
                     }),
                     "the burst names distinct mailboxes so nothing coalesces"
                 );
+                index += 1;
             }
             other => panic!("a client this far under every cap is never resynced: {other:?}"),
         }
@@ -1506,12 +1517,37 @@ async fn a_reading_client_receives_the_whole_burst_in_revision_order() {
         watermark > bootstrap,
         "every burst revision is above the bootstrap's own"
     );
-    assert_no_event_within(
-        &mut conn,
-        Duration::from_millis(200),
-        "after the whole burst",
-    )
-    .await;
+    assert_no_burst_event_within(&mut conn, Duration::from_millis(200)).await;
+}
+
+/// Whether `event` is one the burst hook committed: an invalidate of a
+/// `burst-<i>` mailbox, which no account has.
+fn is_burst_event(event: &EventEnvelope) -> bool {
+    event.payload["resource"]
+        .as_str()
+        .is_some_and(|resource| resource.starts_with("mailbox:alpha/burst-"))
+}
+
+/// Assert that no burst event and no resync arrives on this connection for
+/// `window`: the burst was delivered once. An event of the daemon's own
+/// startup may still arrive. Bounded by construction: it waits exactly that
+/// long and never longer.
+async fn assert_no_burst_event_within(conn: &mut Connection, window: Duration) {
+    let deadline = tokio::time::Instant::now() + window;
+    while let Ok(Some(notification)) =
+        tokio::time::timeout_at(deadline, conn.next_notification()).await
+    {
+        assert_eq!(
+            notification.method, METHOD_STATE_EVENT,
+            "after the whole burst: a reading client is never resynced: {notification:?}"
+        );
+        let event: EventEnvelope = serde_json::from_value(notification.params.clone())
+            .unwrap_or_else(|e| panic!("the params are an event envelope: {e}"));
+        assert!(
+            !is_burst_event(&event),
+            "after the whole burst: a burst event arrived twice: {event:?}"
+        );
+    }
 }
 
 /// The plan's "no slow client delays another": one client bootstraps and never
