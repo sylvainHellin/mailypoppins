@@ -527,7 +527,7 @@ A client cannot read an account's blob store, so the daemon writes the bytes it 
 | `message.materialise_attachment` | client_integration | `{account, row_id\|id\|selector, mailbox?, part}` | `{handle, path, name, bytes, expires_at}` |
 | `message.materialise_html` | client_integration | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
 | `message.materialise_markdown` | client_integration | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
-| `message.materialise_eml` | client_integration | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
+| `message.materialise_eml` | client_integration | `{account, row_id\|id\|selector, mailbox?}` or `{account, hit: {message_id, mailbox}}` | `{handle, path, name, bytes, expires_at}` |
 | `message.release_handle` | query | `{handle}` | `{}` |
 
 Like the read-only methods, all four open the store by path and take no engine lock: materialising is a read plus a write into the daemon's own directory, and neither makes the daemon an account's engine.
@@ -568,6 +568,7 @@ The bytes are the row's stored `raw` blob when it has one, which every IMAP inge
 A row without one (every Graph row) is answered from the server: Graph's `/me/messages/{id}/$value` export, the id found by the row's `Message-ID`, or an IMAP `BODY.PEEK[]` by `Message-ID` in the row's mailbox; nothing is written back to the store.
 That server leg is why it is a method of its own in the code (`methods::message_eml`) and the one materialiser with an await in it; a failure there is `-32603` with `{account}`, as the other server legs answer.
 `name` is `<YYYY-MM-DD>_<subject>.eml`, the day taken from the `Date:` header and dropped when it does not parse, the subject kept readable with the characters a file system refuses removed, and `message.eml` for a message with no subject.
+It also takes a server-search hit with no row, `hit: {message_id, mailbox}`, the address `message.fetch` takes and instead of `row_id`, `id` or `selector`: a hit the store has since caught up with is that row's export, and any other is the server leg above, named off the bytes' own `Subject:` and `Date:`; nothing is ingested, so the hit stays a hit.
 
 All four address a message as `message.get` does: exactly one of `row_id`, `id` and `selector`, with `mailbox` narrowing a selector.
 `row_id` is documented here because this is the method whose call site holds one, and the other two accept it because the whole family resolves an address through one helper; widening them was additive and free (P5-U10c).
@@ -722,6 +723,7 @@ The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they ar
 The bytes are `message.materialise_eml`'s, so a Graph row is fetched from the server first, and they are written to `<account>/attachments/<message-id>/<date>_<subject>.eml`, where a forward's carried parts already go; the draft lists that one file instead of the original's parts, which are inside it, and the `.eml` extension is what makes the send label the part `message/rfc822`.
 The body is the usual forward's, quoted header block included; `mp_core::draft::ATTACHED_FORWARD_BODY` is the one line that would make it Outlook's, the signature alone.
 A source whose bytes cannot be had is `-32603` with `{account}` and writes no draft.
+With `as_attachment` the source may also be a server-search hit with no row, `{hit: {message_id, mailbox}}`: the `.eml` is `message.materialise_eml`'s for that hit, and the forward's headers and quoted body are parsed out of it by the same builder; a reply or an inline forward of a hit goes through `draft.create_from_message` instead, and a hit source there is `-32602`.
 
 **`draft.create_from_message` is the one draft built from a message rather than from a row.**
 A server-search hit that resolved to no local row has no `messages.id`, no uid and no selector, and its content is the fetch the client is already rendering; `draft.reply` and `draft.forward` cannot build that draft, because every form of their `source` is an address into the store.

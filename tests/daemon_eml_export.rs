@@ -200,6 +200,55 @@ async fn a_bad_address_is_invalid_params() {
     }
 }
 
+/// A server-search hit is addressed as `message.fetch` addresses it. One the
+/// store has caught up with is that row's export; one it has not goes to the
+/// server, which the test has none of, so the refusal is the server leg's
+/// and not an address the daemon does not know (PERSO-174).
+#[tokio::test]
+async fn a_server_search_hit_is_exported_through_its_message_id() {
+    let (tmp, _daemon) = seeded();
+    let (mut conn, _) = connect(tmp.path()).await;
+    let result = call(
+        &mut conn,
+        json!({
+            "account": fixture::ACCOUNT,
+            "hit": {"message_id": "<deal@example.com>", "mailbox": "inbox"},
+        }),
+    )
+    .await
+    .expect("a hit the store holds is exported");
+    assert_eq!(result["name"], json!(EXPECTED_NAME));
+    let path = Path::new(result["path"].as_str().expect("path"));
+    assert_eq!(fs::read(path).expect("the exported file"), RAW);
+
+    let error = call(
+        &mut conn,
+        json!({
+            "account": fixture::ACCOUNT,
+            "hit": {"message_id": "<only-on-the-server@example.com>", "mailbox": "inbox"},
+        }),
+    )
+    .await
+    .expect_err("there is no server to fetch the hit from");
+    assert_eq!(error.code, -32603, "a server leg failure, got {error:?}");
+    assert_eq!(error.data, Some(json!({"account": fixture::ACCOUNT})));
+
+    for params in [
+        json!({"account": fixture::ACCOUNT, "hit": {"message_id": "<x@y>"}}),
+        json!({"account": fixture::ACCOUNT, "hit": {"message_id": " ", "mailbox": "inbox"}}),
+        json!({
+            "account": fixture::ACCOUNT,
+            "id": "inbox/5",
+            "hit": {"message_id": "<deal@example.com>", "mailbox": "inbox"},
+        }),
+    ] {
+        let error = call(&mut conn, params.clone())
+            .await
+            .expect_err("a bad hit is refused");
+        assert_eq!(error.code, -32602, "{params}: got {error:?}");
+    }
+}
+
 /// The `attachments:` entries of a draft file, unquoted.
 ///
 /// Line ends are normalised first: a draft built from a CRLF message is
@@ -266,6 +315,85 @@ async fn a_forward_as_attachment_carries_the_eml() {
         eml.display()
     );
     assert_eq!(fs::read(eml).expect("the attached .eml"), RAW);
+}
+
+/// A server-search hit forwards as attachment through the same `.eml`, with
+/// the forward built from its bytes; one the server cannot be asked for
+/// writes no draft (PERSO-174).
+#[tokio::test]
+async fn a_server_search_hit_forwards_as_attachment() {
+    let (tmp, _daemon) = seeded();
+    let (mut conn, _) = connect(tmp.path()).await;
+    let created = within(
+        "draft.forward",
+        conn.call(
+            "draft.forward",
+            json!({
+                "account": fixture::ACCOUNT,
+                "source": {"hit": {"message_id": "<deal@example.com>", "mailbox": "inbox"}},
+                "as_attachment": true,
+            }),
+        ),
+    )
+    .await
+    .expect("the forward of a hit is written");
+    assert_eq!(
+        created["subject"],
+        json!("Fwd: Re: Elsevier DEAL open access")
+    );
+    let draft = fs::read_to_string(created["path"].as_str().expect("path")).expect("the draft");
+    assert!(
+        draft.contains("forwarded_from: \"<deal@example.com>\""),
+        "{draft}"
+    );
+    let attachments = attachments_of(&draft);
+    assert_eq!(attachments.len(), 1, "{draft}");
+    assert_eq!(
+        Path::new(&attachments[0])
+            .file_name()
+            .and_then(|n| n.to_str()),
+        Some(EXPECTED_NAME)
+    );
+    assert_eq!(fs::read(&attachments[0]).expect("the attached .eml"), RAW);
+
+    let drafts = fixture::account_dir(tmp.path(), fixture::ACCOUNT).join("drafts");
+    let before = fs::read_dir(&drafts).map(|d| d.count()).unwrap_or(0);
+    let refused = within(
+        "draft.forward",
+        conn.call(
+            "draft.forward",
+            json!({
+                "account": fixture::ACCOUNT,
+                "source": {"hit": {"message_id": "<only-on-the-server@example.com>", "mailbox": "inbox"}},
+                "as_attachment": true,
+            }),
+        ),
+    )
+    .await;
+    match refused {
+        Err(ClientError::Rpc(error)) => assert_eq!(error.code, -32603, "{error:?}"),
+        other => panic!("a hit with no server is refused, got {other:?}"),
+    }
+    assert_eq!(
+        fs::read_dir(&drafts).map(|d| d.count()).unwrap_or(0),
+        before
+    );
+
+    let inline = within(
+        "draft.forward",
+        conn.call(
+            "draft.forward",
+            json!({
+                "account": fixture::ACCOUNT,
+                "source": {"hit": {"message_id": "<deal@example.com>", "mailbox": "inbox"}},
+            }),
+        ),
+    )
+    .await;
+    match inline {
+        Err(ClientError::Rpc(error)) => assert_eq!(error.code, -32602, "{error:?}"),
+        other => panic!("an inline forward of a hit source is refused, got {other:?}"),
+    }
 }
 
 /// Without the flag a forward still carries the original's own parts, and

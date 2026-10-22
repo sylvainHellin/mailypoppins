@@ -784,6 +784,11 @@ fn from_source(
 /// where a forward's carried parts already go, the source's stable
 /// attachments directory, under `<date>_<subject>.eml`, whose extension is
 /// what makes the send path label the part `message/rfc822`.
+///
+/// `source: {hit: {message_id, mailbox}}` is a server-search hit with no row,
+/// addressed as `message.fetch` addresses it: the `.eml` is
+/// `message.materialise_eml`'s for that hit, and the forward's headers and
+/// quoted body are built from those bytes by the same builder.
 async fn forward_as_attachment(
     params: &Value,
     accounts: &[AccountConfig],
@@ -793,6 +798,10 @@ async fn forward_as_attachment(
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?.clone();
     let source = params.get("source").cloned().unwrap_or(Value::Null);
+    if let Some(hit) = source.get("hit").filter(|v| !v.is_null()) {
+        let hit = super::message_eml::Hit::from_param(&account, hit)?;
+        return forward_hit_as_attachment(params, &account, email, &hit, secrets).await;
+    }
     let row = {
         let store = Store::open(crate::config::store_path(&name))
             .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
@@ -810,6 +819,58 @@ async fn forward_as_attachment(
     std::fs::write(&path, &bytes)
         .map_err(|e| internal(format!("writing {}: {e}", path.display())))?;
     from_source(params, accounts, email, false, Some(path))
+}
+
+/// [`forward_as_attachment`] of a server-search hit: the bytes come from
+/// [`super::message_eml::raw_of_hit`], and the [`SourceMessage`] the forward
+/// quotes is parsed out of them, as `mp_core::draft::source_from_fetched`
+/// builds one from any fetch.
+async fn forward_hit_as_attachment(
+    params: &Value,
+    account: &AccountConfig,
+    email: &EmailSettings,
+    hit: &super::message_eml::Hit,
+    secrets: crate::secrets::SecretsBackendKind,
+) -> Result<Value, RpcError> {
+    let name = account.name.as_str();
+    let source = params.get("source").cloned().unwrap_or(Value::Null);
+    let given = |key: &str| !matches!(source.get(key), None | Some(Value::Null));
+    if given("row_id") || given("id") || given("selector") {
+        return Err(invalid_params(
+            "hit is an address of its own; send it without row_id, id or selector",
+        ));
+    }
+    let (filename, bytes, _pinned) = super::message_eml::raw_of_hit(account, hit, secrets).await?;
+    let fetched = crate::parse::parse_rfc822_to_fetched_email(&bytes).ok_or_else(|| {
+        internal(format!(
+            "the server's copy of {} in {name} does not parse as a message",
+            hit.message_id
+        ))
+    })?;
+    let account_dir = crate::config::account_dir(name);
+    let mut built = crate::draft::source_from_fetched(&account_dir, &fetched, false)
+        .map_err(|e| internal(format!("reading {}: {e:#}", hit.message_id)))?;
+    let dir = crate::parse::stable_attachments_dir(&account_dir, &hit.message_id);
+    crate::config::create_private_dir_all(&dir)
+        .map_err(|e| internal(format!("creating {}: {e}", dir.display())))?;
+    let path = dir.join(filename);
+    std::fs::write(&path, &bytes)
+        .map_err(|e| internal(format!("writing {}: {e}", path.display())))?;
+    built.attachments = vec![path];
+
+    let headers = recipient_headers(params)?;
+    let (draft, written) = crate::draft::create_draft_from_source(
+        name,
+        &account.default_from,
+        &built,
+        crate::draft::DraftFromSource::Forward {
+            as_attachment: true,
+        },
+        headers.as_ref(),
+        signature_of(account, params, email).as_deref(),
+    )
+    .map_err(|e| internal(format!("writing the draft of {name}: {e:#}")))?;
+    created(name, &written.key, &draft, None)
 }
 
 /// The `headers` override of `draft.reply`, `draft.forward` (P5-U6) and
@@ -1122,6 +1183,12 @@ fn address_received(
     account: &str,
 ) -> Result<(MessageRow, Selector), RpcError> {
     let given = |key: &str| !matches!(source.get(key), None | Some(Value::Null));
+    if given("hit") {
+        return Err(invalid_params(
+            "a hit source is forwarded with as_attachment only; a server-only hit is \
+             replied to or forwarded inline through draft.create_from_message",
+        ));
+    }
     if given("row_id") {
         if given("id") || given("selector") {
             return Err(invalid_params(

@@ -17,6 +17,12 @@
 //!    written back to the store: the export is a copy for the user, and
 //!    giving a Graph row a raw blob would change what every reader of that
 //!    row parses.
+//!
+//! A server-search hit with no row is addressed as `message.fetch` addresses
+//! it, `hit: {message_id, mailbox}`, and goes straight to the second source:
+//! the same `$value` or `BODY.PEEK[]` by `Message-ID`, with the name read off
+//! the bytes' own `Subject:` and `Date:`. Nothing is ingested, so the hit
+//! stays a hit and no unread count moves.
 
 use std::sync::Arc;
 
@@ -35,7 +41,7 @@ use super::super::dispatch::{
     CancelToken, ClientCtx, Dispatcher, DomainError, Method, MethodKind, MethodSpec, Outcome,
 };
 use super::super::handles::{reap, HandleKind, HandleTable};
-use super::{internal, string_param};
+use super::{internal, invalid_params, string_param};
 
 /// The method, in an array of its own as the Markdown rendition is
 /// (`MESSAGE_MARKDOWN_METHOD_SPECS`): `ClientIntegration` and `Durable`,
@@ -89,7 +95,9 @@ pub fn register(dispatcher: &mut Dispatcher, config: Arc<ConfigStore>, handles: 
 }
 
 /// The `result` of `message.materialise_eml`, addressed as `message.get`
-/// addresses a message: `{account, row_id|id|selector, mailbox?}`.
+/// addresses a message, `{account, row_id|id|selector, mailbox?}`, or as
+/// `message.fetch` addresses a server-only hit, `{account, hit: {message_id,
+/// mailbox}}`.
 async fn materialise_eml(
     params: &Value,
     accounts: &[AccountConfig],
@@ -98,11 +106,22 @@ async fn materialise_eml(
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?.clone();
-    let (row, bytes, pinned) = raw_message(&account, params, secrets).await?;
-    let filename = crate::parse::eml_name(
-        row.subject.as_deref().unwrap_or_default(),
-        row.date_display.as_deref(),
-    );
+    let (filename, bytes, pinned) = match params.get("hit").filter(|v| !v.is_null()) {
+        Some(hit) => {
+            let addressed = |key: &str| !matches!(params.get(key), None | Some(Value::Null));
+            if addressed("row_id") || addressed("id") || addressed("selector") {
+                return Err(invalid_params(
+                    "hit is an address of its own; send it without row_id, id or selector",
+                ));
+            }
+            let hit = Hit::from_param(&account, hit)?;
+            raw_of_hit(&account, &hit, secrets).await?
+        }
+        None => {
+            let (row, bytes, pinned) = raw_message(&account, params, secrets).await?;
+            (name_of_row(&row), bytes, pinned)
+        }
+    };
     super::message::write_handle(
         handles,
         HandleKind::Eml,
@@ -151,10 +170,98 @@ pub(super) async fn raw_of_row(
         return Ok((bytes, vec![hash]));
     }
     super::open_secrets(name, secrets)?;
-    let bytes = fetch_raw(account, row)
+    let bytes = fetch_raw(account, &row.message_id, &row.mailbox)
         .await
         .map_err(|e| super::server_error(name, &e))?;
     Ok((bytes, Vec::new()))
+}
+
+/// The `.eml` name of a stored row.
+fn name_of_row(row: &MessageRow) -> String {
+    crate::parse::eml_name(
+        row.subject.as_deref().unwrap_or_default(),
+        row.date_display.as_deref(),
+    )
+}
+
+/// The `.eml` name of bytes the store holds no row for, off their own
+/// `Subject:` and `Date:`, which is where a row's subject and date come from.
+pub(super) fn name_of_raw(bytes: &[u8]) -> String {
+    let headers = mailparse::parse_headers(bytes)
+        .map(|(headers, _)| headers)
+        .unwrap_or_default();
+    let header = |key: &str| {
+        headers
+            .iter()
+            .find(|h| h.get_key().eq_ignore_ascii_case(key))
+            .map(|h| h.get_value())
+    };
+    crate::parse::eml_name(
+        header("Subject").as_deref().unwrap_or_default(),
+        header("Date").as_deref(),
+    )
+}
+
+/// A server-search hit with no row, addressed as `message.fetch` addresses
+/// it: the mailbox it came from and the `Message-ID` the server reported.
+pub(super) struct Hit {
+    /// The `messages.mailbox` key the hit's mailbox resolves to.
+    pub(super) mailbox: String,
+    pub(super) message_id: String,
+}
+
+impl Hit {
+    /// The `{message_id, mailbox}` object a client sends, `mailbox` resolved
+    /// as `message.fetch` resolves it (a sidebar label or a mailbox key).
+    pub(super) fn from_param(account: &AccountConfig, value: &Value) -> Result<Self, RpcError> {
+        if !value.is_object() {
+            return Err(invalid_params(
+                "hit is {message_id, mailbox}, the address of a server-search hit",
+            ));
+        }
+        super::only_params("hit", value, &["message_id", "mailbox"])?;
+        let message_id = string_param(value, "message_id")?;
+        if message_id.trim().is_empty() {
+            return Err(invalid_params(
+                "hit.message_id is the Message-ID header of the hit",
+            ));
+        }
+        let wanted = string_param(value, "mailbox")?;
+        let mailbox = super::message::resolve_mailbox(account, &wanted)?;
+        Ok(Self {
+            mailbox,
+            message_id,
+        })
+    }
+}
+
+/// A hit's `.eml` name, its RFC 822 bytes, and the blobs those were read from.
+///
+/// A hit the store has caught up with since the search (a sync, an `f`) is
+/// that row's export, pinned like any other; one it has not is the server's
+/// copy, fetched as a row with no raw blob is.
+pub(super) async fn raw_of_hit(
+    account: &AccountConfig,
+    hit: &Hit,
+    secrets: crate::secrets::SecretsBackendKind,
+) -> Result<(String, Vec<u8>, Vec<String>), RpcError> {
+    let name = account.name.as_str();
+    let held = {
+        let store = open_store(name)?;
+        read::find_by_message_id(&store, name, &hit.message_id)
+            .map_err(|e| internal(format!("looking up {} in {name}: {e:#}", hit.message_id)))?
+            .into_iter()
+            .next()
+    };
+    if let Some(row) = held {
+        let (bytes, pinned) = raw_of_row(account, &row, secrets).await?;
+        return Ok((name_of_row(&row), bytes, pinned));
+    }
+    super::open_secrets(name, secrets)?;
+    let bytes = fetch_raw(account, &hit.message_id, &hit.mailbox)
+        .await
+        .map_err(|e| super::server_error(name, &e))?;
+    Ok((name_of_raw(&bytes), bytes, Vec::new()))
 }
 
 fn open_store(name: &str) -> Result<Store, RpcError> {
@@ -162,29 +269,29 @@ fn open_store(name: &str) -> Result<Store, RpcError> {
         .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))
 }
 
-/// The server's copy of a row with no stored raw message.
-async fn fetch_raw(account: &AccountConfig, row: &MessageRow) -> anyhow::Result<Vec<u8>> {
+/// The server's copy of the message `message_id` in the mailbox keyed
+/// `mailbox`: a row with no stored raw message, or a hit with no row.
+async fn fetch_raw(
+    account: &AccountConfig,
+    message_id: &str,
+    mailbox: &str,
+) -> anyhow::Result<Vec<u8>> {
     if account.auth_method == AuthMethod::Graph {
         let config = crate::config::GraphConfig::load(account)?;
         let client = crate::graph::GraphClient::new_async(&config).await?;
         let graph_id = client
-            .find_message_by_internet_id(&row.message_id)
+            .find_message_by_internet_id(message_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("the server no longer has {}", row.message_id))?;
+            .ok_or_else(|| anyhow::anyhow!("the server no longer has {message_id}"))?;
         return client.fetch_mime(&graph_id).await;
     }
-    let server_name = crate::config::find_server_name_for_role(account, &row.mailbox);
+    let server_name = crate::config::find_server_name_for_role(account, mailbox);
     let imap = crate::config::ImapConfig::load(account)?;
     let mut session = crate::imap_client::open_imap_session(&imap).await?;
     let found =
-        crate::imap_client::fetch_raw_by_message_id(&mut session, &server_name, &row.message_id)
-            .await;
+        crate::imap_client::fetch_raw_by_message_id(&mut session, &server_name, message_id).await;
     session.logout().await.ok();
-    let (_uid, raw, _email) = found?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "the server no longer has {} in {server_name}",
-            row.message_id
-        )
-    })?;
+    let (_uid, raw, _email) = found?
+        .ok_or_else(|| anyhow::anyhow!("the server no longer has {message_id} in {server_name}"))?;
     Ok(raw)
 }
