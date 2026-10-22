@@ -28,6 +28,7 @@ It prints the instance id, the application version, the protocol range, the pid,
 The round trip carries no `initialize`, which is what lets `status` describe a daemon whose protocol range this build cannot negotiate.
 
 `mp daemon stop` asks the running daemon to shut down, waits for its report, and then waits until it is really gone, up to `--timeout-secs` (default 10).
+Really gone is the socket removed, nothing answering it, and the process exited, since the daemon unlinks its socket before its process ends; a zombie waiting for its parent to reap it counts as exited.
 `--grace-secs <N>` is how long the daemon may spend settling work that is already running; absent, the daemon applies its own default of 10 seconds, and `0` waits for nothing.
 The two are counted one after the other: `--timeout-secs` starts when the daemon says it has finished, so a long grace cannot make the command give up on a daemon doing exactly what it was asked.
 

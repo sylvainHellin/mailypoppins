@@ -797,7 +797,13 @@ fn string_of(value: &Value) -> String {
 // stop and restart
 // ---------------------------------------------------------------------------
 
-/// Ask the daemon to stop, and wait until it is really gone.
+/// Ask the daemon to stop, and wait until it is really gone: its socket
+/// removed, nothing answering, and its process exited.
+///
+/// The process is the last of the three, because the daemon removes its
+/// socket before it finishes exiting. A caller that went on as soon as the
+/// socket was gone could still find the old process in the process table, and
+/// a `mp daemon start` straight after would race its cleanup.
 ///
 /// Exit 0 whatever the daemon reported: the daemon stopped, which is what was
 /// asked. A nonzero code would make [`restart`] refuse to start the
@@ -847,7 +853,7 @@ async fn stop(timeout: Duration, grace_secs: Option<u64>) -> Result<i32> {
     // the command give up on a daemon that is doing what it was asked.
     let deadline = Instant::now() + timeout;
     loop {
-        if !socket.exists() && query_status().await.is_err() {
+        if !socket.exists() && query_status().await.is_err() && pid.is_none_or(process_exited) {
             print_stop_outcome(&outcome);
             return Ok(EXIT_OK);
         }
@@ -909,18 +915,11 @@ fn print_stop_outcome(outcome: &StopOutcome) {
 /// (PERSO-109).
 async fn restart(grace_secs: Option<u64>) -> Result<i32> {
     let route = super::service::start_route()?;
-    let previous = read_instance_meta().map(|meta| meta.pid);
+    // The stop returns once the old process has exited, so the new daemon
+    // does not race the old one's cleanup for the socket it just created.
     let code = stop(Duration::from_secs(10), grace_secs).await?;
     if code != EXIT_OK {
         return Ok(code);
-    }
-    // The old process must be gone before the new one binds, or the new daemon
-    // races the old one's cleanup for the socket it just created.
-    if let Some(pid) = previous {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while process_alive(pid) && Instant::now() < deadline {
-            tokio::time::sleep(POLL).await;
-        }
     }
     start_via(route, Duration::from_secs(10)).await
 }
@@ -1013,6 +1012,60 @@ fn process_alive(pid: u32) -> bool {
     // SAFETY: signal 0 delivers nothing and only reports whether the pid exists
     // and is signalable by this uid.
     unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// Whether `pid` has exited: nothing answers to it, or what answers is a
+/// zombie waiting for its parent.
+///
+/// A zombie counts as exited because it holds nothing any more: its socket,
+/// its engine locks and its files went when it exited. A daemon whose parent
+/// started it in the foreground (a test fixture, the desktop app) stays one
+/// until that parent waits for it, so a stop that waited for the pid to vanish
+/// would wait out its whole timeout.
+fn process_exited(pid: u32) -> bool {
+    !process_alive(pid) || is_zombie(pid)
+}
+
+/// Whether the process `pid` names is a zombie, from its BSD info.
+///
+/// A process the kernel no longer describes counts as one: `kill` found the
+/// pid a moment earlier, so it is on its way out.
+#[cfg(target_os = "macos")]
+fn is_zombie(pid: u32) -> bool {
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: an all-zero `proc_bsdinfo` is a valid value of a plain C struct.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: the buffer is a `proc_bsdinfo` of exactly `size` bytes, which is
+    // what `PROC_PIDTBSDINFO` writes, and it outlives the call.
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast(),
+            size,
+        )
+    };
+    filled < size || info.pbi_status == libc::SZOMB
+}
+
+/// Whether the process `pid` names is a zombie, from the state field of
+/// `/proc/<pid>/stat`, which follows the last `)` because the command name
+/// before it may hold spaces and parentheses. A process with no `stat` any
+/// more counts as one, for the reason the macOS probe gives.
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            == Some("Z")
+    })
+}
+
+/// No zombie probe on other systems: the pid has to vanish.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn is_zombie(_pid: u32) -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1505,5 +1558,35 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.len(), 32);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// A running child has not exited; once it exits it has, while it is still
+    /// an unreaped zombie and after it was reaped. The zombie is the case a
+    /// stop of a daemon started in the foreground meets.
+    #[test]
+    fn a_zombie_has_exited_and_a_running_process_has_not() {
+        let mut running = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        assert!(!process_exited(running.id()), "a sleeping child is alive");
+        running.kill().expect("kill sleep");
+        running.wait().expect("reap sleep");
+
+        let mut done = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = done.id();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !process_exited(pid) {
+            assert!(Instant::now() < deadline, "`true` never exited");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            process_alive(pid),
+            "unreaped, the child is a zombie that still answers signal 0"
+        );
+        done.wait().expect("reap true");
+        assert!(process_exited(pid), "and reaped it is gone");
     }
 }
