@@ -7,8 +7,14 @@ All notable changes to this project are documented in this file.
 ### Added
 - Config: any key config.toml does not know, anywhere in the file (a typo like `sync_intervall_secs`, a stray `[accounts.mailboxes.spesen]` table that belongs in `[[accounts.mailboxes.extra]]`), now warns, naming the key and its account: on stderr, in the TUI activity log, in the daemon log and as a `config_loaded` health warning, instead of being dropped silently; the config still loads (PERSO-118).
 - Desktop: the daemon's health checks that are not ok now show as calm, dismissible lines under the connection banner and in the activity log, from startup and live as they change; each line clears when its check recovers, and the config.toml line offers Open config.toml.
+- Desktop: `pnpm preview:browser` in clients/desktop runs the frontend in a browser on the tests' fixture backend, and `pnpm build` fails when an app module loads any part of that backend.
 
 ### Fixed
+- Desktop: a pressed toggle shows as pressed in the dark theme (Theme, Reader, Editor colours, the reader's HTML and Text), and the Calendar view's Past events toggle shows when it is on.
+- Desktop: the attachment picker highlights its cursor row (PERSO-159).
+- Desktop and TUI: the palette lists the best match first, scored the same way in both clients, so a typed name and Enter run it; while a search runs, each desktop row names its section.
+- Desktop: in the outbox view the sidebar highlights the outbox line alone, no longer the selected mailbox of another account beside it.
+- Desktop: the screen-reader titles of the palette and of the move picker leave the page when the dialogs close.
 - A second warning in config.toml while one is already shown now reaches the TUI and the desktop, and the TUI no longer logs a held warning again after reconnecting.
 
 ## [0.12.0] - 2026-10-22

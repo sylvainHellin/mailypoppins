@@ -2848,3 +2848,32 @@ The scheduler now fires `STARTUP_TICK` (10 s) after start while no tick has fini
 
 Since config.toml warns on every key the load ignores, a test config that keeps old secret fields for the redaction tests now turns `config_loaded` amber, so a test that expects a healthy daemon needs a config with only known keys.
 `serde_ignored` reports nothing inside a `#[serde(flatten)]` HashMap, which takes every key it is given, so a typo there stays silent.
+
+## The desktop's browser preview finds what jsdom cannot see, and the browser has limits of its own (PERSO-159, 2026-10-22)
+
+vitest runs with `css: false`, so a class that never matches passes every test; the preview in a real browser found three such faults in one pass.
+shadcn's `data-selected:` variant matches `data-selected="true"` only, so a row with a bare `data-selected` attribute never painted its cursor; a test has to check the value, not the attribute.
+An outline button's `dark:bg-input/30` has the specificity of a bare `aria-pressed:bg-*` and comes later in the CSS, so a pressed style needs a `dark:` twin; the ghost variant had no pressed style at all.
+A dev server on plain http over the tailnet is not a secure context: `crypto.randomUUID` and `navigator.clipboard` are missing there.
+BrowserOS (neo) key presses do not reach the out-of-process reader frame; a synthetic event sent through `Target.attachToTarget` does.
+
+## cmdk ranks the rows inside a group but never the groups, and the TUI needed cmdk's scorer for parity (2026-10-22)
+
+cmdk 1.1 looks a group up by its React id where it stored its value, so it never reorders groups, and the best match under a later section sat below weaker ones; the desktop palette ungroups its rows while a search runs and names each row's section instead.
+The TUI filtered labels by subsequence in keymap order, so the same query and Enter ran another action than the desktop ("Forward" ran Cycle focus forward).
+`command_score` in `clients/tui/src/app/keys.rs` ports `command-score` from cmdk's `dist/command-score.mjs`, and its test pins scores computed by that file; after a cmdk upgrade, recompute them from the new file.
+
+## A string scan of `dist/` misses an import of one export of the fixture backend (2026-10-22)
+
+Tree-shaking keeps only what an import uses, so an app module importing one constant from `src/fixture/backend.ts` drops every string `check-bundle.ts` looks for.
+`scripts/fixture-guard.ts` is a build-only plugin whose `load` hook throws for any module under `src/fixture/`, which catches it at the import.
+Vite 8 warns on an extensionless relative import in `vite.config.ts`, so the config imports `./scripts/fixture-guard.ts` with its extension.
+
+## Two sidebar entries read as selected while another account's outbox was open (2026-10-22)
+
+A mailbox was the current page unless its own account's outbox was open, so opening home's outbox left work's Inbox current; the sidebar cursor's tint, drawn on any cursor row that was not the current page, lit it a second time.
+A mailbox is now current only while no outbox is shown, and the cursor is tinted only where it left the selection.
+
+## shadcn's CommandDialog keeps its screen-reader title on the page while closed (2026-10-22)
+
+The generated `CommandDialog` renders its sr-only `DialogHeader` beside `DialogContent`, and Base UI's `Dialog.Title` renders wherever it is placed, so the title and description of a closed palette stayed in the accessibility tree; inside the popup they unmount with it, and the dialog keeps its name.
