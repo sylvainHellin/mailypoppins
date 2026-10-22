@@ -82,7 +82,7 @@ pub fn cmd_config_path() {
 
 /// What the daemon said about each account's folders, for `[folders]`: the
 /// rows of `mailbox.list` with `ignored: true`, or why there are none.
-pub type AccountFolders = std::collections::HashMap<String, Result<Vec<MailboxRow>, String>>;
+pub type AccountFolders = HashMap<String, Result<Vec<MailboxRow>, String>>;
 
 /// The `[folders]` lines of one account: every folder of the last listing
 /// with its policy and, for a role folder, the role (#0141).

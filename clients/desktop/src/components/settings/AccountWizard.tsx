@@ -254,23 +254,30 @@ export function AccountWizardForm({ preset, init, taken, onCancel, firstRef }: A
       </>
     );
   } else if (step === "mailboxes") {
-    const eid = `${id}-extra`;
+    const oid = `${id}-overrides`;
     body = (
       <>
         <p className="text-xs text-muted-foreground">The server's names for the three standard mailboxes; the defaults are the provider's usual ones.</p>
         {text("inbox", "Inbox")}
         {text("archive", "Archive")}
         {text("sent", "Sent")}
-        <Field id={eid} label="Extra mailboxes to sync" hint="One server name per line; empty syncs only the three above.">
+        <p className="text-xs text-muted-foreground">
+          Every other folder on the server is found and synced on its own. The server marks its drafts, trash and junk folders; name one only if it does not.
+        </p>
+        {text("drafts", "Drafts", { hint: "Empty: the folder the server marks." })}
+        {text("trash", "Trash", { hint: "Empty: the folder the server marks." })}
+        {text("junk", "Junk", { hint: "Empty: the folder the server marks." })}
+        <Field id={oid} label="Policy overrides" hint="One per line: a pattern, then sync, status-only or ignore, e.g. Labels/* ignore." error={errors.overrides}>
           {(describedBy) => (
             <Textarea
-              id={eid}
-              data-field="extra"
+              id={oid}
+              data-field="overrides"
               rows={2}
-              value={form.extra}
+              value={form.overrides}
               spellCheck={false}
               aria-describedby={describedBy}
-              onChange={(e) => set("extra", e.currentTarget.value)}
+              aria-invalid={errors.overrides ? true : undefined}
+              onChange={(e) => set("overrides", e.currentTarget.value)}
             />
           )}
         </Field>
@@ -292,7 +299,10 @@ export function AccountWizardForm({ preset, init, taken, onCancel, firstRef }: A
     }
     if (draft?.mailboxes) {
       const m = draft.mailboxes;
-      rows.push(["Mailboxes", [m.inbox, m.archive, m.sent, ...(m.extra ?? [])].join(", ")]);
+      rows.push(["Mailboxes", [m.inbox, m.archive, m.sent].join(", ")]);
+      const marked = (["drafts", "trash", "junk"] as const).filter((role) => m[role]).map((role) => `${role} ${m[role]}`);
+      if (marked.length > 0) rows.push(["Role folders", marked.join(", ")]);
+      if (m.overrides?.length) rows.push(["Overrides", m.overrides.map((o) => `${o.match} ${o.policy}`).join(", ")]);
     }
     body = (
       <>

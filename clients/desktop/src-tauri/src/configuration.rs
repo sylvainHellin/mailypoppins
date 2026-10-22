@@ -271,7 +271,12 @@ pub struct AccountDraftServer {
     pub accept_invalid_certs: Option<bool>,
 }
 
-/// The server names of the three standard mailboxes, and any extra ones.
+/// The server names of the three standard mailboxes, the role folders a
+/// server usually marks itself, and the policy overrides (#0141).
+///
+/// No extra mailboxes: the daemon syncs every folder the server lists, so the
+/// wizard pins none. `drafts`, `trash` and `junk` are set only when the server
+/// does not mark the folder.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
@@ -280,9 +285,31 @@ pub struct AccountDraftMailboxes {
     pub inbox: String,
     pub archive: String,
     pub sent: String,
-    /// Omitted on the wire when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub drafts: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub trash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub junk: Option<String>,
+    /// Omitted on the wire when empty; the first match wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extra: Vec<String>,
+    pub overrides: Vec<AccountDraftOverride>,
+}
+
+/// One `[[accounts.mailboxes.override]]` of an [`AccountDraftMailboxes`]: a
+/// glob over the server name and the policy it gives the folders it matches.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+#[serde(deny_unknown_fields)]
+pub struct AccountDraftOverride {
+    #[serde(rename = "match")]
+    pub pattern: String,
+    /// `sync`, `status-only` or `ignore`; the daemon refuses anything else.
+    pub policy: String,
 }
 
 /// `config.init`'s answer: the swap that started the first account, and the
@@ -643,7 +670,10 @@ mod tests {
         "mailboxes.inbox",
         "mailboxes.archive",
         "mailboxes.sent",
-        "mailboxes.extra",
+        "mailboxes.drafts",
+        "mailboxes.trash",
+        "mailboxes.junk",
+        "mailboxes.overrides",
     ];
 
     /// Every key path of an object, nested objects included.
@@ -675,7 +705,7 @@ mod tests {
             inbox: "INBOX".into(),
             archive: "Archive".into(),
             sent: sent.into(),
-            extra: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -705,7 +735,11 @@ mod tests {
                     smtp: Some(server("127.0.0.1", 1025, "me@proton.me", true)),
                     imap: Some(server("127.0.0.1", 1143, "", true)),
                     mailboxes: Some(AccountDraftMailboxes {
-                        extra: vec!["Folders/Invoices".into()],
+                        junk: Some("Spam".into()),
+                        overrides: vec![AccountDraftOverride {
+                            pattern: "Labels/*".into(),
+                            policy: "ignore".into(),
+                        }],
                         ..standard_mailboxes("Sent")
                     }),
                     ..Default::default()
@@ -734,7 +768,7 @@ mod tests {
                         inbox: "Inbox".into(),
                         archive: "Archive".into(),
                         sent: "Sent Items".into(),
-                        extra: Vec::new(),
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -772,7 +806,11 @@ mod tests {
         assert_eq!(oauth2["oauth2"]["tenant_id"], "contoso.onmicrosoft.com");
         let proton = serde_json::to_value(&presets()[1].1).expect("proton");
         assert_eq!(proton["smtp"]["accept_invalid_certs"], true);
-        assert_eq!(proton["mailboxes"]["extra"], json!(["Folders/Invoices"]));
+        assert_eq!(proton["mailboxes"]["junk"], "Spam");
+        assert_eq!(
+            proton["mailboxes"]["overrides"],
+            json!([{"match": "Labels/*", "policy": "ignore"}])
+        );
         let imap = serde_json::to_value(&presets()[0].1).expect("imap");
         assert!(
             imap.get("auth_method").is_none(),
@@ -789,7 +827,8 @@ mod tests {
         for bad in [
             json!({"name": "x", "password": "hunter2"}),
             json!({"name": "x", "smtp": {"host": "h", "password": "hunter2"}}),
-            json!({"name": "x", "mailboxes": {"inbox": "INBOX", "archive": "A", "sent": "S", "drafts": "D"}}),
+            json!({"name": "x", "mailboxes": {"inbox": "INBOX", "archive": "A", "sent": "S", "extra": ["D"]}}),
+            json!({"name": "x", "mailboxes": {"inbox": "INBOX", "archive": "A", "sent": "S", "overrides": [{"match": "x", "policy": "sync", "why": "y"}]}}),
         ] {
             assert!(
                 serde_json::from_value::<AccountDraft>(bad.clone()).is_err(),
@@ -824,7 +863,13 @@ mod tests {
         );
         assert!(text.contains("[accounts.smtp]\nhost = \"127.0.0.1\"\nusername = \"me@proton.me\"\nport = 1025\naccept_invalid_certs = true\n"), "{text}");
         assert!(
-            text.contains("[[accounts.mailboxes.extra]]\nserver = \"Folders/Invoices\"\n"),
+            text.contains("[accounts.mailboxes.junk]\nserver = \"Spam\"\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "[[accounts.mailboxes.override]]\nmatch = \"Labels/*\"\npolicy = \"ignore\"\n"
+            ),
             "{text}"
         );
         assert!(!text.contains("password"), "{text}");

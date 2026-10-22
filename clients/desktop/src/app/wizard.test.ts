@@ -9,10 +9,13 @@ import {
   NAME_EMPTY,
   NAME_SHAPE,
   nameTaken,
+  overrideBad,
+  parseOverrides,
   PORT_BAD,
   PRESET_ORDER,
   presetForm,
   stepErrors,
+  stepOf,
   TENANT_EMPTY,
   USERNAME_EMPTY,
   withPreset,
@@ -33,7 +36,10 @@ const ACCOUNT_BLOCK_KEYS = new Set([
   "mailboxes.inbox",
   "mailboxes.archive",
   "mailboxes.sent",
-  "mailboxes.extra",
+  "mailboxes.drafts",
+  "mailboxes.trash",
+  "mailboxes.junk",
+  "mailboxes.overrides",
   ...["smtp", "imap"].flatMap((t) =>
     ["", ".host", ".username", ".port", ".fetch_concurrency", ".body_fetch_deadline_secs", ".sync_interval_secs", ".accept_invalid_certs"].map(
       (k) => `${t}${k}`,
@@ -123,11 +129,33 @@ describe("the account wizard's draft", () => {
     expect(graph.oauth2).toEqual({ client_id: "client", tenant_id: "tenant" });
     expect(graph.smtp).toBeUndefined();
     expect(graph.imap).toBeUndefined();
-    expect(graph.mailboxes).toEqual({ inbox: "Inbox", archive: "Archive", sent: "Sent Items", extra: [] });
+    expect(graph.mailboxes).toEqual({ inbox: "Inbox", archive: "Archive", sent: "Sent Items" });
 
-    const imap = accountDraft({ ...filled("imap"), default_from: "", extra: " Lists \n\nProjects\n" });
+    const imap = accountDraft({
+      ...filled("imap"),
+      default_from: "",
+      trash: " Papierkorb ",
+      overrides: " Labels/* ignore \n\nSent Items/Old  status-only\n",
+    });
     expect(imap.default_from).toBe("me@example.com");
-    expect(imap.mailboxes).toEqual({ inbox: "INBOX", archive: "Archive", sent: "Sent", extra: ["Lists", "Projects"] });
+    expect(imap.mailboxes).toEqual({
+      inbox: "INBOX",
+      archive: "Archive",
+      sent: "Sent",
+      trash: "Papierkorb",
+      overrides: [
+        { match: "Labels/*", policy: "ignore" },
+        { match: "Sent Items/Old", policy: "status-only" },
+      ],
+    });
+  });
+
+  it("an override line needs a pattern and one of the three policies (#0141)", () => {
+    expect(parseOverrides("Labels/* sometimes")).toEqual({ overrides: [], bad: "Labels/* sometimes" });
+    expect(parseOverrides("ignore").bad).toBe("ignore");
+    expect(stepErrors("mailboxes", { ...filled("imap"), overrides: "Labels/*" }, []).overrides).toBe(overrideBad("Labels/*"));
+    expect(stepErrors("mailboxes", { ...filled("imap"), overrides: "Labels/* ignore" }, [])).toEqual({});
+    expect(stepOf("overrides")).toBe("mailboxes");
   });
 
   it("an empty Graph client and tenant become the mailypoppins app and common, as in the CLI", () => {

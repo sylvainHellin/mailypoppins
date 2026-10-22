@@ -25,7 +25,9 @@ use anyhow::{anyhow, Context, Result};
 use colored::*;
 use serde_json::{json, Value};
 
-use crate::config::{account_dir, blobs_dir, drafts_dir, mailypoppins_data_dir, store_path};
+use crate::config::{
+    account_dir, blobs_dir, drafts_dir, mailypoppins_data_dir, store_path, FolderPolicy,
+};
 
 /// What a `config.probe` answered.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -118,12 +120,21 @@ pub struct ImapAnswers {
 }
 
 /// The mailbox mapping both kinds of account end with.
+///
+/// No `extra` list: since #0141 the daemon syncs every folder the server
+/// lists, so a wizard pins none. `drafts`, `trash` and `junk` name a role
+/// folder the server does not mark itself, and `overrides` change the policy
+/// the daemon would give a folder.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Mailboxes {
     pub inbox: String,
     pub archive: String,
     pub sent: String,
-    pub extra: Vec<String>,
+    pub drafts: Option<String>,
+    pub trash: Option<String>,
+    pub junk: Option<String>,
+    /// `(match, policy)`, first match wins.
+    pub overrides: Vec<(String, FolderPolicy)>,
 }
 
 /// The `[[accounts]]` block of an IMAP/SMTP account, as `config.init`,
@@ -185,12 +196,28 @@ pub fn graph_candidate(
 /// The mailbox mapping on a candidate, once one was chosen.
 fn with_mailboxes(mut candidate: Value, m: &Mailboxes) -> Value {
     if !m.inbox.is_empty() {
-        candidate["mailboxes"] = json!({
+        let mut mailboxes = json!({
             "inbox": m.inbox,
             "archive": m.archive,
             "sent": m.sent,
-            "extra": m.extra,
         });
+        for (role, server) in [
+            ("drafts", &m.drafts),
+            ("trash", &m.trash),
+            ("junk", &m.junk),
+        ] {
+            if let Some(server) = server {
+                mailboxes[role] = json!(server);
+            }
+        }
+        if !m.overrides.is_empty() {
+            mailboxes["overrides"] = m
+                .overrides
+                .iter()
+                .map(|(pattern, policy)| json!({"match": pattern, "policy": policy.as_str()}))
+                .collect();
+        }
+        candidate["mailboxes"] = mailboxes;
     }
     candidate
 }
@@ -660,8 +687,9 @@ impl Labels {
     }
 }
 
-/// Offer the server's mailboxes for the three roles and the extras, or ask
-/// for the names when the server would not list them.
+/// Offer the server's mailboxes for the three roles, then the roles a server
+/// usually marks and the policy overrides (#0141), or ask for the names when
+/// the server would not list them.
 async fn choose_mailboxes(
     daemon: &mut impl WizardDaemon,
     candidate: &Value,
@@ -690,11 +718,15 @@ async fn choose_mailboxes(
         let inbox = prompt_input(&format!("Inbox {noun} name"), labels.inbox.0)?;
         let archive = prompt_input(&format!("Archive {noun} name"), labels.archive.0)?;
         let sent = prompt_input(&format!("Sent {noun} name"), labels.sent.0)?;
+        let (drafts, trash, junk) = marked_roles(noun, &[])?;
         return Ok(Mailboxes {
             inbox,
             archive,
             sent,
-            extra: Vec::new(),
+            drafts,
+            trash,
+            junk,
+            overrides: ask_overrides(noun)?,
         });
     }
 
@@ -718,22 +750,95 @@ async fn choose_mailboxes(
     )?;
     available.retain(|m| m != &sent);
 
-    let extra = if available.is_empty() {
-        Vec::new()
-    } else {
-        let selection = dialoguer::MultiSelect::new()
-            .with_prompt(format!("Select additional {noun}s to sync (optional)"))
-            .items(&available)
-            .interact()
-            .unwrap_or_default();
-        selection.iter().map(|&i| available[i].clone()).collect()
-    };
+    let (drafts, trash, junk) = marked_roles(noun, &available)?;
     Ok(Mailboxes {
         inbox,
         archive,
         sent,
-        extra,
+        drafts,
+        trash,
+        junk,
+        overrides: ask_overrides(noun)?,
     })
+}
+
+/// The drafts, trash and junk folders, each `None` to let the daemon find the
+/// one the server marks (#0141). The daemon syncs every other folder the
+/// server lists on its own, so nothing here asks for extra folders.
+fn marked_roles(
+    noun: &str,
+    available: &[String],
+) -> Result<(Option<String>, Option<String>, Option<String>)> {
+    println!(
+        "  The server marks its drafts, trash and junk {noun}s; name one only if it does not."
+    );
+    let pick = |role: &str| -> Result<Option<String>> {
+        if available.is_empty() {
+            let typed = prompt_input(
+                &format!("{role} {noun} name (Enter: the one the server marks)"),
+                "",
+            )?;
+            return Ok(role_answer(&typed));
+        }
+        let mut items = vec!["The one the server marks".to_string()];
+        items.extend(available.iter().cloned());
+        let selection = dialoguer::FuzzySelect::new()
+            .with_prompt(format!("Which {noun} is your {role}?"))
+            .items(&items)
+            .default(0)
+            .interact()
+            .context("Selection cancelled")?;
+        Ok((selection > 0).then(|| items[selection].clone()))
+    };
+    Ok((pick("Drafts")?, pick("Trash")?, pick("Junk")?))
+}
+
+/// A typed role folder name, `None` for an empty answer.
+fn role_answer(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    (!typed.is_empty()).then(|| typed.to_string())
+}
+
+/// The policy overrides, one `<pattern> <policy>` line at a time until an
+/// empty one (#0141).
+fn ask_overrides(noun: &str) -> Result<Vec<(String, FolderPolicy)>> {
+    println!(
+        "  Each {noun} is synced, shown with the server's counts, or ignored by default; \
+         an override changes that for the {noun}s a pattern matches."
+    );
+    let mut overrides = Vec::new();
+    loop {
+        let line = prompt_input(
+            "Override as `<pattern> <sync|status-only|ignore>` (Enter: done)",
+            "",
+        )?;
+        if line.trim().is_empty() {
+            return Ok(overrides);
+        }
+        match parse_override(&line) {
+            Ok(rule) => overrides.push(rule),
+            Err(why) => eprintln!("  {} {why}", "\u{26a0}".yellow()),
+        }
+    }
+}
+
+/// One override line: a glob, then the policy as its last word. A pattern
+/// may hold spaces (`Sent Items`), a policy never does.
+pub fn parse_override(line: &str) -> Result<(String, FolderPolicy), String> {
+    let line = line.trim();
+    let Some((pattern, policy)) = line.rsplit_once(char::is_whitespace) else {
+        return Err(format!(
+            "'{line}' has no policy; end it with sync, status-only or ignore"
+        ));
+    };
+    let pattern = pattern.trim();
+    match FolderPolicy::parse(policy) {
+        Some(policy) if !pattern.is_empty() => Ok((pattern.to_string(), policy)),
+        Some(_) => Err(format!("'{line}' has no pattern")),
+        None => Err(format!(
+            "'{policy}' is not a policy; a policy is sync, status-only or ignore"
+        )),
+    }
 }
 
 /// Write the account: a whole file for `init`, one block for `add-account`.

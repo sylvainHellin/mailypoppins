@@ -549,7 +549,10 @@ fn account_block(account: &Value) -> Result<String, DomainError> {
         }
     }
     if let Some(mailboxes) = account.get("mailboxes").filter(|value| value.is_object()) {
-        for role in ["inbox", "archive", "sent"] {
+        // The three synced roles, then the roles a server usually marks
+        // itself (#0141): a `drafts`, `trash` or `junk` key names the folder
+        // only when the server does not.
+        for role in ["inbox", "archive", "sent", "drafts", "trash", "junk"] {
             if let Some(server) = mailbox_server(mailboxes.get(role)) {
                 out.push_str(&format!(
                     "\n[accounts.mailboxes.{role}]\nserver = {}\n",
@@ -569,6 +572,26 @@ fn account_block(account: &Value) -> Result<String, DomainError> {
                     quote(&server)
                 ));
             }
+        }
+        for rule in mailboxes
+            .get("overrides")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            let pattern = string_param(rule, "match")?;
+            let policy = string_param(rule, "policy")?;
+            if crate::config::FolderPolicy::parse(&policy).is_none() {
+                return Err(DomainError::invalid_params(format!(
+                    "the override for '{pattern}' has policy '{policy}'; \
+                     a policy is sync, status-only or ignore"
+                )));
+            }
+            out.push_str(&format!(
+                "\n[[accounts.mailboxes.override]]\nmatch = {}\npolicy = {}\n",
+                quote(&pattern),
+                quote(&policy)
+            ));
         }
     }
     Ok(out)
@@ -1097,6 +1120,51 @@ mod tests {
                 .server,
             "News"
         );
+    }
+
+    /// The roles a server usually marks and the policy overrides render as
+    /// the keys the catalogue reads (#0141), and an unknown policy is refused
+    /// rather than written into a file that would not load.
+    #[test]
+    fn an_account_block_carries_the_role_keys_and_the_overrides() {
+        let block = account_block(&json!({
+            "name": "work",
+            "mailboxes": {
+                "inbox": "INBOX",
+                "trash": "Papierkorb",
+                "junk": {"server": "Spam"},
+                "overrides": [
+                    {"match": "Labels/*", "policy": "ignore"},
+                    {"match": "Archive/2019", "policy": "status-only"},
+                ],
+            },
+        }))
+        .expect("a well-formed account renders");
+        let config: GlobalConfig = toml::from_str(&block).expect("and parses back");
+        assert_eq!(crate::config::config_warnings(&block), Vec::<String>::new());
+        let mailboxes = &config.accounts[0].mailboxes;
+        assert_eq!(mailboxes.trash.as_ref().unwrap().server, "Papierkorb");
+        assert_eq!(mailboxes.junk.as_ref().unwrap().server, "Spam");
+        assert!(mailboxes.drafts.is_none());
+        let rules: Vec<(&str, crate::config::FolderPolicy)> = mailboxes
+            .overrides
+            .iter()
+            .map(|rule| (rule.pattern.as_str(), rule.policy))
+            .collect();
+        assert_eq!(
+            rules,
+            vec![
+                ("Labels/*", crate::config::FolderPolicy::Ignore),
+                ("Archive/2019", crate::config::FolderPolicy::StatusOnly),
+            ]
+        );
+
+        let refused = account_block(&json!({
+            "name": "work",
+            "mailboxes": {"overrides": [{"match": "x", "policy": "sometimes"}]},
+        }))
+        .expect_err("an unknown policy");
+        assert!(format!("{refused:?}").contains("sometimes"), "{refused:?}");
     }
 
     /// A candidate's sign-in is staged, a configured account's is not: a

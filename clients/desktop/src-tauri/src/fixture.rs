@@ -1249,7 +1249,7 @@ fn account_toml(account: &Value) -> String {
                 .map(str::to_string)
                 .or_else(|| v["server"].as_str().map(str::to_string))
         };
-        for role in ["inbox", "archive", "sent"] {
+        for role in ["inbox", "archive", "sent", "drafts", "trash", "junk"] {
             if let Some(name) = server(&mailboxes[role]) {
                 out.push_str(&format!(
                     "\n[accounts.mailboxes.{role}]\nserver = {}\n",
@@ -1262,6 +1262,16 @@ fn account_toml(account: &Value) -> String {
                 out.push_str(&format!(
                     "\n[[accounts.mailboxes.extra]]\nserver = {}\n",
                     quote(&name)
+                ));
+            }
+        }
+        for rule in mailboxes["overrides"].as_array().into_iter().flatten() {
+            if let (Some(pattern), Some(policy)) = (rule["match"].as_str(), rule["policy"].as_str())
+            {
+                out.push_str(&format!(
+                    "\n[[accounts.mailboxes.override]]\nmatch = {}\npolicy = {}\n",
+                    quote(pattern),
+                    quote(policy)
                 ));
             }
         }
@@ -1314,7 +1324,11 @@ fn effective_account(account: &Value) -> Value {
             "inbox": mailbox("inbox"),
             "archive": mailbox("archive"),
             "sent": mailbox("sent"),
+            "drafts": mailbox("drafts"),
+            "trash": mailbox("trash"),
+            "junk": mailbox("junk"),
             "extra": account["mailboxes"]["extra"].as_array().cloned().unwrap_or_default(),
+            "override": account["mailboxes"]["overrides"].as_array().cloned().unwrap_or_default(),
         },
         "save_to_sent": account["save_to_sent"].as_str().unwrap_or("auto"),
         "hooks": [],

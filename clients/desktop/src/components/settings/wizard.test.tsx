@@ -120,8 +120,16 @@ describe("the account wizard", () => {
     await next(user, dialog);
     expect(within(dialog).getByLabelText("Inbox")).toHaveValue("INBOX");
     expect(within(dialog).getByLabelText("Sent")).toHaveValue("Sent");
+    expect(within(dialog).getByLabelText("Trash")).toHaveValue("");
+    // An override that is not one stops the step, naming the line (#0141).
+    await fill(user, dialog, "Policy overrides", "Lists/*");
+    await next(user, dialog);
+    expect(within(dialog).getByLabelText("Policy overrides")).toHaveAttribute("aria-invalid", "true");
+    await fill(user, dialog, "Policy overrides", "Lists/* status-only");
+    await fill(user, dialog, "Junk", "Spam");
     await next(user, dialog);
     expect(within(dialog).getByText("smtp.fastmail.com:465 as me@fastmail.com")).toBeInTheDocument();
+    expect(within(dialog).getByText("Lists/* status-only")).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Add account" }));
     await waitFor(() =>
       expect(callsOf("config_add_account")).toEqual([
@@ -131,7 +139,13 @@ describe("the account wizard", () => {
             default_from: "me@fastmail.com",
             smtp: { host: "smtp.fastmail.com", port: 465, username: "me@fastmail.com" },
             imap: { host: "imap.fastmail.com", port: 993 },
-            mailboxes: { inbox: "INBOX", archive: "Archive", sent: "Sent", extra: [] },
+            mailboxes: {
+              inbox: "INBOX",
+              archive: "Archive",
+              sent: "Sent",
+              junk: "Spam",
+              overrides: [{ match: "Lists/*", policy: "status-only" }],
+            },
           },
         },
       ]),
@@ -345,7 +359,7 @@ describe("the first run", () => {
         default_from: "me@proton.me",
         smtp: { host: "127.0.0.1", port: 1025, username: "me@proton.me", accept_invalid_certs: true },
         imap: { host: "127.0.0.1", port: 1143, accept_invalid_certs: true },
-        mailboxes: { inbox: "INBOX", archive: "Archive", sent: "Sent", extra: [] },
+        mailboxes: { inbox: "INBOX", archive: "Archive", sent: "Sent" },
       },
     });
     expect(callsOf("config_add_account")).toEqual([]);

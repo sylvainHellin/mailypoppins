@@ -1003,7 +1003,8 @@ The pure half is `app/wizard.ts`: the presets, the per-step checks and the `Acco
    Switching the preset replaces the provider's values and keeps the name the user typed, the usernames and the app registration.
 2. Identity: the account name, and the From address ("Email address" for Graph, where it is required).
 3. Servers: SMTP host, port and username, IMAP host, port and username, then for both Microsoft 365 presets the client ID and the tenant ID; Graph shows only the last two.
-4. Mailboxes: the server names of Inbox, Archive and Sent (INBOX, Archive and Sent by default), and extra mailboxes to sync, one per line.
+4. Mailboxes: the server names of Inbox, Archive and Sent (INBOX, Archive and Sent by default), then Drafts, Trash and Junk, each left empty for the folder the server marks, and the policy overrides, one `<pattern> <sync|status-only|ignore>` per line (#0141).
+   There is no list of extra mailboxes: the daemon finds and syncs every other folder the server lists.
 5. Review: what will be written, then "Add account", or "Write config.toml" when the daemon has none.
 
 Next checks the step, and Enter in a field is Next.

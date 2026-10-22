@@ -502,7 +502,16 @@ type AccountDraft = {
   oauth2?: { client_id: string; tenant_id: string };
   smtp?: AccountDraftServer;
   imap?: AccountDraftServer;
-  mailboxes?: { inbox: string; archive: string; sent: string; extra?: string[] };
+  mailboxes?: AccountDraftMailboxes;
+};
+type AccountDraftMailboxes = {
+  inbox: string;
+  archive: string;
+  sent: string;
+  drafts?: string; // each of the three only when the server does not mark the folder (#0141)
+  trash?: string;
+  junk?: string;
+  overrides?: { match: string; policy: string }[]; // "sync" | "status-only" | "ignore"
 };
 type AccountDraftServer = { host?: string; port?: number; username?: string; accept_invalid_certs?: boolean };
 type ConfigInitialised = { path: string; added: string[]; updated: string[]; removed: string[] };

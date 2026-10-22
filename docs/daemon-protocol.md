@@ -280,7 +280,7 @@ It is a query of its own rather than a field of `config.get`, which stays contra
 A backend with nothing stored yet answers every password absent; one that cannot be opened at all is `-32603`, because "not set" would then be a guess.
 The types are `mp_protocol::account::{AccountCredentials, AccountCredential, TokenState}`; `mp config show` and the desktop's Settings cards render it.
 
-`mailbox.list` takes `{"account": str}` and returns one account's sidebar hierarchy:
+`mailbox.list` takes `{"account": str, "ignored"?: bool}` and returns one account's sidebar hierarchy:
 
 ```json
 {
@@ -297,7 +297,7 @@ The order, the roles, the slugs and the labels are the bootstrap snapshot's `mai
 The hierarchy is the account's mailbox catalogue (#0141): the four fixed rows Inbox, Drafts, Sent and Archive, then every folder the server lists that the daemon does not ignore, in the order trash, junk, the configured `extra` folders, the other synced folders by name, the counts-only folders by name.
 `role` is one of `inbox`, `drafts`, `sent`, `archive`, `trash`, `junk`, `other`; `slug` is the store key a client addresses in `message.list`; `label` is what a sidebar prints.
 `server` is the folder's name on the server, `null` for the local Drafts view and for a role the account has no folder for.
-`policy` is `sync` or `status-only` (an `ignore` folder is not a row): a `status-only` folder's `total` and `unread` are the counts the last tick's `STATUS` read from the server, since its store holds at most the newest few messages, and a client that sums an account's mail counts the `sync` rows alone.
+`policy` is `sync` or `status-only` (an `ignore` folder is not a row unless `ignored` is `true`, which appends every ignored folder of the last listing after the sidebar's rows, with role `other`, policy `ignore` and zero counts, for `mp config show`): a `status-only` folder's `total` and `unread` are the counts the last tick's `STATUS` read from the server, since its store holds at most the newest few messages, and a client that sums an account's mail counts the `sync` rows alone.
 Both members default when absent, `null` and `sync`, so a client reads an older daemon's answer.
 A tick that lists a folder the server just created re-seeds the account's hierarchy and announces the new row with a `state.invalidate` of `mailbox:<account>/<slug>` even at zero counts, and a folder the server stopped listing goes with a `state.remove` of the same resource; a client re-reads the hierarchy on either.
 Drafts are listed here and refused by `message.list`, exactly as the sidebar lists them and the message listing does not.
@@ -704,6 +704,8 @@ The previous snapshot stays live, its runtimes keep serving and keep their engin
 The candidate document is built in memory, validated, and only then written, so a refusal leaves `config.toml` byte-identical.
 `config.init` refuses an existing file with `-32602` naming it unless `replace` is `true`, because `mp config init` asks "Overwrite? [y/N]" in the client and a daemon has nobody to ask; `config.add_account` refuses a missing file with `-32602` naming `config.init`, and a duplicate account name with `-32602` naming the name.
 The daemon-era equivalent of the wizard's password prompt is a second call to `config.set_password`: one path into the secrets backend is one path to audit.
+The account's `mailboxes` object takes `inbox`, `archive` and `sent`, then `drafts`, `trash` and `junk` for a role folder the server does not mark, each a server name or `{server}`, and `overrides`, a list of `{match, policy}` written as `[[accounts.mailboxes.override]]` in order (#0141); a policy other than `sync`, `status-only` or `ignore` is `-32602`.
+`extra` is still read, for a hand-written block, but neither wizard sends it: the daemon syncs every folder the server lists.
 
 **The setup wizards run on these methods.** `mp config init` and `mp config add-account` prompt in the client and do everything else here: `config.probe` tests a login or lists the server's mailboxes for the account being described, `config.oauth2_login` with a `candidate` signs it in, `config.init` or `config.add_account` writes it, and `config.set_password` stores each password the user typed, once the account exists.
 Nothing is written until the last prompt is answered, so an abandoned wizard leaves `config.toml` and the secrets backend as they were.
@@ -1601,7 +1603,7 @@ The daemon leftovers (2026-10-22) added nine methods, three optional parameters,
 `message.list_server`, `mp fetch`'s one-mailbox query, was retired with the command as a duplicate of `mp search --mailbox` on `message.search_server`; a client that still calls it gets `-32601`, and the capability list lost its name.
 The capability list grew by the new names, which is the derivation working rather than a change to it.
 
-#0141 (PERSO-119) added two members to a mailbox row, five to a `mailbox.list_server` row and two roles, all additively; no field was renamed, none was dropped, and no method was added.
+#0141 (PERSO-119) added two members to a mailbox row, five to a `mailbox.list_server` row, two roles, `mailbox.list`'s optional `ignored` and the `drafts`, `trash`, `junk` and `overrides` keys of a `config.init` or `config.add_account` account's `mailboxes`, all additively; no field was renamed, none was dropped, and no method was added.
 `MailboxRow` gained `server`, the folder's server name, and `policy`, `mp_protocol::state::FolderPolicy` (`sync`, `status-only` or `ignore`), both `default` on the way in, so a row from an older daemon reads as a synced mailbox with no server name; the bootstrap snapshot's `mailboxes` rows carry the same two members.
 `role` may now be `trash` or `junk`, which a client that does not know them reads as `other`.
 `mailbox.list_server` rows gained `label`, `role`, `policy`, `key` and `reason`, and its Graph answer lists the whole folder tree with `Parent/Child` names rather than the top level.

@@ -147,6 +147,17 @@ impl FolderPolicy {
             FolderPolicy::Ignore => "ignore",
         }
     }
+
+    /// The policy `as_str` spells `name`, `None` for anything else.
+    pub fn parse(name: &str) -> Option<FolderPolicy> {
+        [
+            FolderPolicy::Sync,
+            FolderPolicy::StatusOnly,
+            FolderPolicy::Ignore,
+        ]
+        .into_iter()
+        .find(|policy| policy.as_str() == name.trim())
+    }
 }
 
 impl std::fmt::Display for FolderPolicy {

@@ -113,6 +113,7 @@ fn export_into(dir: &Path) -> usize {
         configuration::AccountDraft,
         configuration::AccountDraftServer,
         configuration::AccountDraftMailboxes,
+        configuration::AccountDraftOverride,
         configuration::ConfigInitialised,
         configuration::OAuth2Stored,
         editor::EditorSource,

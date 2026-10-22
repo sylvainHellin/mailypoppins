@@ -5,8 +5,8 @@
 
 use serde_json::Value;
 
-use super::init::{graph_candidate, imap_candidate, ImapAnswers, Mailboxes, Probe};
-use crate::config::{AccountConfig, AuthMethod};
+use super::init::{graph_candidate, imap_candidate, parse_override, ImapAnswers, Mailboxes, Probe};
+use crate::config::{AccountConfig, AuthMethod, FolderPolicy};
 use crate::daemon::methods::config::candidate_account;
 
 fn loaded(candidate: &Value) -> AccountConfig {
@@ -18,7 +18,9 @@ fn mapped() -> Mailboxes {
         inbox: "INBOX".into(),
         archive: "Archive".into(),
         sent: "Sent".into(),
-        extra: vec!["Projects".into()],
+        trash: Some("Papierkorb".into()),
+        overrides: vec![("Labels/*".into(), FolderPolicy::Ignore)],
+        ..Default::default()
     }
 }
 
@@ -60,15 +62,38 @@ fn a_password_candidate_loads_with_its_fallbacks_and_mailboxes() {
         "Archive"
     );
     assert_eq!(account.mailboxes.sent.as_ref().unwrap().server, "Sent");
-    let extra: Vec<&str> = account
+    assert!(
+        account.mailboxes.extra.is_none(),
+        "the daemon syncs every listed folder, so the wizard pins none (#0141)"
+    );
+    assert_eq!(
+        account.mailboxes.trash.as_ref().unwrap().server,
+        "Papierkorb"
+    );
+    assert!(account.mailboxes.junk.is_none());
+    let rules: Vec<(&str, FolderPolicy)> = account
         .mailboxes
-        .extra
-        .as_ref()
-        .expect("extra")
+        .overrides
         .iter()
-        .map(|m| m.server.as_str())
+        .map(|rule| (rule.pattern.as_str(), rule.policy))
         .collect();
-    assert_eq!(extra, ["Projects"]);
+    assert_eq!(rules, [("Labels/*", FolderPolicy::Ignore)]);
+}
+
+/// An override line is a pattern, spaces allowed, then its policy.
+#[test]
+fn an_override_line_reads_its_pattern_and_policy() {
+    assert_eq!(
+        parse_override("Sent Items/Old  status-only"),
+        Ok(("Sent Items/Old".to_string(), FolderPolicy::StatusOnly))
+    );
+    assert_eq!(
+        parse_override("Labels/* ignore"),
+        Ok(("Labels/*".to_string(), FolderPolicy::Ignore))
+    );
+    assert!(parse_override("Labels/*").is_err());
+    assert!(parse_override("Labels/* sometimes").is_err());
+    assert!(parse_override(" sync").is_err());
 }
 
 /// Proton Bridge: both servers accept the bridge's self-signed certificate.
@@ -126,7 +151,9 @@ fn wizard_answers_needing_toml_escapes_round_trip() {
         inbox: odd.into(),
         archive: "Archive".into(),
         sent: "Sent".into(),
-        extra: vec![odd.into(), "Say \"hi\"".into()],
+        junk: Some("Say \"hi\"".into()),
+        overrides: vec![(odd.into(), FolderPolicy::Sync)],
+        ..Default::default()
     };
     let account = loaded(&imap_candidate(&ImapAnswers {
         default_from: from.into(),
@@ -146,15 +173,8 @@ fn wizard_answers_needing_toml_escapes_round_trip() {
 
     let graph = loaded(&graph_candidate("g", from, "client", "tenant", &mailboxes));
     assert_eq!(graph.default_from, from);
-    let extra: Vec<&str> = graph
-        .mailboxes
-        .extra
-        .as_ref()
-        .expect("extra")
-        .iter()
-        .map(|m| m.server.as_str())
-        .collect();
-    assert_eq!(extra, [odd, "Say \"hi\""]);
+    assert_eq!(graph.mailboxes.junk.as_ref().unwrap().server, "Say \"hi\"");
+    assert_eq!(graph.mailboxes.overrides[0].pattern, odd);
 }
 
 /// PERSO-164: Enter at the Graph wizard's client ID and tenant prompts writes

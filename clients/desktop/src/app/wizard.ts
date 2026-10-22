@@ -10,7 +10,7 @@ import type { Dispatch } from "react";
 import type { Action } from "@/app/reducer";
 import { startSignIn } from "@/app/signin";
 import * as cmd from "@/lib/commands";
-import { asGuiError, type AccountDraft, type AuthMethod } from "@/lib/gui-types";
+import { asGuiError, type AccountDraft, type AccountDraftMailboxes, type AccountDraftOverride, type AuthMethod } from "@/lib/gui-types";
 
 export type Preset = "imap" | "proton" | "microsoft365" | "graph";
 
@@ -132,8 +132,12 @@ export type WizardForm = {
   inbox: string;
   archive: string;
   sent: string;
-  /** Extra mailboxes to sync, one server name per line. */
-  extra: string;
+  /** The drafts, trash and junk folders, empty for the one the server marks (ticket 0141). */
+  drafts: string;
+  trash: string;
+  junk: string;
+  /** Policy overrides, one `<pattern> <policy>` per line, the first match winning. */
+  overrides: string;
 };
 
 export type WizardField = Exclude<keyof WizardForm, "preset">;
@@ -168,7 +172,10 @@ export function presetForm(preset: Preset): WizardForm {
     inbox: p.inbox,
     archive: p.archive,
     sent: p.sent,
-    extra: "",
+    drafts: "",
+    trash: "",
+    junk: "",
+    overrides: "",
   };
 }
 
@@ -214,6 +221,30 @@ export const CLIENT_EMPTY = "The app registration's client ID is required";
 export const TENANT_EMPTY = "The tenant ID is required";
 export const MAILBOX_EMPTY = "A server mailbox name is required";
 export const PORT_BAD = "A port is a whole number from 1 to 65535";
+export const overrideBad = (line: string): string =>
+  `"${line}" is not an override: a pattern, then sync, status-only or ignore`;
+
+/** The policies an override may give, as config.toml spells them. */
+export const POLICIES = ["sync", "status-only", "ignore"] as const;
+
+/**
+ * The overrides typed one per line: a glob over the server name, then the
+ * policy as the last word, so a pattern may hold spaces (`Sent Items/Old`).
+ * Blank lines are skipped; a line that is not an override is answered as such.
+ */
+export function parseOverrides(text: string): { overrides: AccountDraftOverride[]; bad: string | null } {
+  const overrides: AccountDraftOverride[] = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    const cut = line.search(/\s+\S+$/);
+    const policy = cut < 0 ? "" : line.slice(cut).trim();
+    const pattern = cut < 0 ? "" : line.slice(0, cut).trim();
+    if (pattern === "" || !(POLICIES as readonly string[]).includes(policy)) return { overrides, bad: line };
+    overrides.push({ match: pattern, policy });
+  }
+  return { overrides, bad: null };
+}
 
 function port(value: string): boolean {
   if (!/^\d+$/.test(value.trim())) return false;
@@ -249,6 +280,8 @@ export function stepErrors(step: WizardStep, form: WizardForm, taken: readonly s
   }
   if (step === "mailboxes" || step === "review") {
     for (const role of ["inbox", "archive", "sent"] as const) if (blank(form[role])) out[role] = MAILBOX_EMPTY;
+    const { bad } = parseOverrides(form.overrides);
+    if (bad !== null) out.overrides = overrideBad(bad);
   }
   return out;
 }
@@ -256,7 +289,8 @@ export function stepErrors(step: WizardStep, form: WizardForm, taken: readonly s
 /** The step a field is entered on, for the review's "fix it" jump. */
 export function stepOf(field: WizardField): WizardStep {
   if (field === "name" || field === "default_from") return "identity";
-  if (field === "inbox" || field === "archive" || field === "sent" || field === "extra") return "mailboxes";
+  const mailboxes: WizardField[] = ["inbox", "archive", "sent", "drafts", "trash", "junk", "overrides"];
+  if (mailboxes.includes(field)) return "mailboxes";
   return "servers";
 }
 
@@ -290,11 +324,11 @@ export function accountDraft(form: WizardForm): AccountDraft {
     if (t(form.imap_host)) draft.imap.host = t(form.imap_host);
     if (t(form.imap_username)) draft.imap.username = t(form.imap_username);
   }
-  const extra = form.extra
-    .split("\n")
-    .map(t)
-    .filter((line) => line !== "");
-  draft.mailboxes = { inbox: t(form.inbox), archive: t(form.archive), sent: t(form.sent), extra };
+  const mailboxes: AccountDraftMailboxes = { inbox: t(form.inbox), archive: t(form.archive), sent: t(form.sent) };
+  for (const role of ["drafts", "trash", "junk"] as const) if (t(form[role])) mailboxes[role] = t(form[role]);
+  const { overrides } = parseOverrides(form.overrides);
+  if (overrides.length > 0) mailboxes.overrides = overrides;
+  draft.mailboxes = mailboxes;
   return draft;
 }
 
