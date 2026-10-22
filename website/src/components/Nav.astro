@@ -29,6 +29,7 @@ import { navLinks, isActive } from '../data/nav';
         <a
           href={link.href}
           class:list={['nav-link', { active: isActive(link, currentPath) }]}
+          aria-current={isActive(link, currentPath) ? 'page' : undefined}
         >
           {link.label}
         </a>

@@ -28,33 +28,35 @@
 </script>
 
 <div class="clients">
-  <div class="tablist" role="tablist" aria-label="Clients">
-    {#each tabs as tab, i (tab.id)}
-      <button
-        id={`tab-${tab.id}`}
-        role="tab"
-        class="tab"
-        aria-selected={active === tab.id}
-        aria-controls={`panel-${tab.id}`}
-        tabindex={active === tab.id ? 0 : -1}
-        onclick={() => (active = tab.id)}
-        onkeydown={(e) => onKey(e, i)}
-      >
-        {tab.label}
-      </button>
-    {/each}
-  </div>
+  <div class="frame">
+    <div class="bar">
+      <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      <div class="tablist" role="tablist" aria-label="Clients">
+        {#each tabs as tab, i (tab.id)}
+          <button
+            id={`tab-${tab.id}`}
+            role="tab"
+            class="tab"
+            aria-selected={active === tab.id}
+            aria-controls={`panel-${tab.id}`}
+            tabindex={active === tab.id ? 0 : -1}
+            onclick={() => (active = tab.id)}
+            onkeydown={(e) => onKey(e, i)}
+          >
+            {tab.label}
+          </button>
+        {/each}
+      </div>
+    </div>
 
-  {#each tabs as tab (tab.id)}
-    <div
-      id={`panel-${tab.id}`}
-      role="tabpanel"
-      aria-labelledby={`tab-${tab.id}`}
-      class="panel"
-      hidden={active !== tab.id}
-    >
-      <p class="caption">{tab.caption}</p>
-      <div class="frame">
+    {#each tabs as tab (tab.id)}
+      <div
+        id={`panel-${tab.id}`}
+        role="tabpanel"
+        aria-labelledby={`tab-${tab.id}`}
+        class="panel"
+        hidden={active !== tab.id}
+      >
         {#if tab.id === 'tui'}
           <img
             src="/tui-screenshot.png"
@@ -64,7 +66,7 @@
             loading="lazy"
           />
         {:else if tab.id === 'cli'}
-          <pre class="term" aria-label="A command-line session"><span class="p">$</span> mp search --local 'from:ada invoice'
+<pre class="term" aria-label="A command-line session"><span class="p">$</span> mp search --local 'from:ada invoice'
 <span class="dim">"from:ada invoice" in work (1 hit):</span>
 <span class="dim">────────────────────────────────────────────────────────</span>
 [<span class="b">unread</span>] mp://work/inbox/8c41f0e2@example.com → you@example.com
@@ -90,47 +92,13 @@ mp://work/drafts/3f9c27a1d4e8b605
           />
         {/if}
       </div>
-    </div>
-  {/each}
+    {/each}
+  </div>
+
+  <p class="caption">{tabs.find((t) => t.id === active)?.caption}</p>
 </div>
 
 <style>
-  .tablist {
-    display: flex;
-    justify-content: center;
-    gap: var(--space-1);
-    margin-bottom: var(--space-4);
-  }
-
-  .tab {
-    font: inherit;
-    font-size: 0.9375rem;
-    font-weight: 500;
-    padding: var(--space-2) var(--space-4);
-    border: 1px solid transparent;
-    border-radius: 8px;
-    background: none;
-    color: var(--color-text-muted);
-    cursor: pointer;
-  }
-
-  .tab:hover {
-    color: var(--color-text);
-    background: var(--color-surface-hover);
-  }
-
-  .tab[aria-selected='true'] {
-    color: var(--color-text);
-    background: var(--color-surface);
-    border-color: var(--color-border);
-  }
-
-  .caption {
-    text-align: center;
-    color: var(--color-text-muted);
-    margin: 0 0 var(--space-5);
-  }
-
   .frame {
     border: 1px solid var(--color-code-border);
     border-radius: 10px;
@@ -139,7 +107,66 @@ mp://work/drafts/3f9c27a1d4e8b605
     background: var(--color-code-bg);
   }
 
-  .frame img {
+  .bar {
+    display: flex;
+    align-items: stretch;
+    gap: var(--space-4);
+    padding: 0 var(--space-4);
+    background: var(--color-code-header);
+    border-bottom: 1px solid var(--color-code-border);
+  }
+
+  .dots {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .dots i {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: rgba(244, 241, 232, 0.2);
+  }
+
+  .tablist {
+    display: flex;
+    gap: var(--space-1);
+  }
+
+  .tab {
+    font: inherit;
+    font-size: 0.875rem;
+    font-weight: 500;
+    padding: var(--space-3) var(--space-3);
+    border: 0;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    background: none;
+    color: var(--color-code-label);
+    cursor: pointer;
+  }
+
+  .tab:hover {
+    color: #f4f1e8;
+  }
+
+  .tab[aria-selected='true'] {
+    color: #f4f1e8;
+    border-bottom-color: var(--color-cta);
+  }
+
+  .tab:focus-visible {
+    outline-offset: -2px;
+  }
+
+  .caption {
+    text-align: center;
+    color: var(--color-text-muted);
+    margin: var(--space-4) 0 0;
+  }
+
+  .panel img {
     display: block;
     width: 100%;
     height: auto;
@@ -167,6 +194,10 @@ mp://work/drafts/3f9c27a1d4e8b605
     .term {
       font-size: 0.75rem;
       padding: var(--space-4);
+    }
+
+    .dots {
+      display: none;
     }
   }
 </style>

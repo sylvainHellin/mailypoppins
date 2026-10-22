@@ -49,17 +49,20 @@ const label = filename || lang;
     color: var(--color-code-label);
   }
 
+  /* The copy button stays put while a long line scrolls under it: the pre
+     scrolls, not the body, and the body keeps the button's width clear. */
   .code-body {
     position: relative;
-    padding: var(--space-4);
-    overflow-x: auto;
+    padding: var(--space-4) calc(var(--space-4) + 32px) var(--space-4) var(--space-4);
   }
 
   .code-body :global(pre) {
     margin: 0;
     padding: 0;
     border: none;
-    background: transparent;
+    overflow-x: auto;
+    /* Shiki writes the theme background inline; the block owns the colour. */
+    background: transparent !important;
     font-family: var(--font-mono);
     font-size: 0.875rem;
     line-height: 1.6;

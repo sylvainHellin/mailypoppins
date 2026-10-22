@@ -48,6 +48,7 @@
           href={link.href}
           class="menu-link"
           class:active={isActive(link, currentPath)}
+          aria-current={isActive(link, currentPath) ? 'page' : undefined}
           onclick={close}
         >
           {link.label}

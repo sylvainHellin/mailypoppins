@@ -137,7 +137,15 @@
 
 html {
   scroll-behavior: smooth;
+  /* Anchor jumps land below the sticky nav, not under it. */
+  scroll-padding-top: calc(var(--nav-height) + var(--space-4));
   -webkit-text-size-adjust: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
 }
 
 body {
@@ -165,6 +173,7 @@ input, button, textarea, select {
    ============================================================ */
 
 h1, h2, h3 {
+  text-wrap: balance;
   line-height: 1.2;
   color: var(--color-text);
   font-weight: 600;
@@ -210,6 +219,11 @@ code {
   padding: 0.15em 0.35em;
   border-radius: 4px;
   color: var(--color-accent-text);
+  overflow-wrap: anywhere;
+}
+
+pre code {
+  overflow-wrap: normal;
 }
 
 pre {
@@ -268,6 +282,10 @@ pre code {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+p {
+  text-wrap: pretty;
 }
 
 /* ============================================================

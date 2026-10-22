@@ -9,7 +9,7 @@ export interface NavLink {
 }
 
 export const navLinks: NavLink[] = [
-  { href: '/#download', label: 'Download' },
+  { href: '/#download', label: 'Get started' },
   { href: '/getting-started/', label: 'Guide' },
   { href: '/commands/', label: 'Reference', also: ['/config/', '/draft-format/'] },
   { href: '/faq/', label: 'FAQ' },

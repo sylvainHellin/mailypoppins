@@ -6,11 +6,11 @@ import CodeBlock from '../components/CodeBlock.astro';
 import { Code } from 'astro:components';
 ---
 
-<Layout title="Getting Started · mailypoppins" description="Install mailypoppins and send your first email in under 5 minutes.">
+<Layout title="Guide · mailypoppins" description="Install mailypoppins and send your first email in under 5 minutes.">
   <Nav />
   <main id="main-content" class="content page">
     <header class="page-header">
-      <h1>Getting Started</h1>
+      <h1>Guide</h1>
       <p class="subtitle">Install mailypoppins and send your first email in under 5 minutes.</p>
     </header>
 
@@ -32,7 +32,7 @@ brew install mailypoppins`}
       <p>
         Download the archive for your platform (macOS arm64, Linux x86_64 gnu or
         static musl) from the
-        <a href="https://github.com/sylvainhellin/mailypoppins/releases" target="_blank" rel="noopener noreferrer">GitHub Releases page</a>,
+        <a href="https://github.com/sylvainHellin/mailypoppins/releases" target="_blank" rel="noopener noreferrer">GitHub Releases page</a>,
         verify the <code>.sha256</code> checksum, and place the
         <code>mp</code> binary somewhere on your <code>PATH</code>.
       </p>
@@ -87,7 +87,7 @@ brew install mailypoppins`}
       </p>
       <CodeBlock
         lang="bash"
-        code={`git clone https://github.com/sylvainhellin/mailypoppins
+        code={`git clone https://github.com/sylvainHellin/mailypoppins
 cd mailypoppins
 cargo install --path .`}
       />

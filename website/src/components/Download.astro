@@ -88,7 +88,7 @@ const latest = 'https://github.com/sylvainHellin/mailypoppins/releases/latest/do
 
   .step {
     display: grid;
-    grid-template-columns: 3rem 1fr;
+    grid-template-columns: 3rem minmax(0, 1fr);
     gap: var(--space-4);
     margin: 0;
     padding: var(--space-6) 0;
@@ -123,7 +123,7 @@ const latest = 'https://github.com/sylvainHellin/mailypoppins/releases/latest/do
 
   .options {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-10);
     margin-top: var(--space-3);
   }
@@ -152,12 +152,12 @@ const latest = 'https://github.com/sylvainHellin/mailypoppins/releases/latest/do
 
   @media (max-width: 768px) {
     .options {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
       gap: var(--space-6);
     }
 
     .step {
-      grid-template-columns: 2.5rem 1fr;
+      grid-template-columns: 2.5rem minmax(0, 1fr);
       gap: var(--space-3);
     }
 
