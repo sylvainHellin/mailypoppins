@@ -32,6 +32,10 @@ All notable changes to this project are documented in this file.
 - Desktop, TUI and the Neovim colorscheme: the warning colour clears 4.5:1 on the muted surface (light #B24600, dark #FF7212), and the desktop's contrast check covers that pair.
 - `state.bootstrap`: an account's `sync_health` carries `reason`, the error of a failed last pass, and `at`, when that pass finished.
 - TUI: every theme that paints its own background (all but terminal) now draws a rounded frame around the whole screen in its border colour, so the TUI no longer runs straight into the terminal's own background; terminal keeps the full window, and an 80-column terminal keeps the full split.
+- Server search: every action on a result the local store does not hold works without a fetch first, in the TUI and the desktop app (PERSO-155).
+  The attachment list, saving or opening a part, the read-only view and an inline forward read the server's copy through the daemon, which stores nothing and downloads the copy once for all of a result's actions within two minutes; forwarding any result opens the forward wizard in both clients.
+- TUI: a server search over all mailboxes is one account-wide query on Microsoft Graph, as in the desktop app and `mp search`, instead of one query per mailbox (PERSO-155).
+- `mp <selector>` and the other draft commands still refuse a received-mail selector, and the refusal now names `mp show <selector>` (PERSO-155).
 - Desktop: prefix keys wait for the second key, as in the TUI (#0148). After g, f, c, t, s or Space the which-key list stays until the next key; Escape cancels it and does nothing else, and a click drops it.
 
 ### Fixed
@@ -54,6 +58,8 @@ All notable changes to this project are documented in this file.
 - TUI: an account whose last sync failed before the TUI started is marked in the account picker and the sidebar, with the daemon's reason and time, as the desktop's picker marks it.
 - The test suite no longer posts real desktop notifications.
 - Daemon: a client that bootstraps while the daemon commits a long run of changes is answered at once instead of after the run, and queueing an event for a slow client no longer copies every queued event to look for a duplicate.
+- `mp reply`, `forward`, `invite`, `archive` and `delete` now fetch a message the store does not hold, as `mp show`, `save` and `open` already did, so the Sent selectors `mp search` prints work with every command (PERSO-155).
+  `archive` and `delete` refuse to act on a copy the store holds in another mailbox and name that copy's selector, and `mp invite` answers from the selector's own account instead of the default one.
 
 ### Removed
 - The obsolete `spikes/ipc-bench` benchmark.

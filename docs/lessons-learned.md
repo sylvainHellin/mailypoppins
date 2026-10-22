@@ -2991,3 +2991,23 @@ Code that records an id to read the item back later (the outbox's `graph-draft:`
 Send `Prefer: IdType="ImmutableId"` on every request that returns or takes such an id, creation included, so the id is the immutable one from the start and keeps resolving through every move ([src/graph.rs](../src/graph.rs), `PREFER_IMMUTABLE_ID`).
 Keep it on all of them, folder lookups whose ids are compared with `parentFolderId` included: a mix of default and immutable ids for one item never compares equal.
 The sync path still records default ids; the two are kept apart rather than converted.
+
+## A refusal changed on purpose shows up as an oracle diff (2026-10-22)
+
+The oracle parity tests (`tests/daemon_admin_slice.rs` and the other slices) compare the daemon's refusals with the pre-daemon binary's byte for byte, so a deliberate change to a refusal path, such as PERSO-155's fetch on miss, fails the oracle comparison.
+Assert the new sentence explicitly beside the oracle's for that one case, and keep the comparison strict for the rest of the command.
+
+## A request-level parity check builds the desktop's query with mp_core, not the mock's literal (2026-10-22)
+
+The desktop's vitest mock answers `search_query` without `mp_core`'s query renderer, so its query string is not the one the real app sends.
+A TUI test that checks its search request against the desktop's builds the expected query with `mp_core::search::SearchFields` and `to_query_string`, which is what the desktop's `search_plan` calls.
+
+## A new TUI compose mode is boxed to keep Overlay small (2026-10-22)
+
+`Overlay` carries `ComposeWizard` inline, so a `ComposeMode` variant with a large payload trips clippy's `large_enum_variant` on `Overlay`.
+Box the variant's payload, as `ComposeMode::SearchForward(Box<SearchForward>)` does, instead of allowing the lint.
+
+## A daemon read with a server leg is tested through its fetcher, with no server (2026-10-22)
+
+No test server exists for IMAP or Graph, so a test of a server-only search hit used to reach only the `-32603` refusal.
+The daemon's `ServerCopies` takes its downloader as a `Fetcher`, and a test that hands it a counting fetcher answering fixed RFC 822 bytes runs `message.get`, the materialisers and the export of a hit end to end and counts the downloads.
