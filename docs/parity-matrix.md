@@ -156,7 +156,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### ACC-10 Signature file management
 
 - Classification: GUI parity
-- Source anchor: the TUI `cs` overlay (`clients/tui/src/app/keymap.rs:603`), `crates/mp-core/src/signatures.rs`, the per-account default recorded in `state.json`
+- Source anchor: the TUI `cs` overlay (`clients/tui/src/app/keymap.rs:746`), `crates/mp-core/src/signatures.rs`, the per-account default recorded in `state.json`
 - Daemon surface: `signature.list`, `signature.read`, `signature.write`, `signature.create`, `signature.rename`, `signature.delete`, `signature.set_default`
 - GUI location: clients/desktop: `cs` in Mail and the palette's "Manage signatures" open the Signatures dialog, which lists every signature with the account's default, previews the cursor one, and creates (`n`), renames (`r`), edits in the external editor (`e`), deletes behind a confirmation (`d`) and sets or clears the default (Enter), through the Tauri layer over `mp_core::signatures`, since the daemon serves only `signature.list` of the family (M4, #0131; shell.md, "Signatures", rust-layer.md, "Signatures")
 - Validation: `clients/desktop/src/components/signatures/signatures.test.tsx` (`cs lists every signature with the account's default marked and previews the selected one`, `Enter makes the selected signature the default, and clears it when it already is`, `n asks for a name, Enter creates the signature and opens it in the editor`, `r renames from a field seeded with the name, and the default follows`, `d asks first with the file's path; n keeps it, y deletes it`, `signature.changed reads the listing and the preview again while it is open`), `clients/desktop/src/app/signatures.test.ts` (`signature.changed, the dialog's own change and a bootstrap make every listing stale`), `clients/desktop/src-tauri/src/signatures.rs` (`create_writes_an_empty_file_and_refuses_a_name_taken`, `rename_carries_the_default_and_moves_the_file`, `deleting_the_default_clears_it_and_publishes_nothing`, `set_default_sets_and_clears_the_accounts_default`)
@@ -199,7 +199,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MBX-02 Browse and select mailboxes in the sidebar
 
 - Classification: GUI parity
-- Source anchor: TUI `j/k` and `Enter` (`clients/tui/src/app/keymap.rs:636`), `gm` (`clients/tui/src/app/keymap.rs:590`), `clients/tui/src/ui/sidebar.rs`
+- Source anchor: TUI `j/k` and `Enter` (`clients/tui/src/app/keymap.rs:1147-1163`), `gm` (`clients/tui/src/app/keymap.rs:756`), `clients/tui/src/ui/sidebar.rs`
 - Daemon surface: `state.bootstrap` mailbox summaries, `message.list_stream` on selection (#0138)
 - GUI location: clients/desktop: the sidebar lists the mailboxes of the selected account and of any account expanded by a click on its header, the others collapsed to one header row with the inbox's unread count (#0147); `gm` focuses it, `j`/`k` move its cursor, and Enter or a click opens the mailbox with the cursor on its top row, as the TUI's `switch_mailbox` does (M1, #0129; PERSO-94)
 - Validation: TUI golden frames under `clients/tui/src/`; `clients/desktop/src/app/reducer.test.ts` (`puts the cursor on the top row of a mailbox once its list lands`, `walks the sidebar cursor over the expanded accounts only`), `clients/desktop/src/components/sidebar/accountPicker.test.tsx` (`starts with only the selected account expanded, and a header click toggles one without selecting it`), `clients/desktop/src/keymap/keymap.test.tsx` (`the sidebar cursor moves with j and Enter opens the mailbox`), `clients/desktop/src/components/shell/a11y.test.tsx` (`marks the selected mailbox as the current page`)
@@ -208,7 +208,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MBX-03 Jump to a mailbox by digit 1 through 9
 
 - Classification: GUI parity
-- Source anchor: `clients/tui/src/app/keymap.rs:558`
+- Source anchor: `clients/tui/src/app/keymap.rs:628`
 - Daemon surface: client-side over the bootstrap mailbox list, then `message.list_stream`
 - GUI location: clients/desktop: `1` to `9` open the selected account's nth mailbox (M1, #0129)
 - Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`digits jump to a mailbox of the selected account`)
@@ -220,13 +220,13 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Source anchor: TUI `ga`, the KEYMAP row of `KeyAction::SwitchAccount` in `clients/tui/src/app/keymap.rs`, guarded by `Guard::MultiAccount` so it appears only with more than one configured account; it opens the account picker, `Overlay::Account` (#0147)
 - Daemon surface: `account.list`, a second `state.bootstrap`
 - GUI location: clients/desktop: `ga` and the palette's "Switch account" open the account picker, which lists every account with its inbox's unread count, the runtime state of one not serving (`opening` or `blocked`, in the TUI as well, from the bootstrap and `account.state_changed`) and a warning mark on one whose last sync failed (the TUI's row says `sync failed`); `j`/`k` move, Enter switches and opens the account's inbox, `1` to `9` switch directly, Escape and `q` cancel; a mailbox chosen in the sidebar selects the account it belongs to (M1, #0129; #0147)
-- Validation: TUI golden frame `golden_account_picker` with its daemon twin, and the account picker tests in `clients/tui/src/app/keys.rs` and `clients/tui/src/ui/overlays.rs`, `a_blocked_snapshot_marks_the_account_blocked_until_a_ready_one` (`clients/tui/src/app/bootstrap.rs`) and `an_account_state_change_marks_the_runtime_blocked_and_ready_clears_it` (`src/tui_tests/events.rs`); `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`, `open_account_picker opens the overlay with two accounts and is a no-op with one`), `clients/desktop/src/components/sidebar/accountPicker.test.tsx`
+- Validation: TUI golden frame `golden_account_picker` with its daemon twin, and the account picker tests in `clients/tui/src/app/keys.rs` and `clients/tui/src/ui/overlays.rs`, `a_blocked_snapshot_marks_the_account_blocked_until_a_ready_one` and `a_failed_sync_health_in_the_snapshot_marks_the_account` (`clients/tui/src/app/bootstrap.rs`), `an_account_state_change_marks_the_runtime_blocked_and_ready_clears_it` and `a_ready_after_an_opening_resync_ends_the_opening_and_recounts` (`src/tui_tests/events.rs`); `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`, `open_account_picker opens the overlay with two accounts and is a no-op with one`), `clients/desktop/src/components/sidebar/accountPicker.test.tsx`
 - Status: GUI shipped (M1, #0129; picker #0147)
 
 ### MBX-05 Switch between the Mail, Contacts, and Calendar views
 
 - Classification: GUI parity
-- Source anchor: TUI `Space m`, `Space c`, `Space a` (`clients/tui/src/app/keymap.rs:601-603`)
+- Source anchor: TUI `Space m`, `Space c`, `Space a` (`clients/tui/src/app/keymap.rs:842-862`)
 - Daemon surface: client-side; the view switch reads data already bootstrapped
 - GUI location: clients/desktop: `Space m`, `Space c` and `Space a`, the sidebar's Contacts, Calendar and Settings entries and the palette's "Switch to Mail view", "Switch to Contacts view", "Switch to Calendar view" and "Open settings" switch between Mail and the full-pane views, which keep the selection, the marks and the outbox view; Settings is a fourth view with no key (M4, #0131; shell.md, "Views")
 - Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`Space c, Space a and Space m switch the view, and Escape comes back to Mail`, `a view's own key runs before any prefix arms, and the prefix arms again in Mail`), `clients/desktop/src/app/reducer.test.ts` (`switches to a view and back keeping the selection and the marks, with focus on the view's pane`), `clients/desktop/src/components/shell/a11y.test.tsx` (`makes the views sidebar buttons, one of them or a mailbox the current page, and names each view's region`)
@@ -235,7 +235,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MBX-06 Cycle pane focus and zoom the focused pane
 
 - Classification: GUI parity
-- Source anchor: TUI `Tab` (`clients/tui/src/app/keymap.rs:559`), `Shift+Tab` (`clients/tui/src/app/keymap.rs:560`), `z` (`clients/tui/src/app/keymap.rs:569`), `Enter` in the MESSAGE section (`KeyAction::FocusBody`), which moves the keyboard from the list or the headers into the body pane as the desktop's Enter on a row focuses the reader (PERSO-92), and the `g` pane jumps `gm`, `gl` and `gr` (`KeyAction::GoMailbox`, `GoList`, `GoReader`)
+- Source anchor: TUI `Tab` (`clients/tui/src/app/keymap.rs:636`), `Shift+Tab` (`clients/tui/src/app/keymap.rs:644`), `z` (`clients/tui/src/app/keymap.rs:685`), `Enter` in the MESSAGE section (`KeyAction::FocusBody`), which moves the keyboard from the list or the headers into the body pane as the desktop's Enter on a row focuses the reader (PERSO-92), and the `g` pane jumps `gm`, `gl` and `gr` (`KeyAction::GoMailbox`, `GoList`, `GoReader`)
 - Daemon surface: client-side
 - GUI location: clients/desktop: `Tab` and `Shift+Tab` cycle sidebar, list and reader from the pane the model holds as focused, `gm` focuses the sidebar, `gl` the list, and `gr` or the palette's "Go to reader (body)" the reader, the TUI's three `g` pane jumps, and `z` zooms the focused list or reader; the focused pane carries `data-focused="true"`, drawn as a 1px `ring` line inside its edge, square where it meets the neighbouring pane (M1, #0129; PERSO-95; shell.md, "Focus order")
 - Validation: TUI golden frames, `clients/tui/src/app/keys.rs` (`enter_on_a_received_row_focuses_the_body_pane`, `enter_in_the_headers_and_body_panes_stays_on_the_body`, `g_prefix_jumps_to_the_reader_the_list_and_the_sidebar`, `gr_in_a_narrow_terminal_zooms_the_body_pane`); `clients/desktop/src/keymap/keymap.test.tsx` (`Tab and Shift+Tab cycle focus through sidebar, list and reader`, `marks the pane holding the focus with data-focused, and gr or the palette's Go to reader focus the reader`, `gl focuses the message list from the sidebar and the reader, as the TUI's gl`), `clients/desktop/src/components/shell/layout.test.tsx` (`places the panes where index.css squares the focus ring's shared corners`), `clients/desktop/src/app/reducer.test.ts` (`cycles focus through sidebar, list and reader and walks back through history`, `focus_reader focuses the reader from any pane, brings Mail back from a view, and cycles on from there`); zoom: `keymap.test.tsx` (`z zooms the focused list pane, hiding the reader`), `clients/desktop/src/components/reader/readerMode.test.tsx` (`z zooms the reader in text mode, and j scrolls the reader's container`)
@@ -276,7 +276,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### LST-03 Jump to a date in the list
 
 - Classification: GUI parity
-- Source anchor: TUI `gt` (`clients/tui/src/app/keymap.rs:652`), `clients/tui/src/app/jump_date.rs`
+- Source anchor: TUI `gt` (`clients/tui/src/app/keymap.rs:1276`), `clients/tui/src/app/jump_date.rs`
 - Daemon surface: client-side while the list is whole; `message.jump_to_date` if paging lands
 - GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: unit tests in `clients/tui/src/app/jump_date.rs`
@@ -286,7 +286,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### LST-04 Filter the current list by metadata
 
 - Classification: GUI parity
-- Source anchor: TUI `fm` (`clients/tui/src/app/keymap.rs:624`)
+- Source anchor: TUI `fm` (`clients/tui/src/app/keymap.rs:1020`)
 - Daemon surface: client-side while the list is whole; `message.filter` if paging lands
 - GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames
@@ -295,7 +295,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### LST-05 Toggle a flagged-only filter
 
 - Classification: GUI parity
-- Source anchor: TUI `fF` (`clients/tui/src/app/keymap.rs:673`)
+- Source anchor: TUI `fF` (`clients/tui/src/app/keymap.rs:1393`)
 - Daemon surface: client-side while the list is whole; `message.filter` if paging lands
 - GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames
@@ -325,7 +325,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### LST-08 Merged search in the TUI
 
 - Classification: GUI parity
-- Source anchor: TUI `ff` (`clients/tui/src/app/keymap.rs:581`), `Action::ServerSearch` (`clients/tui/src/app/types.rs:1619`)
+- Source anchor: TUI `ff` (`clients/tui/src/app/keymap.rs:723`), `Action::ServerSearch` (`clients/tui/src/app/types.rs:1619`)
 - Daemon surface: `message.search` local first, then `message.search_server` as a durable `operation.*` streaming hits on `state.event`
 - GUI location: clients/desktop: Shift+Enter, the header's server button and the palette's "Search server" run the server leg, which keeps the hits of a finished local search and excludes their Message-IDs; hits stream in until the settle, and Cancel or leaving the search cancels it (M1, #0129). `ff`, the palette's "Search all mail" and the header's form button open the TUI overlay's form (#0086b) as a dialog: Search In (Current Mailbox or Current Account), From, To, Subject, Keywords, After, Before, the attachment toggle and the Advanced line that greys the rest, with Tab, Space, Enter and Escape as in the TUI; `search_query` builds the query with `mp-core`'s parser, the store answers first when its index can, then the server leg runs over the same scope, and the results fill the list pane (PERSO-115; shell.md, "The Server Search form")
 - Validation: TUI golden frames; `the_local_pass_finds_the_row_the_index_holds` (`src/tui_tests/commands.rs`); `clients/desktop/src/components/search/search.test.tsx` (the "server search" and "the Server Search form (PERSO-115)" blocks), `clients/desktop/src/app/search.test.ts`, `clients/desktop/src/keymap/keymap.test.tsx` (`ff opens the Server Search form, the TUI's Search all mail, and the help and palette name it`), `clients/desktop/src-tauri/src/fixture.rs` (`a_server_search_streams_hits_and_finishes`), `clients/desktop/src-tauri/src/commands.rs` (`a_server_search_is_awaited_until_cancelled`, `the_search_form_builds_the_query_the_tui_builds`, `a_recipient_term_is_not_one_the_store_can_answer`)
@@ -356,7 +356,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### LST-10 Show the conversation a message belongs to
 
 - Classification: GUI parity
-- Source anchor: TUI `tt` (`clients/tui/src/app/keymap.rs:630`), the thread overlay in `clients/tui/src/ui/overlays.rs`
+- Source anchor: TUI `tt` (`clients/tui/src/app/keymap.rs:1073`), the thread overlay in `clients/tui/src/ui/overlays.rs`
 - Daemon surface: `message.thread`
 - GUI location: clients/desktop (M1, #0131 read slice)
 - Validation: TUI golden frames, `tests/daemon_thread_slice.rs`
@@ -462,7 +462,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### RD-06 Open a message read-only in `$EDITOR` as a Markdown rendition
 
 - Classification: GUI parity
-- Source anchor: TUI `e` (`clients/tui/src/app/keymap.rs:882`), search overlay `e`; `Enter` on a list row focuses the body pane since PERSO-92, as in the desktop client, so `e` alone opens `$EDITOR`
+- Source anchor: TUI `e` (`clients/tui/src/app/keymap.rs:915`), search overlay `e`; `Enter` on a list row focuses the body pane since PERSO-92, as in the desktop client, so `e` alone opens `$EDITOR`
 - Daemon surface: `message.materialise_markdown` `{account, row_id|id|selector, mailbox?}`, the third member of the handle family
 - GUI location: clients/desktop: `e` on a received message, in a mailbox or on a stored search hit, opens the rendition by a draft's route: with a terminal editor `message_markdown_path` materialises it and `terminal_spawn` runs the editor on it in the reader area's embedded pane, which closes when the editor exits, and with a GUI editor `message_markdown_open` opens it in the external editor; Enter focuses the reader, as in the TUI the reader shows on Enter; on a draft `e` still edits it, and on a server-only hit it asks for `F` first (PERSO-92; shell.md, "Compose", "A message's rendition")
 - Validation: TUI golden frames, `clients/tui/src/app/keys.rs` (`e_on_a_received_row_opens_the_editor`, `e_in_the_body_pane_opens_the_editor`, `a_draft_keeps_e_for_editing_and_enter_reads_it`); `clients/desktop/src/keymap/keymap.test.tsx` (`e on a message opens its Markdown rendition in the editor and Enter focuses the reader; on a draft e edits it (PERSO-92)`, `on a server-only hit, e asks for the fetch first and opens no editor (PERSO-92)`), `clients/desktop/src/components/compose/embedded.test.tsx` (`e on a received message opens its read-only rendition in the reader area like a draft, and code 0 brings the message back (PERSO-92)`, `a rendition's editor that fails keeps its pane, says nothing of a save, and Reopen writes the rendition again (PERSO-92)`, `0 from a message's rendition gives the focus back to the list too (PERSO-124)`), `clients/tui/src/actions.rs` (`a_clean_return_from_e_puts_the_keyboard_back_on_the_list`), `clients/desktop/src-tauri/src/daemon_files.rs` (`message_markdown_path_on_answers_the_read_only_rendition_and_opens_nothing`, `message_markdown_open_on_journals_the_editor_on_the_daemons_rendition`, `message_markdown_open_on_a_row_the_store_lost_is_not_found_and_opens_nothing`)
@@ -479,7 +479,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### RD-07 Copy a message's `mp://` selector to the clipboard
 
 - Classification: GUI parity
-- Source anchor: TUI `y` (`clients/tui/src/app/keymap.rs:618`)
+- Source anchor: TUI `y` (`clients/tui/src/app/keymap.rs:980`)
 - Daemon surface: `selector` on the `message.list` row and on the `message.search` hit, then a client-side clipboard write
 - GUI location: clients/desktop: `y` copies the selected message's `mp://` selector and says "Copied <selector>" (M1, #0129), and on a draft in Drafts its file path instead, listed as "Copy the draft's file path (Drafts only)" (PERSO-100), where the TUI copies the draft's selector; the copy goes through `copyText`, and the reader's Copy menu and the palette's "Copy link (mp://)" copy the same selector (M4, #0131; reader.md, "The toolbar")
 - Validation: `tests/cli_selector_contract.rs` for the selector shape; `clients/desktop/src/lib/clipboard.test.ts` (`writes the text and says what it copied`), `clients/desktop/src/components/activity/activity.test.tsx` (`the Copy menu copies the sender's address, the mp:// link and the subject`), `clients/desktop/src/keymap/keymap.test.tsx` (`y on a draft copies its file path, and on a message its mp:// selector`)
@@ -505,7 +505,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MSG-01 Archive a received message on the server and locally
 
 - Classification: GUI parity
-- Source anchor: `mp archive <selector> [--mailbox]` (`src/main.rs`), TUI `a` (`clients/tui/src/app/keymap.rs:613`)
+- Source anchor: `mp archive <selector> [--mailbox]` (`src/main.rs`), TUI `a` (`clients/tui/src/app/keymap.rs:935`)
 - Daemon surface: `message.archive`, addressed by `row_id`, by `"<mailbox>/<uid>"` or by the selector the daemon resolves; with `settle` (the default) the daemon commits the row move and drains the owed server op before it answers, and with `settle: false`, the TUI's contract (P5-U6), it queues the pair and answers, and the account's drainer drains it once mutations have been quiet for 1.5 s (#0133)
 - GUI location: clients/desktop: `a` in the list or the reader, the palette's "Archive" and the reader toolbar's Archive, each asking "Archive this email?" first; the row leaves the list at once and comes back on a refusal or a rollback (M2, #0131)
 - Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`a asks first, and y archives the cursor row`), `clients/desktop/src/app/events.test.tsx` (`archives a row, and the drain's invalidation keeps it gone`), `clients/desktop/src-tauri/src/commands.rs` (`an_archive_moves_every_row_in_order_and_queues`)
@@ -527,7 +527,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MSG-03 Toggle read and unread
 
 - Classification: GUI parity
-- Source anchor: TUI `u` (`clients/tui/src/app/keymap.rs:615`)
+- Source anchor: TUI `u` (`clients/tui/src/app/keymap.rs:953`)
 - Daemon surface: `message.set_read` `{account, row_id, read, settle}`
 - GUI location: clients/desktop: `u` in the list or the reader, the row's "Unread" toggle, the reader toolbar and the palette; over marks, marking read wins when any marked row is unread (M2, #0131)
 - Validation: `src/tui_tests/actions.rs`, TUI golden frames; `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`the flag and unread toggles act on their own row`), `clients/desktop/src/app/reducer.test.ts` (`marks read in place and moves the unread count`), `clients/desktop/src-tauri/src/commands.rs` (`flag_and_read_set_the_state_they_name`)
@@ -537,7 +537,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MSG-04 Toggle the `\Flagged` star
 
 - Classification: GUI parity
-- Source anchor: TUI `*` (`clients/tui/src/app/keymap.rs:616`)
+- Source anchor: TUI `*` (`clients/tui/src/app/keymap.rs:962`)
 - Daemon surface: `message.set_flag` `{account, row_id, flagged, settle}`
 - GUI location: clients/desktop: `*` in the list or the reader, the row's "Flagged" toggle, the reader toolbar and the palette (M2, #0131)
 - Validation: `src/tui_tests/actions.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`* flags the cursor row and unflags a flagged one`, `over marks, * flags them all when any is unflagged, and the marks clear`), `clients/desktop/src/app/reducer.test.ts` (`flags in place, and a refusal puts the old flag back`)
@@ -559,7 +559,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MSG-06 Multi-select and batch actions
 
 - Classification: GUI parity
-- Source anchor: TUI `v` (`clients/tui/src/app/keymap.rs:653`), `Ctrl+a` (`clients/tui/src/app/keymap.rs:654`), the batch actions in `clients/tui/src/app/types.rs`
+- Source anchor: TUI `v` (`clients/tui/src/app/keymap.rs:1287`), `Ctrl+a` (`clients/tui/src/app/keymap.rs:1298`), the batch actions in `clients/tui/src/app/types.rs`
 - Daemon surface: one call per selected message, in the selection's order, over `message.set_read`, `message.set_flag`, `message.archive`, `message.delete`, `draft.discard`, `draft.approve` and `draft.demote`; selection stays client-side
 - GUI location: clients/desktop: `v` marks the cursor row and steps, `Ctrl+a` marks every shown row, Shift+click marks a range and Cmd+click or the row's mark box one row, Escape clears the marks, and a hidden "N marked" status counts them; keys and the palette act on the marks in list order (M2, #0131)
 - Validation: `src/tui_tests/actions.rs`, TUI golden frames; `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`marks rows by the box, Shift+click and Cmd+click, counts them and clears them`), `clients/desktop/src/keymap/keymap.test.tsx` (`Ctrl+a marks every row, and Escape clears the marks before the selection`), `clients/desktop/src/app/reducer.test.ts` (the multi-select cases), `clients/desktop/src-tauri/src/commands.rs` (`an_unknown_row_fails_alone_and_the_rest_go_ahead`, `a_batch_stops_at_an_error_about_the_whole_batch`)
@@ -606,7 +606,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### DFT-01 Create a draft from the template and print its selector
 
 - Classification: GUI parity
-- Source anchor: `mp new <name>` (`src/main.rs`), TUI `cn` (`clients/tui/src/app/keymap.rs:583`)
+- Source anchor: `mp new <name>` (`src/main.rs`), TUI `cn` (`clients/tui/src/app/keymap.rs:733`)
 - Daemon surface: `draft.create`
 - GUI location: clients/desktop: `cn` from any pane or the palette's "New draft" opens the wizard, whose submit calls `draft_create` with the recipients, the signature and any inline body, and opens the file in the editor unless a body was typed (M3, #0131; shell.md, "Compose", "The wizard")
 - Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`cn opens the new-draft wizard for the shown account`), `clients/desktop/src/components/compose/compose.test.tsx` (`Enter moves to the next field, and Cmd+Enter creates the draft and opens it in the editor`, `shows the daemon's refusal in the dialog, which stays open`), `clients/desktop/src-tauri/src/commands.rs` (`a_created_draft_is_a_file_with_frontmatter_and_a_taken_name_is_refused`); the focus after the editor: `clients/tui/src/actions.rs` (`a_clean_return_from_a_new_drafts_editor_puts_the_keyboard_back_on_the_list`)
@@ -636,7 +636,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### DFT-04 Approve a draft and demote it back to draft status
 
 - Classification: GUI parity
-- Source anchor: `mp mark-approved`, `mp mark-draft` (`src/main.rs`), TUI `cA` and `cD` (`clients/tui/src/app/keymap.rs:667-668`)
+- Source anchor: `mp mark-approved`, `mp mark-draft` (`src/main.rs`), TUI `cA` and `cD` (`clients/tui/src/app/keymap.rs:1360-1370`)
 - Daemon surface: `draft.approve`, `draft.demote`, resolved through `draft.path` first so the client knows the previous status
 - GUI location: clients/desktop: `cA` and `cD` in Drafts, the palette and the draft preview's Approve and Back to draft buttons, on the marked drafts after a confirmation or on the cursor draft at once; the status changes in the list as a pending axis, and a draft that does not parse is refused alone with the diagnostic and the path (M3, #0131; shell.md, "Approve and demote")
 - Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`cA approves the cursor draft and cD puts it back`, `cA over marked drafts asks first, with the TUI's words, and approves the batch`), `clients/desktop/src/components/compose/compose.test.tsx` (`a draft that does not parse is refused, and the alert names why and where`), `clients/desktop/src-tauri/src/commands.rs` (`approve_refuses_an_invalid_draft_with_its_payload_and_goes_on`)
@@ -679,7 +679,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### DFT-08 Create a reply or a reply-all draft from a received message
 
 - Classification: GUI parity
-- Source anchor: `mp reply <selector> [--all] [--mailbox]` (`src/main.rs`), TUI `r`, `cr` (`clients/tui/src/app/keymap.rs:626`), `ca`, search overlay `r` and `R`
+- Source anchor: `mp reply <selector> [--all] [--mailbox]` (`src/main.rs`), TUI `r`, `cr` (`clients/tui/src/app/keymap.rs:1030`), `ca`, search overlay `r` and `R`
 - Daemon surface: `draft.reply`, and `draft.create_from_message` for a hit with no local row
 - GUI location: clients/desktop: `r` or `cr` and `ca` from the list or the reader, the reader toolbar's Reply and Reply all, and the palette, which open the new draft in the external editor; on a server-only hit they go through `draft_from_message` (M3, #0131; shell.md, "Compose")
 - Validation: `tests/draft_integration.rs`, `tests/daemon_draft_slice.rs`, `tests/daemon_draft_from_message_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`r and cr reply to the cursor row and open the draft in the editor, ca replies to all`, `on a server-only hit, r, ca and cf build the draft from the hit's own headers`), `clients/desktop/src/components/compose/compose.test.tsx` (`Reply, Reply all and Forward act on the open message`), `clients/desktop/src-tauri/src/commands.rs` (`a_reply_carries_in_reply_to_and_the_subject`); the focus after the editor: `clients/tui/src/actions.rs` (`a_clean_return_from_a_new_drafts_editor_puts_the_keyboard_back_on_the_list`)
@@ -719,7 +719,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### DFT-11 Edit the recipients of an existing draft
 
 - Classification: GUI parity
-- Source anchor: TUI `ce` in the drafts mailbox (`clients/tui/src/app/keymap.rs:656`)
+- Source anchor: TUI `ce` in the drafts mailbox (`clients/tui/src/app/keymap.rs:1330`)
 - Daemon surface: `draft.set_recipients`, which re-splices the signature block
 - GUI location: clients/desktop: `ce` in Drafts, the palette and the draft preview's Edit recipients open the "Edit recipients" dialog filled from the listed draft row, Bcc included, and its submit calls `draft_set_recipients`, which rewrites the `to`, `cc`, `bcc` and `subject` lines client-side with `mp_core::draft::rewrite_draft_recipients` (M3, #0131; shell.md, "The recipients dialog")
 - Validation: TUI golden frames; `edit_recipients_finds_the_draft_through_the_index` (`src/tui_tests/actions_store.rs`); `clients/desktop/src/keymap/keymap.test.tsx` (`ce opens the recipients dialog filled from the listed draft, Bcc included`), `clients/desktop/src/components/compose/compose.test.tsx` (`rewrites the recipients and keeps the subject when it did not change`), `clients/desktop/src-tauri/src/commands.rs` (`set_recipients_rewrites_the_header_and_keeps_the_body`)
@@ -776,7 +776,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### ATT-03 Attach a file to a draft
 
 - Classification: GUI parity
-- Source anchor: TUI `ta` in the drafts mailbox (`clients/tui/src/app/keymap.rs:659`), `resolve_attachment_paths` (`src/send.rs:1964`)
+- Source anchor: TUI `ta` in the drafts mailbox (`clients/tui/src/app/keymap.rs:1342`), `resolve_attachment_paths` (`src/send.rs:1964`)
 - Daemon surface: `draft.attach` with an absolute path
 - GUI location: clients/desktop: `ta` in Drafts, the palette or the draft preview's Attach file open the "Attach file" dialog, whose File field takes an absolute or `~` path; `draft_attach` appends it through the daemon's `draft.attach`, and the preview's attachment list removes an entry with `draft_attachment_remove` over `draft.detach` (M3, #0131; reader.md, "Drafts and server-only hits")
 - Validation: `tests/draft_integration.rs`; `clients/desktop/src/components/compose/compose.test.tsx` (`ta opens the path dialog, which keeps a missing file open and attaches an existing one`, `Browse attaches a file the native picker chose, under ~ as the draft keeps it, and a path outside home as picked`, `the preview lists the entries in order, opens one, flags a missing one and removes one`), `clients/desktop/src-tauri/src/attachments.rs` (`attach_appends_in_order_refuses_duplicates_and_missing_files_and_remove_rewrites`, `a_draft_entry_resolves_as_the_send_path_resolves_it`)
@@ -798,7 +798,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### ATT-05 Open a message's HTML part in the browser
 
 - Classification: GUI parity
-- Source anchor: TUI `tb` (`clients/tui/src/app/keymap.rs:1058`), search overlay `b`
+- Source anchor: TUI `tb` (`clients/tui/src/app/keymap.rs:1126`), search overlay `b`
 - Daemon surface: `message.materialise_html`, opened client-side through `parse::open_file_with_system`; on a Drafts row `draft.html`, the HTML part the send would build, which the TUI and the desktop write to a file and open the same way, and which the desktop's `mpmsg` scheme also serves to the reader frame (PERSO-136)
 - GUI location: clients/desktop: `tb`, the reader toolbar's Open in browser and the palette hand the daemon's rendition to the default browser through `html_open`, a server-only hit's markup through `hit_html_open`, which writes it with the charset and the CSP into the app cache, and on a draft in Drafts the HTML the send would build through `draft_html_open`, `draft.html` written into the same cache as `renditions/draft-<id>/message.html`; the draft preview opens on the Markdown body in either reader mode, and `tt` toggles it with that HTML in the sandboxed reader frame on `mpmsg://localhost/<account>/drafts/<id>`, without touching the stored mode (M3, #0131, PERSO-136; reader.md, "The browser rendition", "Drafts and server-only hits")
 - Validation: unit tests in `src/parse.rs` for the companion document; `the_browser_gets_the_html_blob_written_to_a_file`, `the_browser_rendition_inlines_cid_images_as_data_uris`, `tb_on_a_drafts_row_opens_the_html_the_send_would_build` and `tb_on_a_vanished_draft_says_the_preview_failed` (`src/tui_tests/actions_store.rs`); `tests/daemon_draft_html.rs` for `draft.html`; `clients/desktop/src/components/reader/reader.test.tsx` (`tb and the toolbar open the daemon's rendition in the browser, and a message without markup says so`, `opens the hit's own markup in the browser, and one with none has no button`), `clients/desktop/src-tauri/src/attachments.rs` (`html_opens_the_daemons_rendition_and_a_message_without_markup_is_none`, `a_hit_rendition_carries_the_charset_and_the_csp_and_opens`, `a_drafts_send_rendition_is_written_per_draft_and_opened`, `a_draft_id_names_one_directory_under_the_renditions`), `clients/desktop/src-tauri/src/reader.rs` (`a_draft_path_parses_into_an_account_and_an_id`, `a_draft_is_served_as_its_send_rendition_with_the_bridge`), `clients/desktop/src/app/attachments.test.ts` (`opens the HTML the send would build, through draft_html_open`, `a refused draft.html says why on the activity line and opens nothing`, `a draft that does not parse asks for the editor and calls nothing`), `clients/desktop/src/components/reader/readerMode.test.tsx` (`a draft opens on its Markdown in html mode, tt shows the send's HTML in the frame, tt again the Markdown, and nothing is stored`, `a save of the draft reloads the frame while it is shown`, `another draft and back opens on the Markdown again, and a message keeps the html default`), `clients/desktop/src/components/compose/compose.test.tsx` (`shows the headers, the status, the validation and the body of the selected draft`)
@@ -822,7 +822,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### SND-02 Send every approved draft of one account or of all accounts
 
 - Classification: GUI parity
-- Source anchor: `mp send-approved [-y] [--all-accounts]` (`src/main.rs`), TUI `cX` (`clients/tui/src/app/keymap.rs:669`)
+- Source anchor: `mp send-approved [-y] [--all-accounts]` (`src/main.rs`), TUI `cX` (`clients/tui/src/app/keymap.rs:1380`)
 - Daemon surface: `send.approved`
 - GUI location: clients/desktop: `cX` in Drafts and the palette ask "Send all approved emails?" with "In <mailbox label>", and the OK calls `send_approved` with `hold: true` for the selected account, awaited as the operation kind `send_approved`; the end says "Sent N, failed M" or "No approved emails found" (M3, #0131; shell.md, "Send")
 - Validation: `tests/outbox_integration.rs`, `tests/daemon_send_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`cX is Drafts only, and in Drafts sends every approved draft of the account`), `clients/desktop/src/app/reducer.test.ts` (`a batch says Sent N, failed M with its failures as an alert`), `clients/desktop/src-tauri/src/commands.rs` (`send_approved_is_awaited_as_send_approved`), `clients/desktop/src-tauri/src/fixture.rs` (`send_approved_sends_every_approved_draft_behind_one_hold`)
@@ -834,7 +834,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### SND-03 Approve and send the current draft with one key
 
 - Classification: GUI parity
-- Source anchor: TUI `x` (`clients/tui/src/app/keymap.rs:573`)
+- Source anchor: TUI `x` (`clients/tui/src/app/keymap.rs:706`)
 - Daemon surface: `draft.approve` then `send.draft`
 - GUI location: clients/desktop: `x` from any pane, or the palette's "Send current draft (approve + send)", on a `draft` status asks "Draft is not approved. Approve and send?", and `send_draft` then validates, approves and sends the cursor draft; a draft being sent refuses `d`, `cA`, `cD`, `e`, `ce` and `x` (M3, #0131; shell.md, "Send")
 - Validation: TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`x on a draft asks the TUI's approve-and-send question, and y sends it with the hold`, `x on received mail says it needs a draft, and n cancels a send`), `clients/desktop/src-tauri/src/commands.rs` (`send_draft_validates_approves_then_sends_with_the_hold`, `a_refused_approve_stops_the_send_with_the_invalid_payload`)
@@ -911,7 +911,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### SYN-01 Quick sync and full sync from a client
 
 - Classification: GUI parity
-- Source anchor: TUI `ss` (`clients/tui/src/app/keymap.rs:593`) and `sS` (`clients/tui/src/app/keymap.rs:594`)
+- Source anchor: TUI `ss` (`clients/tui/src/app/keymap.rs:794`) and `sS` (`clients/tui/src/app/keymap.rs:803`)
 - Daemon surface: `sync.quick`, `sync.full` as `operation.*` with progress on `state.event`
 - GUI location: clients/desktop: `ss` and `sS`, and the palette's "Quick sync" and "Full sync", start a quick or a full sync of the selected account through `sync_trigger`, and a failed or dropped sync stays as an activity alert (M2, #0131)
 - Validation: TUI golden frames; the two methods in `tests/daemon_sync_slice.rs`; `a_refused_sync_is_the_sentence_the_daemon_gave` (`src/tui_tests/commands.rs`) and `the_finished_operation_lands_where_the_poll_landed` (`src/tui_tests/events.rs`); `clients/desktop/src/keymap/keymap.test.tsx` (`ss and sS start a quick and a full sync of the selected account`), `clients/desktop/src/components/palette/palette.test.tsx` (`Toggle flag/star and Quick sync run from the palette`), `clients/desktop/src/app/mutations.test.ts` (`starts a sync and awaits its id, and reports one that did not start`), `clients/desktop/src-tauri/src/commands.rs` (`a_sync_is_awaited_as_a_sync`)
@@ -952,15 +952,15 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Note: implicit workflow with no command, and the reason a client shows content before sync completes.
   `LoadMailbox` became `message.list` / `draft.list` in P5-U4, `message.list_stream` / `draft.list` since #0138, and the two fetch arms became `sync.quick` in P5-U6, each still on the worker thread it always had.
   P5-U8 took the wait off those threads: a pass is started by `commands::dispatch` and its finish arrives as an `operation.finished` event, so nothing polls `operation.status` any more.
-  The `opening` -> ready transition is still `BgResult::AccountOpened` as well as the bootstrap's, because the store-backed open is what a client with a wedged session has left; the account runtime's readiness now reaches the client as an event beside it.
+  The `opening` -> ready transition is still `BgResult::AccountOpened` as well as the bootstrap's, because the store-backed open is what a client with a wedged session has left; the account runtime's readiness reaches the client as an `account.state_changed` beside it, which ends `opening` and recounts the account, the one path left after a resync bootstrap that caught the runtime opening.
 
 ### SYN-05 Sync health and error surfacing per account
 
 - Classification: GUI parity
-- Source anchor: `src/sync_health.rs`
-- Daemon surface: `state.bootstrap` health summary, then `state.event`
+- Source anchor: `crates/mp-core/src/sync_health.rs`
+- Daemon surface: `state.bootstrap` `sync_health` (`state`, `reason`, `at`), then `sync.completed` on `state.event`
 - GUI location: clients/desktop: a health badge beside each account in the sidebar, which each `sync.completed` updates (M1, #0129)
-- Validation: unit tests in `src/sync_health.rs`; `clients/desktop/src/app/reducer.test.ts` (`tracks sync health and account state from events`)
+- Validation: unit tests in `crates/mp-core/src/sync_health.rs`; `clients/tui/src/app/bootstrap.rs` (`a_failed_sync_health_in_the_snapshot_marks_the_account`); `clients/desktop/src/app/reducer.test.ts` (`tracks sync health and account state from events`)
 - Status: GUI shipped (M1, #0129)
 
 ### SYN-06 Pending operation queue replayed against the server
@@ -1233,7 +1233,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### INT-01 Open `config.toml` in the editor
 
 - Classification: GUI parity
-- Source anchor: TUI `sc` (`clients/tui/src/app/keymap.rs:596`)
+- Source anchor: TUI `sc` (`clients/tui/src/app/keymap.rs:821`)
 - Daemon surface: `config.get`'s `path` for the location; the daemon reloads the file either way
 - GUI location: clients/desktop: `sc` from every view, the palette's "Open config.toml in $EDITOR", and "Open config.toml" in the Settings view and on the config.toml banner call `config_open`, which opens `config.get`'s `path` in the external editor; the Settings view's Reload then calls `config_reload` (M4, #0131; shell.md, "config.toml and the daemon log" and "Settings")
 - Validation: `clients/desktop/src/components/activity/activity.test.tsx` (`s c and s f open them from Mail and from Contacts, and s l works there too`, `says why when there is no config.toml or no log yet, and logs it as a warning`), `clients/desktop/src/components/settings/settings.test.tsx` (`Open config.toml hands the daemon's file to the editor`, `Reload says what the swap did, logs it once, and reads the configuration again`), `clients/desktop/src-tauri/src/daemon_files.rs` (`config_open_on_journals_the_editor_on_the_daemons_path`, `config_open_on_an_absent_configuration_is_not_found_and_opens_nothing`, `config_open_on_an_invalid_configuration_still_opens_it`)
@@ -1243,7 +1243,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### INT-02 Open the log file in the editor
 
 - Classification: GUI parity
-- Source anchor: TUI `sf` (`clients/tui/src/app/keymap.rs:597`), the `OpenLogFile` action (`clients/tui/src/app/types.rs:1597`)
+- Source anchor: TUI `sf` (`clients/tui/src/app/keymap.rs:830`), the `OpenLogFile` action (`clients/tui/src/app/types.rs:1597`)
 - Daemon surface: `diagnostic.log_path`, which answers the dated file the daemon is writing (`<data_dir>/logs/mailypoppins-<date>.log`), the same file the TUI's `sf` opens
 - GUI location: clients/desktop: `sf` from every view and the palette's "Open log file in $EDITOR" call `log_open`, which opens the file `diagnostic.log_path` names in the external editor (M4, #0131; shell.md, "config.toml and the daemon log")
 - Validation: `tests/daemon_diagnostics.rs`; contract in [docs/tickets/0125-daemon-hardening.md](tickets/0125-daemon-hardening.md) (P6-U7); `clients/desktop/src/components/activity/activity.test.tsx` (`s c and s f open them from Mail and from Contacts, and s l works there too`, `the palette's rows run them`), `clients/desktop/src-tauri/src/daemon_files.rs` (`log_open_on_journals_the_editor_on_the_dated_log`, `log_open_on_a_missing_log_is_not_found_and_opens_nothing`)
@@ -1293,7 +1293,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### OBS-01 Activity log overlay with scrolling and a filter
 
 - Classification: GUI parity
-- Source anchor: TUI `!` (`clients/tui/src/app/keymap.rs:570`), `sl` (`clients/tui/src/app/keymap.rs:595`), and `/` inside the overlay (ACTIVITY LOG keymap section)
+- Source anchor: TUI `!` (`clients/tui/src/app/keymap.rs:695`), `sl` (`clients/tui/src/app/keymap.rs:812`), and `/` inside the overlay (ACTIVITY LOG keymap section)
 - Daemon surface: `state.event` activity stream; the overlay itself is client-side
 - GUI location: clients/desktop: `sl`, the sidebar's Activity entry and the palette's "Activity log overlay" open the activity log dialog, the newest 100 lines this window reported (its notices, `sync.completed`, `config.changed`, `config.invalid` and the end of a hold) with their level, scrolled with `j`/`k`, `d`/`u`, `gg`/`G` and filtered with `/`; `!` hides or shows the activity area's notices and never a live hold card, since the desktop has no bottom log pane (M4, #0131; shell.md, "Activity log")
 - Validation: TUI golden frames; `clients/desktop/src/components/activity/activity.test.tsx` (`s l lists what the window reported, oldest first, with each level, and Escape closes it`, `filters on text and level: / goes to the field, Enter back to the lines, Escape clears, then closes`, `opens at the end and scrolls with j/k, d/u, gg and G`, `hides the notices and never the live hold card, and shows them again`), `clients/desktop/src/app/activity.test.ts` (`keeps the newest ACTIVITY_LOG_CAP lines, oldest first, with rising ids`, `logs sync.completed at the daemon's severity, config.changed and config.invalid`)
@@ -1302,7 +1302,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### OBS-02 Command palette over every runnable action
 
 - Classification: GUI parity
-- Source anchor: TUI `:` (`clients/tui/src/app/keymap.rs:564`) and `Ctrl+p` (`clients/tui/src/app/keymap.rs:565`), `palette_actions()` (`clients/tui/src/app/keymap.rs:841`)
+- Source anchor: TUI `:` (`clients/tui/src/app/keymap.rs:663`) and `Ctrl+p` (`clients/tui/src/app/keymap.rs:673`), `palette_actions()` (`clients/tui/src/app/keymap.rs:1812`)
 - Daemon surface: client-side, derived from `KEYMAP` so it cannot drift from the bindings
 - GUI location: clients/desktop: `:` or `Ctrl+p` opens the command palette over every row of the generated `keymap.json` and the desktop's own rows, each runnable or disabled with its badge (M1, #0129); a query matches each row's section, label and keys and lists the best match first, scored by cmdk's `command-score`, which the TUI's `command_score` ports
 - Validation: unit tests in `clients/tui/src/app/keymap.rs`, `clients/tui/src/app/keys.rs` (`command_score_matches_cmdk`, `command_palette_ranks_the_best_match_first`), TUI golden frames; `clients/desktop/src/components/palette/palette.test.tsx` (`lists every action of the generated keymap`, `ranks the best match first across sections, so a typed name and Enter run it`, `marks what this build cannot run as disabled with its milestone`, `runs an enabled action`), `clients/desktop/src/keymap/keymap.test.tsx` (`: and Ctrl+p open the palette, ? the key help`)
@@ -1311,7 +1311,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### OBS-03 Help overlay and hint bar
 
 - Classification: GUI parity
-- Source anchor: TUI `?` (`clients/tui/src/app/keymap.rs:561`), `help_sections()` (`clients/tui/src/app/keymap.rs:787`)
+- Source anchor: TUI `?` (`clients/tui/src/app/keymap.rs:652`), `help_sections()` (`clients/tui/src/app/keymap.rs:1758`)
 - Daemon surface: client-side, generated from the same `KEYMAP`
 - GUI location: clients/desktop: `?` opens the key help, the generated `keymap.json`'s sections followed by the desktop's own keys (M1, #0129)
 - Validation: unit tests in `clients/tui/src/app/keymap.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`: and Ctrl+p open the palette, ? the key help`), `clients/desktop/src/components/palette/palette.test.tsx` (`the key help lists the desktop client's own keys after the TUI's`)
@@ -1359,7 +1359,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### OBS-08 Quit the client while leaving durable work in place
 
 - Classification: GUI parity
-- Source anchor: TUI `q` (`clients/tui/src/app/keymap.rs:557`)
+- Source anchor: TUI `q` (`clients/tui/src/app/keymap.rs:620`)
 - Daemon surface: client disconnect; the daemon keeps running
 - GUI location: clients/desktop (M1, #0129)
 - Validation: TUI golden frames
@@ -1500,7 +1500,8 @@ Three moved or were imprecise in the plan's inventory and are corrected here.
 - `OBS-07`: there is no `[theme]` config section; `theme` is a top-level key (`src/config.rs:25`).
   `clients/tui/src/theme.rs` resolves.
 
-`ACC-10` was resolved again against the tree of M4 (#0131): the `cs` binding is at `clients/tui/src/app/keymap.rs:603`, and the signature files are `crates/mp-core/src/signatures.rs`.
+The `clients/tui/src/app/keymap.rs` anchors were resolved again on 2026-10-22, each at the line that holds its key string.
+`ACC-10`'s signature files are `crates/mp-core/src/signatures.rs`, resolved against the tree of M4 (#0131).
 
 `RD-05` has no resolvable anchor by design: `clients/tui/src/images.rs` was deleted when #0109 retired the capability.
 
