@@ -135,7 +135,16 @@ pub enum ServerOp {
     /// write before the queue row. The run is [`crate::draft_mirror`]'s, not
     /// [`run_op`]'s, because it reads the file and writes the store's
     /// `draft_sync` row.
-    PushDraft { draft_id: String },
+    ///
+    /// `hash` is the hash of the file the push was queued for, kept up to
+    /// date while it waits: a push parked `failed` is not queued again for
+    /// the same bytes, so only the next edit retries it. Absent from a row
+    /// queued before the field existed.
+    PushDraft {
+        draft_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
     /// Remove every copy of one draft from a server folder (#0143): after a
     /// send that reached every recipient, after `draft.discard`, and for a
     /// copy whose draft was retired. `uid` and `uidvalidity` are the copy the
@@ -187,7 +196,7 @@ impl ServerOp {
             | ServerOp::SetFlagged { message_id, .. }
             | ServerOp::SetAnswered { message_id, .. }
             | ServerOp::DeleteDraft { message_id, .. } => message_id,
-            ServerOp::PushDraft { draft_id } => draft_id,
+            ServerOp::PushDraft { draft_id, .. } => draft_id,
         }
     }
 }
@@ -379,6 +388,7 @@ mod tests {
         assert_eq!(mv("<abc@x>", "INBOX", "Archive").message_id(), "<abc@x>");
         let push = ServerOp::PushDraft {
             draft_id: "d1".to_string(),
+            hash: None,
         };
         assert_eq!((push.kind(), push.message_id()), ("push_draft", "d1"));
         assert!(push.is_draft_op() && !mv("<1@x>", "INBOX", "Archive").is_draft_op());
@@ -425,6 +435,7 @@ mod tests {
             },
             ServerOp::PushDraft {
                 draft_id: "d1".to_string(),
+                hash: Some("ab".repeat(32)),
             },
             ServerOp::DeleteDraft {
                 mailbox: "Drafts".to_string(),

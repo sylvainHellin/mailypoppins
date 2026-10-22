@@ -138,6 +138,94 @@ pub fn delete(store: &Store, account: &str, draft_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The absences the last reconcile saw (#0143): a draft whose server copy was
+/// missing from the listing, or a row whose file was missing from `drafts/`.
+/// A draft is retired, or a hand-removed draft's copy deleted, only when two
+/// reconciles in a row see the same absence under the same UIDVALIDITY, so
+/// one short listing or an editor's save-by-rename retires nothing.
+pub const ABSENCE_TABLE: &str = "draft_absence";
+
+/// Its `CREATE` statement, run beside [`create_sql`].
+pub fn absence_create_sql() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {ABSENCE_TABLE} (
+            account     TEXT NOT NULL,
+            draft_id    TEXT NOT NULL,
+            kind        TEXT NOT NULL,
+            uidvalidity INTEGER NOT NULL,
+            PRIMARY KEY (account, draft_id)
+        )"
+    )
+}
+
+/// Record that this reconcile saw the absence `kind` of `draft_id` under
+/// `uidvalidity`. `true` when the previous reconcile saw the same one, which
+/// is when the absence is acted on.
+pub fn note_absent(
+    store: &Store,
+    account: &str,
+    draft_id: &str,
+    kind: &str,
+    uidvalidity: u32,
+) -> Result<bool> {
+    let seen: Option<(String, i64)> = store
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT kind, uidvalidity FROM {ABSENCE_TABLE}
+                 WHERE account = ?1 AND draft_id = ?2"
+            ),
+            [account, draft_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .context("reading a draft absence")?;
+    if seen.is_some_and(|(k, v)| k == kind && v == i64::from(uidvalidity)) {
+        return Ok(true);
+    }
+    store
+        .conn()
+        .execute(
+            &format!(
+                "INSERT INTO {ABSENCE_TABLE} (account, draft_id, kind, uidvalidity)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (account, draft_id) DO UPDATE SET
+                    kind = excluded.kind, uidvalidity = excluded.uidvalidity"
+            ),
+            rusqlite::params![account, draft_id, kind, i64::from(uidvalidity)],
+        )
+        .context("recording a draft absence")?;
+    Ok(false)
+}
+
+/// Forget every absence of `account` but the ones this reconcile saw, which
+/// is what makes two sightings consecutive.
+pub fn keep_absences(
+    store: &Store,
+    account: &str,
+    seen: &std::collections::HashSet<String>,
+) -> Result<()> {
+    let ids: Vec<String> = {
+        let mut stmt = store.conn().prepare(&format!(
+            "SELECT draft_id FROM {ABSENCE_TABLE} WHERE account = ?1"
+        ))?;
+        let rows = stmt
+            .query_map([account], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        rows
+    };
+    for id in ids.iter().filter(|id| !seen.contains(*id)) {
+        store
+            .conn()
+            .execute(
+                &format!("DELETE FROM {ABSENCE_TABLE} WHERE account = ?1 AND draft_id = ?2"),
+                [account, id.as_str()],
+            )
+            .context("forgetting a draft absence")?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

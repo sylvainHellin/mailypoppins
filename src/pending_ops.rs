@@ -456,22 +456,72 @@ pub fn counts(store: &Store, account: &str) -> Result<(usize, usize)> {
 /// row. A push for a draft that already has one queued, and a delete of a
 /// `Message-ID` that already has one queued, are not queued twice: the drain
 /// reads the file when it runs, so one queued push carries every save before
-/// it. `Ok(None)` when nothing was queued.
+/// it; the queued push takes the newer op's `hash`, so a push parked
+/// `failed` names the last bytes it was owed for. `Ok(None)` when nothing was
+/// queued.
 pub fn enqueue_draft_op(store: &Store, account: &str, op: &ServerOp) -> Result<Option<i64>> {
-    let duplicate = queued_ops(store, account)?
-        .iter()
-        .any(|row| match (&row.op, op) {
-            (ServerOp::PushDraft { draft_id: a }, ServerOp::PushDraft { draft_id: b }) => a == b,
+    for row in queued_ops(store, account)? {
+        match (&row.op, op) {
+            (
+                ServerOp::PushDraft {
+                    draft_id: a,
+                    hash: queued,
+                },
+                ServerOp::PushDraft { draft_id: b, hash },
+            ) if a == b => {
+                if queued != hash {
+                    rewrite_queued(store, &row, op)?;
+                }
+                return Ok(None);
+            }
             (
                 ServerOp::DeleteDraft { message_id: a, .. },
                 ServerOp::DeleteDraft { message_id: b, .. },
-            ) => a == b,
-            _ => false,
-        });
-    if duplicate {
-        return Ok(None);
+            ) if a == b => return Ok(None),
+            _ => {}
+        }
     }
     enqueue(store.conn(), account, None, op, &Rollback::None).map(Some)
+}
+
+/// Record on the queued push of `draft_id` that it is running for the bytes
+/// hashing to `hash` (#0143): a first push writes the draft's
+/// `server_message_id`, which changes the file after the push was queued, and
+/// a push parked `failed` must name the bytes it last tried.
+pub fn note_push_hash(store: &Store, account: &str, draft_id: &str, hash: &str) -> Result<()> {
+    for row in queued_ops(store, account)? {
+        if let ServerOp::PushDraft {
+            draft_id: id,
+            hash: queued,
+        } = &row.op
+        {
+            if id == draft_id && queued.as_deref() != Some(hash) {
+                let op = ServerOp::PushDraft {
+                    draft_id: id.clone(),
+                    hash: Some(hash.to_string()),
+                };
+                rewrite_queued(store, &row, &op)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replace the op of the queued row `row` with `op`.
+fn rewrite_queued(store: &Store, row: &PendingOp, op: &ServerOp) -> Result<()> {
+    let payload = serde_json::to_string(&Payload {
+        op: op.clone(),
+        rollback: row.rollback.clone(),
+    })
+    .context("encoding the pending op payload")?;
+    store
+        .conn()
+        .execute(
+            "UPDATE pending_ops SET payload = ?1 WHERE id = ?2 AND state = ?3",
+            rusqlite::params![payload, row.id, STATE_QUEUED],
+        )
+        .context("updating a queued push")?;
+    Ok(())
 }
 
 /// The drafts whose push was parked `failed` (#0143), which their rows show as
@@ -480,17 +530,28 @@ pub fn failed_draft_pushes(store: &Store, account: &str) -> Result<Vec<String>> 
     Ok(failed_ops(store, account)?
         .into_iter()
         .filter_map(|row| match row.op {
-            ServerOp::PushDraft { draft_id } => Some(draft_id),
+            ServerOp::PushDraft { draft_id, .. } => Some(draft_id),
             _ => None,
         })
         .collect())
+}
+
+/// Whether a push of the draft `draft_id` for the bytes hashing to `hash` is
+/// parked `failed` (#0143): the owed-push scan does not queue it again, so a
+/// push that keeps failing is one failed row and one `mutations.rolled_back`,
+/// and the next edit, a new hash, retries it.
+pub fn push_failed_for(store: &Store, account: &str, draft_id: &str, hash: &str) -> Result<bool> {
+    Ok(failed_ops(store, account)?.iter().any(|row| {
+        matches!(&row.op, ServerOp::PushDraft { draft_id: id, hash: Some(h) }
+            if id == draft_id && h == hash)
+    }))
 }
 
 /// Forget the failed pushes of one draft, which a push that succeeded has
 /// made moot.
 pub fn forget_failed_pushes(store: &Store, account: &str, draft_id: &str) -> Result<()> {
     for row in failed_ops(store, account)? {
-        if matches!(&row.op, ServerOp::PushDraft { draft_id: id } if id == draft_id) {
+        if matches!(&row.op, ServerOp::PushDraft { draft_id: id, .. } if id == draft_id) {
             retire(store, row.id)?;
         }
     }

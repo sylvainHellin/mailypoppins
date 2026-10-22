@@ -188,13 +188,20 @@ Email body here.`;
         open is not interrupted.
       </p>
       <p>
+        The copy's body is the message as it would be sent, so a copy sent unedited from another
+        client carries nothing more. mp keeps its own bookkeeping out of the body: the draft
+        file rides in <code>X-Mailypoppins-Draft-Source</code> headers with its
+        <code>bcc:</code> left out, and the Bcc travels only in the copy's own Bcc header.
+      </p>
+      <p>
         Every sync also reads the server's Drafts folder back. An edit made in Outlook, Apple
         Mail or the Proton app is written into the draft file: the recipients, the subject and
         the text above the quote, converted to Markdown, while the quoted thread below
         <code>&lt;!-- mp:quote --&gt;</code> stays as mp wrote it. A draft edited both here and
         on the server keeps the server's version, and your local text is saved beside it as
         <code>&lt;name&gt;.conflict.md</code> to merge by hand and delete. A draft sent or
-        deleted in another client moves to <code>drafts/.retired/</code>, a draft written in mp
+        deleted in another client moves to <code>drafts/.retired/</code> once two syncs in a row
+        miss its copy, and comes back if the copy does; a draft written in mp
         on your other machine appears here as it was written there, and a draft started in
         Outlook, Apple Mail or the Proton app appears as a Markdown file of its own. The
         server's Drafts folder is not listed as a mailbox: its drafts are the Drafts view. An approved draft

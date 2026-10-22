@@ -19,7 +19,9 @@
 //! watcher, which opens no store, asks the account's runtime for that drain
 //! when a settled save owes one.
 
+pub mod carrier;
 pub mod folder;
+pub mod holds;
 pub mod push;
 pub mod reconcile;
 
@@ -98,6 +100,8 @@ pub struct LocalDraft {
     pub path: PathBuf,
     /// [`file_hash`] of the bytes the parse read.
     pub hash: String,
+    /// The file's bytes, the ones `hash` and `draft` were read from.
+    pub bytes: Vec<u8>,
     pub draft: EmailDraft,
 }
 
@@ -106,7 +110,8 @@ impl LocalDraft {
     /// parse, or has no `id:`.
     pub fn read(path: PathBuf) -> Option<LocalDraft> {
         let bytes = std::fs::read(&path).ok()?;
-        let draft = crate::draft::parse_email_draft(&path).ok()?;
+        let text = std::str::from_utf8(&bytes).ok()?;
+        let draft = crate::draft::parse_email_draft_content(&path, text).ok()?;
         let id = draft
             .frontmatter
             .id
@@ -115,6 +120,7 @@ impl LocalDraft {
         Some(LocalDraft {
             id,
             hash: file_hash(&bytes),
+            bytes,
             path,
             draft,
         })

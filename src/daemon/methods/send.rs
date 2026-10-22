@@ -403,7 +403,7 @@ fn plan(
             // that is the one a countdown is about; a batch with nothing in it
             // arms no window, so "no approved emails found" is not a sentence
             // a user waits twenty seconds for.
-            let hold = hold_plan(params, &email, || {
+            let hold = hold_plan(params, &email, true, || {
                 first_approved(&account.name).map(|row| (row.id, row.subject.unwrap_or_default()))
             })?;
             Ok(Request::Operation {
@@ -466,7 +466,7 @@ fn plan(
             }
             let key = super::draft::addressed_one(params, &account.name)?;
             let row = super::draft::resolve(&account.name, &key)?;
-            let hold = hold_plan(params, &email, || {
+            let hold = hold_plan(params, &email, false, || {
                 Some((row.id.clone(), row.subject.clone().unwrap_or_default()))
             })?;
             Ok(Request::Operation {
@@ -504,6 +504,7 @@ fn only(method: &str, params: &Value, allowed: &[&str]) -> Result<(), RpcError> 
 fn hold_plan(
     params: &Value,
     email: &EmailSettings,
+    batch: bool,
     what: impl FnOnce() -> Option<(String, String)>,
 ) -> Result<Option<HoldPlan>, RpcError> {
     let asked = match params.get("hold") {
@@ -519,6 +520,7 @@ fn hold_plan(
         hold_secs: email.send_hold_secs,
         draft_id,
         subject,
+        batch,
     }))
 }
 

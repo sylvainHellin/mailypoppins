@@ -494,39 +494,112 @@ pub fn looks_like_html(s: &str) -> bool {
     .is_match(s)
 }
 
-/// The comment a draft's copy in the server's Drafts folder carries its source
-/// file in (#0143): the draft's Markdown file whole, base64, at the end of the
-/// HTML part.
+/// The mark a draft's copy in the server's Drafts folder ends its HTML part
+/// with (#0143): the SHA-256 of the draft file the copy was written from, and
+/// of the carried source when the copy's headers carry one.
 ///
 /// HTML comments survive mp's own APPEND on both servers and are dropped by
-/// every foreign edit (the probe of 2026-10-20), so a copy that still carries
-/// one is exactly the file mp pushed: mp on the other machine reads it back
-/// byte for byte, and a copy without it was edited elsewhere and is converted
-/// from its HTML instead ([`draft_html_to_markdown`]).
-const DRAFT_SOURCE_TAG: &str = "mp:source v1";
+/// every foreign edit (the probe of 2026-10-20), so a copy that still ends with
+/// the mark is exactly the file mp pushed, and a copy without it was edited
+/// elsewhere and is converted from its HTML ([`draft_html_to_markdown`]).
+/// The mark holds hashes and nothing else: a copy sent unedited from another
+/// client reaches its recipients with its HTML part, and the draft's own file
+/// (Bcc, private frontmatter) must never ride in it.
+const DRAFT_COPY_TAG: &str = "mp:copy v2";
 
-/// The comment carrying `bytes` as a draft's source.
-pub fn draft_source_comment(bytes: &[u8]) -> String {
-    use base64::Engine;
-    format!(
-        "<!-- {DRAFT_SOURCE_TAG} {} -->",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )
+/// What a copy's mark says: the hash of the draft file it was written from,
+/// and of the source its headers carry, if they carry one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftCopyMark {
+    pub file_hash: String,
+    pub source_hash: Option<String>,
 }
 
-/// The source file a draft copy's HTML carries, `None` when it carries none or
-/// the comment does not decode.
-pub fn draft_source_of(html: &str) -> Option<Vec<u8>> {
-    use base64::Engine;
-    let start = html.find(&format!("<!-- {DRAFT_SOURCE_TAG} "))? + DRAFT_SOURCE_TAG.len() + 6;
-    let end = start + html[start..].find("-->")?;
-    let encoded: String = html[start..end]
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .ok()
+/// The comment that marks a copy written from a file hashing to `file_hash`,
+/// whose headers carry a source hashing to `source_hash`.
+pub fn draft_copy_comment(file_hash: &str, source_hash: Option<&str>) -> String {
+    match source_hash {
+        Some(source) => format!("<!-- {DRAFT_COPY_TAG} file={file_hash} src={source} -->"),
+        None => format!("<!-- {DRAFT_COPY_TAG} file={file_hash} -->"),
+    }
+}
+
+/// The mark a copy's HTML ends with, `None` when it has none.
+///
+/// Only mp's own mark counts: the last comment of the part, followed by
+/// nothing but closing tags. A reply embeds the original's HTML verbatim, so a
+/// mark a sender planted in it sits above mp's own and is never read.
+pub fn draft_copy_mark(html: &str) -> Option<DraftCopyMark> {
+    let start = html.rfind("<!--")?;
+    let rest = &html[start + 4..];
+    let end = rest.find("-->")?;
+    if !only_closing_tags(&rest[end + 3..]) {
+        return None;
+    }
+    let mut fields = rest[..end].split_whitespace();
+    if fields.next()? != "mp:copy" || fields.next()? != "v2" {
+        return None;
+    }
+    let is_hash = |h: &str| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit());
+    let file_hash = fields
+        .next()?
+        .strip_prefix("file=")
+        .filter(|h| is_hash(h))?;
+    let source_hash = match fields.next() {
+        Some(field) => Some(field.strip_prefix("src=").filter(|h| is_hash(h))?),
+        None => None,
+    };
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(DraftCopyMark {
+        file_hash: file_hash.to_ascii_lowercase(),
+        source_hash: source_hash.map(str::to_ascii_lowercase),
+    })
+}
+
+/// Whether `tail` is whitespace and closing tags only.
+fn only_closing_tags(tail: &str) -> bool {
+    let mut rest = tail.trim_start();
+    while !rest.is_empty() {
+        let Some(after) = rest.strip_prefix("</") else {
+            return false;
+        };
+        let Some(close) = after.find('>') else {
+            return false;
+        };
+        if !after[..close]
+            .trim()
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric())
+        {
+            return false;
+        }
+        rest = after[close + 1..].trim_start();
+    }
+    true
+}
+
+/// `html` with every comment that names one of mp's carriers (`mp:copy`, and
+/// the `mp:source` of the first builds) renamed, so HTML embedded in a draft,
+/// a quoted original or a forwarded message, can never pass for mp's own mark
+/// (#0143). The text outside comments is left as it is.
+pub fn neutralize_draft_marks(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        let comment = &rest[start..];
+        let end = comment.find("-->").map_or(comment.len(), |at| at + 3);
+        out.push_str(
+            &comment[..end]
+                .replace("mp:copy", "mp-quoted-copy")
+                .replace("mp:source", "mp-quoted-source"),
+        );
+        rest = &comment[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Where a draft's own text ends in the HTML of its server copy (#0143): mp's
@@ -2926,15 +2999,46 @@ Content-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n--B--\r\n"
         }
     }
 
-    /// A draft's source comment round-trips its bytes whole, and HTML without
-    /// one, or with one that does not decode, carries none (#0143).
+    /// A copy's mark round-trips its hashes; only the last comment of the
+    /// part counts, and a mark embedded above it, as a planted one in a
+    /// quoted original is, is never read (#0143).
     #[test]
-    fn a_drafts_source_comment_round_trips() {
-        let file = "---\nid: \"d1\"\nsubject: Grüße\nstatus: draft\n---\n\n<!-- mp:quote -->\n";
-        let html = format!("<p>x</p>\n{}\n", draft_source_comment(file.as_bytes()));
-        assert_eq!(draft_source_of(&html).as_deref(), Some(file.as_bytes()));
-        assert_eq!(draft_source_of("<p>x</p>"), None);
-        assert_eq!(draft_source_of("<!-- mp:source v1 not*base64 -->"), None);
+    fn a_copys_mark_is_only_the_last_comment() {
+        let file = "a".repeat(64);
+        let src = "b".repeat(64);
+        let mark = draft_copy_comment(&file, Some(&src));
+        let html = format!("<html><body><p>x</p></body></html>\n{mark}\n");
+        let read = draft_copy_mark(&html).expect("a mark");
+        assert_eq!(
+            (read.file_hash, read.source_hash),
+            (file.clone(), Some(src))
+        );
+        let inside = format!(
+            "<html><body><p>x</p>{}</body></html>",
+            draft_copy_comment(&file, None)
+        );
+        assert_eq!(draft_copy_mark(&inside).unwrap().source_hash, None);
+
+        assert_eq!(draft_copy_mark("<p>x</p>"), None);
+        let planted = format!("<blockquote>{mark}</blockquote><p>my reply</p>");
+        assert_eq!(draft_copy_mark(&planted), None, "text after it");
+        let below = format!("{mark}<!-- mp:quote --></div>");
+        assert_eq!(draft_copy_mark(&below), None, "another comment after it");
+        assert_eq!(draft_copy_mark("<!-- mp:copy v2 file=zz -->"), None);
+    }
+
+    /// Embedded HTML loses every carrier comment it held, and keeps the rest.
+    #[test]
+    fn embedded_html_loses_its_carrier_comments() {
+        let html =
+            "<p>mp:copy is text</p><!-- mp:copy v2 file=00 --><!--mp:source v1 QQ== --><!-- x -->";
+        let out = neutralize_draft_marks(html);
+        assert!(out.starts_with("<p>mp:copy is text</p>"), "{out}");
+        assert!(
+            !out.contains("<!-- mp:copy") && !out.contains("mp:source"),
+            "{out}"
+        );
+        assert!(out.ends_with("<!-- x -->"));
     }
 
     /// The draft's own text ends at the first quote wrapper: mp's marker,

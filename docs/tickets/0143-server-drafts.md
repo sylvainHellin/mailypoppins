@@ -235,7 +235,8 @@ The same recovery covers a crash between an APPEND and the write of its row.
 The push is a `pending_ops` row (`src/pending_ops.rs`), drained by the account's drainer after `DRAIN_DEBOUNCE` (`src/daemon/runtime/drainer.rs:76`, 1.5 s) like a queued archive.
 `ServerOp` (`src/ops.rs:81`) gains two kinds:
 
-- `PushDraft { draft_id }`: render the file as it is at drain time, APPEND it, retire the previous copy.
+- `PushDraft { draft_id, hash }`: render the file as it is at drain time, APPEND it, retire the previous copy.
+  `hash` is the hash of the bytes the push is owed for, kept current while the row waits, so a push parked `failed` is not queued again for the same bytes and only the next edit retries it.
 - `DeleteDraft { mailbox, message_id, uid, uidvalidity }`: remove every copy of one draft from the server folder.
 
 `PushDraft` names the draft and carries no bytes.
@@ -358,17 +359,21 @@ A conflict copy is never pushed; the user merges it and deletes it, or removes `
 
 Retiring moves the file and its HTML companion into `drafts/.retired/` and deletes nothing.
 The indexer and the watcher read only the top level of `drafts/` (`WalkDir::new(dir).max_depth(1)`, `src/store/drafts.rs:362-363`; `std::fs::read_dir`, `src/daemon/watch.rs:420-427`), so a retired file leaves every list without a code change there.
-`.retired/` doubles as the tombstone set: a server copy whose marker names a retired id is deleted, never imported back.
+A draft sent, discarded or removed by hand is a tombstone in `.retired/`: a server copy whose `Message-ID` or marker names it is deleted, never imported back.
+A draft retired because its copy went is kept as `<name>.copy-gone.md` and is no tombstone: a copy under its `Message-ID` that comes back (the other machine pushed it again) is pulled back into `drafts/` rather than deleted.
+Otherwise one machine's mistaken retire would leave a tombstone that deletes the other machine's next push, and the draft would be retired on both.
 Files in `.retired/` older than 30 days are pruned by the reconcile.
 
 Three paths retire:
 
 - The server copy is gone: the draft was sent or deleted in another client.
+  Two reconciles in a row under one UIDVALIDITY must miss the copy (the `draft_absence` table), so one short listing retires nothing.
 - `draft.discard` (`src/daemon/methods/draft.rs:767`), which today calls `delete_indexed_draft` and deletes the file; it now moves the file and enqueues `DeleteDraft`.
 - A send that reached every recipient, which today deletes the file (`settle_sent_draft`, `src/draft.rs:189`) and now moves it.
 
 A file removed by hand from `drafts/` arrives as `WatchEvent::DraftRemoved` with no retired twin.
-Its server copy may be the only one left, so the reconcile pulls it into `.retired/` before it enqueues the `DeleteDraft`.
+Its server copy may be the only one left, so the reconcile pulls it into `.retired/` before it deletes the copy.
+As built, the reconcile acts on a row whose file is missing from two reconciles in a row, and a file whose frontmatter does not parse still counts as present when a line scan reads its `id:`, so a draft whose YAML is half typed is never taken for one removed by hand.
 
 #### Send
 
@@ -468,6 +473,17 @@ No `state.invalidate` scope changes: drafts never travelled as invalidations, an
 - The mirror is on by default for Proton as for TUM.
 - `.retired/` is pruned after 30 days.
 - An agent may delete the probe's leftover drafts from the TUM and Proton Drafts and Deleted Items folders once they are listed under "Leftovers to delete".
+- No part of a server copy carries anything that is not already in the message a client would send (review finding B4, 2026-10-21).
+  A copy can be sent unedited from Outlook, Apple Mail or the Proton app, and whatever its body holds then reaches every recipient, so the first build's `<!-- mp:source v1 -->` comment, the whole draft file with its `bcc:` and private frontmatter in the HTML part, is gone.
+  The HTML part now ends with a mark holding two SHA-256 hashes, `<!-- mp:copy v2 file=<hash> src=<hash> -->`, which is all that tells an unedited copy from one edited elsewhere.
+  The draft file rides in `X-Mailypoppins-Draft-Source` headers instead, base64 in numbered chunks of 8 KiB, at most 64 KiB in all, with its `bcc:` emptied; the Bcc comes back from the copy's own `Bcc` header, which every client treats as blind.
+  Evidence for the headers: Exchange Online caps one header at 32 KB and a header block at 256 KB (Microsoft Learn, "Exchange Online limits"), and Exchange Server has the same block limit as a receive connector setting; Dovecot allows 10 MB for one header block (Dovecot CE, "Limits").
+  Exchange promotes no X-header to a MAPI property unless something already mapped it (Microsoft Exchange Team, "Named Properties, X-Headers, and You"), which is why Outlook's edit dropped `X-Mailypoppins-Draft-Id` in the probe; a message Outlook sends is built from those properties, so an unmapped X-header should not leave with it.
+  Proton Bridge stores no custom header (the probe lost `X-Mailypoppins-Draft-Id` at the APPEND, and Proton's feedback forum reports `X-Keywords` stripped the same way), so on Proton a copy reaches the other machine through its HTML, as an edited one does, and the mark still keeps a rebuilt store from writing conflict copies.
+  Apple Mail rebuilds a message from its compose window and writes its own X-headers; whether it keeps a foreign one on send is not documented.
+  Rejected: the source in an attachment part (every client sends attachments), the source in the HTML encrypted with a key shared between the two machines (a key to distribute and keep, for a gain only on Proton), and no source at all (a reply's quote and the frontmatter would round-trip through `htmd` on every cross-machine pull).
+  Accepted risk until the live checks: a header that some client keeps on send carries the draft's frontmatter (without Bcc) and Markdown, whose text the recipients receive anyway.
+- Only mp's own mark counts: the last comment of the HTML part, followed by nothing but closing tags; a carried draft whose `server_message_id` is not the copy's `Message-ID`, or whose source does not hash to the mark, is read as a foreign copy; and the HTML a reply or a forward embeds has every `mp:copy` and `mp:source` comment renamed when its companion is written and when it is rendered (review finding B3).
 
 Open for Sylvain:
 
@@ -488,9 +504,9 @@ Open for Sylvain:
 5. Reconcile and pull: `messages.draft_marker`, the eviction exemption, the reconcile pass and its recovery of a lost `draft_sync` row, the HTML-to-Markdown step with the `htmd` dependency, conflict copies, the marker import from the other machine.
    Done (`src/draft_mirror/reconcile.rs`, run by the account runtime after every sync body, IMAP accounts only), with three deviations from the design above:
    - The Drafts folder is read directly by the reconcile, one `SELECT` and every header, a body only for a copy it pulls or imports, and is not ingested into the store; so there is no `messages.draft_marker` column and no eviction exemption, the folder keeps the catalogue's `ignore` policy, and no received list, search or conversation can show a server draft beside its file.
-   - A copy mp writes carries the draft file whole, base64, in an `<!-- mp:source v1 ... -->` comment at the end of its HTML part (`parse::draft_source_comment`). HTML comments survive mp's own APPEND on both servers and no foreign edit (the probe), so a copy that still carries one is exactly a file mp pushed: the recovery of a lost row compares that source with the file instead of rendering the copy, and mp on the other machine reads a draft back byte for byte. A copy without one was edited elsewhere and goes through `parse::draft_html_to_markdown` (`htmd` 0.5.6).
-   - The pull waits for an open outbox row but not for an armed undo-send hold, which lives in the daemon: a pull into an approved draft demotes it, so a hold that fires afterwards is refused as not approved rather than sending what nobody approved.
-   A push that finds copies and no row of its folder runs the reconcile instead of pushing, so a rebuilt store never replaces a copy edited elsewhere. Two copies under one draft where the row's is the older is another machine pushing over this one: the newer wins and the local text becomes a conflict copy unless the two are the same file. Word's fake list bullets are turned into `- ` items after the conversion rather than by an `htmd` handler.
+   - A copy mp writes ends its HTML part with a mark of two hashes and carries the draft file, its Bcc left out, in `X-Mailypoppins-Draft-Source` headers (`draft_mirror::carrier`, "Decisions"). HTML comments survive mp's own APPEND on both servers and no foreign edit (the probe), so a copy that still ends with the mark is exactly a file mp pushed: the recovery of a lost row compares the mark's hash with the file, and mp on the other machine reads a draft back byte for byte when the headers travelled. A copy without the mark was edited elsewhere and goes through `parse::draft_html_to_markdown` (`htmd` 0.5.6); the recovery renders it as a pull would and compares that with the file.
+   The pull waits for an open outbox row and for an armed undo-send hold, which the daemon's hold scheduler records in `draft_mirror::holds` (a `send.approved` hold covers every approved draft of its account). A pull hashes the file again just before its rename and leaves a draft saved since it was read to the next reconcile, and the row records the hash of the bytes the pull wrote.
+   A push that finds copies and no row of its folder runs the reconcile instead of pushing, so a rebuilt store never replaces a copy edited elsewhere. Two copies under one draft where the row's is the older is another machine pushing over this one: the newer wins, and the local text becomes a conflict copy only when the file moved since the row and is not the newer copy. Word's fake list bullets are turned into `- ` items after the conversion rather than by an `htmd` handler.
 6. Foreign drafts: the import, and the received list hiding the `drafts`-role folder in the TUI and the desktop.
    Done: `reconcile::import_foreign`; a push that finds a copy its row does not name (an edit in Outlook or another machine's push since the last reconcile) runs the reconcile instead, and an older copy edited elsewhere is kept as a conflict copy before it is deleted, so no text typed in another client is buried under a local push; a reply started elsewhere keeps its quoted thread below a quote marker, so a later pull keeps it. The `drafts`-role folder was already out of both clients' received lists, since #0141 ignores it and both render `mailbox.list`; it now stays ignored whatever an override says, with the reason "mirrored into the Drafts view, read by the drafts mirror".
 7. Graph, once an account uses it.
@@ -509,7 +525,11 @@ Installing it turns the mirror on for `tum` and `proton` at once, so the first d
 - [ ] Edit it in Apple Mail (a new `Message-ID`); the file follows the edit rather than a second draft appearing.
 - [ ] Approve a draft, edit it in Outlook; after the tick it is `status: draft` again.
 - [ ] `mp send` a draft; its copy leaves Outlook's Drafts and the file is in `drafts/.retired/`.
-- [ ] Send a draft from Outlook, and delete one in Apple Mail; after the tick both files are in `drafts/.retired/` and neither comes back.
+- [ ] Send a draft from Outlook, and delete one in Apple Mail; after two ticks both files are in `drafts/.retired/` and neither comes back.
+- [ ] On `tum`, open an mp draft's copy in Apple Mail with View, Message, Raw Source, without editing it: it carries `X-Mailypoppins-Draft-Source` headers and its HTML ends with `<!-- mp:copy v2 ... -->`, and the base64 of the headers decodes to the draft with an empty `bcc:`.
+- [ ] On `proton`, a draft made on the Mac appears on the home server with its text and Bcc, through its HTML when Bridge dropped the headers, and a store rebuild there leaves it `synced` with no conflict copy.
+- [ ] Send an mp draft unedited from Outlook, from Apple Mail and from the Proton app to an outside address you can read; the received message's source carries no `X-Mailypoppins-Draft-Source` header and no Bcc address.
+- [ ] Type half a YAML line into a mirrored draft's frontmatter in Neovim, save, wait two ticks, then fix it; the draft stays in `drafts/` on both machines and the server keeps one copy.
 - [ ] Start a draft in Outlook and one in the Proton app; both appear in mp's Drafts view as Markdown files, and no server Drafts mailbox is listed.
 - [ ] On the home server, the Mac's draft appears under the same id after a tick there, and an edit there reaches the Mac.
 - [ ] Stop the daemon, delete `accounts/tum/store.sqlite3`, start it and let it sync; every draft is `synced` again, with no second copy and no conflict copy.

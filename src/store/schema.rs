@@ -565,8 +565,10 @@ pub const GRAPH_CLEANUPS_TABLE: &str = "graph_cleanups";
 ///
 /// `draft_sync` is where each mirrored draft's server copy is (#0143,
 /// [`super::draft_sync`]); losing it in a rebuild costs one reconcile, which
-/// re-derives every row from the server copy and the file.
-fn additive_tables() -> [(&'static str, String); 4] {
+/// re-derives every row from the server copy and the file. `draft_absence`
+/// beside it holds what the last reconcile found missing; losing it delays a
+/// retirement by one reconcile.
+fn additive_tables() -> [(&'static str, String); 5] {
     [
         (
             ATTACHMENT_REPAIRS_TABLE,
@@ -596,6 +598,10 @@ fn additive_tables() -> [(&'static str, String); 4] {
             crate::catalogue::listing::create_sql(),
         ),
         (super::draft_sync::TABLE, super::draft_sync::create_sql()),
+        (
+            super::draft_sync::ABSENCE_TABLE,
+            super::draft_sync::absence_create_sql(),
+        ),
     ]
 }
 

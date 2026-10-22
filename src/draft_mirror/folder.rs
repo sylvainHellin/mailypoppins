@@ -303,6 +303,12 @@ pub mod fake {
         pub log: Vec<String>,
         pub fail_append: bool,
         pub fail_select: bool,
+        /// UIDs a listing does not show, as a server that answered a
+        /// `SEARCH` without them for one round would.
+        pub hidden: Vec<u32>,
+        /// A file and the text appended to it at the next `fetch`: a save in
+        /// the editor while the mirror waits on the network.
+        pub touch_on_fetch: Option<(std::path::PathBuf, String)>,
     }
 
     impl Default for FakeFolder {
@@ -316,6 +322,8 @@ pub mod fake {
                 log: Vec::new(),
                 fail_append: false,
                 fail_select: false,
+                hidden: Vec::new(),
+                touch_on_fetch: None,
             }
         }
     }
@@ -337,6 +345,14 @@ pub mod fake {
         /// The copies a client sees: not flagged deleted.
         pub fn live(&self) -> Vec<&Copy> {
             self.copies.iter().filter(|c| !c.deleted).collect()
+        }
+
+        /// The copies a listing shows: live and not hidden.
+        fn listed(&self) -> Vec<&Copy> {
+            self.live()
+                .into_iter()
+                .filter(|c| !self.hidden.contains(&c.uid))
+                .collect()
         }
 
         pub fn remove(&mut self, uid: u32) {
@@ -368,7 +384,7 @@ pub mod fake {
         async fn uids_of(&mut self, message_id: &str) -> Result<Vec<u32>> {
             let wanted = bare_message_id(message_id).to_string();
             Ok(self
-                .live()
+                .listed()
                 .iter()
                 .filter(|c| {
                     header_value(&c.raw, "Message-ID")
@@ -395,7 +411,7 @@ pub mod fake {
 
         async fn heads(&mut self) -> Result<Vec<ServerHead>> {
             Ok(self
-                .live()
+                .listed()
                 .iter()
                 .map(|c| {
                     let end = c
@@ -413,8 +429,13 @@ pub mod fake {
         }
 
         async fn fetch(&mut self, uid: u32) -> Result<Option<Vec<u8>>> {
+            if let Some((path, text)) = self.touch_on_fetch.take() {
+                let mut bytes = std::fs::read(&path)?;
+                bytes.extend_from_slice(text.as_bytes());
+                std::fs::write(&path, bytes)?;
+            }
             Ok(self
-                .live()
+                .listed()
                 .iter()
                 .find(|c| c.uid == uid)
                 .map(|c| c.raw.clone()))

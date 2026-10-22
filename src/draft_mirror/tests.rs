@@ -49,6 +49,11 @@ impl Fixture {
     /// Write `drafts/<name>.md` with `id: <id>` and the given extra
     /// frontmatter lines and body.
     pub fn write(&self, name: &str, id: &str, extra: &str, body: &str) -> PathBuf {
+        Self::write_in_current(name, id, extra, body)
+    }
+
+    /// [`Fixture::write`] into whichever data dir is current.
+    pub fn write_in_current(name: &str, id: &str, extra: &str, body: &str) -> PathBuf {
         let path = crate::config::drafts_dir("tum").join(format!("{name}.md"));
         std::fs::write(
             &path,
@@ -86,9 +91,14 @@ fn a_server_copy_keeps_the_bcc_the_id_and_the_reply_headers() {
         "Danke!",
     );
     let draft = crate::draft::parse_email_draft(&path).unwrap();
-    let raw =
-        crate::send::build_server_draft(&draft, "me@tum.de", &fx.email, "<mp-draft.1@tum.de>")
-            .unwrap();
+    let raw = crate::send::build_server_draft(
+        &draft,
+        "me@tum.de",
+        &fx.email,
+        "<mp-draft.1@tum.de>",
+        &std::fs::read(&path).unwrap(),
+    )
+    .unwrap();
     let header = String::from_utf8_lossy(&raw);
     assert_eq!(
         header_value(&raw, "X-Mailypoppins-Draft-Id").as_deref(),
@@ -119,7 +129,14 @@ fn a_server_copy_keeps_the_bcc_the_id_and_the_reply_headers() {
     )
     .unwrap();
     let draft = crate::draft::parse_email_draft(&path).unwrap();
-    assert!(crate::send::build_server_draft(&draft, "me@tum.de", &fx.email, "<x@tum.de>").is_ok());
+    assert!(crate::send::build_server_draft(
+        &draft,
+        "me@tum.de",
+        &fx.email,
+        "<x@tum.de>",
+        &std::fs::read(&path).unwrap()
+    )
+    .is_ok());
 }
 
 /// The first push mints the draft's `server_message_id` into its file, puts
@@ -262,12 +279,10 @@ fn the_owed_pushes_are_queued_once() {
     );
     let queued = pending_ops::queued_ops(&fx.store, "tum").unwrap();
     assert_eq!(queued.len(), 1);
-    assert_eq!(
-        queued[0].op,
-        ServerOp::PushDraft {
-            draft_id: "d-new".to_string()
-        }
-    );
+    assert!(matches!(
+        &queued[0].op,
+        ServerOp::PushDraft { draft_id, hash: Some(_) } if draft_id == "d-new"
+    ));
     assert_eq!(queued[0].target_message_id, None);
 
     std::fs::write(
@@ -336,7 +351,7 @@ impl OpExecutor for FakeExecutor<'_> {
 #[test]
 fn a_queued_push_drains_and_a_refused_one_parks_failed() {
     let fx = Fixture::new();
-    fx.write("a", "d1", "", "eins");
+    let path = fx.write("a", "d1", "", "eins");
     push::enqueue_owed(&fx.store, &fx.account).unwrap();
     let blobs = BlobStore::for_account("tum");
     let mut folder = FakeFolder {
@@ -365,9 +380,23 @@ fn a_queued_push_drains_and_a_refused_one_parks_failed() {
     folder.fail_append = false;
     assert_eq!(
         push::enqueue_owed(&fx.store, &fx.account).unwrap(),
-        1,
-        "still owed"
+        0,
+        "the parked push is for these bytes: not queued again at every drain"
     );
+    assert_eq!(
+        pending_ops::failed_ops(&fx.store, "tum").unwrap().len(),
+        1,
+        "one failed row, not one per drain"
+    );
+    // The next edit retries.
+    std::fs::write(
+        &path,
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("eins", "eins, zwei"),
+    )
+    .unwrap();
+    assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 1);
     let mut exec = FakeExecutor {
         folder: &mut folder,
         account: fx.account.clone(),
@@ -655,8 +684,9 @@ fn an_edit_on_both_sides_keeps_the_local_text_as_a_conflict_copy() {
     );
 }
 
-/// A copy sent or deleted in another client takes the draft with it: the file
-/// moves to `drafts/.retired/` and is not imported back.
+/// A copy sent or deleted in another client takes the draft with it, once two
+/// reconciles in a row have missed it: the file moves to `drafts/.retired/`
+/// under a name that says why.
 #[test]
 fn a_copy_gone_elsewhere_retires_the_draft() {
     let fx = Fixture::new();
@@ -665,6 +695,7 @@ fn a_copy_gone_elsewhere_retires_the_draft() {
     block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
     folder.remove(folder.live()[0].uid);
 
+    assert_eq!(reconciled(&fx, &mut folder).retired, 0, "missed once");
     let report = reconciled(&fx, &mut folder);
     assert_eq!(report.retired, 1);
     assert!(!path.exists());
@@ -672,7 +703,7 @@ fn a_copy_gone_elsewhere_retires_the_draft() {
         .parent()
         .unwrap()
         .join(crate::draft::RETIRED_DIR)
-        .join("angebot.md")
+        .join("angebot.copy-gone.md")
         .exists());
     assert!(fx.row("d1").is_none());
     assert_eq!(reconciled(&fx, &mut folder), ReconcileReport::default());
@@ -710,24 +741,35 @@ fn an_apple_mail_edit_under_a_new_message_id_is_relinked() {
 fn a_draft_from_the_other_machine_is_imported_under_its_id() {
     let fx = Fixture::new();
     let mut folder = FakeFolder::default();
-    {
+    let theirs = {
         // The other machine: its own data dir, the same server folder.
         let other = Fixture::new();
-        other.write("fern", "d-remote", "", "Von drüben");
+        let path = other.write("fern", "d-remote", "", "Von drüben");
         block_on(push::push(&other.mirror(1), &mut folder, "d-remote")).unwrap();
-    }
+        std::fs::read(path).unwrap()
+    };
     let report = reconciled(&fx, &mut folder);
     assert_eq!(report.imported, 1, "{report:?}");
     let local = find_local("tum", "d-remote").expect("imported under its id");
     assert!(local.draft.body_markdown.contains("Von drüben"));
+    assert_eq!(
+        local.draft.frontmatter.bcc.as_deref(),
+        Some("chef@example.com"),
+        "the Bcc comes back from the copy's own header"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&local.bytes),
+        String::from_utf8_lossy(&theirs),
+        "byte for byte"
+    );
     assert!(fx.row("d-remote").is_some());
     assert_eq!(reconciled(&fx, &mut folder), ReconcileReport::default());
     assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 0);
 }
 
 /// A copy whose draft was retired here is deleted, never imported back; a
-/// draft removed by hand keeps its copy's text in `.retired/` before the copy
-/// goes.
+/// draft removed by hand, missing from two reconciles in a row, keeps its
+/// copy's text in `.retired/` before the copy goes.
 #[test]
 fn a_retired_drafts_copy_is_deleted_and_a_hand_removed_one_is_kept() {
     let fx = Fixture::new();
@@ -739,8 +781,11 @@ fn a_retired_drafts_copy_is_deleted_and_a_hand_removed_one_is_kept() {
     crate::draft::retire_draft_files(&gone).unwrap();
     std::fs::remove_file(&removed).unwrap();
 
+    let first = reconciled(&fx, &mut folder);
+    assert_eq!((first.deleted, first.imported), (1, 0), "{first:?}");
+    assert!(fx.row("d-hand").is_some(), "missed once: kept");
     let report = reconciled(&fx, &mut folder);
-    assert_eq!(report.deleted, 2, "{report:?}");
+    assert_eq!(report.deleted, 1, "{report:?}");
     assert_eq!(report.imported, 0);
     assert!(folder.live().is_empty());
     let kept = crate::config::drafts_dir("tum")
@@ -765,8 +810,14 @@ fn a_crash_between_append_and_delete_leaves_one_copy_after_the_reconcile() {
     std::fs::write(&path, &edited).unwrap();
     // The APPEND of the edit landed; the delete and the row did not.
     let local = find_local("tum", "d1").unwrap();
-    let raw = crate::send::build_server_draft(&local.draft, "me@tum.de", &fx.email, &mid_of(&path))
-        .unwrap();
+    let raw = crate::send::build_server_draft(
+        &local.draft,
+        "me@tum.de",
+        &fx.email,
+        &mid_of(&path),
+        edited.as_bytes(),
+    )
+    .unwrap();
     let newer = folder.put(&raw);
 
     let report = reconciled(&fx, &mut folder);
@@ -845,7 +896,7 @@ fn a_draft_started_in_outlook_is_imported_as_a_markdown_file() {
     assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 1);
     block_on(push::push(&fx.mirror(2), &mut folder, &local.id)).unwrap();
     assert_eq!(folder.live().len(), 1);
-    assert!(String::from_utf8_lossy(&folder.live()[0].raw).contains("mp:source"));
+    assert!(String::from_utf8_lossy(&folder.live()[0].raw).contains("mp:copy v2"));
 }
 
 /// A reply started in Apple Mail keeps its quoted thread below a quote
@@ -928,4 +979,450 @@ fn an_older_foreign_copy_is_kept_as_a_conflict_copy() {
     let copy = path.with_file_name("angebot.conflict.md");
     assert!(std::fs::read_to_string(copy).unwrap().contains("Fremd"));
     assert_eq!(folder.live().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Review findings of the mirror (#0143)
+// ---------------------------------------------------------------------------
+
+/// One machine of a pair sharing a server folder: its own data dir, store and
+/// drafts directory, entered for the length of a guard.
+struct Machine {
+    store: Store,
+    account: AccountConfig,
+    email: EmailSettings,
+    dir: tempfile::TempDir,
+}
+
+impl Machine {
+    fn new() -> Machine {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::config::test_env::DataDirOverride::set(dir.path());
+        std::fs::create_dir_all(crate::config::drafts_dir("tum")).unwrap();
+        let store = Store::open(crate::config::store_path("tum")).unwrap();
+        Machine {
+            store,
+            account: AccountConfig {
+                name: "tum".to_string(),
+                default_from: "me@tum.de".to_string(),
+                ..Default::default()
+            },
+            email: EmailSettings::default(),
+            dir,
+        }
+    }
+
+    fn enter(&self) -> crate::config::test_env::DataDirOverride {
+        crate::config::test_env::DataDirOverride::set(self.dir.path())
+    }
+
+    fn mirror(&self) -> Mirror<'_> {
+        Mirror {
+            store: &self.store,
+            account: &self.account,
+            email: &self.email,
+            now: 9000,
+        }
+    }
+
+    fn reconcile(&self, folder: &mut FakeFolder) -> ReconcileReport {
+        let _guard = self.enter();
+        block_on(reconcile(&self.mirror(), folder)).unwrap()
+    }
+
+    /// Queue every owed push and drain the queue against `folder`.
+    fn drain(&self, folder: &mut FakeFolder) {
+        let _guard = self.enter();
+        push::enqueue_owed(&self.store, &self.account).unwrap();
+        let blobs = BlobStore::for_account("tum");
+        let mut exec = FakeExecutor {
+            folder,
+            account: self.account.clone(),
+            email: EmailSettings::default(),
+        };
+        block_on(pending_ops::drain(
+            &self.store,
+            &blobs,
+            "tum",
+            &mut exec,
+            crate::outbox::unix_now(),
+        ))
+        .unwrap();
+    }
+
+    fn has(&self, id: &str) -> bool {
+        let _guard = self.enter();
+        find_local("tum", id).is_some()
+    }
+}
+
+/// The server copy mp would write of the draft file `text`, under `mid`.
+fn server_copy_of(text: &str, mid: &str) -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("copy.md");
+    std::fs::write(&path, text).unwrap();
+    let draft = crate::draft::parse_email_draft(&path).unwrap();
+    crate::send::build_server_draft(
+        &draft,
+        "me@tum.de",
+        &EmailSettings::default(),
+        mid,
+        text.as_bytes(),
+    )
+    .unwrap()
+}
+
+/// A draft whose frontmatter is half typed on one machine is still that
+/// machine's draft: its copy is not deleted as if removed by hand, the other
+/// machine does not retire it, and once the YAML is whole again both
+/// machines hold it and the server one copy (the cascade of review finding
+/// B1).
+#[test]
+fn a_half_typed_frontmatter_never_cascades_into_a_retire_on_both_machines() {
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    let path = {
+        let _guard = m1.enter();
+        let path = Fixture::write_in_current("angebot", "d1", "", "Hallo");
+        block_on(push::push(&m1.mirror(), &mut folder, "d1")).unwrap();
+        path
+    };
+    assert_eq!(m2.reconcile(&mut folder).imported, 1);
+
+    let whole = std::fs::read_to_string(&path).unwrap();
+    let half = whole.replace("to: robin@example.com", "to: [robin@example.com");
+    std::fs::write(&path, &half).unwrap();
+    for _ in 0..3 {
+        m1.reconcile(&mut folder);
+        m1.drain(&mut folder);
+        m2.reconcile(&mut folder);
+    }
+    std::fs::write(&path, &whole).unwrap();
+    for _ in 0..3 {
+        m1.drain(&mut folder);
+        m1.reconcile(&mut folder);
+        m2.reconcile(&mut folder);
+    }
+
+    assert!(
+        m1.has("d1"),
+        "the draft is still in drafts/ on the first machine"
+    );
+    assert!(m2.has("d1"), "and on the second");
+    assert_eq!(folder.live().len(), 1, "one copy: {:?}", folder.log);
+}
+
+/// A copy one listing did not show is not gone: a draft is retired only when
+/// two reconciles in a row under one UIDVALIDITY miss its copy.
+#[test]
+fn a_copy_missing_from_one_listing_does_not_retire_its_draft() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let uid = folder.live()[0].uid;
+
+    folder.hidden = vec![uid];
+    assert_eq!(reconciled(&fx, &mut folder).retired, 0);
+    assert!(
+        path.exists(),
+        "one listing without the copy retires nothing"
+    );
+    folder.hidden.clear();
+    assert_eq!(reconciled(&fx, &mut folder), ReconcileReport::default());
+
+    folder.hidden = vec![uid];
+    assert_eq!(
+        reconciled(&fx, &mut folder).retired,
+        0,
+        "the count restarted"
+    );
+    assert_eq!(
+        reconciled(&fx, &mut folder).retired,
+        1,
+        "missed twice in a row"
+    );
+    assert!(!path.exists());
+}
+
+/// A draft retired because its copy went is no tombstone: when a copy under
+/// its `Message-ID` comes back (the other machine pushed it again), the copy
+/// is not deleted, and the draft returns to `drafts/` with the copy's text.
+#[test]
+fn a_returning_copy_brings_back_a_draft_retired_for_its_absence() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let mid = mid_of(&path);
+    let text = std::fs::read_to_string(&path).unwrap();
+    folder.remove(folder.live()[0].uid);
+    reconciled(&fx, &mut folder);
+    reconciled(&fx, &mut folder);
+    assert!(
+        !path.exists(),
+        "retired after two reconciles without its copy"
+    );
+
+    folder.put(&server_copy_of(&text.replace("eins", "zwei"), &mid));
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(folder.live().len(), 1, "the copy stays: {:?}", folder.log);
+    assert_eq!(report.deleted, 0, "{report:?}");
+    let back = find_local("tum", "d1").expect("the draft is back in drafts/");
+    assert!(back.draft.body_markdown.contains("zwei"));
+    assert_eq!(fx.row("d1").unwrap().uid, folder.live()[0].uid);
+}
+
+/// A save that lands while the reconcile waits on the server is never
+/// overwritten by the pull it was racing: the pull skips the draft, and the
+/// next reconcile sees both sides changed and keeps the save in a conflict
+/// copy (review finding B2).
+#[test]
+fn a_save_during_the_fetch_is_never_overwritten_by_a_pull() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Original");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let mid = mid_of(&path);
+    folder.remove(folder.live()[0].uid);
+    folder.put(&outlook_copy(
+        &mid,
+        "robin@example.com",
+        "Angebot",
+        "<p>Server text</p>",
+    ));
+    folder.touch_on_fetch = Some((path.clone(), "\nTyped while the mirror waited\n".into()));
+
+    reconciled(&fx, &mut folder);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("Typed while the mirror waited"), "{text}");
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!(report.conflicts, 1, "{report:?}");
+    let copy = std::fs::read_to_string(path.with_file_name("angebot.conflict.md")).unwrap();
+    assert!(copy.contains("Typed while the mirror waited"), "{copy}");
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("Server text"));
+}
+
+/// A reply quotes the original's HTML verbatim, so a sender can plant what
+/// looks like mp's own carrier in it. The other machine reads the draft the
+/// user wrote, never the planted one (review finding B3).
+#[test]
+fn a_carrier_planted_in_a_quoted_message_is_never_read_as_the_draft() {
+    use base64::Engine;
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    let crafted = "---\nid: \"d-evil\"\nto: attacker@evil.example\nsubject: x\n\
+                   status: approved\nattachments:\n  - /etc/passwd\n---\n\nhi\n";
+    let planted = format!(
+        "<p>Hello</p><!-- mp:source v1 {} --><!-- mp:copy v2 file=00 src=00 -->",
+        base64::engine::general_purpose::STANDARD.encode(crafted)
+    );
+    {
+        let _guard = m1.enter();
+        let path = Fixture::write_in_current(
+            "re",
+            "d1",
+            "",
+            "Danke!\n\n<!-- mp:quote -->\n\n> Robin wrote:\n> Hello",
+        );
+        std::fs::write(path.with_extension("html"), &planted).unwrap();
+        block_on(push::push(&m1.mirror(), &mut folder, "d1")).unwrap();
+    }
+    m2.reconcile(&mut folder);
+    assert!(!m2.has("d-evil"), "the planted draft is not imported");
+    let _guard = m2.enter();
+    for local in local_drafts("tum") {
+        let attachments = local.draft.frontmatter.attachments.unwrap_or_default();
+        assert!(
+            !attachments.iter().any(|a| a.contains("passwd")),
+            "{attachments:?}"
+        );
+        assert_ne!(
+            local.draft.frontmatter.to.as_deref(),
+            Some("attacker@evil.example")
+        );
+    }
+}
+
+/// Sent unedited from Outlook, Apple Mail or the Proton app, a server copy
+/// reaches its recipients as it is: no part of it may carry the draft file,
+/// and nothing mp carries for itself may carry the Bcc (review finding B4).
+#[test]
+fn no_part_of_a_server_copy_carries_the_draft_file_or_its_bcc() {
+    use base64::Engine;
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let raw = folder.live()[0].raw.clone();
+    let file = std::fs::read(&path).unwrap();
+    let email = crate::parse::parse_rfc822_to_fetched_email(&raw).unwrap();
+    let html = email.html_body.clone().unwrap_or_default();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&file);
+    assert!(!html.contains(&encoded[..24]), "{html}");
+    assert!(!html.contains("chef@example.com"), "{html}");
+    assert!(!email.body_text.contains("chef@example.com"));
+
+    let (headers, _) = mailparse::parse_headers(&raw).unwrap();
+    for header in headers.iter().filter(|h| {
+        h.get_key()
+            .to_ascii_lowercase()
+            .starts_with("x-mailypoppins")
+    }) {
+        let value = header.get_value();
+        let payload = value.split_whitespace().last().unwrap_or_default();
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload) {
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("chef@example.com"),
+                "{} carries the Bcc",
+                header.get_key()
+            );
+        }
+    }
+}
+
+/// Another machine's push over a draft this one has not touched since is a
+/// plain pull, with no conflict copy (review finding N1).
+#[test]
+fn another_machine_pushing_over_an_unchanged_draft_is_a_plain_pull() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    let mid = mid_of(&path);
+    let theirs = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("eins", "zwei vom anderen Rechner");
+    folder.put(&server_copy_of(&theirs, &mid));
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!((report.pulled, report.conflicts), (1, 0), "{report:?}");
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("zwei vom anderen Rechner"));
+    assert_eq!(folder.live().len(), 1);
+}
+
+/// A rebuilt store loses the row of a draft imported from Outlook; the
+/// reconcile renders the copy as a pull would, finds the file, and records
+/// the row rather than writing a conflict copy (review finding N2).
+#[test]
+fn a_lost_row_of_an_imported_foreign_draft_is_recovered_without_a_conflict() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    folder.put(&outlook_new_draft());
+    assert_eq!(reconciled(&fx, &mut folder).imported, 1);
+    let local = local_drafts("tum").pop().unwrap();
+    draft_sync::delete(&fx.store, "tum", &local.id).unwrap();
+
+    let report = reconciled(&fx, &mut folder);
+    assert_eq!((report.recovered, report.conflicts), (1, 0), "{report:?}");
+    assert!(fx.row(&local.id).is_some());
+    assert_eq!(local_drafts("tum").len(), 1, "no conflict copy");
+    assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 0);
+}
+
+/// A pull waits while an undo-send hold is armed for the draft, as it waits
+/// for an open outbox row, and lands once the hold is gone.
+#[test]
+fn a_pull_waits_for_an_armed_undo_send_hold() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d-held", "", "Original");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d-held")).unwrap();
+    let mid = mid_of(&path);
+    folder.remove(folder.live()[0].uid);
+    folder.put(&outlook_copy(
+        &mid,
+        "robin@example.com",
+        "Angebot",
+        "<p>Server text</p>",
+    ));
+
+    super::holds::arm("tum", Some("d-held"));
+    let held = reconciled(&fx, &mut folder);
+    super::holds::release("tum", Some("d-held"));
+    assert_eq!(held.pulled, 0, "{held:?}");
+    assert!(std::fs::read_to_string(&path).unwrap().contains("Original"));
+
+    assert_eq!(reconciled(&fx, &mut folder).pulled, 1);
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("Server text"));
+}
+
+/// `raw` as Proton Bridge stores an APPEND: without mp's own headers.
+fn without_mp_headers(raw: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(raw);
+    let (head, body) = text.split_once("\r\n\r\n").unwrap();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut dropping = false;
+    for line in head.split("\r\n") {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if !dropping {
+                kept.push(line);
+            }
+            continue;
+        }
+        dropping = line.to_ascii_lowercase().starts_with("x-mailypoppins");
+        if !dropping {
+            kept.push(line);
+        }
+    }
+    format!("{}\r\n\r\n{body}", kept.join("\r\n")).into_bytes()
+}
+
+/// A copy whose server dropped mp's headers, as Proton Bridge does, still
+/// carries its mark: a lost row is recovered without a conflict, and the
+/// other machine imports the draft through its HTML, Bcc included.
+#[test]
+fn a_copy_without_mps_headers_still_recovers_and_imports() {
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    {
+        let _guard = m1.enter();
+        Fixture::write_in_current("angebot", "d1", "", "Hallo Robin");
+        block_on(push::push(&m1.mirror(), &mut folder, "d1")).unwrap();
+        draft_sync::delete(&m1.store, "tum", "d1").unwrap();
+    }
+    for copy in &mut folder.copies {
+        copy.raw = without_mp_headers(&copy.raw);
+    }
+    assert!(!String::from_utf8_lossy(&folder.copies[0].raw).contains("X-Mailypoppins"));
+
+    let report = m1.reconcile(&mut folder);
+    assert_eq!((report.recovered, report.conflicts), (1, 0), "{report:?}");
+
+    assert_eq!(m2.reconcile(&mut folder).imported, 1);
+    let _guard = m2.enter();
+    let local = local_drafts("tum").pop().unwrap();
+    assert!(local.draft.body_markdown.contains("Hallo Robin"));
+    assert_eq!(
+        local.draft.frontmatter.bcc.as_deref(),
+        Some("chef@example.com")
+    );
+}
+
+/// A copy whose carried draft names another `Message-ID` than the copy's own
+/// is not mp's: it is imported as a foreign draft under a fresh id.
+#[test]
+fn a_carried_draft_naming_another_message_id_is_read_as_foreign() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    let text = "---\nid: \"d-evil\"\nto: a@example.com\nsubject: x\nstatus: draft\n\
+                server_message_id: \"<other@example.com>\"\n---\n\nhi\n";
+    folder.put(&server_copy_of(text, "<mine@example.com>"));
+    assert_eq!(reconciled(&fx, &mut folder).imported, 1);
+    assert!(find_local("tum", "d-evil").is_none());
+    let local = local_drafts("tum").pop().unwrap();
+    assert_eq!(
+        local.draft.frontmatter.server_message_id.as_deref(),
+        Some("<mine@example.com>")
+    );
 }

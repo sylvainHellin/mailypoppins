@@ -4218,8 +4218,12 @@ pub fn draft_html_body(
     signature: Option<&str>,
 ) -> String {
     let companion = draft.path.with_extension("html");
+    // A companion an older build wrote may still hold a carrier comment a
+    // sender planted; renamed here, it can never pass for mp's own (#0143).
     let quoted_html = if companion.exists() {
-        fs::read_to_string(&companion).ok()
+        fs::read_to_string(&companion)
+            .ok()
+            .map(|html| crate::parse::neutralize_draft_marks(&html))
     } else {
         None
     };
@@ -4250,21 +4254,20 @@ pub enum MissingAttachment {
 /// The one assembly [`build_draft_message`] and [`build_server_draft`] share,
 /// so a draft in Outlook's Drafts looks like the message it would send.
 ///
-/// `source` is the draft file's own bytes, which a server copy carries in a
-/// comment at the end of its HTML part (#0143,
-/// [`crate::parse::draft_source_comment`]) so mp on another machine reads the
-/// draft back whole; a sent message carries none.
+/// `mark` is the comment a server copy ends its HTML part with (#0143,
+/// [`crate::parse::draft_copy_comment`]), which says which file the copy was
+/// written from; a sent message carries none.
 pub fn draft_mime_body(
     draft: &EmailDraft,
     email_config: &EmailSettings,
     signature: Option<&str>,
     missing: MissingAttachment,
-    source: Option<&[u8]>,
+    mark: Option<&str>,
 ) -> Result<MultiPart> {
     let mut body_html = draft_html_body(draft, email_config, signature);
-    if let Some(source) = source {
+    if let Some(mark) = mark {
         body_html.push('\n');
-        body_html.push_str(&crate::parse::draft_source_comment(source));
+        body_html.push_str(mark);
         body_html.push('\n');
     }
     let alternative = MultiPart::alternative()
@@ -4339,11 +4342,16 @@ pub const DRAFT_STATUS_HEADER: &str = "X-Mailypoppins-Draft-Status";
 /// the draft), and `In-Reply-To` and `References` for a reply, which Outlook
 /// and Apple Mail need to show the draft as one. An address that does not
 /// parse yet is left out of its header with a warning.
+///
+/// `source` is the draft file's bytes, the ones `draft` was parsed from: the
+/// copy's HTML part ends with their hash and its headers carry them, Bcc left
+/// out, for mp on another machine ([`crate::draft_mirror::carrier`]).
 pub fn build_server_draft(
     draft: &EmailDraft,
     default_from: &str,
     email_config: &EmailSettings,
     message_id: &str,
+    source: &[u8],
 ) -> Result<Vec<u8>> {
     let from_address = draft.frontmatter.from.as_deref().unwrap_or(default_from);
     let from_mailbox: Mailbox = normalize_address_for_smtp(from_address)
@@ -4403,21 +4411,21 @@ pub fn build_server_draft(
     {
         builder = builder.reply_to(mailbox);
     }
-    let source = std::fs::read(&draft.path).ok();
+    let carried = crate::draft_mirror::carrier::carry(source);
     let body = draft_mime_body(
         draft,
         email_config,
         None,
         MissingAttachment::Skip,
-        source.as_deref(),
+        Some(&carried.mark),
     )?;
     let message = builder
         .multipart(body)
         .context("Failed to build the draft's server copy")?;
 
-    // The two headers of our own lead the message; lettre has no typed
-    // header for either, and a header's place in the block carries no meaning.
-    let mut raw = Vec::new();
+    // The headers of our own lead the message; lettre has no typed header
+    // for any, and a header's place in the block carries no meaning.
+    let mut raw = carried.headers;
     if let Some(id) = draft.frontmatter.id.as_deref() {
         raw.extend_from_slice(format!("{DRAFT_ID_HEADER}: {id}\r\n").as_bytes());
     }

@@ -41,7 +41,7 @@ pub async fn run<F: DraftsFolder>(
     op: &ServerOp,
 ) -> Result<()> {
     match op {
-        ServerOp::PushDraft { draft_id } => push(mirror, folder, draft_id).await,
+        ServerOp::PushDraft { draft_id, .. } => push(mirror, folder, draft_id).await,
         ServerOp::DeleteDraft {
             mailbox,
             message_id,
@@ -90,6 +90,7 @@ pub async fn push<F: DraftsFolder>(
             minted
         }
     };
+    crate::pending_ops::note_push_hash(mirror.store, account, draft_id, &local.hash)?;
 
     let mailbox = drafts_mailbox(mirror.store, mirror.account);
     let info = folder.select(&mailbox).await?;
@@ -121,6 +122,7 @@ pub async fn push<F: DraftsFolder>(
         &mirror.account.default_from,
         mirror.email,
         &message_id,
+        &local.bytes,
     )?;
     folder.append(&raw).await?;
     let after = folder.uids_of(&message_id).await?;
@@ -188,7 +190,9 @@ pub async fn delete<F: DraftsFolder>(
 
 /// Queue a push for every draft of `account` that owes one: pushable, and its
 /// file's hash differs from its row's or it has no row. A draft that already
-/// has a push queued is not queued twice. Returns how many were queued.
+/// has a push queued is not queued twice, and one whose push for these very
+/// bytes is parked `failed` is not queued again: the next edit retries it.
+/// Returns how many were queued.
 ///
 /// It also prunes the account's retired drafts past their 30 days, mirror or
 /// not, since every drain point passes here.
@@ -207,11 +211,14 @@ pub fn enqueue_owed(store: &Store, account: &AccountConfig) -> Result<usize> {
             .iter()
             .find(|row| row.draft_id == local.id)
             .is_some_and(|row| row.synced_hash == local.hash);
-        if synced {
+        if synced
+            || crate::pending_ops::push_failed_for(store, &account.name, &local.id, &local.hash)?
+        {
             continue;
         }
         let op = ServerOp::PushDraft {
             draft_id: local.id.clone(),
+            hash: Some(local.hash.clone()),
         };
         if crate::pending_ops::enqueue_draft_op(store, &account.name, &op)?.is_some() {
             queued += 1;

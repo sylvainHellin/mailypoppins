@@ -64,6 +64,9 @@ pub struct HoldPlan {
     pub hold_secs: u64,
     /// The draft that is waiting; the first of a batch.
     pub draft_id: String,
+    /// A `send.approved` batch, which sends every approved draft of the
+    /// account when it fires, rather than `draft_id` alone.
+    pub batch: bool,
     /// Its subject, empty when it has none.
     pub subject: String,
 }
@@ -73,6 +76,8 @@ pub struct HoldPlan {
 struct Armed {
     /// Everything but the remainder, which is derived from [`Armed::deadline`].
     status: HoldStatus,
+    /// Whether it holds the account's whole approved batch.
+    batch: bool,
     /// When it fires, on this process's monotonic clock.
     deadline: Instant,
 }
@@ -140,11 +145,15 @@ impl HoldScheduler {
                 id.clone(),
                 Armed {
                     status: status.clone(),
+                    batch: plan.batch,
                     deadline,
                 },
             );
             lock(&self.order).push(id.clone());
         }
+        // The drafts mirror's pull waits while a hold is armed for its draft
+        // (#0143), and reaches the hold only through this table.
+        crate::draft_mirror::holds::arm(account, (!plan.batch).then_some(plan.draft_id.as_str()));
         publish(canonical, KIND_SEND_HOLD_STARTED, &status);
         status
     }
@@ -239,8 +248,12 @@ impl HoldScheduler {
     /// Remove one hold from the table, whoever is asking.
     fn take(&self, id: &OperationId) -> Option<Armed> {
         let taken = lock(&self.armed).remove(id);
-        if taken.is_some() {
+        if let Some(hold) = &taken {
             lock(&self.order).retain(|queued| queued != id);
+            crate::draft_mirror::holds::release(
+                &hold.status.account,
+                (!hold.batch).then_some(hold.status.draft_id.as_str()),
+            );
         }
         taken
     }
@@ -370,6 +383,7 @@ mod tests {
             hold_secs: 20,
             draft_id: "freigabe".to_string(),
             subject: "Angebot".to_string(),
+            batch: false,
         }
     }
 

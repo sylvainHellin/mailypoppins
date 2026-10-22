@@ -408,6 +408,25 @@ pub fn mark_conflict_copy(path: &Path, id: &str, conflict_of: &str) -> Result<()
 /// Record the `Message-ID` a draft answers in its `in_reply_to:`
 /// frontmatter, in place (#0143's import of a reply started in another
 /// client).
+/// A draft file's text with its `bcc:` emptied, for a carrier that must not
+/// hold the blind copies (#0143): the key stays, so [`set_draft_bcc`] puts the
+/// value back on the same line.
+pub fn redact_draft_bcc(content: &str) -> Result<String> {
+    rewrite_frontmatter_scalars(content, &[("bcc", FieldWrite::ClearIfPresent)])
+}
+
+/// A draft file's text with its `bcc:` set to `bcc`, every other byte kept;
+/// `quoted` writes the value as a double-quoted YAML scalar, otherwise it is
+/// written as it is, which only a caller that checks the result may ask for.
+pub fn draft_with_bcc(content: &str, bcc: &str, quoted: bool) -> Result<String> {
+    let value = if quoted {
+        yaml_dq_escape(bcc)
+    } else {
+        bcc.to_string()
+    };
+    rewrite_frontmatter_scalars(content, &[("bcc", FieldWrite::Set(value))])
+}
+
 pub fn set_draft_in_reply_to(path: &Path, message_id: &str) -> Result<()> {
     rewrite_frontmatter_scalars_at(
         path,
@@ -885,9 +904,14 @@ pub fn create_reply_draft_from(
     // Copy and wrap companion HTML for the draft if the original has one.
     // The header values are text, not markup: a raw `Name <addr>` would reach
     // the sent HTML as an unknown `<addr>` tag that every client drops
-    // (PERSO-169), so each one is escaped.
+    // (PERSO-169), so each one is escaped. A carrier comment of mp's in the
+    // original is renamed, so a sender cannot plant a draft (#0143).
     {
-        if let Some(html_content) = inbox.html.clone() {
+        if let Some(html_content) = inbox
+            .html
+            .as_deref()
+            .map(crate::parse::neutralize_draft_marks)
+        {
             let wrapped = format!(
                 "<p style=\"color:#666\">On {}, {} wrote:</p>\n\
                  <div style=\"margin:0;padding:0 0 0 1em;border-left:2px solid #ccc\">\n\
@@ -1067,7 +1091,11 @@ pub fn create_forward_draft_with(
     // Create companion HTML for the forward, its header values escaped as in
     // create_reply_draft_from (PERSO-169); an empty body quotes nothing.
     if body == ForwardBody::Quoted {
-        if let Some(html_content) = inbox.html.clone() {
+        if let Some(html_content) = inbox
+            .html
+            .as_deref()
+            .map(crate::parse::neutralize_draft_marks)
+        {
             let wrapped = format!(
                 "<p style=\"color:#666\">---------- Forwarded message ----------<br/>\n\
                  From: {}<br/>\n\
@@ -1907,9 +1935,14 @@ fn reject_non_string_id(data: &gray_matter::Pod) -> Result<()> {
 pub fn parse_email_draft(path: &Path) -> Result<EmailDraft> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
+    parse_email_draft_content(path, &content)
+}
 
+/// [`parse_email_draft`] over bytes already read from `path`, so a caller that
+/// hashes the file parses the very bytes it hashed (#0143).
+pub fn parse_email_draft_content(path: &Path, content: &str) -> Result<EmailDraft> {
     let matter = Matter::<YAML>::new();
-    let parsed = matter.parse(&content);
+    let parsed = matter.parse(content);
 
     let data = parsed
         .data
