@@ -723,6 +723,7 @@ It is a query, as `mailbox.list_server` is: it writes nothing here or on the ser
 The token is staged under `tokens/candidates/<account>.enc` rather than cached under `account`, and `config.init` or `config.add_account` moves it to `tokens/<account>.enc` when it writes an `oauth2` or `graph` account of that name, after the file and before the account's runtime starts.
 An abandoned wizard, or one whose candidate is named like a configured account, leaves that account's token untouched; `config.reset_secrets` removes staged sign-ins with the other caches.
 Each candidate sign-in first drops the staged sign-ins written more than a day before, which only an abandoned wizard leaves: one younger may belong to a wizard still running in either client, and a wizard that comes back after a day signs in again.
+The daemon drops them by the same rule as it starts, before it binds its socket, so the sign-in of a wizard never run again does not stay until `config.reset_secrets`.
 A candidate named other than `account` is `-32602`.
 
 **`config.set_password` publishes no event.**

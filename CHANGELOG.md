@@ -98,6 +98,7 @@ All notable changes to this project are documented in this file.
   `archive` and `delete` refuse to act on a copy the store holds in another mailbox and name that copy's selector, and `mp invite` answers from the selector's own account instead of the default one.
 - Setup wizards: a Microsoft 365 sign-in for an account being set up is staged under `tokens/candidates/` and becomes the account's token only when `config.init` or `config.add_account` writes the account, so an abandoned `mp config init` leaves a configured account of the same name signed in as it was.
   A connection test of an account being set up never uses a configured account's token, so a candidate named like a configured account cannot carry that token to the servers it names.
+- Daemon: a start drops the setup wizards' staged sign-ins written more than a day before, as each wizard sign-in already did, so the sign-in of a wizard never run again no longer stays under `tokens/candidates/` until `config.reset_secrets`.
 - A server-search hit from a folder the account does not configure can be fetched, read with `mp show` and `mp save`, exported as .eml and forwarded as attachment in every client (#0141).
 - `mp list-mailboxes` printed the special-use attributes without their backslash (`Sent` for `\Sent`) (#0141).
 - TUI: the sidebar scrolls to keep the open mailbox on screen when there are more mailboxes than rows (#0141).

@@ -157,16 +157,16 @@ pub fn promote_staged_token(account_name: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// How old a staged sign-in may grow before the next candidate sign-in drops
-/// it. A wizard that signed in a day ago and still has not written its
+/// How old a staged sign-in may grow before the next candidate sign-in or
+/// daemon start drops it. A wizard that signed in a day ago and still has not written its
 /// account was abandoned; one that comes back after that signs in again.
 pub const STAGED_TOKEN_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Drop the staged sign-ins older than [`STAGED_TOKEN_MAX_AGE`], which an
-/// abandoned wizard left behind. The daemon runs it as each candidate sign-in
-/// starts, the first token-cache write of every OAuth2 or Graph wizard in
-/// either client; a younger sign-in may belong to a wizard still running and
-/// is kept. Answers how many it dropped.
+/// abandoned wizard left behind. The daemon runs it as it starts and as each
+/// candidate sign-in starts, the first token-cache write of every OAuth2 or
+/// Graph wizard in either client; a younger sign-in may belong to a wizard
+/// still running and is kept. Answers how many it dropped.
 pub fn sweep_staged_tokens() -> Result<usize> {
     sweep_staged_tokens_in(
         &crate::config::tokens_dir().join(STAGED_TOKEN_DIR),

@@ -2046,6 +2046,37 @@ async fn only_the_committed_write_promotes_a_staged_sign_in() {
     assert!(!staged.exists(), "the staged sign-in moved, not copied");
 }
 
+/// A daemon start drops the staged sign-ins written more than a day before,
+/// which a wizard never run again would otherwise keep forever, and keeps a
+/// younger one, which may belong to a wizard still running.
+#[tokio::test]
+async fn a_starting_daemon_drops_the_staged_sign_ins_older_than_a_day() {
+    let mut slice = Slice::start();
+    slice.stop_daemon();
+    let staging = slice.root().join("tokens").join("candidates");
+    std::fs::create_dir_all(&staging).expect("the staging dir");
+    let abandoned = staging.join("abandoned.enc");
+    let running = staging.join("running.enc");
+    std::fs::write(&abandoned, b"old-token").expect("an abandoned sign-in");
+    std::fs::write(&running, b"young-token").expect("a running wizard's sign-in");
+    let two_days_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+    std::fs::File::options()
+        .write(true)
+        .open(&abandoned)
+        .and_then(|f| f.set_modified(two_days_ago))
+        .expect("backdating the abandoned sign-in");
+
+    slice.start_daemon();
+    assert!(
+        !abandoned.exists(),
+        "the sign-in staged two days ago survived the start"
+    );
+    assert_eq!(
+        std::fs::read(&running).expect("the younger sign-in is kept"),
+        b"young-token"
+    );
+}
+
 /// `mp config oauth2-login` on an account that cannot do it: three refusals,
 /// each in the sentence the CLI prints today.
 #[tokio::test]

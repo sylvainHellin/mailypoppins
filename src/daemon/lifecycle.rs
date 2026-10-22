@@ -367,6 +367,12 @@ async fn run(foreground_logs: bool) -> Result<()> {
     // No daemon answers and the start lock is ours, so whatever a previous
     // daemon materialised is nobody's any more.
     super::handles::remove_leftover_handles();
+    // A wizard abandoned and never run again would keep its staged sign-in
+    // forever if only a candidate sign-in swept them; the same day of grace
+    // holds here, so a wizard still running in a client keeps its own.
+    if let Err(e) = crate::oauth2::sweep_staged_tokens() {
+        warn!("[daemon] could not drop the abandoned staged sign-ins: {e:#}");
+    }
 
     let listener = bind_socket(&socket)?;
     echo(&format!("listening on {}", socket.display()));
