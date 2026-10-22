@@ -765,10 +765,45 @@ pub fn create_reply_draft_from(
     Ok(dest)
 }
 
+/// What a forward's body holds above its signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardBody {
+    /// The forwarded-message header block and the original's text, below the
+    /// quote marker: every forward's body.
+    Quoted,
+    /// Nothing but the signature, as Outlook writes a forward as attachment:
+    /// the message travels whole as the attached `.eml`.
+    Empty,
+}
+
+/// The body a forward as attachment carries (`mp forward --as-attachment`,
+/// PERSO-174): the one line that picks between the usual forward's quoted
+/// body and Outlook's empty one, for the daemon and every client's fixture.
+pub const ATTACHED_FORWARD_BODY: ForwardBody = ForwardBody::Quoted;
+
 /// Forward a message that is not a file: the #0050 path, used by
 /// `mp forward <selector>` over a store row.
 pub fn create_forward_draft_from(
     source: &SourceMessage,
+    default_from: &str,
+    drafts_dir: Option<&Path>,
+    signature: Option<&str>,
+) -> Result<PathBuf> {
+    create_forward_draft_with(
+        source,
+        ForwardBody::Quoted,
+        default_from,
+        drafts_dir,
+        signature,
+    )
+}
+
+/// [`create_forward_draft_from`] with the body named: a forward as
+/// attachment passes [`ATTACHED_FORWARD_BODY`], its `source` carrying the
+/// `.eml` as its one attachment.
+pub fn create_forward_draft_with(
+    source: &SourceMessage,
+    body: ForwardBody,
     default_from: &str,
     drafts_dir: Option<&Path>,
     signature: Option<&str>,
@@ -829,9 +864,13 @@ pub fn create_forward_draft_from(
 
     // See create_reply_draft_from: the quote marker stays for splicing,
     // the per-account signature (#0099) goes above it in the reply area.
+    // An empty body is the signature alone, laid out as a new draft's.
     let sig_block = signature.and_then(wrap_signature_block);
-    let full_content = match sig_block {
-        Some(block) => format!(
+    let full_content = match (body, sig_block) {
+        (ForwardBody::Empty, block) => {
+            format!("{}\n\n{}", fm.trim_end(), block.unwrap_or_default())
+        }
+        (ForwardBody::Quoted, Some(block)) => format!(
             "{}\n\n\n{}\n{}\n\n{}\n\n{}\n",
             fm.trim_end(),
             block,
@@ -839,7 +878,7 @@ pub fn create_forward_draft_from(
             fwd_header,
             clean_body.trim()
         ),
-        None => format!(
+        (ForwardBody::Quoted, None) => format!(
             "{}\n\n\n{}\n\n{}\n\n{}\n",
             fm.trim_end(),
             QUOTE_MARKER,
@@ -886,8 +925,8 @@ pub fn create_forward_draft_from(
     fs::write(&dest, full_content)?;
 
     // Create companion HTML for the forward, its header values escaped as in
-    // create_reply_draft_from (PERSO-169).
-    {
+    // create_reply_draft_from (PERSO-169); an empty body quotes nothing.
+    if body == ForwardBody::Quoted {
         if let Some(html_content) = inbox.html.clone() {
             let wrapped = format!(
                 "<p style=\"color:#666\">---------- Forwarded message ----------<br/>\n\
@@ -3749,5 +3788,48 @@ mod tests {
              To: Me <me@example.com>, Ops & Co <ops@x.com>\n\n\
              Original body\n";
         assert!(md.ends_with(header), "{md}");
+    }
+
+    /// Outlook's forward as attachment (PERSO-174): the frontmatter a forward
+    /// writes, its attachment included, over the signature alone, with no
+    /// header block, quote marker or companion HTML.
+    #[test]
+    fn an_empty_forward_body_is_the_signature_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = SourceMessage {
+            attachments: vec![PathBuf::from("/a/2026-10-21_Q&A.eml")],
+            ..html_source("Zoë <zoe@example.de>")
+        };
+        let path = create_forward_draft_with(
+            &source,
+            ForwardBody::Empty,
+            "me@example.com",
+            Some(tmp.path()),
+            Some("Sylvain"),
+        )
+        .unwrap();
+        let md = fs::read_to_string(&path).unwrap();
+        let (front, body) = md.rsplit_once("---\n").unwrap();
+        assert!(
+            front.contains("subject: \"Fwd: Q&A <draft> \\\"v2\\\"\"\n"),
+            "{md}"
+        );
+        assert!(front.contains("  - \"/a/2026-10-21_Q&A.eml\"\n"), "{md}");
+        assert_eq!(
+            body,
+            format!("\n{}", wrap_signature_block("Sylvain").unwrap())
+        );
+        assert!(!md.contains(QUOTE_MARKER) && !md.contains("Forwarded message"));
+        assert!(!path.with_extension("html").exists());
+
+        let bare = create_forward_draft_with(
+            &source,
+            ForwardBody::Empty,
+            "me@example.com",
+            Some(tmp.path()),
+            None,
+        )
+        .unwrap();
+        assert!(fs::read_to_string(bare).unwrap().ends_with("---\n\n"));
     }
 }

@@ -122,13 +122,47 @@ pub fn create_draft_from_source(
             create_forward_draft_from(source, default_from, Some(&dir), signature)?
         }
     };
+    register_draft(account, &path, headers)
+}
+
+/// [`create_draft_from_source`] for a forward as attachment
+/// (`mp forward --as-attachment`, PERSO-174): `source` carries the message's
+/// `.eml` as its one attachment, and the body is [`ATTACHED_FORWARD_BODY`].
+pub fn create_attached_forward_draft(
+    account: &str,
+    default_from: &str,
+    source: &SourceMessage,
+    headers: Option<&DraftRecipientEdit>,
+    signature: Option<&str>,
+) -> Result<(PathBuf, crate::selector::Selector)> {
+    let dir = crate::config::drafts_dir(account);
+    let path = create_forward_draft_with(
+        source,
+        ATTACHED_FORWARD_BODY,
+        default_from,
+        Some(&dir),
+        signature,
+    )?;
+    register_draft(account, &path, headers)
+}
+
+/// The tail every draft built from a message shares: the header rewrite, the
+/// minted `id:` and the reindex, in that order, and the selector.
+fn register_draft(
+    account: &str,
+    path: &std::path::Path,
+    headers: Option<&DraftRecipientEdit>,
+) -> Result<(PathBuf, crate::selector::Selector)> {
     if let Some(edit) = headers {
-        rewrite_draft_recipients(&path, edit)?;
+        rewrite_draft_recipients(path, edit)?;
     }
     let id = crate::store::drafts::new_id();
-    set_draft_id(&path, &id)?;
+    set_draft_id(path, &id)?;
     crate::store::drafts::refresh_account(account)?;
-    Ok((path, crate::selector::Selector::for_draft(account, &id)))
+    Ok((
+        path.to_path_buf(),
+        crate::selector::Selector::for_draft(account, &id),
+    ))
 }
 
 /// Settle a draft after a finished send: mark it sent, and retire the file

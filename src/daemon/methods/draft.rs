@@ -740,27 +740,40 @@ fn from_source(
     let mut built = crate::draft::source_from_row(&store, &blobs, &row, carry)
         .map_err(|e| internal(format!("reading {name}:{}/{}: {e:#}", row.mailbox, row.uid)))?;
     drop(store);
-    if let Some(eml) = eml {
-        built.attachments = vec![eml];
-    }
 
-    let kind = if reply {
-        crate::draft::DraftFromSource::Reply {
-            all: flag(params, "all")?,
-        }
-    } else {
-        crate::draft::DraftFromSource::Forward
-    };
     let headers = recipient_headers(params)?;
-    let (path, written) = crate::draft::create_draft_from_source(
-        &name,
-        &account.default_from,
-        &built,
-        kind,
-        headers.as_ref(),
-        signature_of(account, params, email).as_deref(),
-    )
-    .map_err(|e| internal(format!("writing the draft of {name}: {e:#}")))?;
+    let signature = signature_of(account, params, email);
+    let written = match eml {
+        Some(eml) => {
+            built.attachments = vec![eml];
+            crate::draft::create_attached_forward_draft(
+                &name,
+                &account.default_from,
+                &built,
+                headers.as_ref(),
+                signature.as_deref(),
+            )
+        }
+        None => {
+            let kind = if reply {
+                crate::draft::DraftFromSource::Reply {
+                    all: flag(params, "all")?,
+                }
+            } else {
+                crate::draft::DraftFromSource::Forward
+            };
+            crate::draft::create_draft_from_source(
+                &name,
+                &account.default_from,
+                &built,
+                kind,
+                headers.as_ref(),
+                signature.as_deref(),
+            )
+        }
+    };
+    let (path, written) =
+        written.map_err(|e| internal(format!("writing the draft of {name}: {e:#}")))?;
 
     created(
         &name,

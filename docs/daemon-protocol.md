@@ -720,7 +720,7 @@ The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they ar
 
 **`as_attachment: true` forwards the source as one `.eml` part** (`mp forward --as-attachment`, PERSO-174).
 The bytes are `message.materialise_eml`'s, so a Graph row is fetched from the server first, and they are written to `<account>/attachments/<message-id>/<date>_<subject>.eml`, where a forward's carried parts already go; the draft lists that one file instead of the original's parts, which are inside it, and the `.eml` extension is what makes the send label the part `message/rfc822`.
-The body is the usual forward's, quoted header block included.
+The body is the usual forward's, quoted header block included; `mp_core::draft::ATTACHED_FORWARD_BODY` is the one line that would make it Outlook's, the signature alone.
 A source whose bytes cannot be had is `-32603` with `{account}` and writes no draft.
 
 **`draft.create_from_message` is the one draft built from a message rather than from a row.**
