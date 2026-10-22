@@ -1800,6 +1800,11 @@ async fn routed_search(
 
 /// The parameters `message.search` and `message.search_server` share: the
 /// query as typed, `mp search`'s flags under their wire names, and the limit.
+///
+/// A flag the user did not give is left out rather than sent empty or
+/// `false`: a daemon older than the field filters on `message.search_server`
+/// refuses a key it does not know, so an `mp search` with no filter keeps
+/// working against it until it restarts.
 fn search_params(
     account: &str,
     query: &str,
@@ -1810,8 +1815,10 @@ fn search_params(
         "account": account,
         "query": query,
         "limit": limit,
-        "has_attachment": flags.has_attachment,
     });
+    if flags.has_attachment {
+        params["has_attachment"] = serde_json::json!(true);
+    }
     for (key, value) in [
         ("from", &flags.from),
         ("to", &flags.to),
@@ -4753,7 +4760,28 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{handed_back, is_drafts_selector};
+    use super::{handed_back, is_drafts_selector, search_params};
+
+    /// A search with no filter sends only the three keys every daemon
+    /// accepts, so one that predates the field filters does not refuse it;
+    /// a filter the user gave travels under its wire name (PERSO-175).
+    #[test]
+    fn a_search_sends_only_the_filters_the_user_gave() {
+        let plain = search_params("tum", "invoice", &Default::default(), 20);
+        assert_eq!(
+            plain,
+            serde_json::json!({"account": "tum", "query": "invoice", "limit": 20})
+        );
+
+        let flags = mailypoppins::search::Flags {
+            has_attachment: true,
+            from: Some("borrmann".into()),
+            ..Default::default()
+        };
+        let filtered = search_params("tum", "", &flags, 20);
+        assert_eq!(filtered["has_attachment"], true);
+        assert_eq!(filtered["from"], "borrmann");
+    }
 
     /// A terminal keeps the decorated lines and a pipe gets the bare value
     /// alone, however many lines the decoration spans (#0144).
