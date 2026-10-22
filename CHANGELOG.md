@@ -14,6 +14,11 @@ All notable changes to this project are documented in this file.
 - Conversations: an expanded conversation reads as one block with a visible end, its members tinted and indented, closed by a rule in the desktop and by a corner branch in the TUI (PERSO-179).
 
 ### Changed
+- Server search: `mp search`, the TUI search overlay and the desktop search bar get the newest `--limit` results across every mailbox from one daemon search; each mailbox is asked for its newest N and only the N newest overall are downloaded (PERSO-175).
+  A cut answer ends with "More results than the N shown", N being the results listed, and `mp search --json` carries `truncated`.
+  On Microsoft Graph a search that names no mailbox is one query across every folder, so mail in a folder the account does not configure matches too, and each result shows the mailbox or folder it sits in.
+- Server search on Microsoft Graph pages through results up to the limit, and when Microsoft's 1000-result cap stops a search every client names the cap instead of suggesting a larger limit (PERSO-175).
+  `mp search --mailbox` accepts any folder the server lists, and a mailbox that fails, or a result the server matched but did not hand over after three tries, is reported after the results.
 - TUI: in the wide list an expanded member shows its sender under CONTACT and its mailbox under SUBJECT, and in the narrow list a long mailbox label is cut short so the sender stays visible (PERSO-179).
 - TUI themes: every text colour of the list reaches 4.5:1 on both list backgrounds; mailypoppins-light's orange is a step darker, and catppuccin-latte's muted text, green, blue and yellow are darker than the upstream palette (PERSO-179).
 - Desktop: prefix keys wait for the second key, as in the TUI (#0148). After g, f, c, t, s or Space the which-key list stays until the next key; Escape cancels it and does nothing else, and a click drops it.

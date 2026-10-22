@@ -2886,3 +2886,22 @@ A `Table`'s `row_highlight_style` is applied to the whole row after the cells re
 
 `own` was first decided on `default_from` alone, and the config names no aliases, so a Sent copy sent from an alias or from a former `default_from` read as someone else's.
 The daemon now also counts every member in the `sent` mailbox as the user's own, as `agenda.rs` and the contacts extractor already treat Sent (PERSO-179).
+
+## async_imap returns HEADER.FIELDS data through `Fetch::header()` (2026-10-22)
+
+A `UID FETCH (BODY.PEEK[HEADER.FIELDS (DATE MESSAGE-ID)])` answer is read with `Fetch::header()`, because imap-proto maps `HEADER.FIELDS` to `MessageSection::Header` (PERSO-175).
+
+## A search limit shared across mailboxes needs a stub pass before any download (2026-10-22)
+
+Splitting the limit per mailbox dropped a busy mailbox's newest hits for an idle one's older ones, and asking every mailbox for the whole limit downloaded as many times the answer as there are mailboxes.
+The server search now asks each mailbox for its newest N as stubs (key, `Date`, `Message-ID`), merges and cuts them, and downloads only the survivors (PERSO-175).
+
+## A search has no next pass, so the sync's batch download drops hits (2026-10-22)
+
+`GraphClient::fetch_messages_by_ids` skips a throttled or failed message because the next sync finds it new again; reused for a search's second pass, it made hits vanish with nothing said.
+`fetch_search_hits` asks again for a throttled id after its `Retry-After`, three requests in all, and hands back every id still missing with why, which the search reports as a failure line (PERSO-175).
+
+## The burst test asserted the daemon commits nothing of its own (2026-10-22)
+
+`a_reading_client_receives_the_whole_burst_in_revision_order` expected only burst events after its bootstrap, but the account runtime starts off the startup path, so its `account.state_changed` and the `diagnostic.check_changed` of the health check it flips can land after `daemon.status` first answers.
+On a loaded run they fell between two burst revisions and failed the kind assertion; the test now receives them beside the burst and keeps the no-gap revision check over every event.
