@@ -1028,6 +1028,10 @@ fn an_account_blocked_by_another_engine_is_a_warning() {
         !text(&beta, "detail").is_empty(),
         "and it says whose lock it is: {beta}"
     );
+    assert!(
+        text(&beta, "detail").starts_with("blocked: "),
+        "without repeating the account the check's name carries: {beta}"
+    );
     assert_eq!(
         text(&check(&health, &format!("account:{ALPHA}")), "status"),
         "ok",
@@ -1077,6 +1081,10 @@ fn an_account_whose_runtime_never_came_up_is_a_failure() {
         text(&gamma, "status"),
         "fail",
         "an account with no local store has no runtime at all: {gamma}"
+    );
+    assert!(
+        text(&gamma, "detail").starts_with("no runtime at all: "),
+        "{gamma}"
     );
     assert_eq!(
         text(&check(&health, "store_open"), "status"),

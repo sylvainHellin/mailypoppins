@@ -440,7 +440,7 @@ mod tests {
                 diagnostics: vec![HealthCheck {
                     name: "account:work".to_string(),
                     status: CheckStatus::Fail,
-                    detail: "work has no runtime at all".to_string(),
+                    detail: "no runtime at all".to_string(),
                 }],
             },
         };

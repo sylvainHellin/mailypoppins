@@ -69,6 +69,24 @@ describe("health checks", () => {
     expect(shownChecks({ ...s, configProblem: { path: "/c", line: 3, message: "m", atStartup: false } })).toEqual([storeFail]);
   });
 
+  it("a dismissed line stays hidden until its check's detail changes or it recovers", () => {
+    const dismiss: Action = { type: "dismiss_check", name: storeFail.name, detail: storeFail.detail };
+    const s0 = run(initialState(), boot([mailboxWarn, storeFail]), dismiss);
+    expect(shownChecks(s0)).toEqual([mailboxWarn]);
+    // The same sentence again, by event or by a reconnect's snapshot, stays hidden.
+    const s1 = run(s0, envelope("diagnostic.check_changed", storeFail), boot([mailboxWarn, storeFail]));
+    expect(shownChecks(s1)).toEqual([mailboxWarn]);
+    // A new detail shows.
+    const moved = { ...storeFail, detail: "0 of 2 account store(s) are open under /a" };
+    expect(shownChecks(run(s1, envelope("diagnostic.check_changed", moved)))).toEqual([mailboxWarn, moved]);
+    // A recovery lets go, so the old sentence coming back shows again.
+    const back = run(s1, envelope("diagnostic.check_changed", { ...storeFail, status: "ok" }), envelope("diagnostic.check_changed", storeFail));
+    expect(back.healthDismissed).toEqual({});
+    expect(shownChecks(back)).toEqual([mailboxWarn, storeFail]);
+    // A click on a line whose detail already moved hides nothing.
+    expect(run(s0, { type: "dismiss_check", name: mailboxWarn.name, detail: "stale" }).healthDismissed).toEqual({ [storeFail.name]: storeFail.detail });
+  });
+
   it("orders and labels: a new check joins the end, a known one keeps its place", () => {
     expect(withCheck([mailboxWarn, storeFail], { ...mailboxWarn, status: "fail" }).map((c) => c.status)).toEqual(["fail", "fail"]);
     expect(checkLabel("config_loaded")).toBe("config.toml");

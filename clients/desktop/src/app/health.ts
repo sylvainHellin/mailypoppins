@@ -1,6 +1,7 @@
 // The daemon's health checks that are not ok (P6-U8): the bootstrap
 // snapshot's `diagnostics` seeds them and each `diagnostic.check_changed`
-// replaces, adds or, on `ok`, drops one by name. Pure; the reducer applies,
+// replaces, adds or, on `ok`, drops one by name. A dismissed line stays
+// hidden until its check's detail changes. Pure; the reducer applies,
 // StatusRegion shows (clients/desktop/docs/shell.md, "Health checks").
 
 import type { CheckStatus, HealthCheck } from "@/protocol/types";
@@ -56,12 +57,27 @@ export function withCheck(health: readonly HealthCheck[], check: HealthCheck): H
 }
 
 /**
- * The checks the banner shows: all of them, but `config_loaded` while the
- * config.toml banner is up, which says the same with the line and the
- * daemon's sentence.
+ * The dismissals that still hold after `health` changed: one whose check
+ * still carries the detail it was dismissed with. A new detail or a recovery
+ * lets it go, so the same sentence coming back later shows again.
  */
-export function shownChecks(s: Pick<AppState, "health" | "configProblem">): HealthCheck[] {
-  return s.configProblem ? s.health.filter((c) => c.name !== "config_loaded") : [...s.health];
+export function keptDismissals(dismissed: Readonly<Record<string, string>>, health: readonly HealthCheck[]): Record<string, string> {
+  const kept: Record<string, string> = {};
+  for (const check of health) {
+    if (dismissed[check.name] === check.detail) kept[check.name] = check.detail;
+  }
+  return kept;
+}
+
+/**
+ * The checks the banner shows: all of them, but a dismissed one while its
+ * detail has not changed, and `config_loaded` while the config.toml banner is
+ * up, which says the same with the line and the daemon's sentence.
+ */
+export function shownChecks(s: Pick<AppState, "health" | "healthDismissed" | "configProblem">): HealthCheck[] {
+  return s.health.filter(
+    (c) => s.healthDismissed[c.name] !== c.detail && !(s.configProblem && c.name === "config_loaded"),
+  );
 }
 
 /** Whether `health` already holds `check` as it is, so a re-bootstrap does not log it again. */

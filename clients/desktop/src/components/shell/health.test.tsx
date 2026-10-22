@@ -32,8 +32,22 @@ describe("the health banner", () => {
     await waitFor(() => expect(mock.editorOpens).toEqual([MOCK_CONFIG_PATH]));
 
     act(() => emitEnvelope("diagnostic.check_changed", { name: "config_loaded", status: "ok", detail: "/fixture/config.toml loaded, 2 account(s)" }));
-    act(() => emitEnvelope("diagnostic.check_changed", { name: seeded.name, status: "ok", detail: "home is serving" }));
+    act(() => emitEnvelope("diagnostic.check_changed", { name: seeded.name, status: "ok", detail: "serving" }));
     await waitFor(() => expect(document.querySelector("[data-health]")).toBeNull());
+  });
+
+  it("dismisses a line until its check's detail changes", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    const shown = await waitFor(() => {
+      const el = line(seeded.name);
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    await user.click(within(shown).getByRole("button", { name: "Dismiss Account home" }));
+    await waitFor(() => expect(line(seeded.name)).toBeNull());
+    act(() => emitEnvelope("diagnostic.check_changed", { ...seeded, detail: "blocked: a second engine took the lock" }));
+    await waitFor(() => expect(line(seeded.name)).toHaveTextContent("Account home: blocked: a second engine took the lock"));
   });
 
   it("shows a failing check in the destructive colour, and gives config_loaded to the config.toml banner when it shows", async () => {

@@ -452,27 +452,23 @@ impl Diagnostics {
     }
 
     /// One account's runtime, as the check that names it.
+    ///
+    /// The detail does not repeat the account: the check's name carries it,
+    /// and every client shows the two together (`account:home: blocked: ...`
+    /// in the TUI, `Account home: blocked: ...` on the desktop).
     fn account_check(&self, account: &str) -> Check {
         let name = format!("account:{account}");
         match self.runtimes.health_of(account) {
-            RuntimeHealth::Ready => Check::new(name, Status::Ok, format!("{account} is serving")),
-            RuntimeHealth::Opening => Check::new(
-                name,
-                Status::Warn,
-                format!("{account} is still opening its store"),
-            ),
+            RuntimeHealth::Ready => Check::new(name, Status::Ok, "serving"),
+            RuntimeHealth::Opening => Check::new(name, Status::Warn, "still opening its store"),
             // A lock held elsewhere is a normal state of a developer's machine:
             // the daemon still serves this account's reads.
-            RuntimeHealth::Blocked(reason) => Check::new(
-                name,
-                Status::Warn,
-                format!("{account} is blocked: {reason}"),
-            ),
-            RuntimeHealth::Failed(reason) => Check::new(
-                name,
-                Status::Fail,
-                format!("{account} has no runtime at all: {reason}"),
-            ),
+            RuntimeHealth::Blocked(reason) => {
+                Check::new(name, Status::Warn, format!("blocked: {reason}"))
+            }
+            RuntimeHealth::Failed(reason) => {
+                Check::new(name, Status::Fail, format!("no runtime at all: {reason}"))
+            }
         }
     }
 

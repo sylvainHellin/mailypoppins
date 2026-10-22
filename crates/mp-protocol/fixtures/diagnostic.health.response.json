@@ -44,12 +44,12 @@
         "status": "ok"
       },
       {
-        "detail": "tum is serving",
+        "detail": "serving",
         "name": "account:tum",
         "status": "ok"
       },
       {
-        "detail": "proton is blocked: another engine holds the store lock",
+        "detail": "blocked: another engine holds the store lock",
         "name": "account:proton",
         "status": "warn"
       }

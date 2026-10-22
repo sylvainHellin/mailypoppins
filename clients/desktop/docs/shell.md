@@ -917,6 +917,8 @@ Each check is a line under the connection banner, inside the same polite status 
 The labels are "config.toml", "Account stores", "Daemon socket", "Daemon log" and "Account <name>".
 The `config_loaded` line has "Open config.toml", since a warning there, such as a key the load ignored (PERSO-118), is fixed in the file.
 While the config.toml banner shows, the `config_loaded` line does not: that banner says the same with the line and keeps its own button.
+Each line has a dismiss button, since an account blocked by another engine's lock is a normal state of a machine running two.
+A dismissal is `state.healthDismissed`, the check's name and the detail it had: the line stays hidden while the check says exactly that, and a new detail or a recovery drops the dismissal, so the same sentence coming back later shows again.
 
 ### config.changed
 

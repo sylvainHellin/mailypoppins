@@ -124,7 +124,7 @@ import {
 } from "@/app/state";
 import { viewPanes } from "@/app/views";
 import { logActivity, logEvent, withNotice } from "@/app/activity";
-import { checkLevel, checkLine, isHealthCheck, knownCheck, withCheck } from "@/app/health";
+import { checkLevel, checkLine, isHealthCheck, keptDismissals, knownCheck, withCheck } from "@/app/health";
 import {
   closeOutbox,
   isOutboxOperation,
@@ -355,6 +355,8 @@ export type Action =
   | { type: "exit_search" }
   | { type: "intercepted_fetched"; urls: InterceptedUrl[] }
   | { type: "dismiss_intercept"; entry: InterceptedUrl }
+  /** Hide a health line until its check's detail changes (src/app/health.ts). */
+  | { type: "dismiss_check"; name: string; detail: string }
   // Mutations (app/mutations.ts dispatches these around each command).
   | {
       type: "mutation_apply";
@@ -1170,6 +1172,7 @@ function bootstrapModel(s: AppState, bootstrap: Bootstrap): AppState {
     // The snapshot's checks are the daemon's current complaints: a window
     // that opens finds them without waiting for a flip that may never come.
     health: bootstrap.snapshot.diagnostics,
+    healthDismissed: keptDismissals(s.healthDismissed, bootstrap.snapshot.diagnostics),
     mailboxes,
     accounts: s.accounts.data
       ? markStale({ ...s.accounts, data: s.accounts.data.filter((a) => names.includes(a.name)) })
@@ -1346,8 +1349,11 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       return staleAllSignatures(s);
     case "config.invalid":
       return configInvalid(s, payload as ConfigInvalid);
-    case "diagnostic.check_changed":
-      return isHealthCheck(payload) ? { ...s, health: withCheck(s.health, payload) } : s;
+    case "diagnostic.check_changed": {
+      if (!isHealthCheck(payload)) return s;
+      const health = withCheck(s.health, payload);
+      return { ...s, health, healthDismissed: keptDismissals(s.healthDismissed, health) };
+    }
     case "config.changed":
       return configChanged(
         s,
@@ -1972,6 +1978,12 @@ function reduce(s: AppState, a: Action): AppState {
       if (fresh.length === 0) return s;
       return { ...s, intercepted: [...s.intercepted, ...fresh].slice(-INTERCEPT_CAP) };
     }
+    case "dismiss_check":
+      // Keyed by the detail shown, so a line that changed under the click is
+      // not hidden in its new form.
+      return s.health.some((c) => c.name === a.name && c.detail === a.detail)
+        ? { ...s, healthDismissed: { ...s.healthDismissed, [a.name]: a.detail } }
+        : s;
     case "dismiss_intercept":
       // The notice names the link it is for: a timer armed for an older link
       // must not clear a newer one that replaced it in the same flush.

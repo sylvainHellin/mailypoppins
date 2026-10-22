@@ -909,6 +909,12 @@ export type AppState = {
    * `diagnostic.check_changed` by name, a recovered one dropped (src/app/health.ts).
    */
   health: HealthCheck[];
+  /**
+   * The health lines the user dismissed, check name to the detail it had
+   * then: hidden while that check still says exactly that, shown again once
+   * its detail changes or it recovers (src/app/health.ts).
+   */
+  healthDismissed: Record<string, string>;
   /** What the `password` overlay shows; null whenever another overlay or none is open. */
   passwordDialog: PasswordDialog | null;
   /** What the `account_wizard` overlay shows; null whenever another overlay or none is open. */
@@ -1005,6 +1011,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     config: emptyLoadable(),
     configProblem: null,
     health: [],
+    healthDismissed: {},
     passwordDialog: null,
     accountWizard: null,
     signIn: null,

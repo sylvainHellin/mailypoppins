@@ -59,7 +59,7 @@
     ],
     "operations": [],
     "diagnostics": [
-      {"name": "account:home", "status": "warn", "detail": "The last sync of home failed: the server refused the login."}
+      {"name": "account:home", "status": "warn", "detail": "blocked: another engine holds the store lock"}
     ]
   }
 }

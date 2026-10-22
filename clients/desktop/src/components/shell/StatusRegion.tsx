@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { CircleAlert, CloudOff, RefreshCw, Power, SquarePen } from "lucide-react";
+import { CircleAlert, CloudOff, RefreshCw, Power, SquarePen, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { bannerFor, type AppState } from "@/app/state";
 import { checkLabel, shownChecks } from "@/app/health";
@@ -33,7 +33,9 @@ function NoticeLine({ text }: { text: string }) {
 /**
  * One health check that is not ok, a line under the connection banner: the
  * icon carries the level, the text stays calm, and `config_loaded` offers the
- * file, which is where a warning about it is fixed.
+ * file, which is where a warning about it is fixed. Dismissing hides it until
+ * the check's detail changes: a blocked account is a normal state of a
+ * machine running a second engine, and a line that cannot go is a nag.
  */
 function HealthLine({ check }: { check: HealthCheck }) {
   const dispatch = useDispatch();
@@ -53,6 +55,14 @@ function HealthLine({ check }: { check: HealthCheck }) {
           Open config.toml
         </Button>
       ) : null}
+      <Button
+        size="icon-xs"
+        variant="ghost"
+        aria-label={`Dismiss ${checkLabel(check.name)}`}
+        onClick={() => dispatch({ type: "dismiss_check", name: check.name, detail: check.detail })}
+      >
+        <X aria-hidden="true" />
+      </Button>
     </div>
   );
 }
