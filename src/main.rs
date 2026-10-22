@@ -1711,9 +1711,10 @@ enum StandIn {
 /// the daemon's own sentence for it, minted by the same [`selector::not_found`]
 /// the resolver raises, so any other refusal (an ambiguity, a malformed
 /// selector, a message that is no invitation) is reported unchanged and
-/// fetches nothing. A selector with no mailbox, or one the account does not
-/// have, fetches nothing either: the server has to be told which mailbox to
-/// search.
+/// fetches nothing. A selector with no mailbox fetches nothing either: the
+/// server has to be told which mailbox to search. One that names a mailbox is
+/// handed to `message.fetch` whatever the mailbox, and a name the server does
+/// not list is refused there, in the daemon's words (#0141).
 ///
 /// The retry names the selector the fetch settled on, which is a copy the
 /// store already held in another mailbox when there was one (`already_present`,
@@ -1739,20 +1740,45 @@ async fn fetch_on_miss<T>(
         return Err(refused);
     };
 
+    // Which mailboxes a fetch may file a row under is the daemon's call, made
+    // from the server's folder list (#0141): a hit from a folder the sidebar
+    // leaves out (Proton's All Mail) is fetchable, as its `.eml` export and
+    // its forward already are. A refusal carries the daemon's own reason,
+    // whichever daemon answers: an older one that only knew the configured
+    // mailboxes says so in its own words.
     let account = account_config.name.as_str();
     let mut session = operation_session().await;
-    let fetched = run_admin_operation(
-        &mut session,
-        "message.fetch",
-        serde_json::json!({
-            "account": account,
-            "mailbox": mailbox_key,
-            "message_id": message_id,
-        }),
-        account,
-    )
-    .await
-    .map_err(|e| anyhow!("{refused}, and fetching it from the server failed: {e:#}"))?;
+    let fetched = match session
+        .run_operation(
+            "message.fetch",
+            serde_json::json!({
+                "account": account,
+                "mailbox": mailbox_key,
+                "message_id": message_id,
+            }),
+            DAEMON_TIMEOUT,
+            |_| {},
+        )
+        .await
+    {
+        Ok(Settled::Done(result)) => result,
+        Ok(Settled::Failed(message)) => {
+            bail!("{refused}, and fetching it from the server failed: {message}")
+        }
+        Err(mp_client::ClientError::Rpc(error))
+            if error.code != mp_protocol::ErrorCode::AccountNotReady.code() =>
+        {
+            bail!(
+                "{refused}, and the daemon will not fetch it: {}",
+                error.message
+            )
+        }
+        Err(mp_client::ClientError::Rpc(error)) => return Err(refusal(account, error)),
+        Err(mp_client::ClientError::Closed) => {
+            daemon_unavailable("the daemon closed the connection with an operation still running")
+        }
+        Err(e) => unanswered("message.fetch", e),
+    };
     let settled = wire_str(&fetched["selector"]).to_string();
     if fetched["already_present"].as_bool() == Some(true) {
         let held_in = wire_str(&fetched["mailbox"]);

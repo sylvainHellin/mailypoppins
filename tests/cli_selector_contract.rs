@@ -538,10 +538,49 @@ fn a_missing_sent_selector_is_fetched_and_then_shown_and_saved() {
     assert!(stderr.contains(&inbox), "{stderr}");
 }
 
+/// #0141 review: a server-search hit from a folder the account ignores (a
+/// `\Flagged` view, as Proton's Starred) is readable by `mp show`, as its
+/// `.eml` export and its forward already were. The CLI used to refuse it
+/// before asking the daemon, because the sidebar leaves the folder out.
+#[test]
+fn a_hit_from_an_ignored_folder_is_fetched_by_mp_show() {
+    use mailypoppins::catalogue::listing::{self, ListedFolder};
+    let fx = Fixture::new();
+    let key = "starred@example.com";
+    fx.ingest("inbox", 1, key, "Starred one");
+    let store = Store::open(
+        fx.data()
+            .join("accounts")
+            .join(ACCOUNT)
+            .join("store.sqlite3"),
+    )
+    .expect("store");
+    listing::replace(
+        &store,
+        ACCOUNT,
+        &[
+            ListedFolder::named("INBOX"),
+            ListedFolder::named("Starred").with_attributes(&["\\Flagged"]),
+        ],
+    )
+    .expect("listing");
+
+    let starred = format!("mp://{ACCOUNT}/Starred/{}", selector::encode(key));
+    let out = fx.run(&["show", &starred]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "mp show {starred} failed: {stderr}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Starred one"),
+        "{stderr}"
+    );
+}
+
 /// A message the server cannot hand over either (here: no credentials, no
 /// server) fails with both halves of the story, and a selector that names no
-/// mailbox, or one the account lacks, fetches nothing: the miss stays the
-/// plain "no match" it was.
+/// mailbox fetches nothing: the miss stays the plain "no match" it was. A
+/// mailbox the server does not list is the daemon's refusal to make, in its
+/// own words (#0141): the CLI no longer pre-checks the sidebar, which left a
+/// hit from an ignored folder (Proton's All Mail) unreadable by `mp show`.
 #[test]
 fn a_failed_fetch_names_the_miss_and_a_bare_key_fetches_nothing() {
     let fx = Fixture::new();
@@ -558,16 +597,25 @@ fn a_failed_fetch_names_the_miss_and_a_bare_key_fetches_nothing() {
             "mp {command}: {stderr}"
         );
 
-        // A bare key, and a mailbox the account does not have: nothing to
-        // tell the server, so the miss is reported as it always was.
-        for unaddressable in ["unknown@example.com", "nope/unknown@example.com"] {
-            let stderr = fx.err(&[command, unaddressable]);
-            assert!(stderr.contains("received mail"), "mp {command}: {stderr}");
-            assert!(
-                !stderr.contains("fetching it from the server"),
-                "mp {command} {unaddressable}: no mailbox to fetch from: {stderr}"
-            );
-        }
+        // A bare key: nothing to tell the server, so the miss is reported as
+        // it always was.
+        let stderr = fx.err(&[command, "unknown@example.com"]);
+        assert!(stderr.contains("received mail"), "mp {command}: {stderr}");
+        assert!(
+            !stderr.contains("fetch it"),
+            "mp {command}: no mailbox to fetch from: {stderr}"
+        );
+
+        // A mailbox the server never listed: the daemon refuses the fetch and
+        // says why, after the miss.
+        let stderr = fx.err(&[command, "nope/unknown@example.com"]);
+        assert!(
+            stderr.contains(&format!(
+                "no match for unknown@example.com in the received mail index of {ACCOUNT}/nope, \
+                 and the daemon will not fetch it: the server listed no folder 'nope'"
+            )),
+            "mp {command}: {stderr}"
+        );
     }
 }
 
