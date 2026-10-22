@@ -475,6 +475,22 @@ fn an_unknown_key_names_the_namespace_it_searched() {
     assert!(stderr.contains("drafts"), "{stderr}");
 }
 
+/// `mp <selector>` previews a draft, and a received-mail selector there is
+/// still refused, with the command that reads one named: `mp search` prints
+/// those selectors, and pasting one after a bare `mp` is the likely slip.
+#[test]
+fn a_received_selector_given_to_the_draft_preview_names_mp_show() {
+    let fx = Fixture::new();
+    fx.ingest("inbox", 1, "known@example.com", "Known");
+    let selector = format!("mp://{ACCOUNT}/inbox/known@example.com");
+
+    let stderr = fx.err(&[selector.as_str()]);
+    assert!(
+        stderr.contains(&format!("run `mp show {selector}`")),
+        "{stderr}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PERSO-155: a selector the store has no row for is fetched
 // ---------------------------------------------------------------------------

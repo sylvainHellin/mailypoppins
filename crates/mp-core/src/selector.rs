@@ -265,10 +265,14 @@ pub fn parse_in(
     let mailbox = match namespace {
         Namespace::Drafts => {
             if let Some(mb) = named_mailbox.as_deref() {
+                // The likeliest mistake is a received-mail selector handed to
+                // a draft command, `mp <selector>` above all, so the refusal
+                // names the command that reads one.
                 if mb != DRAFTS_MAILBOX {
                     bail!(
                         "{input} names the mailbox {mb}, but a draft selector's mailbox segment \
-                         is the reserved name `{DRAFTS_MAILBOX}`"
+                         is the reserved name `{DRAFTS_MAILBOX}`; to read received mail, run \
+                         `mp show {input}`"
                     );
                 }
             }
@@ -543,6 +547,10 @@ mod tests {
     fn a_draft_selector_rejects_a_non_drafts_mailbox() {
         let err = parse_in("inbox/some-id", Namespace::Drafts, "work", None).unwrap_err();
         assert!(err.to_string().contains("reserved name"), "{err}");
+        assert!(
+            err.to_string().contains("run `mp show inbox/some-id`"),
+            "the refusal names the command that reads received mail: {err}"
+        );
     }
 
     #[test]
