@@ -317,8 +317,8 @@ fn apply_flag_change(
 pub struct PostSendFlag {
     /// Local rows whose answered/forwarded bit was written.
     pub rows: usize,
-    /// The queued op, when there was a server half to owe. `None` for a Graph
-    /// account, or when nothing local matched.
+    /// The queued op, when there was a server half to owe. `None` when the
+    /// account has no server to write to, or when nothing local matched.
     pub op_id: Option<i64>,
 }
 
@@ -333,9 +333,10 @@ pub struct PostSendFlag {
 /// with the process, and that it costs the send path one `COMMIT` rather than N
 /// IMAP logins.
 ///
-/// `server_mailboxes` is empty for a Graph account (answered lives in extended
-/// MAPI properties and the backend is parked, #0042/#0055), which writes the
-/// local half and queues nothing.
+/// `server_mailboxes` is empty for an account with no usable server config,
+/// which writes the local half and queues nothing. A Graph account queues the
+/// same op, which the Graph arm of [`run_op`] turns into Outlook's MAPI
+/// history properties (PERSO-171); `reply_all` only matters there.
 ///
 /// The op's rollback is [`Rollback::None`] on purpose; see that variant.
 pub fn apply_post_send_flag(
@@ -343,6 +344,7 @@ pub fn apply_post_send_flag(
     account: &str,
     message_id: &str,
     answered: bool,
+    reply_all: bool,
     server_mailboxes: &[String],
 ) -> Result<PostSendFlag> {
     let tx = store
@@ -395,6 +397,7 @@ pub fn apply_post_send_flag(
                 message_id: message_id.to_string(),
                 mailboxes: server_mailboxes.to_vec(),
                 answered,
+                reply_all: answered && reply_all,
             },
             &Rollback::None,
         )?)
@@ -1552,6 +1555,7 @@ mod tests {
             "alice",
             "<inbox-1@example.com>",
             true,
+            false,
             &["INBOX".to_string(), "Archive".to_string()],
         )
         .unwrap();
@@ -1564,6 +1568,51 @@ mod tests {
         assert_eq!(queued.len(), 1, "N mailboxes are one op, not N");
         assert_eq!(queued[0].kind, "set_answered");
         assert_eq!(queued[0].rollback, Rollback::None);
+    }
+
+    /// The verb Graph records rides the payload (PERSO-171): a reply to all
+    /// says so, and a forward never does, whatever the caller passed.
+    #[test]
+    fn the_post_send_op_carries_the_reply_all_verb_and_a_forward_drops_it() {
+        let fx = fixture();
+        fx.ingest_plain("inbox", 1, "Question");
+        fx.ingest_plain("inbox", 2, "Passing on");
+        for (message_id, answered) in [
+            ("<inbox-1@example.com>", true),
+            ("<inbox-2@example.com>", false),
+        ] {
+            apply_post_send_flag(
+                &fx.store,
+                "alice",
+                message_id,
+                answered,
+                true,
+                &["inbox".to_string()],
+            )
+            .unwrap();
+        }
+        let ops: Vec<_> = queued_ops(&fx.store, "alice")
+            .unwrap()
+            .into_iter()
+            .map(|row| row.op)
+            .collect();
+        assert_eq!(
+            ops,
+            vec![
+                ServerOp::SetAnswered {
+                    message_id: "<inbox-1@example.com>".to_string(),
+                    mailboxes: vec!["inbox".to_string()],
+                    answered: true,
+                    reply_all: true,
+                },
+                ServerOp::SetAnswered {
+                    message_id: "<inbox-2@example.com>".to_string(),
+                    mailboxes: vec!["inbox".to_string()],
+                    answered: false,
+                    reply_all: false,
+                },
+            ]
+        );
     }
 
     /// The #0076 durability contract, offline: a send that succeeded and whose
@@ -1615,6 +1664,7 @@ mod tests {
             "alice",
             "<inbox-1@example.com>",
             true,
+            false,
             &["INBOX".to_string()],
         )
         .unwrap();
@@ -1667,6 +1717,7 @@ mod tests {
             &fx.store,
             "alice",
             "<inbox-1@example.com>",
+            false,
             false,
             &["INBOX".to_string()],
         )

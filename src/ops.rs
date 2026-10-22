@@ -114,10 +114,18 @@ pub enum ServerOp {
     /// Idempotent by construction (`+FLAGS` on a flag that may already be set)
     /// and not-found tolerant per mailbox, so a replay after a crash converges
     /// rather than failing.
+    ///
+    /// On Graph the op writes Outlook's MAPI history properties on every copy
+    /// of the message instead (PERSO-171), and `reply_all` picks the verb it
+    /// records: Exchange tells a reply from a reply to all, IMAP does not, so
+    /// the IMAP arm ignores it. Absent from a payload queued before the field
+    /// existed, which reads as a plain reply.
     SetAnswered {
         message_id: String,
         mailboxes: Vec<String>,
         answered: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reply_all: bool,
     },
 }
 
@@ -228,6 +236,7 @@ async fn run_imap(config: &ImapConfig, op: &ServerOp) -> Result<()> {
             message_id,
             mailboxes,
             answered,
+            ..
         } => {
             let flag = if *answered {
                 crate::types::FLAG_ANSWERED
@@ -259,15 +268,18 @@ async fn run_graph(config: &GraphConfig, op: &ServerOp) -> Result<()> {
             log::debug!("[graph] flag parked locally for {message_id}; Graph is seen-only");
             Ok(())
         }
-        // Graph exposes the answered state only through extended MAPI
-        // properties and the backend is parked (#0042, #0055), so the local
-        // write stands alone; `ingest::apply_seen_flags` is what keeps a Graph
-        // sync from erasing it. `Ok`, not an error: this op must never fail a
-        // send's bookkeeping (#0076). The queue-side guard is that the send
-        // path enqueues nothing on a Graph account at all.
-        ServerOp::SetAnswered { message_id, .. } => {
-            log::debug!("[graph] answered/forwarded parked locally for {message_id}");
-            Ok(())
+        // Graph has no answered flag; Outlook keeps the reply and forward
+        // history in MAPI properties, which Exchange accepts through a PATCH
+        // (PERSO-171, measured on the EVOQS account on 2026-10-22). The
+        // folder list is not read: every copy of the message is written.
+        ServerOp::SetAnswered {
+            message_id,
+            answered,
+            reply_all,
+            ..
+        } => {
+            let verb = crate::graph::LastVerb::of_send(*answered, *reply_all);
+            crate::graph::mark_last_verb_graph(config, message_id, verb).await
         }
     }
 }
@@ -311,6 +323,7 @@ mod tests {
                 message_id: "<1@x>".to_string(),
                 mailboxes: vec!["INBOX".to_string()],
                 answered: true,
+                reply_all: false,
             }
             .kind(),
             "set_answered"
@@ -321,6 +334,7 @@ mod tests {
                 message_id: "<abc@x>".to_string(),
                 mailboxes: Vec::new(),
                 answered: false,
+                reply_all: false,
             }
             .message_id(),
             "<abc@x>"
@@ -348,10 +362,33 @@ mod tests {
                 message_id: "<5@x>".to_string(),
                 mailboxes: vec!["INBOX".to_string(), "Archive".to_string()],
                 answered: true,
+                reply_all: false,
+            },
+            ServerOp::SetAnswered {
+                message_id: "<6@x>".to_string(),
+                mailboxes: vec!["inbox".to_string()],
+                answered: true,
+                reply_all: true,
             },
         ] {
             let json = serde_json::to_string(&op).unwrap();
             assert_eq!(serde_json::from_str::<ServerOp>(&json).unwrap(), op);
         }
+    }
+
+    /// A `set_answered` payload a build before PERSO-171 queued carries no
+    /// `reply_all` and still decodes, as a plain reply; a plain reply writes the
+    /// payload it always did.
+    #[test]
+    fn an_answered_op_queued_before_reply_all_existed_still_decodes() {
+        let old = r#"{"SetAnswered":{"message_id":"<7@x>","mailboxes":["INBOX"],"answered":true}}"#;
+        let op = ServerOp::SetAnswered {
+            message_id: "<7@x>".to_string(),
+            mailboxes: vec!["INBOX".to_string()],
+            answered: true,
+            reply_all: false,
+        };
+        assert_eq!(serde_json::from_str::<ServerOp>(old).unwrap(), op);
+        assert_eq!(serde_json::to_string(&op).unwrap(), old);
     }
 }

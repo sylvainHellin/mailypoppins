@@ -1370,7 +1370,37 @@ pub fn apply_seen_flags(
     )
 }
 
-/// The shared transaction both entry points above run in.
+/// Apply a whole mailbox's worth of Graph flag states in one transaction: the
+/// Graph entry point (PERSO-171).
+///
+/// The server's `\Seen` replaces the row's, as in [`apply_seen_flags`]. Its
+/// answered and forwarded bits, read off Outlook's `PidTagLastVerbExecuted`,
+/// are only ever added: the property holds the *last* verb alone, so a
+/// forward after a reply reads as a forward, and a delta entry carries no
+/// verb at all. Neither says the message was never answered, so neither may
+/// clear a bit the row holds. The star is left alone, as Graph does not
+/// mirror it (#0007).
+pub fn apply_graph_flags(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    flags: impl IntoIterator<Item = (i64, MessageFlags)>,
+) -> usize {
+    apply_flag_updates(
+        store,
+        account,
+        mailbox,
+        flags.into_iter().map(|(uid, server)| {
+            (uid, move |have: MessageFlags| MessageFlags {
+                answered: have.answered || server.answered,
+                forwarded: have.forwarded || server.forwarded,
+                ..have.with_seen(server.seen)
+            })
+        }),
+    )
+}
+
+/// The shared transaction the entry points above run in.
 fn apply_flag_updates<F>(
     store: &Store,
     account: &str,

@@ -33,8 +33,20 @@ const IN_REPLY_TO_PROPERTY: &str = "String 0x1042";
 /// The MAPI property behind `References`, `PidTagInternetReferences`.
 const REFERENCES_PROPERTY: &str = "String 0x1039";
 
+/// The MAPI property Outlook records a message's last reply or forward in,
+/// `PidTagLastVerbExecuted` (PERSO-171): see [`LastVerb`].
+const LAST_VERB_PROPERTY: &str = "Integer 0x1081";
+
+/// When that verb ran, `PidTagLastVerbExecutionTime`.
+const LAST_VERB_TIME_PROPERTY: &str = "SystemTime 0x1082";
+
+/// The icon Outlook draws for a message, `PidTagIconIndex`: what shows the
+/// replied or forwarded arrow in the message list.
+const ICON_INDEX_PROPERTY: &str = "Integer 0x1080";
+
 /// The `$expand` that brings a message's `In-Reply-To` and `References`
-/// (PERSO-147), percent-encoded for a URL and for a `/$batch` sub-request.
+/// (PERSO-147) and its last reply or forward (PERSO-171), percent-encoded for
+/// a URL and for a `/$batch` sub-request.
 ///
 /// The two MAPI properties rather than `internetMessageHeaders`: measured on
 /// the EVOQS inbox on 2026-10-22, the whole header block costs about 9.3 KB per
@@ -45,7 +57,114 @@ const REFERENCES_PROPERTY: &str = "String 0x1039";
 /// re-thread walks the folder listing, and both accept it. A `$search` and the
 /// Message-ID `$filter` accept it too (measured on the EVOQS inbox on
 /// 2026-10-22), so a search hit `message.fetch` lands is threaded at ingest.
-const THREADING_EXPAND: &str = "$expand=singleValueExtendedProperties($filter=id%20eq%20'String%200x1042'%20or%20id%20eq%20'String%200x1039')";
+/// The last-verb property rides the same filter for about 6 bytes a message
+/// that carries it, so a message downloaded after a reply in Outlook lands
+/// answered.
+const MESSAGE_EXPAND: &str = "$expand=singleValueExtendedProperties($filter=id%20eq%20'String%200x1042'%20or%20id%20eq%20'String%200x1039'%20or%20id%20eq%20'Integer%200x1081')";
+
+/// The `$expand` the folder enumeration carries (PERSO-171): the last verb
+/// alone, so the listing that restates `isRead` on every held row restates
+/// the reply and forward history beside it. Measured on the EVOQS inbox on
+/// 2026-10-22: 1.2 KB more on a 200-message page of 74 KB. `/messages/delta`
+/// refuses it like it refuses [`MESSAGE_EXPAND`], so a quick pass that walks
+/// the delta leaves the history to the next enumeration.
+const LAST_VERB_EXPAND: &str =
+    "$expand=singleValueExtendedProperties($filter=id%20eq%20'Integer%200x1081')";
+
+/// The reply or forward Outlook last recorded on a message, the value of
+/// `PidTagLastVerbExecuted` (PERSO-171).
+///
+/// Graph has no answered flag; Exchange keeps this MAPI property instead, and
+/// Outlook draws its replied and forwarded arrows from it and from
+/// `PidTagIconIndex`. It holds the *last* verb only: a reply followed by a
+/// forward reads as a forward, which is why the sync merge only ever adds a
+/// history bit and never clears one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastVerb {
+    Reply,
+    ReplyAll,
+    Forward,
+}
+
+impl LastVerb {
+    /// The verb a sent draft records: a forward when it was not an answer.
+    pub fn of_send(answered: bool, reply_all: bool) -> Self {
+        match (answered, reply_all) {
+            (false, _) => LastVerb::Forward,
+            (true, false) => LastVerb::Reply,
+            (true, true) => LastVerb::ReplyAll,
+        }
+    }
+
+    /// `PidTagLastVerbExecuted`: `NOTEIVERB_REPLYTOSENDER`, `_REPLYTOALL`,
+    /// `_FORWARD`.
+    pub fn code(self) -> i64 {
+        match self {
+            LastVerb::Reply => 102,
+            LastVerb::ReplyAll => 103,
+            LastVerb::Forward => 104,
+        }
+    }
+
+    /// `PidTagIconIndex`: 261 the replied mail icon, 262 the forwarded one.
+    pub fn icon(self) -> i64 {
+        match self {
+            LastVerb::Reply | LastVerb::ReplyAll => 261,
+            LastVerb::Forward => 262,
+        }
+    }
+
+    /// The verb a value of the property names, `None` for any other verb
+    /// (a reply to a public folder, a voting button, an open).
+    fn from_code(code: i64) -> Option<Self> {
+        match code {
+            102 => Some(LastVerb::Reply),
+            103 => Some(LastVerb::ReplyAll),
+            104 => Some(LastVerb::Forward),
+            _ => None,
+        }
+    }
+
+    /// The verb among a message's expanded extended properties. Graph sends
+    /// an integer property's value as a string.
+    fn from_properties(properties: &[GraphExtendedProperty]) -> Option<Self> {
+        properties
+            .iter()
+            .find(|p| p.id.eq_ignore_ascii_case(LAST_VERB_PROPERTY))
+            .and_then(|p| p.value.as_deref())
+            .and_then(|v| v.trim().parse().ok())
+            .and_then(Self::from_code)
+    }
+
+    /// `flags` with the history bit this verb stands for set: a reply or a
+    /// reply to all is `\Answered`, a forward `$Forwarded`.
+    pub fn mark(self, flags: crate::types::MessageFlags) -> crate::types::MessageFlags {
+        match self {
+            LastVerb::Reply | LastVerb::ReplyAll => crate::types::MessageFlags {
+                answered: true,
+                ..flags
+            },
+            LastVerb::Forward => crate::types::MessageFlags {
+                forwarded: true,
+                ..flags
+            },
+        }
+    }
+}
+
+/// The PATCH body that records `verb` on a message the way Outlook does: the
+/// verb, when it ran, and the icon (PERSO-171). Exchange Online accepted all
+/// three through Graph on the EVOQS account on 2026-10-22 (HTTP 200, read
+/// back unchanged).
+fn last_verb_patch_body(verb: LastVerb, at: chrono::DateTime<chrono::Utc>) -> serde_json::Value {
+    serde_json::json!({
+        "singleValueExtendedProperties": [
+            {"id": LAST_VERB_PROPERTY, "value": verb.code().to_string()},
+            {"id": LAST_VERB_TIME_PROPERTY, "value": at.format("%Y-%m-%dT%H:%M:%SZ").to_string()},
+            {"id": ICON_INDEX_PROPERTY, "value": verb.icon().to_string()},
+        ]
+    })
+}
 
 /// Graph's hard ceiling on the number of requests in one `/$batch` call.
 const BATCH_MAX_REQUESTS: usize = 20;
@@ -257,8 +376,8 @@ struct GraphMessage {
     is_read: bool,
     #[serde(default)]
     conversation_id: Option<String>,
-    /// The two threading properties [`THREADING_EXPAND`] asks for, absent
-    /// when the message carries neither header.
+    /// The extended properties [`MESSAGE_EXPAND`] asks for, absent when the
+    /// message carries none of them.
     #[serde(default)]
     single_value_extended_properties: Vec<GraphExtendedProperty>,
 }
@@ -396,6 +515,9 @@ struct GraphMessageIdEntry {
     is_read: bool,
     #[serde(default)]
     received_date_time: Option<String>,
+    /// [`LAST_VERB_EXPAND`]'s answer, absent when Outlook recorded no verb.
+    #[serde(default)]
+    single_value_extended_properties: Vec<GraphExtendedProperty>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -416,6 +538,10 @@ pub struct FolderEntry {
     pub graph_id: String,
     /// The server's `\Seen` equivalent.
     pub is_read: bool,
+    /// The reply or forward Outlook last recorded (PERSO-171). Only a folder
+    /// enumeration reads it; a delta entry carries `None`, which the flag
+    /// merge reads as "nothing to add", never as "not answered".
+    pub last_verb: Option<LastVerb>,
     /// `receivedDateTime` verbatim (ISO 8601, always UTC from Graph), used to
     /// order a capped download newest-first. Sorts as a string, which is why
     /// the UTC form matters; `None` sorts oldest.
@@ -609,7 +735,7 @@ fn batch_request_body(ids: &[&str]) -> serde_json::Value {
                 "method": "GET",
                 "url": format!(
                     "/me/messages/{}?$select={},conversationId&{}",
-                    encoded, MESSAGE_SELECT, THREADING_EXPAND
+                    encoded, MESSAGE_SELECT, MESSAGE_EXPAND
                 ),
             })
         })
@@ -1223,14 +1349,19 @@ fn graph_message_to_fetched_email(msg: &GraphMessage) -> FetchedEmail {
         server_has_attachments: Some(msg.has_attachments),
         message_id,
         attachments: Vec::new(), // filled by caller if has_attachments
-        // Graph answers `isRead` and nothing else: the other two bits of the
-        // second axis (#TKT-0051) stay unset on this path, and the flag merge
-        // in `ingest::apply_seen_flags` is what keeps a Graph pass from
-        // erasing one a user set here. Ingest itself writes the set verbatim,
-        // so a *re-download* of a row this build flagged would drop that flag;
-        // the Graph fetch only downloads Message-IDs the store does not hold
-        // (`ingest::known_message_ids`), which is what keeps that out of reach.
-        flags: crate::types::MessageFlags::seen(msg.is_read),
+        // `isRead`, and the reply or forward Outlook recorded in its MAPI
+        // property (PERSO-171). The flag merge in `ingest::apply_graph_flags`
+        // only ever adds a history bit, so a Graph pass never erases one a
+        // user set here. Ingest itself writes the set verbatim, so a
+        // *re-download* of a row this build flagged would drop a bit the
+        // server does not hold; the Graph fetch only downloads Message-IDs the
+        // store does not hold (`ingest::known_message_ids`), which is what
+        // keeps that out of reach.
+        flags: {
+            let seen = crate::types::MessageFlags::seen(msg.is_read);
+            LastVerb::from_properties(&msg.single_value_extended_properties)
+                .map_or(seen, |verb| verb.mark(seen))
+        },
         calendar_ics: None, // filled by caller once attachments are fetched
         event: None,
     }
@@ -1459,7 +1590,7 @@ fn enumeration_url(folder_path: &str, ordered: bool) -> String {
     format!(
         "{}/me/mailFolders/{}/messages?\
          $select=id,internetMessageId,isRead,receivedDateTime&\
-         {}$top=200",
+         {}{LAST_VERB_EXPAND}&$top=200",
         GRAPH_BASE, folder_path, orderby
     )
 }
@@ -1657,6 +1788,8 @@ fn absorb_delta_page(
                 graph_id: entry.id,
                 is_read: entry.is_read,
                 received: entry.received_date_time,
+                // The delta refuses the `$expand` that would carry it.
+                last_verb: None,
             },
         );
     }
@@ -2081,9 +2214,18 @@ fn absorb_page(result: &mut HashMap<String, FolderEntry>, page: Vec<GraphMessage
                 graph_id: entry.id,
                 is_read: entry.is_read,
                 received: entry.received_date_time,
+                last_verb: LastVerb::from_properties(&entry.single_value_extended_properties),
             },
         );
     }
+}
+
+/// The flags the server states for one held row: `isRead`, and the history
+/// bit its last verb stands for (PERSO-171). What the merge does with them is
+/// [`crate::ingest::apply_graph_flags`]'s business.
+fn server_flags(entry: &FolderEntry) -> crate::types::MessageFlags {
+    let seen = crate::types::MessageFlags::seen(entry.is_read);
+    entry.last_verb.map_or(seen, |verb| verb.mark(seen))
 }
 
 /// The messages this pass will download, and how many new ones it found in all.
@@ -2399,7 +2541,7 @@ impl GraphClient {
     /// reached the last page (PERSO-147).
     ///
     /// The listing carries `conversationId` and the two MAPI threading
-    /// properties ([`THREADING_EXPAND`]) and nothing else, about 510 bytes a
+    /// properties ([`MESSAGE_EXPAND`]) and nothing else, about 510 bytes a
     /// message, so a folder of a few thousand messages is a few requests and
     /// about a megabyte, and no body is downloaded again.
     async fn list_folder_threading(
@@ -2497,7 +2639,7 @@ impl GraphClient {
 fn threading_listing_url(folder_path: &str) -> String {
     format!(
         "{GRAPH_BASE}/me/mailFolders/{folder_path}/messages?\
-         $select=internetMessageId,conversationId&{THREADING_EXPAND}&$top=200"
+         $select=internetMessageId,conversationId&{MESSAGE_EXPAND}&$top=200"
     )
 }
 
@@ -2792,15 +2934,16 @@ pub async fn sync_mailboxes_graph(
         }
         span.mark(&format!("ingest:{}", target.role));
 
-        // Read status for messages the store already holds, one transaction
-        // for the whole folder.
-        result.flags_updated += crate::ingest::apply_seen_flags(
+        // Read status, and the reply or forward Outlook recorded (PERSO-171),
+        // for messages the store already holds, one transaction for the whole
+        // folder.
+        result.flags_updated += crate::ingest::apply_graph_flags(
             &store,
             account_name,
             target.role.as_str(),
             server
                 .iter()
-                .map(|(mid, entry)| (crate::ingest::graph_uid(mid), entry.is_read)),
+                .map(|(mid, entry)| (crate::ingest::graph_uid(mid), server_flags(entry))),
         );
         span.mark(&format!("flags:{}", target.role));
 
@@ -3112,6 +3255,19 @@ impl GraphClient {
         &self,
         internet_message_id: &str,
     ) -> Result<Option<String>> {
+        Ok(self
+            .find_messages_by_internet_id(internet_message_id)
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    /// Every copy of a message the mailbox holds, by its RFC822 Message-ID:
+    /// one Graph id per folder it is filed in.
+    pub async fn find_messages_by_internet_id(
+        &self,
+        internet_message_id: &str,
+    ) -> Result<Vec<String>> {
         let url = message_lookup_url(internet_message_id)?;
 
         let resp = self
@@ -3137,7 +3293,29 @@ impl GraphClient {
             .await
             .context("Failed to parse message lookup")?;
 
-        Ok(result.value.first().map(|e| e.id.clone()))
+        Ok(result.value.into_iter().map(|e| e.id).collect())
+    }
+
+    /// Record a reply or a forward on a message the way Outlook does, through
+    /// its MAPI history properties (PERSO-171).
+    pub async fn set_last_verb(&self, message_id: &str, verb: LastVerb) -> Result<()> {
+        let url = format!("{}/me/messages/{}", GRAPH_BASE, message_id);
+        let resp = self
+            .client
+            .patch(&url)
+            .bearer_auth(self.bearer())
+            .json(&last_verb_patch_body(verb, chrono::Utc::now()))
+            .send()
+            .await
+            .context("Failed to record the reply or forward")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Recording the reply or forward failed (HTTP {status}): {body}"
+            ));
+        }
+        Ok(())
     }
 
     /// Move a message to a different folder.
@@ -3270,6 +3448,40 @@ pub async fn delete_message_graph(config: &GraphConfig, internet_message_id: &st
     Ok(())
 }
 
+/// Record a reply or a forward on every server copy of a message, naming it by
+/// its `Message-ID` (PERSO-171): the Graph half of the post-send
+/// `set_answered` op.
+///
+/// Every copy, because the store flags every local copy of a source and the
+/// server holds one item per folder the message is filed in. Idempotent: a
+/// replay writes the same verb again, with a fresher time. A message the
+/// mailbox no longer holds is the typed not-found the drain converges on.
+pub async fn mark_last_verb_graph(
+    config: &GraphConfig,
+    internet_message_id: &str,
+    verb: LastVerb,
+) -> Result<()> {
+    let client = GraphClient::new_async(config).await?;
+    let copies = client
+        .find_messages_by_internet_id(internet_message_id)
+        .await?;
+    if copies.is_empty() {
+        return Err(crate::ops::NotFoundOnServer {
+            message_id: internet_message_id.to_string(),
+            mailbox: None,
+        }
+        .into());
+    }
+    for graph_id in &copies {
+        client.set_last_verb(graph_id, verb).await?;
+    }
+    info!(
+        "Graph: recorded {verb:?} on {} cop(ies) of {internet_message_id}",
+        copies.len()
+    );
+    Ok(())
+}
+
 /// Mark read/unread via Graph API.
 pub async fn mark_read_graph(
     config: &GraphConfig,
@@ -3337,7 +3549,7 @@ fn graph_query_param(query: &crate::search::GraphQuery) -> Option<(&'static str,
 /// matches a handful of copies at most.
 ///
 /// Every search asks for the threading signals the sync download asks for,
-/// `conversationId` and [`THREADING_EXPAND`] (PERSO-147), so a hit
+/// `conversationId` and [`MESSAGE_EXPAND`] (PERSO-147), so a hit
 /// `message.fetch` ingests threads at once instead of waiting for a re-thread
 /// that lists its whole folder for it. Graph accepts the `$expand` beside a
 /// `$search` and beside a `$filter`.
@@ -3360,7 +3572,7 @@ fn search_url(base: &str, limit: usize, query: &crate::search::GraphQuery) -> Re
         .collect::<Vec<_>>()
         .join("&");
     // Already percent-encoded, so it joins the query as it is.
-    let query = format!("{query}&{THREADING_EXPAND}");
+    let query = format!("{query}&{MESSAGE_EXPAND}");
     let mut url = reqwest::Url::parse(base).with_context(|| format!("parsing {base}"))?;
     url.set_query(Some(&query));
     Ok(url)
@@ -3660,6 +3872,7 @@ mod tests {
             graph_id: graph_id.to_string(),
             is_read: false,
             received: received.map(|s| s.to_string()),
+            last_verb: None,
         }
     }
 
@@ -3764,6 +3977,7 @@ mod tests {
                 internet_message_id: Some("  <padded@x>\r\n".into()),
                 is_read: false,
                 received_date_time: Some("2026-08-06T10:00:00Z".into()),
+                single_value_extended_properties: Vec::new(),
             }],
         );
         assert_eq!(map.keys().collect::<Vec<_>>(), vec!["<padded@x>"]);
@@ -3794,12 +4008,14 @@ mod tests {
                     internet_message_id: None,
                     is_read: false,
                     received_date_time: None,
+                    single_value_extended_properties: Vec::new(),
                 },
                 GraphMessageIdEntry {
                     id: "BBB".into(),
                     internet_message_id: Some("   ".into()),
                     is_read: false,
                     received_date_time: None,
+                    single_value_extended_properties: Vec::new(),
                 },
             ],
         );
@@ -3996,17 +4212,209 @@ mod tests {
         let body = batch_request_body(&["AAA"]);
         let url = body["requests"][0]["url"].as_str().unwrap();
         assert!(url.contains(",conversationId&"), "got {url}");
-        assert!(url.contains(THREADING_EXPAND), "got {url}");
+        assert!(url.contains(MESSAGE_EXPAND), "got {url}");
         let listing = threading_listing_url("inbox");
         assert!(
             listing.contains("$select=internetMessageId,conversationId&"),
             "got {listing}"
         );
-        assert!(listing.contains(THREADING_EXPAND), "got {listing}");
+        assert!(listing.contains(MESSAGE_EXPAND), "got {listing}");
         assert!(
-            !THREADING_EXPAND.contains(' '),
+            !MESSAGE_EXPAND.contains(' '),
             "a batch sub-request URL carries no raw space"
         );
+    }
+
+    /// PERSO-171: the enumeration that restates `isRead` asks for the last
+    /// verb beside it, and only for that; the delta, which refuses an
+    /// `$expand`, does not ask.
+    #[test]
+    fn the_enumeration_asks_for_the_last_verb_and_the_delta_does_not() {
+        for ordered in [true, false] {
+            let url = enumeration_url("inbox", ordered);
+            assert!(url.contains(LAST_VERB_EXPAND), "got {url}");
+            assert!(!url.contains("0x1042"), "got {url}");
+        }
+        assert!(!LAST_VERB_EXPAND.contains(' '));
+        assert!(!delta_url("inbox", false).contains("$expand"));
+        assert!(MESSAGE_EXPAND.contains("'Integer%200x1081'"));
+    }
+
+    /// The property's values map onto the history bits: a reply and a reply to
+    /// all are answered, a forward is forwarded, any other verb is nothing.
+    #[test]
+    fn the_last_verb_property_maps_onto_the_history_bits() {
+        let props = |value: &str| {
+            vec![GraphExtendedProperty {
+                id: "Integer 0x1081".into(),
+                value: Some(value.into()),
+            }]
+        };
+        assert_eq!(
+            LastVerb::from_properties(&props("102")),
+            Some(LastVerb::Reply)
+        );
+        assert_eq!(
+            LastVerb::from_properties(&props("103")),
+            Some(LastVerb::ReplyAll)
+        );
+        assert_eq!(
+            LastVerb::from_properties(&props("104")),
+            Some(LastVerb::Forward)
+        );
+        assert_eq!(LastVerb::from_properties(&props("105")), None);
+        assert_eq!(LastVerb::from_properties(&props("junk")), None);
+        assert_eq!(LastVerb::from_properties(&[]), None);
+        // The threading properties beside it are not mistaken for it.
+        let threading = vec![GraphExtendedProperty {
+            id: "String 0x1042".into(),
+            value: Some("102".into()),
+        }];
+        assert_eq!(LastVerb::from_properties(&threading), None);
+
+        let none = crate::types::MessageFlags::default();
+        let replied = LastVerb::ReplyAll.mark(none);
+        assert!(replied.answered && !replied.forwarded);
+        let forwarded = LastVerb::Forward.mark(none);
+        assert!(forwarded.forwarded && !forwarded.answered);
+
+        // A downloaded message carries the verb into its flags.
+        let msg = graph_message(serde_json::json!({
+            "id": "AAMk1",
+            "internetMessageId": "<a@x>",
+            "isRead": true,
+            "singleValueExtendedProperties": [{"id": "Integer 0x1081", "value": "102"}]
+        }));
+        let flags = graph_message_to_fetched_email(&msg).flags;
+        assert!(flags.seen && flags.answered && !flags.forwarded);
+
+        // An enumerated entry too, and a delta entry never.
+        let mut map = HashMap::new();
+        absorb_page(
+            &mut map,
+            vec![GraphMessageIdEntry {
+                id: "AAA".into(),
+                internet_message_id: Some("<a@x>".into()),
+                is_read: false,
+                received_date_time: None,
+                single_value_extended_properties: props("104"),
+            }],
+        );
+        assert_eq!(map["<a@x>"].last_verb, Some(LastVerb::Forward));
+        let flags = server_flags(&map["<a@x>"]);
+        assert!(!flags.seen && flags.forwarded && !flags.answered);
+    }
+
+    /// The PATCH body records the verb, its time and the icon, as the three
+    /// properties Exchange accepted on the live test (PERSO-171).
+    #[test]
+    fn the_last_verb_patch_names_the_verb_its_time_and_the_icon() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:24:45Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let body = |verb| last_verb_patch_body(verb, at);
+        assert_eq!(
+            body(LastVerb::Reply),
+            serde_json::json!({"singleValueExtendedProperties": [
+                {"id": "Integer 0x1081", "value": "102"},
+                {"id": "SystemTime 0x1082", "value": "2026-10-22T10:24:45Z"},
+                {"id": "Integer 0x1080", "value": "261"},
+            ]})
+        );
+        let all = body(LastVerb::ReplyAll);
+        assert_eq!(all["singleValueExtendedProperties"][0]["value"], "103");
+        assert_eq!(all["singleValueExtendedProperties"][2]["value"], "261");
+        let forward = body(LastVerb::Forward);
+        assert_eq!(forward["singleValueExtendedProperties"][0]["value"], "104");
+        assert_eq!(forward["singleValueExtendedProperties"][2]["value"], "262");
+
+        assert_eq!(LastVerb::of_send(true, false), LastVerb::Reply);
+        assert_eq!(LastVerb::of_send(true, true), LastVerb::ReplyAll);
+        assert_eq!(LastVerb::of_send(false, true), LastVerb::Forward);
+    }
+
+    /// The store half (PERSO-171): a sync row whose listing carries 0x1081=102
+    /// lands answered, a held row a later enumeration names as replied turns
+    /// answered, and an entry with no verb (the delta's) clears nothing.
+    #[test]
+    fn a_row_the_server_names_replied_lands_answered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        let answered = |mid: &str| -> bool {
+            let flags: Option<String> = store
+                .conn()
+                .query_row(
+                    "SELECT flags FROM messages WHERE message_id = ?1",
+                    [mid],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            crate::types::MessageFlags::parse(flags.as_deref().unwrap_or_default()).answered
+        };
+        let mut result = SyncResult::default();
+
+        // Downloaded with the property: answered at ingest.
+        let msg = graph_message(serde_json::json!({
+            "id": "AAMk1",
+            "internetMessageId": "<replied@x>",
+            "receivedDateTime": "2026-10-21T20:12:00Z",
+            "isRead": true,
+            "singleValueExtendedProperties": [{"id": "Integer 0x1081", "value": "102"}]
+        }));
+        let mut fetched = received("<replied@x>", "2026-10-21T20:12:00Z");
+        fetched.email.flags = graph_message_to_fetched_email(&msg).flags;
+        let plain = received("<later@x>", "2026-10-21T20:13:00Z");
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &[fetched, plain],
+            None,
+            &mut result,
+        );
+        assert!(answered("<replied@x>"));
+        assert!(!answered("<later@x>"));
+
+        // Replied in Outlook later: the next enumeration says so.
+        let listed = |verb: Option<LastVerb>| FolderEntry {
+            graph_id: "AAA".into(),
+            is_read: true,
+            received: None,
+            last_verb: verb,
+        };
+        let updated = crate::ingest::apply_graph_flags(
+            &store,
+            "acct",
+            "inbox",
+            [(
+                crate::ingest::graph_uid("<later@x>"),
+                server_flags(&listed(Some(LastVerb::Reply))),
+            )],
+        );
+        assert_eq!(updated, 1);
+        assert!(answered("<later@x>"));
+
+        // A delta entry, or a forward after the reply, clears nothing.
+        crate::ingest::apply_graph_flags(
+            &store,
+            "acct",
+            "inbox",
+            [
+                (
+                    crate::ingest::graph_uid("<later@x>"),
+                    server_flags(&listed(None)),
+                ),
+                (
+                    crate::ingest::graph_uid("<replied@x>"),
+                    server_flags(&listed(Some(LastVerb::Forward))),
+                ),
+            ],
+        );
+        assert!(answered("<later@x>"));
+        assert!(answered("<replied@x>"));
     }
 
     /// A search, and the Message-ID lookup `message.fetch` downloads a hit
@@ -4023,7 +4431,7 @@ mod tests {
             );
             assert_eq!(
                 pairs["$expand"],
-                "singleValueExtendedProperties($filter=id eq 'String 0x1042' or id eq 'String 0x1039')",
+                "singleValueExtendedProperties($filter=id eq 'String 0x1042' or id eq 'String 0x1039' or id eq 'Integer 0x1081')",
                 "{query}"
             );
         }

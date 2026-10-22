@@ -799,6 +799,19 @@ mod tests {
         assert_eq!(source_to_flag(&blank), None);
     }
 
+    /// One addressee is a reply, more than one across To and Cc a reply to
+    /// all: the verb a Graph account records on the source (PERSO-171).
+    #[test]
+    fn a_reply_to_several_people_reads_as_a_reply_to_all() {
+        let mut reply = draft_with(None, "/drafts/r.md");
+        assert!(!answers_all(&reply), "one To, no Cc");
+        reply.frontmatter.cc = Some("carol@example.com".to_string());
+        assert!(answers_all(&reply), "a Cc beside the To");
+        reply.frontmatter.cc = None;
+        reply.frontmatter.to = Some("Bob <bob@example.com>, dave@example.com".to_string());
+        assert!(answers_all(&reply), "two To");
+    }
+
     /// The `In-Reply-To` and `References` values a built message carries,
     /// unfolded the way a reading client sees them.
     fn threading_of(raw: &[u8]) -> (Option<String>, Option<String>) {
@@ -1153,6 +1166,7 @@ mod tests {
             "alice",
             &message_id,
             true,
+            false,
             &mailboxes,
         )
         .unwrap();
@@ -1207,8 +1221,15 @@ mod tests {
             .unwrap()
             .unwrap()
             .message_id;
-        crate::pending_ops::apply_post_send_flag(&fx.store, "alice", &message_id, false, &[])
-            .unwrap();
+        crate::pending_ops::apply_post_send_flag(
+            &fx.store,
+            "alice",
+            &message_id,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
 
         let row = crate::store::read::find_by_id(&fx.store, id)
             .unwrap()
@@ -1220,7 +1241,7 @@ mod tests {
             crate::pending_ops::queued_ops(&fx.store, "alice")
                 .unwrap()
                 .is_empty(),
-            "no server mailboxes (a Graph account) queues nothing"
+            "no server mailboxes (no server config) queues nothing"
         );
     }
 
@@ -1235,6 +1256,7 @@ mod tests {
             "alice",
             "<gone@example.com>",
             true,
+            false,
             &["INBOX".to_string()],
         )
         .unwrap();
@@ -2884,6 +2906,19 @@ fn source_to_flag(draft: &EmailDraft) -> Option<(&str, bool)> {
     (!message_id.is_empty()).then_some((message_id, answered))
 }
 
+/// Whether a reply draft answers more than one person, which Exchange records
+/// as a reply to all rather than a reply (PERSO-171).
+///
+/// The draft does not remember which command built it, so this reads its
+/// recipients: more than one address across To and Cc is a reply to all. A
+/// Cc added by hand to a plain reply reads as one too; both verbs show the
+/// same replied icon in Outlook, so the cost of a wrong guess is the tooltip.
+fn answers_all(draft: &EmailDraft) -> bool {
+    let to = parse_graph_recipients(draft.frontmatter.to.as_deref());
+    let cc = parse_graph_recipients(draft.frontmatter.cc.as_deref());
+    to.len() + cc.len() > 1
+}
+
 /// The distinct server mailboxes the local copies of a source live in, in a
 /// stable order (#0076).
 ///
@@ -2925,10 +2960,10 @@ fn server_mailboxes_of(
 /// that can never be written is still self-healed by the sync, which restates
 /// every flag the server holds over the whole window.
 ///
-/// The Graph path writes locally and queues nothing: Graph exposes the answered
-/// state only through extended MAPI properties, and the backend is parked
-/// (#0042, #0055). Its flag merge (`ingest::apply_seen_flags`) is what keeps a
-/// Graph sync from erasing what is written here.
+/// A Graph account queues the same op (PERSO-171): its drain writes Outlook's
+/// MAPI history properties on the server's copies, and its sync merge
+/// (`ingest::apply_graph_flags`) only ever adds a history bit, so a pass can
+/// never erase what is written here.
 async fn mark_source_after_send(draft: &EmailDraft, ctx: &SendContext) {
     let Some((message_id, answered)) = source_to_flag(draft) else {
         return;
@@ -2952,10 +2987,11 @@ async fn mark_source_after_send(draft: &EmailDraft, ctx: &SendContext) {
         debug!("[send] nothing local to flag for {message_id}");
         return;
     }
-    // A Graph account, or an account with no usable IMAP config, has no server
-    // half to owe: write the local bit and queue nothing.
+    // An account with no usable IMAP config has no server half to owe: write
+    // the local bit and queue nothing. A Graph account owes one; its op writes
+    // every server copy and only carries the folders for the record.
     let server_mailboxes = if ctx.graph.is_some() {
-        Vec::new()
+        server_mailboxes_of(&ctx.account, &rows)
     } else if let Err(e) = crate::config::ImapConfig::load(&ctx.account) {
         debug!("[send] no IMAP config to flag {message_id} on the server: {e:#}");
         Vec::new()
@@ -2968,6 +3004,7 @@ async fn mark_source_after_send(draft: &EmailDraft, ctx: &SendContext) {
         &ctx.account.name,
         message_id,
         answered,
+        answered && answers_all(draft),
         &server_mailboxes,
     ) {
         Ok(outcome) => debug!(
