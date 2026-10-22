@@ -2953,3 +2953,8 @@ The fence is `cfg(any(test, feature = "test-support"))`, the feature every test 
 
 Every worktree of a repository reads the same remote-tracking refs, so another agent's `git fetch` moves `origin/main` between two steps of a rebase or an autosquash.
 Record the target with `git rev-parse origin/main` right after the fetch and rebase onto that hash.
+
+## A layout change that shifts every cell rewrites every golden frame (2026-10-22)
+
+A layout change that shifts every cell (an outer frame, a margin) rewrites every golden frame at once, including the root crate's `src/tui_tests` snapshots.
+A test that asserts several snapshots stops at the first failure and hides the rest, so run `cargo test --workspace --no-fail-fast`, accept, and run again until no `.snap.new` appears.

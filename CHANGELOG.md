@@ -31,6 +31,7 @@ All notable changes to this project are documented in this file.
   In catppuccin-latte and mailypoppins-light every text colour reaches 4.5:1 on each ground the TUI draws it on, the cursor row and the pickers' cursor included, and borders and faint text reach 3:1; most of catppuccin-latte's text colours are darker than upstream, and mailypoppins-light's cursor orange, cyan and green are a step darker than the app's.
 - Desktop, TUI and the Neovim colorscheme: the warning colour clears 4.5:1 on the muted surface (light #B24600, dark #FF7212), and the desktop's contrast check covers that pair.
 - `state.bootstrap`: an account's `sync_health` carries `reason`, the error of a failed last pass, and `at`, when that pass finished.
+- TUI: every theme that paints its own background (all but terminal) now draws a rounded frame around the whole screen in its border colour, so the TUI no longer runs straight into the terminal's own background; terminal keeps the full window, and an 80-column terminal keeps the full split.
 - Desktop: prefix keys wait for the second key, as in the TUI (#0148). After g, f, c, t, s or Space the which-key list stays until the next key; Escape cancels it and does nothing else, and a click drops it.
 
 ### Fixed
