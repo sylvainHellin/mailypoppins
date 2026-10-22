@@ -42,7 +42,9 @@ const REFERENCES_PROPERTY: &str = "String 0x1039";
 /// about 90 and 390 bytes. A message without either header carries no
 /// `singleValueExtendedProperties` at all. `/messages/delta` refuses this
 /// `$expand` (HTTP 400), which costs nothing: the sync downloads by id and the
-/// re-thread walks the folder listing, and both accept it.
+/// re-thread walks the folder listing, and both accept it. A `$search` and the
+/// Message-ID `$filter` accept it too (measured on the EVOQS inbox on
+/// 2026-10-22), so a search hit `message.fetch` lands is threaded at ingest.
 const THREADING_EXPAND: &str = "$expand=singleValueExtendedProperties($filter=id%20eq%20'String%200x1042'%20or%20id%20eq%20'String%200x1039')";
 
 /// Graph's hard ceiling on the number of requests in one `/$batch` call.
@@ -3136,13 +3138,16 @@ fn graph_query_param(query: &crate::search::GraphQuery) -> Option<(&'static str,
 /// `InefficientFilter`. Only the term-less listing is sorted server-side; a
 /// `$search` comes back newest first on its own, and the Message-ID filter
 /// matches a handful of copies at most.
+///
+/// Every search asks for the threading signals the sync download asks for,
+/// `conversationId` and [`THREADING_EXPAND`] (PERSO-147), so a hit
+/// `message.fetch` ingests threads at once instead of waiting for a re-thread
+/// that lists its whole folder for it. Graph accepts the `$expand` beside a
+/// `$search` and beside a `$filter`.
 fn search_url(base: &str, limit: usize, query: &crate::search::GraphQuery) -> Result<reqwest::Url> {
     let mut pairs: Vec<(&str, String)> = Vec::new();
     pairs.push(("$top", limit.clamp(1, GRAPH_MAX_TOP).to_string()));
-    pairs.push((
-        "$select",
-        "id,internetMessageId,subject,from,toRecipients,ccRecipients,body,receivedDateTime,hasAttachments,isRead".to_string(),
-    ));
+    pairs.push(("$select", format!("{MESSAGE_SELECT},conversationId")));
     match graph_query_param(query) {
         Some(param) => pairs.push(param),
         None => pairs.push(("$orderby", "receivedDateTime desc".to_string())),
@@ -3157,6 +3162,8 @@ fn search_url(base: &str, limit: usize, query: &crate::search::GraphQuery) -> Re
         })
         .collect::<Vec<_>>()
         .join("&");
+    // Already percent-encoded, so it joins the query as it is.
+    let query = format!("{query}&{THREADING_EXPAND}");
     let mut url = reqwest::Url::parse(base).with_context(|| format!("parsing {base}"))?;
     url.set_query(Some(&query));
     Ok(url)
@@ -3207,6 +3214,22 @@ impl GraphClient {
         folder: Option<&str>,
         limit: usize,
     ) -> Result<Vec<FetchedEmail>> {
+        Ok(self
+            .search_messages_threaded(query, folder, limit)
+            .await?
+            .into_iter()
+            .map(|hit| hit.email)
+            .collect())
+    }
+
+    /// [`Self::search_messages`], with each hit's threading signals beside it
+    /// (PERSO-147), for the caller that ingests a hit: `message.fetch`.
+    pub async fn search_messages_threaded(
+        &self,
+        query: &crate::search::Query,
+        folder: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<GraphFetched>> {
         let graph_query = crate::search::to_graph(query).map_err(|e| anyhow!("{e}"))?;
 
         let base = if let Some(f) = folder {
@@ -3249,7 +3272,13 @@ impl GraphClient {
                 }
             }
             populate_calendar_from_attachments(&mut email);
-            emails.push(email);
+            emails.push(GraphFetched {
+                email,
+                threading: thread_hints(
+                    msg.conversation_id.as_deref(),
+                    &msg.single_value_extended_properties,
+                ),
+            });
         }
 
         retain_exact_message_id_graph(&mut emails, query.message_id.as_deref());
@@ -3260,12 +3289,12 @@ impl GraphClient {
 
 /// Tighten the fuzzy `$search` / `$filter` match to an exact Message-ID one,
 /// case- and bracket-insensitively, when the query named a Message-ID.
-fn retain_exact_message_id_graph(emails: &mut Vec<FetchedEmail>, message_id: Option<&str>) {
+fn retain_exact_message_id_graph(emails: &mut Vec<GraphFetched>, message_id: Option<&str>) {
     let Some(mid) = message_id else {
         return;
     };
     let wanted = crate::imap_client::normalize_message_id(mid).to_string();
-    emails.retain(|email| {
+    emails.retain(|GraphFetched { email, .. }| {
         email.message_id.as_deref().is_some_and(|m| {
             crate::imap_client::normalize_message_id(m).eq_ignore_ascii_case(&wanted)
         })
@@ -3780,6 +3809,30 @@ mod tests {
             !THREADING_EXPAND.contains(' '),
             "a batch sub-request URL carries no raw space"
         );
+    }
+
+    /// A search, and the Message-ID lookup `message.fetch` downloads a hit
+    /// through, ask for the threading signals the sync download asks for
+    /// (PERSO-147), and the nested `$filter` stays inside the `$expand`.
+    #[test]
+    fn a_search_asks_for_the_threading_signals() {
+        for query in ["from:amazon", "message-id:<a+b@x>", "after:2026-10-01"] {
+            let pairs = url_pairs(query, 5);
+            assert_eq!(
+                pairs["$select"],
+                format!("{MESSAGE_SELECT},conversationId"),
+                "{query}"
+            );
+            assert_eq!(
+                pairs["$expand"],
+                "singleValueExtendedProperties($filter=id eq 'String 0x1042' or id eq 'String 0x1039')",
+                "{query}"
+            );
+        }
+        let search = url_pairs("from:amazon", 5);
+        assert!(!search.contains_key("$filter"), "{search:?}");
+        let lookup = url_pairs("message-id:<a+b@x>", 1);
+        assert_eq!(lookup["$filter"], "internetMessageId eq '<a+b@x>'");
     }
 
     /// PERSO-147: a Graph reply and its parent, downloaded in two windows in

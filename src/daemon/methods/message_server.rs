@@ -252,7 +252,12 @@ async fn run_fetch(request: FetchRequest, handle: OperationHandle, canonical: Ar
     } else {
         imap_fetch(&request).await
     };
-    let (uid, raw, email) = match fetched {
+    let Fetched {
+        uid,
+        raw,
+        email,
+        threading,
+    } = match fetched {
         Ok(fetched) => fetched,
         Err(e) => return handle.fail(DomainError::from(super::server_error(&name, &e))),
     };
@@ -261,7 +266,14 @@ async fn run_fetch(request: FetchRequest, handle: OperationHandle, canonical: Ar
     // uid derived from the Message-ID; plain IMAP needs the uid the mailbox
     // holds the message under, since a made-up one would be pruned or
     // duplicated by the next sync.
-    let ingested = ingest(&name, &request.mailbox, uid, &email, raw.as_deref());
+    let ingested = ingest(
+        &name,
+        &request.mailbox,
+        uid,
+        &email,
+        raw.as_deref(),
+        threading.as_ref(),
+    );
     let (row_id, selector, published) = match ingested {
         Ok(landed) => landed,
         Err(e) => return handle.fail(DomainError::from(internal(format!("{e:#}")))),
@@ -310,11 +322,20 @@ fn held_row(account: &str, message_id: &str) -> Result<Option<Value>, RpcError> 
     })))
 }
 
+/// One message a server handed `message.fetch`, as ingest takes it.
+struct Fetched {
+    uid: i64,
+    /// The RFC822 bytes, which IMAP has and Graph does not.
+    raw: Option<Vec<u8>>,
+    email: FetchedEmail,
+    /// The threading signals of a backend without raw bytes (PERSO-147): the
+    /// Graph hit's `In-Reply-To`, `References` and `conversationId`.
+    threading: Option<crate::ingest::ThreadHints>,
+}
+
 /// The uid, the raw bytes and the parsed message one IMAP server holds under
 /// `message_id`.
-async fn imap_fetch(
-    request: &FetchRequest,
-) -> anyhow::Result<(i64, Option<Vec<u8>>, FetchedEmail)> {
+async fn imap_fetch(request: &FetchRequest) -> anyhow::Result<Fetched> {
     let server_name = request.server_name.clone();
     let imap = crate::config::ImapConfig::load(&request.account)?;
     let mut session = crate::imap_client::open_imap_session(&imap).await?;
@@ -327,14 +348,22 @@ async fn imap_fetch(
     session.logout().await.ok();
     let (uid, raw, email) =
         found?.ok_or_else(|| anyhow::anyhow!("the server no longer has that message"))?;
-    Ok((uid as i64, Some(raw), email))
+    Ok(Fetched {
+        uid: uid as i64,
+        raw: Some(raw),
+        email,
+        threading: None,
+    })
 }
 
 /// The same, over Graph, which carries the whole payload already and keys the
 /// row by the synthetic uid ingest derives from the Message-ID.
-async fn graph_fetch(
-    request: &FetchRequest,
-) -> anyhow::Result<(i64, Option<Vec<u8>>, FetchedEmail)> {
+///
+/// The lookup asks for the threading signals the sync download asks for
+/// (PERSO-147), so the row threads at ingest and reads as asked; without them
+/// it would root its own thread and the next sync's re-thread would list its
+/// whole folder to settle this one row.
+async fn graph_fetch(request: &FetchRequest) -> anyhow::Result<Fetched> {
     let server_name = request.server_name.clone();
     let config = crate::config::GraphConfig::load(&request.account)?;
     let client = crate::graph::GraphClient::new_async(&config).await?;
@@ -343,13 +372,18 @@ async fn graph_fetch(
         ..Default::default()
     };
     let found = client
-        .search_messages(&query, Some(&server_name), 1)
+        .search_messages_threaded(&query, Some(&server_name), 1)
         .await?;
-    let email = found
+    let hit = found
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("the server no longer has that message"))?;
-    Ok((crate::ingest::graph_uid(&request.message_id), None, email))
+    Ok(Fetched {
+        uid: crate::ingest::graph_uid(&request.message_id),
+        raw: None,
+        email: hit.email,
+        threading: Some(hit.threading),
+    })
 }
 
 /// Ingest one fetched message, answering the row it landed as, its selector,
@@ -365,12 +399,28 @@ fn ingest(
     uid: i64,
     email: &FetchedEmail,
     raw: Option<&[u8]>,
+    threading: Option<&crate::ingest::ThreadHints>,
 ) -> anyhow::Result<(i64, String, Option<Change>)> {
     let store = Store::open(crate::config::store_path(account))?;
     let blobs = BlobStore::for_account(account);
-    let outcome = crate::ingest::ingest_message(
-        &store,
-        &blobs,
+    ingest_into(&store, &blobs, account, mailbox, uid, email, raw, threading)
+}
+
+/// [`ingest`] into a store already open, which is the part a test can drive.
+#[allow(clippy::too_many_arguments)]
+fn ingest_into(
+    store: &Store,
+    blobs: &BlobStore,
+    account: &str,
+    mailbox: &str,
+    uid: i64,
+    email: &FetchedEmail,
+    raw: Option<&[u8]>,
+    threading: Option<&crate::ingest::ThreadHints>,
+) -> anyhow::Result<(i64, String, Option<Change>)> {
+    let outcome = crate::ingest::ingest_message_threaded(
+        store,
+        blobs,
         &crate::ingest::IngestInput {
             account,
             mailbox,
@@ -378,13 +428,15 @@ fn ingest(
             email,
             raw,
         },
+        &crate::ingest::RebindPolicy::Always,
+        threading,
     )?;
-    let row = read::find_by_id(&store, outcome.row_id)?;
+    let row = read::find_by_id(store, outcome.row_id)?;
     let selector = row
         .as_ref()
         .map(|row| Selector::for_message(account, row).to_string())
         .unwrap_or_default();
-    let change = read::mailbox_read_counts(&store, account)
+    let change = read::mailbox_read_counts(store, account)
         .ok()
         .and_then(|counts| {
             counts
@@ -987,5 +1039,78 @@ mod tests {
         let refused = pick_target(&configured, "nosuch", "gamma").expect_err("no such mailbox");
         assert_eq!(refused.code, -32602);
         assert!(refused.message.contains("INBOX"), "{}", refused.message);
+    }
+
+    fn email(mid: &str) -> FetchedEmail {
+        FetchedEmail {
+            from: "a@x".into(),
+            to: "me@x".into(),
+            cc: None,
+            reply_to: None,
+            bcc: None,
+            subject: "Re: plan".into(),
+            date: "Thu, 22 Oct 2026 10:00:00 +0000".into(),
+            body_text: "body".into(),
+            html_body: None,
+            has_attachments: false,
+            message_id: Some(mid.into()),
+            attachments: Vec::new(),
+            flags: Default::default(),
+            calendar_ics: None,
+            event: None,
+        }
+    }
+
+    /// A Graph hit `message.fetch` lands joins its stored parent at ingest and
+    /// reads as asked, so the next sync's re-thread has no reason to list the
+    /// folder for it (PERSO-147).
+    #[test]
+    fn a_fetched_graph_hit_threads_onto_its_stored_parent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        let ingest_one = |mid: &str, threading: Option<&crate::ingest::ThreadHints>| {
+            ingest_into(
+                &store,
+                &blobs,
+                "acct",
+                "Inbox",
+                crate::ingest::graph_uid(mid),
+                &email(mid),
+                None,
+                threading,
+            )
+            .unwrap()
+            .0
+        };
+        let field = |row: i64, column: &str| -> Option<String> {
+            store
+                .conn()
+                .query_row(
+                    &format!("SELECT {column} FROM messages WHERE id = ?1"),
+                    [row],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+
+        let parent = ingest_one("<p@x>", None);
+        let hit = ingest_one(
+            "<r@x>",
+            Some(&crate::ingest::ThreadHints {
+                in_reply_to: Some("<p@x>".into()),
+                references: Some("<p@x>".into()),
+                conversation_id: Some("AAQkConv=".into()),
+            }),
+        );
+        assert_eq!(field(hit, "thread_id"), field(parent, "thread_id"));
+        assert_eq!(field(hit, "conversation_id").as_deref(), Some("AAQkConv="));
+        assert!(
+            !crate::ingest::rethread_candidates(&store, "acct", "Inbox")
+                .unwrap()
+                .iter()
+                .any(|c| c.row_id == hit),
+            "the fetched hit is not a re-thread candidate"
+        );
     }
 }
