@@ -117,8 +117,15 @@ impl Theme {
         }
     }
 
-    /// Catppuccin Latte (light variant), its text-bearing slots darkened where
-    /// the palette falls under 4.5:1 on `bg` or `panel_bg` (PERSO-179).
+    /// Catppuccin Latte (light variant), deliberately not the upstream palette
+    /// in five slots: `text_muted` takes subtext1 instead of subtext0, and
+    /// `selection`, `unread`, `accent` and `warning` are darkened versions of
+    /// green, blue, blue and yellow. Upstream Latte puts those colours under
+    /// the WCAG AA 4.5:1 text contrast on `bg` or `panel_bg`, and each slot
+    /// draws text, so each is moved just far enough to reach it (PERSO-179).
+    /// Re-syncing with upstream must keep these five, or the light theme's
+    /// muted, selected, unread, accent and warning text falls under 4.5:1
+    /// again.
     pub const fn catppuccin_latte() -> Self {
         Self {
             bg: Color::Rgb(239, 241, 245),            // base
