@@ -72,3 +72,10 @@ Why: the TUI, the Mac app and the website should read as one product, and there 
 Rejected: keeping `catppuccin-mocha` as the default with `mailypoppins` as an opt-in (every new user would start on a look the rest of the product dropped).
 Source: chat with Sylvain, 2026-10-22.
 Status: accepted
+
+## 2026-10-22 - Attachments carry their Content-ID and an inline flag as two additive columns on `message_blobs`
+
+Why: the attachment listings, the paperclip and the forward need a per-reference yes or no they can read in SQL, and the renderer needs the id to turn a `cid:` URL into a stored blob on a Graph row, which has no raw message; two nullable columns added on open keep every stored body, with `is_inline` `NULL` as the "never classified" marker the readers fall back on and the backfill picks up. Inline means an image whose Content-ID the HTML body references, since Exchange gives every attachment an id.
+Rejected: one `content_id` column with the inline verdict derived from the HTML at read time (every listing would read every HTML body); not storing inline parts as attachments at all (the renderer needs their bytes, and a misjudged part would be lost rather than hidden); a schema version bump (drops every store and re-downloads every body).
+Source: PERSO-165 and #0145 brief from Vera's session; live backfill on a copy of the EVOQS store, 2026-10-22 (`examples/graph_inline_probe.rs`).
+Status: accepted

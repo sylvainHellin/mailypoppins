@@ -148,7 +148,6 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 - [#0148 Configurable prefix wait in the desktop app, 5 s by default](docs/tickets/0148-chord-timeout.md) -- feature _(plan [chord-timeout.md](docs/plans/chord-timeout.md), not started; a late `ca` archives today)_
 
 > Data-access-layer redesign (DECIDED 2026-07-14, decisions settled 2026-07-31, drafts amended 2026-10-13): server-as-truth SQLite mirror + content-addressed blob store; drafts are the local truth, mirrored two-way to the server Drafts folder by [#0143](docs/tickets/0143-server-drafts.md); received read-only. Greenfield rebuild on a branch, no dual-write, safety net is `mp-legacy` + the `pre-dal-nuke` tag. Plan: [docs/plans/data-access-layer.md](docs/plans/data-access-layer.md). Stage 0 (#0049, the pre-nuke oracle capture and the `pre-dal-nuke` freeze) is done. Order below is the build order; the stop-gate sits after the #0038 + #0050 + #0052 triple, because the product is only half usable between them. #0038, #0050 and #0052 have all shipped, so the stop-gate is reached and the stages below it are the work after the pause.
-- [#0145 Mark inline (cid-referenced) images at ingest so attachment lists stop showing signature logos](docs/tickets/0145-mark-inline-images-at-ingest.md) -- bug _(`b4209c44` fixed the forward path only, by re-parsing raw; Graph rows still forward every attachment)_
 
 ## Later
 
@@ -181,6 +180,5 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 - Gmail rows without usable headers do not thread by `X-GM-THRID` -- feature _(the Graph half of PERSO-147 shipped; the Gmail half needs an `async-imap` accessor for the attribute and waits for a Gmail account; see step 7 of [#0142](docs/tickets/0142-conversation-list.md))_
 - After a Graph reply the answered flag stays local -- bug _(PERSO-171; the send path enqueues no server op and Graph sync reads only `isRead`; the MAPI `PidTagLastVerbExecuted` extended property is the candidate, unverified)_
 - Graph search returns at most 1000 hits with no notice -- bug _(`search_messages` reads one page and clamps `$top` to 1000, so `--limit 2500` quietly returns 1000; page through `@odata.nextLink` or print a note; PERSO-173 review)_
-- Graph inline images render broken -- bug _(the renderer inlines `cid:` images only from the raw message, which Graph rows do not have, and the store keeps no content-id per attachment, so the fix needs a schema change; inline-only messages stored before 88342da1 are not repaired; see #0145)_
 
 The parity half of [#0059](docs/tickets/0059-syncbackend-trait.md) is parked with it: the trait and the engine shipped, but `graph.rs` still runs its own loop rather than being a second `SyncBackend`.

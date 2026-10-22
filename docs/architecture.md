@@ -213,6 +213,7 @@ The `messages_message_id` index is deliberately non-unique: it serves threading,
 `thread_id` and the additive `conversation_id` column are the conversation key and Graph's second threading signal ([Threading](#threading)).
 - `blobs` is the refcount index for the content-addressed blob store, and `message_blobs` is the per-message list of `body`, `html`, `raw` and `attachment` references.
 Refcounts live in the database so a reference can be taken in the same transaction as the row that carries the hash.
+An `attachment` reference also carries the additive `content_id` and `is_inline` columns ([Inline images](#inline-images)).
 - `messages_fts` is a contentless FTS5 index (`content=''`, `contentless_delete=1`) over subject, from and body text.
 Only `rowid`-returning `MATCH` queries work; there is nothing to rebuild from, and nothing needs to be, because a store that loses its index is dropped.
 It is written inside the same transaction as the `messages` row it describes and removed by every delete path, so it needs no reconcile pass; `store::search::index_drift` is the check that says so rather than the comment claiming it.
@@ -270,6 +271,18 @@ An IMAP parent that arrives after its reply still roots its own thread, since no
 `conversation_id` is an additive column: `NULL` means nobody asked the server (an IMAP row, an outbox row, or a Graph row an older build stored), the empty string means Graph was asked and named none.
 The Graph sync re-threads the `NULL` rows that have no raw message once (`GraphClient::rethread_stored`, then `ingest::rethread_rows`): it walks the folder listing with the two properties and `conversationId`, about 500 bytes per message and no body, writes the signals, resolves each row as ingest would, and moves the row's whole old thread into the new one, so a reply re-threaded before its parent lands where a parent re-threaded first would have put it.
 A row the complete listing does not name gets the empty string, so the candidates only shrink.
+
+### Inline images
+
+An inline image is an attachment whose `Content-ID` the HTML body references by `cid:` URL and whose bytes or file name say it is an image (`parse::is_inline_image`); an Outlook signature's `image001.png` is the common case (PERSO-165, #0145).
+Ingest marks every `attachment` reference with the part's normalised `content_id` and that verdict in `is_inline`, for both backends: an IMAP part brings its `Content-ID` header, a Graph file attachment its `contentId`.
+The id alone is not enough, because Exchange gives every attachment one, a PDF included, and a `cid:` link to a document stays a listed attachment.
+The readers read the mark: `read::attachments_for` (the CLI, the TUI, the desktop app and every save or open path) leaves inline references out, the forward copies only what it lists, and `messages.has_attachments` counts real attachments only, so a message whose parts are all inline images shows no paperclip.
+The browser rendition (`message.html` and `message.materialise_html`, `html_rendition` in the daemon) inlines `cid:` images as `data:` URIs from the stored blobs by `content_id` (`read::stored_inline_images`), which is what makes them show on a Graph row, which has no raw message; the desktop reader loads that rendition and needs nothing of its own.
+
+`is_inline` `NULL` is a reference an older build stored, which the readers serve as before: listed, with the raw message re-parsed for the forward and the render where there is one.
+The backfill writes the marks in bounded batches per sync pass: `ingest::classify_inline_from_raw` re-parses the raw of rows that have one (every IMAP row, and the outbox's Sent copies), and on a Graph account `GraphClient::classify_stored_inline` asks for each row's attachment list as names and content ids only (`$select=...,microsoft.graph.fileAttachment/contentId`, about 1.3 KB a message) and pairs it with the stored references by name in order.
+Graph inline-only messages stored before 88342da1 have no attachment reference at all, because Graph's `hasAttachments` is false for them; `ingest::mark_inline_only_rows` queues those whose HTML references `cid:` for the attachment repair once per store, which downloads their images.
 
 ### Read
 

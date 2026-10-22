@@ -2820,3 +2820,11 @@ Changing the default theme therefore moves `fg:selection` runs in six golden fra
 
 `scripts/deploy-website.sh` feeds sftp a password through `SSH_ASKPASS`, and the first connection from a new machine also asks to confirm the host key, which the askpass helper does not answer, so the upload sat silent until the tool timed out.
 The script now passes `StrictHostKeyChecking=accept-new`: a first connection records the key, and a changed key still fails.
+
+## Graph returns `contentId` without content only when the `$select` qualifies it with its type (PERSO-165, 2026-10-22)
+
+`contentId`, like `contentBytes`, is a property of the derived `fileAttachment` type, and `/me/messages/{id}/attachments?$select=...,contentId` is HTTP 400 ("Could not find a property named 'contentId' on type 'microsoft.graph.attachment'"); the type-cast path segment `/attachments/microsoft.graph.fileAttachment?$select=...` is refused with the same message.
+`$select=id,name,isInline,microsoft.graph.fileAttachment/contentId` works: about 1.3 KB a message on the EVOQS inbox against megabytes for the unselected list, which carries every attachment's bytes.
+Exchange gives every file attachment a `contentId`, a PDF included, so a content id is no sign of an inline part; what marks one is the HTML body naming it by `cid:` URL.
+Graph's `hasAttachments` is false for a message whose only attachments are inline (lesson of 88342da1), so a fix that marks stored attachments cannot reach those rows: they have none, and need their attachment list fetched with content.
+A Gmail forward of an Outlook mail can carry an `image007.png` whose content id no longer matches the `cid:image007.png@...` its HTML references; it stays a listed attachment, and nothing renders it inline in any client either.
