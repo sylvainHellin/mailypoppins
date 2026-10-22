@@ -234,7 +234,6 @@ pub(super) fn resolve_send_account(
     Option<mp_core::config::ImapConfig>,
     Option<mp_core::config::GraphConfig>,
     AccountConfig,
-    Option<String>,
 ) {
     if let Ok(draft) = parse_email_draft(draft_path) {
         let from = draft.frontmatter.from.unwrap_or_default().to_lowercase();
@@ -246,7 +245,6 @@ pub(super) fn resolve_send_account(
                     acct.imap_config.clone(),
                     acct.graph_config.clone(),
                     acct.account_config.clone(),
-                    acct.signature_content.clone(),
                 );
             }
         }
@@ -258,7 +256,6 @@ pub(super) fn resolve_send_account(
         acct.imap_config.clone(),
         acct.graph_config.clone(),
         acct.account_config.clone(),
-        acct.signature_content.clone(),
     )
 }
 
@@ -285,7 +282,7 @@ mod tests {
 
     /// A minimal `AccountState`. Built as a struct literal rather than through
     /// `AccountState::new`, which reads the user's config, keyring and
-    /// signature files and would make these tests machine-dependent.
+    /// files and would make these tests machine-dependent.
     fn account(name: &str, default_from: &str) -> super::super::app::AccountState {
         super::super::app::AccountState {
             account_config: AccountConfig {
@@ -296,7 +293,6 @@ mod tests {
             imap_config: None,
             smtp_config: None,
             graph_config: None,
-            signature_content: Some(format!("-- \n{name}")),
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             mailboxes: Vec::new(),
@@ -446,7 +442,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// parity. The draft's `from:` selects the account, case-insensitively,
-    /// and the whole per-account bundle (index, configs, signature, sent dir)
+    /// and the whole per-account bundle (index, configs, sent dir)
     /// comes from that account rather than from the active one.
     #[test]
     fn resolve_send_account_matches_the_draft_from_address_case_insensitively() {
@@ -464,10 +460,9 @@ mod tests {
             Some("Sylvain Hellin <SYLVAIN@Perso.Example>"),
         );
 
-        let (idx, _smtp, _imap, _graph, cfg, signature) = resolve_send_account(&app, &path);
+        let (idx, _smtp, _imap, _graph, cfg) = resolve_send_account(&app, &path);
         assert_eq!(idx, 1);
         assert_eq!(cfg.name, "perso");
-        assert_eq!(signature.as_deref(), Some("-- \nperso"));
     }
 
     /// parity. With no `from:` in the draft, or with a `from:` that matches no
@@ -508,7 +503,7 @@ mod tests {
             1,
         );
         let path = draft(tmp.path(), "d.md", Some("shared@example.com"));
-        let (idx, _, _, _, cfg, _) = resolve_send_account(&app, &path);
+        let (idx, _, _, _, cfg) = resolve_send_account(&app, &path);
         assert_eq!(idx, 0);
         assert_eq!(cfg.name, "first");
     }
@@ -531,7 +526,7 @@ mod tests {
             0,
         );
         let path = draft(tmp.path(), "d.md", Some("not-sylvain@work.example"));
-        let (idx, _, _, _, cfg, _) = resolve_send_account(&app, &path);
+        let (idx, _, _, _, cfg) = resolve_send_account(&app, &path);
         assert_eq!(idx, 1, "a different mailbox matched by substring");
         assert_eq!(cfg.name, "work");
     }
@@ -552,7 +547,7 @@ mod tests {
             1,
         );
         let path = draft(tmp.path(), "d.md", Some("sylvain@work.example"));
-        let (idx, _, _, _, cfg, _) = resolve_send_account(&app, &path);
+        let (idx, _, _, _, cfg) = resolve_send_account(&app, &path);
         assert_eq!(idx, 0);
         assert_eq!(cfg.name, "half-configured");
     }

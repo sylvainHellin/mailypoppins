@@ -563,7 +563,7 @@ fn html(
 /// `draft.forward`'s contract. Both are optional, so `mp new` and the TUI write
 /// the skeleton as before; with them the file is complete in one call rather
 /// than rewritten by the client behind the daemon's back.
-fn create(
+pub(super) fn create(
     params: &Value,
     accounts: &[AccountConfig],
     email: &EmailSettings,
@@ -1158,7 +1158,7 @@ fn attachments(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcE
 
 /// `draft.attach` `{account, id|selector, path}`: the TUI prompt's checks,
 /// then one more `attachments:` entry, stored as typed.
-fn attach(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
+pub(super) fn attach(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcError> {
     let (account, row) = attachment_draft(params, accounts)?;
     let input = string_param(params, "path")?;
     crate::draft::attach_checked(&row.path, &input, dirs::home_dir().as_deref())

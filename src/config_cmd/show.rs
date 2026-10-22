@@ -3,7 +3,10 @@ use std::path::Path;
 use anyhow::Result;
 use colored::*;
 
+use std::collections::HashMap;
+
 use mp_protocol::account::{AccountCredential, AccountCredentials, TokenState};
+use mp_protocol::signature::SignatureFile;
 
 use crate::config::{
     all_configured_mailboxes, blobs_dir, config_path, drafts_dir, mailypoppins_data_dir,
@@ -18,6 +21,17 @@ fn horizon_label(days: u32) -> String {
     } else {
         format!("{days}")
     }
+}
+
+/// The signatures `mp config show` lists, as the daemon answered for them:
+/// every file with its content (`signature.read`) and each account's default
+/// (`signature.list`).
+#[derive(Clone, Debug, Default)]
+pub struct Signatures {
+    /// Every signature, in name order.
+    pub files: Vec<SignatureFile>,
+    /// Each account's default, `None` when it has none.
+    pub defaults: HashMap<String, Option<String>>,
 }
 
 /// The daemon's answer about `account`, `None` when it named no such account.
@@ -77,6 +91,7 @@ pub fn cmd_config_show(
     config: &GlobalConfig,
     path: &Path,
     credentials: &AccountCredentials,
+    signatures: &Signatures,
 ) -> Result<()> {
     println!("{}", "=== mailypoppins configuration ===".bold().cyan());
     println!("{}: {}", "Config file".bold(), path.display());
@@ -228,7 +243,8 @@ pub fn cmd_config_show(
         }
 
         // Signatures are app-managed files since #0107, not config keys: the
-        // directory and the state file are the source of truth here.
+        // daemon's `signature.list` and `signature.read` answer for the
+        // directory and the state file.
         println!("\n  {}", "[signatures]".bold());
         println!(
             "    dir     = {}",
@@ -236,25 +252,28 @@ pub fn cmd_config_show(
         );
         println!(
             "    default = {}",
-            crate::signatures::default_signature_name(&account.name)
+            signatures
+                .defaults
+                .get(&account.name)
+                .cloned()
+                .flatten()
                 .unwrap_or_else(|| "(none)".to_string())
         );
-        let names = crate::signatures::list();
-        if names.is_empty() {
+        if signatures.files.is_empty() {
             println!("    (none)");
         }
-        for name in &names {
+        for file in &signatures.files {
             // First line with content, skipping the RFC 3676 delimiter, which
             // every signature starts with and which identifies none of them.
-            let preview: String = crate::signatures::read(name)
-                .unwrap_or_default()
+            let preview: String = file
+                .content
                 .lines()
                 .find(|l| !l.trim().is_empty() && l.trim() != "--")
                 .unwrap_or_default()
                 .chars()
                 .take(60)
                 .collect();
-            println!("    {name}.md: {preview}");
+            println!("    {}.md: {preview}", file.name);
         }
         if !account.signatures.entries.is_empty() || account.signatures.default.is_some() {
             println!(

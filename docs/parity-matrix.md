@@ -82,13 +82,13 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: diagnostics and maintenance
 - Source anchor: `mp config show`, `src/config_cmd/show.rs`
-- Daemon surface: `config.get`, `account.credentials`
+- Daemon surface: `config.get`, `account.credentials`, `signature.list`, `signature.read`
 - GUI location: not required (diagnostics and maintenance); the Settings cards show the same password and token facts (`ACC-05`)
 - Validation: `tests/daemon_admin_slice.rs` (`mp_config_show_matches_the_oracle`), `tests/daemon_config.rs` (`account_credentials_reports_presence_and_never_a_value`)
 - Status: routed (P4-U14) for the configuration, and since the daemon leftovers (2026-10-22) for the password column and the token line
 - Note: the output is redacted, and after the cutover the daemon is the only reader of the underlying `config.toml`.
   The `password = **** / (not set)` column and the `token = valid|expired|invalid|not cached` line render `account.credentials`, which answers presence and a token verdict and never a value; `config.get` stays contracted *not* to probe a secret (`tests/daemon_config.rs`), because answering "is a password stored" on every configuration read is what turns a redacted read into a secret read.
-  The signature listing is still read through `mp_core::signatures` in the client.
+  The signature listing renders `signature.list` and `signature.read`.
   One divergence from the `pre-daemon` binary is deliberate and older than this slice: `config.get` reports the effective configuration, which `docs/daemon-protocol.md` defines as the document *after serde defaults*, so `mp config show` prints `smtp.port = 465` and `imap.port = 993` for a configuration that omits them where the oracle printed `0`.
   The `ACC-03` parity row names every port in its fixture, which takes the difference out of the comparison and leaves the row measuring what it is about.
 
@@ -157,12 +157,12 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### ACC-10 Signature file management
 
 - Classification: GUI parity
-- Source anchor: the TUI `cs` overlay (`clients/tui/src/app/keymap.rs:746`), `crates/mp-core/src/signatures.rs`, the per-account default recorded in `state.json`
-- Daemon surface: `signature.list`, `signature.read`, `signature.write`, `signature.create`, `signature.rename`, `signature.delete`, `signature.set_default`
-- GUI location: clients/desktop: `cs` in Mail and the palette's "Manage signatures" open the Signatures dialog, which lists every signature with the account's default, previews the cursor one, and creates (`n`), renames (`r`), edits in the external editor (`e`), deletes behind a confirmation (`d`) and sets or clears the default (Enter), through the Tauri layer over `mp_core::signatures`, since the daemon serves only `signature.list` of the family (M4, #0131; shell.md, "Signatures", rust-layer.md, "Signatures")
-- Validation: `clients/desktop/src/components/signatures/signatures.test.tsx` (`cs lists every signature with the account's default marked and previews the selected one`, `Enter makes the selected signature the default, and clears it when it already is`, `n asks for a name, Enter creates the signature and opens it in the editor`, `r renames from a field seeded with the name, and the default follows`, `d asks first with the file's path; n keeps it, y deletes it`, `signature.changed reads the listing and the preview again while it is open`), `clients/desktop/src/app/signatures.test.ts` (`signature.changed, the dialog's own change and a bootstrap make every listing stale`), `clients/desktop/src-tauri/src/signatures.rs` (`create_writes_an_empty_file_and_refuses_a_name_taken`, `rename_carries_the_default_and_moves_the_file`, `deleting_the_default_clears_it_and_publishes_nothing`, `set_default_sets_and_clears_the_accounts_default`)
-- Status: GUI shipped (M4, #0131), client-side over `mp_core::signatures`; another client's delete shows on the next open of the dialog, since the daemon publishes no `signature.removed`
-- Note: there is no CLI equivalent, so the GUI takes this capability from the TUI.
+- Source anchor: the TUI `cs` overlay (`clients/tui/src/app/keymap.rs`, `clients/tui/src/app/keys.rs`), `crates/mp-core/src/signatures.rs` behind the daemon's `signature.*` family (`src/daemon/methods/signature.rs`), the per-account default recorded in `state.json`
+- Daemon surface: `signature.list`, `signature.read`, `signature.create`, `signature.rename`, `signature.delete`, `signature.set_default`, and the watcher's `signature.changed` and `signature.removed`; no method writes content, the editor does
+- GUI location: clients/desktop: `cs` in Mail and the palette's "Manage signatures" open the Signatures dialog, which lists every signature with the account's default, previews the cursor one, and creates (`n`), renames (`r`), edits in the external editor (`e`), deletes behind a confirmation (`d`) and sets or clears the default (Enter), each one `signature.*` call (M4, #0131; the daemon leftovers, 2026-10-22; shell.md, "Signatures", rust-layer.md, "Signatures")
+- Validation: `tests/daemon_draft_watch.rs` (`the_signature_methods_write_and_the_watcher_announces_every_change`, `a_deleted_signature_settles_into_signature_removed`), `src/tui_tests/signatures.rs` (the TUI overlay over an in-process daemon); `clients/desktop/src/components/signatures/signatures.test.tsx` (`cs lists every signature with the account's default marked and previews the selected one`, `Enter makes the selected signature the default, and clears it when it already is`, `n asks for a name, Enter creates the signature and opens it in the editor`, `r renames from a field seeded with the name, and the default follows`, `d asks first with the file's path; n keeps it, y deletes it`, `signature.changed reads the listing and the preview again while it is open`), `clients/desktop/src/app/signatures.test.ts` (`signature.changed, signature.removed, the dialog's own change and a bootstrap make every listing stale`), `clients/desktop/src-tauri/src/signatures.rs` (`create_writes_an_empty_file_and_refuses_a_name_taken`, `rename_carries_the_default_and_moves_the_file`, `deleting_the_default_clears_it_and_publishes_signature_removed`, `set_default_sets_and_clears_the_accounts_default`)
+- Status: routed in the TUI and the desktop (the daemon leftovers, 2026-10-22), GUI shipped (M4, #0131); another client's change reaches an open dialog or overlay through `signature.changed` and `signature.removed`
+- Note: there is no CLI equivalent beyond `mp config show`'s listing, which reads `signature.list` and `signature.read` too.
   Every signature is a file under `signatures/`: the startup migration of #0107 turned the inline-text entries of `config.toml` into files, so none is edited through a temporary copy.
 
 ### ACC-11 Signature injection into a draft
@@ -1143,11 +1143,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### CON-06 Send a contact as a vCard
 
 - Classification: GUI parity
-- Source anchor: TUI `v` in the contacts view, `src/contacts/vcard.rs`
-- Daemon surface: client-side vCard: the Tauri layer builds it with `mp_core::contacts::contact_to_vcard`, writes the `.vcf` under the drafts' `_vcards/` directory, and attaches it to a draft made by `draft.create`; the daemon serves no `contact.vcard`
-- GUI location: clients/desktop: `v`, the header's "Send vCard" and the palette's "Send contact as vCard" call `contact_vcard_draft`, which writes a "Contact: <name>" draft to the contact with the `.vcf` attached, then the draft opens in the external editor (M4, #0131; shell.md, "Contacts", "Keys and actions", rust-layer.md, "The contacts")
-- Validation: unit tests in `src/contacts/vcard.rs`; `clients/desktop/src/components/contacts/contacts.test.tsx` (`v writes a vCard draft to the contact and opens it in the editor`), `clients/desktop/src-tauri/src/contacts.rs` (`a_vcard_draft_writes_the_vcf_beside_the_drafts_and_attaches_it_once`, `a_vcard_name_is_the_display_name_else_the_local_part`)
-- Status: GUI shipped (M4, #0131); a failure after `draft.create` leaves the draft in Drafts without its `.vcf`
+- Source anchor: TUI `v` in the contacts view (`clients/tui/src/actions.rs`), `crates/mp-core/src/contacts/vcard.rs`, `contact.vcard_draft` in `src/daemon/methods/contact.rs`
+- Daemon surface: `contact.vcard_draft` `{account, name, address, display_name}` -> `{draft, vcf}`: the daemon writes the "Contact: <name>" draft with no signature, the `.vcf` under the drafts directory's `_vcards/`, and its attachment (the daemon leftovers, 2026-10-22)
+- GUI location: clients/desktop: `v`, the header's "Send vCard" and the palette's "Send contact as vCard" call `contact_vcard_draft`, one `contact.vcard_draft`, then the draft opens in the external editor (M4, #0131; shell.md, "Contacts", "Keys and actions", rust-layer.md, "The contacts")
+- Validation: unit tests in `crates/mp-core/src/contacts/vcard.rs`, `tests/daemon_admin_slice.rs` (`contact_vcard_draft_writes_the_draft_and_attaches_the_vcard`); `clients/desktop/src/components/contacts/contacts.test.tsx` (`v writes a vCard draft to the contact and opens it in the editor`), `clients/desktop/src-tauri/src/contacts.rs` (`a_vcard_draft_writes_the_vcf_beside_the_drafts_and_attaches_it_once`, `a_vcard_draft_without_an_address_asks_nothing`)
+- Status: routed in the TUI and the desktop (the daemon leftovers, 2026-10-22); GUI shipped (M4, #0131)
 
 ### CON-07 Copy a contact's email address
 
@@ -1162,14 +1162,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `src/contacts/extractor.rs`, `src/contacts/rank.rs`, `src/contacts/hooks.rs`
-- Daemon surface: daemon-internal, with `state.event` when the index changes
-- GUI location: clients/desktop: the Contacts view lists the daemon's ranking in its order, with each row's To, Cc and received counts and a query's match score; no event names the index, so the view reads the list on every open and after a written rebuild (M4, #0131; shell.md, "Contacts", "Staleness")
-- Validation: unit tests in `src/contacts/rank.rs`, `src/contacts/extractor.rs`; `clients/desktop/src/components/contacts/contacts.test.tsx` (`lists the selected account's ranked contacts in a listbox named Contacts, with their counts and scores`, `j, k, G and gg move the cursor, and each open reads the list again`)
-- Status: routed (P4-U14); GUI shipped (M4, #0131) as the display of the daemon's ranking; the index-changed event is not built
+- Daemon surface: daemon-internal, announced as `contact.changed` `{account, contacts}` whenever an index is written: a rebuild, the build a search runs for an account with none, and the bump a sync or a send gives the addresses it saw (the daemon leftovers, 2026-10-22); a search whose own build the cache guard refused answers the kept index with `rebuild` set
+- GUI location: clients/desktop: the Contacts view lists the daemon's ranking in its order, with each row's To, Cc and received counts and a query's match score; a `contact.changed` makes the account's list stale, read again when the view shows it, and a refused build of a search says the cache guard's line as a notice (M4, #0131; shell.md, "Contacts", "Staleness")
+- Validation: unit tests in `src/contacts/rank.rs`, `src/contacts/extractor.rs`, `src/daemon/methods/contact.rs` (`a_refused_implicit_build_serves_the_kept_index_and_says_so`), `crates/mp-client/src/format.rs` (`a_refused_build_has_one_line_and_a_written_one_none`), `tests/daemon_admin_slice.rs` (`a_written_rebuild_publishes_contact_changed`); `clients/desktop/src/components/contacts/contacts.test.tsx` (`j, k, G and gg move the cursor, and a contact.changed while hidden reads the list on the next open`), `clients/desktop/src/app/contacts.test.ts` (`a written rebuild says how many, and its contact.changed reads the list again`, `a search whose own build the cache guard refused says so`)
+- Status: routed (P4-U14); GUI shipped (M4, #0131); the index-changed event and the refused-build notice since the daemon leftovers (2026-10-22); `mp contacts search` says the notice on stderr, and the TUI, whose Contacts view reads the cache file, reads it again on `contact.changed`
 - Note: implicit workflow that keeps the index current as mail arrives.
-  Since the admin slice the extraction, the ranking and the cache guard (#0067) all run in the daemon; no client opens the index.
-
-## Calendar and iMIP
 
 ### CAL-01 RSVP to a received invitation
 

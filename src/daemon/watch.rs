@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use log::debug;
-use mp_protocol::events::{Diagnostic, KIND_SIGNATURE_CHANGED};
+use mp_protocol::events::{Diagnostic, KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED};
 use serde_json::json;
 
 use super::state::events::Event;
@@ -193,6 +193,9 @@ pub enum WatchEvent {
     DraftRemoved { account: String, id: String },
     /// A signature file appeared or changed.
     SignatureChanged { name: String, path: PathBuf },
+    /// A signature file that had been announced is gone: deleted, or renamed
+    /// away, in which case the new name arrives as a [`Self::SignatureChanged`].
+    SignatureRemoved { name: String },
 }
 
 impl WatchEvent {
@@ -226,7 +229,7 @@ impl WatchEvent {
                 account: account.clone(),
                 id: id.clone(),
             }),
-            WatchEvent::SignatureChanged { .. } => None,
+            WatchEvent::SignatureChanged { .. } | WatchEvent::SignatureRemoved { .. } => None,
         }
     }
 
@@ -236,6 +239,10 @@ impl WatchEvent {
             WatchEvent::SignatureChanged { name, path } => Some(Event::Lifecycle {
                 kind: KIND_SIGNATURE_CHANGED,
                 payload: json!({"name": name, "path": path.display().to_string()}),
+            }),
+            WatchEvent::SignatureRemoved { name } => Some(Event::Lifecycle {
+                kind: KIND_SIGNATURE_REMOVED,
+                payload: json!({"name": name}),
             }),
             _ => None,
         }
@@ -370,13 +377,15 @@ impl DraftWatcher {
                                 state.announced = Some(name);
                                 events.push(event);
                             }
-                            None => {
-                                if let (Some(account), Some(id)) =
-                                    (root.account.clone(), state.announced.take())
-                                {
+                            None => match (root.account.clone(), state.announced.take()) {
+                                (Some(account), Some(id)) => {
                                     events.push(WatchEvent::DraftRemoved { account, id });
                                 }
-                            }
+                                (None, Some(name)) => {
+                                    events.push(WatchEvent::SignatureRemoved { name });
+                                }
+                                _ => {}
+                            },
                         }
                     }
                 }
@@ -500,6 +509,7 @@ fn announced_name(event: &WatchEvent) -> String {
         WatchEvent::DraftChanged(summary) => summary.id.clone(),
         WatchEvent::DraftInvalid { id, .. } => id.clone(),
         WatchEvent::SignatureChanged { name, .. } => name.clone(),
+        WatchEvent::SignatureRemoved { name } => name.clone(),
         WatchEvent::DraftRemoved { id, .. } => id.clone(),
     }
 }

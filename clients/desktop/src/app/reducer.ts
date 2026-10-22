@@ -197,6 +197,7 @@ import {
   setContactsQuery,
   setContactsSearching,
   staleAllContacts,
+  staleContacts,
 } from "@/app/contacts";
 import type { ConfigSnapshot, ContactSearch, SecretKind, SignatureListing } from "@/lib/gui-types";
 import type { AccountCredentials, CheckStatus, ConfigChanged, ConfigInvalid } from "@/protocol/types";
@@ -1368,10 +1369,19 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const next = staleListIf(staleMailboxes(s, account), (a, m) => a === account && m === "drafts");
       return staleConversations(next, account);
     }
-    // A signature file was written or created, here or in another client;
-    // the files are global, so every account's listing is stale.
+    // A signature file was written, created, deleted or renamed away, here
+    // or in another client; the files are global, so every account's
+    // listing is stale.
     case "signature.changed":
+    case "signature.removed":
       return staleAllSignatures(s);
+    // An account's contact index was written: by a rebuild, a sync's or a
+    // send's bump, from any client. Its list is read again when the view
+    // shows it.
+    case "contact.changed": {
+      const account = (payload as { account?: unknown }).account;
+      return typeof account === "string" ? staleContacts(s, account) : s;
+    }
     case "config.invalid":
       return configInvalid(s, payload as ConfigInvalid);
     case "diagnostic.check_changed": {

@@ -203,6 +203,14 @@ pub const KIND_DRAFT_INVALID: &str = "draft.invalid";
 /// The `kind` a watched signature file travels as.
 pub const KIND_SIGNATURE_CHANGED: &str = "signature.changed";
 
+/// The `kind` a watched signature file that is gone travels as (the daemon
+/// leftovers, 2026-10-22).
+pub const KIND_SIGNATURE_REMOVED: &str = "signature.removed";
+
+/// The `kind` an account's contact index travels as once it was written (the
+/// daemon leftovers, 2026-10-22).
+pub const KIND_CONTACT_CHANGED: &str = "contact.changed";
+
 /// The `kind` one progress report of an operation travels as, with a payload
 /// carrying its `operation_id`.
 pub const KIND_OPERATION_PROGRESS: &str = "operation.progress";
@@ -294,6 +302,34 @@ pub struct SignatureChanged {
     pub name: String,
     /// The absolute path of the file.
     pub path: String,
+}
+
+/// One signature file the watcher had announced and that is gone, as
+/// `signature.removed` carries it: deleted, or renamed away, in which case a
+/// `signature.changed` names the new file.
+///
+/// A lifecycle event, like [`SignatureChanged`], and the reason a client that
+/// lists signatures never keeps a row for a file another client deleted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct SignatureRemoved {
+    /// The file stem the signature was listed under.
+    pub name: String,
+}
+
+/// An account's contact index was written, as `contact.changed` carries it:
+/// by a rebuild, by the build a search ran because there was no index, or by
+/// the bump a sync or a send gives the addresses it saw.
+///
+/// A lifecycle event: a client that shows the index reads it again with
+/// `contact.search`, since the payload says only that and how big it is now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ContactChanged {
+    /// The account whose index it is.
+    pub account: String,
+    /// How many contacts the index holds now.
+    pub contacts: u64,
 }
 
 /// Why a configuration candidate was refused, as the `config.invalid` event

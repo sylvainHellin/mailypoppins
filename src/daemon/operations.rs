@@ -340,6 +340,20 @@ impl OperationHandle {
         });
     }
 
+    /// Publish a lifecycle event the work caused, beside the operation's own:
+    /// the `contact.changed` a send or a sync leaves when it bumps a contact
+    /// index. Queued behind the operation's earlier events, in order.
+    pub fn announce(&self, event: Event) {
+        {
+            let mut inner = lock(&self.shared.inner);
+            if !inner.entries.contains_key(&self.id) {
+                return;
+            }
+            inner.pending.push_back(event);
+        }
+        self.shared.fan_out();
+    }
+
     /// Finish with a result.
     pub fn succeed(&self, result: Value) {
         self.shared.mutate(&self.id, |status| {

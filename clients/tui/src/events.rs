@@ -48,10 +48,10 @@ use serde_json::json;
 use mp_protocol::diagnostic::{CheckStatus, HealthCheck};
 use mp_protocol::events::{
     AccountStateChanged, Arrival, MutationsRolledBack, SyncCompleted, KIND_ACCOUNT_STATE_CHANGED,
-    KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED, KIND_DRAFT_CHANGED,
-    KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED,
+    KIND_CONTACT_CHANGED, KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED,
+    KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED,
     KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK,
-    KIND_SYNC_COMPLETED,
+    KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
@@ -354,6 +354,22 @@ impl App {
             }
             KIND_REMOVE if draft_resource_account(event).is_some() => {
                 self.apply_draft_change(draft_resource_account(event))
+            }
+            // A signature file was written, created, deleted or renamed away,
+            // here or in another client: an open signatures overlay asks the
+            // daemon for its listing again. Nothing else holds a signature.
+            KIND_SIGNATURE_CHANGED | KIND_SIGNATURE_REMOVED => {
+                self.refresh_signatures_overlay();
+                Applied::Ignored
+            }
+            // The active account's contact index was written (a rebuild, a
+            // sync's or a send's bump, from any client): the contacts view
+            // reads it again, now if it is showing, else on its next show.
+            KIND_CONTACT_CHANGED => {
+                if event.payload["account"].as_str() == Some(self.account_config.name.as_str()) {
+                    self.reload_contacts();
+                }
+                Applied::Ignored
             }
             _ => match MessageRowDelta::decode(event) {
                 Some(delta) => {

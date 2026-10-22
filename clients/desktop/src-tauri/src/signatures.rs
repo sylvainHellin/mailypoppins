@@ -1,22 +1,19 @@
 //! Signatures management (ACC-10, #0131): the TUI's `cs` overlay.
 //!
-//! The daemon serves `signature.list` (which
-//! [`crate::commands::signature_list_on`] calls) and no other `signature.*`
-//! method yet. A signature is a file, `config_dir()/signatures/<name>.md`,
-//! and the account's default lives in the app state file, so over a daemon
-//! these commands call `mp_core::signatures` themselves, as the TUI does; the
-//! desktop's config dir is the daemon's (the handshake's
-//! `Identity.config_dir`). A refusal is `mp_core`'s own sentence (a name
-//! [`mp_core::signatures::validate_name`] refuses, a name already taken, a
-//! name that names nothing) as a `protocol` error, or `not_found` for the
-//! last. The fixture answers the same calls as pseudo-methods
-//! ([`crate::fixture::FIXTURE_ONLY_METHODS`]) with the same sentences.
+//! Every command is one `signature.*` call on the daemon (the daemon
+//! leftovers, 2026-10-22): `signature.read`, `signature.create`,
+//! `signature.rename`, `signature.delete` and `signature.set_default`, beside
+//! the `signature.list` [`crate::commands::signature_list_on`] calls. A
+//! refusal is the daemon's `-32602` carrying `mp_core::signatures`' own
+//! sentence (a name it refuses, a name already taken, a name that names
+//! nothing) as a `protocol` error, or `not_found` for the last; an unknown
+//! account is the daemon's `-32005`. The fixture answers the same methods with
+//! the same sentences.
 //!
 //! No command writes a signature's content: that is the editor's, through
 //! `editor_open` on [`SignatureFile::path`]. The daemon's watcher publishes
-//! `signature.changed` for a file written or created; nothing reports a
-//! delete (no `signature.removed`), so the dialog reads the listing again
-//! after each of its own changes.
+//! `signature.changed` for a file written or created and `signature.removed`
+//! for one deleted or renamed away, whichever client made the change.
 
 use std::time::Duration;
 
@@ -31,7 +28,9 @@ use crate::session::{Door, SessionHandle};
 /// One signature call: a file read or written, or the fixture's memory.
 const SIGNATURE_BUDGET: Duration = Duration::from_secs(10);
 
-/// One signature: its name, its file and what the file holds.
+/// One signature: its name, its file and what the file holds; the shape of
+/// `mp_protocol::signature::SignatureFile`, kept under this name for the
+/// frontend's generated types.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
@@ -44,8 +43,8 @@ pub struct SignatureFile {
     pub content: String,
 }
 
-/// A sentence of `mp_core::signatures` as the webview gets it: a name that
-/// names no signature is `not_found`, every other refusal `protocol`.
+/// A refusal sentence as the webview gets it: a name that names no signature
+/// is `not_found`, every other refusal `protocol`.
 fn refusal(sentence: &str) -> GuiError {
     if sentence.starts_with("no signature named") {
         GuiError::not_found(sentence)
@@ -54,14 +53,9 @@ fn refusal(sentence: &str) -> GuiError {
     }
 }
 
-/// An `mp_core::signatures` error, with its context chain.
-fn core_error(e: anyhow::Error) -> GuiError {
-    refusal(&format!("{e:#}"))
-}
-
-/// A fixture pseudo-method: its `-32602` refusal carries `mp_core`'s
-/// sentence, which reaches the webview as the daemon door's does.
-fn fixture_call<T: serde::de::DeserializeOwned>(
+/// One `signature.*` call: a `-32602` refusal carries the sentence, which
+/// reaches the webview as [`refusal`] sorts it; anything else as every call's.
+fn signature_call<T: serde::de::DeserializeOwned>(
     door: &Door,
     method: &str,
     params: Value,
@@ -78,48 +72,15 @@ fn fixture_call<T: serde::de::DeserializeOwned>(
     decode(method, answer)
 }
 
-/// The listing of `account` as `mp_core` reads it now.
-fn core_listing(account: &str) -> SignatureListing {
-    SignatureListing {
-        account: account.to_string(),
-        names: mp_core::signatures::list(),
-        default: mp_core::signatures::default_signature_name(account),
-    }
-}
-
-fn core_file(name: &str, content: String) -> SignatureFile {
-    SignatureFile {
-        name: name.to_string(),
-        path: mp_core::signatures::signature_file(name)
-            .display()
-            .to_string(),
-        content,
-    }
-}
-
 /// The signature `name` and its content.
 pub fn signature_read_on(door: &Door, name: &str) -> Result<SignatureFile, GuiError> {
-    match door {
-        Door::Fixture(_) => fixture_call(door, "signature.read", json!({"name": name})),
-        Door::Daemon(_) => {
-            mp_core::signatures::validate_name(name).map_err(core_error)?;
-            let content = mp_core::signatures::read(name)
-                .ok_or_else(|| refusal(&format!("no signature named '{name}'")))?;
-            Ok(core_file(name, content))
-        }
-    }
+    signature_call(door, "signature.read", json!({"name": name}))
 }
 
 /// A new, empty signature `name`; a name already taken is refused, so a
 /// create never blanks a signature. The frontend opens its file next.
 pub fn signature_create_on(door: &Door, name: &str) -> Result<SignatureFile, GuiError> {
-    match door {
-        Door::Fixture(_) => fixture_call(door, "signature.create", json!({"name": name})),
-        Door::Daemon(_) => {
-            mp_core::signatures::create(name).map_err(core_error)?;
-            Ok(core_file(name, String::new()))
-        }
-    }
+    signature_call(door, "signature.create", json!({"name": name}))
 }
 
 /// Rename `old` to `new`, carrying every account default that named it;
@@ -130,17 +91,11 @@ pub fn signature_rename_on(
     old: &str,
     new: &str,
 ) -> Result<SignatureListing, GuiError> {
-    match door {
-        Door::Fixture(_) => fixture_call(
-            door,
-            "signature.rename",
-            json!({"account": account, "old": old, "new": new}),
-        ),
-        Door::Daemon(_) => {
-            mp_core::signatures::rename(old, new).map_err(core_error)?;
-            Ok(core_listing(account))
-        }
-    }
+    signature_call(
+        door,
+        "signature.rename",
+        json!({"account": account, "old": old, "new": new}),
+    )
 }
 
 /// Delete `name` and clear every account default that named it; answers
@@ -150,17 +105,11 @@ pub fn signature_delete_on(
     account: &str,
     name: &str,
 ) -> Result<SignatureListing, GuiError> {
-    match door {
-        Door::Fixture(_) => fixture_call(
-            door,
-            "signature.delete",
-            json!({"account": account, "name": name}),
-        ),
-        Door::Daemon(_) => {
-            mp_core::signatures::delete(name).map_err(core_error)?;
-            Ok(core_listing(account))
-        }
-    }
+    signature_call(
+        door,
+        "signature.delete",
+        json!({"account": account, "name": name}),
+    )
 }
 
 /// Make `name` the default of `account`, or clear it with `None`; answers
@@ -170,17 +119,11 @@ pub fn signature_set_default_on(
     account: &str,
     name: Option<&str>,
 ) -> Result<SignatureListing, GuiError> {
-    match door {
-        Door::Fixture(_) => fixture_call(
-            door,
-            "signature.set_default",
-            json!({"account": account, "name": name}),
-        ),
-        Door::Daemon(_) => {
-            mp_core::signatures::set_default_signature(account, name).map_err(core_error)?;
-            Ok(core_listing(account))
-        }
-    }
+    signature_call(
+        door,
+        "signature.set_default",
+        json!({"account": account, "name": name}),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -362,9 +305,11 @@ mod tests {
         assert!(std::path::Path::new(&office.path).is_file());
         assert!(!std::path::Path::new(&old_path).exists());
         let events = drained(&rx);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, "signature.changed");
-        assert_eq!(events[0].1["name"], "office");
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[0].0, "signature.removed");
+        assert_eq!(events[0].1, json!({"name": "work"}));
+        assert_eq!(events[1].0, "signature.changed");
+        assert_eq!(events[1].1["name"], "office");
         // The other account's listing names the same files and its own default.
         assert_eq!(signature_list_on(&d, "home").expect("home").default, None);
         match signature_rename_on(&d, "work", "short", "office") {
@@ -384,14 +329,17 @@ mod tests {
     }
 
     #[test]
-    fn deleting_the_default_clears_it_and_publishes_nothing() {
+    fn deleting_the_default_clears_it_and_publishes_signature_removed() {
         let (d, _f, rx) = fixture_door();
         let path = signature_read_on(&d, "work").expect("read").path;
         let listing = signature_delete_on(&d, "work", "work").expect("deleted");
         assert_eq!(listing.names, ["short"]);
         assert_eq!(listing.default, None);
         assert!(!std::path::Path::new(&path).exists());
-        assert!(drained(&rx).is_empty(), "no signature.removed exists");
+        let events = drained(&rx);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].0, "signature.removed");
+        assert_eq!(events[0].1, json!({"name": "work"}));
         assert!(matches!(
             signature_delete_on(&d, "work", "work"),
             Err(GuiError::NotFound { .. })
@@ -448,7 +396,7 @@ mod tests {
             GuiError::NotFound { .. }
         ));
         assert!(matches!(
-            core_error(anyhow::anyhow!("a signature named 'x' already exists")),
+            refusal("a signature named 'x' already exists"),
             GuiError::Protocol { code: None, .. }
         ));
     }

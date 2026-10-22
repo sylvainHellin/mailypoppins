@@ -89,19 +89,13 @@ fn apply_contacts_rebuild(
     };
     let contacts = settled["contacts"].as_u64().unwrap_or(0);
     let kept = settled["kept"].as_u64().unwrap_or(0);
-    match settled["saved"].as_str() {
-        Some("refused_empty") => {
-            return app.set_status_level(
-                format!("Contacts rebuild found none, kept {kept} cached"),
-                StatusLevel::Warning,
-            );
-        }
-        Some("refused_shrunk") => {
-            return app.set_status_level(
-                format!("Contacts rebuild found only {contacts}, kept {kept} cached"),
-                StatusLevel::Warning,
-            );
-        }
+    let saved = settled["saved"].as_str();
+    if let Some(line) =
+        saved.and_then(|s| mp_client::format::refused_rebuild_line(s, contacts, kept))
+    {
+        return app.set_status_level(line, StatusLevel::Warning);
+    }
+    match saved {
         Some("written") => {}
         other => log::warn!(
             "[tui] contact.rebuild settled with an unknown verdict {other:?}; \
@@ -877,7 +871,6 @@ mod tests {
             imap_config: None,
             smtp_config: None,
             graph_config: None,
-            signature_content: None,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             mailboxes: Vec::new(),

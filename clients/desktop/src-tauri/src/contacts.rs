@@ -7,27 +7,25 @@
 //! the quoting of a display name with a comma in it. `contact.rebuild` is an
 //! operation the GUI awaits as `contact_rebuild`, settling as a
 //! [`ContactRebuilt`] whose `saved` says whether the cache guard kept the
-//! index it had.
+//! index it had; a search whose own build the guard refused says so in
+//! [`ContactSearch::rebuild`]. The daemon announces every write of an index as
+//! `contact.changed`, which is when the webview reads a list again.
 //!
-//! No daemon method exports a vCard, so [`contact_vcard_draft_on`] does what
-//! the TUI's `v` does client-side: a new draft addressed to the contact with
-//! the subject `Contact: <name>`, the `.vcf` written by
-//! `mp_core::contacts::contact_to_vcard` into `_vcards/` beside the draft
-//! (`<stem>.vcf`, then `<stem>-1.vcf` and on while the name is taken), and
-//! attached through the same `attachments:` append the Attach dialog uses.
+//! [`contact_vcard_draft_on`] is the TUI's `v`, one `contact.vcard_draft`: the
+//! daemon writes a new draft addressed to the contact with the subject
+//! `Contact: <name>`, the contact's `.vcf` under `_vcards/` beside it, and the
+//! attachment.
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::State;
 
-use mp_core::contacts::{contact_to_vcard, vcard_file_stem, Contact, ContactSource};
+use mp_protocol::contact::RefusedRebuild;
 use mp_protocol::draft::DraftCreated;
 
-use crate::attachments::draft_attach_on;
-use crate::commands::{call, decode, draft_create_on, with_door, DraftHeaders, OperationStarted};
+use crate::commands::{call, decode, with_door, OperationStarted};
 use crate::error::{Addressing, GuiError};
 use crate::session::{Door, PendingKind, SessionHandle};
 
@@ -38,8 +36,8 @@ const SEARCH_BUDGET: Duration = Duration::from_secs(30);
 /// Starting a rebuild: the daemon answers with an id before it walks anything.
 const REBUILD_START_BUDGET: Duration = Duration::from_secs(10);
 
-/// The directory beside the drafts the vCards live in, the TUI's.
-pub const VCARD_DIR: &str = "_vcards";
+/// One vCard draft: a draft and a small file written.
+const VCARD_BUDGET: Duration = Duration::from_secs(10);
 
 /// A contact as `contact.search` carries it.
 #[derive(Deserialize)]
@@ -63,6 +61,8 @@ struct WireSearch {
     #[serde(default)]
     query: String,
     contacts: Vec<WireContact>,
+    #[serde(default)]
+    rebuild: Option<RefusedRebuild>,
 }
 
 /// One ranked contact: the daemon's row, whose `score` is the match score
@@ -93,6 +93,9 @@ pub struct ContactSearch {
     pub account: String,
     pub query: String,
     pub contacts: Vec<ContactRow>,
+    /// The build this search ran because the account had no index, when the
+    /// cache guard refused it: the rows are the kept index's.
+    pub rebuild: Option<RefusedRebuild>,
 }
 
 /// What `contact.rebuild` settles with, the daemon's inline `json!`
@@ -110,8 +113,10 @@ pub struct ContactRebuilt {
     pub cache_path: String,
 }
 
-/// A contact sent as a vCard: the new draft, and the `.vcf` it attaches.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// A contact sent as a vCard: the new draft, and the `.vcf` it attaches; the
+/// shape of `mp_protocol::contact::VcardDraft`, kept under this name for the
+/// frontend's generated types.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
 pub struct VcardDraft {
@@ -150,6 +155,7 @@ pub fn contact_search_on(
                 score: c.score,
             })
             .collect(),
+        rebuild: wire.rebuild,
     })
 }
 
@@ -170,34 +176,10 @@ pub fn contact_rebuild_on(
     Ok(OperationStarted { operation_id })
 }
 
-/// The name a vCard draft's subject gives the contact: the display name, else
-/// the address's local part (the TUI's `vcard_display_name`).
-pub fn vcard_name(display_name: &str, address: &str) -> String {
-    let name = display_name.trim();
-    if name.is_empty() {
-        address.split('@').next().unwrap_or(address).to_string()
-    } else {
-        name.to_string()
-    }
-}
-
-/// Where the `.vcf` of a contact whose file stem is `stem` goes in `dir`: the
-/// first of `<stem>.vcf`, `<stem>-1.vcf`, `<stem>-2.vcf`, ... not taken.
-pub fn vcard_path(dir: &Path, stem: &str) -> PathBuf {
-    let mut path = dir.join(format!("{stem}.vcf"));
-    let mut n = 1usize;
-    while path.exists() {
-        path = dir.join(format!("{stem}-{n}.vcf"));
-        n += 1;
-    }
-    path
-}
-
-/// Send a contact as a vCard, the TUI's `v`: a new draft named `name`
-/// addressed to the contact, subject `Contact: <name>`, with no signature
-/// (the TUI's vCard draft carries none), and the contact's `.vcf` written
-/// under `_vcards/` beside it and appended to its `attachments:`. The
-/// frontend opens the draft in the editor.
+/// Send a contact as a vCard, the TUI's `v`: one `contact.vcard_draft`, which
+/// writes a new draft named `name` addressed to the contact, subject
+/// `Contact: <name>`, with no signature, and the contact's `.vcf` under
+/// `_vcards/` beside it, attached. The frontend opens the draft in the editor.
 pub fn contact_vcard_draft_on(
     door: &Door,
     account: &str,
@@ -205,39 +187,22 @@ pub fn contact_vcard_draft_on(
     address: &str,
     display_name: &str,
 ) -> Result<VcardDraft, GuiError> {
-    let address = address.trim();
-    if address.is_empty() {
+    if address.trim().is_empty() {
         return Err(GuiError::protocol("A vCard needs the contact's address"));
     }
-    let contact = Contact {
-        address: address.to_string(),
-        display_name: display_name.trim().to_string(),
-        sent_to: 0,
-        sent_cc: 0,
-        received: 0,
-        first_seen: String::new(),
-        last_seen: String::new(),
-        source: ContactSource::default(),
-    };
-    let headers = DraftHeaders {
-        to: mp_core::addresses::format_recipient(&contact.display_name, &contact.address),
-        cc: String::new(),
-        bcc: String::new(),
-        subject: format!("Contact: {}", vcard_name(&contact.display_name, address)),
-    };
-    let draft = draft_create_on(door, account, name, None, true, Some(&headers), None)?;
-    let drafts = Path::new(&draft.path)
-        .parent()
-        .ok_or_else(|| GuiError::protocol(format!("{} has no directory", draft.path)))?;
-    let dir = drafts.join(VCARD_DIR);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| GuiError::protocol(format!("could not create {}: {e}", dir.display())))?;
-    let vcf = vcard_path(&dir, &vcard_file_stem(&contact));
-    std::fs::write(&vcf, contact_to_vcard(&contact))
-        .map_err(|e| GuiError::protocol(format!("could not write {}: {e}", vcf.display())))?;
-    let vcf = vcf.display().to_string();
-    draft_attach_on(door, account, &draft.id, &vcf)?;
-    Ok(VcardDraft { draft, vcf })
+    let answer = call(
+        door,
+        "contact.vcard_draft",
+        json!({
+            "account": account,
+            "name": name,
+            "address": address,
+            "display_name": display_name,
+        }),
+        VCARD_BUDGET,
+        Addressing::Params,
+    )?;
+    decode("contact.vcard_draft", answer)
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +253,10 @@ pub async fn contact_vcard_draft(
 mod tests {
     use super::*;
     use crate::fixture::Fixture;
+    use std::path::Path;
     use std::sync::Arc;
+
+    const VCARD_DIR: &str = "_vcards";
 
     fn fixture_door() -> (Door, Arc<Fixture>) {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -344,12 +312,6 @@ mod tests {
     }
 
     #[test]
-    fn a_vcard_name_is_the_display_name_else_the_local_part() {
-        assert_eq!(vcard_name(" Doe, Jane ", "jane@x.example"), "Doe, Jane");
-        assert_eq!(vcard_name("", "ops@x.example"), "ops");
-    }
-
-    #[test]
     fn a_vcard_draft_writes_the_vcf_beside_the_drafts_and_attaches_it_once() {
         let (door, f) = fixture_door();
         let first = contact_vcard_draft_on(
@@ -401,13 +363,13 @@ mod tests {
             Path::new(&second.vcf),
             drafts.join(VCARD_DIR).join("doe-jane-1.vcf")
         );
-        // A draft and its attachment, both written by the daemon: nothing
-        // else is asked, and no editor opens; the frontend opens the draft.
+        // One call, the daemon's: it writes the draft, the vCard and the
+        // attachment, and no editor opens; the frontend opens the draft.
         let methods: std::collections::BTreeSet<String> =
             f.calls().into_iter().map(|(m, _)| m).collect();
         assert_eq!(
             methods.into_iter().collect::<Vec<_>>(),
-            ["draft.attach", "draft.create"]
+            ["contact.vcard_draft"]
         );
         assert!(f.editor_opens().is_empty());
     }

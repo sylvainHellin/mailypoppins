@@ -12,6 +12,7 @@
 
 pub mod account;
 pub mod calendar;
+pub mod contact;
 pub mod diagnostic;
 pub mod draft;
 pub mod events;

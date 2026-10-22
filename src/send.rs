@@ -3181,6 +3181,10 @@ pub struct SentDraft {
     /// while retiring the draft file. The message is on the server either
     /// way, so this is a line for the caller to word, never a failed send.
     pub settle_error: Option<anyhow::Error>,
+    /// How many contacts the account's index holds after the send bumped its
+    /// recipients, `None` when no index was written; the daemon announces a
+    /// written one as `contact.changed`.
+    pub contacts: Option<usize>,
 }
 
 /// Parse an address string like `"Name <addr>"` or `"addr"` into
@@ -3520,6 +3524,7 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
     };
 
     let mut settle_error = None;
+    let mut contacts = None;
     if report.send_result.any_succeeded() {
         if let Err(e) = crate::draft::settle_sent_draft(draft, &report, Some(&built.message_id)) {
             warn!("Sent but failed to retire {}: {e:#}", draft.path.display());
@@ -3528,13 +3533,14 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
         // Best-effort, no-op without a contacts cache; the message went out,
         // so the correspondent is worth remembering whether or not the file
         // could be retired.
-        crate::contacts::hooks::bump_after_send(&ctx.account, draft);
+        contacts = crate::contacts::hooks::bump_after_send(&ctx.account, draft);
         mark_source_after_send(draft, ctx).await;
     }
     Ok(SentDraft {
         report,
         message_id: built.message_id.clone(),
         settle_error,
+        contacts,
     })
 }
 

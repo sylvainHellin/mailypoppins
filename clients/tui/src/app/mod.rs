@@ -127,7 +127,6 @@ pub struct App {
     pub imap_config: Option<mp_core::config::ImapConfig>,
     pub smtp_config: Option<mp_core::config::SmtpConfig>,
     pub graph_config: Option<mp_core::config::GraphConfig>,
-    pub signature_content: Option<String>,
     pub archive_server_name: String,
     pub drafts_dir: Option<PathBuf>,
     pub account_config: mp_core::config::AccountConfig,
@@ -313,7 +312,7 @@ impl App {
         let accounts: Vec<AccountState> = global_config
             .accounts
             .iter()
-            .map(|ac| AccountState::new(ac.clone(), &global_config.email))
+            .map(|ac| AccountState::new(ac.clone()))
             .collect();
 
         let mut app = Self::shell(global_config, accounts);
@@ -393,7 +392,6 @@ impl App {
             imap_config: None,
             smtp_config: None,
             graph_config: None,
-            signature_content: None,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             account_config: mp_core::config::AccountConfig::default(),
@@ -478,7 +476,6 @@ impl App {
             imap_config: None,
             smtp_config: None,
             graph_config: None,
-            signature_content: None,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             account_config: mp_core::config::AccountConfig::default(),
@@ -560,7 +557,6 @@ impl App {
             self.imap_config = acct.imap_config.clone();
             self.smtp_config = acct.smtp_config.clone();
             self.graph_config = acct.graph_config.clone();
-            self.signature_content = acct.signature_content.clone();
             self.archive_server_name = acct.archive_server_name.clone();
             self.drafts_dir = acct.drafts_dir.clone();
             self.account_config = acct.account_config.clone();
@@ -625,6 +621,19 @@ impl App {
         self.contacts_view.loaded = true;
         self.contacts_view.list_index = 0;
         self.recompute_contact_matches();
+    }
+
+    /// The active account's index changed (`contact.changed`): read it again
+    /// now when the Contacts view is showing, keeping the query, and on the
+    /// next show otherwise.
+    pub fn reload_contacts(&mut self) {
+        self.contacts_view.loaded = false;
+        if self.view == View::Contacts {
+            let root = mp_core::config::account_dir(&self.account_config.name);
+            self.contacts_view.index = mp_core::contacts::load_cache(&root).ok().flatten();
+            self.contacts_view.loaded = true;
+            self.recompute_contact_matches();
+        }
     }
 
     /// Force the contact index to reload from the active account's cache
@@ -2150,38 +2159,71 @@ impl App {
         }
     }
 
-    /// Re-resolve the cached account signature after the signatures layer
-    /// changed under it (#0107).
-    ///
-    /// `signature_content` is read when a draft is created outside the compose
-    /// wizard (reply, forward, `new_draft_skeleton`), so a default that was
-    /// just switched, renamed, deleted or edited has to reach it or those
-    /// drafts keep carrying the old block until the next restart. The wizard
-    /// resolves its own signature fresh and does not depend on this.
-    ///
-    /// Every account is re-resolved, not just the active one: a delete or a
-    /// rename retargets the default of *every* account that pointed at the
-    /// name (`signatures::retarget_defaults`), and a non-active account's
-    /// cached content is what `load_from_account` restores on a switch and
-    /// what `resolve_send_account` hands to a reply sent from that identity.
-    /// The `include_signature` gate is the one `AccountState::new` applies.
-    pub fn refresh_signature_content(&mut self) {
-        let include = self.global_config.email.include_signature;
-        for acct in &mut self.accounts {
-            acct.signature_content = if include {
-                mp_core::config::resolve_signature_markdown(&acct.account_config, None)
-            } else {
-                None
-            };
-        }
-        self.signature_content = if include {
-            mp_core::config::resolve_signature_markdown(&self.account_config, None)
-        } else {
-            None
+    /// One `signature.*` call on the session: the answer, or the sentence
+    /// the daemon refused with (`no daemon session` for an `App` with none).
+    pub(crate) fn signature_call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let queries = self
+            .queries()
+            .ok_or_else(|| "no daemon session".to_string())?;
+        queries
+            .call(method, params)
+            .map_err(|e| match mp_client::session::refusal(&e) {
+                Some(refused) => refused.message.clone(),
+                None => format!("{e:#}"),
+            })
+    }
+
+    /// The daemon's `signature.list` for `account`.
+    pub(crate) fn signature_listing(
+        &self,
+        account: &str,
+    ) -> Result<mp_protocol::signature::SignatureListing, String> {
+        let answer =
+            self.signature_call("signature.list", serde_json::json!({ "account": account }))?;
+        serde_json::from_value(answer).map_err(|e| format!("reading signature.list: {e}"))
+    }
+
+    /// The Markdown block a compose wizard splices for the signature `name`,
+    /// or for the account's default when it names none: the file the daemon
+    /// reads (`signature.read`, after `signature.list` for the default),
+    /// through the conversion the daemon's draft writers apply. `None` when
+    /// there is no such signature or it is empty.
+    pub fn compose_signature_markdown(&self, name: Option<&str>) -> Option<String> {
+        let chosen = match name {
+            Some(name) => name.to_string(),
+            None => self
+                .signature_listing(&self.account_config.name)
+                .ok()
+                .and_then(|listing| listing.default)?,
         };
-        let idx = self.active_account;
-        if let Some(acct) = self.accounts.get_mut(idx) {
-            acct.signature_content = self.signature_content.clone();
+        let file = self
+            .signature_call("signature.read", serde_json::json!({ "name": chosen }))
+            .map_err(|e| log::warn!("[signatures] signature.read for a compose wizard: {e}"))
+            .ok()?;
+        let content = file["content"].as_str()?.trim_end();
+        (!content.is_empty()).then(|| mp_core::config::signature_source_to_markdown(content))
+    }
+
+    /// Ask the daemon for the open signatures overlay's listing and apply it,
+    /// after the overlay's own change, an `$EDITOR` round trip, or another
+    /// client's (`signature.changed`, `signature.removed`).
+    pub fn refresh_signatures_overlay(&mut self) {
+        let Some(account) = self.signatures_overlay_mut().map(|o| o.account.clone()) else {
+            return;
+        };
+        match self.signature_listing(&account) {
+            Ok(listing) => {
+                if let Some(overlay) = self.signatures_overlay_mut() {
+                    overlay.apply(listing);
+                }
+            }
+            Err(e) => {
+                self.set_status_level(format!("Cannot list signatures: {e}"), StatusLevel::Error)
+            }
         }
     }
 

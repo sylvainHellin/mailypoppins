@@ -2,6 +2,8 @@
 import type { DraftCreated } from "../DraftCreated";
 
 /**
- * A contact sent as a vCard: the new draft, and the `.vcf` it attaches.
+ * A contact sent as a vCard: the new draft, and the `.vcf` it attaches; the
+ * shape of `mp_protocol::contact::VcardDraft`, kept under this name for the
+ * frontend's generated types.
  */
 export type VcardDraft = { draft: DraftCreated, vcf: string, };

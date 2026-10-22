@@ -81,7 +81,7 @@ impl App {
                         name: account.name.clone(),
                         ..Default::default()
                     });
-                AccountState::new(config, &global_config.email)
+                AccountState::new(config)
             })
             .collect();
 

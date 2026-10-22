@@ -13,7 +13,9 @@ use chrono::{DateTime, Utc};
 use log::{debug, warn};
 
 /// Merge the recipients of a just-sent draft into the account's contact index.
-pub fn bump_after_send(account: &AccountConfig, draft: &EmailDraft) {
+/// Answers how many contacts the index holds once it was written, `None` when
+/// nothing was written, so the daemon can announce the change.
+pub fn bump_after_send(account: &AccountConfig, draft: &EmailDraft) -> Option<usize> {
     let root = account_dir(&account.name);
     let mut index = match load_cache(&root) {
         Ok(Some(idx)) => idx,
@@ -22,14 +24,14 @@ pub fn bump_after_send(account: &AccountConfig, draft: &EmailDraft) {
                 "contacts hook: no cache for account '{}', skipping send bump",
                 account.name
             );
-            return;
+            return None;
         }
         Err(e) => {
             warn!(
                 "contacts hook: failed to load cache for '{}': {}",
                 account.name, e
             );
-            return;
+            return None;
         }
     };
 
@@ -51,7 +53,7 @@ pub fn bump_after_send(account: &AccountConfig, draft: &EmailDraft) {
         }
     }
     if obs.is_empty() {
-        return;
+        return None;
     }
 
     if let Err(e) = observe(&mut index, &account.default_from, &obs, &now) {
@@ -59,21 +61,28 @@ pub fn bump_after_send(account: &AccountConfig, draft: &EmailDraft) {
             "contacts hook: observe failed for '{}': {}",
             account.name, e
         );
-        return;
+        return None;
     }
     if let Err(e) = save_cache(&root, &index) {
         warn!(
             "contacts hook: failed to save cache for '{}': {}",
             account.name, e
         );
+        return None;
     }
+    Some(index.contacts.len())
 }
 
 /// Merge freshly-fetched email headers into the account's contact index.
 /// Called after a successful `sync_mailboxes`.
-pub fn bump_after_sync(account: &AccountConfig, observations: &[FreshObservation]) {
+/// Answers how many contacts the index holds once it was written, `None` when
+/// nothing was written, so the daemon can announce the change.
+pub fn bump_after_sync(
+    account: &AccountConfig,
+    observations: &[FreshObservation],
+) -> Option<usize> {
     if observations.is_empty() {
-        return;
+        return None;
     }
     let root = account_dir(&account.name);
     let mut index = match load_cache(&root) {
@@ -83,14 +92,14 @@ pub fn bump_after_sync(account: &AccountConfig, observations: &[FreshObservation
                 "contacts hook: no cache for account '{}', skipping sync bump",
                 account.name
             );
-            return;
+            return None;
         }
         Err(e) => {
             warn!(
                 "contacts hook: failed to load cache for '{}': {}",
                 account.name, e
             );
-            return;
+            return None;
         }
     };
 
@@ -138,19 +147,20 @@ pub fn bump_after_sync(account: &AccountConfig, observations: &[FreshObservation
         merged += 1;
     }
     if merged == 0 {
-        return;
+        return None;
     }
     if let Err(e) = save_cache(&root, &index) {
         warn!(
             "contacts hook: failed to save cache for '{}': {}",
             account.name, e
         );
-    } else {
-        debug!(
-            "contacts hook: merged {} observations into '{}' index",
-            merged, account.name
-        );
+        return None;
     }
+    debug!(
+        "contacts hook: merged {} observations into '{}' index",
+        merged, account.name
+    );
+    Some(index.contacts.len())
 }
 
 fn rfc2822_to_rfc3339(s: &str) -> Option<String> {

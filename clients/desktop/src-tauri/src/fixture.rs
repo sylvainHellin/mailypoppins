@@ -64,13 +64,11 @@
 //!
 //! The signatures are `signatures.json`'s, held in memory and mirrored to
 //! `<temp>/mp-desktop-fixture-<pid>/signatures/<name>.md` so an Edit opens a
-//! real file. `signature.list` answers as the daemon does, and the
-//! pseudo-methods `signature.read`, `signature.create`, `signature.rename`,
-//! `signature.delete` and `signature.set_default` answer what the Rust layer
-//! answers from `mp_core::signatures` over a daemon ([`FIXTURE_ONLY_METHODS`]),
-//! with its sentences; a create and a rename publish the watcher's
-//! `signature.changed` for the new file, a delete publishes nothing, and
-//! `signature_changed` edits `work` as another window would.
+//! real file. The six `signature.*` methods answer as the daemon does, with
+//! its sentences; a create and a rename publish the watcher's
+//! `signature.changed` for the new file, a delete and a rename the watcher's
+//! `signature.removed` for the file that went, and `signature_changed` edits
+//! `work` as another window would.
 //!
 //! `send.draft` and `send.approved` arm a hold of the fixture's own
 //! `email.send_hold_secs` when asked for one, count it down through the same
@@ -135,7 +133,7 @@ use mp_protocol::events::{
     Diagnostic, DraftInvalid, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK,
     KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS, KIND_SEND_HOLD_CANCELLED,
     KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SIGNATURE_CHANGED,
-    KIND_SYNC_COMPLETED,
+    KIND_SIGNATURE_REMOVED, KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::{
     ApprovedOutcome, HoldListing, HoldStatus, OutboxCounts, OutboxListing, OutboxRetryOutcome,
@@ -229,18 +227,6 @@ const ARCHIVE_MAILBOX: &str = "archive";
 
 /// Keys a fixture row carries that a `message.list` row does not.
 const FIXTURE_ONLY_KEYS: &[&str] = &["body", "attachments"];
-
-/// Methods only the fixture answers, which the handshake never asks a daemon
-/// for: over a daemon the Rust layer does their work itself
-/// ([`crate::signatures`] calls `mp_core::signatures`), so they stay out of
-/// [`crate::connector::REQUIRED_CAPABILITIES`].
-pub const FIXTURE_ONLY_METHODS: &[&str] = &[
-    "signature.read",
-    "signature.create",
-    "signature.rename",
-    "signature.delete",
-    "signature.set_default",
-];
 
 /// The directory under the per-run root the signature files mirror into.
 const SIGNATURES_DIR: &str = "signatures";
@@ -993,6 +979,11 @@ impl State {
         )
     }
 
+    /// The watcher's `signature.removed` for the file of `name`.
+    fn signature_removed(name: &str) -> (&'static str, Value) {
+        (KIND_SIGNATURE_REMOVED, json!({"name": name}))
+    }
+
     /// Point every account default that named `old` at `new`, or clear it,
     /// as `mp_core::signatures`' rename and delete do.
     fn retarget_signature_defaults(&mut self, old: &str, new: Option<&str>) {
@@ -1073,7 +1064,7 @@ impl State {
                 self.retarget_signature_defaults(old, Some(new));
                 Ok((
                     self.signature_listing(account),
-                    vec![self.signature_changed(new)],
+                    vec![Self::signature_removed(old), self.signature_changed(new)],
                 ))
             }
             "signature.delete" => {
@@ -1086,8 +1077,10 @@ impl State {
                 }
                 let _ = fs::remove_file(self.signature_path(name));
                 self.retarget_signature_defaults(name, None);
-                // The daemon's watcher publishes no removal (no `signature.removed`).
-                Ok((self.signature_listing(account), Vec::new()))
+                Ok((
+                    self.signature_listing(account),
+                    vec![Self::signature_removed(name)],
+                ))
             }
             "signature.set_default" => {
                 let account = param_str(method, params, "account")?;
@@ -2907,8 +2900,7 @@ impl Fixture {
         // fixture's own methods.
         #[cfg(test)]
         assert!(
-            crate::connector::REQUIRED_CAPABILITIES.contains(&method)
-                || FIXTURE_ONLY_METHODS.contains(&method),
+            crate::connector::REQUIRED_CAPABILITIES.contains(&method),
             "{method} is called but missing from REQUIRED_CAPABILITIES"
         );
         let mut s = self.state();
@@ -3839,7 +3831,86 @@ impl Fixture {
                     &query,
                     limit,
                 );
-                Ok(json!({"account": account, "query": query, "contacts": contacts}))
+                Ok(json!({
+                    "account": account, "query": query, "contacts": contacts, "rebuild": null
+                }))
+            }
+            // The daemon's `contact.vcard_draft`: the draft `draft.create`
+            // writes, the contact's vCard under `_vcards/` beside it, and the
+            // `draft.attach` of its path, in the daemon's order and words.
+            "contact.vcard_draft" => {
+                only(
+                    method,
+                    &params,
+                    &["account", "address", "display_name", "name"],
+                )?;
+                let account = param_str(method, &params, "account")?.to_string();
+                let name = param_str(method, &params, "name")?.to_string();
+                let address = params["address"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if address.is_empty() {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        "A vCard needs the contact's address",
+                    ));
+                }
+                let display_name = params["display_name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let shown = if display_name.is_empty() {
+                    address.split('@').next().unwrap_or(&address).to_string()
+                } else {
+                    display_name.clone()
+                };
+                let headers = json!({
+                    "to": mp_core::addresses::format_recipient(&display_name, &address),
+                    "cc": "", "bcc": "",
+                    "subject": format!("Contact: {shown}"),
+                });
+                let create = json!({
+                    "account": account, "name": name, "no_signature": true, "headers": headers
+                });
+                let (draft, events) = s.draft_method("draft.create", &create)?;
+                for (kind, payload) in events {
+                    self.emit_locked(&mut s, kind, payload);
+                }
+                let draft_path = PathBuf::from(draft["path"].as_str().unwrap_or_default());
+                let dir = draft_path
+                    .parent()
+                    .map(|d| d.join("_vcards"))
+                    .ok_or_else(|| refused(method, -32603, "the draft has no directory"))?;
+                fs::create_dir_all(&dir)?;
+                let contact = mp_core::contacts::Contact {
+                    address: address.clone(),
+                    display_name: display_name.clone(),
+                    sent_to: 0,
+                    sent_cc: 0,
+                    received: 0,
+                    first_seen: String::new(),
+                    last_seen: String::new(),
+                    source: mp_core::contacts::ContactSource::default(),
+                };
+                let stem = mp_core::contacts::vcard_file_stem(&contact);
+                let mut vcf = dir.join(format!("{stem}.vcf"));
+                let mut n = 1usize;
+                while vcf.exists() {
+                    vcf = dir.join(format!("{stem}-{n}.vcf"));
+                    n += 1;
+                }
+                fs::write(&vcf, mp_core::contacts::contact_to_vcard(&contact))?;
+                let vcf = vcf.display().to_string();
+                let attach = json!({"account": account, "id": draft["id"], "path": vcf});
+                let (_, events) = s.draft_method("draft.attach", &attach)?;
+                for (kind, payload) in events {
+                    self.emit_locked(&mut s, kind, payload);
+                }
+                Ok(json!({"draft": draft, "vcf": vcf}))
             }
             "contact.rebuild" => {
                 only(method, &params, &["account"])?;
@@ -3885,9 +3956,18 @@ impl Fixture {
                 });
                 let fixture = Arc::clone(self);
                 let op = id.clone();
+                let written = saved == "written";
                 std::thread::spawn(move || {
                     std::thread::sleep(delay);
                     if fixture.running(&op) {
+                        // The daemon announces a written index to every
+                        // client before the rebuild settles.
+                        if written {
+                            fixture.emit(
+                                "contact.changed",
+                                json!({"account": account, "contacts": contacts}),
+                            );
+                        }
                         fixture.settle(&op, "succeeded", Some(result));
                     }
                 });
@@ -5467,18 +5547,6 @@ mod tests {
         (Arc::new(Fixture::load(tx).expect("fixtures load")), rx)
     }
 
-    /// A fixture-only method is never asked of a daemon, so it cannot also
-    /// be required at the handshake.
-    #[test]
-    fn the_fixture_only_methods_are_not_required_of_a_daemon() {
-        for method in FIXTURE_ONLY_METHODS {
-            assert!(
-                !crate::connector::REQUIRED_CAPABILITIES.contains(method),
-                "{method}"
-            );
-        }
-    }
-
     /// `config.get` names the `config.toml` written at load, whose accounts
     /// are `accounts.json`'s in its order, as `config.json`'s are.
     #[test]
@@ -6016,6 +6084,10 @@ mod tests {
                 "total": null, "message": "work"
             })
         );
+        // A written index is announced to every client before the settle.
+        let changed = next_event(&rx);
+        assert_eq!(changed.kind, "contact.changed");
+        assert_eq!(changed.payload, json!({"account": "work", "contacts": 25}));
         let finished = next_event(&rx);
         assert_eq!(finished.kind, KIND_OPERATION_FINISHED);
         assert_eq!(finished.payload["state"], "succeeded");
@@ -6045,6 +6117,11 @@ mod tests {
         f.call("contact.rebuild", json!({"account": "work"}))
             .expect("started");
         next_event(&rx);
+        assert_eq!(
+            next_event(&rx).kind,
+            "contact.changed",
+            "a written index is announced"
+        );
         assert_eq!(next_event(&rx).payload["result"]["saved"], "written");
     }
 

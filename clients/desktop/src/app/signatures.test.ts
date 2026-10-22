@@ -67,13 +67,16 @@ describe("the signature listings", () => {
     expect(edit.signatures).toEqual({});
   });
 
-  it("signature.changed, the dialog's own change and a bootstrap make every listing stale", () => {
+  it("signature.changed, signature.removed, the dialog's own change and a bootstrap make every listing stale", () => {
     let s = withDialog();
     s = run(s, { type: "open_compose", dialog: { kind: "new", account: "home" } });
     s = run(s, { type: "signatures_loaded", account: "home", gen: s.signatures.home.gen, listing: listing("home", ["short", "work"], null) });
     expect(isStale(s.signatures.work) || isStale(s.signatures.home)).toBe(false);
     const changed = run(s, envelope("signature.changed", { name: "work", path: "/c/signatures/work.md" }));
     expect(isStale(changed.signatures.work) && isStale(changed.signatures.home)).toBe(true);
+    // A file another client deleted makes them stale too (signature.removed).
+    const removed = run(s, envelope("signature.removed", { name: "work" }));
+    expect(isStale(removed.signatures.work) && isStale(removed.signatures.home)).toBe(true);
     // Only the open wizard's is read.
     expect(signaturesWanted(changed)).toBe("home");
     const own = run(s, { type: "signatures_changed" });

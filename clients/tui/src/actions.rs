@@ -860,7 +860,7 @@ pub(super) fn handle_action(
             // mailbox: a draft written for another configured account leaves
             // through that account's credentials, and `send.draft` resolves
             // the draft under the account it is told.
-            let (account_index, smtp, _imap, graph, account_config, _signature) =
+            let (account_index, smtp, _imap, graph, account_config) =
                 super::helpers::resolve_send_account(app, &path);
             // The account's `auth_method` decides the transport, not which
             // config happened to load. The check stays here because its
@@ -1228,13 +1228,24 @@ fn open_compose_wizard(app: &mut App, mode: ComposeMode) {
         mp_core::contacts::load_cache(&root).ok().flatten()
     };
 
-    // The signature names for the Signature field selector (#0106), read from
-    // the app-managed signatures directory (#0107).
-    let available_signatures = mp_core::signatures::list();
+    // The signature names for the Signature field selector (#0106) and the
+    // account's default, as the daemon's `signature.list` answers them. A
+    // refusal leaves the selector empty and says why; the wizard still opens.
+    let listing = match app.signature_listing(&app.account_config.name) {
+        Ok(listing) => Some(listing),
+        Err(e) => {
+            log::warn!("[actions] signature.list for the compose wizard: {e}");
+            None
+        }
+    };
+    let available_signatures = listing
+        .as_ref()
+        .map(|l| l.names.clone())
+        .unwrap_or_default();
     // Only auto-select the default when signatures are globally on, so a New
     // draft with `include_signature = false` keeps carrying none (#0099 parity).
     let default_signature = if app.global_config.email.include_signature {
-        mp_core::signatures::default_signature_name(&app.account_config.name)
+        listing.and_then(|l| l.default)
     } else {
         None
     };
@@ -1357,52 +1368,67 @@ fn open_compose_wizard_seeded(app: &mut App, to: String) {
     app.focus = Focus::ComposeWizard;
 }
 
-/// Export a contact to a `.vcf` and attach it to a brand-new draft (#0033,
-/// send-contact-as-vCard). The vCard is written into the drafts mailbox's
-/// `_vcards/` sidecar dir and referenced by absolute path in the draft's
-/// `attachments:` frontmatter (the same plumbing `src/send.rs` already reads).
-/// Then hands off to `$EDITOR` exactly like the new-draft flow.
+/// Send a contact as a vCard (#0033): `contact.vcard_draft` writes a new draft
+/// addressed to the contact, with no signature, and the contact's `.vcf`
+/// under the drafts directory's `_vcards/`, attached; the desktop's `v` makes
+/// the same call. Then hands off to `$EDITOR` exactly like the new-draft flow.
 ///
 /// v1 intentionally targets a *new* draft only: attaching to an existing draft
-/// would need a draft picker + an in-place `attachments:` frontmatter rewrite
-/// (new machinery beyond the reused new-draft path); deferred per the ticket.
+/// would need a draft picker; deferred per the ticket.
 fn send_contact_as_vcard(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     contact: &mp_core::contacts::Contact,
 ) -> Result<()> {
-    let dir = app.drafts_dir();
-
-    // Write the .vcf into a sidecar dir beside the drafts so it is stable and
-    // out of the mailbox listing (which only reads `*.md`).
-    let vcard_dir = dir.join("_vcards");
-    if let Err(e) = std::fs::create_dir_all(&vcard_dir) {
-        app.set_status_level(format!("vCard dir failed: {e}"), StatusLevel::Error);
+    let Some(door) = app.queries() else {
+        app.set_status_level(
+            "vCard draft failed: no daemon session".to_string(),
+            StatusLevel::Error,
+        );
         return Ok(());
-    }
-    let stem = mp_core::contacts::vcard_file_stem(contact);
-    let mut vcf_path = vcard_dir.join(format!("{stem}.vcf"));
-    let mut counter = 1usize;
-    while vcf_path.exists() {
-        vcf_path = vcard_dir.join(format!("{stem}-{counter}.vcf"));
-        counter += 1;
-    }
-    let vcard = mp_core::contacts::contact_to_vcard(contact);
-    if let Err(e) = std::fs::write(&vcf_path, vcard) {
-        app.set_status_level(format!("vCard write failed: {e}"), StatusLevel::Error);
-        return Ok(());
-    }
-
-    // Create a new draft addressed to the contact with the .vcf attached.
-    let recipient = mp_core::addresses::format_recipient(&contact.display_name, &contact.address);
-    let subject = format!("Contact: {}", vcard_display_name(contact));
-    let path = match write_vcard_draft(app, &dir, &recipient, &subject, &vcf_path) {
-        Ok(p) => p,
+    };
+    // The file name the TUI has always given a draft it writes: a timestamp,
+    // then the subject's slug.
+    let shown = match contact.display_name.trim() {
+        "" => contact
+            .address
+            .split('@')
+            .next()
+            .unwrap_or(&contact.address),
+        name => name,
+    };
+    let slug = slugify_subject_for_filename(&format!("Contact: {shown}"));
+    let timestamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S");
+    let name = if slug.is_empty() {
+        format!("draft-{timestamp}")
+    } else {
+        format!("draft-{timestamp}-{slug}")
+    };
+    let made = door
+        .call(
+            "contact.vcard_draft",
+            json!({
+                "account": app.account_config.name,
+                "name": name,
+                "address": contact.address,
+                "display_name": contact.display_name,
+            }),
+        )
+        .and_then(|answer| {
+            serde_json::from_value::<mp_protocol::contact::VcardDraft>(answer).map_err(Into::into)
+        });
+    let made = match made {
+        Ok(made) => made,
         Err(e) => {
-            app.set_status_level(format!("Draft creation failed: {e}"), StatusLevel::Error);
+            let why = match mp_client::session::refusal(&e) {
+                Some(refused) => refused.message.clone(),
+                None => format!("{e:#}"),
+            };
+            app.set_status_level(format!("vCard draft failed: {why}"), StatusLevel::Error);
             return Ok(());
         }
     };
+    let recipient = mp_core::addresses::format_recipient(&contact.display_name, &contact.address);
 
     if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
         app.invalidate_cache_idx(idx);
@@ -1410,7 +1436,7 @@ fn send_contact_as_vcard(
 
     // Hand off to $EDITOR (matches the new-draft flow).
     suspend_terminal(terminal)?;
-    let edit_result = edit_file(&path);
+    let edit_result = edit_file(Path::new(&made.draft.path));
     resume_terminal(terminal)?;
     match edit_result {
         Ok(()) => {
@@ -1420,74 +1446,6 @@ fn send_contact_as_vcard(
     }
     app.reload_current_mailbox();
     Ok(())
-}
-
-/// The name shown in the vCard-draft subject: display name if any, else the
-/// address local-part.
-fn vcard_display_name(contact: &mp_core::contacts::Contact) -> String {
-    if contact.display_name.trim().is_empty() {
-        contact
-            .address
-            .split('@')
-            .next()
-            .unwrap_or(&contact.address)
-            .to_string()
-    } else {
-        contact.display_name.trim().to_string()
-    }
-}
-
-/// Write a new draft addressed to `recipient` with `vcf_path` in the
-/// `attachments:` frontmatter list. Mirrors `write_new_draft_from_wizard`'s
-/// frontmatter shape plus a single attachment entry.
-fn write_vcard_draft(
-    app: &App,
-    dir: &std::path::Path,
-    recipient: &str,
-    subject: &str,
-    vcf_path: &std::path::Path,
-) -> Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let default_from = app
-        .smtp_config
-        .as_ref()
-        .map(|s| s.default_from.clone())
-        .unwrap_or_else(|| app.account_config.default_from.clone());
-    let from = default_from.as_str();
-    let now = chrono::Utc::now().to_rfc2822();
-
-    let slug = slugify_subject_for_filename(subject);
-    let timestamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S");
-    let base_name = if slug.is_empty() {
-        format!("draft-{timestamp}.md")
-    } else {
-        format!("draft-{timestamp}-{slug}.md")
-    };
-    let mut path = dir.join(&base_name);
-    let mut counter = 1usize;
-    while path.exists() {
-        path = dir.join(format!("draft-{timestamp}-{slug}-{counter}.md"));
-        counter += 1;
-    }
-
-    let mut fm = String::from("---\n");
-    fm.push_str(&format!("to: {}\n", yaml_escape(recipient)));
-    fm.push_str("cc:\n");
-    fm.push_str("bcc:\n");
-    fm.push_str(&format!("subject: {}\n", yaml_escape(subject)));
-    fm.push_str("status: draft\n");
-    fm.push_str(&format!("from: \"{from}\"\n"));
-    fm.push_str(&format!("date: {now}\n"));
-    fm.push_str("reply_to:\n");
-    fm.push_str("attachments:\n");
-    fm.push_str(&format!(
-        "  - \"{}\"\n",
-        vcf_path.display().to_string().replace('"', "\\\"")
-    ));
-    fm.push_str("---\n\n");
-
-    std::fs::write(&path, fm)?;
-    Ok(path)
 }
 
 /// Edit the compose wizard's selected signature in `$EDITOR` (#0106).
@@ -1563,20 +1521,31 @@ fn edit_signature_file(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     name: &str,
 ) -> Result<()> {
-    if let Err(e) = mp_core::signatures::validate_name(name) {
-        app.set_status_level(format!("Cannot open signature: {e:#}"), StatusLevel::Error);
-        return Ok(());
-    }
-    // Missing means the selection went stale (renamed or deleted elsewhere):
-    // create it rather than dropping the user into `$EDITOR` on a path whose
-    // parent directory may not exist.
-    if !mp_core::signatures::exists(name) {
-        if let Err(e) = mp_core::signatures::write(name, "") {
-            app.set_status_level(format!("Cannot open signature: {e:#}"), StatusLevel::Error);
+    // The daemon names the file. Missing means the selection went stale
+    // (renamed or deleted elsewhere): create it rather than dropping the user
+    // into `$EDITOR` on a path whose parent directory may not exist.
+    let named = json!({ "name": name });
+    let opened = match app.signature_call("signature.read", named.clone()) {
+        Ok(file) => Ok(file),
+        Err(e) if e.starts_with("no signature named") => {
+            app.signature_call("signature.create", named)
+        }
+        Err(e) => Err(e),
+    };
+    let path = match opened.map(|file| file["path"].as_str().map(PathBuf::from)) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            app.set_status_level(
+                "Cannot open signature: the daemon named no file".to_string(),
+                StatusLevel::Error,
+            );
             return Ok(());
         }
-    }
-    let path = mp_core::signatures::signature_file(name);
+        Err(e) => {
+            app.set_status_level(format!("Cannot open signature: {e}"), StatusLevel::Error);
+            return Ok(());
+        }
+    };
 
     suspend_terminal(terminal)?;
     let edit_result = edit_file(&path);
@@ -1587,9 +1556,8 @@ fn edit_signature_file(
         Err(e) => app.set_status_level(format!("Edit failed: {e}"), StatusLevel::Error),
     }
 
-    app.refresh_signature_content();
+    app.refresh_signatures_overlay();
     if let Overlay::Signatures(overlay) = &mut app.overlay {
-        overlay.refresh();
         overlay.select(name);
     }
     Ok(())
@@ -1862,14 +1830,13 @@ fn write_new_draft_from_wizard(app: &App, wizard: &ComposeWizard) -> Result<Path
 /// the selected signature file, resolved fresh so an `$EDITOR` edit made from
 /// the wizard is picked up (#0107). Honours the global `include_signature`
 /// toggle so a New draft written with signatures turned off carries none, as
-/// before.
+/// before. The file is the daemon's ([`App::compose_signature_markdown`]).
 fn wizard_signature(app: &App, wizard: &ComposeWizard) -> (Option<String>, Option<String>) {
     if !app.global_config.email.include_signature {
         return (None, None);
     }
     let name = wizard.signature_name.clone();
-    let md = mp_core::config::resolve_signature_markdown(&app.account_config, name.as_deref());
-    (md, name)
+    (app.compose_signature_markdown(name.as_deref()), name)
 }
 
 /// Normalize a recipient-list field on wizard submit:
@@ -2618,7 +2585,11 @@ mod tests {
             "---\nto: bob@example.com\nsubject: \"Re: hello\"\nstatus: draft\n---\n\nThanks.\n",
         )
         .unwrap();
-        let opened_with = wizard_signature(&app, app.compose_wizard().unwrap()).0;
+        // The block the daemon's `signature.read` gives the wizard; this unit
+        // test has no daemon, so it reads the file as the daemon would.
+        let account = app.account_config.clone();
+        let block = || mp_core::config::resolve_signature_markdown(&account, Some("work"));
+        let opened_with = block();
         mp_core::draft::rewrite_draft_signature(&path, opened_with.as_deref(), Some("work"))
             .unwrap();
         assert!(
@@ -2638,8 +2609,8 @@ mod tests {
         );
 
         // What the submit path then does with that decision.
-        let (sig_md, sig_name) = wizard_signature(&app, app.compose_wizard().unwrap());
-        mp_core::draft::rewrite_draft_signature(&path, sig_md.as_deref(), sig_name.as_deref())
+        let sig_name = app.compose_wizard().unwrap().signature_name.clone();
+        mp_core::draft::rewrite_draft_signature(&path, block().as_deref(), sig_name.as_deref())
             .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();

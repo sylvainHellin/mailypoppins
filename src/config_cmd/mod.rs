@@ -16,7 +16,7 @@ pub use init::{
     cmd_config_add_account, cmd_config_init, graph_candidate, imap_candidate, ImapAnswers,
     Mailboxes, Probe, WizardDaemon,
 };
-pub use show::{cmd_config_path, cmd_config_show};
+pub use show::{cmd_config_path, cmd_config_show, Signatures};
 
 #[cfg(test)]
 mod tests;

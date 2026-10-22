@@ -35,4 +35,5 @@ mod invites;
 mod oracle;
 mod preview;
 mod queries;
+mod signatures;
 mod types;

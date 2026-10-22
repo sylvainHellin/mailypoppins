@@ -1467,7 +1467,6 @@ fn account_state(name: &str) -> crate::tui::app::AccountState {
         imap_config: None,
         smtp_config: None,
         graph_config: None,
-        signature_content: None,
         archive_server_name: "Archive".to_string(),
         drafts_dir: None,
         mailboxes: Vec::new(),

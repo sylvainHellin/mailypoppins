@@ -72,6 +72,22 @@ pub fn mutations_rolled_back_line(failed: u64) -> String {
     format!("{failed} mutation(s) failed and were rolled back (see the log)")
 }
 
+/// The line a contact index build the cache guard (#0067) refused earns:
+/// `saved` is `refused_empty` or `refused_shrunk`, `contacts` what the build
+/// found and `kept` what the kept index holds; `None` for any other verdict.
+///
+/// One wording for a `contact.rebuild` settle and for the build a
+/// `contact.search` reports in its `rebuild`, in every client.
+pub fn refused_rebuild_line(saved: &str, contacts: u64, kept: u64) -> Option<String> {
+    match saved {
+        "refused_empty" => Some(format!("Contacts rebuild found none, kept {kept} cached")),
+        "refused_shrunk" => Some(format!(
+            "Contacts rebuild found only {contacts}, kept {kept} cached"
+        )),
+        _ => None,
+    }
+}
+
 /// The line under a server search the limit cut (PERSO-175): more matched
 /// than the `shown` hits, and `remedy`, the client's own way to see them
 /// (`raise -n to see them` in `mp search`, a narrower search in the TUI and
@@ -478,4 +494,24 @@ pub fn oauth2_device_code_lines(verification_uri: &str, user_code: &str) -> Stri
 /// The line a finished login prints.
 pub fn oauth2_stored_line(account: &str) -> String {
     format!("\u{2713} OAuth2 token acquired and cached for account '{account}'")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refused_rebuild_line;
+
+    /// The two refusals of the cache guard have one wording in every client,
+    /// and a written index has none.
+    #[test]
+    fn a_refused_build_has_one_line_and_a_written_one_none() {
+        assert_eq!(
+            refused_rebuild_line("refused_empty", 0, 25).as_deref(),
+            Some("Contacts rebuild found none, kept 25 cached")
+        );
+        assert_eq!(
+            refused_rebuild_line("refused_shrunk", 3, 25).as_deref(),
+            Some("Contacts rebuild found only 3, kept 25 cached")
+        );
+        assert_eq!(refused_rebuild_line("written", 30, 0), None);
+    }
 }

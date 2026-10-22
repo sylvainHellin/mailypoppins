@@ -3,9 +3,9 @@
 // account, so the dialog sets and clears the selection account's default.
 // The listing is a Loadable per account the dialog and the new-draft wizard
 // both read, so a change the dialog makes shows in the wizard's select.
-// No event reports a delete (no `signature.removed`), so the dialog reads the
-// listing again after each change of its own; `signature.changed` makes
-// every listing stale.
+// The dialog reads the listing again after each change of its own, and the
+// watcher's `signature.changed` and `signature.removed` make every listing
+// stale, whichever client changed a file.
 
 import type { Dispatch } from "react";
 import type { Action } from "@/app/reducer";

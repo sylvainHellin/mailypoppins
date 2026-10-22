@@ -97,7 +97,8 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `event` `diagnostic.check_changed` | a line in the activity log, and the check's health banner line replaced, added, or on `ok` removed (see Health checks) |
 | `event` `draft.*` | the account's counts and, when shown, its list stale; an editing session stays |
 | `event` `mutations.rolled_back` | the account's pending rows put back, its counts and list stale, an activity notice |
-| `event` `signature.changed` | every account's signature listing stale, read again while the Signatures dialog or a new-draft or forward wizard is open |
+| `event` `signature.changed`, `signature.removed` | every account's signature listing stale, read again while the Signatures dialog or a new-draft or forward wizard is open |
+| `event` `contact.changed` | that account's contact list stale, read again when the Contacts view shows it (see Contacts, "Staleness") |
 | `event` `send.hold_started`, `_tick`, `_cancelled`, `_fired` | the hold's entry in `holds`, and a line in the activity log when it fires or is cancelled |
 | `event` `operation.finished` of a send | the send settles: its card or a notice says how it ended |
 | `event` `operation.finished` of an outbox retry | the retry settles: a notice says how the row ended, and the outbox is read again |
@@ -322,7 +323,7 @@ A row the store no longer holds is a warning notice, "Open failed: that message 
 
 `cn`, `cf` and `cF` on a stored message open `ComposeWizard.tsx`, a dialog titled "New draft", "Forward" or "Forward as attachment" with To, Cc, Bcc and Subject, and a new draft has the TUI's inline Body last.
 Both have a Signature select, filled from `signature_list`, with the account's default preselected and "none" last; a reply has no wizard and carries the account's default, as in the TUI.
-The select reads the account's listing in `state.signatures`, which a `signature.changed` or a change in the Signatures dialog makes stale, so it follows while the wizard is open: until the user picks, it shows the default, and a pick stays while its name is listed and falls back to the default when it goes.
+The select reads the account's listing in `state.signatures`, which a `signature.changed`, a `signature.removed` or a change in the Signatures dialog makes stale, so it follows while the wizard is open: until the user picks, it shows the default, and a pick stays while its name is listed and falls back to the default when it goes.
 The forward's Subject starts as the forward will write it (`Fwd: `, the rule of `mp_core::draft::fwd_subject`); the TUI asks for the forward's recipients first too, and a reply goes straight to the editor.
 Enter in a field moves to the next one and, after the last, to the submit button, except in Body, where it starts a new line; Cmd+Enter or Ctrl+Enter submits from anywhere in the dialog; Escape cancels and writes nothing.
 
@@ -659,8 +660,9 @@ The settle says the TUI's words:
 
 ### Staleness
 
-No daemon event names a contact index.
-So the shown account's list is read on every switch to the view, when the view follows the selection to another account, after a written rebuild, on a new query, and on every bootstrap, which also drops the lists of accounts that are gone.
+The daemon's `contact.changed` `{account, contacts}` names a contact index whenever it is written: a rebuild from any client, the build a search runs for an account with none, and the bump a sync or a send gives.
+So an account's list goes stale on that event, on a new query, when the view first comes to an account or follows the selection to another one, and on every bootstrap, which also drops the lists of accounts that are gone; a switch back to the view reads nothing that did not go stale.
+A search whose own build the cache guard refused answers the kept index, and its `rebuild` is said as the rebuild's refusal notice ("Contacts rebuild found only N, kept K cached").
 Only the shown list is read: one that went stale behind another view is read when the Contacts view comes back.
 
 ## Calendar
@@ -794,7 +796,7 @@ Deleting the default clears it, which `mp_core` does itself.
 
 `state.signatures` keeps each account's `signature_list` answer as a `Loadable`.
 Every open of the dialog or of the new-draft wizard for an account creates it or makes it stale.
-Every `signature.changed`, every change the dialog makes (answered or refused) and every bootstrap make all of them stale, since the files are shared.
+Every `signature.changed` and `signature.removed`, every change the dialog makes (answered or refused) and every bootstrap make all of them stale, since the files are shared.
 Only the listing of the open dialog or the open wizard is read; a stale one is read when one of them opens again.
 The daemon publishes nothing for a delete, so another client's delete shows on the next open, and this dialog's own delete shows at once because it reads the listing again.
 

@@ -164,10 +164,15 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         Arc::clone(&operations),
         Arc::clone(&holds),
     );
-    self::contact::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
+    self::contact::register(
+        dispatcher,
+        Arc::clone(&config),
+        Arc::clone(&operations),
+        Arc::clone(&canonical),
+    );
     self::calendar::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     self::hook::register(dispatcher, Arc::clone(&config), Arc::clone(&operations));
-    self::signature::register(dispatcher, Arc::clone(&config));
+    self::signature::register(dispatcher, Arc::clone(&config), Arc::clone(&canonical));
     self::diagnostic::register(
         dispatcher,
         Arc::clone(&config),

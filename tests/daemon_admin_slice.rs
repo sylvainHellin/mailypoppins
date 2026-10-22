@@ -1254,6 +1254,109 @@ async fn contact_rebuild_reports_progress_and_settles_with_the_save_verdict() {
     assert_path_free("contact.rebuild", result);
 }
 
+/// A rebuild that wrote the index announces it to every bootstrapped client as
+/// `contact.changed` `{account, contacts}` (the daemon leftovers, 2026-10-22),
+/// so a client showing the contacts re-reads them whoever started the rebuild.
+#[tokio::test]
+async fn a_written_rebuild_publishes_contact_changed() {
+    let slice = Slice::start();
+    let mut watcher = slice.connect().await;
+    call(&mut watcher, "state.bootstrap", json!({})).await;
+    let mut conn = slice.connect().await;
+    call(&mut conn, "state.bootstrap", json!({})).await;
+
+    let started = call(
+        &mut conn,
+        "contact.rebuild",
+        json!({"account": fixture::ACCOUNT}),
+    )
+    .await;
+    let result = succeeded(&settle(&mut conn, &operation_id(&started)).await).clone();
+    assert_eq!(result["saved"], "written", "{result}");
+
+    let start = Instant::now();
+    let mut changed = None;
+    while start.elapsed() < SETTLE_DEADLINE {
+        let Some(notification) = within("state.event", watcher.next_notification()).await else {
+            break;
+        };
+        if notification.params["kind"] == "contact.changed" {
+            changed = Some(notification.params["payload"].clone());
+            break;
+        }
+    }
+    let changed = changed.expect("another client was told the index changed");
+    let typed: mp_protocol::events::ContactChanged =
+        serde_json::from_value(changed.clone()).expect("a ContactChanged");
+    assert_eq!(typed.account, fixture::ACCOUNT);
+    assert_eq!(
+        Some(typed.contacts),
+        result["contacts"].as_u64(),
+        "{changed}"
+    );
+}
+
+/// `contact.vcard_draft` writes a draft addressed to the contact, subject
+/// `Contact: <name>`, with no signature, and the contact's vCard under
+/// `_vcards/`, attached: the TUI's and the desktop's `v`, done once.
+#[tokio::test]
+async fn contact_vcard_draft_writes_the_draft_and_attaches_the_vcard() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let answer = call(
+        &mut conn,
+        "contact.vcard_draft",
+        json!({
+            "account": fixture::ACCOUNT,
+            "name": "vcard-jane",
+            "address": "jane@example.com",
+            "display_name": "Doe, Jane",
+        }),
+    )
+    .await;
+    let made: mp_protocol::contact::VcardDraft =
+        serde_json::from_value(answer.clone()).expect("a VcardDraft");
+    assert!(made.draft.path.ends_with("vcard-jane.md"), "{answer}");
+    assert!(made.vcf.contains("/_vcards/"), "{answer}");
+    let vcard = std::fs::read_to_string(&made.vcf).expect("the vCard is on disk");
+    assert!(
+        vcard.contains("EMAIL") && vcard.contains("jane@example.com"),
+        "{vcard}"
+    );
+    let draft = std::fs::read_to_string(&made.draft.path).expect("the draft is on disk");
+    assert!(draft.contains("Contact: Doe, Jane"), "{draft}");
+    assert!(draft.contains("jane@example.com"), "{draft}");
+    assert!(
+        draft.contains(&made.vcf),
+        "the draft attaches the vCard: {draft}"
+    );
+
+    let second = call(
+        &mut conn,
+        "contact.vcard_draft",
+        json!({
+            "account": fixture::ACCOUNT,
+            "name": "vcard-jane-again",
+            "address": "jane@example.com",
+            "display_name": "Doe, Jane",
+        }),
+    )
+    .await;
+    assert_ne!(
+        second["vcf"], answer["vcf"],
+        "a second vCard of one contact gets its own file"
+    );
+
+    let empty = call_err(
+        &mut conn,
+        "contact.vcard_draft",
+        json!({"account": fixture::ACCOUNT, "name": "x", "address": " ", "display_name": ""}),
+    )
+    .await;
+    assert_eq!(empty.code, -32602, "{empty:?}");
+    assert_eq!(empty.message, "A vCard needs the contact's address");
+}
+
 /// Cancel the operation `id`, held at its commit point, and wait for the
 /// worker's verdict: the answer is the registry's, the verdict the worker's.
 async fn cancel_at_commit_point(conn: &mut Connection, root: &Path, method: &str, id: &str) {

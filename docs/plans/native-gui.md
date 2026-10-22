@@ -352,7 +352,7 @@ The attachment save and attach take a typed path, and since 2026-10-01 a Browse 
 M4 landed on the `gui-m4` branch on 2026-09-30, in the commits `f888afce` to `41e3b73f`, each tagged `(#0131)`.
 What shipped per unit, the keys, the fixture simulations, the decisions and what stays open are in the ticket's section ["M4 landed"](../tickets/0131-gui-full-parity.md#m4-landed), and the parity rows it closes in [parity-matrix.md](../parity-matrix.md).
 No plugin was installed: the copies go through `navigator.clipboard.writeText` from the key or click handler instead of the clipboard-manager plugin; the dialog plugin came after M5, for M3's path fields.
-The signatures and the vCard are client-side over `mp-core`, since the daemon serves no `signature.*` method and no `contact.vcard`.
+The signatures and the vCard were client-side over `mp-core` at M4; since the daemon leftovers (2026-10-22) they are the daemon's `signature.*` family and `contact.vcard_draft`.
 
 ### M5: embedded Neovim (#0130)
 

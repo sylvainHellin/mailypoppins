@@ -2966,6 +2966,18 @@ async fn routed_contacts_search(
     )
     .await
     .map_err(|error| refusal(account, error))?;
+    // The build this search ran because the account had no index, refused by
+    // the cache guard: the answer is the kept index, and stderr says so, which
+    // leaves `--parsable` and `--json` on stdout as they are.
+    if let Ok(refused) =
+        serde_json::from_value::<mp_protocol::contact::RefusedRebuild>(result["rebuild"].clone())
+    {
+        if let Some(line) =
+            mp_client::format::refused_rebuild_line(&refused.saved, refused.contacts, refused.kept)
+        {
+            eprintln!("{} {line}", "\u{26a0}".yellow());
+        }
+    }
     let rows = contact_rows(&result["contacts"]);
     if json {
         println!(
@@ -3505,7 +3517,37 @@ async fn routed_config_show() -> Result<()> {
     .map_err(|error| anyhow!("{}", error.message))?;
     let credentials: mp_protocol::account::AccountCredentials = serde_json::from_value(answer)
         .context("reading the credential presence the daemon reported")?;
-    cmd_config_show(&config, &path, &credentials)
+    let mut signatures = mailypoppins::config_cmd::Signatures::default();
+    for account in &config.accounts {
+        let answer = daemon_try_call(
+            &mut connection,
+            "signature.list",
+            serde_json::json!({"account": account.name}),
+        )
+        .await
+        .map_err(|error| anyhow!("{}", error.message))?;
+        let listing: mp_protocol::signature::SignatureListing = serde_json::from_value(answer)
+            .context("reading the signature listing the daemon reported")?;
+        if signatures.files.is_empty() {
+            for name in &listing.names {
+                let answer = daemon_try_call(
+                    &mut connection,
+                    "signature.read",
+                    serde_json::json!({"name": name}),
+                )
+                .await
+                .map_err(|error| anyhow!("{}", error.message))?;
+                signatures.files.push(
+                    serde_json::from_value(answer)
+                        .context("reading the signature the daemon reported")?,
+                );
+            }
+        }
+        signatures
+            .defaults
+            .insert(account.name.clone(), listing.default);
+    }
+    cmd_config_show(&config, &path, &credentials, &signatures)
 }
 
 /// `mp config set-password`: the prompt is this process's terminal's, the value

@@ -1,7 +1,7 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { mock, settleRebuild } from "@/test/tauri-mock";
+import { emitEnvelope, mock, settleRebuild } from "@/test/tauri-mock";
 import { CONTACTS_SEARCH_ID } from "@/app/contacts";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
@@ -45,7 +45,7 @@ describe("the Contacts view", () => {
     expect(status()).toHaveTextContent("work: 25 contacts");
   });
 
-  it("j, k, G and gg move the cursor, and each open reads the list again", async () => {
+  it("j, k, G and gg move the cursor, and a contact.changed while hidden reads the list on the next open", async () => {
     const { user } = await openContacts();
     await user.keyboard("j");
     expect(cursorRow()).toBe("jane.doe@example.com");
@@ -57,6 +57,11 @@ describe("the Contacts view", () => {
     expect(cursorRow()).toBe("robin@example.com");
     expect(document.activeElement).toHaveAttribute("data-address", "robin@example.com");
     await user.keyboard(" m");
+    await user.keyboard(" c");
+    await new Promise((r) => setTimeout(r, 200));
+    expect(callsOf("contact_search")).toHaveLength(1);
+    await user.keyboard(" m");
+    act(() => emitEnvelope("contact.changed", { account: "work", contacts: 25 }));
     await user.keyboard(" c");
     await waitFor(() => expect(callsOf("contact_search")).toHaveLength(2));
   });

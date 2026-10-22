@@ -397,46 +397,41 @@ The Contacts view asks with a `limit` of 1000, where the TUI lists the whole ind
 Each row is the daemon's inline `{address, display_name, sent_to, sent_cc, received, score}` plus `recipient`, which the layer formats with `mp_core::addresses::format_recipient`: `Name <address>`, the name quoted when it holds a character outside atext and spaces (`"Doe, Jane" <jane@example.com>`), or the bare address when no message named one.
 The webview puts `recipient` in To as it is and never quotes a name itself.
 `score` is the fuzzy match score of a query; every row of an empty query carries `4294967295` (`u32::MAX`), which the view does not show.
-With no cache on disk the daemon builds the index inside the query, which walks the whole store, so a first search can take seconds; a rebuild the cache guard refuses there is only logged by the daemon.
+With no cache on disk the daemon builds the index inside the query, which walks the whole store, so a first search can take seconds; when the cache guard refuses that build (another writer's index appeared meanwhile), the answer is the kept index and `rebuild` carries the protocol's `RefusedRebuild` `{saved, contacts, kept}`, which the webview says as a notice, and `null` otherwise.
 An account whose store is not ready is refused with `protocol` code `-32006`, and an unknown one is `not_found` with `-32005`.
 
 `contact_rebuild` starts `contact.rebuild {account}` and awaits it as `kind: "contact_rebuild"`.
 The daemon reports one `operation.progress`, phase `contacts` with the account as its message, which reaches the webview because the operation is awaited.
 `ContactRebuilt` is the daemon's inline settle: `contacts` the rebuild found, and `saved`, which is `written`, or `refused_empty` or `refused_shrunk` when the cache guard (#0067) kept the `kept` contacts it had instead.
-No event says that an index changed, so the frontend reads the list again after a written rebuild and on every open of the view.
+The daemon announces every write of an index as `contact.changed` `{account, contacts}`, a rebuild's, a search's own build's, and the bump a sync or a send gives; the frontend marks that account's list stale and reads it when the view shows it.
 
-`contact_vcard_draft` is the TUI's `v`, done client-side since no daemon method exports a vCard:
-
-1. `draft.create` of `name` with the headers `to: recipient` and `subject: "Contact: <name>"` (the display name, else the address's local part) and `no_signature`, the TUI's vCard draft carrying none;
-2. `mp_core::contacts::contact_to_vcard` of the contact into `_vcards/` beside the new draft, named by `vcard_file_stem` (`doe-jane.vcf`), then `-1`, `-2` and on while the name is taken, the TUI's rule;
-3. the `.vcf`'s absolute path appended to the draft's `attachments:` through `draft.attach`.
-
-It answers the `DraftCreated` and the `.vcf`'s path, and opens nothing: the frontend hands the draft to the editor as a new draft's.
+`contact_vcard_draft` is the TUI's `v`, one `contact.vcard_draft {account, name, address, display_name}`: the daemon writes the draft `name` addressed to the contact, subject "Contact: <name>" (the display name, else the address's local part), with no signature, the contact's `.vcf` under `_vcards/` beside it (`doe-jane.vcf`, then `-1`, `-2` and on while the name is taken), and the attachment.
+It answers the protocol's `VcardDraft`, the `DraftCreated` and the `.vcf`'s path, and opens nothing: the frontend hands the draft to the editor as a new draft's.
 An empty address is a `protocol` refusal before any call.
 
 ## Signatures
 
 A signature is the file `<config_dir>/signatures/<name>.md`, shared by every account, and each account's default lives in the app state file.
-The daemon serves no `signature.*` method, so the signature commands call `mp_core::signatures` over a daemon door, as the TUI does, from the desktop's own config directory, which the handshake already takes to be the daemon's (`Identity.config_dir`).
+Every command is one call of the daemon's `signature.*` family (the daemon leftovers, 2026-10-22), as the TUI's overlay makes it.
 
 ```ts
 type SignatureListing = { account: string; names: string[]; default: string | null };
 type SignatureFile = { name: string; path: string; content: string };
 ```
 
-- `signature_list` lists every valid name, sorted, and the account's default when its file still exists, through the daemon's `signature.list`.
-- `signature_read` answers the file's path and content.
-- `signature_create` writes an empty file and answers it; the frontend opens `path` in the editor next, as the TUI's `n` does.
-- `signature_rename` moves the file and points every account default that named it at the new name.
-- `signature_delete` removes the file and clears every default that named it.
-- `signature_set_default` records the account's default, or clears it for `name: null`.
+- `signature_list` is `signature.list`: every valid name, sorted, and the account's default when its file still exists.
+- `signature_read` is `signature.read`: the file's path and content.
+- `signature_create` is `signature.create`: an empty file, answered; the frontend opens `path` in the editor next, as the TUI's `n` does.
+- `signature_rename` is `signature.rename`: the file moves and every account default that named it follows.
+- `signature_delete` is `signature.delete`: the file goes and every default that named it is cleared.
+- `signature_set_default` is `signature.set_default`: the account's default, or none for `name: null`.
 
 The last three answer the account's listing after the change.
 No command writes content: the editor does, through `editor_open` on the file.
-A refusal is `mp_core`'s sentence as it stands ("signature name '../x' cannot start with a dot", "a signature named 'work' already exists"), a `protocol` error with no code, or `not_found` for "no signature named '<name>'".
+A refusal is the daemon's `-32602` carrying `mp_core::signatures`' sentence as it stands ("signature name '../x' cannot start with a dot", "a signature named 'work' already exists"), a `protocol` error with no code, or `not_found` for "no signature named '<name>'"; an unknown account is the daemon's `-32005`.
 
-The daemon's watcher publishes `signature.changed {name, path}` when a signature file is written or created, including by this layer, and nothing when one is deleted, since no `signature.removed` exists.
-So the frontend reads the listing again after each change it makes, and on every `signature.changed` while the Signatures dialog or the new-draft wizard is open ([shell.md](shell.md), "Signatures").
+The daemon's watcher publishes `signature.changed {name, path}` when a signature file is written or created and `signature.removed {name}` when one is deleted or renamed away, whichever client made the change.
+So the frontend reads the listing again after each change it makes, and on either event while the Signatures dialog or the new-draft wizard is open ([shell.md](shell.md), "Signatures").
 
 ## config.toml, the daemon log and a message's Markdown rendition
 

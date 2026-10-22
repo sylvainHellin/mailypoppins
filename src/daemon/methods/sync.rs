@@ -417,7 +417,11 @@ pub async fn first_sync(
     drop(mark);
     match result {
         Ok(Some(pass)) => {
-            crate::contacts::hooks::bump_after_sync(&request.account, &pass.fresh_observations);
+            if let Some(contacts) =
+                crate::contacts::hooks::bump_after_sync(&request.account, &pass.fresh_observations)
+            {
+                canonical.publish(super::contact::contact_changed(&account, contacts));
+            }
             let outcome = from_sync_result(&account, &pass, 0, None);
             canonical.apply(super::super::state::Change::SyncCompleted(outcome));
             log::info!("[daemon] {account} finished its first sync");
@@ -575,7 +579,15 @@ async fn run_pass_to_end(
                 None,
             );
             if !request.dry_run {
-                crate::contacts::hooks::bump_after_sync(&request.account, &pass.fresh_observations);
+                if let Some(contacts) = crate::contacts::hooks::bump_after_sync(
+                    &request.account,
+                    &pass.fresh_observations,
+                ) {
+                    canonical.publish(super::contact::contact_changed(
+                        &request.account.name,
+                        contacts,
+                    ));
+                }
                 // A dry run publishes nothing: an outcome counting what *would*
                 // have been ingested would read, to every other client, as mail
                 // that arrived.

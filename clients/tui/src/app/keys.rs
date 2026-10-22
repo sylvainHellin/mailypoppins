@@ -1048,26 +1048,37 @@ impl App {
                                 self.push_action(Action::BatchDelete(msgs));
                             }
                         }
-                        // The one confirmed action that is a local file
-                        // removal rather than a queued `Action`: deleting a
-                        // signature is a `signatures::delete` call, and the
-                        // overlay it came from is restored (refreshed, so a
-                        // default the delete cleared stops being marked).
+                        // The one confirmed action that is not a queued
+                        // `Action`: deleting a signature is one
+                        // `signature.delete`, whose answer is the listing the
+                        // overlay it came from is restored with (so a default
+                        // the delete cleared stops being marked).
                         ConfirmAction::DeleteSignature(mut overlay) => {
                             let name = overlay.selected_name().map(str::to_string);
                             if let Some(name) = name {
-                                match mp_core::signatures::delete(&name) {
-                                    Ok(()) => {
+                                let deleted = self
+                                    .signature_call(
+                                        "signature.delete",
+                                        serde_json::json!({
+                                            "account": overlay.account,
+                                            "name": name,
+                                        }),
+                                    )
+                                    .and_then(|answer| {
+                                        serde_json::from_value(answer)
+                                            .map_err(|e| format!("reading signature.delete: {e}"))
+                                    });
+                                match deleted {
+                                    Ok(listing) => {
+                                        overlay.apply(listing);
                                         self.set_status(format!("Deleted signature '{name}'"))
                                     }
                                     Err(e) => self.set_status_level(
-                                        format!("Cannot delete: {e:#}"),
+                                        format!("Cannot delete: {e}"),
                                         StatusLevel::Error,
                                     ),
                                 }
                             }
-                            overlay.refresh();
-                            self.refresh_signature_content();
                             self.overlay = Overlay::Signatures(overlay);
                         }
                         _ => {
@@ -2302,6 +2313,7 @@ impl App {
     fn open_signatures_overlay(&mut self) {
         let account = self.account_config.name.clone();
         self.overlay = Overlay::Signatures(SignaturesOverlay::for_account(&account));
+        self.refresh_signatures_overlay();
     }
 
     /// Route to the browse surface or to whichever prompt owns the keyboard.
@@ -2319,9 +2331,8 @@ impl App {
     }
 
     /// The list surface: navigate, set the default, and the four file
-    /// operations. Each mutation goes through [`mp_core::signatures`] and
-    /// surfaces its validation error on the status line rather than failing
-    /// quietly.
+    /// operations. Each mutation is a `signature.*` call on the daemon and
+    /// surfaces its refusal on the status line rather than failing quietly.
     fn handle_signatures_browse_key(&mut self, key: KeyEvent) -> Option<Message> {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -2434,12 +2445,20 @@ impl App {
         } else {
             Some(name.as_str())
         };
-        match mp_core::signatures::set_default_signature(&account, target) {
-            Ok(()) => {
+        let set = self
+            .signature_call(
+                "signature.set_default",
+                serde_json::json!({"account": account, "name": target}),
+            )
+            .and_then(|answer| {
+                serde_json::from_value(answer)
+                    .map_err(|e| format!("reading signature.set_default: {e}"))
+            });
+        match set {
+            Ok(listing) => {
                 if let Some(overlay) = self.signatures_overlay_mut() {
-                    overlay.refresh();
+                    overlay.apply(listing);
                 }
-                self.refresh_signature_content();
                 let msg = if already_default {
                     format!("'{name}' is no longer the default signature")
                 } else {
@@ -2448,33 +2467,35 @@ impl App {
                 self.set_status(msg);
             }
             Err(e) => self.set_status_level(
-                format!("Cannot set the default signature: {e:#}"),
+                format!("Cannot set the default signature: {e}"),
                 StatusLevel::Error,
             ),
         }
     }
 
-    /// Enter at the create prompt. A name the signatures module refuses (empty,
-    /// a path separator, already taken) leaves the prompt open with the text
-    /// intact so it can be fixed; a good one creates the file and drops the
-    /// user straight into `$EDITOR`, which is what they wanted `n` for.
+    /// Enter at the create prompt. A name the daemon refuses (empty, a path
+    /// separator, already taken) leaves the prompt open with the text intact
+    /// so it can be fixed; a good one creates the file and drops the user
+    /// straight into `$EDITOR`, which is what they wanted `n` for.
     fn commit_new_signature(&mut self) {
         let name = match &self.overlay {
             Overlay::Signatures(overlay) => overlay.input.clone(),
             _ => return,
         };
-        match mp_core::signatures::create(&name) {
+        match self.signature_call("signature.create", serde_json::json!({"name": name})) {
             Ok(_) => {
                 if let Some(overlay) = self.signatures_overlay_mut() {
                     overlay.mode = SignaturesMode::Browse;
                     overlay.input.clear();
-                    overlay.refresh();
+                }
+                self.refresh_signatures_overlay();
+                if let Some(overlay) = self.signatures_overlay_mut() {
                     overlay.select(&name);
                 }
                 self.push_action(Action::EditSignatureFile { name: name.clone() });
                 self.set_status(format!("Created signature '{name}'"));
             }
-            Err(e) => self.set_status_level(format!("Cannot create: {e:#}"), StatusLevel::Error),
+            Err(e) => self.set_status_level(format!("Cannot create: {e}"), StatusLevel::Error),
         }
     }
 
@@ -2492,20 +2513,31 @@ impl App {
             self.set_status("No signature to rename".to_string());
             return;
         };
-        match mp_core::signatures::rename(&old, &new) {
-            Ok(()) => {
+        let account = match &self.overlay {
+            Overlay::Signatures(overlay) => overlay.account.clone(),
+            _ => return,
+        };
+        let renamed = self
+            .signature_call(
+                "signature.rename",
+                serde_json::json!({"account": account, "old": old, "new": new}),
+            )
+            .and_then(|answer| {
+                serde_json::from_value(answer).map_err(|e| format!("reading signature.rename: {e}"))
+            });
+        match renamed {
+            Ok(listing) => {
                 if let Some(overlay) = self.signatures_overlay_mut() {
                     overlay.mode = SignaturesMode::Browse;
                     overlay.input.clear();
-                    // `rename` carries the account default across, so the
-                    // refresh is what shows the marker on the new name.
-                    overlay.refresh();
+                    // The rename carries the account default across, so the
+                    // listing is what shows the marker on the new name.
+                    overlay.apply(listing);
                     overlay.select(&new);
                 }
-                self.refresh_signature_content();
                 self.set_status(format!("Renamed '{old}' to '{new}'"));
             }
-            Err(e) => self.set_status_level(format!("Cannot rename: {e:#}"), StatusLevel::Error),
+            Err(e) => self.set_status_level(format!("Cannot rename: {e}"), StatusLevel::Error),
         }
     }
 
@@ -2521,11 +2553,15 @@ impl App {
         else {
             return;
         };
+        // The file the daemon would delete, as `signature.read` names it.
+        let detail = self
+            .signature_call("signature.read", serde_json::json!({"name": name}))
+            .ok()
+            .and_then(|answer| answer["path"].as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("{name}.md"));
         self.overlay = Overlay::Confirm(ConfirmDialog {
             title: format!("Delete signature '{name}'?"),
-            detail: mp_core::signatures::signature_file(&name)
-                .display()
-                .to_string(),
+            detail,
             action: ConfirmAction::DeleteSignature(overlay),
         });
     }
@@ -4483,40 +4519,6 @@ mod tests {
         assert!(app.pending_actions.is_empty());
     }
 
-    // -----------------------------------------------------------------------
-    // Signature management overlay (#0107)
-    // -----------------------------------------------------------------------
-
-    /// Both path layers redirected into one tempdir: `config_dir()` for the
-    /// signature files, `mailypoppins_data_dir()` for the state file that
-    /// records the default. Mirrors `signatures::tests::fixture`.
-    struct SigFixture {
-        _dir: tempfile::TempDir,
-        _config: mp_core::config::test_env::ConfigDirOverride,
-        _data: mp_core::config::test_env::TestDataDir,
-    }
-
-    fn sig_fixture() -> SigFixture {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config = mp_core::config::test_env::ConfigDirOverride::new(dir.path());
-        config.set_config_dir(&dir.path().join("config"));
-        SigFixture {
-            _dir: dir,
-            _config: config,
-            _data: mp_core::config::test_env::TestDataDir::new(),
-        }
-    }
-
-    /// An app on account `work` with `names` already on disk.
-    fn app_with_signatures(names: &[&str]) -> App {
-        let mut app = app_with_emails(sample());
-        app.account_config.name = "work".to_string();
-        for name in names {
-            mp_core::signatures::write(name, &format!("-- \n{name}")).unwrap();
-        }
-        app
-    }
-
     fn press(app: &mut App, c: char) {
         app.handle_key(KeyEvent::from(KeyCode::Char(c)));
     }
@@ -4525,352 +4527,6 @@ mod tests {
         for c in text.chars() {
             press(app, c);
         }
-    }
-
-    /// `cs` opens the overlay on the account's signature files, `Esc` closes it.
-    #[test]
-    fn cs_opens_the_signatures_overlay_and_esc_closes_it() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["work", "casual"]);
-
-        press(&mut app, 'c');
-        press(&mut app, 's');
-        let Overlay::Signatures(overlay) = &app.overlay else {
-            panic!("`cs` should open the signatures overlay");
-        };
-        assert_eq!(
-            overlay.names,
-            vec!["casual".to_string(), "work".to_string()]
-        );
-        assert_eq!(overlay.account, "work");
-        assert_eq!(overlay.default, None);
-
-        app.handle_key(KeyEvent::from(KeyCode::Esc));
-        assert!(matches!(app.overlay, Overlay::None));
-    }
-
-    /// The overlay opens on an empty directory too: it is where the first
-    /// signature gets created.
-    #[test]
-    fn the_overlay_opens_with_no_signatures_at_all() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&[]);
-
-        press(&mut app, 'c');
-        press(&mut app, 's');
-        let Overlay::Signatures(overlay) = &app.overlay else {
-            panic!("the overlay should open on an empty list");
-        };
-        assert!(overlay.names.is_empty());
-        assert_eq!(overlay.selected_name(), None);
-    }
-
-    /// j/k move the cursor and stop at both ends.
-    #[test]
-    fn signatures_navigation_clamps_at_both_ends() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["casual", "work"]);
-        press(&mut app, 'c');
-        press(&mut app, 's');
-
-        press(&mut app, 'k'); // already at the top
-        assert_eq!(app.signatures_overlay_mut().unwrap().selected, 0);
-        press(&mut app, 'j');
-        assert_eq!(app.signatures_overlay_mut().unwrap().selected, 1);
-        press(&mut app, 'j'); // already at the bottom
-        assert_eq!(app.signatures_overlay_mut().unwrap().selected, 1);
-        assert_eq!(
-            app.signatures_overlay_mut().unwrap().selected_name(),
-            Some("work")
-        );
-    }
-
-    /// Enter records the cursor signature as the account default; Enter on the
-    /// one that already is clears it.
-    #[test]
-    fn enter_sets_and_then_clears_the_account_default() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["casual", "work"]);
-        press(&mut app, 'c');
-        press(&mut app, 's');
-        press(&mut app, 'j'); // cursor on "work"
-
-        app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert_eq!(
-            mp_core::signatures::default_signature_name("work").as_deref(),
-            Some("work")
-        );
-        assert_eq!(
-            app.signatures_overlay_mut().unwrap().default.as_deref(),
-            Some("work"),
-            "the list marks the new default"
-        );
-        // The cached content follows, or a reply written next still carries
-        // nothing (or the previous default).
-        let cached = app.signature_content.clone().unwrap_or_default();
-        assert!(cached.contains("work"), "{cached:?}");
-
-        app.handle_key(KeyEvent::from(KeyCode::Enter));
-        assert_eq!(mp_core::signatures::default_signature_name("work"), None);
-        assert_eq!(app.signatures_overlay_mut().unwrap().default, None);
-        assert_eq!(
-            app.signature_content, None,
-            "clearing the default clears the cached content too"
-        );
-    }
-
-    /// `e` hands the selected file to the `$EDITOR` action (the suspend /
-    /// restore dance lives in `actions.rs`).
-    #[test]
-    fn e_queues_an_editor_launch_for_the_selected_signature() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["casual", "work"]);
-        press(&mut app, 'c');
-        press(&mut app, 's');
-        press(&mut app, 'j');
-        press(&mut app, 'e');
-
-        match app.pending_actions.pop_front() {
-            Some(Action::EditSignatureFile { name }) => assert_eq!(name, "work"),
-            other => panic!("expected EditSignatureFile, got {other:?}"),
-        }
-        assert!(
-            matches!(app.overlay, Overlay::Signatures(_)),
-            "the overlay stays open under the editor"
-        );
-    }
-
-    /// `n` prompts for a name; a valid one creates the file, puts the cursor on
-    /// it and opens `$EDITOR`.
-    #[test]
-    fn n_creates_a_signature_and_opens_it_in_the_editor() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["work"]);
-        press(&mut app, 'c');
-        press(&mut app, 's');
-
-        press(&mut app, 'n');
-        assert_eq!(
-            app.signatures_overlay_mut().unwrap().mode,
-            SignaturesMode::New
-        );
-        type_text(&mut app, "casual");
-        app.handle_key(KeyEvent::from(KeyCode::Backspace));
-        type_text(&mut app, "l");
-        app.handle_key(KeyEvent::from(KeyCode::Enter));
-
-        assert!(mp_core::signatures::exists("casual"));
-        let overlay = app.signatures_overlay_mut().unwrap();
-        assert_eq!(overlay.mode, SignaturesMode::Browse);
-        assert_eq!(overlay.selected_name(), Some("casual"));
-        match app.pending_actions.pop_front() {
-            Some(Action::EditSignatureFile { name }) => assert_eq!(name, "casual"),
-            other => panic!("expected EditSignatureFile, got {other:?}"),
-        }
-    }
-
-    /// A name the signatures module refuses is reported and leaves the prompt
-    /// open with the text intact, so it can be fixed rather than retyped.
-    #[test]
-    fn an_invalid_new_name_is_reported_and_keeps_the_prompt_open() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["work"]);
-        press(&mut app, 'c');
-        press(&mut app, 's');
-        press(&mut app, 'n');
-        type_text(&mut app, "../evil");
-        app.handle_key(KeyEvent::from(KeyCode::Enter));
-
-        let status = app.status_message.clone().unwrap_or_default();
-        assert!(status.contains("Cannot create"), "{status}");
-        let overlay = app.signatures_overlay_mut().unwrap();
-        assert_eq!(overlay.mode, SignaturesMode::New);
-        assert_eq!(overlay.input, "../evil");
-        assert_eq!(mp_core::signatures::list(), vec!["work".to_string()]);
-        assert!(app.pending_actions.is_empty());
-
-        // Esc abandons the prompt and returns to the list.
-        app.handle_key(KeyEvent::from(KeyCode::Esc));
-        let overlay = app.signatures_overlay_mut().unwrap();
-        assert_eq!(overlay.mode, SignaturesMode::Browse);
-        assert!(overlay.input.is_empty());
-    }
-
-    /// `r` seeds the prompt with the current name; committing moves the file
-    /// and carries the account default with it.
-    #[test]
-    fn r_renames_the_selected_signature_and_carries_the_default() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["work"]);
-        mp_core::signatures::set_default_signature("work", Some("work")).unwrap();
-        press(&mut app, 'c');
-        press(&mut app, 's');
-
-        press(&mut app, 'r');
-        assert_eq!(app.signatures_overlay_mut().unwrap().input, "work");
-        type_text(&mut app, "-external");
-        app.handle_key(KeyEvent::from(KeyCode::Enter));
-
-        assert_eq!(
-            mp_core::signatures::list(),
-            vec!["work-external".to_string()]
-        );
-        assert_eq!(
-            mp_core::signatures::default_signature_name("work").as_deref(),
-            Some("work-external")
-        );
-        let overlay = app.signatures_overlay_mut().unwrap();
-        assert_eq!(overlay.mode, SignaturesMode::Browse);
-        assert_eq!(overlay.selected_name(), Some("work-external"));
-        assert_eq!(overlay.default.as_deref(), Some("work-external"));
-    }
-
-    /// A rename onto an existing name is refused and reported, and the prompt
-    /// stays open.
-    #[test]
-    fn a_rename_onto_an_existing_name_is_refused() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["casual", "work"]);
-        press(&mut app, 'c');
-        press(&mut app, 's'); // cursor on "casual"
-
-        press(&mut app, 'r');
-        for _ in 0.."casual".len() {
-            app.handle_key(KeyEvent::from(KeyCode::Backspace));
-        }
-        type_text(&mut app, "work");
-        app.handle_key(KeyEvent::from(KeyCode::Enter));
-
-        let status = app.status_message.clone().unwrap_or_default();
-        assert!(status.contains("Cannot rename"), "{status}");
-        assert_eq!(
-            mp_core::signatures::list(),
-            vec!["casual".to_string(), "work".to_string()]
-        );
-        assert_eq!(
-            app.signatures_overlay_mut().unwrap().mode,
-            SignaturesMode::Rename
-        );
-    }
-
-    /// `d` goes through the shared confirm dialog; `y` deletes the file, clears
-    /// a default that named it, and hands the refreshed list back.
-    #[test]
-    fn d_deletes_behind_the_confirm_dialog_and_clears_the_default() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["casual", "work"]);
-        mp_core::signatures::set_default_signature("work", Some("work")).unwrap();
-        press(&mut app, 'c');
-        press(&mut app, 's');
-        press(&mut app, 'j'); // cursor on "work"
-
-        press(&mut app, 'd');
-        let Overlay::Confirm(dialog) = &app.overlay else {
-            panic!("`d` should raise the confirm dialog");
-        };
-        assert!(dialog.title.contains("work"), "{}", dialog.title);
-
-        press(&mut app, 'y');
-        assert!(!mp_core::signatures::exists("work"));
-        assert_eq!(mp_core::signatures::default_signature_name("work"), None);
-        let Overlay::Signatures(overlay) = &app.overlay else {
-            panic!("the list comes back after the delete");
-        };
-        assert_eq!(overlay.names, vec!["casual".to_string()]);
-        assert_eq!(overlay.default, None);
-        assert_eq!(
-            overlay.selected_name(),
-            Some("casual"),
-            "the cursor stays in range"
-        );
-    }
-
-    /// A minimal `AccountState` for `name`, carrying `content` as its cached
-    /// signature.
-    fn account_state(name: &str, content: Option<&str>) -> crate::app::AccountState {
-        crate::app::AccountState {
-            signature_content: content.map(str::to_string),
-            ..crate::app::AccountState::for_tests(name)
-        }
-    }
-
-    /// `signatures::delete` clears the default of *every* account that named
-    /// the file, so the cached content of the accounts that are not active has
-    /// to be re-resolved too: `load_from_account` restores it on a switch and
-    /// `resolve_send_account` hands it to a reply sent from that identity, so a
-    /// stale copy signs mail with a signature that no longer exists.
-    #[test]
-    fn deleting_a_shared_default_refreshes_every_accounts_cached_signature() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["shared"]);
-        mp_core::signatures::set_default_signature("work", Some("shared")).unwrap();
-        mp_core::signatures::set_default_signature("home", Some("shared")).unwrap();
-        let cached = mp_core::config::resolve_signature_markdown(&app.account_config, None);
-        assert!(
-            cached.is_some(),
-            "the fixture starts with a resolved signature"
-        );
-        app.signature_content = cached.clone();
-        app.accounts = vec![
-            account_state("work", cached.as_deref()),
-            account_state("home", cached.as_deref()),
-        ];
-        app.active_account = 0;
-
-        press(&mut app, 'c');
-        press(&mut app, 's');
-        press(&mut app, 'd');
-        press(&mut app, 'y');
-
-        assert!(!mp_core::signatures::exists("shared"));
-        assert_eq!(mp_core::signatures::default_signature_name("home"), None);
-        assert_eq!(app.signature_content, None);
-        assert_eq!(app.accounts[0].signature_content, None);
-        assert_eq!(
-            app.accounts[1].signature_content, None,
-            "the non-active account kept a signature that no longer exists"
-        );
-    }
-
-    /// The global toggle still wins: with signatures off, a refresh clears
-    /// every account rather than resolving one.
-    #[test]
-    fn refreshing_with_signatures_disabled_clears_every_account() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["shared"]);
-        mp_core::signatures::set_default_signature("work", Some("shared")).unwrap();
-        mp_core::signatures::set_default_signature("home", Some("shared")).unwrap();
-        app.accounts = vec![
-            account_state("work", Some("stale")),
-            account_state("home", Some("stale")),
-        ];
-        app.global_config.email.include_signature = false;
-
-        app.refresh_signature_content();
-
-        assert_eq!(app.signature_content, None);
-        assert_eq!(app.accounts[0].signature_content, None);
-        assert_eq!(app.accounts[1].signature_content, None);
-    }
-
-    /// Answering `n` to the delete keeps the file and returns to the list.
-    #[test]
-    fn a_cancelled_signature_delete_returns_to_the_list() {
-        let _fx = sig_fixture();
-        let mut app = app_with_signatures(&["casual", "work"]);
-        press(&mut app, 'c');
-        press(&mut app, 's');
-        press(&mut app, 'd');
-        press(&mut app, 'n');
-
-        assert!(mp_core::signatures::exists("casual"));
-        let Overlay::Signatures(overlay) = &app.overlay else {
-            panic!("cancelling returns to the signatures overlay");
-        };
-        assert_eq!(
-            overlay.names,
-            vec!["casual".to_string(), "work".to_string()]
-        );
     }
 
     // -----------------------------------------------------------------------

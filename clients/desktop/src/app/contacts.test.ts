@@ -23,7 +23,7 @@ function envelope(kind: string, payload: unknown, revision = 900): Action {
 
 function search(account: string, query = ""): ContactSearch {
   const contacts = fixtures.contacts[account].map((c) => ({ ...c, recipient: formatRecipient(c.display_name, c.address) }));
-  return { account, query, contacts };
+  return { account, query, contacts, rebuild: null };
 }
 
 /** The Contacts view open on `work`, its list read. */
@@ -60,7 +60,7 @@ describe("the contact rebuild's notices, the TUI's words", () => {
 });
 
 describe("the Contacts view's model", () => {
-  it("opens on the selection's account, reads its list on every open, and keeps the query", () => {
+  it("opens on the selection's account, keeps the query, and reads the list again only once contact.changed says so", () => {
     let s = withContacts();
     expect(s.contactsView).toEqual({ account: "work", query: "", cursor: null, searching: false });
     expect(isStale(s.contacts.work)).toBe(false);
@@ -69,8 +69,16 @@ describe("the Contacts view's model", () => {
     expect(isStale(s.contacts.work)).toBe(true);
     s = run(s, { type: "contacts_loaded", account: "work", gen: s.contacts.work.gen, search: search("work", "doe") });
     s = run(s, { type: "switch_view", view: "mail" }, { type: "switch_view", view: "contacts" });
-    expect(isStale(s.contacts.work)).toBe(true);
+    expect(isStale(s.contacts.work)).toBe(false);
     expect(s.contactsView?.query).toBe("doe");
+    // Another client's rebuild, or a sync's bump, while the view was hidden.
+    s = run(s, { type: "switch_view", view: "mail" }, envelope("contact.changed", { account: "work", contacts: 26 }));
+    s = run(s, { type: "switch_view", view: "contacts" });
+    expect(isStale(s.contacts.work)).toBe(true);
+    // Another account's index is not this list's.
+    s = run(s, { type: "contacts_loaded", account: "work", gen: s.contacts.work.gen, search: search("work", "doe") });
+    s = run(s, envelope("contact.changed", { account: "home", contacts: 3 }, 901));
+    expect(isStale(s.contacts.work)).toBe(false);
   });
 
   it("drops the answer of a query typed over, so the list is asked again for the new one", () => {
@@ -135,13 +143,26 @@ describe("the Contacts view's model", () => {
 describe("the contact rebuilds this window awaits", () => {
   const requested = (token = 1): Action => ({ type: "rebuild_requested", token, account: "work" });
 
-  it("a written rebuild says how many and reads the list again", () => {
+  it("a written rebuild says how many, and its contact.changed reads the list again", () => {
     let s = run(withContacts(), requested(), { type: "rebuild_started", token: 1, operation_id: "op-r" });
     expect(s.rebuilds).toEqual([{ token: 1, account: "work", operation_id: "op-r" }]);
+    s = run(s, envelope("contact.changed", { account: "work", contacts: 25 }));
+    expect(isStale(s.contacts.work)).toBe(true);
     s = run(s, finished("op-r", rebuilt()));
     expect(s.rebuilds).toEqual([]);
     expect(last(s)).toMatchObject({ kind: "applied", account: "work", text: "Contacts refreshed (25)" });
-    expect(isStale(s.contacts.work)).toBe(true);
+  });
+
+  it("a search whose own build the cache guard refused says so", () => {
+    let s = withContacts();
+    s = run(s, { type: "contacts_query", query: "x" });
+    s = run(s, {
+      type: "contacts_loaded",
+      account: "work",
+      gen: s.contacts.work.gen,
+      search: { ...search("work", "x"), rebuild: { saved: "refused_shrunk", contacts: 3, kept: 25 } },
+    });
+    expect(last(s)).toMatchObject({ kind: "rebuild_refused", account: "work", text: "Contacts rebuild found only 3, kept 25 cached" });
   });
 
   it("a refused rebuild warns and keeps the list as it is", () => {

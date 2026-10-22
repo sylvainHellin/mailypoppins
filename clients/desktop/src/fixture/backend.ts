@@ -17,6 +17,7 @@ import messagesFx from "../../fixtures/messages.json";
 import signaturesFx from "../../fixtures/signatures.json";
 import type {
   AccountCredentials,
+  RefusedRebuild,
   AgendaEvent,
   Bootstrap,
   DraftCreated,
@@ -231,6 +232,8 @@ export const mock = {
   rebuilds: [] as { operation_id: string; account: string }[],
   /** The next rebuild's operation id counter. */
   nextRebuild: 1,
+  /** The cache guard's refusal the next `contact_search` reports in `rebuild`, armed by a test. */
+  searchRebuildRefused: null as RefusedRebuild | null,
   /** The vCard drafts `contact_vcard_draft` wrote, oldest first. */
   vcards: [] as { account: string; id: string; vcf: string }[],
   /** The signatures and each account's default, what the `signature_*` commands read and change. */
@@ -445,6 +448,7 @@ export function resetMock(): void {
   mock.contacts = clone(fixtures.contacts);
   mock.rebuilds = [];
   mock.nextRebuild = 1;
+  mock.searchRebuildRefused = null;
   mock.vcards = [];
   mock.signatures = clone(fixtures.signatures);
   mock.configState = "ok";
@@ -488,6 +492,8 @@ export function settleRebuild(opts: { saved?: "refused_empty" | "refused_shrunk"
   const indexed = (mock.contacts[run.account] ?? []).length;
   const saved = opts.saved ?? "written";
   const found = saved === "refused_shrunk" ? 3 : saved === "refused_empty" ? 0 : indexed;
+  // The daemon announces a written index to every client before the settle.
+  if (saved === "written") emitEnvelope("contact.changed", { account: run.account, contacts: indexed });
   emitEnvelope("operation.finished", {
     operation_id: run.operation_id,
     state: "succeeded",
@@ -1664,6 +1670,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       mock.signatures.signatures[name] = mock.signatures.signatures[old];
       delete mock.signatures.signatures[old];
       retargetDefaults(old, name);
+      emitEnvelope("signature.removed", { name: old });
       emitEnvelope("signature.changed", { name, path: signaturePath(name) });
       return signatureListing(account);
     }
@@ -1673,6 +1680,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       signatureKnown(name);
       delete mock.signatures.signatures[name];
       retargetDefaults(name, null);
+      emitEnvelope("signature.removed", { name });
       return signatureListing(account);
     }
     case "signature_set_default": {
@@ -1930,7 +1938,10 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         .sort((a, b) => b.score - a.score)
         .slice(0, Number(args.limit ?? 20))
         .map((c) => ({ ...clone(c), recipient: formatRecipient(c.display_name, c.address) }));
-      return { account, query, contacts: rows };
+      // fixture.rs's search answers no refused build; a test arms one here.
+      const rebuild = mock.searchRebuildRefused;
+      mock.searchRebuildRefused = null;
+      return { account, query, contacts: rows, rebuild };
     }
     case "contact_rebuild": {
       knownAccount(cmd, account);

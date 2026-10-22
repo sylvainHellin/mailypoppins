@@ -782,13 +782,16 @@ async fn run(work: Work, handle: OperationHandle) {
             .await
             .and_then(|inner| inner);
             match sent {
-                Ok(outcome) => handle.succeed(value_or_fail(
-                    "send.draft",
-                    &SendOutcome {
-                        selector: Some(selector),
-                        ..outcome
-                    },
-                )),
+                Ok((outcome, contacts)) => {
+                    announce_contacts(&handle, &name, contacts);
+                    handle.succeed(value_or_fail(
+                        "send.draft",
+                        &SendOutcome {
+                            selector: Some(selector),
+                            ..outcome
+                        },
+                    ))
+                }
                 Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
             }
         }
@@ -814,6 +817,7 @@ async fn run(work: Work, handle: OperationHandle) {
                 return handle.fail(DomainError::from(e));
             }
             let token = handle.token.clone();
+            let name = account.name.clone();
             let sent = off_thread("the invitation", move || async move {
                 send_invite(&account, &plan, signature.as_deref(), &email, &token).await
             })
@@ -823,7 +827,10 @@ async fn run(work: Work, handle: OperationHandle) {
                 // Cancelled at the commit point: nothing went out, and the
                 // registry has already settled the operation.
                 Ok(None) => {}
-                Ok(Some(outcome)) => handle.succeed(value_or_fail("send.invite", &outcome)),
+                Ok(Some((outcome, contacts))) => {
+                    announce_contacts(&handle, &name, contacts);
+                    handle.succeed(value_or_fail("send.invite", &outcome))
+                }
                 Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
             }
         }
@@ -866,19 +873,28 @@ fn to_value<T: Serialize>(method: &str, payload: &T) -> Result<Value, RpcError> 
         .map_err(|e| internal(format!("{method} could not serialise its answer: {e}")))
 }
 
-/// One draft, built, submitted and retired.
+/// `contact.changed` for an index a send bumped, beside the operation's own
+/// events.
+fn announce_contacts(handle: &OperationHandle, account: &str, contacts: Option<usize>) {
+    if let Some(contacts) = contacts {
+        handle.announce(super::contact::contact_changed(account, contacts));
+    }
+}
+
+/// One draft, built, submitted and retired, and how many contacts the index
+/// holds when the send bumped its recipients into it.
 async fn send_one(
     account: &AccountConfig,
     path: &std::path::Path,
     email: &EmailSettings,
-) -> anyhow::Result<SendOutcome> {
+) -> anyhow::Result<(SendOutcome, Option<usize>)> {
     let draft = crate::draft::parse_email_draft(path)?;
     crate::draft::validate_draft(&draft)?;
     let ctx = context_for(account, email)?;
     let sent = crate::send::send_draft(&draft, &ctx).await?;
     let mut outcome = outcome_of(account, None, &sent.report, sent.settle_error);
     outcome.message_id = sent.message_id;
-    Ok(outcome)
+    Ok((outcome, sent.contacts))
 }
 
 /// The transport one account sends through, fake included.
@@ -991,10 +1007,13 @@ async fn send_approved(
         .await
         .and_then(|inner| inner);
         let result = match sent {
-            Ok(result) => SendOutcome {
-                selector: Some(selector),
-                ..result
-            },
+            Ok((result, contacts)) => {
+                announce_contacts(handle, &name, contacts);
+                SendOutcome {
+                    selector: Some(selector),
+                    ..result
+                }
+            }
             // A draft that could not be sent is one line of the batch and not
             // the end of it: the loop keeps going, exactly as it always has.
             Err(e) => SendOutcome {
@@ -1030,7 +1049,7 @@ async fn send_invite(
     signature: Option<&str>,
     email: &EmailSettings,
     token: &CancelToken,
-) -> anyhow::Result<Option<SendOutcome>> {
+) -> anyhow::Result<Option<(SendOutcome, Option<usize>)>> {
     let ics = crate::invite::build_invite_ics(&plan.spec)?;
     let event =
         crate::calendar::parse_ics(ics.as_bytes()).map(|p| crate::calendar::event_frontmatter(&p));
@@ -1080,12 +1099,14 @@ async fn send_invite(
         return Ok(None);
     }
     let report = crate::send::send_durably(&built, account, &smtp).await?;
-    if report.send_result.any_succeeded() {
-        crate::contacts::hooks::bump_after_send(account, &draft);
-    }
+    let contacts = if report.send_result.any_succeeded() {
+        crate::contacts::hooks::bump_after_send(account, &draft)
+    } else {
+        None
+    };
     let mut outcome = outcome_of(account, None, &report, None);
     outcome.message_id = built.message_id.clone();
-    Ok(Some(outcome))
+    Ok(Some((outcome, contacts)))
 }
 
 /// One retry: re-arm what can be re-armed, submit what was never submitted, and

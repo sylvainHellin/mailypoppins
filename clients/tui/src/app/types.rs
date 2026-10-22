@@ -911,7 +911,6 @@ pub struct AccountState {
     pub imap_config: Option<mp_core::config::ImapConfig>,
     pub smtp_config: Option<mp_core::config::SmtpConfig>,
     pub graph_config: Option<mp_core::config::GraphConfig>,
-    pub signature_content: Option<String>,
     pub archive_server_name: String,
     pub drafts_dir: Option<PathBuf>,
     pub mailboxes: Vec<MailboxInfo>,
@@ -961,22 +960,10 @@ pub struct AccountState {
 }
 
 impl AccountState {
-    pub fn new(
-        account_config: mp_core::config::AccountConfig,
-        email_settings: &mp_core::config::EmailSettings,
-    ) -> Self {
+    pub fn new(account_config: mp_core::config::AccountConfig) -> Self {
         let imap_config = mp_core::config::ImapConfig::load(&account_config).ok();
         let smtp_config = mp_core::config::SmtpConfig::load(&account_config).ok();
         let graph_config = mp_core::config::GraphConfig::load(&account_config).ok();
-
-        // The account's Markdown signature, appended to the draft body at
-        // compose/reply/forward time (#0099). `None` when the account has none
-        // or the user turned signatures off.
-        let signature_content = if email_settings.include_signature {
-            mp_core::config::resolve_signature_markdown(&account_config, None)
-        } else {
-            None
-        };
 
         let archive_server_name = account_config
             .mailboxes
@@ -1010,7 +997,6 @@ impl AccountState {
             imap_config,
             smtp_config,
             graph_config,
-            signature_content,
             archive_server_name,
             drafts_dir,
             mailboxes,
@@ -1044,7 +1030,6 @@ impl AccountState {
             imap_config: None,
             smtp_config: None,
             graph_config: None,
-            signature_content: None,
             archive_server_name: "Archive".to_string(),
             drafts_dir: None,
             mailboxes: Vec::new(),
@@ -2431,12 +2416,13 @@ pub enum SignaturesMode {
 
 /// Overlay state for signature management (`cs`, #0107).
 ///
-/// The filesystem is the index ([`mp_core::signatures`]), so this holds a
-/// snapshot of it plus the cursor: `names` is what the directory listed when
-/// the overlay last refreshed, `default` the account's recorded default (only
-/// when its file still exists). Every mutation goes through the signatures
-/// module and then calls [`SignaturesOverlay::refresh`], so the list can never
-/// claim a file that is no longer there.
+/// The daemon owns the signatures (`signature.*`), so this holds its last
+/// listing plus the cursor: `names` is what `signature.list` answered when the
+/// overlay last asked, `default` the account's recorded default (only when its
+/// file still exists). Every mutation is a daemon call whose answer, or a
+/// fresh `signature.list`, is [`SignaturesOverlay::apply`]ed, and the
+/// watcher's `signature.changed` and `signature.removed` ask again, so the
+/// list never claims a file that is no longer there.
 ///
 /// `Clone` because a delete hands the whole overlay to the confirm dialog and
 /// takes it back on either answer (see `ConfirmAction::DeleteSignature`).
@@ -2457,28 +2443,25 @@ pub struct SignaturesOverlay {
 }
 
 impl SignaturesOverlay {
-    /// Open on `account`, reading the signatures directory and the recorded
-    /// default.
+    /// An overlay on `account` with nothing listed yet; the caller applies
+    /// the daemon's `signature.list` to it.
     pub fn for_account(account: &str) -> Self {
-        let mut overlay = Self {
+        Self {
             account: account.to_string(),
             names: Vec::new(),
             default: None,
             selected: 0,
             mode: SignaturesMode::Browse,
             input: String::new(),
-        };
-        overlay.refresh();
-        overlay
+        }
     }
 
-    /// Re-read the directory and the recorded default, keeping the cursor in
-    /// range. Called after every mutation, including the ones that happen
-    /// outside the overlay (an `$EDITOR` round trip, a delete that cleared the
-    /// account default).
-    pub fn refresh(&mut self) {
-        self.names = mp_core::signatures::list();
-        self.default = mp_core::signatures::default_signature_name(&self.account);
+    /// Take the daemon's listing, keeping the cursor in range. Applied after
+    /// every mutation, including the ones that happen outside the overlay (an
+    /// `$EDITOR` round trip, another client's delete).
+    pub fn apply(&mut self, listing: mp_protocol::signature::SignatureListing) {
+        self.names = listing.names;
+        self.default = listing.default;
         if self.selected >= self.names.len() {
             self.selected = self.names.len().saturating_sub(1);
         }

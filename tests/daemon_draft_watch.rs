@@ -295,8 +295,8 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use mp_protocol::events::{
-    Diagnostic, DraftChanged, DraftInvalid, SignatureChanged, KIND_DRAFT_CHANGED,
-    KIND_DRAFT_INVALID, KIND_SIGNATURE_CHANGED,
+    Diagnostic, DraftChanged, DraftInvalid, SignatureChanged, SignatureRemoved, KIND_DRAFT_CHANGED,
+    KIND_DRAFT_INVALID, KIND_SIGNATURE_CHANGED, KIND_SIGNATURE_REMOVED,
 };
 use mp_protocol::{ErrorCode, EventEnvelope, RpcError, METHOD_STATE_EVENT};
 
@@ -1583,6 +1583,47 @@ fn a_signature_write_settles_into_signature_changed_named_by_its_stem() {
     );
 }
 
+/// A signature file the watcher announced and that is then deleted settles
+/// into `SignatureRemoved`, named by its stem: the twin `draft.removed` has
+/// always had, so a client never keeps a row for a file another one deleted.
+#[test]
+fn a_deleted_signature_settles_into_signature_removed() {
+    let root = TempDir::new().expect("tempdir");
+    let signatures = root.path().join("config").join("signatures");
+    fs::create_dir_all(&signatures).expect("signatures dir");
+    let path = signatures.join("work.md");
+    fs::write(&path, "Viele Gruesse\n").expect("write signature");
+
+    let mut watcher = DraftWatcher::new(
+        WatchRoots::new()
+            .with_account("alpha", drafts_dir_of(&root, "alpha"))
+            .with_signatures(&signatures),
+        unit_config(),
+    );
+    let debounce = unit_config().debounce;
+    let (_, t1) = settle(&mut watcher, Instant::now(), debounce);
+
+    fs::remove_file(&path).expect("delete signature");
+    let (events, t2) = settle(&mut watcher, t1 + debounce, debounce);
+    assert_eq!(
+        events,
+        vec![WatchEvent::SignatureRemoved {
+            name: "work".to_string()
+        }]
+    );
+    let lifecycle = events[0].as_lifecycle().expect("a lifecycle event");
+    assert!(
+        matches!(&lifecycle, Event::Lifecycle { kind, payload }
+            if *kind == "signature.removed" && payload == &json!({"name": "work"})),
+        "{lifecycle:?}"
+    );
+    assert!(events[0].as_change().is_none(), "it reduces into nothing");
+    assert!(
+        watcher.poll_once(t2 + debounce * 4).is_empty(),
+        "a removal is announced once"
+    );
+}
+
 #[test]
 fn a_watcher_with_no_signature_root_watches_no_signatures() {
     let root = TempDir::new().expect("tempdir");
@@ -2066,6 +2107,120 @@ async fn deleting_a_draft_reaches_a_client_as_a_remove_of_its_resource() {
         !path.exists(),
         "the watcher does not restore a draft the user deleted"
     );
+}
+
+/// The `signature.*` writers through the daemon: create, rename, set the
+/// default and delete, each answered and each seen by a subscribed client as
+/// the watcher's `signature.changed` or `signature.removed`.
+#[tokio::test]
+async fn the_signature_methods_write_and_the_watcher_announces_every_change() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let _daemon = sandbox.start_daemon().await;
+    let mut conn = subscribed(&sandbox).await;
+
+    let created = within(
+        "signature call",
+        conn.call("signature.create", json!({"name": "work"})),
+    )
+    .await
+    .expect("created");
+    let path = sandbox.signatures_dir().join("work.md");
+    assert_eq!(
+        created,
+        json!({"name": "work", "path": path.display().to_string(), "content": ""})
+    );
+    let changed = next_event_of_kind(&mut conn, KIND_SIGNATURE_CHANGED).await;
+    assert_eq!(changed.payload["name"], json!("work"));
+
+    let taken = within(
+        "signature call",
+        conn.call("signature.create", json!({"name": "work"})),
+    )
+    .await
+    .expect_err("a name taken is refused");
+    assert!(
+        format!("{taken:?}").contains("a signature named 'work' already exists"),
+        "{taken:?}"
+    );
+
+    fs::write(&path, "Viele Gruesse\n").expect("the editor writes");
+    let read = within(
+        "signature call",
+        conn.call("signature.read", json!({"name": "work"})),
+    )
+    .await
+    .expect("read");
+    assert_eq!(read["content"], json!("Viele Gruesse\n"));
+
+    let set = within(
+        "signature call",
+        conn.call(
+            "signature.set_default",
+            json!({"account": "alpha", "name": "work"}),
+        ),
+    )
+    .await
+    .expect("set");
+    assert_eq!(
+        set,
+        json!({"account": "alpha", "names": ["work"], "default": "work"})
+    );
+
+    let renamed = within(
+        "signature call",
+        conn.call(
+            "signature.rename",
+            json!({"account": "alpha", "old": "work", "new": "office"}),
+        ),
+    )
+    .await
+    .expect("renamed");
+    assert_eq!(
+        renamed,
+        json!({"account": "alpha", "names": ["office"], "default": "office"}),
+        "the default follows the rename"
+    );
+    let gone = next_event_of_kind(&mut conn, KIND_SIGNATURE_REMOVED).await;
+    assert_eq!(gone.payload, json!({"name": "work"}));
+
+    let deleted = within(
+        "signature call",
+        conn.call(
+            "signature.delete",
+            json!({"account": "alpha", "name": "office"}),
+        ),
+    )
+    .await
+    .expect("deleted");
+    assert_eq!(
+        deleted,
+        json!({"account": "alpha", "names": [], "default": null})
+    );
+    let removed = next_event_of_kind(&mut conn, KIND_SIGNATURE_REMOVED).await;
+    let typed: SignatureRemoved =
+        serde_json::from_value(removed.payload.clone()).expect("a SignatureRemoved");
+    assert_eq!(typed.name, "office");
+
+    let missing = within(
+        "signature call",
+        conn.call("signature.read", json!({"name": "office"})),
+    )
+    .await
+    .expect_err("a name that names nothing is refused");
+    assert!(
+        format!("{missing:?}").contains("no signature named 'office'"),
+        "{missing:?}"
+    );
+    let unknown = within(
+        "signature call",
+        conn.call(
+            "signature.delete",
+            json!({"account": "nobody", "name": "x"}),
+        ),
+    )
+    .await
+    .expect_err("an unknown account is refused");
+    assert!(format!("{unknown:?}").contains("-32005"), "{unknown:?}");
 }
 
 #[tokio::test]

@@ -104,9 +104,9 @@ impl TestDaemon {
     /// stays with the test, so the `App` (and with it the session) must be
     /// dropped before it, which declaration order already gives.
     pub(super) fn session(self) -> Session {
-        let root = self.root.clone();
+        let overrides = Overrides::ambient(&self.root);
         Session::serving(move || {
-            std::mem::forget(crate::config::test_env::DataDirOverride::set(&root));
+            overrides.install();
             self
         })
     }
@@ -148,9 +148,9 @@ impl TestDaemon {
     /// to `log` first: what a key handler that reads its door off
     /// `app.session` asked the daemon for, which a test asserts on.
     pub(super) fn recording_session(self, log: CallLog) -> Session {
-        let root = self.root.clone();
+        let overrides = Overrides::ambient(&self.root);
         Session::serving(move || {
-            std::mem::forget(crate::config::test_env::DataDirOverride::set(&root));
+            overrides.install();
             Recording { daemon: self, log }
         })
     }
@@ -253,13 +253,42 @@ impl Queries for TestDaemon {
 /// thread-local, and the guard is forgotten because the thread dies with the
 /// runtime.
 fn new_runtime(root: &std::path::Path) -> tokio::runtime::Runtime {
-    let root = root.to_path_buf();
+    let overrides = Overrides::ambient(root);
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
-        .on_thread_start(move || {
-            std::mem::forget(crate::config::test_env::DataDirOverride::set(&root));
-        })
+        .on_thread_start(move || overrides.install())
         .build()
         .expect("a multi-thread runtime")
+}
+
+/// The thread-local path overrides a test armed, carried onto every thread the
+/// daemon runs on: the data root, and the config directory when the test
+/// pointed it somewhere (the signatures live under it).
+#[derive(Clone)]
+struct Overrides {
+    root: PathBuf,
+    config_dir: Option<String>,
+}
+
+impl Overrides {
+    /// What the calling thread has armed, with `root` as the data root.
+    fn ambient(root: &std::path::Path) -> Overrides {
+        Overrides {
+            root: root.to_path_buf(),
+            config_dir: crate::config::test_env::config_dir().flatten(),
+        }
+    }
+
+    /// Arm them on this thread for the rest of its life; the guards are
+    /// forgotten because the thread dies with the runtime or the session.
+    fn install(&self) {
+        std::mem::forget(crate::config::test_env::DataDirOverride::set(&self.root));
+        if let Some(dir) = &self.config_dir {
+            let dir = std::path::Path::new(dir);
+            let config = crate::config::test_env::ConfigDirOverride::new(dir);
+            config.set_config_dir(dir);
+            std::mem::forget(config);
+        }
+    }
 }

@@ -508,6 +508,7 @@ mod tests {
                 "contact.rebuild".to_string(),
                 "contact.search".to_string(),
                 "contact.stats".to_string(),
+                "contact.vcard_draft".to_string(),
                 "diagnostic.health".to_string(),
                 "diagnostic.log_path".to_string(),
                 "diagnostic.logs".to_string(),
@@ -564,7 +565,12 @@ mod tests {
                 "send.outbox_discard".to_string(),
                 "send.outbox_list".to_string(),
                 "send.outbox_retry".to_string(),
+                "signature.create".to_string(),
+                "signature.delete".to_string(),
                 "signature.list".to_string(),
+                "signature.read".to_string(),
+                "signature.rename".to_string(),
+                "signature.set_default".to_string(),
                 "state.bootstrap".to_string(),
                 "sync.full".to_string(),
                 "sync.quick".to_string(),
@@ -581,7 +587,12 @@ mod tests {
         assert!(session.client_ctx().is_none());
         session
             .initialize(
-                &params_with(1, 1, &["account.list"], &["message.list", "signature.read"]),
+                &params_with(
+                    1,
+                    1,
+                    &["account.list"],
+                    &["message.list", "signature.write"],
+                ),
                 &state(),
             )
             .expect("ok");

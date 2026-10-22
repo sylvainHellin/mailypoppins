@@ -78,12 +78,16 @@ export function dropContacts(s: AppState, account: string): AppState {
 
 /**
  * An answer asked at an older generation is dropped: it may be for a query
- * typed over, and the read of the current one is already under way.
+ * typed over, and the read of the current one is already under way. A search
+ * whose own build of a missing index the cache guard refused answers the
+ * kept index and says so, which the notice line repeats.
  */
 export function contactsLoaded(s: AppState, account: string, gen: number, search: ContactSearch): AppState {
   const l = loadableOf(s, account);
   if (gen < l.gen) return s;
-  return { ...s, contacts: { ...s.contacts, [account]: { ...l, data: search, loadedGen: gen, error: null } } };
+  const next = { ...s, contacts: { ...s.contacts, [account]: { ...l, data: search, loadedGen: gen, error: null } } };
+  const refused = search.rebuild ? rebuildResult({ account, cache_path: "", ...search.rebuild }) : null;
+  return refused?.kind === "rebuild_refused" ? pushNotice(next, { kind: "rebuild_refused", account, text: refused.text }) : next;
 }
 
 export function contactsFailed(s: AppState, account: string, gen: number, error: GuiError): AppState {
@@ -120,11 +124,13 @@ export function followContacts(s: AppState): AppState {
   return openContacts(s, account);
 }
 
-/** The view comes back: no event says the index changed, so it reads the list again. */
+/**
+ * The view comes back. Its list was read for the query the view has, and a
+ * `contact.changed` while it was hidden made it stale already, so nothing
+ * more is read than what the selection's account needs.
+ */
 export function reopenContacts(s: AppState): AppState {
-  const next = followContacts(s);
-  const account = next.contactsView?.account;
-  return account ? staleContacts(next, account) : next;
+  return followContacts(s);
 }
 
 /** The search field's typing paused on `query`: the list is asked for it, the cursor back to the top. */
@@ -227,7 +233,11 @@ export function rebuildCancelledText(account: string): string {
   return `Stopped waiting for the contact index of ${account}; the daemon may still finish the rebuild`;
 }
 
-/** A rebuild of this window ended: say how; a written index is read again. */
+/**
+ * A rebuild of this window ended: say how. A written index comes back as the
+ * daemon's `contact.changed`, which is what reads the list again, here and in
+ * every other window.
+ */
 function rebuildEnded(s: AppState, run: RebuildRun, end: OperationEnd): AppState {
   const next: AppState = { ...s, rebuilds: s.rebuilds.filter((r) => r !== run) };
   const account = run.account;
@@ -236,14 +246,14 @@ function rebuildEnded(s: AppState, run: RebuildRun, end: OperationEnd): AppState
   }
   if (end.state === "cancelled") {
     // The daemon's rebuild does not stop on a cancel, so it may still write
-    // the index: the next open of the view reads it again.
-    return pushNotice(staleContacts(next, account), { kind: "operation_cancelled", account, text: rebuildCancelledText(account) });
+    // the index, which its `contact.changed` then says.
+    return pushNotice(next, { kind: "operation_cancelled", account, text: rebuildCancelledText(account) });
   }
   if (end.state !== "succeeded") {
     return pushNotice(next, { kind: "failed", account, text: `Contacts refresh failed: ${end.error ?? end.state}` });
   }
   const { kind, text } = rebuildResult((end.result ?? null) as ContactRebuilt | null);
-  return pushNotice(kind === "applied" ? staleContacts(next, account) : next, { kind, account, text });
+  return pushNotice(next, { kind, account, text });
 }
 
 /** An operation ended: a rebuild this window awaits settles; while one is unanswered an unknown id waits for it. */
