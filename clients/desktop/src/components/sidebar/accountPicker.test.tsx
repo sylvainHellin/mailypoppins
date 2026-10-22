@@ -95,7 +95,7 @@ describe("the account picker", () => {
   it("marks an account whose last sync failed, and follows a sync.completed", async () => {
     const { user } = renderApp(1400, () => {
       const home = mock.bootstrap.snapshot.accounts.find((a) => a.name === "home");
-      if (home) home.sync_health = { state: "failed" };
+      if (home) home.sync_health = { state: "failed", reason: "IMAP login failed", at: "2026-07-02T09:20:11+02:00" };
     });
     await shellReady();
     await user.keyboard("ga");

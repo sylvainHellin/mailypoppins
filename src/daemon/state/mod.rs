@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use mp_protocol::state::SyncHealthState;
+use mp_protocol::state::{SyncHealth, SyncHealthState};
 
 pub use revision::{ConnectionId, InstanceId, Revision};
 pub use snapshot::{seeds_from_config, AccountSeed, AccountState, Change, MailboxSeed, Snapshot};
@@ -326,11 +326,16 @@ pub struct CanonicalState {
     operations: Mutex<Option<Arc<crate::daemon::operations::OperationRegistry>>>,
     holds: Mutex<Option<Arc<crate::daemon::hold::HoldScheduler>>>,
     diagnostics: Mutex<Option<Arc<crate::daemon::diagnostics::Diagnostics>>>,
-    /// When each account's last tick finished and how it went. Not part of the
-    /// state a change reduces into, for the reason [`CanonicalState::last_sync`]
-    /// gives; the snapshot projects the outcome into `sync_health` at capture.
-    last_sync: Mutex<BTreeMap<String, (chrono::DateTime<chrono::Local>, &'static str)>>,
+    /// When each account's last tick finished and its error, `None` for a
+    /// clean one. Not part of the state a change reduces into, for the reason
+    /// [`CanonicalState::last_sync`] gives; the snapshot projects the outcome
+    /// into `sync_health` at capture.
+    last_sync: Mutex<BTreeMap<String, LastSync>>,
 }
+
+/// One account's entry in the `last_sync` ledger: when its last tick finished,
+/// and that tick's error, `None` for a clean one.
+type LastSync = (chrono::DateTime<chrono::Local>, Option<String>);
 
 #[derive(Debug)]
 struct Inner {
@@ -436,7 +441,9 @@ impl CanonicalState {
         &self,
         account: &str,
     ) -> Option<(chrono::DateTime<chrono::Local>, &'static str)> {
-        lock(&self.last_sync).get(account).copied()
+        lock(&self.last_sync)
+            .get(account)
+            .map(|(at, error)| (*at, if error.is_some() { "failed" } else { "ok" }))
     }
 
     /// The `(total, unread)` counts the state holds for one mailbox, `None`
@@ -483,14 +490,7 @@ impl CanonicalState {
         if let Change::SyncCompleted(outcome) = &change {
             lock(&self.last_sync).insert(
                 outcome.account.clone(),
-                (
-                    chrono::Local::now(),
-                    if outcome.error.is_some() {
-                        "failed"
-                    } else {
-                        "ok"
-                    },
-                ),
+                (chrono::Local::now(), outcome.error.clone()),
             );
         }
         let mut inner = lock(&self.inner);
@@ -674,11 +674,15 @@ impl CanonicalState {
         // revisioned change to it.
         snapshot.sync_health = lock(&self.last_sync)
             .iter()
-            .map(|(account, (_, outcome))| {
-                let health = if *outcome == "failed" {
-                    SyncHealthState::Failed
-                } else {
-                    SyncHealthState::Ok
+            .map(|(account, (at, error))| {
+                let health = SyncHealth {
+                    state: if error.is_some() {
+                        SyncHealthState::Failed
+                    } else {
+                        SyncHealthState::Ok
+                    },
+                    reason: error.clone(),
+                    at: Some(at.to_rfc3339()),
                 };
                 (account.clone(), health)
             })

@@ -92,7 +92,7 @@ Status: accepted
 Why: a plain list with the digits 1 to 9 and no filter field keeps `j` and `k` as navigation; each row shows new mail as the inbox unread count in the desktop and as a dot in the TUI, which keeps no per-account unread count; a desktop account expanded or collapsed by hand stays so until the app quits, and every start shows only the selected account expanded; in the desktop sidebar `j` and `k` skip collapsed accounts and `ga` is the keyboard path to another account, and picking the current account there expands it again after a hand collapse, since its header takes no key; a row of an account that is not serving says so in both pickers (the runtime state in the desktop, `not ready` in the TUI, which has one flag for opening and blocked); the unreachable `Ctrl+1..9` account jump leaves the TUI code. Ticket [#0147](docs/tickets/0147-account-picker.md), plan `docs/plans/account-picker.md`.
 Rejected: a type-to-filter field (it would swallow `j` and `k`); a TUI unread count per account (new state for a cosmetic gain); remembering the expand state across restarts; a cursor stop on every account header with Enter to toggle it (a second keyboard model for the picker's job).
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 1, answered 2026-10-22.
-Status: accepted
+Status: accepted, amended by the 2026-10-22 entry "Both account pickers say opening, blocked or sync failed"
 
 ## 2026-10-22 - The desktop prefix chord never times out, as in the TUI
 
@@ -155,4 +155,11 @@ Status: accepted
 Why: something sub-optimal noticed in passing is fixed in the same pass instead of parked as a leftover, which is what grew the daemon follow-up lists; the CLI, the TUI and the desktop make the same daemon calls and offer the same capabilities, so a fix or a feature lands once. Both are stated in `AGENTS.md`, and the second also in `docs/architecture.md`, "Project invariants".
 Rejected: parking follow-ups in BACKLOG.md until one causes a visible bug.
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, comments, 2026-10-22.
+Status: accepted
+
+## 2026-10-22 - Both account pickers say opening, blocked or sync failed (amends the account picker entry)
+
+Why: the TUI reads the daemon's account state from the bootstrap and from `account.state_changed`, so its picker tells an opening account from a blocked one as the desktop's does, where it had one `not ready` flag for both; both pickers also mark an account whose last sync failed, the TUI from its own sync outcomes and from the bootstrap's `sync_health`, so a failure from before the TUI started shows too.
+Rejected: keeping the single `not ready` tag (the two pickers would say different things about the same account).
+Source: the review of the 2026-10-22 cleanup batch, under the same-capabilities principle above.
 Status: accepted

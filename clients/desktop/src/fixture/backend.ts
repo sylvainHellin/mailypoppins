@@ -336,7 +336,11 @@ function configureAccount(account: AccountDraft): string {
   const name = account.name;
   const auth = account.auth_method ?? "password";
   mock.accounts.push({ name, default: mock.accounts.length === 0, backend: auth === "graph" ? "graph" : "imap", state: "ready" });
-  mock.bootstrap.snapshot.accounts.push({ name, state: "ready", sync_health: { state: "ok" } } as Bootstrap["snapshot"]["accounts"][number]);
+  mock.bootstrap.snapshot.accounts.push({
+    name,
+    state: "ready",
+    sync_health: { state: "ok", reason: null, at: "2026-07-02T09:14:03+02:00" },
+  });
   mock.bootstrap.snapshot.mailboxes[name] = [
     { role: "inbox", slug: "inbox", label: "Inbox", total: 0, unread: 0, badge: 0 },
     { role: "archive", slug: "archive", label: "Archive", total: 0, unread: 0, badge: 0 },

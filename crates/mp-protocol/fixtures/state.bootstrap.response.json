@@ -15,6 +15,8 @@
           "name": "work",
           "state": "ready",
           "sync_health": {
+            "at": "2026-07-02T09:14:03+02:00",
+            "reason": null,
             "state": "ok"
           }
         },
@@ -22,6 +24,8 @@
           "name": "perso",
           "state": "opening",
           "sync_health": {
+            "at": null,
+            "reason": null,
             "state": "unknown"
           }
         }

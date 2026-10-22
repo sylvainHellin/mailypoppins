@@ -1131,7 +1131,7 @@ fn the_bootstrap_fixtures_carry_the_documented_fields() {
             assert_keys(account, ACCOUNT, &format!("{name} accounts[{index}]"));
             assert_keys(
                 &account["sync_health"],
-                &["state"],
+                &["at", "reason", "state"],
                 &format!("{name} accounts[{index}].sync_health"),
             );
         }

@@ -22,7 +22,7 @@ use mp_protocol::operation::OperationStatus;
 use mp_protocol::send::HoldStatus;
 use serde_json::{json, Value};
 
-use mp_protocol::state::SyncHealthState;
+use mp_protocol::state::SyncHealth;
 
 use crate::config::AccountConfig;
 
@@ -332,7 +332,7 @@ pub struct Snapshot {
     /// `Change::SyncCompleted` commits under, so it agrees with the captured
     /// revision: a `sync.completed` at or below it is reflected here, and one
     /// above it reaches the client as the event.
-    pub(super) sync_health: BTreeMap<String, SyncHealthState>,
+    pub(super) sync_health: BTreeMap<String, SyncHealth>,
 }
 
 impl Snapshot {
@@ -345,9 +345,9 @@ impl Snapshot {
     /// that bootstraps mid-operation or mid-window learns about it instead of
     /// having to ask.
     pub fn to_json(&self) -> Value {
-        // `sync_health` is an object rather than a bare string so the reason
-        // and the timestamp can join it without a version bump. `unknown` for
-        // an account no pass has finished on yet.
+        // `sync_health` carries the verdict, the error and the finish time of
+        // the last pass, every key always present: `unknown` with a `null`
+        // reason and time for an account no pass has finished on yet.
         let accounts: Vec<Value> = self
             .accounts
             .iter()
@@ -355,12 +355,16 @@ impl Snapshot {
                 let health = self
                     .sync_health
                     .get(&account.name)
-                    .copied()
+                    .cloned()
                     .unwrap_or_default();
                 json!({
                     "name": account.name,
                     "state": account.state.as_str(),
-                    "sync_health": {"state": health},
+                    "sync_health": {
+                        "state": health.state,
+                        "reason": health.reason,
+                        "at": health.at,
+                    },
                 })
             })
             .collect();

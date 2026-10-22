@@ -1240,13 +1240,15 @@ fn applying_an_outcome_queues_one_event_and_leaves_the_snapshot_alone() {
     // reduction into the state: the outcome itself is carried by no snapshot.
     assert_eq!(
         before["accounts"][0]["sync_health"],
-        json!({"state": "unknown"})
+        json!({"state": "unknown", "reason": null, "at": null})
     );
+    let health = &after["accounts"][0]["sync_health"];
     assert_eq!(
-        after["accounts"][0]["sync_health"],
-        json!({"state": "ok"}),
+        (&health["state"], &health["reason"]),
+        (&json!("ok"), &Value::Null),
         "the bootstrap projects the verdict of the last completed pass"
     );
+    assert_rfc3339(&health["at"]);
     assert_eq!(
         without_sync_health(after),
         without_sync_health(before),
@@ -1277,17 +1279,33 @@ fn the_bootstrap_reports_the_last_completed_pass() {
     let state = fresh_state();
     state.apply(Change::SyncCompleted(failed()));
     let (snapshot, _, _) = state.bootstrap(ConnectionId(1));
+    let health = &snapshot.to_json()["accounts"][0]["sync_health"];
+    assert_eq!(health["state"], "failed");
     assert_eq!(
-        snapshot.to_json()["accounts"][0]["sync_health"],
-        json!({"state": "failed"})
+        health["reason"], "login refused: AUTHENTICATIONFAILED",
+        "the reason is the error of the failed pass"
     );
+    assert_rfc3339(&health["at"]);
 
     state.apply(Change::SyncCompleted(clean()));
     let (snapshot, _, _) = state.bootstrap(ConnectionId(2));
+    let health = &snapshot.to_json()["accounts"][0]["sync_health"];
+    assert_eq!(health["state"], "ok");
     assert_eq!(
-        snapshot.to_json()["accounts"][0]["sync_health"],
-        json!({"state": "ok"})
+        health["reason"],
+        Value::Null,
+        "a clean pass clears the reason"
     );
+    assert_rfc3339(&health["at"]);
+}
+
+/// `sync_health.at` is an RFC 3339 time, the moment the pass was noted.
+fn assert_rfc3339(at: &Value) {
+    let text = at
+        .as_str()
+        .unwrap_or_else(|| panic!("sync_health.at is a string, got {at}"));
+    chrono::DateTime::parse_from_rfc3339(text)
+        .unwrap_or_else(|e| panic!("sync_health.at {text:?} is RFC 3339: {e}"));
 }
 
 /// Every tick gets its own revision, strictly increasing, and a client applies
@@ -1701,7 +1719,7 @@ async fn a_later_bootstrap_carries_the_last_passes_verdict() {
         .expect("state.bootstrap answers");
     assert_eq!(
         first["snapshot"]["accounts"][0]["sync_health"],
-        json!({"state": "unknown"}),
+        json!({"state": "unknown", "reason": null, "at": null}),
         "no pass has finished before the first bootstrap: {first}"
     );
     let revision = first["revision"].as_u64().expect("a u64 revision");
@@ -1710,11 +1728,16 @@ async fn a_later_bootstrap_carries_the_last_passes_verdict() {
     let second = within("state.bootstrap", conn.call("state.bootstrap", json!({})))
         .await
         .expect("state.bootstrap answers again");
+    let health = &second["snapshot"]["accounts"][0]["sync_health"];
     assert_eq!(
-        second["snapshot"]["accounts"][0]["sync_health"],
-        json!({"state": "failed"}),
+        health["state"], "failed",
         "the pass the event reported is in the next bootstrap: {second}"
     );
+    assert_eq!(
+        health["reason"], "login refused: AUTHENTICATIONFAILED",
+        "with the error the event carried: {second}"
+    );
+    assert_rfc3339(&health["at"]);
 }
 
 /// The warning is not merged into the clean tick behind it, which is the whole

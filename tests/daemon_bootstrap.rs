@@ -618,6 +618,13 @@ fn assert_snapshot_shape(snapshot: &Value, label: &str) {
             "{label}: {name} sync_health.state is one of the three SyncHealth variants, \
              got {health_state:?}"
         );
+        assert_keys(health, &["at", "reason", "state"], "a snapshot sync_health");
+        for field in ["at", "reason"] {
+            assert!(
+                health[field].is_null() || health[field].is_string(),
+                "{label}: {name} sync_health.{field} is a string or null, got {health}"
+            );
+        }
         names.push(name.to_string());
     }
 

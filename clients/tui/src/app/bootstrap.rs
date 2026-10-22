@@ -197,6 +197,10 @@ impl App {
             // that already opened included: a runtime can block after it
             // served, and the picker says so.
             self.accounts[index].blocked = account.state == WireAccountState::Blocked;
+            // The last pass's verdict too, so a sync that failed before this
+            // client started (or while it was disconnected) is marked in the
+            // picker and the sidebar, as the desktop's picker marks it.
+            land_sync_health(&mut self.accounts[index].sync_health, &account.sync_health);
             if !resync && !self.accounts[index].opening {
                 continue;
             }
@@ -243,6 +247,38 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// A snapshot's `sync_health` landed on the account's own mark (#0071).
+///
+/// The mark follows the daemon's verdict and keeps what the client counted:
+/// a failure the client already marks keeps its repeat count, a clean pass
+/// clears it, and `unknown` (a daemon no pass has finished on, as after a
+/// restart) leaves whatever the client knew. The time is the daemon's, so the
+/// headline names when the pass failed rather than when the client heard.
+fn land_sync_health(
+    mark: &mut mp_core::sync_health::SyncHealth,
+    wire: &mp_protocol::state::SyncHealth,
+) {
+    use mp_core::sync_health::SyncHealth;
+    use mp_protocol::state::SyncHealthState;
+
+    let at = wire
+        .at
+        .as_deref()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.with_timezone(&chrono::Local))
+        .unwrap_or_else(chrono::Local::now);
+    match wire.state {
+        SyncHealthState::Unknown => {}
+        SyncHealthState::Failed if !mark.is_failed() => {
+            *mark = mark.updated(Err(wire.reason.as_deref().unwrap_or_default()), at);
+        }
+        SyncHealthState::Ok if !matches!(mark, SyncHealth::Ok { .. }) => {
+            *mark = SyncHealth::Ok { at };
+        }
+        SyncHealthState::Failed | SyncHealthState::Ok => {}
     }
 }
 
@@ -413,6 +449,87 @@ mod tests {
         assert!(
             app.accounts[0].blocked,
             "a runtime that blocks after it served is marked too"
+        );
+    }
+
+    /// A snapshot whose account failed its last pass before this client
+    /// started marks it failed, with the daemon's reason and time, so the
+    /// picker says `sync failed` and the sidebar shows the reason, as they do
+    /// for a pass this client saw.
+    #[test]
+    fn a_failed_sync_health_in_the_snapshot_marks_the_account() {
+        let _data = mp_core::config::test_env::TestDataDir::new();
+        let mut snapshot = bootstrap("fixture", WireAccountState::Ready, four_rows());
+        snapshot.snapshot.accounts[0].sync_health = mp_protocol::state::SyncHealth {
+            state: mp_protocol::state::SyncHealthState::Failed,
+            reason: Some("IMAP login failed: no such user".to_string()),
+            at: Some("2026-07-02T09:20:11+00:00".to_string()),
+        };
+        let app = App::from_bootstrap(config("fixture"), &snapshot);
+
+        let health = &app.accounts[0].sync_health;
+        assert!(health.is_failed(), "got {health:?}");
+        let at = chrono::DateTime::parse_from_rfc3339("2026-07-02T09:20:11+00:00")
+            .expect("RFC 3339")
+            .with_timezone(&chrono::Local);
+        assert_eq!(
+            health.failure_lines(),
+            Some((
+                format!("\u{26a0} sync failed {}", at.format("%H:%M")),
+                "IMAP login failed: no such user".to_string()
+            )),
+            "the reason and the time are the daemon's"
+        );
+    }
+
+    /// A later snapshot moves the mark with the daemon's verdict: a failure
+    /// already marked keeps its repeat count, a clean pass clears it, and
+    /// `unknown` (a restarted daemon) leaves it as it was.
+    #[test]
+    fn a_later_snapshot_moves_the_sync_mark_with_the_daemon() {
+        use mp_core::sync_health::SyncHealth;
+        use mp_protocol::state::SyncHealthState;
+
+        let _data = mp_core::config::test_env::TestDataDir::new();
+        let mut app = App::from_bootstrap(
+            config("fixture"),
+            &bootstrap("fixture", WireAccountState::Ready, four_rows()),
+        );
+        let now = chrono::Local::now();
+        app.accounts[0].sync_health = SyncHealth::default()
+            .updated(Err("nope"), now)
+            .updated(Err("nope"), now);
+        let with = |state, reason: Option<&str>| {
+            let mut snapshot = bootstrap("fixture", WireAccountState::Ready, four_rows());
+            snapshot.snapshot.accounts[0].sync_health = mp_protocol::state::SyncHealth {
+                state,
+                reason: reason.map(str::to_string),
+                at: Some("2026-07-02T09:20:11+00:00".to_string()),
+            };
+            snapshot
+        };
+
+        app.apply_bootstrap(&with(SyncHealthState::Failed, Some("nope")));
+        assert!(
+            matches!(
+                app.accounts[0].sync_health,
+                SyncHealth::Failed { consecutive: 2, .. }
+            ),
+            "a failure already marked keeps its count, got {:?}",
+            app.accounts[0].sync_health
+        );
+
+        app.apply_bootstrap(&bootstrap("fixture", WireAccountState::Ready, four_rows()));
+        assert!(
+            app.accounts[0].sync_health.is_failed(),
+            "unknown says nothing about the last pass"
+        );
+
+        app.apply_bootstrap(&with(SyncHealthState::Ok, None));
+        assert!(
+            matches!(app.accounts[0].sync_health, SyncHealth::Ok { .. }),
+            "a clean pass the client missed clears the mark, got {:?}",
+            app.accounts[0].sync_health
         );
     }
 

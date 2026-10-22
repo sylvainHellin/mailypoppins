@@ -186,7 +186,7 @@ SIGTERM and SIGINT run the same eight steps with the default grace, so a unit st
   "revision": 4217,
   "capabilities": ["state.bootstrap", "account.list"],
   "snapshot": {
-    "accounts": [{"name": "work", "state": "opening", "sync_health": {"state": "unknown"}}],
+    "accounts": [{"name": "work", "state": "opening", "sync_health": {"state": "unknown", "reason": null, "at": null}}],
     "mailboxes": {"work": [{"role": "inbox", "slug": "inbox", "label": "Inbox", "total": 0, "unread": 0, "badge": 0}]},
     "drafts": {"work": [{"id": "d-one", "path": "/home/alice/.local/share/mailypoppins/accounts/work/drafts/angebot.md", "to": "robin@example.com", "subject": "Angebot", "status": "draft", "valid": true, "ready": true}]},
     "outbox": {"work": {"queued": 0, "failed": 0}},
@@ -218,8 +218,10 @@ An account's `state` is one of `opening`, `ready` or `blocked`, and it reports t
 The two are deliberately different questions.
 An account is `opening` in a snapshot taken before its runtime came back and converges by event afterwards.
 For an `opening` account all counts are `0` and the draft list is empty, exactly as the TUI presents an account it has not opened yet; readiness arrives afterwards as an ordinary event.
-`sync_health` is an object whose `state` is `unknown`, `ok` or `failed`.
+`sync_health` is an object `{state, reason, at}` whose `state` is `unknown`, `ok` or `failed`.
 It reflects the account's last completed pass at bootstrap time: `failed` when that pass carried an `error`, `ok` when it did not, and `unknown` until one has finished, which is what a fresh daemon reports.
+`reason` is that `error` verbatim for a failed pass and `null` otherwise; `at` is when the daemon noted the pass, RFC 3339 with the daemon's offset, and `null` while the state is `unknown`.
+Both keys are always present, so a client that starts after a failed pass marks the account with the error and the time as one that saw the `sync.completed` would.
 It is a projection of the daemon's `last_sync` ledger read at capture, not a reduction of a change: a completed pass takes a revision for its `sync.completed` event and moves nothing a revision describes.
 A client keeps the field current from `sync.completed` events after the bootstrap, not from a revisioned change to it.
 The ledger is read under the same gate a pass is noted under, so the two agree: a `sync.completed` at or below the captured revision is already in `sync_health`, and one above it arrives as the event.

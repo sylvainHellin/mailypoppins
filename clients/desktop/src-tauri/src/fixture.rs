@@ -1143,7 +1143,11 @@ impl State {
         }
         let snapshot = &mut self.bootstrap["snapshot"];
         if let Some(list) = snapshot["accounts"].as_array_mut() {
-            list.push(json!({"name": name, "state": "ready", "sync_health": {"state": "ok"}}));
+            list.push(json!({
+                "name": name,
+                "state": "ready",
+                "sync_health": {"state": "ok", "reason": null, "at": "2026-07-02T09:14:03+02:00"},
+            }));
         }
         snapshot["mailboxes"][&name] = ADDED_MAILBOXES
             .iter()

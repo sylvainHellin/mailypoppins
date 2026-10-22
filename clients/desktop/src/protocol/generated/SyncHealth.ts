@@ -2,13 +2,24 @@
 import type { SyncHealthState } from "./SyncHealthState";
 
 /**
- * An account's sync health.
+ * An account's sync health: the verdict of its last completed pass, why it
+ * failed and when it finished.
  *
- * An object around one enum rather than a bare string, because the reason and
- * the timestamp join it without a version bump.
+ * `reason` and `at` let a client that starts after a failed pass mark the
+ * account as one that saw the pass would, with the error and the time.
  */
 export type SyncHealth = {
 /**
  * `unknown`, `ok` or `failed`.
  */
-state: SyncHealthState, };
+state: SyncHealthState,
+/**
+ * The error of the last pass when it failed, the `error` its
+ * `sync.completed` carried; `null` otherwise.
+ */
+reason: string | null,
+/**
+ * When the last pass finished, RFC 3339 with the daemon's offset; `null`
+ * while `state` is `unknown`.
+ */
+at: string | null, };

@@ -82,16 +82,25 @@ pub enum SyncHealthState {
     Failed,
 }
 
-/// An account's sync health.
+/// An account's sync health: the verdict of its last completed pass, why it
+/// failed and when it finished.
 ///
-/// An object around one enum rather than a bare string, because the reason and
-/// the timestamp join it without a version bump.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// `reason` and `at` let a client that starts after a failed pass mark the
+/// account as one that saw the pass would, with the error and the time.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SyncHealth {
     /// `unknown`, `ok` or `failed`.
     #[serde(default)]
     pub state: SyncHealthState,
+    /// The error of the last pass when it failed, the `error` its
+    /// `sync.completed` carried; `null` otherwise.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// When the last pass finished, RFC 3339 with the daemon's offset; `null`
+    /// while `state` is `unknown`.
+    #[serde(default)]
+    pub at: Option<String>,
 }
 
 /// One account of the snapshot, in `config.toml`'s order.
@@ -295,8 +304,13 @@ mod tests {
         assert_eq!(accounts[0].name, "work");
         assert_eq!(accounts[0].state, AccountState::Ready);
         assert_eq!(accounts[0].sync_health.state, SyncHealthState::Ok);
+        assert_eq!(
+            accounts[0].sync_health.at.as_deref(),
+            Some("2026-07-02T09:14:03+02:00")
+        );
+        assert_eq!(accounts[0].sync_health.reason, None);
         assert_eq!(accounts[1].state, AccountState::Opening);
-        assert_eq!(accounts[1].sync_health.state, SyncHealthState::Unknown);
+        assert_eq!(accounts[1].sync_health, SyncHealth::default());
 
         let work = bootstrap.snapshot.mailboxes_of("work");
         assert_eq!(work.len(), 4);
@@ -357,8 +371,12 @@ mod tests {
             }]
         );
         assert_eq!(
-            bootstrap.snapshot.accounts[0].sync_health.state,
-            SyncHealthState::Failed
+            bootstrap.snapshot.accounts[0].sync_health,
+            SyncHealth {
+                state: SyncHealthState::Failed,
+                reason: Some("IMAP login failed: no such user".to_string()),
+                at: Some("2026-07-02T09:20:11+02:00".to_string()),
+            }
         );
         assert_eq!(
             serde_json::to_value(&bootstrap).expect("it serialises"),
@@ -381,6 +399,8 @@ mod tests {
                     state: AccountState::Blocked,
                     sync_health: SyncHealth {
                         state: SyncHealthState::Failed,
+                        reason: Some("IMAP login failed".to_string()),
+                        at: Some("2026-09-11T08:00:00+02:00".to_string()),
                     },
                 }],
                 mailboxes: BTreeMap::from([(
