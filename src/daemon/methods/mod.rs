@@ -106,6 +106,9 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
     dispatcher.register(Arc::new(account::AccountList {
         config: Arc::clone(&config),
     }));
+    dispatcher.register(Arc::new(account::AccountCredentialsMethod {
+        config: Arc::clone(&config),
+    }));
     dispatcher.register(Arc::new(mailbox::MailboxList {
         config: Arc::clone(&config),
     }));

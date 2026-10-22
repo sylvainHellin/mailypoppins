@@ -166,6 +166,22 @@ export function useDataSync(state: AppState, dispatch: Dispatch<Action>): void {
     );
   }, [hasBootstrap, configWanted, config, dispatch]);
 
+  // Whether each account's passwords and token are stored, while the
+  // Settings view shows: stale with the configuration, after a stored
+  // password and after a sign-in.
+  const credentialsWanted = state.view === "settings";
+  const credentials = state.credentials;
+  useEffect(() => {
+    if (!hasBootstrap || !credentialsWanted || !isStale(credentials)) return;
+    const gen = credentials.gen;
+    run(`credentials@${gen}`, () =>
+      cmd
+        .accountCredentials()
+        .then((answer) => dispatch({ type: "credentials_loaded", gen, credentials: answer }))
+        .catch((e: unknown) => dispatch({ type: "credentials_failed", gen, error: asGuiError(e) })),
+    );
+  }, [hasBootstrap, credentialsWanted, credentials, dispatch]);
+
   // The signature listing the Signatures dialog or the new-draft wizard
   // shows, and only while one of them is open: a listing that went stale
   // behind a closed one is read when it opens again.

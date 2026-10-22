@@ -825,10 +825,12 @@ const ENGINE_SYMBOLS: [&str; 23] = [
 /// is still there.
 ///
 /// `(file, symbol, reason)`, sorted by file then symbol. Read it as the answer
-/// to "why is the Phase 4 gate not at literal zero": three groups, each with a
-/// cause that outlives this unit. The fourth, the server leg of `mp search`
-/// (`LST-06`), went when it moved onto `message.search_server` (PERSO-175).
-const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 12] = [
+/// to "why is the Phase 4 gate not at literal zero": two groups, each with a
+/// cause that outlives this unit. The server leg of `mp search` (`LST-06`)
+/// went when it moved onto `message.search_server` (PERSO-175), and
+/// `mp config show`'s secret column and token line when they moved onto
+/// `account.credentials`.
+const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 9] = [
     // (d) The two wizards. They call `config.get` (`routed_config_state` in
     //     `src/main.rs`) for the path, whether the file exists and the account
     //     names, and do the rest themselves: the prompting, the connection
@@ -867,26 +869,6 @@ const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 12] = [
         "src/config_cmd/init.rs",
         "set_secret(",
         "the wizards store the password they have just prompted for",
-    ),
-    // (c) `mp config show`'s three local probes. `config.get` is contracted
-    //     *not* to look a secret up (`tests/daemon_config.rs`), its key set is
-    //     pinned at four, and the config family is pinned at nine methods by
-    //     `tests/daemon_admin_slice.rs`, so neither a field nor a method can
-    //     carry them without editing a T unit's file.
-    (
-        "src/config_cmd/show.rs",
-        "get_secret(",
-        "mp config show's (not set)/**** column; config.get is contracted not to probe a secret",
-    ),
-    (
-        "src/config_cmd/show.rs",
-        "load_token_cache(",
-        "mp config show's token = valid/expired/invalid line; the same contract",
-    ),
-    (
-        "src/config_cmd/show.rs",
-        "token_cache_path(",
-        "mp config show's token = not cached line; the same contract",
     ),
     // (b) The startup preamble, which runs before any socket and on the
     //     no-daemon list too (`mp config path`, `mp daemon *`). Routing it would

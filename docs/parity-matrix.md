@@ -82,12 +82,13 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: diagnostics and maintenance
 - Source anchor: `mp config show`, `src/config_cmd/show.rs`
-- Daemon surface: `config.get`
-- GUI location: not required (diagnostics and maintenance)
-- Validation: `tests/daemon_admin_slice.rs` (`mp_config_show_matches_the_oracle`)
-- Status: routed (P4-U14) for the configuration; three probes stay client-side, recorded (P4-U15)
+- Daemon surface: `config.get`, `account.credentials`
+- GUI location: not required (diagnostics and maintenance); the Settings cards show the same password and token facts (`ACC-05`)
+- Validation: `tests/daemon_admin_slice.rs` (`mp_config_show_matches_the_oracle`), `tests/daemon_config.rs` (`account_credentials_reports_presence_and_never_a_value`)
+- Status: routed (P4-U14) for the configuration, and since the daemon leftovers (2026-10-22) for the password column and the token line
 - Note: the output is redacted, and after the cutover the daemon is the only reader of the underlying `config.toml`.
-  Three things on the screen are still read locally, and stay so by `config.get`'s own contract: the `password = **** / (not set)` column (`get_secret`), the `token = valid|expired|invalid|not cached` line (`oauth2::load_token_cache`), and the signature listing. `tests/daemon_config.rs` contracts `config.get` *not* to probe a secret, because answering "is a password stored" for every account on every read is what turns a redacted read into a secret read; a tenth `config.*` method is pinned shut by `tests/daemon_admin_slice.rs`. Three rows of `CLI_ENGINE_RESIDUE`.
+  The `password = **** / (not set)` column and the `token = valid|expired|invalid|not cached` line render `account.credentials`, which answers presence and a token verdict and never a value; `config.get` stays contracted *not* to probe a secret (`tests/daemon_config.rs`), because answering "is a password stored" on every configuration read is what turns a redacted read into a secret read.
+  The signature listing is still read through `mp_core::signatures` in the client.
   One divergence from the `pre-daemon` binary is deliberate and older than this slice: `config.get` reports the effective configuration, which `docs/daemon-protocol.md` defines as the document *after serde defaults*, so `mp config show` prints `smtp.port = 465` and `imap.port = 993` for a configuration that omits them where the oracle printed `0`.
   The `ACC-03` parity row names every port in its fixture, which takes the difference out of the comparison and leaves the row measuring what it is about.
 
@@ -108,7 +109,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Daemon surface: `config.set_password`
 - GUI location: clients/desktop: a password account's card in the Settings view has "Set SMTP password" and "Set IMAP password", which open a masked dialog whose Enter calls `config_set_password`; the value lives in the dialog's own state only and is emptied on every submit and close (M4, #0131; shell.md, "The password dialog")
 - Validation: `tests/secrets_integration.rs` for the backend, `tests/daemon_admin_slice.rs` (`mp_config_set_password_reads_the_password_in_the_client`); `clients/desktop/src/components/settings/settings.test.tsx` (`takes a masked, unremembered value in a labelled field, focused on open`, `stores the password, says so without the value, and keeps it nowhere in the model`, `clears the value when it closes, and shows a refusal with the field empty for a retry`), `clients/desktop/src-tauri/src/configuration.rs` (`a_stored_password_is_in_no_journal_no_debug_and_no_tracing_line`, `a_refused_password_names_the_account_and_never_the_value`)
-- Status: routed (P4-U14); GUI shipped (M4, #0131); the card does not say whether a password is stored, since `config.get` never probes a secret (`ACC-03`)
+- Status: routed (P4-U14); GUI shipped (M4, #0131); the card says whether each password is stored and an OAuth2 or Graph account's token state, from `account_credentials` (`account.credentials`), read again after a stored password and a sign-in (`settings.test.tsx`, `says whether each password and token is stored, and reads it again once a password is stored`; `configuration.rs`, `account_credentials_say_whether_a_password_is_stored`)
 - Note: secret values travel only on the local socket and never appear in logs, diagnostics, or protocol errors.
 
 ### ACC-06 OAuth2 device-code login

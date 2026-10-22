@@ -51,7 +51,7 @@ export function usesPassword(account: ConfigAccount): boolean {
 
 /** The Settings view opened: its configuration is read again. */
 export function openSettings(s: AppState): AppState {
-  return { ...s, config: markStale(s.config) };
+  return { ...s, config: markStale(s.config), credentials: markStale(s.credentials) };
 }
 
 /**
@@ -98,7 +98,13 @@ export function configChanged(
   stale: (s: AppState, account: string) => AppState,
   remove: (s: AppState, account: string) => AppState,
 ): AppState {
-  let next: AppState = { ...s, configProblem: null, config: markStale(s.config), accounts: markStale(s.accounts) };
+  let next: AppState = {
+    ...s,
+    configProblem: null,
+    config: markStale(s.config),
+    credentials: markStale(s.credentials),
+    accounts: markStale(s.accounts),
+  };
   for (const name of [...(p.added ?? []), ...(p.updated ?? [])]) next = stale(next, name);
   for (const name of p.removed ?? []) if (accountNames(next).includes(name)) next = remove(next, name);
   return next;

@@ -16,6 +16,7 @@ import htmlFx from "../../fixtures/html.json";
 import messagesFx from "../../fixtures/messages.json";
 import signaturesFx from "../../fixtures/signatures.json";
 import type {
+  AccountCredentials,
   AgendaEvent,
   Bootstrap,
   DraftCreated,
@@ -1724,6 +1725,22 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         state: mock.configState,
         config: clone(mock.config),
       } satisfies ConfigSnapshot;
+    // fixture.rs's `account.credentials`: a password is there once stored here, a token always valid.
+    case "account_credentials":
+      return {
+        accounts: mock.config.accounts.map((a) => {
+          const auth = a.auth_method || "password";
+          const graph = auth === "graph";
+          const stored = (kind: string) => mock.passwords.some((p) => p.account === a.name && p.kind === kind);
+          return {
+            account: a.name,
+            auth_method: auth,
+            smtp_password: graph ? null : stored("smtp"),
+            imap_password: graph ? null : stored("imap"),
+            token: auth === "password" ? null : ("valid" as const),
+          };
+        }),
+      } satisfies AccountCredentials;
     // fixture.rs's `config.add_account` and `config.init`, their refusals in the daemon's words.
     case "config_add_account": {
       const draft = args.account as AccountDraft;

@@ -6,6 +6,7 @@ import type { Dismissal } from "@/app/health";
 import type { ReaderMode } from "@/app/readerMode";
 import type { Action } from "@/app/reducer";
 import type {
+  AccountCredentials,
   AgendaEvent,
   Bootstrap,
   ConfigInvalid,
@@ -922,6 +923,12 @@ export type AppState = {
    */
   config: Loadable<ConfigSnapshot>;
   /**
+   * Whether each account's passwords and token are stored
+   * (`account_credentials`), read while the Settings view shows; stale again
+   * with the configuration, after a stored password and after a sign-in.
+   */
+  credentials: Loadable<AccountCredentials>;
+  /**
    * The config.toml banner: the last `config.invalid` of this daemon
    * instance, or `config.get`'s `invalid` state, until a `config.changed`
    * says a configuration loaded or another instance answers.
@@ -1035,6 +1042,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     signatures: {},
     signaturesDialog: null,
     config: emptyLoadable(),
+    credentials: emptyLoadable(),
     configProblem: null,
     health: [],
     healthDismissed: {},

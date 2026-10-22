@@ -95,7 +95,7 @@ Methods are domain operations, and each one declares whether it is a query, a co
 The families, all of them reserved here and served over the phases of the migration:
 
 - `state.*` for bootstrap and state diagnostics.
-- `account.*` for listing, selection metadata, sync health, and account operations.
+- `account.*` for listing, selection metadata, sync health, and account operations. This build serves `account.list` and `account.credentials`.
 - `mailbox.*` for listings, counts, and mailbox metadata.
 - `message.*` for listing, retrieval, search, selection, mutation, attachments, and browser materialisation. This build serves five mutations: `message.archive`, `message.delete`, `message.move`, `message.set_flag` and `message.set_read`, and two invitation reads, `message.ics` and `message.invite`.
 - `draft.*` for creation, parsing status, validation, recipient editing, reply, reply-all, forward, approval, discard, and attachment changes. This build serves the eleven methods of the draft slice and the mutation slice.
@@ -117,7 +117,7 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `signature.list`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `account.credentials`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `signature.list`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
 - **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold` and the nine `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.list_conversations`, `message.list_stream`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
@@ -262,6 +262,23 @@ The two report different things, the runtime and the store on disk, and the boot
 
 That `state` is probed read-only: the daemon opens the store file with `SQLITE_OPEN_READ_ONLY` and checks the schema stamp and the required tables, rather than going through `Store::open`, which creates a missing store and rebuilds a corrupt one.
 Asking which accounts exist may not create or destroy a cache, so a file that fails the probe is `blocked` and is left exactly as it was found.
+
+`account.credentials` takes `{"account": str?}` and answers whether each account's secrets are stored, never what they are:
+
+```json
+{"accounts": [
+  {"account": "work", "auth_method": "password", "smtp_password": true, "imap_password": false, "token": null},
+  {"account": "exchange", "auth_method": "graph", "smtp_password": null, "imap_password": null, "token": "expired"}
+]}
+```
+
+It lists every configured account in the file's order, or the one `account` names; an unknown name is `-32005`.
+`smtp_password` and `imap_password` say whether `smtp-password-<account>` and `imap-password-<account>` are in the secrets backend, `null` for a Graph account, which has neither transport; `imap_password` is the IMAP key alone, and a client says "falls back to smtp" itself from the two booleans.
+`token` is `valid`, `expired`, `invalid` (a cache file that does not decrypt or parse) or `not_cached` for an `oauth2` or `graph` account, and `null` for a password account.
+No value, length, prefix or key name travels.
+It is a query of its own rather than a field of `config.get`, which stays contracted never to look a secret up: a settings screen asks this question, and every configuration read would otherwise be a secret read.
+A backend with nothing stored yet answers every password absent; one that cannot be opened at all is `-32603`, because "not set" would then be a guess.
+The types are `mp_protocol::account::{AccountCredentials, AccountCredential, TokenState}`; `mp config show` and the desktop's Settings cards render it.
 
 `mailbox.list` takes `{"account": str}` and returns one account's sidebar hierarchy:
 
@@ -658,6 +675,7 @@ Retention is reported resolved, per-account overrides layered over the global ta
 
 **Secrets never travel.** `smtp.password` and `imap.password` are always present and always the literal `<redacted>`.
 Present, because their absence would say "no password is stored", which is a fact about the secrets backend and one a redacted read must not go and look up; the literal, because a length, a prefix or a fixed number of asterisks all leak something.
+Whether a password is stored is `account.credentials`'s answer ([Read-only methods](#read-only-methods)), asked for by the screen that shows it.
 `oauth2.client_id` is not redacted: it is a public identifier, `mp config show` prints it in the clear, and redacting it would break the one screen that exists to diagnose an OAuth2 setup.
 
 **`config.validate` is a pure function of the string it is given.**

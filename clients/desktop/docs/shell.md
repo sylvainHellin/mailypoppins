@@ -896,7 +896,8 @@ Each card carries a "Conversation view" switch, On or Off; Off adds the account 
 A password account has "Set SMTP password" and "Set IMAP password".
 An OAuth2 or Graph account has "Sign in", which opens the device-code dialog on a new sign-in of that account (see Account wizard); while a sign-in runs, it shows that one again instead, with a notice when it is another account's.
 Below the cards "Add account" opens the account wizard, as does the palette's "Add account".
-`config.get` never says whether a password or a token is stored, so the cards do not either.
+Whether each password and token is stored comes from `account_credentials` (`account.credentials`), which answers presence only, never a value: a password account's card says "SMTP password" and "IMAP password" are "stored" or "not set", the IMAP one "uses the SMTP password" when only that one is stored, as `mp config show` says it; an OAuth2 or Graph card says "Token" is "signed in", "expired, sign in again", "unreadable, sign in again" or "not signed in on this machine".
+`state.credentials` is read while the view shows, and goes stale with the configuration, after a stored password and after a sign-in settles.
 
 ### The password dialog
 

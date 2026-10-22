@@ -148,6 +148,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "contact.search",
     "contact.rebuild",
     "config.get",
+    "account.credentials",
     "diagnostic.log_path",
     "config.reload",
     "config.set_password",

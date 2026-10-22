@@ -4,6 +4,7 @@
 
 import { invoke, type Channel } from "@/lib/tauri";
 import type {
+  AccountCredentials,
   AgendaEvent,
   Bootstrap,
   DraftCreated,
@@ -293,6 +294,9 @@ export const messageMarkdownOpen = (account: string, source: MessageSource): Pro
 
 /** The daemon's configuration (`config.get`): its file, its state and the part the Settings view shows. */
 export const configGet = (): Promise<ConfigSnapshot> => invoke<ConfigSnapshot>("config_get");
+
+/** Whether each account's passwords and token are stored, never what they are (`account.credentials`). */
+export const accountCredentials = (): Promise<AccountCredentials> => invoke<AccountCredentials>("account_credentials");
 
 /**
  * Reload config.toml. A file that does not load rejects with a `protocol`

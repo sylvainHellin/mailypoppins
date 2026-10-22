@@ -3,9 +3,11 @@ use std::path::Path;
 use anyhow::Result;
 use colored::*;
 
+use mp_protocol::account::{AccountCredential, AccountCredentials, TokenState};
+
 use crate::config::{
-    all_configured_mailboxes, blobs_dir, config_path, drafts_dir, get_secret,
-    mailypoppins_data_dir, retention_for, store_path, AuthMethod, GlobalConfig,
+    all_configured_mailboxes, blobs_dir, config_path, drafts_dir, mailypoppins_data_dir,
+    retention_for, store_path, AuthMethod, GlobalConfig,
 };
 use crate::store::sweep::human_bytes;
 
@@ -15,6 +17,46 @@ fn horizon_label(days: u32) -> String {
         "0 (keep all)".to_string()
     } else {
         format!("{days}")
+    }
+}
+
+/// The daemon's answer about `account`, `None` when it named no such account.
+fn credential_of<'a>(
+    credentials: &'a AccountCredentials,
+    account: &str,
+) -> Option<&'a AccountCredential> {
+    credentials.accounts.iter().find(|c| c.account == account)
+}
+
+/// The `[smtp]` password column: stored or not, never the value.
+fn smtp_password_line(credential: Option<&AccountCredential>) -> String {
+    match credential.and_then(|c| c.smtp_password) {
+        Some(true) => "****".green().to_string(),
+        _ => "(not set)".red().to_string(),
+    }
+}
+
+/// The `[imap]` password column, which falls back to the SMTP password when
+/// the account has no IMAP one of its own.
+fn imap_password_line(credential: Option<&AccountCredential>) -> String {
+    match credential.map(|c| (c.imap_password, c.smtp_password)) {
+        Some((Some(true), _)) => "****".green().to_string(),
+        Some((_, Some(true))) => format!("{} (falls back to smtp)", "****".green()),
+        _ => "(not set)".red().to_string(),
+    }
+}
+
+/// The `[oauth2]` token line.
+fn token_line(credential: Option<&AccountCredential>) -> String {
+    match credential.and_then(|c| c.token) {
+        Some(TokenState::Valid) => "valid".green().to_string(),
+        Some(TokenState::Expired) => format!("{} (run `mp config oauth2-login`)", "expired".red()),
+        Some(TokenState::Invalid) => {
+            format!("{} (corrupt or undecryptable cache file)", "invalid".red())
+        }
+        Some(TokenState::NotCached) | None => {
+            format!("{} (run `mp config oauth2-login`)", "not cached".red())
+        }
     }
 }
 
@@ -29,7 +71,13 @@ pub fn cmd_config_path() {
 /// P4-U14 they come off the wire: `mp config show` renders `config.get`'s
 /// effective configuration, which is the loaded document after serde defaults
 /// (`docs/daemon-protocol.md`), rather than re-reading the file the daemon owns.
-pub fn cmd_config_show(config: &GlobalConfig, path: &Path) -> Result<()> {
+/// Whether each password and token is there is `account.credentials`'s answer,
+/// so this process reads no secret and no token cache of its own.
+pub fn cmd_config_show(
+    config: &GlobalConfig,
+    path: &Path,
+    credentials: &AccountCredentials,
+) -> Result<()> {
     println!("{}", "=== mailypoppins configuration ===".bold().cyan());
     println!("{}: {}", "Config file".bold(), path.display());
     println!(
@@ -77,33 +125,10 @@ pub fn cmd_config_show(config: &GlobalConfig, path: &Path) -> Result<()> {
                     println!("\n  {}", "[oauth2]".bold());
                     println!("    client_id = {}", oauth2.client_id);
                     println!("    tenant_id = {}", oauth2.tenant_id);
-                    // Show token cache status
-                    let cache_path = crate::oauth2::token_cache_path(&account.name);
-                    if cache_path.exists() {
-                        match crate::oauth2::load_token_cache(&account.name) {
-                            Some(cache) => {
-                                if cache.is_expired() {
-                                    println!(
-                                        "    token      = {} (run `mp config oauth2-login`)",
-                                        "expired".red()
-                                    );
-                                } else {
-                                    println!("    token      = {}", "valid".green());
-                                }
-                            }
-                            None => {
-                                println!(
-                                    "    token      = {} (corrupt or undecryptable cache file)",
-                                    "invalid".red()
-                                );
-                            }
-                        }
-                    } else {
-                        println!(
-                            "    token      = {} (run `mp config oauth2-login`)",
-                            "not cached".red()
-                        );
-                    }
+                    println!(
+                        "    token      = {}",
+                        token_line(credential_of(credentials, &account.name))
+                    );
                 }
             }
             AuthMethod::Password => {
@@ -120,13 +145,8 @@ pub fn cmd_config_show(config: &GlobalConfig, path: &Path) -> Result<()> {
             println!("    host     = {}", account.smtp.host);
             println!("    port     = {}", account.smtp.port);
             println!("    username = {}", account.smtp.username);
-            let smtp_key = format!("smtp-password-{}", account.name);
-            let smtp_pw = if get_secret(&smtp_key).is_ok() {
-                "****".green().to_string()
-            } else {
-                "(not set)".red().to_string()
-            };
-            println!("    password = {}", smtp_pw);
+            let credential = credential_of(credentials, &account.name);
+            println!("    password = {}", smtp_password_line(credential));
             if account.smtp.accept_invalid_certs {
                 println!("    accept_invalid_certs = {}", "true".yellow());
             }
@@ -153,16 +173,7 @@ pub fn cmd_config_show(config: &GlobalConfig, path: &Path) -> Result<()> {
                     account.imap.username.clone()
                 }
             );
-            let imap_key = format!("imap-password-{}", account.name);
-            let smtp_key = format!("smtp-password-{}", account.name);
-            let imap_pw = if get_secret(&imap_key).is_ok() {
-                "****".green().to_string()
-            } else if get_secret(&smtp_key).is_ok() {
-                format!("{} (falls back to smtp)", "****".green())
-            } else {
-                "(not set)".red().to_string()
-            };
-            println!("    password = {}", imap_pw);
+            println!("    password = {}", imap_password_line(credential));
             if account.imap.accept_invalid_certs {
                 println!("    accept_invalid_certs = {}", "true".yellow());
             }

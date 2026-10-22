@@ -2931,6 +2931,38 @@ impl Fixture {
                     "config": s.config,
                 }))
             }
+            // The daemon's `account.credentials`: presence only. A password is
+            // there once this fixture stored it, and an OAuth2 or Graph
+            // account's token is taken to be cached and valid.
+            "account.credentials" => {
+                only(method, &params, &["account"])?;
+                let stored = |account: &str, kind: &str| {
+                    s.password_writes
+                        .iter()
+                        .any(|w| w["account"] == account && w["kind"] == kind)
+                };
+                let accounts: Vec<Value> = s.config["accounts"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|a| params.get("account").is_none_or(|n| a["name"] == *n))
+                    .map(|a| {
+                        let name = a["name"].as_str().unwrap_or_default();
+                        let auth = a["auth_method"].as_str().unwrap_or("password");
+                        let auth = if auth.is_empty() { "password" } else { auth };
+                        let graph = auth == "graph";
+                        json!({
+                            "account": name,
+                            "auth_method": auth,
+                            "smtp_password": (!graph).then(|| stored(name, "smtp")),
+                            "imap_password": (!graph).then(|| stored(name, "imap")),
+                            "token": (auth != "password").then_some("valid"),
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "accounts": accounts }))
+            }
             // The daemon's `config.reload`: the file read again, and either a
             // swap (here always an empty one) or `config.invalid` then
             // `-32007`, with what it served left as it was.

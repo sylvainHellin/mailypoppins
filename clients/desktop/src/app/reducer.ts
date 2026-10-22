@@ -199,7 +199,7 @@ import {
   staleAllContacts,
 } from "@/app/contacts";
 import type { ConfigSnapshot, ContactSearch, SecretKind, SignatureListing } from "@/lib/gui-types";
-import type { CheckStatus, ConfigChanged, ConfigInvalid } from "@/protocol/types";
+import type { AccountCredentials, CheckStatus, ConfigChanged, ConfigInvalid } from "@/protocol/types";
 import {
   closePasswordDialog,
   configChanged,
@@ -447,6 +447,8 @@ export type Action =
   | { type: "config_reloaded"; text: string }
   | { type: "open_password"; account: string; kind: SecretKind }
   | { type: "close_password"; account: string; kind: SecretKind }
+  | { type: "credentials_loaded"; gen: number; credentials: AccountCredentials }
+  | { type: "credentials_failed"; gen: number; error: GuiError }
   | { type: "open_account_wizard"; preset?: AccountWizard["preset"] }
   | { type: "sign_in_requested"; token: number; account: string }
   | { type: "sign_in_started"; token: number; operation_id: string }
@@ -1470,6 +1472,7 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
         // Another daemon may serve another configuration, and its
         // config.toml banner comes from its own config.get or config.invalid.
         config: markStale(next.config),
+        credentials: markStale(next.credentials),
         configProblem: sameInstance ? next.configProblem : null,
         dialog: closeDialog ? null : next.dialog,
         composeDialog: closeCompose ? null : next.composeDialog,
@@ -1497,7 +1500,9 @@ export function applyGuiEvent(s: AppState, e: GuiEvent): AppState {
       if (e.kind === "rsvp") return rsvpSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "send_invite") return inviteSignal(s, settledEnd(e.operation_id, e.status));
       if (e.kind === "contact_rebuild") return rebuildSignal(s, settledEnd(e.operation_id, e.status));
-      if (e.kind === "oauth2_login") return signInSignal(s, settledEnd(e.operation_id, e.status));
+      if (e.kind === "oauth2_login") {
+        return signInSignal({ ...s, credentials: markStale(s.credentials) }, settledEnd(e.operation_id, e.status));
+      }
       return signal(s, settledSignal(e.operation_id, e.status));
     case "operation_dropped":
       s = endProgress(s, e.operation_id);
@@ -2157,12 +2162,17 @@ function reduce(s: AppState, a: Action): AppState {
       return configLoaded(s, a.gen, a.snapshot);
     case "config_failed":
       return configFailed(s, a.gen, a.error);
+    case "credentials_loaded":
+      return { ...s, credentials: { ...s.credentials, data: a.credentials, loadedGen: a.gen, error: null } };
+    case "credentials_failed":
+      return { ...s, credentials: { ...s.credentials, loadedGen: a.gen, error: a.error } };
     case "config_reloaded":
       return { ...s, notice: a.text };
     case "open_password":
       return openPasswordDialog(s, { account: a.account, kind: a.kind });
     case "close_password":
-      return closePasswordDialog(s, { account: a.account, kind: a.kind });
+      // The password is stored, so the card's "not set" is read again.
+      return { ...closePasswordDialog(s, { account: a.account, kind: a.kind }), credentials: markStale(s.credentials) };
     case "open_account_wizard":
       return openAccountWizard(s, a.preset ?? "imap");
     case "sign_in_requested":

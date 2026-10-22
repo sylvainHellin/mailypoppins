@@ -456,7 +456,8 @@ The three methods are in `REQUIRED_CAPABILITIES`.
 
 ## Configuration and secrets
 
-`configuration.rs` serves the Settings view and the account wizard (ACC-01, ACC-02, ACC-05, ACC-06) with six daemon methods, all in `REQUIRED_CAPABILITIES`: `config.get`, `config.reload`, `config.set_password`, `config.init`, `config.add_account` and `config.oauth2_login`.
+`configuration.rs` serves the Settings view and the account wizard (ACC-01, ACC-02, ACC-03, ACC-05, ACC-06) with seven daemon methods, all in `REQUIRED_CAPABILITIES`: `config.get`, `account.credentials`, `config.reload`, `config.set_password`, `config.init`, `config.add_account` and `config.oauth2_login`.
+`account_credentials` answers `account.credentials` as the protocol's `AccountCredentials`: per account, whether the SMTP and IMAP passwords are stored and the OAuth2 token's state, never a value.
 The daemon has no per-key writer, since a tenth `config.*` method is pinned shut, so a setting changes in `config.toml` and reaches the daemon through `config_reload`.
 
 ```ts

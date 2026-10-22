@@ -25,6 +25,7 @@ import { conversationModeOn } from "@/app/state";
 import { usePaneFocused } from "@/hooks/use-pane-focused";
 import * as cmd from "@/lib/commands";
 import type { ConfigAccount, ConfigServer, EditorSetting, SecretKind } from "@/lib/gui-types";
+import type { AccountCredential, TokenState } from "@/protocol/types";
 
 const AUTH_LABELS: Record<string, string> = {
   password: "Password",
@@ -37,6 +38,26 @@ const STATE_LABELS: Record<string, string> = {
   absent: "No config.toml yet",
   invalid: "Did not load when the daemon started",
 };
+
+const TOKEN_LABELS: Record<TokenState, string> = {
+  valid: "signed in",
+  expired: "expired, sign in again",
+  invalid: "unreadable, sign in again",
+  not_cached: "not signed in on this machine",
+};
+
+/** The SMTP password line: stored or not, never the value. */
+export function smtpPasswordLine(c: AccountCredential | undefined): string {
+  if (!c || c.smtp_password === null) return "not reported";
+  return c.smtp_password ? "stored" : "not set";
+}
+
+/** The IMAP password line, which falls back to the SMTP password, as `mp config show` says. */
+export function imapPasswordLine(c: AccountCredential | undefined): string {
+  if (!c || c.imap_password === null) return "not reported";
+  if (c.imap_password) return "stored";
+  return c.smtp_password ? "uses the SMTP password" : "not set";
+}
 
 function server(s: ConfigServer): string {
   if (!s.host) return "not set";
@@ -89,12 +110,14 @@ function ConversationViewSwitch({ account, on, onChange }: { account: string; on
 
 function AccountCard({
   account,
+  credential,
   conversations,
   onConversations,
   onPassword,
   onSignIn,
 }: {
   account: ConfigAccount;
+  credential: AccountCredential | undefined;
   conversations: boolean;
   onConversations: (on: boolean) => void;
   onPassword: (kind: SecretKind) => void;
@@ -113,12 +136,15 @@ function AccountCard({
         {account.auth_method === "graph" ? null : (
           <>
             <Field label="SMTP">{server(account.smtp)}</Field>
+            <Field label="SMTP password">{smtpPasswordLine(credential)}</Field>
             <Field label="IMAP">{server(account.imap)}</Field>
+            <Field label="IMAP password">{imapPasswordLine(credential)}</Field>
           </>
         )}
         {account.oauth2 ? (
           <Field label="App registration">{`client ${account.oauth2.client_id}, tenant ${account.oauth2.tenant_id}`}</Field>
         ) : null}
+        {credential?.token ? <Field label="Token">{TOKEN_LABELS[credential.token]}</Field> : null}
       </dl>
       <ConversationViewSwitch account={account.name} on={conversations} onChange={onConversations} />
       <div className="mt-2 flex flex-wrap gap-2">
@@ -447,6 +473,7 @@ export function SettingsView() {
                   <AccountCard
                     key={account.name}
                     account={account}
+                    credential={s.credentials.data?.accounts.find((c) => c.account === account.name)}
                     conversations={conversationModeOn(s, account.name)}
                     onConversations={(on) => dispatch({ type: "conversation_mode", account: account.name, on })}
                     onPassword={(kind) => dispatch({ type: "open_password", account: account.name, kind })}

@@ -17,7 +17,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mp_protocol::{
-    calendar, diagnostic, draft, events, listing, operation, rendition, send, signature, state,
+    account, calendar, diagnostic, draft, events, listing, operation, rendition, send, signature,
+    state,
 };
 use ts_rs::{Config, TS};
 
@@ -49,6 +50,9 @@ fn export_into(dir: &Path) -> usize {
     let cfg = config(dir);
     let cfg = &cfg;
     export!(cfg;
+        account::TokenState,
+        account::AccountCredential,
+        account::AccountCredentials,
         calendar::EventAttendee,
         calendar::EventFrontmatter,
         calendar::AgendaEvent,

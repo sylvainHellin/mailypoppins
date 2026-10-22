@@ -28,6 +28,7 @@ use futures::future::BoxFuture;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 
+use mp_protocol::account::{AccountCredential, AccountCredentials, TokenState};
 use mp_protocol::{ErrorCode, RpcError};
 
 use crate::config::{AccountConfig, AuthMethod};
@@ -75,6 +76,119 @@ impl Method for AccountList {
         _cancel: CancelToken,
     ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
         Box::pin(async move { Ok(Outcome::query(list(&self.config.accounts()))) })
+    }
+}
+
+/// `account.credentials`: whether each account's passwords and token are
+/// there, never what they are (`ACC-03`).
+///
+/// A query of its own rather than a field of `config.get`, which is
+/// contracted never to look a secret up: a redacted read that probed the
+/// backend on every call would turn every configuration read into a secret
+/// read. This one is asked for by a screen that shows credentials, and it
+/// answers booleans and a token verdict only.
+pub struct AccountCredentialsMethod {
+    /// The live configuration, so a reload is visible to the next answer.
+    pub config: Arc<super::super::config::ConfigStore>,
+}
+
+impl Method for AccountCredentialsMethod {
+    fn spec(&self) -> MethodSpec {
+        MethodSpec::new("account.credentials", MethodKind::Query, 1)
+    }
+
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a ClientCtx,
+        params: Value,
+        _cancel: CancelToken,
+    ) -> BoxFuture<'a, Result<Outcome, DomainError>> {
+        Box::pin(async move {
+            super::only_params("account.credentials", &params, &["account"])?;
+            let snapshot = self.config.snapshot();
+            let accounts: Vec<AccountConfig> = match params.get("account") {
+                None | Some(Value::Null) => snapshot.accounts.to_vec(),
+                Some(_) => {
+                    let name = super::string_param(&params, "account")?;
+                    vec![configured_account(&snapshot.accounts, &name)?.clone()]
+                }
+            };
+            let backend = snapshot.config.secrets_backend;
+            let answer = tokio::task::spawn_blocking(move || credentials(backend, &accounts))
+                .await
+                .map_err(|e| DomainError::internal(format!("the credentials task {e}")))??;
+            let answer = serde_json::to_value(answer).map_err(|e| {
+                DomainError::internal(format!("serialising account.credentials: {e}"))
+            })?;
+            Ok(Outcome::query(answer))
+        })
+    }
+}
+
+/// The presence of every secret of `accounts`, read through `backend`.
+///
+/// A backend with nothing stored yet is not a failure: every password is
+/// absent, which is the answer a first run should see. A backend that cannot
+/// be opened at all is, because "not set" would then be a guess.
+pub fn credentials(
+    backend: crate::secrets::SecretsBackendKind,
+    accounts: &[AccountConfig],
+) -> Result<AccountCredentials, DomainError> {
+    match crate::secrets::init(backend) {
+        Ok(()) | Err(crate::secrets::SecretsError::NotInitialized(_)) => {}
+        Err(e) => {
+            return Err(DomainError::internal(format!(
+                "opening the secrets backend: {e}"
+            )))
+        }
+    }
+    let present = |key: String| crate::config::get_secret(&key).is_ok();
+    let accounts = accounts
+        .iter()
+        .map(|account| {
+            let graph = account.auth_method == AuthMethod::Graph;
+            let (smtp_password, imap_password) = if graph {
+                (None, None)
+            } else {
+                (
+                    Some(present(format!("smtp-password-{}", account.name))),
+                    Some(present(format!("imap-password-{}", account.name))),
+                )
+            };
+            let token = match account.auth_method {
+                AuthMethod::Password => None,
+                AuthMethod::OAuth2 | AuthMethod::Graph => Some(token_state(&account.name)),
+            };
+            AccountCredential {
+                account: account.name.clone(),
+                auth_method: auth_method_word(&account.auth_method).to_string(),
+                smtp_password,
+                imap_password,
+                token,
+            }
+        })
+        .collect();
+    Ok(AccountCredentials { accounts })
+}
+
+/// What the account's OAuth2 token cache holds, without handing any of it out.
+fn token_state(account: &str) -> TokenState {
+    if !crate::oauth2::token_cache_path(account).exists() {
+        return TokenState::NotCached;
+    }
+    match crate::oauth2::load_token_cache(account) {
+        Some(cache) if cache.is_expired() => TokenState::Expired,
+        Some(_) => TokenState::Valid,
+        None => TokenState::Invalid,
+    }
+}
+
+/// `auth_method` as `config.toml` spells it.
+fn auth_method_word(method: &AuthMethod) -> &'static str {
+    match method {
+        AuthMethod::Password => "password",
+        AuthMethod::OAuth2 => "oauth2",
+        AuthMethod::Graph => "graph",
     }
 }
 

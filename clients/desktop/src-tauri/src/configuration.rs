@@ -34,6 +34,7 @@
 
 use std::time::Duration;
 
+use mp_protocol::account::AccountCredentials;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::State;
@@ -360,6 +361,20 @@ pub fn config_get_on(door: &Door) -> Result<ConfigSnapshot, GuiError> {
     decode("config.get", answer)
 }
 
+/// Whether each account's passwords and token are stored, never what they
+/// are: `account.credentials`, which the Settings cards show beside each
+/// server and under the sign-in (`ACC-03`).
+pub fn account_credentials_on(door: &Door) -> Result<AccountCredentials, GuiError> {
+    let answer = call(
+        door,
+        "account.credentials",
+        json!({}),
+        SECRET_BUDGET,
+        Addressing::Resource,
+    )?;
+    decode("account.credentials", answer)
+}
+
 /// Re-read `config.toml` and swap it in. A file that does not load is a
 /// protocol error with the daemon's sentence (code `-32007`); the daemon
 /// keeps serving what it had, and its `config.invalid` names the line.
@@ -498,6 +513,15 @@ pub async fn config_oauth2_login(
         config_oauth2_login_on(session, door, &account)
     })
     .await
+}
+
+/// Whether each account's passwords and token are stored, for the Settings
+/// view.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn account_credentials(
+    session: State<'_, SessionHandle>,
+) -> Result<AccountCredentials, GuiError> {
+    with_door(&session, |_, door| account_credentials_on(door)).await
 }
 
 /// The daemon's configuration, for the Settings view.
@@ -955,6 +979,38 @@ mod tests {
             home.oauth2.as_ref().map(|o| o.tenant_id.as_str()),
             Some("common")
         );
+    }
+
+    /// `account.credentials` decodes into the protocol type, and a password
+    /// stored through the layer shows as present on the next read, never as
+    /// its value.
+    #[test]
+    fn account_credentials_say_whether_a_password_is_stored() {
+        use mp_protocol::account::TokenState;
+        let (door, _f, _rx) = fixture_door();
+        let before = account_credentials_on(&door).expect("account.credentials");
+        let work = &before.accounts[0];
+        assert_eq!(work.account, "work");
+        assert_eq!(
+            (work.smtp_password, work.imap_password, work.token),
+            (Some(false), Some(false), None)
+        );
+        let home = &before.accounts[1];
+        assert_eq!(home.auth_method, "graph");
+        assert_eq!(
+            (home.smtp_password, home.token),
+            (None, Some(TokenState::Valid))
+        );
+
+        config_set_password_on(
+            &door,
+            &SetPassword::new("work", SecretKind::Smtp, "hunter2"),
+        )
+        .expect("stored");
+        let after = account_credentials_on(&door).expect("account.credentials");
+        assert_eq!(after.accounts[0].smtp_password, Some(true));
+        assert_eq!(after.accounts[0].imap_password, Some(false));
+        assert!(!serde_json::to_string(&after).unwrap().contains("hunter2"));
     }
 
     #[test]

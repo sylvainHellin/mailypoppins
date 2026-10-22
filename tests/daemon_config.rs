@@ -2125,6 +2125,94 @@ async fn config_set_password_stores_through_the_existing_backend() {
     assert_eq!(imap["key"], json!(SecretKind::Imap.secret_key("alpha")));
 }
 
+/// `account.credentials` answers whether each password and token is there,
+/// per account and in the file's order, and nothing else: no value, no key
+/// name, no length (`ACC-03`). It is what `mp config show` and the desktop
+/// Settings render, so neither reads a secret of its own.
+#[tokio::test]
+async fn account_credentials_reports_presence_and_never_a_value() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let original = sandbox.read_config();
+    sandbox.write_config(&format!(
+        "{original}\n\
+         [[accounts]]\n\
+         name = \"exchange\"\n\
+         default_from = \"me@example.com\"\n\
+         auth_method = \"graph\"\n\
+         \n\
+         [accounts.oauth2]\n\
+         client_id = \"cid\"\n\
+         tenant_id = \"common\"\n\
+         \n\
+         [[accounts]]\n\
+         name = \"office\"\n\
+         default_from = \"me@example.com\"\n\
+         auth_method = \"oauth2\"\n\
+         \n\
+         [accounts.oauth2]\n\
+         client_id = \"cid\"\n\
+         tenant_id = \"common\"\n"
+    ));
+    // A cache file that does not decrypt is `invalid`, a missing one
+    // `not_cached`.
+    let tokens = sandbox.data_dir().join("tokens");
+    fs::create_dir_all(&tokens).expect("tokens dir");
+    fs::write(tokens.join("office.enc"), b"not a token cache").expect("garbage cache");
+    let _daemon = sandbox.start_daemon().await;
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+
+    let before = call_ok(&mut conn, "account.credentials", json!({})).await;
+    assert_eq!(
+        before,
+        json!({"accounts": [
+            {"account": "alpha", "auth_method": "password",
+             "smtp_password": false, "imap_password": false, "token": null},
+            {"account": "exchange", "auth_method": "graph",
+             "smtp_password": null, "imap_password": null, "token": "not_cached"},
+            {"account": "office", "auth_method": "oauth2",
+             "smtp_password": false, "imap_password": false, "token": "invalid"},
+        ]}),
+    );
+
+    call_ok(
+        &mut conn,
+        "config.set_password",
+        json!({"account": "alpha", "kind": "smtp", "value": SECRET}),
+    )
+    .await;
+    let after = call_ok(
+        &mut conn,
+        "account.credentials",
+        json!({"account": "alpha"}),
+    )
+    .await;
+    assert_eq!(
+        after,
+        json!({"accounts": [
+            {"account": "alpha", "auth_method": "password",
+             "smtp_password": true, "imap_password": false, "token": null},
+        ]}),
+        "the account named, and only that one"
+    );
+    let mut strings = Vec::new();
+    string_values(&after, &mut strings);
+    assert!(
+        strings
+            .iter()
+            .all(|s| !s.contains(SECRET) && !s.contains("password-")),
+        "no value and no key name travels: {after}"
+    );
+
+    let unknown = call_err(&mut conn, "account.credentials", json!({"account": "nope"})).await;
+    assert_eq!(
+        unknown.code,
+        ErrorCode::AccountUnknown.code(),
+        "{unknown:?}"
+    );
+    let stray = call_err(&mut conn, "account.credentials", json!({"kind": "smtp"})).await;
+    assert_eq!(stray.code, -32602, "{stray:?}");
+}
+
 /// Once the daemon opened its secrets backend it keeps it until a restart, so
 /// a reload that names another one is refused rather than reported as live
 /// while every password still went to the old one.

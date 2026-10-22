@@ -244,6 +244,26 @@ describe("the password dialog", () => {
     expect(within(again).getByLabelText("Password")).toHaveValue("");
   });
 
+  it("says whether each password and token is stored, and reads it again once a password is stored", async () => {
+    const { user, view } = await openSettings();
+    const work = card(view, "work");
+    const field = (c: HTMLElement, label: string) => within(c).getByText(label).nextElementSibling;
+    await waitFor(() => expect(field(work, "SMTP password")).toHaveTextContent("not set"));
+    expect(field(work, "IMAP password")).toHaveTextContent("not set");
+    const home = card(view, "home");
+    expect(within(home).queryByText("SMTP password")).toBeNull();
+    expect(field(home, "Token")).toHaveTextContent("signed in");
+    expect(callsOf("account_credentials")).toHaveLength(1);
+
+    await user.click(within(work).getByRole("button", { name: "Set SMTP password" }));
+    const dialog = await screen.findByRole("dialog", { name: "Set SMTP password" });
+    await user.type(within(dialog).getByLabelText("Password"), SECRET);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(field(card(view, "work"), "SMTP password")).toHaveTextContent("stored"));
+    expect(field(card(view, "work"), "IMAP password")).toHaveTextContent("uses the SMTP password");
+    expect(callsOf("account_credentials")).toHaveLength(2);
+  });
+
   it("a store that answers after the dialog closed leaves the overlay opened since alone", async () => {
     const { user, probe, view } = await openSettings();
     let release = () => {};

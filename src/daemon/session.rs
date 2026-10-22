@@ -490,6 +490,7 @@ mod tests {
             vec![
                 "daemon.status".to_string(),
                 "daemon.stop".to_string(),
+                "account.credentials".to_string(),
                 "account.list".to_string(),
                 "calendar.events".to_string(),
                 "calendar.rebuild".to_string(),

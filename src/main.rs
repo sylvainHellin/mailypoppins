@@ -3565,10 +3565,21 @@ async fn reload_config_quietly() {
     }
 }
 
-/// `mp config show`: the effective configuration, rendered from `config.get`.
+/// `mp config show`: the effective configuration, rendered from `config.get`,
+/// and whether each password and token is stored, from `account.credentials`.
 async fn routed_config_show() -> Result<()> {
     let (path, _, config) = routed_config_state().await?;
-    cmd_config_show(&config, &path)
+    let mut connection = daemon_connection().await;
+    let answer = daemon_try_call(
+        &mut connection,
+        "account.credentials",
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(|error| anyhow!("{}", error.message))?;
+    let credentials: mp_protocol::account::AccountCredentials = serde_json::from_value(answer)
+        .context("reading the credential presence the daemon reported")?;
+    cmd_config_show(&config, &path, &credentials)
 }
 
 /// `mp config set-password`: the prompt is this process's terminal's, the value
