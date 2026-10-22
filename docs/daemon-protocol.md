@@ -872,14 +872,15 @@ A server-only hit carries no row and says so with `null` rather than with an emp
 
 **`query` is the grammar a user types**, not an engine enum: the overlay holds a parsed `search::Query` and renders it back with `search::to_query_string`, so one parser serves every backend, which is `LST-06`'s whole point.
 The field filters are `message.search`'s, under the same names (`body_query` for `--body`), so `mp search`'s flags travel as they do for `--local` and build the same query with `search::from_cli`.
-`mailboxes` is the mailboxes the caller asked for; absent, the query's own `in:` names the one mailbox, and without that every one of the account's that has a server name is searched.
+`mailboxes` is the mailboxes the caller asked for; absent, the query's own `in:` names the one mailbox, and without that an IMAP search runs in every one of the account's that has a server name.
+A Graph search that names neither runs across every folder in one `/me/messages` query, so mail in a folder the account does not configure (an Archive subfolder) matches too, and each hit is listed under the label of the configured mailbox its `parentFolderId` is, else under that folder's display name, both resolved in one `/$batch` per search.
 A configured mailbox is named by its sidebar label **or** by its server name, which is one spelling more than `message.list` accepts: the overlay holds a target of `(label, server_name)` and the search grammar's own `in:` directive is matched against both, so the wire takes whichever the caller has in hand rather than making it re-derive the other.
 Any other name is a folder on the server, searched under that name and reported under it, the rule mailbox discovery (#0141) brings; a name the server does not list fails that one mailbox into `unreachable` and not the call.
 A query the grammar cannot parse is `-32602`, and so is an empty mailbox name.
 
 **`limit` is the number of hits the whole search answers with**, defaulting to 50 (PERSO-175).
 The search runs in two passes, so a five-folder search downloads no more than a one-folder search for the same number.
-The first pass asks every mailbox for its newest `limit` matches with nothing but the key the second pass downloads by and the two headers the merge reads: on IMAP the UID with `BODY.PEEK[HEADER.FIELDS (DATE MESSAGE-ID)]`, on Graph the message id with `$select=id,internetMessageId,receivedDateTime`.
+The first pass asks every mailbox for its newest `limit` matches with nothing but the key the second pass downloads by and the two headers the merge reads: on IMAP the UID with `BODY.PEEK[HEADER.FIELDS (DATE MESSAGE-ID)]`, on Graph the message id with `$select=id,internetMessageId,receivedDateTime,parentFolderId`.
 The stubs of every mailbox are merged newest first by `Date` and cut to `limit`, and the second pass downloads the survivors whole, mailbox by mailbox: one `UID FETCH (BODY.PEEK[] FLAGS)` per mailbox on IMAP, `/$batch` chunks of twenty on Graph.
 The hits stream as each mailbox's survivors land, so a client that lists them sorts by `date_sort`; the daemon has already cut them.
 `truncated` is true when a mailbox matched more than `limit` or the merge dropped stubs, and `capped` when Graph's 1000-result `$search` cap stopped a mailbox short of `limit`, which no larger limit gets past.
@@ -1524,5 +1525,5 @@ PERSO-175 changed what `message.search_server`'s `limit` means and added two mem
 `limit` is the number of hits the whole search answers with rather than a budget split per mailbox with a floor of five: every mailbox is asked for its newest `limit` matches as stubs, the stubs are merged newest first and cut to `limit`, and only the survivors are downloaded.
 `truncated` says more matched than the hits hold and `capped` says Microsoft Graph's 1000-result `$search` cap (`mp_protocol::listing::GRAPH_SEARCH_CAP`) stopped a mailbox; both are `default` on the way in, so a settle from an older daemon reads as an answer nobody cut.
 The method took `message.search`'s field filters, `from`, `to`, `cc`, `subject`, `body_query`, `filename`, `has_attachment`, `after` and `before`, reads the query's `in:` when `mailboxes` is absent, and searches a mailbox name the account does not configure as a server folder instead of refusing it with `-32602`.
-`mp search` without `--local` moved onto the method, so its output is now read off the settle: the per-mailbox failure lines print after the results from `unreachable`, and Graph hits carry the configured mailbox they came from.
+`mp search` without `--local` moved onto the method, so its output is now read off the settle: the per-mailbox failure lines print after the results from `unreachable`, and a Graph search that names no mailbox runs across every folder in one query, as `mp search` always did there, its hits carrying the configured mailbox they sit in or the folder's display name.
 The key list in `tests/daemon_server_leg_slice.rs` is nine names.

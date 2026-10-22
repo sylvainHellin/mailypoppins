@@ -205,6 +205,7 @@ pub async fn search_stubs_on_session(
             key: uid,
             date,
             message_id: mid,
+            folder: None,
         });
     }
     Ok(MailboxStubs {

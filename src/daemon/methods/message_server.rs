@@ -74,7 +74,7 @@ use crate::daemon::state::events::Event;
 use crate::daemon::state::{CanonicalState, Change};
 use crate::parse::FetchedEmail;
 use crate::selector::Selector;
-use crate::server_search::{two_phase, Cut, GraphSearch, ImapSearch, SearchSink};
+use crate::server_search::{two_phase, Cut, GraphSearch, ImapSearch, Scope, SearchSink};
 use crate::store::{read, BlobStore, Store};
 use crate::tui::app::{build_mailboxes, resolve_date};
 
@@ -471,13 +471,33 @@ struct SearchTarget {
     server_name: String,
 }
 
+/// The label a Graph search across every folder is reported under when it
+/// fails as a whole; its hits are listed under their own folders.
+const EVERY_FOLDER_LABEL: &str = "every folder";
+
+/// What one validated search runs against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Targets {
+    /// These mailboxes, one first-pass query each.
+    Mailboxes(Vec<SearchTarget>),
+    /// Every folder of a Graph account in one query, the default when the
+    /// caller names no mailbox and the query no `in:`: one request rather
+    /// than one per configured folder, and a folder the account does not
+    /// configure (an Archive subfolder) is searched too.
+    EveryFolder,
+}
+
 /// One validated `message.search_server`.
 struct SearchRequest {
     account: AccountConfig,
     /// What the user typed, kept verbatim for the settle.
     query: String,
     parsed: crate::search::Query,
-    targets: Vec<SearchTarget>,
+    targets: Targets,
+    /// The account's mailboxes that have a server name, as `(label, server
+    /// name)`: what a hit found across every folder is listed under when its
+    /// folder is one of them.
+    configured: Vec<(String, String)>,
     /// The number of hits the whole search answers with (PERSO-175).
     limit: usize,
     /// The normalised Message-IDs the local pass is already showing.
@@ -520,28 +540,12 @@ fn search_request(
             })
         })
         .collect();
-    // `mailboxes` first, then the query's own `in:` directive, which is the
-    // precedence `mp search` gives `--mailbox` over `in:`.
-    let targets = match params.get("mailboxes") {
-        None | Some(Value::Null) => match parsed.in_mailbox.as_deref() {
-            Some(wanted) => vec![pick_target(&configured, wanted)?],
-            None => configured,
-        },
-        Some(Value::Array(names)) => names
-            .iter()
-            .map(|name| {
-                let wanted = name
-                    .as_str()
-                    .ok_or_else(|| invalid_params("mailboxes is an array of mailbox names"))?;
-                pick_target(&configured, wanted)
-            })
-            .collect::<Result<Vec<SearchTarget>, RpcError>>()?,
-        Some(_) => {
-            return Err(invalid_params(
-                "mailboxes is an array of mailbox names, or null for every searchable one",
-            ))
-        }
-    };
+    let targets = search_targets(
+        params.get("mailboxes"),
+        parsed.in_mailbox.as_deref(),
+        account.auth_method == AuthMethod::Graph,
+        &configured,
+    )?;
 
     let limit = match params.get("limit") {
         None | Some(Value::Null) => DEFAULT_SEARCH_LIMIT,
@@ -574,10 +578,49 @@ fn search_request(
         query,
         parsed,
         targets,
+        configured: configured
+            .into_iter()
+            .map(|target| (target.label, target.server_name))
+            .collect(),
         limit,
         excluded,
         secrets: snapshot.config.secrets_backend,
     })
+}
+
+/// What a search runs against, from its `mailboxes` param, the query's own
+/// `in:` directive, and whether the account is on Graph.
+///
+/// `mailboxes` first, then `in:`, which is the precedence `mp search` gives
+/// `--mailbox` over `in:`. Naming neither searches every configured mailbox
+/// on IMAP, which has no query across mailboxes, and every folder at once on
+/// Graph (PERSO-175).
+fn search_targets(
+    mailboxes: Option<&Value>,
+    in_mailbox: Option<&str>,
+    graph: bool,
+    configured: &[SearchTarget],
+) -> Result<Targets, RpcError> {
+    match mailboxes {
+        None | Some(Value::Null) => Ok(match in_mailbox {
+            Some(wanted) => Targets::Mailboxes(vec![pick_target(configured, wanted)?]),
+            None if graph => Targets::EveryFolder,
+            None => Targets::Mailboxes(configured.to_vec()),
+        }),
+        Some(Value::Array(names)) => names
+            .iter()
+            .map(|name| {
+                let wanted = name
+                    .as_str()
+                    .ok_or_else(|| invalid_params("mailboxes is an array of mailbox names"))?;
+                pick_target(configured, wanted)
+            })
+            .collect::<Result<Vec<SearchTarget>, RpcError>>()
+            .map(Targets::Mailboxes),
+        Some(_) => Err(invalid_params(
+            "mailboxes is an array of mailbox names, or null for every searchable one",
+        )),
+    }
 }
 
 /// The target `wanted` names.
@@ -636,13 +679,23 @@ async fn run_search(
     }
 }
 
-/// The server names of the request's targets, in search order.
-fn server_names(request: &SearchRequest) -> Vec<String> {
-    request
-        .targets
-        .iter()
-        .map(|target| target.server_name.clone())
-        .collect()
+/// The scopes of the request's targets, in search order.
+fn scopes(request: &SearchRequest) -> Vec<Scope> {
+    match &request.targets {
+        Targets::Mailboxes(targets) => targets
+            .iter()
+            .map(|target| Scope::Mailbox(target.server_name.clone()))
+            .collect(),
+        Targets::EveryFolder => vec![Scope::EveryFolder],
+    }
+}
+
+/// The label the `index`-th scope of the request is reported under.
+fn target_label(request: &SearchRequest, index: usize) -> &str {
+    match &request.targets {
+        Targets::Mailboxes(targets) => &targets[index].label,
+        Targets::EveryFolder => EVERY_FOLDER_LABEL,
+    }
 }
 
 /// The plain-IMAP leg: one session, both passes on it.
@@ -676,13 +729,7 @@ async fn search_imap(
         search: imap_search,
         message_id: request.parsed.message_id.clone(),
     };
-    let cut = two_phase(
-        &mut backend,
-        &server_names(request),
-        request.limit,
-        &mut stream,
-    )
-    .await;
+    let cut = two_phase(&mut backend, &scopes(request), request.limit, &mut stream).await;
     session.logout().await.ok();
     Ok(stream.settle(cut))
 }
@@ -716,7 +763,8 @@ fn coverage_of(local_terms: &[String]) -> SearchCoverage {
     }
 }
 
-/// The Graph leg, which searches a folder at a time over HTTP.
+/// The Graph leg, which searches the named folders one at a time, or every
+/// folder in one query when none is named, over HTTP.
 async fn search_graph(
     request: &SearchRequest,
     handle: &OperationHandle,
@@ -725,17 +773,8 @@ async fn search_graph(
     let config = crate::config::GraphConfig::load(&request.account)?;
     let client = crate::graph::GraphClient::new_async(&config).await?;
     let mut stream = Stream::new(request, handle, canonical, false, Vec::new());
-    let mut backend = GraphSearch {
-        client: &client,
-        query: &request.parsed,
-    };
-    let cut = two_phase(
-        &mut backend,
-        &server_names(request),
-        request.limit,
-        &mut stream,
-    )
-    .await;
+    let mut backend = GraphSearch::new(&client, &request.parsed, &request.configured);
+    let cut = two_phase(&mut backend, &scopes(request), request.limit, &mut stream).await;
     Ok(stream.settle(cut))
 }
 
@@ -852,8 +891,8 @@ impl SearchSink for Stream<'_> {
     /// an `.await`, which is what keeps the search future `Send`; it is
     /// optional for the reason [`Stream::new`] gives, and `to_hit` takes a
     /// `None` store as "the local store knows nothing about this hit".
-    fn land(&mut self, mailbox: usize, emails: Vec<FetchedEmail>) {
-        let label = &self.request.targets[mailbox].label;
+    fn land(&mut self, mailbox: usize, folder: Option<&str>, emails: Vec<FetchedEmail>) {
+        let label = folder.unwrap_or_else(|| target_label(self.request, mailbox));
         log::info!("[search_server] '{label}' landed {} hit(s)", emails.len());
         let account = &self.request.account.name;
         let store = crate::store::open_store(account);
@@ -872,10 +911,10 @@ impl SearchSink for Stream<'_> {
 
     /// One mailbox the server refused, which does not fail the search.
     fn refused(&mut self, mailbox: usize, error: &anyhow::Error) {
-        let label = &self.request.targets[mailbox].label;
+        let label = target_label(self.request, mailbox);
         log::warn!("[search_server] search in {label} failed: {error}");
         self.unreachable.push(UnreachableMailbox {
-            mailbox: label.clone(),
+            mailbox: label.to_string(),
             error: format!("{error}"),
         });
     }
@@ -1049,6 +1088,40 @@ mod tests {
         );
         let refused = pick_target(&configured, " ").expect_err("an empty name");
         assert_eq!(refused.code, -32602);
+    }
+
+    /// A search that names no mailbox and no `in:` runs across every folder
+    /// in one query on Graph, which reaches a folder the account does not
+    /// configure, and per configured mailbox on IMAP; a named one is searched
+    /// alone on either (PERSO-175).
+    #[test]
+    fn graph_searches_every_folder_at_once_when_no_mailbox_is_named() {
+        let configured = vec![
+            SearchTarget {
+                label: "Inbox".to_string(),
+                server_name: "Inbox".to_string(),
+            },
+            SearchTarget {
+                label: "Archive".to_string(),
+                server_name: "Archive".to_string(),
+            },
+        ];
+        assert_eq!(
+            search_targets(None, None, true, &configured).unwrap(),
+            Targets::EveryFolder
+        );
+        assert_eq!(
+            search_targets(Some(&Value::Null), None, false, &configured).unwrap(),
+            Targets::Mailboxes(configured.clone())
+        );
+        assert_eq!(
+            search_targets(None, Some("archive"), true, &configured).unwrap(),
+            Targets::Mailboxes(vec![configured[1].clone()])
+        );
+        assert_eq!(
+            search_targets(Some(&json!(["Inbox"])), None, true, &configured).unwrap(),
+            Targets::Mailboxes(vec![configured[0].clone()])
+        );
     }
 
     /// The first pass drops a hit the store marks no attachment on under a

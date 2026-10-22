@@ -387,7 +387,8 @@ enum Commands {
         query: String,
         /// Mailbox to search: a configured one by role or label, or any folder
         /// the server lists by its server name (default: all the account's
-        /// mailboxes; --local: configured ones only)
+        /// mailboxes, and on Exchange every folder; --local: configured ones
+        /// only)
         #[arg(long)]
         mailbox: Option<String>,
         /// Match the sender (from:)
@@ -1850,8 +1851,9 @@ const KIND_SERVER_SEARCH_HIT: &str = "message.server_hit";
 /// is printed around them by [`mailypoppins::read_cmd::server_search_lines`].
 ///
 /// `--mailbox` names a configured mailbox or any folder the server lists;
-/// without it the daemon reads the query's own `in:` and then searches every
-/// configured mailbox.
+/// without it the daemon reads the query's own `in:`, and without that
+/// searches every configured mailbox on IMAP and every folder at once on
+/// Graph, each hit listed under its folder.
 async fn routed_server_search(
     account_config: &AccountConfig,
     query: &str,

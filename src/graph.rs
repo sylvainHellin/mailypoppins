@@ -486,7 +486,8 @@ struct GraphPage<T> {
 }
 
 /// One hit of a search's first pass (PERSO-175): what the merge across
-/// mailboxes reads, and the id the second pass downloads it by.
+/// mailboxes reads, the id the second pass downloads it by, and the folder it
+/// sits in, which names the hit of a search across every folder.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GraphSearchStub {
@@ -495,6 +496,16 @@ struct GraphSearchStub {
     internet_message_id: Option<String>,
     #[serde(default)]
     received_date_time: Option<String>,
+    #[serde(default)]
+    parent_folder_id: Option<String>,
+}
+
+/// One folder as a search names its hits: its id and its display name.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphFolderName {
+    id: String,
+    display_name: String,
 }
 
 /// One entry of a message's `/attachments` collection.
@@ -854,6 +865,62 @@ fn format_recipients(recipients: &[GraphRecipient]) -> String {
         .map(format_recipient)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The JSON body of a `/$batch` call naming one folder per path segment, the
+/// request id being the index into `segments`.
+fn folder_batch_body(segments: &[String]) -> serde_json::Value {
+    let requests: Vec<serde_json::Value> = segments
+        .iter()
+        .enumerate()
+        .map(|(i, segment)| {
+            let encoded = percent_encoding::utf8_percent_encode(segment, ID_ENCODE_SET);
+            serde_json::json!({
+                "id": i.to_string(),
+                "method": "GET",
+                "url": format!("/me/mailFolders/{encoded}?$select=id,displayName"),
+            })
+        })
+        .collect();
+    serde_json::json!({ "requests": requests })
+}
+
+/// The label of every hit folder, from the answers to
+/// [`GraphClient::folder_labels`]'s batch: `asked[i]` is the `i`-th path
+/// segment asked for with its configured label, `None` for a hit's folder id,
+/// and `answers[i]` what Graph said that segment is.
+///
+/// A hit folder some configured mailbox resolves to is listed under that
+/// mailbox's label, whatever the folder is called on the server; any other
+/// is listed under its display name, and one Graph did not name is left out.
+fn label_folders(
+    asked: &[(Option<&str>, &str)],
+    answers: &[Option<GraphFolderName>],
+) -> HashMap<String, String> {
+    // A configured folder is known by the segment it was asked under, which
+    // is already its id unless it is a well-known name, and by the id Graph
+    // answered with.
+    let mut configured: HashMap<&str, &str> = HashMap::new();
+    for ((label, segment), answer) in asked.iter().zip(answers) {
+        let Some(label) = label else { continue };
+        configured.insert(segment, label);
+        if let Some(folder) = answer {
+            configured.insert(&folder.id, label);
+        }
+    }
+    asked
+        .iter()
+        .zip(answers)
+        .filter(|((label, _), _)| label.is_none())
+        .filter_map(|((_, id), answer)| {
+            let label = configured
+                .get(id)
+                .or_else(|| configured.get(answer.as_ref()?.id.as_str()))
+                .map(|label| label.to_string())
+                .or_else(|| Some(answer.as_ref()?.display_name.clone()))?;
+            Some((id.to_string(), label))
+        })
+        .collect()
 }
 
 /// The JSON body of a `/$batch` call fetching one message per id.
@@ -3642,9 +3709,10 @@ const QUERY_VALUE_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::N
 const GRAPH_MAX_TOP: usize = 1000;
 
 /// The `$select` of a search's first pass: the id the second pass downloads
-/// by, the Message-ID the dedup and the attachment post-filter read, and the
-/// date the merge orders by (PERSO-175).
-const STUB_SELECT: &str = "id,internetMessageId,receivedDateTime";
+/// by, the Message-ID the dedup and the attachment post-filter read, the date
+/// the merge orders by, and the folder a hit of a search across every folder
+/// is listed under (PERSO-175).
+const STUB_SELECT: &str = "id,internetMessageId,receivedDateTime,parentFolderId";
 
 /// What a search does after one page of hits.
 #[derive(Debug, PartialEq)]
@@ -3855,6 +3923,7 @@ impl GraphClient {
                     .map(iso_to_rfc2822)
                     .unwrap_or_default(),
                 message_id: stub.internet_message_id,
+                folder: stub.parent_folder_id,
             })
             .collect();
         Ok(MailboxStubs {
@@ -3862,6 +3931,85 @@ impl GraphClient {
             more: pages.truncated,
             capped: pages.capped,
         })
+    }
+
+    /// The label each folder of `ids` (a search hit's `parentFolderId`) is
+    /// listed under: the label of the configured mailbox that is that folder,
+    /// else the folder's display name (PERSO-175). An id Graph does not
+    /// answer for is left out.
+    ///
+    /// `configured` is the account's mailboxes as `(label, server name)`.
+    /// Each server name is resolved to the path segment
+    /// [`Self::folder_path`] gives it (a well-known name, an id, or the id
+    /// its display name was found under) and every segment, configured or
+    /// hit, is asked for its canonical id and display name in one `/$batch`
+    /// per [`BATCH_MAX_REQUESTS`]: a well-known name and a `parentFolderId`
+    /// only compare once both are ids.
+    pub async fn folder_labels(
+        &self,
+        configured: &[(String, String)],
+        ids: &[String],
+    ) -> Result<HashMap<String, String>> {
+        let mut labels: Vec<Option<&str>> = Vec::new();
+        let mut segments: Vec<String> = Vec::new();
+        for (label, server_name) in configured {
+            match self.folder_path(server_name).await {
+                Ok(segment) => {
+                    labels.push(Some(label));
+                    segments.push(segment);
+                }
+                Err(e) => debug!("Graph folder '{server_name}' did not resolve: {e:#}"),
+            }
+        }
+        for id in ids {
+            labels.push(None);
+            segments.push(id.clone());
+        }
+        let asked: Vec<(Option<&str>, &str)> = labels
+            .into_iter()
+            .zip(segments.iter().map(String::as_str))
+            .collect();
+
+        let mut answers: Vec<Option<GraphFolderName>> = Vec::with_capacity(segments.len());
+        for chunk in segments.chunks(BATCH_MAX_REQUESTS) {
+            let resp = self
+                .client
+                .post(format!("{GRAPH_BASE}/$batch"))
+                .bearer_auth(self.bearer())
+                .json(&folder_batch_body(chunk))
+                .send()
+                .await
+                .context("Failed to name the search hits' folders")?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(anyhow!(
+                    "Naming the search hits' folders failed (HTTP {status}): {body}"
+                ));
+            }
+            let batch: GraphBatchResponse = resp
+                .json()
+                .await
+                .context("Failed to parse the folder batch response")?;
+            let mut found: Vec<Option<GraphFolderName>> = chunk.iter().map(|_| None).collect();
+            for entry in batch.responses {
+                let Some(slot) = entry
+                    .id
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| found.get_mut(i))
+                else {
+                    continue;
+                };
+                if entry.status == 200 {
+                    *slot = entry
+                        .body
+                        .and_then(|body| serde_json::from_value(body).ok());
+                }
+            }
+            answers.extend(found);
+        }
+        Ok(label_folders(&asked, &answers))
     }
 
     /// The second pass of a server search (PERSO-175): the messages behind
@@ -5604,6 +5752,61 @@ mod tests {
         let whole = pairs(SearchShape::Whole);
         assert!(whole["$select"].contains("body"), "{whole:?}");
         assert!(whole.contains_key("$expand"), "{whole:?}");
+    }
+
+    /// A stub carries the folder it sits in, which is what a search across
+    /// every folder lists its hit under (PERSO-175).
+    #[test]
+    fn a_stub_names_the_folder_it_sits_in() {
+        assert!(STUB_SELECT
+            .split(',')
+            .any(|field| field == "parentFolderId"));
+        let stub: GraphSearchStub = serde_json::from_value(serde_json::json!({
+            "id": "AAMsg",
+            "internetMessageId": "<a@x>",
+            "receivedDateTime": "2026-10-22T10:00:00Z",
+            "parentFolderId": "AAMkSub",
+        }))
+        .unwrap();
+        assert_eq!(stub.parent_folder_id.as_deref(), Some("AAMkSub"));
+    }
+
+    /// A hit folder that is a configured mailbox is listed under its label,
+    /// whatever Graph calls it, any other under its display name, and one
+    /// Graph did not name is left to the caller (PERSO-175).
+    #[test]
+    fn a_hit_folder_is_labelled_by_its_mailbox_else_its_display_name() {
+        let folder = |id: &str, name: &str| {
+            Some(GraphFolderName {
+                id: id.into(),
+                display_name: name.into(),
+            })
+        };
+        let asked = [
+            (Some("Inbox"), "inbox"),
+            (Some("Extra"), "AAMkReports"),
+            (None, "AAMkInbox"),
+            (None, "AAMkSub"),
+            (None, "AAMkReports"),
+            (None, "AAMkGone"),
+        ];
+        let answers = [
+            folder("AAMkInbox", "Posteingang"),
+            None,
+            folder("AAMkInbox", "Posteingang"),
+            folder("AAMkSub", "2023"),
+            folder("AAMkReports", "Reports"),
+            None,
+        ];
+        let labels = label_folders(&asked, &answers);
+        assert_eq!(labels["AAMkInbox"], "Inbox", "the configured label wins");
+        assert_eq!(labels["AAMkSub"], "2023");
+        assert_eq!(
+            labels["AAMkReports"], "Extra",
+            "a mailbox configured by its id matches by that id"
+        );
+        assert!(!labels.contains_key("AAMkGone"));
+        assert_eq!(labels.len(), 3);
     }
 
     /// A search page carries Graph's `@odata.nextLink`, which the search

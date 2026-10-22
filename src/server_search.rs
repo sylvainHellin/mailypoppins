@@ -22,6 +22,13 @@
 //! dropped without a word: the mailbox is reported as having fallen short,
 //! with how many and why, beside the hits that did land.
 //!
+//! Graph can also search every folder of the account in one query
+//! ([`Scope::EveryFolder`]), which is what a search that names no mailbox
+//! does there: one request rather than one per configured folder, and mail
+//! in a folder the account does not configure (an Archive subfolder) still
+//! matches. Each of its stubs then carries the label of the folder it sits
+//! in, which is what its hit is listed under.
+//!
 //! The backend is a [`SearchBackend`]: one IMAP session ([`ImapSearch`]) or
 //! one Graph client ([`GraphSearch`]). What the hits become is the caller's
 //! [`SearchSink`], which is where the daemon's dedup, attachment post-filter
@@ -47,6 +54,22 @@ pub struct SearchStub<K> {
     /// The `Message-ID` header, which the dedup and the attachment
     /// post-filter read.
     pub message_id: Option<String>,
+    /// The folder the hit sits in, when the search spanned every folder at
+    /// once ([`Scope::EveryFolder`]): Graph's `parentFolderId` as
+    /// [`GraphClient::search_stubs`] reads it, and the label the hit is
+    /// listed under once [`GraphSearch`] has resolved it. `None` when the
+    /// search ran in one mailbox, whose own label the hit is listed under.
+    pub folder: Option<String>,
+}
+
+/// Where one first-pass search runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// One mailbox, by its server name.
+    Mailbox(String),
+    /// Every folder of the account in one query, which only Graph answers
+    /// (`/me/messages`); each stub names the folder it sits in.
+    EveryFolder,
 }
 
 /// One mailbox's first-pass answer.
@@ -59,6 +82,10 @@ pub struct MailboxStubs<K> {
     /// Microsoft Graph's `$search` cap stopped it short of the limit.
     pub capped: bool,
 }
+
+/// The stubs of the scope at an index, as the merge takes and hands them
+/// back.
+pub type StubGroup<K> = (usize, Vec<SearchStub<K>>);
 
 /// What a second pass brought back.
 #[derive(Debug)]
@@ -90,20 +117,20 @@ pub struct Cut {
 /// One server a search runs against.
 pub trait SearchBackend {
     /// What a stub names its message by.
-    type Key: Send + Sync;
+    type Key: Clone + Eq + std::hash::Hash + Send + Sync;
 
-    /// The newest `limit` matches of `mailbox` (a server name) as stubs.
+    /// The newest `limit` matches in `scope` as stubs.
     fn stubs(
         &mut self,
-        mailbox: &str,
+        scope: &Scope,
         limit: usize,
     ) -> impl Future<Output = Result<MailboxStubs<Self::Key>>> + Send;
 
-    /// The whole messages behind `keys` in `mailbox`, and the keys that did
+    /// The whole messages behind `keys` in `scope`, and the keys that did
     /// not come back. An error is the whole download failing.
     fn fetch(
         &mut self,
-        mailbox: &str,
+        scope: &Scope,
         keys: &[Self::Key],
     ) -> impl Future<Output = Result<Fetched<Self::Key>>> + Send;
 }
@@ -114,28 +141,30 @@ pub trait SearchSink {
     /// the caller's dedup and its store post-filter run here, before anything
     /// is downloaded.
     fn admit(&mut self, message_id: Option<&str>) -> bool;
-    /// The downloaded hits of the `mailbox`-th mailbox.
-    fn land(&mut self, mailbox: usize, emails: Vec<FetchedEmail>);
+    /// The downloaded hits of the `mailbox`-th scope, sitting in `folder`
+    /// when the scope spanned every folder ([`SearchStub::folder`]).
+    fn land(&mut self, mailbox: usize, folder: Option<&str>, emails: Vec<FetchedEmail>);
     /// The `mailbox`-th mailbox failed, or some of its hits could not be
     /// downloaded, which does not fail the search.
     fn refused(&mut self, mailbox: usize, error: &anyhow::Error);
 }
 
-/// Search `mailboxes` (server names) for the newest `limit` hits across all of
-/// them, handing each mailbox's downloaded hits to `sink` in mailbox order.
+/// Search `scopes` for the newest `limit` hits across all of them, handing
+/// each scope's downloaded hits to `sink` in scope order, folder by folder
+/// within one that spans every folder.
 pub async fn two_phase<B: SearchBackend, S: SearchSink>(
     backend: &mut B,
-    mailboxes: &[String],
+    scopes: &[Scope],
     limit: usize,
     sink: &mut S,
 ) -> Cut {
     let mut cut = Cut::default();
     let mut groups: Vec<(usize, Vec<SearchStub<B::Key>>)> = Vec::new();
-    for (index, mailbox) in mailboxes.iter().enumerate() {
-        match backend.stubs(mailbox, limit).await {
+    for (index, scope) in scopes.iter().enumerate() {
+        match backend.stubs(scope, limit).await {
             Ok(found) => {
                 log::info!(
-                    "[server_search] '{mailbox}' matched {}{}",
+                    "[server_search] {scope:?} matched {}{}",
                     found.stubs.len(),
                     if found.more { " and more" } else { "" }
                 );
@@ -154,13 +183,13 @@ pub async fn two_phase<B: SearchBackend, S: SearchSink>(
 
     let (picked, dropped) = select(groups, limit);
     cut.truncated |= dropped;
-    for (index, keys) in picked {
-        match backend.fetch(&mailboxes[index], &keys).await {
+    for (index, stubs) in picked {
+        let keys: Vec<B::Key> = stubs.iter().map(|stub| stub.key.clone()).collect();
+        match backend.fetch(&scopes[index], &keys).await {
             Ok(fetched) => {
-                sink.land(
-                    index,
-                    fetched.emails.into_iter().map(|(_, email)| email).collect(),
-                );
+                for (folder, emails) in by_folder(&stubs, fetched.emails) {
+                    sink.land(index, folder, emails);
+                }
                 if !fetched.missing.is_empty() {
                     sink.refused(index, &shortfall(&fetched.missing, keys.len()));
                 }
@@ -169,6 +198,28 @@ pub async fn two_phase<B: SearchBackend, S: SearchSink>(
         }
     }
     cut
+}
+
+/// The downloaded `emails` of one scope grouped by the folder their stubs
+/// name, each group in download order and the groups in the order a folder
+/// first appears; one group under `None` for a scope that is one mailbox.
+fn by_folder<K: Eq + std::hash::Hash>(
+    stubs: &[SearchStub<K>],
+    emails: Vec<(K, FetchedEmail)>,
+) -> Vec<(Option<&str>, Vec<FetchedEmail>)> {
+    let folder_of: std::collections::HashMap<&K, Option<&str>> = stubs
+        .iter()
+        .map(|stub| (&stub.key, stub.folder.as_deref()))
+        .collect();
+    let mut groups: Vec<(Option<&str>, Vec<FetchedEmail>)> = Vec::new();
+    for (key, email) in emails {
+        let folder = folder_of.get(&key).copied().flatten();
+        match groups.iter_mut().find(|(seen, _)| *seen == folder) {
+            Some((_, group)) => group.push(email),
+            None => groups.push((folder, vec![email])),
+        }
+    }
+    groups
 }
 
 /// The error a mailbox whose second pass fell short is reported with: how
@@ -193,17 +244,14 @@ fn shortfall<K>(missing: &[(K, String)], asked: usize) -> anyhow::Error {
     )
 }
 
-/// The keys each mailbox downloads whole, and whether the cut dropped any.
+/// The stubs each mailbox downloads whole, and whether the cut dropped any.
 ///
 /// Every mailbox's stubs are merged newest first by `Date`, an unparsable
 /// date last, and cut to `limit`. The survivors are handed back grouped by
 /// the mailbox index they came with, in that order, newest first within each;
 /// a mailbox none of whose stubs survived is left out, so the second pass
 /// selects nothing it downloads nothing from.
-pub fn select<K>(
-    groups: Vec<(usize, Vec<SearchStub<K>>)>,
-    limit: usize,
-) -> (Vec<(usize, Vec<K>)>, bool) {
+pub fn select<K>(groups: Vec<StubGroup<K>>, limit: usize) -> (Vec<StubGroup<K>>, bool) {
     let mut all: Vec<(usize, SearchStub<K>)> = groups
         .into_iter()
         .flat_map(|(index, stubs)| stubs.into_iter().map(move |stub| (index, stub)))
@@ -212,12 +260,12 @@ pub fn select<K>(
     let dropped = all.len() > limit;
     all.truncate(limit);
 
-    let mut picked: Vec<(usize, Vec<K>)> = Vec::new();
+    let mut picked: Vec<(usize, Vec<SearchStub<K>>)> = Vec::new();
     all.sort_by_key(|(index, _)| *index);
     for (index, stub) in all {
         match picked.last_mut() {
-            Some((last, keys)) if *last == index => keys.push(stub.key),
-            _ => picked.push((index, vec![stub.key])),
+            Some((last, stubs)) if *last == index => stubs.push(stub),
+            _ => picked.push((index, vec![stub])),
         }
     }
     (picked, dropped)
@@ -244,40 +292,111 @@ pub struct ImapSearch<'a> {
 impl SearchBackend for ImapSearch<'_> {
     type Key = u32;
 
-    async fn stubs(&mut self, mailbox: &str, limit: usize) -> Result<MailboxStubs<u32>> {
+    async fn stubs(&mut self, scope: &Scope, limit: usize) -> Result<MailboxStubs<u32>> {
         crate::imap_client::search_stubs_on_session(
             self.session,
             &self.search,
             self.message_id.as_deref(),
-            mailbox,
+            imap_mailbox(scope)?,
             limit,
         )
         .await
     }
 
-    async fn fetch(&mut self, mailbox: &str, uids: &[u32]) -> Result<Fetched<u32>> {
-        crate::imap_client::fetch_uids_on_session(self.session, mailbox, uids).await
+    async fn fetch(&mut self, scope: &Scope, uids: &[u32]) -> Result<Fetched<u32>> {
+        crate::imap_client::fetch_uids_on_session(self.session, imap_mailbox(scope)?, uids).await
     }
 }
 
-/// One Graph client, searching a folder at a time over HTTP.
+/// The mailbox an IMAP search selects: IMAP has no query across mailboxes.
+fn imap_mailbox(scope: &Scope) -> Result<&str> {
+    match scope {
+        Scope::Mailbox(mailbox) => Ok(mailbox),
+        Scope::EveryFolder => anyhow::bail!("an IMAP search runs in one mailbox at a time"),
+    }
+}
+
+/// One Graph client, searching a folder at a time or every folder at once
+/// over HTTP.
 pub struct GraphSearch<'a> {
-    pub client: &'a GraphClient,
-    pub query: &'a crate::search::Query,
+    client: &'a GraphClient,
+    query: &'a crate::search::Query,
+    /// The account's configured mailboxes as `(label, server name)`, whose
+    /// labels a hit of a [`Scope::EveryFolder`] search is listed under.
+    configured: &'a [(String, String)],
+    /// The label of every folder id resolved so far in this search.
+    labels: std::collections::HashMap<String, String>,
+}
+
+impl<'a> GraphSearch<'a> {
+    /// A search of `query` through `client`, on an account configuring
+    /// `configured` as `(label, server name)`.
+    pub fn new(
+        client: &'a GraphClient,
+        query: &'a crate::search::Query,
+        configured: &'a [(String, String)],
+    ) -> GraphSearch<'a> {
+        GraphSearch {
+            client,
+            query,
+            configured,
+            labels: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Replace each stub's folder id by the label it is listed under,
+    /// resolving the ids this search has not met yet in one go.
+    ///
+    /// A folder Graph cannot name is listed under its id, logged: the hit is
+    /// worth more than a tidy label.
+    async fn label_folders(&mut self, stubs: &mut [SearchStub<String>]) {
+        let mut unknown: Vec<String> = Vec::new();
+        for id in stubs.iter().filter_map(|stub| stub.folder.as_ref()) {
+            if !self.labels.contains_key(id) && !unknown.contains(id) {
+                unknown.push(id.clone());
+            }
+        }
+        if !unknown.is_empty() {
+            match self.client.folder_labels(self.configured, &unknown).await {
+                Ok(found) => self.labels.extend(found),
+                Err(e) => log::warn!("[server_search] naming the hits' folders: {e:#}"),
+            }
+        }
+        for stub in stubs.iter_mut() {
+            if let Some(id) = stub.folder.take() {
+                stub.folder = Some(self.labels.get(&id).cloned().unwrap_or(id));
+            }
+        }
+    }
 }
 
 impl SearchBackend for GraphSearch<'_> {
     type Key = String;
 
-    async fn stubs(&mut self, folder: &str, limit: usize) -> Result<MailboxStubs<String>> {
-        self.client
-            .search_stubs(self.query, Some(folder), limit)
-            .await
+    async fn stubs(&mut self, scope: &Scope, limit: usize) -> Result<MailboxStubs<String>> {
+        match scope {
+            Scope::Mailbox(folder) => {
+                let mut found = self
+                    .client
+                    .search_stubs(self.query, Some(folder), limit)
+                    .await?;
+                // One folder's hits are listed under its own label.
+                for stub in &mut found.stubs {
+                    stub.folder = None;
+                }
+                Ok(found)
+            }
+            Scope::EveryFolder => {
+                let mut found = self.client.search_stubs(self.query, None, limit).await?;
+                self.label_folders(&mut found.stubs).await;
+                Ok(found)
+            }
+        }
     }
 
     /// The ids are Graph's own and name a message in whichever folder it
-    /// sits, so `folder` only says whose hits these are.
-    async fn fetch(&mut self, _folder: &str, ids: &[String]) -> Result<Fetched<String>> {
+    /// sits, so the scope only says whose hits these are.
+    async fn fetch(&mut self, _scope: &Scope, ids: &[String]) -> Result<Fetched<String>> {
         self.client.fetch_search_hits(ids).await
     }
 }
@@ -292,7 +411,30 @@ mod tests {
             key,
             date: date.to_string(),
             message_id: Some(message_id.to_string()),
+            folder: None,
         }
+    }
+
+    fn scopes(names: &[&str]) -> Vec<Scope> {
+        names
+            .iter()
+            .map(|name| Scope::Mailbox(name.to_string()))
+            .collect()
+    }
+
+    /// The name a scope's matches are scripted under.
+    fn name(scope: &Scope) -> String {
+        match scope {
+            Scope::Mailbox(mailbox) => mailbox.clone(),
+            Scope::EveryFolder => "*".to_string(),
+        }
+    }
+
+    fn keys_of(picked: Vec<(usize, Vec<SearchStub<u32>>)>) -> Vec<(usize, Vec<u32>)> {
+        picked
+            .into_iter()
+            .map(|(index, stubs)| (index, stubs.into_iter().map(|s| s.key).collect()))
+            .collect()
     }
 
     /// The merge picks the `limit` newest by `Date` across every mailbox,
@@ -319,12 +461,12 @@ mod tests {
             (3, vec![stub(1, "not a date", "<f@x>")]),
         ];
         let (picked, dropped) = select(groups.clone(), 3);
-        assert_eq!(picked, vec![(0, vec![80]), (1, vec![7, 6])]);
+        assert_eq!(keys_of(picked), vec![(0, vec![80]), (1, vec![7, 6])]);
         assert!(dropped, "three of six were cut");
 
         let (picked, dropped) = select(groups, 6);
         assert_eq!(
-            picked,
+            keys_of(picked),
             vec![(0, vec![80, 90]), (1, vec![7, 6, 5]), (3, vec![1])],
             "an unparsable date sorts last"
         );
@@ -346,12 +488,13 @@ mod tests {
     impl SearchBackend for Script {
         type Key = u32;
 
-        async fn stubs(&mut self, mailbox: &str, limit: usize) -> Result<MailboxStubs<u32>> {
-            self.asked.push((mailbox.to_string(), limit));
-            if self.refuse.contains(mailbox) {
+        async fn stubs(&mut self, scope: &Scope, limit: usize) -> Result<MailboxStubs<u32>> {
+            let mailbox = name(scope);
+            self.asked.push((mailbox.clone(), limit));
+            if self.refuse.contains(&mailbox) {
                 anyhow::bail!("NO no such mailbox");
             }
-            let all = self.matches.get(mailbox).cloned().unwrap_or_default();
+            let all = self.matches.get(&mailbox).cloned().unwrap_or_default();
             Ok(MailboxStubs {
                 more: all.len() > limit,
                 stubs: all.into_iter().take(limit).collect(),
@@ -359,9 +502,10 @@ mod tests {
             })
         }
 
-        async fn fetch(&mut self, mailbox: &str, uids: &[u32]) -> Result<Fetched<u32>> {
-            self.fetched.push((mailbox.to_string(), uids.to_vec()));
-            let stubs = &self.matches[mailbox];
+        async fn fetch(&mut self, scope: &Scope, uids: &[u32]) -> Result<Fetched<u32>> {
+            let mailbox = name(scope);
+            self.fetched.push((mailbox.clone(), uids.to_vec()));
+            let stubs = &self.matches[&mailbox];
             let (gone, here): (Vec<u32>, Vec<u32>) =
                 uids.iter().partition(|uid| self.vanish.contains_key(uid));
             let missing = gone
@@ -402,6 +546,8 @@ mod tests {
     struct Collect {
         drop: Option<String>,
         landed: Vec<(usize, Vec<String>)>,
+        /// The folder each `landed` entry sits in.
+        landed_in: Vec<Option<String>>,
         refused: Vec<usize>,
         errors: Vec<String>,
     }
@@ -410,9 +556,10 @@ mod tests {
         fn admit(&mut self, message_id: Option<&str>) -> bool {
             message_id != self.drop.as_deref()
         }
-        fn land(&mut self, mailbox: usize, emails: Vec<FetchedEmail>) {
+        fn land(&mut self, mailbox: usize, folder: Option<&str>, emails: Vec<FetchedEmail>) {
             let ids = emails.into_iter().filter_map(|e| e.message_id).collect();
             self.landed.push((mailbox, ids));
+            self.landed_in.push(folder.map(str::to_string));
         }
         fn refused(&mut self, mailbox: usize, error: &anyhow::Error) {
             self.refused.push(mailbox);
@@ -437,7 +584,7 @@ mod tests {
         script.vanish.insert(7, "HTTP 404");
         let mut sink = Collect::default();
 
-        let cut = two_phase(&mut script, &["INBOX".to_string()], 4, &mut sink).await;
+        let cut = two_phase(&mut script, &scopes(&["INBOX"]), 4, &mut sink).await;
 
         assert_eq!(sink.landed, vec![(0, vec!["<m0@x>".to_string()])]);
         assert_eq!(sink.refused, vec![0]);
@@ -451,6 +598,50 @@ mod tests {
 
     fn day(n: u32) -> String {
         format!("{n} Mar 2026 10:00:00 +0000")
+    }
+
+    /// A search across every folder at once is one first-pass query, and its
+    /// hits land under the folder each sits in, one configured or not
+    /// (PERSO-175): the Graph default, which reaches an Archive subfolder
+    /// the account does not configure.
+    #[tokio::test]
+    async fn a_search_across_every_folder_lands_each_hit_under_its_folder() {
+        let in_folder = |key: u32, n: u32, folder: &str| SearchStub {
+            folder: Some(folder.to_string()),
+            ..stub(key, &day(n), &format!("<{key}@x>"))
+        };
+        let mut script = Script::default();
+        script.matches.insert(
+            "*".into(),
+            vec![
+                in_folder(4, 9, "Inbox"),
+                in_folder(3, 8, "Archive/2023"),
+                in_folder(2, 7, "Inbox"),
+                in_folder(1, 6, "Archive/2023"),
+            ],
+        );
+        let mut sink = Collect::default();
+
+        let cut = two_phase(&mut script, &[Scope::EveryFolder], 3, &mut sink).await;
+
+        assert_eq!(
+            script.asked,
+            [("*".to_string(), 3)],
+            "one query, not one per folder"
+        );
+        assert_eq!(script.fetched, [("*".to_string(), vec![4, 3, 2])]);
+        assert_eq!(
+            sink.landed,
+            [
+                (0, vec!["<4@x>".to_string(), "<2@x>".to_string()]),
+                (0, vec!["<3@x>".to_string()]),
+            ]
+        );
+        assert_eq!(
+            sink.landed_in,
+            [Some("Inbox".to_string()), Some("Archive/2023".to_string())]
+        );
+        assert!(cut.truncated, "the fourth match was cut");
     }
 
     /// Every mailbox is asked for the whole limit, only the merged newest
@@ -471,10 +662,9 @@ mod tests {
                 .map(|i| stub(10 - i, &day(20 - i), &format!("<ar{i}@x>")))
                 .collect(),
         );
-        let mailboxes = vec!["INBOX".to_string(), "Archive".to_string()];
         let mut sink = Collect::default();
 
-        let cut = two_phase(&mut script, &mailboxes, 5, &mut sink).await;
+        let cut = two_phase(&mut script, &scopes(&["INBOX", "Archive"]), 5, &mut sink).await;
 
         assert_eq!(
             script.asked,
@@ -508,13 +698,12 @@ mod tests {
             vec![stub(2, &day(2), "<keep@x>"), stub(1, &day(1), "<shown@x>")],
         );
         script.refuse.insert("Spesen".into());
-        let mailboxes = vec!["Spesen".to_string(), "INBOX".to_string()];
         let mut sink = Collect {
             drop: Some("<shown@x>".into()),
             ..Collect::default()
         };
 
-        let cut = two_phase(&mut script, &mailboxes, 50, &mut sink).await;
+        let cut = two_phase(&mut script, &scopes(&["Spesen", "INBOX"]), 50, &mut sink).await;
 
         assert_eq!(sink.refused, vec![0]);
         assert_eq!(script.fetched, vec![("INBOX".to_string(), vec![2])]);
@@ -538,7 +727,7 @@ mod tests {
             drop: Some("<m0@x>".into()),
             ..Collect::default()
         };
-        let cut = two_phase(&mut script, &["INBOX".to_string()], 2, &mut sink).await;
+        let cut = two_phase(&mut script, &scopes(&["INBOX"]), 2, &mut sink).await;
         assert_eq!(script.fetched, vec![("INBOX".to_string(), vec![9])]);
         assert!(cut.truncated);
     }

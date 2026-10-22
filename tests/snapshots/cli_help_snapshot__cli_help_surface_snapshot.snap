@@ -481,7 +481,7 @@ Arguments:
 
 Options:
       --mailbox <MAILBOX>
-          Mailbox to search: a configured one by role or label, or any folder the server lists by its server name (default: all the account's mailboxes; --local: configured ones only)
+          Mailbox to search: a configured one by role or label, or any folder the server lists by its server name (default: all the account's mailboxes, and on Exchange every folder; --local: configured ones only)
 
       --from <FROM>
           Match the sender (from:)

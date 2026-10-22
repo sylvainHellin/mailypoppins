@@ -459,14 +459,16 @@ mp send --invite --to me@example.com --subject "Kita closed" --start 2026-12-24 
         values are supported (e.g., <code>from:"John Doe"</code>). Sylvain's example
         <code>from:boss@corp.com (invoice OR receipt) has:attachment</code> runs on
         every backend. Without an <code>in:</code> prefix or <code>--mailbox</code>, all
-        the account's mailboxes are searched. A malformed query is an error with a
+        the account's mailboxes are searched, and on Exchange every folder, each hit
+        listed under the folder it sits in. A malformed query is an error with a
         caret pointing at the problem, never a silent search for less.
       </p>
       <p>
         The daemon runs every server search, and <code>mp search</code>, the TUI
         overlay and the desktop app's search bar make the same call. A mailbox the
         server refuses does not stop the others: <code>mp search</code> prints
-        <code>Search in &lt;mailbox&gt; failed</code> on stderr after the results.
+        <code>Search in &lt;mailbox&gt; failed</code> on stderr after the results,
+        and the same line names any hit the server matched but did not hand over.
         When more matched than are shown, <code>mp search</code> ends with
         <code>More results than the 20 shown: raise -n to see them.</code>, and the
         TUI and the desktop app end their count with the same sentence and a
