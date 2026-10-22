@@ -1535,6 +1535,47 @@ fn a_second_submission_of_the_same_draft_is_refused_while_the_first_is_open() {
         .expect("a failed row is a human's problem, not a lock");
 }
 
+/// The second guard behind retiring a resumed send's draft file (#0063
+/// review): a draft whose newest row is `done` is refused, unless the file
+/// carries that row's `Message-ID`, which is what a deliberate re-send after a
+/// partial delivery looks like. A `failed` newest row does not block.
+#[test]
+fn a_draft_whose_newest_row_is_done_is_refused_unless_it_names_that_send() {
+    let account = Account::new();
+    let mid = "<sent-once@example.com>";
+    let id = enqueue_draft(&account, mid, "id:note-1").unwrap();
+    let (store, blobs) = account.open();
+    outbox::record_submission(&store, &blobs, id, &SubmitOutcome::Accepted).unwrap();
+    store
+        .conn()
+        .execute("UPDATE outbox SET state = 'done' WHERE id = ?1", [id])
+        .unwrap();
+
+    let refused = outbox::refuse_a_finished_draft(&store, ACCOUNT, "id:note-1", None)
+        .expect_err("a file a resume could not retire is not sent twice");
+    assert!(outbox::is_already_in_flight(&refused), "{refused:#}");
+    assert!(refused.to_string().contains(mid), "{refused:#}");
+    outbox::refuse_a_finished_draft(&store, ACCOUNT, "id:note-1", Some("<older@example.com>"))
+        .expect_err("a file naming another send is not this one");
+
+    outbox::refuse_a_finished_draft(&store, ACCOUNT, "id:note-1", Some(mid))
+        .expect("the file the send marked, re-approved by hand");
+    outbox::refuse_a_finished_draft(&store, ACCOUNT, "id:note-2", None)
+        .expect("another draft is not affected");
+
+    let retry = enqueue_draft(&account, "<second@example.com>", "id:note-1").unwrap();
+    let (store, blobs) = account.open();
+    outbox::record_submission(
+        &store,
+        &blobs,
+        retry,
+        &SubmitOutcome::Ambiguous("lost".into()),
+    )
+    .unwrap();
+    outbox::refuse_a_finished_draft(&store, ACCOUNT, "id:note-1", None)
+        .expect("the newest row failed: a human's call");
+}
+
 /// The gate compares a key that has been through the envelope encoding with
 /// one that has not, so both sides have to be flattened the same way. A draft
 /// with no frontmatter `id:` is keyed by its path, and a path may hold a tab,

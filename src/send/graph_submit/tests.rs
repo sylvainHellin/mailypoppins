@@ -37,23 +37,56 @@ enum Fault {
     Refuse,
     /// The server acted and the answer timed out.
     TimeoutAfter,
+    /// Graph took the delivering request and answered 504: the message is on
+    /// its way (a draft in the Outbox, not yet in Sent Items) until
+    /// [`FakeGraph::deliver`].
+    Gateway,
+    /// Before `send` acted, the draft left Drafts: an earlier send of it was
+    /// taken late and is on its way. The send answers 404.
+    Vanished,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Item {
     message_id: String,
+    /// Our `Message-ID` in [`crate::graph::MESSAGE_ID_PROPERTY`], on a JSON
+    /// draft.
+    property: Option<String>,
     mime: Option<Vec<u8>>,
     attachments: Vec<OutgoingAttachment>,
+}
+
+impl Item {
+    fn is(&self, message_id: &str) -> bool {
+        self.message_id == message_id || self.property.as_deref() == Some(message_id)
+    }
 }
 
 #[derive(Default)]
 struct Server {
     next_id: u32,
     drafts: BTreeMap<String, Item>,
+    /// Taken by Graph and not yet filed in Sent Items, with the draft id a
+    /// staged send had.
+    queued: Vec<(Option<String>, Item)>,
     sent: Vec<Item>,
     faults: Vec<(Step, Fault)>,
     discarded: Vec<String>,
     sent_drafts: Vec<String>,
+}
+
+impl Server {
+    /// Take one message: filed at once, or queued when Graph answered 504.
+    fn take(&mut self, draft: Option<String>, item: Item, queue: bool) {
+        if queue {
+            self.queued.push((draft, item));
+            return;
+        }
+        if let Some(id) = draft {
+            self.sent_drafts.push(id);
+        }
+        self.sent.push(item);
+    }
 }
 
 #[derive(Default)]
@@ -80,20 +113,35 @@ impl FakeGraph {
         Some(server.faults.remove(at).1)
     }
 
+    /// Take the next fault of `step` only when it is `fault`.
+    fn take_this_fault(&self, step: Step, fault: Fault) -> bool {
+        let mut server = self.0.lock().unwrap();
+        match server.faults.iter().position(|(s, _)| *s == step) {
+            Some(at) if server.faults[at].1 == fault => {
+                server.faults.remove(at);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Run one request: the fault decides whether the server acts and what
-    /// the client hears.
+    /// the client hears. The action is told whether Graph only queues the
+    /// message ([`Fault::Gateway`]).
     async fn act<T: Send>(
         &self,
         step: Step,
-        action: impl FnOnce(&mut Server) -> Result<T> + Send,
+        action: impl FnOnce(&mut Server, bool) -> Result<T> + Send,
     ) -> Result<T> {
         let fault = self.take_fault(step);
         match fault {
             Some(Fault::HangBefore) => std::future::pending::<()>().await,
-            Some(Fault::Refuse) => return Err(anyhow!("HTTP 400 from the fake")),
+            Some(Fault::Refuse) => {
+                return Err(graph_status(400));
+            }
             _ => {}
         }
-        let value = action(&mut self.0.lock().unwrap())?;
+        let value = action(&mut self.0.lock().unwrap(), fault == Some(Fault::Gateway))?;
         match fault {
             Some(Fault::HangAfter) => {
                 std::future::pending::<()>().await;
@@ -102,12 +150,21 @@ impl FakeGraph {
             Some(Fault::TimeoutAfter) => Err(anyhow!(outbox::AmbiguousSubmission(
                 "operation timed out".to_string()
             ))),
+            Some(Fault::Gateway) => Err(graph_status(504)),
             _ => Ok(value),
         }
     }
 
     fn sent(&self) -> Vec<Item> {
         self.0.lock().unwrap().sent.clone()
+    }
+
+    /// Graph finishes what it queued: the messages land in Sent Items.
+    fn deliver(&self) {
+        let mut server = self.0.lock().unwrap();
+        for (draft, item) in std::mem::take(&mut server.queued) {
+            server.take(draft, item, false);
+        }
     }
 
     fn drafts(&self) -> Vec<String> {
@@ -123,23 +180,34 @@ impl FakeGraph {
             id.clone(),
             Item {
                 message_id: message_id.to_string(),
-                mime: None,
-                attachments: Vec::new(),
+                ..Item::default()
             },
         );
         id
     }
 }
 
+/// A delivering request answered with `status`, read the way the real client
+/// reads it ([`crate::graph::delivering_status_error`]).
+fn graph_status(status: u16) -> anyhow::Error {
+    crate::graph::delivering_status_error(
+        status,
+        false,
+        true,
+        format!("HTTP {status} from the fake"),
+    )
+}
+
 impl GraphSendApi for FakeGraph {
     fn send_mime(&self, mime_base64: String) -> impl Future<Output = Result<()>> + Send {
-        self.act(Step::SendMime, move |server| {
+        self.act(Step::SendMime, move |server, queue| {
             let (message_id, mime) = message_id_of_mime(&mime_base64);
-            server.sent.push(Item {
+            let item = Item {
                 message_id,
                 mime: Some(mime),
-                attachments: Vec::new(),
-            });
+                ..Item::default()
+            };
+            server.take(None, item, queue);
             Ok(())
         })
     }
@@ -148,7 +216,7 @@ impl GraphSendApi for FakeGraph {
         &self,
         mime_base64: String,
     ) -> impl Future<Output = Result<String>> + Send {
-        self.act(Step::Create, move |server| {
+        self.act(Step::Create, move |server, _| {
             let (message_id, mime) = message_id_of_mime(&mime_base64);
             server.next_id += 1;
             let id = format!("draft-{}", server.next_id);
@@ -157,23 +225,32 @@ impl GraphSendApi for FakeGraph {
                 Item {
                     message_id,
                     mime: Some(mime),
-                    attachments: Vec::new(),
+                    ..Item::default()
                 },
             );
             Ok(id)
         })
     }
 
-    fn create_draft_json(&self, _message: &Value) -> impl Future<Output = Result<String>> + Send {
-        self.act(Step::Create, move |server| {
+    fn create_draft_json(&self, message: &Value) -> impl Future<Output = Result<String>> + Send {
+        let property = message["singleValueExtendedProperties"]
+            .as_array()
+            .and_then(|props| {
+                props
+                    .iter()
+                    .find(|p| p["id"] == crate::graph::MESSAGE_ID_PROPERTY)
+            })
+            .and_then(|p| p["value"].as_str())
+            .map(str::to_string);
+        self.act(Step::Create, move |server, _| {
             server.next_id += 1;
             let id = format!("draft-{}", server.next_id);
             server.drafts.insert(
                 id.clone(),
                 Item {
                     message_id: format!("<exchange-{}@fake>", server.next_id),
-                    mime: None,
-                    attachments: Vec::new(),
+                    property,
+                    ..Item::default()
                 },
             );
             Ok(id)
@@ -187,7 +264,7 @@ impl GraphSendApi for FakeGraph {
     ) -> impl Future<Output = Result<()>> + Send {
         let draft_id = draft_id.to_string();
         let attachment = attachment.clone();
-        self.act(Step::Attach, move |server| {
+        self.act(Step::Attach, move |server, _| {
             server
                 .drafts
                 .get_mut(&draft_id)
@@ -200,13 +277,18 @@ impl GraphSendApi for FakeGraph {
 
     fn send_draft(&self, draft_id: &str) -> impl Future<Output = Result<()>> + Send {
         let draft_id = draft_id.to_string();
-        self.act(Step::Send, move |server| {
+        if self.take_this_fault(Step::Send, Fault::Vanished) {
+            let mut server = self.0.lock().unwrap();
+            if let Some(item) = server.drafts.remove(&draft_id) {
+                server.queued.push((Some(draft_id.clone()), item));
+            }
+        }
+        self.act(Step::Send, move |server, queue| {
             let item = server
                 .drafts
                 .remove(&draft_id)
-                .ok_or_else(|| anyhow!("HTTP 404"))?;
-            server.sent.push(item);
-            server.sent_drafts.push(draft_id);
+                .ok_or_else(|| graph_status(404))?;
+            server.take(Some(draft_id), item, queue);
             Ok(())
         })
     }
@@ -229,13 +311,32 @@ impl GraphSendApi for FakeGraph {
         async move {
             let server = self.0.lock().unwrap();
             Ok(ServerCopies {
-                sent: server.sent.iter().any(|i| i.message_id == wanted),
+                sent: server.sent.iter().any(|i| i.is(&wanted)),
                 drafts: server
                     .drafts
                     .iter()
-                    .filter(|(_, i)| i.message_id == wanted)
+                    .filter(|(_, i)| i.is(&wanted))
                     .map(|(id, _)| id.clone())
                     .collect(),
+            })
+        }
+    }
+
+    fn draft_state(&self, draft_id: &str) -> impl Future<Output = Result<DraftState>> + Send {
+        let draft_id = draft_id.to_string();
+        async move {
+            let server = self.0.lock().unwrap();
+            Ok(if server.drafts.contains_key(&draft_id) {
+                DraftState::InDrafts
+            } else if server
+                .queued
+                .iter()
+                .any(|(id, _)| id.as_deref() == Some(&draft_id))
+            {
+                DraftState::Sending
+            } else {
+                // Filed in Sent Items under a new id, or deleted.
+                DraftState::Gone
             })
         }
     }
@@ -250,6 +351,7 @@ struct Outbox {
     _dir: tempfile::TempDir,
     store: Store,
     blobs: BlobStore,
+    drafts: std::path::PathBuf,
 }
 
 impl Outbox {
@@ -257,11 +359,27 @@ impl Outbox {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
         let blobs = BlobStore::new(dir.path().join("blobs"));
+        let drafts = dir.path().join("drafts");
+        std::fs::create_dir(&drafts).unwrap();
         Self {
             _dir: dir,
             store,
             blobs,
+            drafts,
         }
+    }
+
+    /// The approved draft file a message keyed `id:<id>` was built from.
+    fn write_draft(&self, id: &str) -> std::path::PathBuf {
+        let path = self.drafts.join(format!("{id}.md"));
+        std::fs::write(
+            &path,
+            format!(
+                "---\nid: {id}\nto: bob@example.com\nsubject: Hello\nstatus: approved\n---\n\nBody.\n"
+            ),
+        )
+        .unwrap();
+        path
     }
 
     /// Commit the row, as `DurableSend::begin` does before the first request.
@@ -296,7 +414,7 @@ impl Outbox {
     }
 
     async fn resume<A: GraphSendApi>(&self, now: i64, api: &A) {
-        resume_rows(&self.store, &self.blobs, ACCOUNT, now, api).await;
+        resume_rows(&self.store, &self.blobs, ACCOUNT, &self.drafts, now, api).await;
     }
 }
 
@@ -600,8 +718,7 @@ async fn a_retried_row_already_in_sent_items_is_not_sent_again() {
     let graph = FakeGraph::default();
     graph.0.lock().unwrap().sent.push(Item {
         message_id: built.message_id.clone(),
-        mime: None,
-        attachments: Vec::new(),
+        ..Item::default()
     });
     graph.plant_draft(&built.message_id);
 
@@ -610,4 +727,292 @@ async fn a_retried_row_already_in_sent_items_is_not_sent_again() {
     assert_eq!(graph.sent().len(), 1);
     assert!(graph.drafts().is_empty());
     assert_eq!(outbox.row(id).state, OutboxState::Done);
+}
+
+// ---------------------------------------------------------------------------
+// The review of d5617984: a 5xx is not a refusal, and a resumed send retires
+// its draft file
+// ---------------------------------------------------------------------------
+
+/// The clock a resume runs at once the backoff of one clean failure is over,
+/// well inside the settle time.
+fn after_backoff() -> i64 {
+    outbox::unix_now() + outbox::backoff_secs(1) + 1
+}
+
+/// sendMail answered 504 after Graph took the message, which it files in Sent
+/// Items later: the row keeps its marker, the resume waits instead of sending
+/// a second copy, and records the first once it shows up.
+#[tokio::test]
+async fn a_5xx_on_send_mail_after_graph_took_it_is_not_sent_again() {
+    let outbox = Outbox::new();
+    let built = small_message("gateway-mime");
+    let id = outbox.enqueue(&built);
+    let graph = FakeGraph::with_fault(Step::SendMime, Fault::Gateway);
+
+    let outcome = outbox.live(id, &built, &graph).await;
+    assert!(
+        matches!(outcome, GraphOutcome::Unconfirmed(_)),
+        "{outcome:?}"
+    );
+    assert!(
+        outbox.row(id).submission_started_at.is_some(),
+        "the marker stays"
+    );
+
+    outbox.resume(after_backoff(), &graph).await;
+    assert!(graph.sent().is_empty(), "nothing sent a second time");
+    assert_eq!(graph.0.lock().unwrap().queued.len(), 1);
+    assert_eq!(outbox.row(id).state, OutboxState::PendingSend);
+
+    graph.deliver();
+    outbox.resume(after_backoff(), &graph).await;
+    assert_eq!(graph.sent().len(), 1, "sent exactly once");
+    assert_eq!(outbox.row(id).state, OutboxState::Done);
+}
+
+/// A draft's `/send` answered 502 after Graph took it: the draft is not
+/// discarded, no second draft is created, and the item in the Outbox past
+/// the settle time is waited for rather than parked.
+#[tokio::test]
+async fn a_5xx_on_a_drafts_send_keeps_the_draft_and_is_not_sent_again() {
+    let outbox = Outbox::new();
+    let built = large_reply("gateway-draft");
+    let id = outbox.enqueue(&built);
+    let graph = FakeGraph::with_fault(Step::Send, Fault::Gateway);
+
+    let outcome = outbox.live(id, &built, &graph).await;
+    assert!(
+        matches!(outcome, GraphOutcome::Unconfirmed(_)),
+        "{outcome:?}"
+    );
+    let row = outbox.row(id);
+    let started = row.submission_started_at.expect("the marker stays");
+    assert!(
+        row.envelope.unwrap().graph_draft.is_some(),
+        "the draft stays recorded"
+    );
+    assert!(
+        graph.0.lock().unwrap().discarded.is_empty(),
+        "nothing discarded"
+    );
+
+    outbox.resume(after_backoff(), &graph).await;
+    outbox.resume(started + SEND_SETTLE_SECS, &graph).await;
+    assert!(graph.sent().is_empty());
+    assert!(graph.drafts().is_empty(), "no second draft was created");
+    assert_eq!(
+        outbox.row(id).state,
+        OutboxState::PendingSend,
+        "a draft on its way is waited for, not parked"
+    );
+
+    graph.deliver();
+    outbox.resume(started + SEND_SETTLE_SECS, &graph).await;
+    assert_eq!(graph.sent().len(), 1, "sent exactly once");
+    assert_eq!(outbox.row(id).state, OutboxState::Done);
+}
+
+/// The settle time passed with the draft still in Drafts, so the resume sends
+/// it again; by then the first send was taken late and moved it, and the
+/// resend gets a 404. That is no proof of anything: the row waits for Sent
+/// Items rather than creating a fresh message.
+#[tokio::test]
+async fn a_resent_draft_that_left_drafts_is_not_replaced_by_a_new_message() {
+    let outbox = Outbox::new();
+    let built = large_reply("resend-404");
+    let id = outbox.enqueue(&built);
+    let graph = FakeGraph::with_fault(Step::Send, Fault::HangBefore);
+
+    crash(outbox.live(id, &built, &graph)).await;
+    let started = outbox.row(id).submission_started_at.unwrap();
+    graph
+        .0
+        .lock()
+        .unwrap()
+        .faults
+        .push((Step::Send, Fault::Vanished));
+    let created = graph.0.lock().unwrap().next_id;
+
+    outbox.resume(started + SEND_SETTLE_SECS, &graph).await;
+    let row = outbox.row(id);
+    assert_eq!(row.state, OutboxState::PendingSend);
+    assert!(
+        row.submission_started_at.is_some(),
+        "the 404 keeps the marker"
+    );
+
+    let later = started + SEND_SETTLE_SECS + outbox::backoff_secs(1) + 1;
+    outbox.resume(later, &graph).await;
+    assert_eq!(graph.0.lock().unwrap().next_id, created, "no new draft");
+    assert!(graph.sent().is_empty());
+    assert_eq!(outbox.row(id).state, OutboxState::PendingSend);
+
+    graph.deliver();
+    outbox.resume(started + SEND_SETTLE_SECS, &graph).await;
+    assert_eq!(graph.sent().len(), 1, "sent exactly once");
+    assert_eq!(outbox.row(id).state, OutboxState::Done);
+}
+
+/// A message whose body alone is over the MIME limit, so it goes as JSON.
+fn large_json_message(key: &str) -> BuiltMessage {
+    let mut draft = draft_with(Some(key), "/drafts/j.md");
+    draft.body_markdown = "word ".repeat(600_000);
+    let built = build_with_ancestry(&draft, None);
+    assert!(
+        matches!(
+            plan(&built).unwrap(),
+            GraphPlan::Draft {
+                body: DraftBody::Json(_),
+                ..
+            }
+        ),
+        "the fixture goes as JSON"
+    );
+    built
+}
+
+/// The JSON resource carries our `Message-ID` in the extended property the
+/// lookups filter on.
+#[test]
+fn a_json_draft_is_stamped_with_our_message_id() {
+    let built = large_json_message("json-stamp");
+    let GraphPlan::Draft {
+        body: DraftBody::Json(message),
+        ..
+    } = plan(&built).unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        message["singleValueExtendedProperties"][0]["id"],
+        crate::graph::MESSAGE_ID_PROPERTY
+    );
+    assert_eq!(
+        message["singleValueExtendedProperties"][0]["value"],
+        built.message_id.as_str()
+    );
+}
+
+/// Killed after Graph created a JSON draft and before its id came back: the
+/// draft is not under our `Message-ID`, and the resume still finds it by the
+/// stamped property and discards it.
+#[tokio::test]
+async fn a_json_draft_whose_creation_was_never_answered_is_found_and_discarded() {
+    let outbox = Outbox::new();
+    let built = large_json_message("json-crash-create");
+    let id = outbox.enqueue(&built);
+    let graph = FakeGraph::with_fault(Step::Create, Fault::HangAfter);
+
+    crash(outbox.live(id, &built, &graph)).await;
+    assert_eq!(graph.drafts().len(), 1);
+
+    outbox.resume(outbox::unix_now(), &graph).await;
+
+    assert_eq!(graph.sent().len(), 1);
+    assert!(graph.drafts().is_empty(), "no orphan draft");
+    assert_eq!(outbox.row(id).state, OutboxState::Done);
+}
+
+/// A JSON send that never took: the recorded draft, read by its id, is still
+/// in Drafts after the settle time, and that same draft is sent.
+#[tokio::test]
+async fn a_json_send_that_never_took_sends_the_same_draft() {
+    let outbox = Outbox::new();
+    let built = large_json_message("json-never-took");
+    let id = outbox.enqueue(&built);
+    let graph = FakeGraph::with_fault(Step::Send, Fault::HangBefore);
+
+    crash(outbox.live(id, &built, &graph)).await;
+    let row = outbox.row(id);
+    let started = row.submission_started_at.unwrap();
+    let draft = row.envelope.unwrap().graph_draft.unwrap();
+    // Read by its id, the draft is found even where no lookup by
+    // `Message-ID` or property would see it.
+    graph
+        .0
+        .lock()
+        .unwrap()
+        .drafts
+        .get_mut(&draft)
+        .unwrap()
+        .property = None;
+
+    outbox.resume(started + SEND_SETTLE_SECS, &graph).await;
+
+    assert_eq!(graph.0.lock().unwrap().sent_drafts, [draft]);
+    assert!(graph.drafts().is_empty());
+    assert_eq!(outbox.row(id).state, OutboxState::Done);
+}
+
+/// A resume that sends the message retires the draft file it was built
+/// from, as the live send does, so `mp send-approved` cannot send it again.
+#[tokio::test]
+async fn a_resumed_send_retires_its_draft_file() {
+    let outbox = Outbox::new();
+    let built = large_reply("retire-after-resume");
+    let file = outbox.write_draft("retire-after-resume");
+    let id = outbox.enqueue(&built);
+    let graph = FakeGraph::with_fault(Step::Attach, Fault::Refuse);
+
+    outbox.live(id, &built, &graph).await;
+    assert!(
+        file.exists(),
+        "a clean failure leaves the file for the resume"
+    );
+
+    outbox.resume(after_backoff(), &graph).await;
+
+    assert_eq!(graph.sent().len(), 1);
+    assert_eq!(outbox.row(id).state, OutboxState::Done);
+    assert!(!file.exists(), "the sent draft is retired");
+}
+
+/// An unconfirmed send found in Sent Items by the resume retires the file
+/// too, and a row still unsettled leaves it alone.
+#[tokio::test]
+async fn an_unconfirmed_send_found_in_sent_items_retires_its_draft_file() {
+    let outbox = Outbox::new();
+    let built = small_message("retire-unconfirmed");
+    let file = outbox.write_draft("retire-unconfirmed");
+    let id = outbox.enqueue(&built);
+    let graph = FakeGraph::with_fault(Step::SendMime, Fault::Gateway);
+
+    outbox.live(id, &built, &graph).await;
+    outbox.resume(after_backoff(), &graph).await;
+    assert!(file.exists(), "nothing is known yet");
+
+    graph.deliver();
+    outbox.resume(after_backoff(), &graph).await;
+    assert_eq!(outbox.row(id).state, OutboxState::Done);
+    assert!(!file.exists(), "the sent draft is retired");
+}
+
+/// Discarding a row removes the drafts it left on the server: the recorded
+/// one and any under its `Message-ID`, but never an item on its way out.
+#[tokio::test]
+async fn discarding_a_row_removes_its_server_drafts_and_nothing_in_flight() {
+    let outbox = Outbox::new();
+    let built = large_reply("discard-row");
+    let id = outbox.enqueue(&built);
+    let graph = FakeGraph::with_fault(Step::Send, Fault::HangBefore);
+    crash(outbox.live(id, &built, &graph)).await;
+    // The recorded draft as no lookup sees it (a JSON draft from before the
+    // stamp): only its recorded id names it.
+    for item in graph.0.lock().unwrap().drafts.values_mut() {
+        item.message_id = "<exchange-own@fake>".to_string();
+    }
+    graph.plant_draft(&built.message_id);
+    assert_eq!(graph.drafts().len(), 2);
+
+    discard_row_drafts(&graph, &outbox.row(id)).await.unwrap();
+    assert!(graph.drafts().is_empty(), "no orphan draft");
+
+    // A recorded draft that left Drafts is the message itself.
+    let built = large_reply("discard-in-flight");
+    let id = outbox.enqueue(&built);
+    let graph = FakeGraph::with_fault(Step::Send, Fault::Gateway);
+    outbox.live(id, &built, &graph).await;
+    discard_row_drafts(&graph, &outbox.row(id)).await.unwrap();
+    assert!(graph.0.lock().unwrap().discarded.is_empty());
 }

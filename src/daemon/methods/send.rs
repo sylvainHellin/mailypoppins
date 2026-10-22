@@ -30,8 +30,10 @@
 //! re-arms one row and then submits it over SMTP and APPENDs it to the Sent
 //! mailbox, which is an unbounded network round trip whose progress a GUI wants
 //! to watch. A command that took thirty seconds and reported one revision would
-//! be a lie about what it did. `send.outbox_discard` really is one committed
-//! transaction against the local store, and `send.outbox_list` reads.
+//! be a lie about what it did. `send.outbox_discard` is one committed
+//! transaction against the local store, preceded on a Graph account by the
+//! removal of any draft the row left on the server (a few short requests, so
+//! still a command), and `send.outbox_list` reads.
 //!
 //! ## What stays in the client
 //!
@@ -188,17 +190,22 @@ impl Method for SendMethod {
                 Request::List(listing) => {
                     Ok(Outcome::query(to_value("send.outbox_list", &listing)?))
                 }
-                Request::Discard { account, row_id } => {
+                Request::Discard {
+                    account,
+                    row_id,
+                    secrets,
+                } => {
                     let revision = self.canonical.revision().get();
                     // In the result as well as in the envelope: a command
                     // reports the revision it moved to, and a client that
                     // renders one row's disappearance reads it beside the row.
-                    let mut result = discard(&account, row_id)?;
+                    let name = account.name.clone();
+                    let mut result = discard(*account, row_id, secrets).await?;
                     result["revision"] = json!(revision);
                     Ok(Outcome::command(
                         result,
                         revision,
-                        vec![ResourceId::new(format!("outbox:{account}"))],
+                        vec![ResourceId::new(format!("outbox:{name}"))],
                     ))
                 }
                 Request::Operation { work, hold } => {
@@ -276,9 +283,11 @@ impl SendMethod {
 enum Request {
     List(OutboxListing),
     Discard {
-        /// The account's name, which is all a discard reads it for.
-        account: String,
+        /// The account: its name for the store, and on a Graph account what
+        /// the server drafts are discarded through.
+        account: Box<AccountConfig>,
         row_id: i64,
+        secrets: crate::secrets::SecretsBackendKind,
     },
     Operation {
         /// What the operation performs, now or when the window elapses.
@@ -369,7 +378,8 @@ fn plan(
         "send.outbox_list" => Ok(Request::List(listing(&account.name)?)),
         "send.outbox_discard" => Ok(Request::Discard {
             row_id: existing_row(&account.name, params)?.id,
-            account: account.name,
+            account: Box::new(account),
+            secrets,
         }),
         "send.outbox_retry" => {
             let row = existing_row(&account.name, params)?;
@@ -652,14 +662,42 @@ fn listed_row(row: &crate::outbox::OutboxRow) -> OutboxRow {
 
 /// `send.outbox_discard`: one row, one transaction, and the message-id in the
 /// answer so the client can name what it dropped without having listed first.
-fn discard(account: &str, row_id: i64) -> Result<Value, RpcError> {
-    let store = crate::store::Store::open(crate::config::store_path(account))
-        .map_err(|e| server_error(account, &e))?;
-    let blobs = crate::store::BlobStore::for_account(account);
-    let Some(row) = outbox::load(&store, row_id).map_err(|e| server_error(account, &e))? else {
+///
+/// On a Graph account a row that is not `done` may have left a draft on the
+/// server (#0063 review); it is discarded first, and a draft that will not go
+/// keeps the row, so nothing is left behind that no row names.
+async fn discard(
+    account: AccountConfig,
+    row_id: i64,
+    secrets: crate::secrets::SecretsBackendKind,
+) -> Result<Value, RpcError> {
+    let name = account.name.clone();
+    let store = crate::store::Store::open(crate::config::store_path(&name))
+        .map_err(|e| server_error(&name, &e))?;
+    let blobs = crate::store::BlobStore::for_account(&name);
+    let Some(row) = outbox::load(&store, row_id).map_err(|e| server_error(&name, &e))? else {
         return Err(invalid_params(format!("no outbox row {row_id}")));
     };
-    outbox::discard(&store, &blobs, row_id).map_err(|e| server_error(account, &e))?;
+    if account.auth_method == AuthMethod::Graph && row.state != OutboxState::Done {
+        super::open_secrets(&name, secrets)?;
+        let held = row.clone();
+        off_thread("the Graph draft discard", move || async move {
+            let config = crate::config::GraphConfig::load(&account)?;
+            let client = crate::graph::GraphClient::new_async(&config).await?;
+            crate::send::graph_submit::discard_row_drafts(&client, &held).await
+        })
+        .await
+        .and_then(|inner| inner)
+        .map_err(|e| {
+            server_error(
+                &name,
+                &e.context(format!(
+                    "outbox row {row_id} is kept: its Graph draft could not be discarded"
+                )),
+            )
+        })?;
+    }
+    outbox::discard(&store, &blobs, row_id).map_err(|e| server_error(&name, &e))?;
     Ok(json!({
         "discarded": true,
         "row_id": row_id,

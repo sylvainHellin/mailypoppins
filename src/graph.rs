@@ -3305,6 +3305,24 @@ pub struct OutgoingAttachment {
     pub bytes: Vec<u8>,
 }
 
+/// The MAPI named property a JSON-created draft carries our `Message-ID` in
+/// (#0063 review).
+///
+/// Exchange gives a draft created from the JSON resource a `Message-ID` of its
+/// own, and `internetMessageHeaders` takes only `x-` names and cannot be read
+/// by `$filter` anyway. A `singleValueExtendedProperty` can, so this is how
+/// the resume finds a JSON draft an interrupted create left behind, and its
+/// sent copy if the property stays on the item when it is sent (a live check
+/// #0063 still owes).
+pub const MESSAGE_ID_PROPERTY: &str =
+    "String {5b0bd1a4-8b35-4c39-9a4e-2f7d3c1e6a90} Name MailypoppinsMessageId";
+
+/// The `singleValueExtendedProperties` entry stamping a JSON draft with our
+/// `Message-ID` ([`MESSAGE_ID_PROPERTY`]).
+pub fn message_id_property(internet_message_id: &str) -> serde_json::Value {
+    serde_json::json!([{ "id": MESSAGE_ID_PROPERTY, "value": internet_message_id }])
+}
+
 /// What the mailbox holds under one RFC 5322 `Message-ID`, for the outbox's
 /// resume (#0063 item 3).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3314,6 +3332,20 @@ pub struct ServerCopies {
     pub sent: bool,
     /// The Graph ids of the copies still sitting in Drafts.
     pub drafts: Vec<String>,
+}
+
+/// Where one recorded draft is now, read by its Graph id (#0063 review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftState {
+    /// A draft, in the Drafts folder: its send never took.
+    InDrafts,
+    /// Still a draft, outside Drafts: a send under way (the Outbox).
+    Sending,
+    /// No longer a draft: the message was sent and kept its id.
+    Sent,
+    /// No item has this id any more. A sent draft gets a new id when it is
+    /// filed in Sent Items, so this is no proof either way.
+    Gone,
 }
 
 /// The JSON body of `POST /me/messages/{id}/attachments` for one small file.
@@ -3374,6 +3406,52 @@ fn delivering_request_error(e: reqwest::Error, what: &str) -> anyhow::Error {
     }
 }
 
+/// A request that may deliver the message was answered with an error status:
+/// say whether it can have delivered (#0063 review).
+///
+/// `sendMail` and `/send` answer 202 and finish later, so a 5xx from Graph's
+/// front end (a 504 from the gateway, a 500) can arrive after Exchange took
+/// the message. Only a 4xx proves nothing went out, along with Graph's two
+/// throttling answers, a 429 and a 503 carrying `Retry-After`, which it gives
+/// before it processes anything. Every other status is wrapped in
+/// [`crate::outbox::AmbiguousSubmission`], so the outbox settles it by asking
+/// the mailbox rather than by sending again.
+///
+/// `gone_is_ambiguous` is for `/send` on a draft: a 404 there means the item
+/// left Drafts, which is what a send already under way does to it.
+pub(crate) fn delivering_status_error(
+    status: u16,
+    retry_after: bool,
+    gone_is_ambiguous: bool,
+    message: String,
+) -> anyhow::Error {
+    let throttled = status == 429 || (status == 503 && retry_after);
+    let refused = (400..500).contains(&status) && !(gone_is_ambiguous && status == 404);
+    if throttled || refused {
+        anyhow!(message)
+    } else {
+        anyhow!(crate::outbox::AmbiguousSubmission(message))
+    }
+}
+
+/// The error a delivering request's non-2xx answer becomes, read off the
+/// response ([`delivering_status_error`]).
+async fn delivering_response_error(
+    resp: reqwest::Response,
+    gone_is_ambiguous: bool,
+    what: &str,
+) -> anyhow::Error {
+    let status = resp.status();
+    let retry_after = resp.headers().contains_key(reqwest::header::RETRY_AFTER);
+    let body = resp.text().await.unwrap_or_default();
+    delivering_status_error(
+        status.as_u16(),
+        retry_after,
+        gone_is_ambiguous,
+        format!("{what} (HTTP {status}): {body}"),
+    )
+}
+
 /// The id of the message a `201 Created` answered with.
 #[derive(Debug, Deserialize)]
 struct CreatedMessage {
@@ -3391,9 +3469,44 @@ struct UploadSession {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CopyEntry {
+    #[serde(default)]
     id: String,
     #[serde(default)]
     is_draft: bool,
+    #[serde(default)]
+    parent_folder_id: Option<String>,
+}
+
+/// The Graph id of a folder.
+#[derive(Debug, Deserialize)]
+struct FolderId {
+    id: String,
+}
+
+/// The copies two lookups found, folded into what the resume asks.
+fn fold_copies(drafts_folder: &str, found: Vec<CopyEntry>) -> ServerCopies {
+    let mut copies = ServerCopies::default();
+    for copy in found {
+        if !copy.is_draft {
+            copies.sent = true;
+        } else if copy.parent_folder_id.as_deref() == Some(drafts_folder)
+            && !copies.drafts.contains(&copy.id)
+        {
+            copies.drafts.push(copy.id);
+        }
+    }
+    copies
+}
+
+/// Read where a draft is from its `isDraft` and `parentFolderId`.
+fn draft_state_of(drafts_folder: &str, entry: &CopyEntry) -> DraftState {
+    if !entry.is_draft {
+        DraftState::Sent
+    } else if entry.parent_folder_id.as_deref() == Some(drafts_folder) {
+        DraftState::InDrafts
+    } else {
+        DraftState::Sending
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3424,9 +3537,7 @@ impl GraphClient {
             info!("Graph sendMail succeeded");
             Ok(())
         } else {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            Err(anyhow!("Graph sendMail failed (HTTP {}): {}", status, body))
+            Err(delivering_response_error(resp, false, "Graph sendMail failed").await)
         }
     }
 
@@ -3567,13 +3678,7 @@ impl GraphClient {
             info!("Graph draft send succeeded");
             Ok(())
         } else {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            Err(anyhow!(
-                "Graph draft send failed (HTTP {}): {}",
-                status,
-                body
-            ))
+            Err(delivering_response_error(resp, true, "Graph draft send failed").await)
         }
     }
 
@@ -3602,25 +3707,72 @@ impl GraphClient {
 
     /// What the mailbox holds under one `Message-ID`: whether a sent copy
     /// exists anywhere, and which copies still sit in Drafts.
+    ///
+    /// Looked up twice, by `internetMessageId` (a MIME send keeps ours) and by
+    /// [`MESSAGE_ID_PROPERTY`] (a JSON draft carries ours only there).
     pub async fn server_copies(&self, internet_message_id: &str) -> Result<ServerCopies> {
-        let all: CopyList = self
-            .get_json(internet_id_url(
+        let drafts_folder = self.drafts_folder_id().await?;
+        let select = "id,isDraft,parentFolderId";
+        let by_header: CopyList = self
+            .get_json(internet_id_url("me/messages", internet_message_id, select)?)
+            .await?;
+        let by_property: CopyList = self
+            .get_json(property_lookup_url(
                 "me/messages",
                 internet_message_id,
-                "id,isDraft",
+                select,
             )?)
             .await?;
-        let drafts: CopyList = self
-            .get_json(internet_id_url(
-                "me/mailFolders/drafts/messages",
-                internet_message_id,
-                "id",
-            )?)
-            .await?;
-        Ok(ServerCopies {
-            sent: all.value.iter().any(|c| !c.is_draft),
-            drafts: drafts.value.into_iter().map(|c| c.id).collect(),
-        })
+        Ok(fold_copies(
+            &drafts_folder,
+            by_header
+                .value
+                .into_iter()
+                .chain(by_property.value)
+                .collect(),
+        ))
+    }
+
+    /// Where the draft with this Graph id is now:
+    /// `GET /me/messages/{id}?$select=isDraft,parentFolderId`, a 404 being
+    /// [`DraftState::Gone`] (#0063 review).
+    pub async fn draft_state(&self, draft_id: &str) -> Result<DraftState> {
+        let drafts_folder = self.drafts_folder_id().await?;
+        let mut url = reqwest::Url::parse(&format!("{GRAPH_BASE}/me/messages"))
+            .context("parsing the Graph messages URL")?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("the Graph messages URL cannot take a path"))?
+            .push(draft_id);
+        url.set_query(Some("$select=isDraft,parentFolderId"));
+        let resp = self
+            .client
+            .get(url)
+            .bearer_auth(self.bearer())
+            .send()
+            .await
+            .context("Failed to look the draft up")?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(DraftState::Gone);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Draft lookup failed (HTTP {status}): {body}"));
+        }
+        let entry: CopyEntry = resp
+            .json()
+            .await
+            .context("Failed to parse the draft lookup")?;
+        Ok(draft_state_of(&drafts_folder, &entry))
+    }
+
+    /// The Graph id of the Drafts folder, which `parentFolderId` is compared
+    /// against.
+    async fn drafts_folder_id(&self) -> Result<String> {
+        let url = reqwest::Url::parse(&format!("{GRAPH_BASE}/me/mailFolders/drafts?$select=id"))
+            .context("parsing the Drafts folder URL")?;
+        let folder: FolderId = self.get_json(url).await?;
+        Ok(folder.id)
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: reqwest::Url) -> Result<T> {
@@ -4116,6 +4268,30 @@ fn internet_id_url(
 ) -> Result<reqwest::Url> {
     let clean_id = internet_message_id.trim_matches(|c| c == '<' || c == '>');
     let filter = format!("internetMessageId eq '<{}>'", clean_id.replace('\'', "''"));
+    let query = format!(
+        "$filter={}&$select={select}",
+        percent_encoding::utf8_percent_encode(&filter, QUERY_VALUE_ENCODE_SET)
+    );
+    let base = format!("{GRAPH_BASE}/{collection}");
+    let mut url = reqwest::Url::parse(&base).with_context(|| format!("parsing {base}"))?;
+    url.set_query(Some(&query));
+    Ok(url)
+}
+
+/// `{collection}?$filter=singleValueExtendedProperties/Any(...)&$select=...`:
+/// the copies stamped with our `Message-ID` in [`MESSAGE_ID_PROPERTY`].
+///
+/// Escaped as [`internet_id_url`] escapes, and the value is matched exactly as
+/// it was stamped, brackets included.
+fn property_lookup_url(
+    collection: &str,
+    internet_message_id: &str,
+    select: &str,
+) -> Result<reqwest::Url> {
+    let filter = format!(
+        "singleValueExtendedProperties/Any(ep: ep/id eq '{MESSAGE_ID_PROPERTY}' and ep/value eq '{}')",
+        internet_message_id.replace('\'', "''")
+    );
     let query = format!(
         "$filter={}&$select={select}",
         percent_encoding::utf8_percent_encode(&filter, QUERY_VALUE_ENCODE_SET)
@@ -6379,6 +6555,83 @@ mod tests {
         let bare = message_lookup_url("plain@x.com").unwrap();
         let pairs: Vec<(String, String)> = bare.query_pairs().into_owned().collect();
         assert_eq!(pairs[0].1, "internetMessageId eq '<plain@x.com>'");
+    }
+
+    /// Only a refusal Graph gives before it processes anything leaves a
+    /// delivering request clean; any other 5xx may follow a send Exchange
+    /// already took (#0063 review), and so may a 404 on a draft's `/send`.
+    #[test]
+    fn only_a_refusal_or_a_throttle_proves_a_delivering_request_sent_nothing() {
+        let ambiguous = |status, retry_after, gone| {
+            delivering_status_error(status, retry_after, gone, format!("HTTP {status}"))
+                .chain()
+                .any(|c| c.is::<crate::outbox::AmbiguousSubmission>())
+        };
+        for clean in [400, 401, 403, 413, 429] {
+            assert!(!ambiguous(clean, false, false), "{clean}");
+            assert!(!ambiguous(clean, false, true), "{clean} on /send");
+        }
+        assert!(!ambiguous(503, true, false), "a throttling 503");
+        assert!(!ambiguous(404, false, false), "sendMail: no such mailbox");
+        assert!(ambiguous(404, false, true), "/send: the draft left Drafts");
+        for unknown in [500, 502, 504] {
+            assert!(ambiguous(unknown, false, false), "{unknown}");
+            assert!(ambiguous(unknown, true, true), "{unknown} on /send");
+        }
+        assert!(ambiguous(503, false, false), "a 503 that is not throttling");
+    }
+
+    /// A copy is sent when it is not a draft, and a draft counts only in the
+    /// Drafts folder: one in the Outbox is a send under way.
+    #[test]
+    fn server_copies_fold_both_lookups_by_folder() {
+        let entry = |id: &str, is_draft, folder: &str| CopyEntry {
+            id: id.to_string(),
+            is_draft,
+            parent_folder_id: Some(folder.to_string()),
+        };
+        let copies = fold_copies(
+            "DRAFTS",
+            vec![
+                entry("a", true, "DRAFTS"),
+                entry("b", true, "OUTBOX"),
+                entry("a", true, "DRAFTS"),
+            ],
+        );
+        assert_eq!(
+            copies,
+            ServerCopies {
+                sent: false,
+                drafts: vec!["a".to_string()]
+            }
+        );
+        assert!(fold_copies("DRAFTS", vec![entry("c", false, "SENT")]).sent);
+        assert_eq!(
+            draft_state_of("DRAFTS", &entry("a", true, "DRAFTS")),
+            DraftState::InDrafts
+        );
+        assert_eq!(
+            draft_state_of("DRAFTS", &entry("b", true, "OUTBOX")),
+            DraftState::Sending
+        );
+        assert_eq!(
+            draft_state_of("DRAFTS", &entry("c", false, "SENT")),
+            DraftState::Sent
+        );
+    }
+
+    #[test]
+    fn the_property_lookup_filters_on_the_stamped_message_id() {
+        let url = property_lookup_url("me/messages", "<a'b+c@x.com>", "id").unwrap();
+        let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs[0].1,
+            format!(
+                "singleValueExtendedProperties/Any(ep: ep/id eq '{MESSAGE_ID_PROPERTY}' \
+                 and ep/value eq '<a''b+c@x.com>')"
+            )
+        );
+        assert!(url.as_str().contains("%2B"));
     }
 
     #[test]

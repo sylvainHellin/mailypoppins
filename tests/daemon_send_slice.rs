@@ -2603,6 +2603,84 @@ fn a_routed_outbox_retry_rearms_and_drains_the_parked_row() {
     );
 }
 
+/// A row the resume sends was built from a draft that is still `approved`,
+/// because its live send never succeeded: the resume retires that file, or
+/// `mp send-approved` would send the message a second time (#0063 review).
+///
+/// Routed side only (fake transport). The parked row is made the approved
+/// draft's by its envelope, which is what a live send that failed
+/// ambiguously leaves.
+#[test]
+fn a_routed_outbox_retry_retires_the_draft_the_row_was_built_from() {
+    let slice = Slice::with_fake_transport();
+    let store = fixture::store(slice.root(), fixture::ACCOUNT);
+    let mut row = mailypoppins::outbox::load(&store, fixture::FAILED_ROW)
+        .unwrap()
+        .unwrap();
+    let mut envelope = row.envelope.take().unwrap();
+    envelope.draft_key = Some(format!("id:{}", fixture::APPROVED));
+    store
+        .conn()
+        .execute(
+            "UPDATE outbox SET envelope = ?2 WHERE id = ?1",
+            rusqlite::params![fixture::FAILED_ROW, envelope.encode()],
+        )
+        .unwrap();
+    let path = fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join(fixture::APPROVED_FILE);
+    assert!(path.exists());
+
+    let out = slice.routed(&["outbox", "retry", &fixture::FAILED_ROW.to_string()]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    assert_eq!(
+        fixture::appends_of(&slice.log(), fixture::FAILED_MID),
+        1,
+        "the retried row went out once"
+    );
+    assert!(
+        !path.exists(),
+        "the draft the resumed row was built from is retired: {} is still there",
+        path.display()
+    );
+}
+
+/// A draft whose newest outbox row is `done` is not sent again, even with the
+/// file still `approved`: the second guard behind retiring it (#0063 review).
+///
+/// Routed side only (fake transport). The partly delivered seeded row, which
+/// is `done`, is made the approved draft's by its envelope.
+#[test]
+fn a_routed_send_of_a_draft_already_sent_is_refused() {
+    let slice = Slice::with_fake_transport();
+    let store = fixture::store(slice.root(), fixture::ACCOUNT);
+    let mut row = mailypoppins::outbox::load(&store, fixture::PARTIAL_ROW)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, OutboxState::Done);
+    let mut envelope = row.envelope.take().unwrap();
+    envelope.draft_key = Some(format!("id:{}", fixture::APPROVED));
+    store
+        .conn()
+        .execute(
+            "UPDATE outbox SET envelope = ?2 WHERE id = ?1",
+            rusqlite::params![fixture::PARTIAL_ROW, envelope.encode()],
+        )
+        .unwrap();
+
+    let selector = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
+    let out = slice.routed(&["send", &selector, "-y"]);
+    assert_ne!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("already sent as <partial@example.com>"),
+        "the refusal names the send: {}",
+        stderr(&out)
+    );
+    assert!(
+        fixture::transport_events(&slice.log()).is_empty(),
+        "nothing reached the transport"
+    );
+}
+
 /// `tests/outbox_integration.rs::two_racing_drains_append_each_row_exactly_once`,
 /// twinned through the daemon.
 ///

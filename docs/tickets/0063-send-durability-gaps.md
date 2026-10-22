@@ -99,13 +99,22 @@ A Graph submission is made of more than one request once the message is large, s
 - The marker is committed immediately before the one request that delivers (`/me/sendMail`, or `POST /me/messages/{id}/send`), never before creating or filling a draft, which deliver nothing.
 - The Graph id of a draft the send created goes into the envelope (`graph-draft:` line, no schema change) as soon as it exists, and leaves it when the draft is discarded.
 - A row with no marker never delivered: the resume discards whatever an interrupted attempt left in Drafts (found by our `Message-ID`, which a MIME draft keeps, or by the recorded id), then submits afresh from the bytes; a copy already in Sent Items (an operator retry of a message that did arrive) is recorded as sent instead.
-- A row with a marker lost the answer to its delivering request: a copy in Sent Items means delivered; the recorded draft still in Drafts 600 s after its send means the send never took, and that same draft is sent rather than a new one; neither means nobody can tell, and the row is parked in `failed` with that reason.
-- A live delivering request that times out records nothing, so the row stays `pending_send` with its marker and the next resume settles it the same way; the status line says "submitted, not yet confirmed".
-- The resume claims the same in-process slot `send_draft` holds, so it never touches a row whose draft a send in this process is still filling (a row with no marker yet).
+- A row with a marker lost the answer to its delivering request: a copy in Sent Items means delivered.
+  Otherwise, 600 s after its send, the recorded draft is read by its Graph id (`isDraft`, `parentFolderId`): still a draft in Drafts means the send never took, and that same draft is sent rather than a new one; a draft in the Outbox is waited for up to an hour; no longer a draft means sent; gone, or no recorded draft, means nobody can tell, and the row is parked in `failed` with that reason.
+- A delivering request counts as refused, and the row as cleanly failed, only on a 4xx or on Graph's throttling answers (429, a 503 with `Retry-After`).
+  `sendMail` and `/send` answer 202 and finish later, so any other 5xx can follow a send Exchange took; it records nothing, like a timeout, and keeps the draft.
+  A 404 on a draft's `/send` is read the same way, because a draft whose earlier send was taken late has left Drafts.
+- A live delivering request that times out or gets such a 5xx records nothing, so the row stays `pending_send` with its marker and the next resume settles it the same way; the status line says "submitted, not yet confirmed".
+- The resume claims the same in-process slot `send_draft` holds, so it never touches a row whose draft a send in this process is still filling (a row with no marker yet); the SMTP resume claims it too.
+- A resume that records a row as sent retires the draft file it was built from, on both transports, as the live send does: marked `sent` once anyone has the message, removed once every recipient took it.
+  Before the review of 2026-10-22 a file whose live send had failed stayed `approved` after the resume sent it, and `mp send-approved` sent it a second time under a fresh `Message-ID`.
+  As a second guard, `send_draft` refuses a draft whose newest outbox row is `done`, unless the file carries that row's `Message-ID` (a re-send after a partial delivery, re-approved by hand).
+- `mp outbox discard` on a Graph row that is not `done` first removes the drafts it left on the server (`permanentDelete`), and keeps the row when one will not go.
 
 The large-message threading fix rides on the same staged send: a message too large for one MIME `sendMail` is a draft created from its own MIME with the largest attachments taken out, the attachments added one request each (a POST under 2.5 MB, an upload session above), then `send`.
 Chosen over `createReply` on the parent because it keeps our `Message-ID` (which the outbox, the local Sent copy and the resume's lookup all key on), needs no Graph id of the parent, and serves forwards and new messages too; `internetMessageHeaders` was never an option, as Graph takes only `x-` names there.
-Only a body that alone exceeds one request still goes as JSON (staged the same way, without threading headers, and without a `Message-ID` of ours, so a crash inside its draft creation can leave one draft the resume cannot find).
+Only a body that alone exceeds one request still goes as JSON, staged the same way, without threading headers and with an Exchange `Message-ID`.
+That draft carries ours in a `singleValueExtendedProperty` (`MESSAGE_ID_PROPERTY`), which `$filter` can read, so the lookups find a JSON draft an interrupted create left behind, and its sent copy, by property as well as by `internetMessageId`.
 
 ### Live checks still owed (EVOQS)
 
@@ -113,3 +122,6 @@ Only a body that alone exceeds one request still goes as JSON (staged the same w
 - The MIME draft created by `POST /me/messages` reports our `Message-ID` as its `internetMessageId`, before and after `send` (the resume's lookup depends on it).
 - A draft that was sent no longer answers the Drafts-folder lookup, and the Sent Items copy has `isDraft` false.
 - Kill the daemon during the attachment upload of a large send, restart it: one message arrives, and Drafts holds nothing of it.
+- A JSON draft (a body over 3.5 MB): `POST /me/messages` accepts the `singleValueExtendedProperties` entry, the `$filter` on it finds the draft, and finds the Sent Items copy after `send`.
+- `GET /me/messages/{id}?$select=isDraft,parentFolderId` on a draft that was sent answers 404 or `isDraft` false, never a draft in Drafts.
+- `mp outbox discard` on a parked Graph row whose draft is still in Drafts leaves nothing in Drafts or in Deleted Items.

@@ -482,8 +482,9 @@ Before hoisting a construction out of a loop, list what the constructor did besi
 ## A prune deletes by identity, so a row the server never listed under that identity is always "vanished"
 
 The Graph prune computes `store − server` over `internetMessageId` and deletes the difference, which is correct for every row the server put there.
-A Graph send does not produce one: `sendMail` takes JSON with no `Message-ID`, Exchange stamps its own, and the outbox has already filed the local copy under a uid derived from *our* id, so that row is in the difference on every pass from the moment it is written (#0065).
-Since PERSO-144 this holds only for the JSON fallback over 3.5 MB of base64; a MIME send carries mailypoppins' own `Message-ID`, which Exchange keeps, so the Sent copy keys on the same uid as the local row (confirmed by the live test of 2026-10-21: one `sent` row per `Message-ID`).
+A Graph send used not to produce one: `sendMail` took JSON with no `Message-ID`, Exchange stamped its own, and the outbox had already filed the local copy under a uid derived from *our* id, so that row was in the difference on every pass from the moment it was written (#0065).
+Since PERSO-144 `sendMail` takes MIME, which carries mailypoppins' own `Message-ID`, and Exchange keeps it, so the Sent copy keys on the same uid as the local row (confirmed by the live test of 2026-10-21: one `sent` row per `Message-ID`); since #0063 a larger message goes as a draft created from the same MIME.
+The mismatch remains only for a message whose body alone is over 3.5 MB, which still goes as a JSON draft with an Exchange `Message-ID`.
 Deleting it releases the raw MIME, which on a Graph account is the only copy that will ever exist.
 The IMAP path was immune by accident rather than by design: its prune was clamped to the fetch window's numeric range, and a `graph_uid` hash sits far above any real UID. Since #0072 the clamp is deliberate, `UIDNEXT - 1`, and IMAP runs the same age guard.
 Two shapes of row are exposed this way, the locally synthesised one and the one whose server copy has not been filed yet, and both are recent; the guard is therefore an age window on the row rather than an exemption for the `sent` role, which would have made the duplicate permanent ([src/ingest.rs](../src/ingest.rs), `prunable_uids`).
@@ -2967,3 +2968,14 @@ A second cost sat on the same path: `Outbound::position_of` built a cloned coale
 Fixing the key cost alone made the flake worse (18 failed binaries in 80), because a faster burst holds an unfair gate more of the time.
 Its sibling `a_stalled_reader_is_told_to_resync_and_sees_no_domain_event_after_it` failed on a `diagnostic.check_changed` after the resync: a lifecycle event, which the contract keeps through the poison, published once the account runtime has started; the test now rejects only domain kinds after the resync.
 Neither reproduced in 105 isolated runs; both did with eight to sixteen parallel copies of the test binary and twelve `yes > /dev/null` processes on the 12-core Mac.
+
+## Graph sends: request caps, header names, deletes and late 202s (#0063, 2026-10-22)
+
+Graph caps every request near 4 MB, MIME draft creation included.
+A larger message is a MIME draft without its big attachments, then one `POST .../attachments` per file under 3 MB (2.5 MB of file here, since base64 inside JSON grows it by a third) or `createUploadSession` with ordered `Content-Range` PUTs under 4 MB to the pre-authenticated `uploadUrl` (no bearer token), then `/send` ([src/send/graph_submit.rs](../src/send/graph_submit.rs)).
+`internetMessageHeaders` accepts only `x-` names, so threading on Graph means MIME or `createReply`, never the JSON resource.
+A JSON draft is found again through a `singleValueExtendedProperty` carrying our `Message-ID`, which `$filter` can read.
+`DELETE /me/messages/{id}` moves the item to Deleted Items; discard your own unsent drafts with `POST .../permanentDelete`.
+`sendMail` and `/send` answer 202 and finish later, and a 5xx from the front end can arrive after Exchange took the message; only a 4xx, or Graph's throttling (429, a 503 with `Retry-After`), proves nothing went out.
+A 404 on a draft's `/send` proves nothing either: a draft whose earlier send was taken late has already left Drafts.
+A resume that finishes a send also has to retire the draft file the send came from, or the next `mp send-approved` sends it again under a fresh `Message-ID` (src/send.rs, `retire_draft_of_row`).

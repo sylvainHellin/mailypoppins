@@ -734,6 +734,60 @@ fn refuse_a_second_submission(
     Ok(())
 }
 
+/// Refuse a send of a draft whose newest outbox row is `done` (#0063 review).
+///
+/// The second guard behind retiring the file when a resume finishes a send
+/// ([`crate::send::retire_draft_of_row`]): a file that could not be retired is
+/// still `approved`, [`refuse_a_second_submission`] sees only rows in flight,
+/// and `mp send-approved` would send the message again under a fresh
+/// `Message-ID`.
+///
+/// A deliberate re-send stays possible. The documented one, after a partial
+/// delivery, is a file the send marked with the row's `Message-ID` whose
+/// `status:` the user set back to `approved`; `sent_as` is that frontmatter
+/// `message_id:`, and a file carrying the done row's id is let through. A
+/// `failed` newest row does not block either: it is a human's call, as at
+/// enqueue.
+pub fn refuse_a_finished_draft(
+    store: &Store,
+    account: &str,
+    key: &str,
+    sent_as: Option<&str>,
+) -> Result<()> {
+    let key = one_line(key);
+    let mut stmt = store.conn().prepare(
+        "SELECT id, state, message_id, envelope FROM outbox
+         WHERE account = ?1 ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map([account], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, state, message_id, encoded) = row?;
+        let holds_the_draft = encoded
+            .as_deref()
+            .map(Envelope::decode)
+            .and_then(|env| env.draft_key)
+            .is_some_and(|other| one_line(&other) == key);
+        if !holds_the_draft {
+            continue;
+        }
+        if state == OutboxState::Done.as_str() && sent_as.map(str::trim) != Some(&*message_id) {
+            return Err(anyhow::Error::new(AlreadyInFlight(format!(
+                "this draft was already sent as {message_id} (outbox row {id}); it is sent \
+                 once, not twice. To send it again on purpose, give it a new id: line"
+            ))));
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+
 /// The active outbox submission whose draft key matches any of `keys`, as its
 /// row id and state string.
 ///

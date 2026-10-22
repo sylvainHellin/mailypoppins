@@ -36,14 +36,23 @@
 //!   in Sent Items (an operator `retry` of a message that did arrive) is
 //!   recorded as sent instead.
 //! - a marker: the delivering request went out and its answer was lost. The
-//!   mailbox settles it: a sent copy means delivered; the recorded draft still
-//!   in Drafts [`SEND_SETTLE_SECS`] later means the send never took, and that
-//!   same draft is sent; neither means nobody can tell, and the row is parked
-//!   in `failed` for a human, as SMTP parks it.
+//!   mailbox settles it: a sent copy means delivered; the recorded draft,
+//!   read by its id, still in Drafts [`SEND_SETTLE_SECS`] later means the
+//!   send never took, and that same draft is sent; neither means nobody can
+//!   tell, and the row is parked in `failed` for a human, as SMTP parks it.
 //!
-//! A live send whose delivering request times out leaves the marker set and
-//! the row `pending_send` for that same reconciliation, rather than parking it
-//! at once.
+//! A live send whose delivering request times out, or is answered with a 5xx,
+//! leaves the marker set and the row `pending_send` for that same
+//! reconciliation, rather than parking it at once: `sendMail` and `/send`
+//! answer 202 and finish later, so a 5xx can follow a send Exchange took, and
+//! only a 4xx proves nothing went out ([`crate::graph`]).
+//!
+//! A JSON draft gets an Exchange `Message-ID`, so it carries ours in
+//! [`crate::graph::MESSAGE_ID_PROPERTY`], which the lookups read as well.
+//!
+//! A resume that records the message as sent also retires the draft file it
+//! was built from, as the live send does, so `mp send-approved` cannot send
+//! it a second time ([`super::retire_draft_of_row`]).
 
 use std::future::Future;
 
@@ -51,7 +60,8 @@ use anyhow::{anyhow, Context, Result};
 use log::{debug, info, warn};
 
 use crate::graph::{
-    fits_mime_send, mime_send_body, OutgoingAttachment, ServerCopies, MIME_SEND_MAX_BASE64_BYTES,
+    fits_mime_send, mime_send_body, DraftState, OutgoingAttachment, ServerCopies,
+    MIME_SEND_MAX_BASE64_BYTES,
 };
 use crate::outbox::{self, OutboxRow, SubmitOutcome};
 use crate::send::{graph_mime, BuiltMessage, RecipientRole};
@@ -63,6 +73,10 @@ use crate::store::{BlobStore, Store};
 /// `sendMail` and `send` both answer 202 and finish asynchronously, so a copy
 /// missing right after a restart is not yet evidence of anything.
 pub const SEND_SETTLE_SECS: i64 = 600;
+
+/// How long a recorded draft found in the Outbox, a send Exchange has taken
+/// and not finished, is waited for before the row is parked for a human.
+pub const SENDING_SETTLE_SECS: i64 = 6 * SEND_SETTLE_SECS;
 
 /// The Graph requests a submission is made of, and nothing else.
 ///
@@ -95,6 +109,8 @@ pub trait GraphSendApi {
         &self,
         internet_message_id: &str,
     ) -> impl Future<Output = Result<ServerCopies>> + Send;
+    /// Where the draft with this Graph id is now.
+    fn draft_state(&self, draft_id: &str) -> impl Future<Output = Result<DraftState>> + Send;
 }
 
 impl GraphSendApi for crate::graph::GraphClient {
@@ -132,6 +148,9 @@ impl GraphSendApi for crate::graph::GraphClient {
     ) -> impl Future<Output = Result<ServerCopies>> + Send {
         crate::graph::GraphClient::server_copies(self, internet_message_id)
     }
+    fn draft_state(&self, draft_id: &str) -> impl Future<Output = Result<DraftState>> + Send {
+        crate::graph::GraphClient::draft_state(self, draft_id)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +164,8 @@ pub enum DraftBody {
     /// header, threading included, as `sendMail` would have sent it.
     Mime(String),
     /// The JSON message resource, for a body too large for any MIME request.
-    /// Carries no threading headers and gets an Exchange `Message-ID`.
+    /// Carries no threading headers and gets an Exchange `Message-ID`; ours
+    /// rides along in [`crate::graph::MESSAGE_ID_PROPERTY`].
     Json(serde_json::Value),
 }
 
@@ -326,7 +346,8 @@ fn outgoing_attachment(part: &mailparse::ParsedMail<'_>) -> Result<OutgoingAttac
 }
 
 /// The JSON message resource for a body too large for MIME: subject, the HTML
-/// (or plain) body, and the recipients by role.
+/// (or plain) body, the recipients by role, and our `Message-ID` in
+/// [`crate::graph::MESSAGE_ID_PROPERTY`] so the resume can find the draft.
 fn json_message(
     built: &BuiltMessage,
     parsed: &mailparse::ParsedMail<'_>,
@@ -369,6 +390,7 @@ fn json_message(
         "subject": parsed.headers.get_first_value("Subject").unwrap_or_default(),
         "body": {"contentType": content_type, "content": content},
         "toRecipients": recipients(RecipientRole::To),
+        "singleValueExtendedProperties": crate::graph::message_id_property(&built.message_id),
     });
     let cc = recipients(RecipientRole::Cc);
     if !cc.is_empty() {
@@ -524,10 +546,14 @@ fn record(store: &Store, blobs: &BlobStore, id: i64, outcome: &GraphOutcome) -> 
 /// lookup fails is simply left for the next pass. A row whose draft a send in
 /// this process is still working on is left alone: its marker is not yet set
 /// while the draft is being filled, and resubmitting it would send it twice.
+///
+/// A row this pass records as sent has its draft file in `drafts` retired
+/// while its send slot is still held ([`super::retire_draft_of_row`]).
 pub async fn resume_rows<A: GraphSendApi>(
     store: &Store,
     blobs: &BlobStore,
     account: &str,
+    drafts: &std::path::Path,
     now: i64,
     api: &A,
 ) {
@@ -539,12 +565,7 @@ pub async fn resume_rows<A: GraphSendApi>(
         }
     };
     for row in rows {
-        let key = row
-            .envelope
-            .as_ref()
-            .and_then(|e| e.draft_key.clone())
-            .unwrap_or_else(|| format!("row:{}", row.id));
-        let Some(_claim) = super::SendAdmission::claim(account, &key) else {
+        let Some(_claim) = super::SendAdmission::claim_row(account, &row) else {
             debug!(
                 "[outbox] row {} is being sent right now; leaving it",
                 row.id
@@ -563,7 +584,38 @@ pub async fn resume_rows<A: GraphSendApi>(
         if let Err(e) = result {
             warn!("[outbox] could not resume row {} over Graph: {e:#}", row.id);
         }
+        super::retire_draft_of_row(drafts, store, row.id);
     }
+}
+
+/// Remove from the server the drafts an outbox row left behind, before the
+/// row is discarded (#0063 review): every draft in Drafts under the row's
+/// `Message-ID`, and the recorded draft when it is still a draft in Drafts.
+///
+/// The recorded id is read before it is deleted, because an item that has
+/// left Drafts may be the message itself on its way out or already sent.
+/// Fails on the first draft that will not go, so the caller keeps the row
+/// that names it.
+pub async fn discard_row_drafts<A: GraphSendApi>(api: &A, row: &OutboxRow) -> Result<()> {
+    let mut drafts = api.server_copies(&row.message_id).await?.drafts;
+    if let Some(id) = row.envelope.as_ref().and_then(|e| e.graph_draft.clone()) {
+        if !drafts.contains(&id) && api.draft_state(&id).await? == DraftState::InDrafts {
+            drafts.push(id);
+        }
+    }
+    for id in &drafts {
+        api.discard_draft(id)
+            .await
+            .with_context(|| format!("discarding the Graph draft {id}"))?;
+    }
+    if !drafts.is_empty() {
+        info!(
+            "[outbox] discarded {} Graph draft(s) of row {}",
+            drafts.len(),
+            row.id
+        );
+    }
+    Ok(())
 }
 
 /// Discard drafts, best effort, logging what will not go.
@@ -690,36 +742,62 @@ async fn settle_unconfirmed<A: GraphSendApi>(
         return Ok(());
     }
 
+    // The recorded draft is read by its id, which works on both routes: a
+    // JSON draft is not under our `Message-ID`, and one the lookup by property
+    // missed is still this item.
     let recorded = row.envelope.as_ref().and_then(|e| e.graph_draft.clone());
-    if let Some(draft_id) = recorded.filter(|id| copies.drafts.contains(id)) {
-        // A draft that was sent leaves Drafts; this one is still there long
-        // after its send, so the send never took. Sending the same item, not
-        // a new one, is what keeps a late-arriving first send from becoming a
-        // second message.
-        let others: Vec<String> = copies
-            .drafts
-            .iter()
-            .filter(|id| **id != draft_id)
-            .cloned()
-            .collect();
-        discard_all(api, &others).await;
-        info!(
-            "[outbox] row {} ({}) is still in Drafts {}s after its send; sending that draft",
-            row.id,
-            row.message_id,
-            now - started
-        );
-        outbox::mark_submission_started(store, row.id)?;
-        let outcome = delivering(api.send_draft(&draft_id).await);
-        if let GraphOutcome::Clean(_) = outcome {
-            discard(Some((store, row.id)), api, &draft_id).await;
+    let state = match &recorded {
+        Some(id) => Some(api.draft_state(id).await?),
+        None => None,
+    };
+    let others: Vec<String> = copies
+        .drafts
+        .iter()
+        .filter(|id| Some(*id) != recorded.as_ref())
+        .cloned()
+        .collect();
+    match (recorded, state) {
+        (_, Some(DraftState::Sent)) => {
+            info!(
+                "[outbox] row {} ({}): its draft is no longer a draft; the send went out",
+                row.id, row.message_id
+            );
+            discard_all(api, &others).await;
+            outbox::record_submission(store, blobs, row.id, &SubmitOutcome::Accepted)?;
+            return Ok(());
         }
-        return record(store, blobs, row.id, &outcome);
+        (_, Some(DraftState::Sending)) if now - started < SENDING_SETTLE_SECS => {
+            debug!(
+                "[outbox] row {} is in the Outbox; asking again on a later pass",
+                row.id
+            );
+            return Ok(());
+        }
+        (Some(draft_id), Some(DraftState::InDrafts)) => {
+            // A draft that was sent leaves Drafts; this one is still there
+            // long after its send, so the send never took. Sending the same
+            // item, not a new one, is what keeps a late-arriving first send
+            // from becoming a second message.
+            discard_all(api, &others).await;
+            info!(
+                "[outbox] row {} ({}) is still in Drafts {}s after its send; sending that draft",
+                row.id,
+                row.message_id,
+                now - started
+            );
+            outbox::mark_submission_started(store, row.id)?;
+            let outcome = delivering(api.send_draft(&draft_id).await);
+            if let GraphOutcome::Clean(_) = outcome {
+                discard(Some((store, row.id)), api, &draft_id).await;
+            }
+            return record(store, blobs, row.id, &outcome);
+        }
+        _ => {}
     }
 
     // Neither sent nor waiting in Drafts: it may be in transit, or lost.
     // Nothing automatic is safe, so a human decides, as for SMTP.
-    discard_all(api, &copies.drafts).await;
+    discard_all(api, &others).await;
     outbox::record_submission(
         store,
         blobs,

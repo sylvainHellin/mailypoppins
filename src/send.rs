@@ -2955,6 +2955,138 @@ impl SendAdmission {
         let mut sending = SENDING.lock().unwrap_or_else(|e| e.into_inner());
         sending.insert(slot.clone()).then(|| SendAdmission(slot))
     }
+
+    /// The slot a resume of one outbox row takes: the draft's own, so a
+    /// resume and a send of the same draft never run together, and a slot of
+    /// the row's own when it came from no draft.
+    fn claim_row(account: &str, row: &crate::outbox::OutboxRow) -> Option<Self> {
+        let key = row
+            .envelope
+            .as_ref()
+            .and_then(|e| e.draft_key.clone())
+            .unwrap_or_else(|| format!("row:{}", row.id));
+        Self::claim(account, &key)
+    }
+}
+
+/// Retire the draft file an outbox row was built from, once a resume has
+/// recorded its message as sent (#0063 review).
+///
+/// The live send retires the file through [`crate::draft::settle_sent_draft`]
+/// when its own submission succeeds. A submission the resume completes (an
+/// interrupted send, a clean failure resent later, an unconfirmed Graph send
+/// found in Sent Items) never reaches that code, and a file left `approved` is
+/// one `mp send-approved` sends again under a fresh `Message-ID`. The same
+/// rule applies here: the file is marked sent once any recipient has the
+/// message, and removed once the row is through with every recipient taking
+/// it.
+///
+/// Best effort and logged: the message is out either way, and the admission
+/// gate's check of finished rows ([`crate::outbox::refuse_a_finished_draft`])
+/// still stands between a file that could not be retired and a second send.
+/// Called with the row's send slot held.
+pub(crate) fn retire_draft_of_row(
+    drafts: &std::path::Path,
+    store: &crate::store::Store,
+    row_id: i64,
+) {
+    use crate::outbox::OutboxState;
+    let row = match crate::outbox::load(store, row_id) {
+        Ok(Some(row)) => row,
+        Ok(None) => return,
+        Err(e) => {
+            warn!("[outbox] could not reload row {row_id} to retire its draft: {e:#}");
+            return;
+        }
+    };
+    let Some(envelope) = row.envelope.as_ref() else {
+        return;
+    };
+    let Some(key) = envelope.draft_key.as_deref() else {
+        return;
+    };
+    let finished = matches!(
+        row.state,
+        OutboxState::Done | OutboxState::SentPendingAppend
+    );
+    if !finished && envelope.delivered.is_empty() {
+        return;
+    }
+    let draft = match find_draft_by_key(drafts, key) {
+        Ok(Some(draft)) => draft,
+        Ok(None) => {
+            debug!("[outbox] row {row_id}: no draft file under {key} to retire");
+            return;
+        }
+        Err(e) => {
+            warn!("[outbox] row {row_id}: could not find its draft {key}: {e:#}");
+            return;
+        }
+    };
+    if let Err(e) = crate::draft::mark_draft_sent(&draft, Some(&row.message_id)) {
+        warn!(
+            "[outbox] row {row_id} was sent but {} could not be marked sent: {e:#}",
+            draft.path.display()
+        );
+        return;
+    }
+    if !(finished && envelope.rejected.is_empty()) {
+        return;
+    }
+    match std::fs::remove_file(&draft.path) {
+        Ok(()) => info!(
+            "[outbox] row {row_id} was sent on resume; retired its draft {}",
+            draft.path.display()
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!(
+            "[outbox] row {row_id} was sent but {} could not be removed: {e:#}",
+            draft.path.display()
+        ),
+    }
+}
+
+/// The draft file in `drafts` a send was admitted under `key`
+/// ([`draft_key`]): the file at the path of a `path:` key, else the one file
+/// whose frontmatter `id:` matches. `None` when there is none, or when two
+/// files claim the id and nothing can say which one was sent.
+fn find_draft_by_key(drafts: &std::path::Path, key: &str) -> Result<Option<EmailDraft>> {
+    if let Some(path) = key.strip_prefix("path:") {
+        let path = std::path::Path::new(path);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        return crate::draft::parse_email_draft(path).map(Some);
+    }
+    let entries = match std::fs::read_dir(drafts) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::Error::from(e))
+                .with_context(|| format!("reading {}", drafts.display()))
+        }
+    };
+    let mut found: Vec<EmailDraft> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !(path.is_file() && path.extension().is_some_and(|ext| ext == "md")) {
+            continue;
+        }
+        // A file that will not parse is not the one a send was built from.
+        if let Ok(draft) = crate::draft::parse_email_draft(&path) {
+            if draft_key(&draft) == key {
+                found.push(draft);
+            }
+        }
+    }
+    if found.len() > 1 {
+        warn!(
+            "[outbox] {} draft files share {key}; none is retired automatically",
+            found.len()
+        );
+        return Ok(None);
+    }
+    Ok(found.pop())
 }
 
 impl Drop for SendAdmission {
@@ -3283,6 +3415,7 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
             "this draft is already being sent; it is sent once, not twice".to_string(),
         ))
     })?;
+    refuse_a_finished_draft(draft, &ctx.account.name, &key)?;
     let ancestry = reply_ancestry(draft, &ctx.account.name);
     let built = build_draft_message(
         draft,
@@ -3329,6 +3462,28 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
         message_id: built.message_id.clone(),
         settle_error,
     })
+}
+
+/// Refuse a draft whose last submission already went out (#0063 review).
+///
+/// The second guard behind [`retire_draft_of_row`]: a file that a resumed send
+/// could not retire is still `approved`, and the outbox's duplicate check at
+/// enqueue sees only rows in flight. A store that will not open costs the
+/// guard and nothing else, as it costs [`DurableSend::begin`] its row.
+fn refuse_a_finished_draft(draft: &EmailDraft, account: &str, key: &str) -> Result<()> {
+    let store = match crate::store::Store::open_account(account) {
+        Ok(store) => store,
+        Err(e) => {
+            debug!("[outbox] no store to check {key} against: {e:#}");
+            return Ok(());
+        }
+    };
+    crate::outbox::refuse_a_finished_draft(
+        &store,
+        account,
+        key,
+        draft.frontmatter.message_id.as_deref(),
+    )
 }
 
 /// The `Message-ID` a reply draft answers, read off its `in_reply_to:`
@@ -3713,15 +3868,27 @@ async fn resubmit_pending(
         }
     };
 
+    let drafts = crate::config::drafts_dir(&account.name);
     for row in sweep.resubmittable {
         if row.updated + crate::outbox::backoff_secs(row.attempts) > now {
             // A previous clean failure (no transport, a rejected address) bumped
             // the counter; wait it out rather than hammer the server.
             continue;
         }
+        // The slot `send_draft` takes for the same draft, so a send of it
+        // started in this process meanwhile and this resubmission cannot both
+        // run, and the file is retired before that send could read it again.
+        let Some(_claim) = SendAdmission::claim_row(&account.name, &row) else {
+            log::debug!(
+                "[outbox] row {} is being sent right now; leaving it",
+                row.id
+            );
+            continue;
+        };
         if let Err(e) = resubmit_row(store, blobs, &row, &smtp_config).await {
             log::warn!("[outbox] could not resubmit row {}: {e:#}", row.id);
         }
+        retire_draft_of_row(&drafts, store, row.id);
     }
 }
 
@@ -3753,7 +3920,10 @@ async fn resubmit_pending_graph(
         Err(e) => Err(e),
     };
     match client {
-        Ok(client) => graph_submit::resume_rows(store, blobs, &account.name, now, &client).await,
+        Ok(client) => {
+            let drafts = crate::config::drafts_dir(&account.name);
+            graph_submit::resume_rows(store, blobs, &account.name, &drafts, now, &client).await
+        }
         Err(e) => log::warn!(
             "[outbox] {} has queued Graph sends but no usable Graph client: {e:#}",
             account.name
