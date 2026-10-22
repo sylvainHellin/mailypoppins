@@ -6,7 +6,7 @@ exclude = ["spikes/*", "clients/desktop"]
 
 [package]
 name = "mailypoppins"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 description = "A CLI tool for sending emails from Markdown drafts with YAML frontmatter"
 license = "MIT"

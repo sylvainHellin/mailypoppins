@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-22
+
 ### Added
 - **TUI themes `mailypoppins` and `mailypoppins-light`, the Mac app's palettes.** `theme = "mailypoppins"` gives the TUI the app's Prussian ground, Cream text, Ocean focus and Pumpkin cursor; `mailypoppins-light` is the Cream variant. `mailypoppins` is the new default; `theme = "catppuccin-mocha"` brings back the old look.
 - **A newly added account syncs on its own and turns ready without a daemon restart.** When an account with a server and no local store comes into the daemon (at start or through a configuration change), the daemon runs its first quick sync in the background and then starts the account's runtime; a failed first sync leaves it `blocked` with the error and the `mp sync -A <account>` that retries it. A `mp sync` that creates an account's store also starts its runtime at once, where it used to wait for the next daemon start.
