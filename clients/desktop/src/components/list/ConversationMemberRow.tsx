@@ -33,9 +33,9 @@ export type ConversationMemberRowProps = {
  * own mailbox. Pure.
  *
  * A member the daemon calls `own` (PERSO-179), from the account's own address
- * whatever mailbox it is in, reads apart from the others: its mailbox chip
- * takes the ocean tint and its sender reads "Me", with the address it went out
- * from on the second line.
+ * whatever mailbox it is in or held in Sent, reads apart from the others: its
+ * mailbox chip takes the ocean tint and its sender reads "Me", with the
+ * address it went out from on the second line.
  *
  * The members sit indented on a muted tint, lighter than their open header's,
  * with the ocean rail the header starts down their left edge; the last one

@@ -377,13 +377,14 @@ pub struct ThreadMessage {
     /// name is extracted client-side, as it is for a listing row.
     #[serde(default)]
     pub from: String,
-    /// Whether `from` is one of the account's own addresses (PERSO-179), which
+    /// Whether the member is the user's own message (PERSO-179), which
     /// is what a client draws the user's own messages apart by.
     ///
-    /// Decided daemon-side on the address, not on the mailbox: a copy of a
+    /// Decided daemon-side on the address, or on the Sent mailbox: a copy of a
     /// message the user sent to themselves sits in the Inbox and is still
-    /// theirs, and the daemon is the one side that holds the configuration
-    /// naming the addresses. A draft member is always the account's own.
+    /// theirs, a Sent copy is theirs whatever address it went out from, and
+    /// the daemon is the one side that holds the configuration naming the
+    /// addresses. A draft member is always the account's own.
     /// `false` from a daemon older than the field.
     #[serde(default)]
     pub own: bool,

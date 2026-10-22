@@ -221,8 +221,8 @@ pub enum ConvRole {
         /// The mailbox this copy lives in, as the store holds it; `drafts` for
         /// a draft member.
         mailbox: String,
-        /// Whether it is from one of the account's own addresses, as the
-        /// daemon decided it (PERSO-179), whatever mailbox it lives in.
+        /// Whether it is the user's own message, as the daemon decided it
+        /// (PERSO-179): from the account's address, or held in Sent.
         own: bool,
     },
 }
@@ -309,8 +309,8 @@ impl EmailEntry {
         }
     }
 
-    /// Whether this row is an expanded member from one of the account's own
-    /// addresses (PERSO-179); `false` for any other row.
+    /// Whether this row is an expanded member that is the user's own message
+    /// (PERSO-179); `false` for any other row.
     pub fn member_own(&self) -> bool {
         matches!(&self.conv, Some(ConvRole::Member { own: true, .. }))
     }

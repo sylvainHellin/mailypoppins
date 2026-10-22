@@ -102,8 +102,8 @@ fn places(rows: &[&EmailEntry]) -> Vec<Place> {
         .collect()
 }
 
-/// What an expanded member from one of the user's own addresses names its
-/// sender as (PERSO-179), where another member names the sender's display name.
+/// What an expanded member that is the user's own message names its sender as
+/// (PERSO-179), where another member names the sender's display name.
 const OWN_SENDER: &str = "Me";
 
 /// The contact cell of one row.
@@ -139,7 +139,7 @@ fn contact_text(app: &App, email: &EmailEntry, width: usize) -> String {
 }
 
 /// The mailbox label of an expanded member: in the theme's `accent` colour
-/// when the member is from one of the user's own addresses (PERSO-179), so the
+/// when the member is the user's own message (PERSO-179), so the
 /// user's own messages stand apart from the others in a conversation, and in
 /// the row's own style otherwise. `accent` is the desktop's link ocean in the
 /// mailypoppins themes, the tint the desktop gives the same chip. On the

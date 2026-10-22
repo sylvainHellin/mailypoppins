@@ -924,7 +924,7 @@ export function threadListing(account: string, rowId: number, prefer: string): T
       mailbox,
       message_id: row.message_id,
       from: row.from,
-      own: addressOf(row.from) === FIXTURE_ADDRESS,
+      own: addressOf(row.from) === FIXTURE_ADDRESS || mailbox === "sent",
       date_display: row.date_display,
       flags: row.flags,
       current: row.message_id === addressed.row.message_id,

@@ -255,6 +255,25 @@ fn seed(root: &Path) -> HashMap<&'static str, i64> {
             None,
         ),
     );
+    // A Sent copy from an alias the configuration does not name: the Sent
+    // mailbox makes it the user's own all the same (PERSO-179).
+    ids.insert(
+        "alias_sent",
+        ingest(
+            &store,
+            &blobs,
+            "sent",
+            3,
+            &message(
+                "<alias@example.com>",
+                "Alpha Alias <alias@example.org>",
+                "Vom Alias",
+                "Mon, 1 Jan 2024 06:00:00 +0000",
+                true,
+            ),
+            None,
+        ),
+    );
     // A note to self, its bare address in another case than `default_from`:
     // the Inbox copy is the user's own message all the same (PERSO-179).
     ids.insert(
@@ -749,6 +768,18 @@ async fn a_note_to_self_in_the_inbox_is_the_users_own() {
 
     let lone = expanded(&mut conn, slice.id("lone"), "inbox").await;
     assert!(!lone.messages[0].own, "{:?}", lone.messages[0]);
+}
+
+/// PERSO-179: a Sent copy is the user's own whatever address it went out
+/// from, an alias or a former `default_from` the configuration no longer names.
+#[tokio::test]
+async fn a_sent_copy_from_another_address_is_the_users_own() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let alias = expanded(&mut conn, slice.id("alias_sent"), "sent").await;
+    assert_eq!(alias.messages.len(), 1);
+    assert_eq!(alias.messages[0].mailbox, "sent");
+    assert!(alias.messages[0].own, "{:?}", alias.messages[0]);
 }
 
 /// Every refusal is the call's own error, issued before any operation.

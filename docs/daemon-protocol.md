@@ -461,7 +461,8 @@ It does carry `selector`, the canonical `mp://` name a listing row gives the sam
 A client that wants the whole message asks `message.get` with the row's `id`, which is the same `messages.id` a listing row carries under the same name.
 
 `current` marks the message the conversation was opened from, and it is decided on the `Message-ID` rather than on the row id: the dedup above may have kept another copy of the addressed message, so the marked row can carry an `id` other than the one the call named.
-`own` says the `From:` address is the account's own `default_from` address, compared case-insensitively on the address alone (PERSO-179); it is decided on the address rather than on the mailbox, so a note to self listed in the Inbox is `own` as much as its Sent copy, and the daemon decides it because it is the side that holds the configuration.
+`own` says the member is the user's own message (PERSO-179): its `From:` address is the account's `default_from` address, compared case-insensitively on the address alone, or it sits in the `sent` mailbox.
+The address makes a note to self listed in the Inbox `own` as much as its Sent copy, and the mailbox makes a Sent copy `own` when it went out from an alias or a former `default_from`, which the configuration does not name; the daemon decides it because it is the side that holds the configuration.
 `subject` is the addressed message's `Subject:` verbatim, `""` when it carried none, and the client renders its own `(no subject)` placeholder.
 
 **A message with no relatives answers with itself alone.** A one-row conversation is the truthful answer to "what else is in this thread", and the client is what turns it into a sentence: the TUI says "No related emails for this message in the store" and opens no overlay for it.

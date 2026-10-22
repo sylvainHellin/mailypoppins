@@ -1195,10 +1195,13 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
                 mailbox: member.mailbox.clone(),
                 message_id: member.message_id.clone(),
                 from: member.from.clone().unwrap_or_default(),
+                // The account's address, or the Sent mailbox, which holds
+                // what the user sent from an alias or a former address too.
                 own: member
                     .from
                     .as_deref()
-                    .is_some_and(|from| account.sends_as(from)),
+                    .is_some_and(|from| account.sends_as(from))
+                    || member.mailbox == "sent",
                 date_display: member.date_display.clone().unwrap_or_default(),
                 flags: mp_protocol::listing::MessageFlags {
                     seen: flags.seen,

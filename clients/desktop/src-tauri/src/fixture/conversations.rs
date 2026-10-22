@@ -211,7 +211,7 @@ pub fn thread(
                 mailbox: mailbox.to_string(),
                 current: row.message_id == current.message_id,
                 message_id: row.message_id,
-                own: !from.is_empty() && address(&row.from) == address(from),
+                own: (!from.is_empty() && address(&row.from) == address(from)) || mailbox == "sent",
                 from: row.from,
                 date_display: row.date_display,
                 flags: row.flags,
@@ -386,6 +386,8 @@ mod tests {
         assert_eq!(t.messages[3].draft_id.as_deref(), Some("offsite-note"));
         assert!(t.messages[0].current);
         assert_eq!(t.thread_id, CANNED_THREAD);
+        let own: Vec<bool> = t.messages.iter().map(|m| m.own).collect();
+        assert_eq!(own, [false, true, true, true]);
         let bare = thread("work", &boxes(), 1007, None, &[], "x").expect("thread");
         assert_eq!(bare.messages.len(), 3);
         assert!(thread("work", &boxes(), 99, None, &[], "x").is_none());
@@ -423,6 +425,27 @@ mod tests {
             .find(|c| c.latest.id == 1021)
             .expect("the newsletter with no subject is listed");
         assert_eq!(row.latest.subject, "");
+    }
+
+    /// A Sent copy is the user's own whatever address it went out from, an
+    /// alias or a former `default_from`, as the daemon decides it (PERSO-179).
+    #[test]
+    fn a_sent_member_from_another_address_is_own() {
+        let t = thread(
+            "work",
+            &boxes(),
+            1007,
+            Some("inbox"),
+            &[],
+            "Alias <alias@example.org>",
+        )
+        .expect("thread");
+        let own: Vec<(&str, bool)> = t
+            .messages
+            .iter()
+            .map(|m| (m.mailbox.as_str(), m.own))
+            .collect();
+        assert_eq!(own, [("inbox", false), ("sent", true), ("sent", true)]);
     }
 
     /// One `Message-ID` held twice counts once, and the expansion names the
