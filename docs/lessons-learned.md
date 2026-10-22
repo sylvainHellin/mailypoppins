@@ -3128,3 +3128,8 @@ Calling `cancelSignIn` with an id as well sends the cancel twice, since the dial
 On the first-run screen the account wizard unmounts as soon as `config.changed` lists the new account, which happens before `writeAccount` has stored the account's passwords.
 Any work after the write must therefore not depend on the component still being mounted: `writeAccount` stores the passwords whatever the component's state, and only the overlay changes (the password dialog, the close) wait for the `shown` check.
 The same holds for a connection test, which takes a still-mounted check so a wizard cancelled mid-test sends the typed password to no further probe.
+
+## A SQLite trigger injects a write that does not land, or one that fails (2026-10-22)
+
+A SQLite `RAISE(IGNORE)` trigger makes an UPDATE skip its row without an error, which is how a test injects a write that silently does not land; `RAISE(ABORT, ...)` injects one that fails.
+The send tests in `src/send.rs` use both on the send-start marker, to hold back a send whose marker changed no row and one whose marker write failed.
