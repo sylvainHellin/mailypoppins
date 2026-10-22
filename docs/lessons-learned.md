@@ -2532,7 +2532,8 @@ The manifest's `signature` is the `.sig` file's content, which the plugin base64
 
 ## A daemon test that waits for readiness events can receive a health check between them
 
-The diagnostics ledger starts every check at `ok`, and each account runtime that reports runs `diagnostics.refresh()`, so in a two-account sandbox the refresh after alpha's readiness can find beta still opening and publish `diagnostic.check_changed` (`account:beta` warn) before beta's `account.state_changed`.
+The diagnostics ledger starts every check at `ok`, and each account runtime that reports runs `diagnostics.refresh()`, so in a two-account sandbox the refresh after alpha's readiness can publish a `diagnostic.check_changed` (`store_open`, or an account that came up blocked) before beta's `account.state_changed`.
+An account still opening no longer warns within `OPENING_GRACE` (2026-10-22), so the case first seen here, beta announced as a warning while it opened, is gone, but the interleaving remains.
 It only shows under load (a full `cargo test --workspace`), which is how `the_snapshot_of_a_converged_daemon_still_has_the_documented_shape` failed once before v0.11.0.
 A test that counts readiness events off the `state.event` stream skips `diagnostic.check_changed` rather than asserting the next event's kind.
 
@@ -3101,7 +3102,7 @@ Nothing compares the table with the calls an action makes, so a change of method
 ## The daemon's own startup events land in every daemon test's stream (2026-10-22)
 
 The daemon answers on its socket before its account runtimes start, and each start commits an `account.state_changed` and then refreshes the health checks, whose `diagnostic.check_changed` follows.
-With two accounts the first start's refresh finds the second still opening and announces a warning, and the second announces the recovery, so a two-account startup always publishes check events.
+Until the tidy-up of 2026-10-22 the first start's refresh found the second account still opening and announced a warning, and the second announced the recovery, so every two-account startup published check events; an account still opening is now `ok` for `OPENING_GRACE`, but a start that comes up blocked or fails still publishes its check.
 Polling `daemon.status` until no account is `opening` does not settle this: the runtime table reads `ready` before the report is committed and before the refresh runs.
 A test that waits for its own events reads past the startup kinds with `tests/support/events.rs`, which classifies domain and lifecycle by `mp_protocol::events::DOMAIN_KINDS`; the daemon pins that list with a unit test over every `Change` variant and a debug assertion in `CanonicalState::publish`.
 A test that needs a quiet stream takes its bootstrap with the owed reports read (`bootstrap_settled` in `tests/daemon_config.rs`) or leaves the checks a start moves out of its silence.

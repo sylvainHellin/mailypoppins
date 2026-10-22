@@ -564,12 +564,6 @@ async fn await_check(conn: &mut Connection, name: &str) -> Value {
     }
 }
 
-/// Whether the check called `name` is one an account runtime's start moves:
-/// `store_open`, which counts the open stores, and the account's own check.
-fn is_refreshed_by_a_start(name: &str) -> bool {
-    name == "store_open" || name.starts_with("account:")
-}
-
 /// An object's keys, sorted.
 fn keys(value: &Value) -> Vec<String> {
     let mut keys: Vec<String> = value
@@ -1880,14 +1874,11 @@ fn a_new_detail_under_a_warning_publishes_an_event() {
 /// whole check set on every evaluation would fill the activity overlay with
 /// news that nothing happened.
 ///
-/// The checks an account runtime's start refreshes, `store_open` and each
-/// `account:<name>`, are left out of the silence. [`wait_settled`] sees the
-/// runtimes report, and the refresh each start runs after its report can
-/// still publish a flip once this connection subscribed: with two accounts,
-/// the first start's refresh finds the second still opening and announces it
-/// as a warning, and the second announces its recovery. The fixed checks no
-/// start touches stay in, and a health call that republished the whole set
-/// would publish them too.
+/// The account checks are in the silence too. With two accounts the first
+/// start's refresh finds the second still opening, which is not a problem and
+/// is `ok` (`OPENING_GRACE`), so a normal start announces neither a warning
+/// nor its recovery. The daemon's log holds every flip it published since it
+/// started, before this connection subscribed as well, and it holds none.
 #[test]
 fn a_check_that_did_not_flip_publishes_nothing() {
     let diag = Diag::start();
@@ -1899,14 +1890,7 @@ fn a_check_that_did_not_flip_publishes_nothing() {
         let quiet = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match conn.next_notification().await {
-                    Some(notification)
-                        if notification.params["kind"] == KIND_CHECK_CHANGED
-                            && !is_refreshed_by_a_start(
-                                notification.params["payload"]["name"]
-                                    .as_str()
-                                    .unwrap_or_default(),
-                            ) =>
-                    {
+                    Some(notification) if notification.params["kind"] == KIND_CHECK_CHANGED => {
                         return notification
                     }
                     Some(_) => continue,
@@ -1920,6 +1904,15 @@ fn a_check_that_did_not_flip_publishes_nothing() {
             "three evaluations of an unchanged check set published {quiet:?}"
         );
     });
+    let log = fs::read_to_string(log_file(diag.root())).expect("the daemon's log");
+    let flips: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("[daemon] account:") && line.contains(" is "))
+        .collect();
+    assert!(
+        flips.is_empty(),
+        "a normal two-account start publishes no account check: {flips:?}"
+    );
     diag.stop();
 }
 

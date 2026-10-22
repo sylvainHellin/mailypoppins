@@ -72,6 +72,8 @@ All notable changes to this project are documented in this file.
 - Setup wizards no longer offer extra mailboxes to sync: the daemon finds and syncs every folder on its own (#0141).
 
 ### Fixed
+- Daemon: a start with two or more accounts no longer announces "account:<name> is warn: still opening its store" and then its recovery in the TUI activity log, the desktop health line and the daemon log.
+  An account whose start is in flight is ok for its first 30 seconds; a start that fails still fails, and one that takes longer warns.
 - Sending over Microsoft Graph: a message too large for one sendMail (a reply with a big attachment) is sent as a draft built from its own MIME, with the attachments uploaded separately, so it stays in its Outlook conversation; an interrupted Graph send, or one Graph answered with a server error after it may have taken it, is resumed on the next start against Drafts and Sent Items, never sent twice and leaving no draft behind (#0063).
 - Sending: a draft whose message the outbox sent after a restart or an `mp outbox retry` is retired like one sent at once, on SMTP and Graph accounts, so `mp send-approved` no longer sends it a second time; a draft whose last send went out is refused unless its file names that send, and so is one whose last send may have gone out before it failed, until `mp outbox retry` or `mp outbox discard` settles that row, while a draft every recipient refused can be corrected and sent again (#0063).
 - Sending: a send whose start the outbox cannot record, because the write fails or finds the row no longer queued, is held back instead of going out unrecorded, where a crash would have had the resume send it again (#0063).

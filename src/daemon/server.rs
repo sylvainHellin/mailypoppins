@@ -1194,6 +1194,7 @@ fn frame_error(error: &FrameError) -> RpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// A daemon state whose configuration is `config`, at revision 0.
     fn state_from(state: super::super::config::ConfigState, accounts: &[&str]) -> DaemonState {
@@ -1282,6 +1283,9 @@ mod tests {
         let mut queue = state.canonical.subscribe(conn);
         let _ = state.canonical.bootstrap(conn);
 
+        state
+            .diagnostics
+            .backdate_opening("alpha", Duration::from_secs(60));
         state.diagnostics.refresh();
         state.runtimes.insert_failure("alpha", "boom".to_string());
         state.diagnostics.refresh();
@@ -1294,6 +1298,66 @@ mod tests {
             .map(|payload| payload["status"].as_str().unwrap_or_default().to_string())
             .collect();
         assert_eq!(statuses, ["warn", "fail"]);
+    }
+
+    /// A two-account start publishes no check for the account still opening:
+    /// the first start's refresh finds the second in flight, which is not a
+    /// problem. A start that fails still publishes its failure, and one that
+    /// overruns the grace warns.
+    #[test]
+    fn an_account_still_opening_publishes_no_check_until_its_start_settles() {
+        let state = state_from(super::super::config::ConfigState::Ok, &["alpha", "beta"]);
+        let conn = ConnectionId(8);
+        let mut queue = state.canonical.subscribe(conn);
+        let _ = state.canonical.bootstrap(conn);
+        let account_checks =
+            |queue: &mut super::super::state::EventQueue| -> Vec<(String, String)> {
+                queue
+                    .drain_all()
+                    .into_iter()
+                    .map(|(_, event)| event.payload())
+                    .filter(|payload| {
+                        payload["name"]
+                            .as_str()
+                            .is_some_and(|n| n.starts_with("account:"))
+                    })
+                    .map(|payload| {
+                        let field =
+                            |key: &str| payload[key].as_str().unwrap_or_default().to_string();
+                        (field("name"), field("status"))
+                    })
+                    .collect()
+            };
+
+        // Alpha's start reports first; beta's is still in flight.
+        state
+            .runtimes
+            .insert_failure("alpha", "no local store yet".to_string());
+        state.diagnostics.refresh();
+        assert_eq!(
+            account_checks(&mut queue),
+            [("account:alpha".to_string(), "fail".to_string())],
+            "the failed start fails, the opening one says nothing"
+        );
+        assert!(
+            state
+                .diagnostics
+                .not_ok()
+                .iter()
+                .all(|check| check.name != "account:beta"),
+            "and a bootstrap does not list it"
+        );
+
+        // Beta's start overruns the grace: the next refresh warns.
+        state.diagnostics.backdate_opening(
+            "beta",
+            super::super::diagnostics::OPENING_GRACE + Duration::from_secs(5),
+        );
+        state.diagnostics.refresh();
+        assert_eq!(
+            account_checks(&mut queue),
+            [("account:beta".to_string(), "warn".to_string())]
+        );
     }
 
     /// A tick whose body fails, so the commit path is exercised without an

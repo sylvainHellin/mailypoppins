@@ -98,6 +98,15 @@ const BUNDLE_LOG_LINES: usize = 2000;
 /// or the log file going away under a daemon nobody is talking to.
 pub const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long an account may stay `opening` before its check warns.
+///
+/// A start in flight is not a problem: every daemon start opens each store,
+/// and with two accounts the first start's refresh would otherwise find the
+/// second still opening and announce a warning and then its recovery on every
+/// launch. Past this the start is stuck, and the next refresh (at the latest
+/// the [`REFRESH_INTERVAL`] sweep) warns.
+pub const OPENING_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
 // ---------------------------------------------------------------------------
 // One check
 // ---------------------------------------------------------------------------
@@ -216,6 +225,10 @@ pub struct Diagnostics {
     /// Each check as the last refresh evaluated it, status and detail both:
     /// what [`is_news`] compares the next evaluation against.
     ledger: Mutex<BTreeMap<String, Check>>,
+    /// Since when each account that is `opening` has been: the daemon's start
+    /// for the accounts configured then, the first evaluation that saw it
+    /// opening for any other. Forgotten once its start settles.
+    opening_since: Mutex<BTreeMap<String, Instant>>,
     /// Held across a whole [`Diagnostics::refresh`], from evaluating the
     /// checks to publishing what flipped. Each account task refreshes on its
     /// own, and without it two refreshes could evaluate in one order and
@@ -243,9 +256,16 @@ impl Diagnostics {
         holds: Arc<HoldScheduler>,
         canonical: &Arc<CanonicalState>,
     ) -> Diagnostics {
+        let started = Instant::now();
+        let opening_since = config
+            .accounts()
+            .iter()
+            .map(|account| (account.name.clone(), started))
+            .collect();
         Diagnostics {
             meta,
-            started: Instant::now(),
+            started,
+            opening_since: Mutex::new(opening_since),
             config,
             runtimes,
             operations,
@@ -380,8 +400,9 @@ impl Diagnostics {
         }
     }
 
-    /// Every check, in report order. Pure: nothing is published and the ledger
-    /// is not touched.
+    /// Every check, in report order. Nothing is published and the ledger is
+    /// not touched; the only thing remembered is when an account was first
+    /// seen opening.
     pub fn checks(&self) -> Vec<Check> {
         let accounts = self.config.accounts();
         let mut checks = vec![
@@ -457,19 +478,24 @@ impl Diagnostics {
     /// and every client shows the two together (`account:home: blocked: ...`
     /// in the TUI, `Account home: blocked: ...` on the desktop).
     fn account_check(&self, account: &str) -> Check {
-        let name = format!("account:{account}");
-        match self.runtimes.health_of(account) {
-            RuntimeHealth::Ready => Check::new(name, Status::Ok, "serving"),
-            RuntimeHealth::Opening => Check::new(name, Status::Warn, "still opening its store"),
-            // A lock held elsewhere is a normal state of a developer's machine:
-            // the daemon still serves this account's reads.
-            RuntimeHealth::Blocked(reason) => {
-                Check::new(name, Status::Warn, format!("blocked: {reason}"))
+        let health = self.runtimes.health_of(account);
+        let opening_for = {
+            let mut opening_since = lock(&self.opening_since);
+            if health == RuntimeHealth::Opening {
+                let now = Instant::now();
+                now - *opening_since.entry(account.to_string()).or_insert(now)
+            } else {
+                opening_since.remove(account);
+                std::time::Duration::ZERO
             }
-            RuntimeHealth::Failed(reason) => {
-                Check::new(name, Status::Fail, format!("no runtime at all: {reason}"))
-            }
-        }
+        };
+        account_check(account, health, opening_for)
+    }
+
+    /// Pretend `account` has been opening since `ago` before now.
+    #[cfg(test)]
+    pub(crate) fn backdate_opening(&self, account: &str, ago: std::time::Duration) {
+        lock(&self.opening_since).insert(account.to_string(), Instant::now() - ago);
     }
 
     /// One account's entry in a health report.
@@ -529,6 +555,35 @@ pub fn log_file() -> PathBuf {
             chrono::Utc::now().format("%Y-%m-%d")
         ))
     })
+}
+
+/// One account's check, from its runtime's health and, while it is opening,
+/// how long it has been.
+///
+/// A start in flight is `ok` until it has taken longer than [`OPENING_GRACE`]:
+/// every daemon start opens every store, and a check that warned for it would
+/// announce a warning and its recovery on each launch.
+fn account_check(account: &str, health: RuntimeHealth, opening_for: std::time::Duration) -> Check {
+    let name = format!("account:{account}");
+    match health {
+        RuntimeHealth::Ready => Check::new(name, Status::Ok, "serving"),
+        RuntimeHealth::Opening if opening_for <= OPENING_GRACE => {
+            Check::new(name, Status::Ok, "opening its store")
+        }
+        RuntimeHealth::Opening => Check::new(
+            name,
+            Status::Warn,
+            format!("still opening its store after {}s", opening_for.as_secs()),
+        ),
+        // A lock held elsewhere is a normal state of a developer's machine:
+        // the daemon still serves this account's reads.
+        RuntimeHealth::Blocked(reason) => {
+            Check::new(name, Status::Warn, format!("blocked: {reason}"))
+        }
+        RuntimeHealth::Failed(reason) => {
+            Check::new(name, Status::Fail, format!("no runtime at all: {reason}"))
+        }
+    }
 }
 
 /// How many of the configured accounts have a store the daemon could open.
@@ -1115,6 +1170,22 @@ mod tests {
             !is_news(Some(&ok("2 account(s)")), &ok("3 account(s)")),
             "a new detail under ok"
         );
+    }
+
+    /// An account whose start is in flight is `ok` until the start has taken
+    /// longer than the grace, and warns after it; a start that failed fails.
+    #[test]
+    fn an_opening_account_is_ok_until_its_start_overruns_the_grace() {
+        use std::time::Duration;
+        let opening = |for_: Duration| account_check("b", RuntimeHealth::Opening, for_);
+        assert_eq!(opening(Duration::ZERO).status, Status::Ok);
+        assert_eq!(opening(Duration::ZERO).detail, "opening its store");
+        assert_eq!(opening(OPENING_GRACE).status, Status::Ok);
+        let stuck = opening(OPENING_GRACE + Duration::from_secs(1));
+        assert_eq!(stuck.status, Status::Warn);
+        assert_eq!(stuck.detail, "still opening its store after 31s");
+        let failed = account_check("b", RuntimeHealth::Failed("boom".into()), Duration::ZERO);
+        assert_eq!(failed.status, Status::Fail);
     }
 
     /// At `DEBUG` the writer adds the thread id and the module path, and both
