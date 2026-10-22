@@ -170,8 +170,8 @@ const searchFlags = [
   { command: '--from / --to / --cc / --subject / --body / --filename <s>', description: 'The field prefixes as flags; they build the same query' },
   { command: '--has-attachment', description: 'Only mail carrying an attachment (has:attachment)' },
   { command: '--after / --before <YYYY-MM-DD>', description: 'The date range as flags' },
-  { command: '--mailbox <name>', description: 'Scope to one mailbox (per-account only)' },
-  { command: '-n, --limit <N>', description: 'Max results across every searched mailbox, newest first (default: 20); a server search cut by it ends with a "raise -n" line; Exchange stops a search at 1000 results, so a larger limit there says to narrow the query instead' },
+  { command: '--mailbox <name>', description: 'Scope to one mailbox: a configured one by role or label, or any folder the server lists by its server name (--local: configured mailboxes only)' },
+  { command: '-n, --limit <N>', description: 'Max results across every searched mailbox, newest first (default: 20): each mailbox is asked for its newest N, and only the N newest overall are downloaded; a server search cut by it ends with a "raise -n" line; Exchange stops a search at 1000 results per mailbox, so a larger limit there says to narrow the query instead' },
   { command: '--full', description: 'Show full body instead of preview' },
   { command: '--local', description: 'Search the local FTS index offline instead of the server' },
   { command: '--json', description: 'Print the hits as one JSON object on stdout, with "truncated": true when more matched than --limit let through; warnings stay on stderr' },
@@ -461,6 +461,16 @@ mp send --invite --to me@example.com --subject "Kita closed" --start 2026-12-24 
         every backend. Without an <code>in:</code> prefix or <code>--mailbox</code>, all
         the account's mailboxes are searched. A malformed query is an error with a
         caret pointing at the problem, never a silent search for less.
+      </p>
+      <p>
+        The daemon runs every server search, and <code>mp search</code>, the TUI
+        overlay and the desktop app's search bar make the same call. A mailbox the
+        server refuses does not stop the others: <code>mp search</code> prints
+        <code>Search in &lt;mailbox&gt; failed</code> on stderr after the results.
+        When more matched than are shown, <code>mp search</code> ends with
+        <code>More results than the 20 shown: raise -n to see them.</code>, and the
+        TUI and the desktop app end their count with the same sentence and a
+        narrower search as the remedy.
       </p>
       <CommandTable commands={searchSyntax} />
 

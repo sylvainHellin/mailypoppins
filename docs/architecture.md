@@ -177,7 +177,8 @@ Re-record a deliberate change with `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --tes
 Neither is feature-gated and both pass on the pre-daemon tree, and `engine_imports` takes the client source root as an argument, which is what let P5-U10f re-point it at `clients/tui/src` without a rewrite.
 
 The third (P4-U15) walks the client-side sources - `src/main.rs`, `src/cutover.rs`, `src/config_cmd/` - for the 23 symbols that open a store, a secret backend, a network backend or an engine lock, and compares the result against `CLI_ENGINE_RESIDUE`, an inline table whose third column is why each survivor is still there.
-Seventeen rows in four groups: the server leg of `mp search` (`docs/parity-matrix.md` LST-06, which no Phase 4 slice contracted), the startup preamble (which runs before any socket and on the no-daemon list too), `mp config show`'s secret and token probes (`config.get` is contracted *not* to look a secret up), and the two `config.toml` wizards (one interactive transaction).
+Twelve rows in three groups: the startup preamble (which runs before any socket and on the no-daemon list too), `mp config show`'s secret and token probes (`config.get` is contracted *not* to look a secret up), and the two `config.toml` wizards (one interactive transaction).
+The fourth group, the server leg of `mp search` (`docs/parity-matrix.md` LST-06), left with PERSO-175, when `mp search` became a client of `message.search_server`.
 The TUI is outside this list because it is outside this crate: `clients/tui` cannot reach any of the 23 symbols, which is what the first two halves record.
 There is no `UPDATE_` switch for it: an entry is added by hand, with its reason, or it is not added.
 
@@ -413,7 +414,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `mp-core/search.rs` | The unified search grammar (#0086a): one parser (`parse`) to one AST (`Query`/`Clause`/`Term`, plus the `in:`/`message-id:` directives), the CLI-flag builder (`from_cli`), and four renderers (`to_imap` with a `has:attachment` post-filter split, `to_gmail`/`to_gmail_search_command` for `X-GM-RAW`, `to_graph` for one Graph request, a KQL `$search` or the Message-ID `$filter`, never both, `to_fts` for the local index). Malformed queries return a caret-pointed `ParseError`. `fts_expression` survives as a thin renderer wrapper. `mp-core/imap_query.rs` beside it holds the three pure IMAP string helpers it shares with `imap_client::search` (`normalize_message_id`, `bracketed_message_id`, `parse_date_to_imap`). |
 | `mp-core/selector.rs` + `src/selector.rs` | The `mp://account/mailbox/key` grammar: parse, resolve, format. Namespace fixed by the command, never sniffed. Split at the resolvers: the grammar is in `mp-core`, the two indexed lookups stay beside the store. |
 | `src/dump.rs` | `mp dump-mailbox`: path-free NDJSON envelope dump of the store, the parity harness for the data-layer rewrite |
-| `src/read_cmd.rs` | `mp show`, `mp list-messages` (#0062) and the `mp search --local` listing (#0043): the human read surface over `store::read` and `store::search`, offline, rendering to a `String` so the layout is testable. Not the dump: that is an oracle with a pinned record shape. |
+| `src/read_cmd.rs` | `mp show`, `mp list-messages` (#0062) and the `mp search --local` listing (#0043): the human read surface over `store::read` and `store::search`, offline, rendering to a `String` so the layout is testable. Not the dump: that is an oracle with a pinned record shape. It also holds what `mp search`'s server leg prints around the daemon's hits (`server_search_lines`, the `--json` record of a hit), decided from the `message.search_server` settle. |
 | `src/draft_cmd.rs` | Rendering for the draft slice (P4-U6): the bytes `mp list`, `mp validate` and the bare-selector dry run print, built from the daemon's `mp_protocol::draft` answers, listings to stdout and skip/collision warnings to stderr |
 | `src/cutover.rs` | `mp cutover` (#0040): the end of the file-era transition. Mints an `id:` into any draft that has none (the one-time draft "import"; the drafts directory never moved) and reports the dead file-era mailbox directories. Deletes nothing, by design. |
 | `mp-core/reconcile.rs` + `src/reconcile.rs` | iMIP invite reconciliation, folded over the rows at display time and never persisted: attendee `PARTSTAT`s (#0030) and, since #0031, the `(UID, RECURRENCE-ID)` cancellation/version fold (`fold_status`) that marks an event cancelled, superseded, or missing individual occurrences. Split at the readers: the fold is in `mp-core`, the three functions that open a store and read blobs stay. |
@@ -426,7 +427,8 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `src/ops.rs` | `ServerOp` (the remote half of a mutation) and its IMAP/Graph execution seam `run_op`, at library layer so the durable queue and the CLI can drive it without depending on `tui/` |
 | `src/pending_ops.rs` | The durable mutation queue (#0039): atomic local-write-plus-enqueue, the drain with backoff and per-kind rollback, crash-replay, `resume_account` (sync-tick drain) and `run_and_settle` (the CLI's synchronous single-op path) |
 | `src/engine_lock.rs` | One engine per account across processes (#0061): a non-blocking `flock` on `<account_dir>/store.lock`, released on exit or crash; taken by the `pending_ops` drain, by the outbox drain (#0116) and by the IMAP sync ingest (#0122) |
-| `src/graph.rs` | Microsoft Graph REST client: folders, fetch, sync, send, move, delete, read flags, search |
+| `src/graph.rs` | Microsoft Graph REST client: folders, fetch, sync, send, move, delete, read flags, search (the two passes `server_search` drives: `search_stubs`, `fetch_search_hits`) |
+| `src/server_search.rs` | The two passes of a server search over several mailboxes (PERSO-175): every mailbox's newest `limit` matches as stubs (key, `Date`, `Message-ID`), merged newest first and cut to `limit` (`select`), then only the survivors downloaded (`two_phase`), over a `SearchBackend` (`ImapSearch`, `GraphSearch`) into the caller's `SearchSink`; `message.search_server` is its one caller |
 | `mp-core/calendar.rs` + `mp-core/invite.rs` + `src/invite.rs` | iCalendar receive-side parsing and send-side building. `invite` is split at `plan_invite`, which reads the sending account. |
 | `mp-core/contacts/` + `src/contacts/` + `src/contacts_cmd.rs` | Contact index built from `messages` rows, frecency ranking, per-account cache at `account_dir(name)/contacts-cache.json`. CLI: `mp contacts {rebuild,stats,list}`. Split at the store read: the cache, the filter, the ranker, the matcher, the vCard writer and the observation merge are in `mp-core`, the rebuild and the send/sync hooks stay. |
 | `src/config_cmd/` | Config subcommands: init wizard, add-account, show, set-password, oauth2-login, reset-secrets, path |
@@ -451,7 +453,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | **`src/imap_client/`** | |
 | `mod.rs` | `ImapStream` wrapper, `open_imap_session()`, re-exports |
 | `pool.rs` | The persistent session pool (`checkout`, `PooledSession`) and `ServerCaps`, the strict post-LOGIN capability gate (#0041) |
-| `fetch.rs` | `fetch_new_raw_on_session` (the two-pass store fetch), `vanished_uids`, `fetch_emails*`, `search_on_session` (runs a pre-rendered `SEARCH`, the seam the unified grammar lowers to), the arrival-coverage arithmetic |
+| `fetch.rs` | `fetch_new_raw_on_session` (the two-pass store fetch), `vanished_uids`, `fetch_emails*`, `search_stubs_on_session` and `fetch_uids_on_session` (a server search's two passes: a pre-rendered `SEARCH`, the seam the unified grammar lowers to, answered as UID + `Date` + `Message-ID` stubs, then the survivors whole), the arrival-coverage arithmetic |
 | `store_sync.rs` | `ImapBackend` (the `SyncBackend` impl: the parallel per-mailbox fetch), `sync_mailboxes()`, `list_mailboxes()` |
 | `search.rs` | `build_imap_search_query()`, `FetchCriteria` (the structured direct-lookup path; the user grammar moved to `crate::search`, and `normalize_message_id` / `bracketed_message_id` / `parse_date_to_imap` moved to `mp_core::imap_query` and are re-exported from here) |
 | `watch.rs` | `watch_mailbox()` (IMAP IDLE) |
@@ -461,7 +463,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | **`src/daemon/`** (the files the daemon section above does not name) | |
 | `sync_outcome.rs` | `from_sync_result`: an engine `SyncResult` to the wire's `SyncCompleted` (P3b-U6), plus the `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME` fake the sync-slice tests arm |
 | `fake_transport.rs` | The daemon-side transport fake (P4-U12): `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` serves the SMTP submission and the Sent APPEND in process and logs each event, so the success half of the send slice is pinned without TLS |
-| `methods/message_server.rs` | `message.search_server` and `message.fetch` (P5-U10c): the TUI search overlay's server leg and its `f` ingest, moved off the client's own thread |
+| `methods/message_server.rs` | `message.search_server` and `message.fetch` (P5-U10c): the server search every client runs (the TUI overlay, the desktop search bar, `mp search`), with its dedup, attachment post-filter and hit stream, and the overlay's `f` ingest |
 | `state/revision.rs` | The newtypes the canonical state is addressed by: `Revision` (dense, monotonic per instance), `InstanceId`, `ConnectionId` |
 | **`clients/tui/src/`** | |
 | `lib.rs` | Event loop (`run_loop`), the session and event-stream drain, background result drain. One iteration drains the queued terminal events and the queued daemon events into the model and then paints once (#0108), both bounded by `MAX_COALESCED_EVENTS` and `COALESCE_BUDGET`, stopping early on an action that `Action::suspends_terminal()` flags. |
@@ -471,7 +473,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `events.rs` | `Incoming` (re-exported from `mp_client::events`), the subscription drain, `App::apply_event` and the watermark, and the rebootstrap a resync or a reconnect costs |
 | `actions.rs` | `handle_action()`, the side-effect dispatch for the `Action` variants `commands::dispatch` hands back: the client-only ones and the overlays |
 | `bg.rs` | `handle_bg_result()`, processing background task completions, and `land_sync`, shared by a tick this client asked for and one it heard about |
-| `helpers.rs` | Terminal suspend and resume, editor, `resolve_send_account`, and the server search leg (`LST-08`) that is still client-side |
+| `helpers.rs` | Terminal suspend and resume, editor, `resolve_send_account`, and `fetched_to_email_entry`, the list row of a server search hit (the search itself is the daemon's `message.search_server`, `LST-08`) |
 | `clipboard.rs` | System clipboard with OSC 52 fallback |
 | `event.rs` | Crossterm event polling: `poll_event` waits up to the 250 ms tick, `poll_pending_event` takes an already-queued event without waiting (the drain step, #0108). Both return `None` for an event we do not model. |
 | `theme.rs` | Named themes, semantic colour slots |

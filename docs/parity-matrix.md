@@ -99,7 +99,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - GUI location: not required (diagnostics and maintenance)
 - Validation: `tests/daemon_admin_slice.rs` (`mp_config_path_never_contacts_a_daemon`)
 - Status: client-side, confirmed (P4-U14)
-- Note: on `needs_daemon`'s no-daemon list for good, and from P4-U14 the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`: it is the only *whole command* a daemon-era binary answers in process. The startup preamble every command runs, and the server leg of `mp search` (`LST-06`), are the other in-process code paths; both are rows of `CLI_ENGINE_RESIDUE` in `tests/architecture_boundaries.rs`.
+- Note: on `needs_daemon`'s no-daemon list for good, and from P4-U14 the `UNMIGRATED` control row of `tests/daemon_parity_harness.rs`: it is the only *whole command* a daemon-era binary answers in process. The startup preamble every command runs is the other in-process code path, a row of `CLI_ENGINE_RESIDUE` in `tests/architecture_boundaries.rs`; the server leg of `mp search` (`LST-06`) left that table when it moved onto `message.search_server` (PERSO-175).
 
 ### ACC-05 Store an SMTP or IMAP password in the active secrets backend
 
@@ -305,11 +305,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: `mp search [query] [--mailbox] [field flags] [-n] [--full]`, `SEARCH_LONG_ABOUT` (`src/main.rs:49`), `src/search.rs`, `src/imap_client/search.rs`
-- Daemon surface: `message.search` as an `operation.*` for the server leg
+- Daemon surface: `message.search` (`--local`); `message.search_server`, a durable `operation.*` streaming hits, for the server leg
 - GUI location: clients/desktop (M1, #0131 read slice)
-- Validation: unit tests in `src/search.rs`, `tests/cli_help_snapshot.rs` for the grammar's help text
-- Status: the method exists (P5-U10c-I1), the CLI leg is not routed to it
-- Note: the read slice (P4-U3/U4) contracted `mp search --local` and nothing else, so the server leg still opens its own IMAP session or Graph client in `src/main.rs`, and the plain-IMAP `has:attachment` post-filter still reads the local index there. It is the largest of the four groups in `CLI_ENGINE_RESIDUE`. `message.search_server` `{account, query, mailboxes?, limit?, exclude_message_ids?}` is served since P5-U10c-I1 and the TUI's overlay runs on it; three user-visible behaviours stand between this leg and it, which is why routing it is a unit of its own. `mp search` prints `Search in <mailbox> failed` to stderr per mailbox as it goes, where the operation reports `unreachable` at the settle; `mp search --mailbox` names the server mailbox directly, so a name the account does not configure is searched rather than refused; and the plain-IMAP `has:attachment` warning is a sentence about a post-filter the daemon now applies itself.
+- Validation: unit tests in `src/search.rs`, `tests/cli_help_snapshot.rs` for the grammar's help text; `src/server_search.rs` (`every_mailbox_is_asked_for_the_whole_limit_and_only_the_survivors_download`, `the_newest_stubs_across_mailboxes_survive_the_cut`, `a_mailbox_holding_more_than_it_listed_cuts_the_answer`, `a_refused_mailbox_and_a_dropped_hit_leave_the_rest_alone`), `src/daemon/methods/message_server.rs` (`a_target_is_a_configured_mailbox_or_any_server_folder`, `the_first_pass_filters_before_the_limit_is_spent`), `src/read_cmd.rs` (`a_failed_mailbox_is_reported_after_the_answer`, `the_store_coverage_warning_and_the_cut_come_from_the_settle`), `tests/daemon_server_leg_slice.rs`
+- Status: routed (PERSO-175): `mp search` without `--local` is a client of `message.search_server`, the call the TUI overlay and the desktop search bar make
+- Note: `--limit` is the number of hits the whole search answers with: the daemon asks every mailbox for its newest `limit` matches as stubs (UID or Graph id, `Date`, `Message-ID`), merges them newest first, cuts to `limit` and downloads only the survivors. The settle's `truncated` and `capped` (Microsoft Graph's 1000-result `$search` cap) feed `--json`'s `truncated`, the "raise -n" line and the cap line. The three behaviours that kept the leg in process were settled with Sylvain on 2026-10-22: a mailbox the server refuses is printed as `Search in <mailbox> failed` after the results, from the settle's `unreachable`; `--mailbox` names a configured mailbox or any folder the server lists; and the plain-IMAP `has:attachment` stderr warning, result-header note and JSON fields read the settle's `local_terms`.
 - Note: the grammar covers `from:`, `to:`, `cc:`, `subject:`, `body:`, `filename:`, `has:attachment`, `before:`, `after:` with `since:` as an alias, quoted phrases, `OR` groups, `in:`, and `message-id:`; `filename:` resolves only on Gmail, Exchange, or the local index.
 
 ### LST-07 Search the local ranked full-text index across every synced mailbox
@@ -334,7 +334,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
   Deduplication is by Message-ID and it is the daemon's: the client sends the Message-IDs the local pass is showing as `exclude_message_ids` and the settle counts them in `deduplicated`, so a message found twice appears once and the count is a fact any client reproduces.
   The local pass is `message.search` with `body: true` since P5-U6.
   The overlay holds a parsed query and the method takes what a user typed, so the query is rendered back into the grammar (`search::to_query_string`) rather than sent as an engine enum.
-  A mailbox the server refuses lands in `unreachable` and does not fail the search; `LST-06`'s CLI leg is not routed through it yet, for the reasons that row gives.
+  A mailbox the server refuses lands in `unreachable` and does not fail the search; `LST-06`'s CLI leg runs on the same call since PERSO-175.
 - Note: the desktop form differs from the overlay in two places. Its results are the list pane's rather than a pane of the dialog, so a hit's keys are `LST-09`'s list keys and the TUI's headers and body panes are the reader; and Search In stays live while the Advanced line greys the other fields, since the TUI still applies the scope to an Advanced query it greys. The desktop's `search_query` repeats the TUI's `SearchForm::build_query` over `mp-core`, since no crate under `crates/` holds the form's lowering yet.
 
 ### LST-09 Act on a search result without leaving the overlay

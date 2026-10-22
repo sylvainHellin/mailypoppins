@@ -847,14 +847,16 @@ A replay is `durable`: a CLI that stops waiting leaves the command running to it
 
 ### The server search leg
 
-Two operations carry what the TUI's search overlay still does in process: the merged server search behind `ff` (`LST-08`, and with it `LST-06`'s unmigrated CLI residue) and the `f` that ingests a server-only hit (`LST-09`).
+Two operations carry every client's server search: the merged search behind the TUI's `ff`, the desktop search bar's server leg and `mp search` without `--local` (`LST-08`, `LST-06`), and the `f` that ingests a server-only hit (`LST-09`).
 
 ```text
-message.search_server {account, query, mailboxes?: [str], limit?, exclude_message_ids?: [str]}
+message.search_server {account, query, mailboxes?: [str], limit?, exclude_message_ids?: [str],
+                       from?, to?, cc?, subject?, body_query?, filename?, has_attachment?,
+                       after?, before?}
         -> {operation_id}
    streams  state.event kind `message.server_hit`, payload {operation_id, hit}
    settles  {account, query, hits, deduplicated, unreachable: [{mailbox, error}],
-             coverage: "server"|"local", local_terms: [str]}
+             coverage: "server"|"local", local_terms: [str], truncated, capped}
 
 message.fetch {account, mailbox, message_id} -> {operation_id}
    settles  {account, mailbox, uid, row_id, selector, already_present}
@@ -869,25 +871,34 @@ A hit is `mp_protocol::listing::ServerSearchHit`: the envelope the overlay rende
 A server-only hit carries no row and says so with `null` rather than with an empty string, because "not in the store" is the fact every row-dependent key of the overlay branches on.
 
 **`query` is the grammar a user types**, not an engine enum: the overlay holds a parsed `search::Query` and renders it back with `search::to_query_string`, so one parser serves every backend, which is `LST-06`'s whole point.
-`mailboxes` is the sidebar mailboxes the overlay asked for and defaults to every one of the account's that has a server name.
-A mailbox is named by its sidebar label **or** by its server name, which is one spelling more than `message.list` accepts: the overlay holds a target of `(label, server_name)` and the search grammar's own `in:` directive is matched against both, so the wire takes whichever the caller has in hand rather than making it re-derive the other.
-`limit` is the total hit budget across the mailboxes, defaulting to 50 and split per mailbox with a floor of five: a per-mailbox limit would make a five-folder search cost five times what a one-folder search costs for the same number.
-`mp search` no longer splits it (PERSO-175): the CLI asks every mailbox for the whole limit, merges newest first and cuts to it, so routing the CLI onto this method needs that budget too.
-A query the grammar cannot parse is `-32602`, and so is a mailbox the account does not have.
+The field filters are `message.search`'s, under the same names (`body_query` for `--body`), so `mp search`'s flags travel as they do for `--local` and build the same query with `search::from_cli`.
+`mailboxes` is the mailboxes the caller asked for; absent, the query's own `in:` names the one mailbox, and without that every one of the account's that has a server name is searched.
+A configured mailbox is named by its sidebar label **or** by its server name, which is one spelling more than `message.list` accepts: the overlay holds a target of `(label, server_name)` and the search grammar's own `in:` directive is matched against both, so the wire takes whichever the caller has in hand rather than making it re-derive the other.
+Any other name is a folder on the server, searched under that name and reported under it, the rule mailbox discovery (#0141) brings; a name the server does not list fails that one mailbox into `unreachable` and not the call.
+A query the grammar cannot parse is `-32602`, and so is an empty mailbox name.
+
+**`limit` is the number of hits the whole search answers with**, defaulting to 50 (PERSO-175).
+The search runs in two passes, so a five-folder search downloads no more than a one-folder search for the same number.
+The first pass asks every mailbox for its newest `limit` matches with nothing but the key the second pass downloads by and the two headers the merge reads: on IMAP the UID with `BODY.PEEK[HEADER.FIELDS (DATE MESSAGE-ID)]`, on Graph the message id with `$select=id,internetMessageId,receivedDateTime`.
+The stubs of every mailbox are merged newest first by `Date` and cut to `limit`, and the second pass downloads the survivors whole, mailbox by mailbox: one `UID FETCH (BODY.PEEK[] FLAGS)` per mailbox on IMAP, `/$batch` chunks of twenty on Graph.
+The hits stream as each mailbox's survivors land, so a client that lists them sorts by `date_sort`; the daemon has already cut them.
+`truncated` is true when a mailbox matched more than `limit` or the merge dropped stubs, and `capped` when Graph's 1000-result `$search` cap stopped a mailbox short of `limit`, which no larger limit gets past.
+A client says so under its hits: `mp search` prints "More results than the N shown: raise -n to see them." (or the cap sentence), and the TUI footer and the desktop status bar end with the same sentence and a narrower search as the remedy, since neither takes a limit.
 
 **Deduplication is by `Message-ID` and it is the daemon's.**
 The local pass has already run when the server leg starts, so the client sends the Message-IDs it is showing as `exclude_message_ids` and the daemon drops a hit that matches one, counting it in `deduplicated`.
+The exclusions, the dedup across mailboxes and the attachment post-filter below all run on the first pass, so a dropped hit takes no place under the limit and is never downloaded.
 A hit that resolves to a local row is not dropped: it arrives with its `row_id` and `selector` filled in, because it is a row the overlay can act on.
 
 **A mailbox that fails does not fail the search.**
-The in-process leg logs a warning per mailbox and keeps going, because four folders of answers are worth having when the fifth is refused; `unreachable` is that list and the operation still `succeeded`.
+Four folders of answers are worth having when the fifth is refused, so `unreachable` lists the refused ones and the operation still `succeeded`; `mp search` prints one `Search in <mailbox> failed: <error>` line per entry on stderr after its results.
 What does fail the operation is a credential that cannot be resolved, which happens once, before any mailbox is selected.
 An account that configures no server at all is `-32006` with `{account, state: "local_only"}` at the call, the same refusal a sync of it makes.
 
 **The settle says which terms the store answered.**
-A plain IMAP server has no search key for `has:attachment`, so the daemon searches without it and keeps the hits the local store marks as carrying an attachment; a message the account has not synced cannot be among them.
+A plain IMAP server has no search key for `has:attachment`, so the daemon searches without it and keeps the hits the local store marks as carrying an attachment; a message the account has not synced, or one without a `Message-ID`, cannot be among them.
 The settle then carries `coverage: "local"` and `local_terms: ["has:attachment"]`, and `coverage: "server"` with `local_terms: []` when the server answered every term, as on Gmail and Graph; the two fields mean what `mp search --json`'s do.
-A client puts the caveat `mp search` prints, `local store only: has:attachment`, after its count, so an empty or short answer does not read as "no such mail".
+A client puts the caveat `mp search` prints, `local store only: has:attachment`, after its count, so an empty or short answer does not read as "no such mail"; `mp search` also keeps its stderr warning and its `--json` `coverage` and `local_terms`, all read off this settle.
 The settle is `mp_protocol::listing::ServerSearchSettled`.
 
 **`message.fetch` is idempotent rather than a refusal.**
@@ -1424,7 +1435,7 @@ The bootstrap snapshot's `holds` array stopped being empty: it carries every win
 
 P5-U10c added three methods, one row field and one event kind, all additive; no field was renamed, none was dropped, and no command's output moved.
 `message.materialise_markdown` `{account, row_id|id|selector, mailbox?}` -> `{handle, path, name, bytes, expires_at}` is the third materialiser, writing `store::read::render_markdown` at mode 0444 under the family's own handle directory and pinning the row's body blob for the handle's life (`RD-06`, #0075); it is the one member of the family that takes `row_id`.
-`message.search_server` `{account, query, mailboxes?, limit?, exclude_message_ids?}` and `message.fetch` `{account, mailbox, message_id}` are durable operations answering with `{operation_id}` (`LST-08`, `LST-09`, and with the first of them `LST-06`'s CLI residue); the search streams one `message.server_hit` event per hit and settles `{account, query, hits, deduplicated, unreachable}`, and the fetch settles `{account, mailbox, uid, row_id, selector, already_present}`.
+`message.search_server` `{account, query, mailboxes?, limit?, exclude_message_ids?}` and `message.fetch` `{account, mailbox, message_id}` are durable operations answering with `{operation_id}` (`LST-08`, `LST-09`); the search streams one `message.server_hit` event per hit and settles `{account, query, hits, deduplicated, unreachable}`, and the fetch settles `{account, mailbox, uid, row_id, selector, already_present}`.
 `message.search_server` is deliberately not `message.list_server`, which P4-U10 gave to `mp fetch`'s query.
 A `message.list` row and a `message.search` hit gained `selector`, the canonical `mp://` of the row, so a clipboard copy costs no store read (`RD-07`); it is the fifteenth key of a row, and the fixture and the two key lists that pin the shape moved with it (`crates/mp-protocol/fixtures/message.list.response.json`, `tests/daemon_read_only_methods.rs`, `tests/daemon_protocol_fixtures.rs`).
 `mp_protocol::listing` is the new module: `MessageListRow`, `MessageListing`, `MessageFlags` and `ServerSearchHit`, the typed decode of a listing for a client that must not link the store.
@@ -1507,3 +1518,10 @@ It is declared in `MESSAGE_CONVERSATION_METHOD_SPECS`, an array of its own for t
 
 PERSO-179 added `own` to `ThreadMessage`, one member, additively; no field was renamed, none was dropped, and no command's output moved.
 It is `default` on the way in, so a row from a daemon that predates it claims no member as the user's, and the fixtures `message.thread.response.json` and `message.thread.drafts.response.json` carry it.
+
+PERSO-175 changed what `message.search_server`'s `limit` means and added two members to its settle and nine optional parameters, all additively on the wire; no field was renamed and none was dropped.
+`limit` is the number of hits the whole search answers with rather than a budget split per mailbox with a floor of five: every mailbox is asked for its newest `limit` matches as stubs, the stubs are merged newest first and cut to `limit`, and only the survivors are downloaded.
+`truncated` says more matched than the hits hold and `capped` says Microsoft Graph's 1000-result `$search` cap (`mp_protocol::listing::GRAPH_SEARCH_CAP`) stopped a mailbox; both are `default` on the way in, so a settle from an older daemon reads as an answer nobody cut.
+The method took `message.search`'s field filters, `from`, `to`, `cc`, `subject`, `body_query`, `filename`, `has_attachment`, `after` and `before`, reads the query's `in:` when `mailboxes` is absent, and searches a mailbox name the account does not configure as a server folder instead of refusing it with `-32602`.
+`mp search` without `--local` moved onto the method, so its output is now read off the settle: the per-mailbox failure lines print after the results from `unreachable`, and Graph hits carry the configured mailbox they came from.
+The key list in `tests/daemon_server_leg_slice.rs` is nine names.
