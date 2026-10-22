@@ -39,6 +39,10 @@ const DESCRIPTION: Record<ComposeDialog["kind"], string> = {
   recipients: "Rewrites the recipient and subject lines of the draft file; the body stays as it is.",
 };
 
+/** `cF`'s wizard: the forward's, the message carried as its `.eml` (PERSO-174). */
+const ATTACHED_DESCRIPTION =
+  "The forward carries the whole message as an .eml attachment, keeps these recipients and this subject, then opens in your editor.";
+
 const SUBMIT: Record<ComposeDialog["kind"], string> = {
   new: "Create and edit",
   forward: "Forward and edit",
@@ -75,6 +79,7 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
   const seeded = dialog?.kind === "new" && Boolean(dialog.to);
   const open = dialog !== null;
   const kind = dialog?.kind ?? "new";
+  const attached = dialog?.kind === "forward" && dialog.as_attachment;
   const account = dialog?.account ?? null;
 
   // A new dialog starts from its own fields.
@@ -177,8 +182,8 @@ export function ComposeWizard({ dialog, onOpenChange }: ComposeWizardProps) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent initialFocus={seeded ? subjectRef : toRef} data-slot="compose-wizard" data-kind={kind} className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{TITLE[kind]}</DialogTitle>
-          <DialogDescription>{DESCRIPTION[kind]}</DialogDescription>
+          <DialogTitle>{attached ? "Forward as attachment" : TITLE[kind]}</DialogTitle>
+          <DialogDescription>{attached ? ATTACHED_DESCRIPTION : DESCRIPTION[kind]}</DialogDescription>
         </DialogHeader>
         <form
           ref={formRef}

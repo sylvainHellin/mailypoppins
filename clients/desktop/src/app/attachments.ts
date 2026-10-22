@@ -1,7 +1,7 @@
-// Attachments, the browser and Markdown renditions and the fetch of a
-// server-only hit (clients/desktop/docs/reader.md, "Attachments"): the TUI's
-// `to`, `ts`, `tb`, `ta` and `e` on a received message, and its search
-// overlay's `f`, here `F`. What the keys, the palette and the buttons run;
+// Attachments, the export, the browser and Markdown renditions and the fetch
+// of a server-only hit (clients/desktop/docs/reader.md, "Attachments"): the
+// TUI's `to`, `ts`, `te`, `tb`, `ta` and `e` on a received message, and its
+// search overlay's `f`, here `F`. What the keys, the palette and the buttons run;
 // the dialogs call the helpers at the bottom.
 
 import type { Dispatch } from "react";
@@ -125,6 +125,19 @@ export async function saveAttachment(s: AppState, dispatch: Dispatch<Action>): P
   }
   if (items.length === 0) return notice(dispatch, "No attachments");
   dispatch({ type: "open_attachments", dialog: { kind: "save", account: subj.account, row_id: subj.row_id, subject: subj.subject, items } });
+}
+
+/**
+ * `te` (PERSO-174): the Save dialog's directory field for the message
+ * itself, written as `<date>_<subject>.eml` by `message_export`, `mp
+ * export`'s copy; a hit asks for the fetch, and a draft is a file already.
+ */
+export function exportMessage(s: AppState, dispatch: Dispatch<Action>): void {
+  const subj = cursorSubject(s);
+  if (!subj) return;
+  if (subj.kind === "hit") return notice(dispatch, isOpenable(subj.hit) ? "Open the result first" : FETCH_FIRST);
+  if (subj.kind === "draft") return notice(dispatch, "Export needs a received message; a draft is a file already");
+  dispatch({ type: "open_attachments", dialog: { kind: "export", account: subj.account, row_id: subj.row_id, subject: subj.subject } });
 }
 
 /**
@@ -262,6 +275,24 @@ export async function saveParts(
   return null;
 }
 
+/**
+ * Export the message into `dir` as typed; resolves to why nothing was
+ * written, or null. The notice names the file as it landed.
+ */
+export async function exportTo(account: string, row_id: number, dir: string, dispatch: Dispatch<Action>): Promise<string | null> {
+  let exported;
+  try {
+    exported = await cmd.messageExport(account, row_id, dir.trim());
+  } catch (e: unknown) {
+    return asGuiError(e).message;
+  }
+  dispatch({ type: "save_dir", dir });
+  dispatch({ type: "overlay", overlay: null });
+  const landed = exported.path.slice(exported.path.lastIndexOf("/") + 1);
+  dispatch({ type: "activity", kind: "applied", account, text: `Exported ${landed} to ${dir.trim()}` });
+  return null;
+}
+
 /** `path` with the home directory written `~`, the form the fields take and a draft keeps portable. */
 export function tildePath(path: string, home: string): string {
   const h = home.replace(/\/+$/, "");
@@ -284,7 +315,7 @@ function pickerStart(typed: string, home: string): string | null {
  * the user closed the picker; rejects with a sentence when the window has no
  * picker (a browser under `pnpm dev`), and the typed field remains.
  */
-export async function pickPath(kind: "directory" | "file", typed: string): Promise<string | null> {
+export async function pickPath(kind: "directory" | "file", typed: string, title?: string): Promise<string | null> {
   let home = "";
   try {
     home = await homeDir();
@@ -296,7 +327,7 @@ export async function pickPath(kind: "directory" | "file", typed: string): Promi
     picked = await openPicker({
       directory: kind === "directory",
       multiple: false,
-      title: kind === "directory" ? "Save attachments to" : "Attach file",
+      title: title ?? (kind === "directory" ? "Save attachments to" : "Attach file"),
       defaultPath: pickerStart(typed, home) ?? undefined,
     });
   } catch (e: unknown) {

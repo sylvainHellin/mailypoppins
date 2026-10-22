@@ -98,7 +98,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `draft_discard` | `account`, `ids` | `DraftDiscardBatch` |
 | `draft_create` | `account`, `name`, `signature?`, `no_signature?`, `headers?: DraftHeaders`, `body?` | `DraftCreated` |
 | `draft_reply` | `account`, `row_id`, `all`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
-| `draft_forward` | `account`, `row_id`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
+| `draft_forward` | `account`, `row_id`, `as_attachment?`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
 | `draft_from_message` | `account`, `kind: DraftKind`, `message: DraftMessage` | `DraftCreated` |
 | `draft_path` | `account`, `id` | `DraftLocation` |
 | `draft_approve` | `account`, `ids` | `DraftStatusBatch` |
@@ -141,6 +141,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `message_fetch` | `account`, `mailbox` (label or server name), `message_id` | `FetchOutcome`, once the fetch has ended |
 | `attachment_open` | `account`, `row_id`, `part` | `OpenedFile` |
 | `attachment_save` | `account`, `row_id`, `parts`, `dest_dir` (absolute or `~`) | `SavedAttachments` |
+| `message_export` | `account`, `row_id`, `dest_dir` (absolute or `~`) | `ExportedMessage` |
 | `html_open` | `account`, `row_id` | `OpenedFile`, or `null` for a message with no HTML part |
 | `hit_html_open` | `html` | `OpenedFile` |
 | `draft_html_open` | `account`, `id` | `OpenedFile` |
@@ -693,6 +694,9 @@ A message whose sender wrote no markup is the daemon's `-32602`, which `html_ope
 The copy is `mp_core::parse::save_attachment`, so a name the directory already has becomes `name_1.ext`, then `name_2.ext`.
 A part that fails lands in `failed` with its `GuiError`, and the others still go.
 
+`message_export` is the same copy for the message itself (PERSO-174): `message.materialise_eml` writes its raw RFC 822 bytes as `<date>_<subject>.eml`, `mp export`'s file, and the copy into `dest_dir` takes the `_1` rule before the handle is released.
+A row stored without its raw message (every Graph row) is answered from the server, so the call waits up to 90 seconds, as `draft_forward` with `as_attachment` does, which attaches the same bytes.
+
 ```ts
 type OpenedFile = { name: string; path: string };
 type SavedAttachments = {
@@ -1003,14 +1007,14 @@ It re-arms a `failed` row to `pending_send`, publishes the invalidation, and 0.4
 The fixture files no Sent copy for a retried row, and it refuses a second retry of a re-armed row while the first runs, where the daemon admits it and settles on what it finds.
 `send.outbox_discard` removes the row, publishes the invalidation, and answers `{discarded, row_id, message_id, revision}`; a row it does not have is `-32602`.
 
-`message.materialise_attachment` writes a small file naming the part, `message.materialise_html` the fixture's rendition of the row's HTML body, and `message.materialise_markdown` a frontmatter of subject, sender and date over the row's body, named after the subject, under `handles/<handle>/` in the run directory; a part the row does not have, a row with no HTML body and a row that does not exist are `-32602`.
+`message.materialise_attachment` writes a small file naming the part, `message.materialise_html` the fixture's rendition of the row's HTML body, `message.materialise_markdown` a frontmatter of subject, sender and date over the row's body, named after the subject, and `message.materialise_eml` the row's envelope over its body as `<date>_<subject>.eml`, under `handles/<handle>/` in the run directory; a part the row does not have, a row with no HTML body and a row that does not exist are `-32602`.
 `message.release_handle` removes the handle's directory.
 `message.fetch` settles at once: a `Message-ID` a row of the account carries answers `already_present`, the fixture's server-only hit (`<server-only@fixture.example>`) lands at the top of the mailbox the hit names, by label or slug, with a counts `state.invalidate`, and any other message fails the operation as not on the server.
 The system opener is never run in fixture mode: each file open is journalled, and the tests read the journal.
 
 The drafts are real files in a per-run directory, `<temp>/mp-desktop-fixture-<pid>/drafts/<account>/`, written at start from `drafts.json`'s rows and `draft-bodies.json`.
 Every call rescans that directory, as the daemon's draft queries do, so the listing, the counts and the bootstrap's drafts follow the files.
-`draft.create`, `draft.reply`, `draft.forward` and `draft.create_from_message` write through the same `mp_core::draft` builders as the daemon; a reply or forward is renamed `<id>.md`, a created draft keeps its name, and a forward carries the source's attachments as small files under `attachments/`.
+`draft.create`, `draft.reply`, `draft.forward` and `draft.create_from_message` write through the same `mp_core::draft` builders as the daemon; a reply or forward is renamed `<id>.md`, a created draft keeps its name, and a forward carries the source's attachments as small files under `attachments/`, or with `as_attachment` the row's `.eml`, its envelope over its body, named by `mp_core::parse::eml_name`, as `message.materialise_eml` writes it.
 `signature.list` answers from `signatures.json`, whose `work` default is spliced into a new `work` draft.
 
 The signatures are `signatures.json`'s `work` and `short`, with `work` the default of `work`.

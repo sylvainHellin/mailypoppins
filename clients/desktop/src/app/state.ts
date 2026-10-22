@@ -588,7 +588,8 @@ export type UpdateInfo = { current: string; last_check: string | null; reason: s
  */
 export type ComposeDialog =
   | { kind: "new"; account: string; to?: string }
-  | { kind: "forward"; account: string; row_id: number; subject: string }
+  /** `as_attachment`: `cF`, the message carried as its `.eml` (PERSO-174). */
+  | { kind: "forward"; account: string; row_id: number; subject: string; as_attachment: boolean }
   | { kind: "recipients"; account: string; draftId: string; to: string; cc: string; bcc: string; subject: string };
 
 /** One attachment a dialog lists: a message's part, or a draft's entry by its index. */
@@ -608,6 +609,8 @@ export type AttachmentOwner =
 export type AttachmentDialog =
   | { kind: "open"; owner: AttachmentOwner; subject: string; items: AttachmentItem[] }
   | { kind: "save"; account: string; row_id: number; subject: string; items: AttachmentItem[] }
+  /** `te`: the message itself as `<date>_<subject>.eml`, into a directory (PERSO-174). */
+  | { kind: "export"; account: string; row_id: number; subject: string }
   | { kind: "attach"; account: string; draftId: string; subject: string };
 
 /** The Save dialog's directory until one is used: `attachments.rs`'s `DEFAULT_SAVE_DIR`. */

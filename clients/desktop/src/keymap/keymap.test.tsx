@@ -442,6 +442,26 @@ describe("compose keys (the TUI's)", () => {
     await waitFor(() => expect(mock.editorOpens).toHaveLength(1));
   });
 
+  it("cF forwards as attachment through the same wizard, draft_forward with as_attachment (PERSO-174)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("jj");
+    await user.keyboard("cF");
+    const dialog = await screen.findByRole("dialog", { name: "Forward as attachment" });
+    expect(within(dialog).getByLabelText("Subject")).toHaveValue("Fwd: Angebot Dachsanierung");
+    await waitFor(() => expect(within(dialog).getByLabelText("To")).toHaveFocus());
+    mock.failing.set("contact_search", new Error("off"));
+    await user.keyboard("kim@example.com{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(callsOf("draft_forward")).toHaveLength(1));
+    expect(callsOf("draft_forward")[0]).toMatchObject({
+      account: "work",
+      row_id: 1002,
+      as_attachment: true,
+      headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: Angebot Dachsanierung" },
+    });
+    await waitFor(() => expect(mock.editorOpens).toHaveLength(1));
+  });
+
   it("on a server-only hit, e asks for the fetch first and opens no editor (PERSO-92)", async () => {
     const { user } = renderApp();
     await shellReady();
@@ -493,6 +513,10 @@ describe("compose keys (the TUI's)", () => {
     expect(callsOf("draft_forward")).toEqual([]);
     expect(screen.queryByRole("dialog", { name: "Forward" })).toBeNull();
     await waitFor(() => expect(mock.editorOpens).toHaveLength(3));
+    // A hit has no stored message to carry as its .eml (PERSO-174).
+    await user.keyboard("cF");
+    expect(await screen.findByText("A forward as attachment needs the message in the store: fetch it first (F)")).toBeInTheDocument();
+    expect(callsOf("draft_from_message")).toHaveLength(3);
   });
 
   it("e on a message opens its Markdown rendition in the editor and Enter focuses the reader; on a draft e edits it (PERSO-92)", async () => {

@@ -117,6 +117,7 @@ The keys act on the cursor message from the list or the reader, as the TUI's MES
 
 - `to` opens a message's only attachment at once, and over several opens the "Open attachment" dialog, one button per part, the first focused; `j`/`k` and the arrows move between the parts, Enter opens the focused one, `q` closes.
 - `ts` opens the Save dialog with every part checked.
+- `te` opens the Export dialog for the message itself (PERSO-174).
 - A message with none says "No attachments", the TUI's line.
 
 The Save dialog ("Save attachment", or "Save attachments" over several parts) has a checkbox per part and a Directory field, the TUI's directory prompt, with "Browse…" beside it, the system's folder picker.
@@ -126,6 +127,10 @@ Browse opens the folder picker at the field's directory, `~` expanded (a relativ
 The picker is `tauri-plugin-dialog`'s `open` (`directory: true`), allowed by `dialog:allow-open` ([rust-layer.md](rust-layer.md), "App CSP").
 Where no picker opens, such as a browser under `pnpm dev`, the alert says "The file picker did not open (<why>); type the path instead" and the field stays; the vitest mock answers whatever path a test sets.
 A save that went through closes the dialog and says "Saved 2 files to ~/Downloads" in the activity area, with the directory as typed; parts that failed turn it into an alert naming why.
+
+The Export dialog ("Export message", `te` or the palette's "Export message as .eml") has the Save dialog's Directory field and Browse, and shares its last directory both ways.
+Export calls `message_export`, which copies the daemon's `message.materialise_eml` file, the raw RFC 822 message `mp export` writes as `<date>_<subject>.eml`, into the directory with the `_1` rule and releases the handle ([rust-layer.md](rust-layer.md), "Attachments").
+It says "Exported <file> to <directory>" in the activity area; a draft says it is a file already, and a server-only hit asks for the fetch first.
 
 ## The browser rendition
 

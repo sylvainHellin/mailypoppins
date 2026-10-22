@@ -236,6 +236,34 @@ describe("the reader's attachments", () => {
     await waitFor(() => expect(screen.getAllByText("Saved 1 file to ~/Mail/Q3")).toHaveLength(2));
   });
 
+  it("te exports the message as its .eml into the directory the Export dialog names, the Save dialog's last (PERSO-174)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    await user.keyboard("te");
+    const dialog = await screen.findByRole("dialog", { name: "Export message" });
+    const dir = within(dialog).getByRole("textbox", { name: "Directory" });
+    expect(dir).toHaveValue("~/Downloads");
+    await waitFor(() => expect(dir).toHaveFocus());
+    await user.clear(dir);
+    await user.type(dir, "Mail{Enter}");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("is not an absolute path");
+    mock.picked = "/home/fixture/Mail/Archive";
+    await user.click(within(dialog).getByRole("button", { name: "Browse for a directory" }));
+    await waitFor(() => expect(dir).toHaveValue("~/Mail/Archive"));
+    expect(mock.pickerCalls[mock.pickerCalls.length - 1]).toMatchObject({ directory: true, title: "Export message to" });
+    expect(within(dialog).getByRole("button", { name: "Export" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(argsOf("message_export").map((a) => a?.dest_dir)).toEqual(["Mail", "~/Mail/Archive"]);
+    expect(argsOf("message_export")[1]).toEqual({ account: "work", row_id: 1001, dest_dir: "~/Mail/Archive" });
+    expect(await screen.findByText("Exported 2026-09-29_Quarterly ledger review.eml to ~/Mail/Archive")).toBeInTheDocument();
+    // The next save offers the directory the export used.
+    await user.keyboard("ts");
+    const save = await screen.findByRole("dialog", { name: "Save attachment" });
+    expect(within(save).getByRole("textbox", { name: "Directory" })).toHaveValue("~/Mail/Archive");
+  });
+
   it("to opens one attachment at once and picks among several; ts saves the checked parts", async () => {
     const { user } = renderApp(1400, twoParts);
     await shellReady();

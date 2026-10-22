@@ -78,22 +78,24 @@ function scrollReader(by: number | "top" | "bottom"): void {
 
 /**
  * The continuations that act on the cursor row: the `c` compose family's
- * MESSAGE (`cr`, `ca`, `cf`) and List (`ce`, `cA`, `cD`) keys and the `t`
- * family's attachment keys, from the list or the reader, never the
+ * MESSAGE (`cr`, `ca`, `cf`, `cF`) and List (`ce`, `cA`, `cD`) keys and the
+ * `t` family's attachment keys, from the list or the reader, never the
  * sidebar. `cn` is global.
  */
 const COMPOSE_ROW_KEYS: Record<string, ActionId> = {
   cr: "reply",
   ca: "reply_all",
   cf: "forward",
+  cF: "forward_as_attachment",
   ce: "edit_recipients",
   cA: "approve",
   cD: "demote",
   cX: "send_all",
-  // The `t` family's attachment keys (MESSAGE `to`, `ts`, `tb`; List `ta`)
-  // and the MESSAGE RSVP (`tv`).
+  // The `t` family's attachment keys (MESSAGE `to`, `ts`, `te`, `tb`; List
+  // `ta`) and the MESSAGE RSVP (`tv`).
   to: "open_attachment",
   ts: "save_attachment",
+  te: "export_message",
   tb: "open_html",
   ta: "attach_file",
   tv: "rsvp",

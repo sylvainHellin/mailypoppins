@@ -312,17 +312,28 @@ export function reply(src: ComposeSource | null, all: boolean, dispatch: Dispatc
  * write, and the draft keeps them over what the builder derives. A
  * server-only hit is forwarded at once, as the TUI's search overlay does:
  * `draft_from_message` takes no recipients.
+ *
+ * `cF` (`asAttachment`) is the same wizard over `draft_forward`'s
+ * `as_attachment`, the message carried as its `.eml` (PERSO-174); a hit has
+ * no stored message to carry, so it asks for the fetch first.
  */
-export function forward(src: ComposeSource | null, dispatch: Dispatch<Action>): void {
+export function forward(src: ComposeSource | null, dispatch: Dispatch<Action>, asAttachment = false): void {
   if (!src) {
     notice(dispatch, "Forward needs a received message; a draft has none to quote");
     return;
   }
   if (src.kind === "hit") {
+    if (asAttachment) return notice(dispatch, "A forward as attachment needs the message in the store: fetch it first (F)");
     void created(dispatch, src.account, "Forward failed", cmd.draftFromMessage(src.account, FROM_HIT.forward, src.message));
     return;
   }
-  const dialog: ComposeDialog = { kind: "forward", account: src.account, row_id: src.row_id, subject: fwdSubject(src.subject) };
+  const dialog: ComposeDialog = {
+    kind: "forward",
+    account: src.account,
+    row_id: src.row_id,
+    subject: fwdSubject(src.subject),
+    as_attachment: asAttachment,
+  };
   dispatch({ type: "open_compose", dialog });
 }
 
@@ -557,7 +568,7 @@ export async function submitCompose(dialog: ComposeDialog, fields: ComposeFields
     const sig = fields.signature;
     const signature = sig === null ? { no_signature: true } : sig ? { signature: sig } : {};
     if (dialog.kind === "forward") {
-      draft = await cmd.draftForward(account, dialog.row_id, headers, signature);
+      draft = await cmd.draftForward(account, dialog.row_id, headers, { ...signature, as_attachment: dialog.as_attachment });
     } else {
       const body = fields.body?.trim() ? fields.body : undefined;
       draft = await cmd.draftCreate(account, draftName(headers.subject), { ...signature, headers, ...(body ? { body } : {}) });

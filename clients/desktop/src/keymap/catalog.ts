@@ -65,6 +65,8 @@ export type ActionId =
   | "reply"
   | "reply_all"
   | "forward"
+  /** `cF`: the forward wizard, the message carried as its `.eml` (PERSO-174). */
+  | "forward_as_attachment"
   | "open_editor"
   | "edit_recipients"
   | "approve"
@@ -76,6 +78,8 @@ export type ActionId =
   | "outbox_discard"
   | "open_attachment"
   | "save_attachment"
+  /** `te`: the message as `<date>_<subject>.eml`, into a directory (PERSO-174). */
+  | "export_message"
   | "open_html"
   | "attach_file"
   | "fetch_hit"
@@ -159,6 +163,7 @@ const BY_ACTION: Record<string, Binding> = {
   Reply: { id: "reply" },
   "Reply all": { id: "reply_all" },
   Forward: { id: "forward" },
+  "Forward as attachment (.eml)": { id: "forward_as_attachment" },
   Archive: { id: "archive" },
   Delete: { id: "delete" },
   "Toggle read/unread": { id: "toggle_read" },
@@ -175,6 +180,7 @@ const BY_ACTION: Record<string, Binding> = {
   "Collapse the conversation (conversation view)": { id: "collapse_conversation" },
   "Open attachment": { id: "open_attachment" },
   "Save attachment to disk": { id: "save_attachment" },
+  "Export message as .eml": { id: "export_message" },
   "Open HTML in browser": { id: "open_html" },
   "RSVP to invitation (Accept/Tentative/Decline)": { id: "rsvp" },
   "Navigate mailboxes": { badge: "key" },

@@ -1443,12 +1443,13 @@ impl State {
             .map(str::to_string)
     }
 
-    /// `message.materialise_attachment`, `message.materialise_html` or
-    /// `message.materialise_markdown`: the part (a small file naming it), the
-    /// browser rendition or the Markdown one (frontmatter and body, named
-    /// after the subject), written under `<root>/handles/<handle>/`, as the
-    /// daemon writes under its runtime directory. A message with no HTML part
-    /// is `-32602`.
+    /// `message.materialise_attachment`, `message.materialise_html`,
+    /// `message.materialise_markdown` or `message.materialise_eml`: the part
+    /// (a small file naming it), the browser rendition, the Markdown one
+    /// (frontmatter and body, named after the subject) or the RFC 822
+    /// message ([`fixture_eml`]), written under `<root>/handles/<handle>/`, as
+    /// the daemon writes under its runtime directory. A message with no HTML
+    /// part is `-32602`.
     fn materialise(&mut self, method: &str, params: &Value) -> Result<Value> {
         let account = param_str(method, params, "account")?.to_string();
         let row_id = param_row_id(method, params)?;
@@ -1457,6 +1458,8 @@ impl State {
             .ok_or_else(|| refused(method, -32602, &format!("no message has row_id {row_id}")))?;
         let (name, bytes) = if method == "message.materialise_markdown" {
             markdown_rendition(row_id, row)
+        } else if method == "message.materialise_eml" {
+            fixture_eml(row)
         } else if method == "message.materialise_html" {
             let body = self
                 .html
@@ -1716,12 +1719,41 @@ impl State {
             }
             "draft.reply" | "draft.forward" => {
                 let reply = method == "draft.reply";
+                let as_attachment = !reply && params["as_attachment"] == true;
                 let headers = recipient_headers(method, params)?;
-                let (message, source) =
-                    self.source_of(method, &account, &params["source"], !reply)?;
+                let (mut message, source) = self.source_of(
+                    method,
+                    &account,
+                    &params["source"],
+                    !reply && !as_attachment,
+                )?;
                 let signature = self.signature_for(&account, params);
                 fs::create_dir_all(&dir)?;
-                let built = if reply {
+                let built = if as_attachment {
+                    // The daemon's forward as attachment: the message's own
+                    // `.eml` instead of its parts, over the shared body rule.
+                    let row_id = params["source"]["row_id"].as_i64().unwrap_or_default();
+                    let (name, bytes) = self
+                        .row(&account, row_id)
+                        .map(|(_, row)| fixture_eml(row))
+                        .ok_or_else(|| anyhow!("{account} lost row {row_id}"))?;
+                    let eml_dir = self
+                        .root
+                        .join("attachments")
+                        .join(&account)
+                        .join(row_id.to_string());
+                    fs::create_dir_all(&eml_dir)?;
+                    let eml = eml_dir.join(name);
+                    fs::write(&eml, bytes)?;
+                    message.attachments = vec![eml];
+                    mp_core::draft::create_forward_draft_with(
+                        &message,
+                        mp_core::draft::ATTACHED_FORWARD_BODY,
+                        FIXTURE_FROM,
+                        Some(&dir),
+                        signature.as_deref(),
+                    )?
+                } else if reply {
                     mp_core::draft::create_reply_draft_from(
                         &message,
                         params["all"] == true,
@@ -3144,7 +3176,8 @@ impl Fixture {
             }
             "message.materialise_attachment"
             | "message.materialise_html"
-            | "message.materialise_markdown" => s.materialise(method, &params),
+            | "message.materialise_markdown"
+            | "message.materialise_eml" => s.materialise(method, &params),
             "message.release_handle" => {
                 let handle = param_str(method, &params, "handle")?;
                 if handle.is_empty()
@@ -5147,6 +5180,21 @@ fn markdown_rendition(row_id: i64, row: &Value) -> (String, Vec<u8>) {
         field("body")
     );
     (name, text.into_bytes())
+}
+
+/// A row as the RFC 822 file `message.materialise_eml` writes, named by the
+/// daemon's own rule (`mp_core::parse::eml_name`): its envelope over its
+/// plain body, since the fixture stores no raw message.
+fn fixture_eml(row: &Value) -> (String, Vec<u8>) {
+    let field = |key: &str| row[key].as_str().unwrap_or_default();
+    let name = mp_core::parse::eml_name(field("subject"), row["date_display"].as_str());
+    let headers = ["from", "to", "subject", "date_display", "message_id"]
+        .iter()
+        .zip(["From", "To", "Subject", "Date", "Message-ID"])
+        .map(|(key, header)| format!("{header}: {}\r\n", field(key)))
+        .collect::<String>();
+    let body = field("body").replace('\n', "\r\n");
+    (name, format!("{headers}\r\n{body}").into_bytes())
 }
 
 /// The `message.get` record (`read_cmd::ShownMessage`).

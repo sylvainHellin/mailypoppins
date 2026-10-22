@@ -672,6 +672,24 @@ function saveName(dir: string, name: string): string {
   return `${dir}/${candidate}`;
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** `mp_core::parse::eml_name` over the fixture's rows: `<YYYY-MM-DD>_<subject>.eml`, the day the `Date:` header's own. */
+function emlName(subject: string, date: string | null): string {
+  const stem =
+    subject
+      .replace(/[/\\]/g, "-")
+      .replace(/[:*?"<>|]/g, "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/^[.\s]+|[.\s]+$/g, "") || "message";
+  const m = /(\d{1,2}) ([A-Z][a-z]{2}) (\d{4})/.exec(date ?? "");
+  const month = m ? MONTHS.indexOf(m[2]) + 1 : 0;
+  if (!m || month === 0) return `${stem}.eml`;
+  return `${m[3]}-${String(month).padStart(2, "0")}-${m[1].padStart(2, "0")}_${stem}.eml`;
+}
+
 /** Part `part` of a stored row, or the daemon's -32602. */
 function partOf(method: string, account: string, rowId: number, part: number): string {
   const hit = findRow(account, rowId);
@@ -1455,6 +1473,16 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         }
       }
       return out;
+    }
+    case "message_export": {
+      const typed = String(args.dest_dir).trim();
+      const dir = expandHome(typed);
+      if (!dir.startsWith("/")) throw { kind: "protocol", message: `\`${typed}\` is not an absolute path; start it with / or ~`, code: null };
+      const rowId = Number(args.row_id);
+      const hit = findRow(account, rowId);
+      if (!hit) throw refusedRow("message.materialise_eml", `no message has row_id ${rowId}`);
+      const name = emlName(hit[1].subject ?? "", hit[1].date_display ?? null);
+      return { name, path: saveName(dir, name) };
     }
     case "html_open": {
       const rowId = Number(args.row_id);

@@ -293,7 +293,8 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
     case "reply_all":
       return compose.reply(compose.cursorSource(s), id === "reply_all", dispatch);
     case "forward":
-      return compose.forward(compose.cursorSource(s), dispatch);
+    case "forward_as_attachment":
+      return compose.forward(compose.cursorSource(s), dispatch, id === "forward_as_attachment");
     case "open_editor":
       // The TUI's `e`: a draft opens in the editor; a received message opens
       // read-only, its Markdown rendition in the editor (PERSO-92), where
@@ -335,6 +336,8 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       return void attachments.openAttachment(s, dispatch);
     case "save_attachment":
       return void attachments.saveAttachment(s, dispatch);
+    case "export_message":
+      return attachments.exportMessage(s, dispatch);
     case "open_html":
       return void attachments.openHtml(s, dispatch);
     case "attach_file":

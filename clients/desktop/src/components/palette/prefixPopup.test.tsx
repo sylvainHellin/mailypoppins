@@ -27,6 +27,7 @@ const COMPOSE = [
   ["cr", "Reply"],
   ["ca", "Reply all"],
   ["cf", "Forward"],
+  ["cF", "Forward as attachment (.eml)"],
 ];
 
 afterEach(() => {

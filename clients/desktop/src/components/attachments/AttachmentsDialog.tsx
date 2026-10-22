@@ -1,12 +1,12 @@
 // The attachment dialogs (clients/desktop/docs/reader.md, "Attachments"):
 // the TUI's `to` picker over several attachments, the Save dialog `ts` opens
-// with a directory field where the TUI has its directory picker, and the
-// path field `ta` opens. Each field has a Browse button beside it, the native
+// with a directory field where the TUI has its directory picker, the Export
+// dialog `te` opens with the same field, and the path field `ta` opens. Each field has a Browse button beside it, the native
 // folder or file picker (tauri-plugin-dialog), which fills the field; the
 // typed path stays, for the keyboard and wherever no picker opens.
 
 import { useEffect, useId, useRef, useState } from "react";
-import { FileWarning, FolderOpen, Paperclip } from "lucide-react";
+import { FileWarning, FolderOpen, Mail, Paperclip } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -19,7 +19,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { formatSize } from "@/components/list/format";
-import { attachPath, openItem, pickPath, saveParts } from "@/app/attachments";
+import { attachPath, exportTo, openItem, pickPath, saveParts } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
 import type { AttachmentDialog as Dialogs, AttachmentItem, AttachmentOwner } from "@/app/state";
 
@@ -35,6 +35,7 @@ function BrowseButton({
   kind,
   current,
   label,
+  pickerTitle,
   onPicked,
   onError,
   submitRef,
@@ -42,6 +43,7 @@ function BrowseButton({
   kind: "directory" | "file";
   current: string;
   label: string;
+  pickerTitle?: string;
   onPicked: (path: string) => void;
   onError: (message: string) => void;
   submitRef: React.RefObject<HTMLButtonElement | null>;
@@ -51,7 +53,7 @@ function BrowseButton({
     if (picking) return;
     setPicking(true);
     try {
-      const picked = await pickPath(kind, current);
+      const picked = await pickPath(kind, current, pickerTitle);
       if (picked !== null) {
         onPicked(picked);
         submitRef.current?.focus();
@@ -182,7 +184,6 @@ function OpenList({
 function SaveForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "save" }>; inputRef: React.RefObject<HTMLInputElement | null> }) {
   const s = useAppState();
   const dispatch = useDispatch();
-  const id = useId();
   const [dir, setDir] = useState(s.saveDir);
   const [checked, setChecked] = useState<number[]>(() => dialog.items.map((i) => i.part));
   const [error, setError] = useState<string | null>(null);
@@ -232,37 +233,14 @@ function SaveForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "save
           {dialog.items[0] ? <Size item={dialog.items[0]} /> : null}
         </p>
       )}
-      <div className="flex flex-col gap-1">
-        <label htmlFor={`${id}-dir`} className="text-sm text-muted-foreground">
-          Directory
-        </label>
-        <div className="flex gap-2">
-          <Input
-            id={`${id}-dir`}
-            ref={inputRef}
-            value={dir}
-            autoComplete="off"
-            spellCheck={false}
-            aria-describedby={`${id}-note`}
-            aria-invalid={error !== null ? true : undefined}
-            onChange={(e) => setDir(e.currentTarget.value)}
-          />
-          <BrowseButton
-            kind="directory"
-            current={dir}
-            label="Browse for a directory"
-            submitRef={submitRef}
-            onPicked={(path) => {
-              setDir(path);
-              setError(null);
-            }}
-            onError={setError}
-          />
-        </div>
-        <p id={`${id}-note`} className="text-xs text-muted-foreground">
-          An absolute path, or one starting with ~. A name already there gets _1. {PICKER_NOTE}
-        </p>
-      </div>
+      <DirectoryField
+        dir={dir}
+        error={error}
+        inputRef={inputRef}
+        submitRef={submitRef}
+        onDir={setDir}
+        onError={setError}
+      />
       <p role="alert" data-slot="attachments-error" className="min-h-5 text-sm text-destructive">
         {error}
       </p>
@@ -270,6 +248,115 @@ function SaveForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "save
         <DialogClose render={<Button type="button" variant="outline" />}>Cancel</DialogClose>
         <Button type="submit" ref={submitRef} disabled={busy || checked.length === 0}>
           Save
+        </Button>
+      </DialogFooter>
+    </form>
+  );
+}
+
+/**
+ * The directory field the Save and Export dialogs share: typed, or filled by
+ * Browse from the native folder picker, which clears the error.
+ */
+function DirectoryField({
+  dir,
+  error,
+  inputRef,
+  submitRef,
+  pickerTitle,
+  onDir,
+  onError,
+}: {
+  dir: string;
+  error: string | null;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  submitRef: React.RefObject<HTMLButtonElement | null>;
+  pickerTitle?: string;
+  onDir: (dir: string) => void;
+  onError: (message: string | null) => void;
+}) {
+  const id = useId();
+  return (
+    <div className="flex flex-col gap-1">
+      <label htmlFor={`${id}-dir`} className="text-sm text-muted-foreground">
+        Directory
+      </label>
+      <div className="flex gap-2">
+        <Input
+          id={`${id}-dir`}
+          ref={inputRef}
+          value={dir}
+          autoComplete="off"
+          spellCheck={false}
+          aria-describedby={`${id}-note`}
+          aria-invalid={error !== null ? true : undefined}
+          onChange={(e) => onDir(e.currentTarget.value)}
+        />
+        <BrowseButton
+          kind="directory"
+          current={dir}
+          label="Browse for a directory"
+          pickerTitle={pickerTitle}
+          submitRef={submitRef}
+          onPicked={(path) => {
+            onDir(path);
+            onError(null);
+          }}
+          onError={onError}
+        />
+      </div>
+      <p id={`${id}-note`} className="text-xs text-muted-foreground">
+        An absolute path, or one starting with ~. A name already there gets _1. {PICKER_NOTE}
+      </p>
+    </div>
+  );
+}
+
+/** The `te` dialog: the message as `<date>_<subject>.eml`, into a directory, the last one used offered first. */
+function ExportForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "export" }>; inputRef: React.RefObject<HTMLInputElement | null> }) {
+  const s = useAppState();
+  const dispatch = useDispatch();
+  const [dir, setDir] = useState(s.saveDir);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const submitRef = useRef<HTMLButtonElement>(null);
+
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    const refusal = await exportTo(dialog.account, dialog.row_id, dir, dispatch);
+    setBusy(false);
+    setError(refusal);
+  };
+
+  return (
+    <form
+      className="flex flex-col gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
+      <p className="flex items-center gap-2 text-sm">
+        <Mail aria-hidden="true" className="size-4 text-muted-foreground" />
+        <span className="min-w-0 flex-1">The whole message, attachments inside, as an .eml file any mail client opens.</span>
+      </p>
+      <DirectoryField
+        dir={dir}
+        error={error}
+        inputRef={inputRef}
+        submitRef={submitRef}
+        pickerTitle="Export message to"
+        onDir={setDir}
+        onError={setError}
+      />
+      <p role="alert" data-slot="attachments-error" className="min-h-5 text-sm text-destructive">
+        {error}
+      </p>
+      <DialogFooter>
+        <DialogClose render={<Button type="button" variant="outline" />}>Cancel</DialogClose>
+        <Button type="submit" ref={submitRef} disabled={busy}>
+          Export
         </Button>
       </DialogFooter>
     </form>
@@ -349,6 +436,7 @@ function AttachForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "at
 const TITLE: Record<Dialogs["kind"], string> = {
   open: "Open attachment",
   save: "Save attachments",
+  export: "Export message",
   attach: "Attach file",
 };
 
@@ -388,6 +476,8 @@ export function AttachmentsDialog({ dialog, onOpenChange }: AttachmentsDialogPro
           />
         ) : d?.kind === "save" ? (
           <SaveForm key={`${d.account}/${d.row_id}/${d.items.map((i) => i.part).join(",")}`} dialog={d} inputRef={fieldRef} />
+        ) : d?.kind === "export" ? (
+          <ExportForm key={`${d.account}/${d.row_id}`} dialog={d} inputRef={fieldRef} />
         ) : d?.kind === "attach" ? (
           <AttachForm key={`${d.account}/${d.draftId}`} dialog={d} inputRef={fieldRef} />
         ) : null}

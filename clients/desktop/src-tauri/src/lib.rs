@@ -257,6 +257,7 @@ pub fn run() {
             commands::message_fetch,
             attachments::attachment_open,
             attachments::attachment_save,
+            attachments::message_export,
             attachments::html_open,
             attachments::hit_html_open,
             attachments::draft_html_open,

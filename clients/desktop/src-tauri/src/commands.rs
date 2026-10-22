@@ -1245,27 +1245,22 @@ fn with_signature(params: &mut Value, signature: Option<&str>, no_signature: boo
     }
 }
 
-/// `draft.reply` or `draft.forward` of the stored message `row_id`.
-#[allow(clippy::too_many_arguments)]
+/// `draft.reply` or `draft.forward` over `params`, the account, the source and
+/// the method's own field, waiting `budget`.
 fn draft_from_row_on(
     door: &Door,
     method: &str,
-    account: &str,
-    row_id: i64,
-    all: Option<bool>,
+    mut params: Value,
     headers: Option<&DraftHeaders>,
     signature: Option<&str>,
     no_signature: bool,
+    budget: Duration,
 ) -> Result<DraftCreated, GuiError> {
-    let mut params = json!({"account": account, "source": {"row_id": row_id}});
-    if let Some(all) = all {
-        params["all"] = json!(all);
-    }
     if let Some(headers) = headers {
         params["headers"] = headers.wire();
     }
     with_signature(&mut params, signature, no_signature);
-    let answer = call(door, method, params, DRAFT_BUDGET, Addressing::Resource)?;
+    let answer = call(door, method, params, budget, Addressing::Resource)?;
     decode(method, answer)
 }
 
@@ -1282,33 +1277,42 @@ pub fn draft_reply_on(
     draft_from_row_on(
         door,
         "draft.reply",
-        account,
-        row_id,
-        Some(all),
+        json!({"account": account, "source": {"row_id": row_id}, "all": all}),
         headers,
         signature,
         no_signature,
+        DRAFT_BUDGET,
     )
 }
 
-/// A forward of the stored message `row_id`, carrying its attachments.
+/// A forward of the stored message `row_id`, carrying its attachments, or
+/// with `as_attachment` the message itself as its `.eml` (the TUI's `cF`,
+/// `mp forward --as-attachment`, PERSO-174), which may come from the server
+/// first and waits as long as an export does.
 pub fn draft_forward_on(
     door: &Door,
     account: &str,
     row_id: i64,
+    as_attachment: bool,
     headers: Option<&DraftHeaders>,
     signature: Option<&str>,
     no_signature: bool,
 ) -> Result<DraftCreated, GuiError> {
+    let mut params = json!({"account": account, "source": {"row_id": row_id}});
+    let budget = if as_attachment {
+        params["as_attachment"] = json!(true);
+        crate::attachments::EML_BUDGET
+    } else {
+        DRAFT_BUDGET
+    };
     draft_from_row_on(
         door,
         "draft.forward",
-        account,
-        row_id,
-        None,
+        params,
         headers,
         signature,
         no_signature,
+        budget,
     )
 }
 
@@ -1975,6 +1979,7 @@ pub async fn draft_forward(
     session: State<'_, SessionHandle>,
     account: String,
     row_id: i64,
+    as_attachment: Option<bool>,
     headers: Option<DraftHeaders>,
     signature: Option<String>,
     no_signature: Option<bool>,
@@ -1984,6 +1989,7 @@ pub async fn draft_forward(
             door,
             &account,
             row_id,
+            as_attachment.unwrap_or(false),
             headers.as_ref(),
             signature.as_deref(),
             no_signature.unwrap_or(false),
@@ -3245,6 +3251,7 @@ mod tests {
             &d,
             "work",
             1001,
+            false,
             Some(&headers("x@example.com", "", "Fwd: x")),
             None,
             true,
@@ -3261,7 +3268,8 @@ mod tests {
     #[test]
     fn a_forward_carries_the_attachments_and_a_hit_is_built_from_itself() {
         let (d, _f) = fixture_door();
-        let forward = draft_forward_on(&d, "work", 1001, None, None, false).expect("forward");
+        let forward =
+            draft_forward_on(&d, "work", 1001, false, None, None, false).expect("forward");
         let draft = parsed(&forward.path);
         assert!(
             draft.body_markdown.contains("Fixture GmbH"),
@@ -3298,6 +3306,58 @@ mod tests {
             .attachments
             .unwrap_or_default()
             .is_empty());
+    }
+
+    /// `cF` (PERSO-174): `draft.forward` with `as_attachment`, and the draft
+    /// lists the message's `.eml` instead of its parts, under the body
+    /// `ATTACHED_FORWARD_BODY` names.
+    #[test]
+    fn a_forward_as_attachment_carries_the_eml_instead_of_the_parts() {
+        let (d, f) = fixture_door();
+        let forward = draft_forward_on(
+            &d,
+            "work",
+            1001,
+            true,
+            Some(&headers(
+                "x@example.com",
+                "",
+                "Fwd: Quarterly ledger review",
+            )),
+            None,
+            false,
+        )
+        .expect("forward");
+        let (method, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(method, "draft.forward");
+        assert_eq!(params["as_attachment"], true);
+        let draft = parsed(&forward.path);
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("x@example.com"));
+        let attachments = draft.frontmatter.attachments.unwrap_or_default();
+        assert_eq!(attachments.len(), 1, "{attachments:?}");
+        assert!(
+            attachments[0].ends_with("2026-09-29_Quarterly ledger review.eml"),
+            "{attachments:?}"
+        );
+        let eml = std::fs::read_to_string(&attachments[0]).expect("the .eml is on disk");
+        assert!(
+            eml.contains("Subject: Quarterly ledger review\r\n"),
+            "{eml}"
+        );
+        let quoted = draft.body_markdown.contains("Forwarded message");
+        assert_eq!(
+            quoted,
+            mp_core::draft::ATTACHED_FORWARD_BODY == mp_core::draft::ForwardBody::Quoted
+        );
+
+        let plain = draft_forward_on(&d, "work", 1001, false, None, None, false).expect("forward");
+        let (_, params) = f.calls().last().cloned().expect("call");
+        assert!(params.get("as_attachment").is_none(), "{params}");
+        assert!(parsed(&plain.path)
+            .frontmatter
+            .attachments
+            .unwrap_or_default()[0]
+            .ends_with("ledger-q3.pdf"));
     }
 
     #[test]

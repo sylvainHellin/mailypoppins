@@ -690,8 +690,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### DFT-09 Forward a message to new recipients
 
 - Classification: GUI parity
-- Source anchor: `mp forward <selector> [--mailbox]` (`src/main.rs`), TUI `cf`, search overlay `w`
-- Daemon surface: `draft.forward`, and `draft.create_from_message` for a hit with no local row
+- Source anchor: `mp forward <selector> [--mailbox] [--as-attachment]` (`src/main.rs`), TUI `cf` and `cF`, search overlay `w`
+- Daemon surface: `draft.forward`, with `as_attachment` for a forward as attachment, and `draft.create_from_message` for a hit with no local row
 - GUI location: clients/desktop: `cf` from the list or the reader, the reader toolbar's Forward and the palette open the forward wizard with To, Cc, Bcc and a `Fwd: ` subject, whose submit calls `draft_forward` with `headers` and opens the draft in the external editor; a server-only hit is forwarded at once through `draft_from_message`, and the search overlay's `w` is `cf` on the hit's row (M3, #0131; shell.md, "The wizard")
 - Validation: `tests/draft_integration.rs`, `tests/mime_oracle_integration.rs`, `tests/daemon_draft_slice.rs`, `tests/daemon_draft_from_message_slice.rs`; `clients/desktop/src/keymap/keymap.test.tsx` (`cf on a stored message asks for the recipients first, with the forward's subject`), `clients/desktop/src-tauri/src/commands.rs` (`a_forward_carries_the_attachments_and_a_hit_is_built_from_itself`); the focus after the editor: `clients/tui/src/actions.rs` (`a_clean_return_from_a_new_drafts_editor_puts_the_keyboard_back_on_the_list`)
 - Status: routed (P5-U6, and P5-U10d-I for the hit with no row); GUI shipped (M3, #0131)
@@ -699,6 +699,10 @@ On top of that, and not repeated per entry: every daemon-served capability gains
   A forward of a server-only hit is the exception and carries none: `message.search_server` streams the envelope and the two body renditions, so since P5-U10c-I1 the client has no parts to forward, and `draft.create_from_message` takes none.
   P5-U6 routed the TUI's two forward keys through it and gave the method `headers`, the compose wizard's override of the recipients and the subject it collected before the draft existed.
 - Note: as after `e` (DFT-07), an editor that returns cleanly gives the keyboard back to the list in both clients, the TUI's `cf` from the headers or body pane it was pressed in; a failed editor keeps the focus, and the search overlay's `w` leaves the focus under the overlay alone (PERSO-129).
+- Note: a forward as attachment (PERSO-174) carries the source as one `<date>_<subject>.eml` part, labelled `message/rfc822` with `7bit` or `8bit`, instead of its parts: `mp forward --as-attachment`, the TUI's `cF` and the desktop's `cF` and palette entry "Forward as attachment (.eml)", the last two through the forward wizard titled "Forward as attachment", all calling `draft.forward` with `as_attachment: true`.
+  The `.eml` is `message.materialise_eml`'s bytes, so a Graph row is fetched from the server first; a server-only hit has no row and is refused with "fetch it first" in both clients.
+  The body is the usual forward's; `mp_core::draft::ATTACHED_FORWARD_BODY` is the one line that would make it Outlook's, the signature alone.
+  Validation: `tests/daemon_eml_export.rs`, `src/send.rs` (`an_eml_with_long_8bit_lines_goes_8bit_byte_for_byte`, `an_eml_with_a_line_over_998_octets_goes_as_an_octet_stream`), `src/tui_tests/actions_store.rs` (`cf_and_cf_upper_open_the_forward_wizard_with_and_without_the_eml`), `clients/tui/src/commands.rs` (`a_forward_as_attachment_is_draft_forward_with_as_attachment`), `clients/desktop/src/keymap/keymap.test.tsx` (`cF forwards as attachment through the same wizard, draft_forward with as_attachment (PERSO-174)`), `clients/desktop/src-tauri/src/commands.rs` (`a_forward_as_attachment_carries_the_eml_instead_of_the_parts`).
 
 ### DFT-10 Compose wizard for new and forwarded mail
 
@@ -754,6 +758,18 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Validation: `tests/cli_selector_contract.rs`, `tests/daemon_mutation_slice.rs`; `clients/desktop/src/components/reader/reader.test.tsx` (`opens a part with the system opener and saves one into the directory the dialog names`, `Browse picks the directory natively, written with ~, and a closed or missing picker leaves the field`, `keeps the Save dialog open on a relative directory, and offers the last directory used next`), `clients/desktop/src-tauri/src/attachments.rs` (`save_applies_the_underscore_rule_and_releases_each_handle`, `the_save_directory_expands_home_and_refuses_a_relative_path_or_a_file`)
 - Status: routed (P4-U8); GUI shipped (M3, #0131) with a typed directory, which Browse fills from the native folder picker (`tauri-plugin-dialog`); `ts` on a draft saves nothing and says its files are already on disk
 - Note: the destination defaults to the current directory and only the client knows what that means (`ANO-15`), so the client resolves it twice over: the absolute form anchors the writes, and the spelling the user typed is what the `✓` lines print. The result is a permanent user artifact rather than a daemon-owned handle with a lifetime, which is what separates this entry from `ATT-01`, `ATT-04`, and `ATT-05`. The daemon never renames a part, so the `_1` rule for two parts sharing a name is applied client-side, within one call.
+
+### ATT-06 Export a received message as its RFC 822 file
+
+- Classification: GUI parity
+- Source anchor: `mp export <selector> [-o dir] [--mailbox]` (`src/main.rs`), TUI `te` (`clients/tui/src/app/keymap.rs`)
+- Daemon surface: `message.materialise_eml`, plus a client-side copy into the destination; the CLI and the desktop release the handle, the TUI leaves it to its lifetime as its `ts` does
+- GUI location: clients/desktop: `te` from the list or the reader, or the palette's "Export message as .eml", opens the "Export message" dialog with the Save dialog's Directory field, Browse and last directory; `message_export` copies with the `_1` rule and releases the handle (PERSO-174; reader.md, "Attachments")
+- Validation: `tests/daemon_eml_export.rs`; `crates/mp-core/src/parse.rs` (`a_long_cjk_or_emoji_subject_is_cut_by_bytes_on_a_char_boundary`); `src/tui_tests/actions_store.rs` (`te_hands_the_messages_eml_to_the_directory_picker`), `clients/tui/src/commands.rs` (`the_eml_is_the_file_message_materialise_eml_wrote`); `clients/desktop/src/components/reader/reader.test.tsx` (`te exports the message as its .eml into the directory the Export dialog names, the Save dialog's last (PERSO-174)`), `clients/desktop/src-tauri/src/attachments.rs` (`export_copies_the_messages_eml_and_releases_its_handle`)
+- Status: routed (PERSO-174); GUI shipped (PERSO-174)
+- Note: the bytes are the row's stored `raw` blob, which every IMAP ingest writes; a row without one, every Graph row, is answered from the server (`$value`, or `BODY.PEEK[]` by `Message-ID`), so the call waits as long as a server query.
+  The file is named `<YYYY-MM-DD>_<subject>.eml` by `mp_core::parse::eml_name`, the subject cut by bytes on a char boundary as an attachment's name is.
+  As in `ATT-02`, the destination is the client's to name and the result is a permanent user artifact; a draft has no message to export and says it is a file already, and a server-only hit asks for the fetch first.
 
 ### ATT-03 Attach a file to a draft
 

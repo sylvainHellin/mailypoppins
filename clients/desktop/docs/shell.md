@@ -290,6 +290,7 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `r`, `cr` | Reply | list, reader | `draft_reply` (`all: false`) or `draft_from_message` (`reply`), then the editor |
 | `ca` | Reply all | list, reader | `draft_reply` (`all: true`) or `draft_from_message` (`reply_all`), then the editor |
 | `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `signature_list`, then `draft_forward` with `headers` and the signature, or `draft_from_message` (`forward`), then the editor |
+| `cF` | Forward as attachment: the same wizard, the message carried as its `.eml` instead of its parts (PERSO-174); a server-only hit says to fetch it first | list, reader | `signature_list`, then `draft_forward` with `as_attachment`, `headers` and the signature, then the editor |
 | `e` | Edit the draft in the editor; on a received message, open its Markdown rendition read-only by the same route, the TUI's `e` (PERSO-92); Enter focuses the reader | list, reader | `draft_path`, then the editor; `message_markdown_path`, then the embedded editor, or `message_markdown_open` |
 | `ce` | Edit recipients, in Drafts or on a conversation's draft member | list, reader | `draft_set_recipients`, the dialog filled from the listed row, or from `draft_preview` for a draft member |
 | `cA` | Approve, in Drafts or on a conversation's draft member | list, reader | `draft_approve` |
@@ -319,7 +320,7 @@ A row the store no longer holds is a warning notice, "Open failed: that message 
 
 ### The wizard
 
-`cn` and `cf` on a stored message open `ComposeWizard.tsx`, a dialog titled "New draft" or "Forward" with To, Cc, Bcc and Subject, and a new draft has the TUI's inline Body last.
+`cn`, `cf` and `cF` on a stored message open `ComposeWizard.tsx`, a dialog titled "New draft", "Forward" or "Forward as attachment" with To, Cc, Bcc and Subject, and a new draft has the TUI's inline Body last.
 Both have a Signature select, filled from `signature_list`, with the account's default preselected and "none" last; a reply has no wizard and carries the account's default, as in the TUI.
 The select reads the account's listing in `state.signatures`, which a `signature.changed` or a change in the Signatures dialog makes stale, so it follows while the wizard is open: until the user picks, it shows the default, and a pick stays while its name is listed and falls back to the default when it goes.
 The forward's Subject starts as the forward will write it (`Fwd: `, the rule of `mp_core::draft::fwd_subject`); the TUI asks for the forward's recipients first too, and a reply goes straight to the editor.
@@ -1119,7 +1120,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `ss`, `sS`: quick and full sync of the selected account.
 - In the Contacts view: `j`/`k`, `gg`/`G` move, `/` focuses the search, Enter and `n` compose to the contact, `v` sends it as a vCard, `c` copies its address, `r` rebuilds the index (see Contacts).
 - In the Calendar view: `j`/`k`, `gg`/`G` move, Enter and `e` open the entry's `invite.ics` in the editor, `t` shows or hides past events, `r` reads the agenda again (see Calendar).
-- `cn`, `r`, `cr`, `ca`, `cf`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
+- `cn`, `r`, `cr`, `ca`, `cf`, `cF`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
   On a received message `e` opens its Markdown rendition read-only instead, by a draft's route, the TUI's `e`, and Enter focuses the reader (PERSO-92); on a server-only hit it says to fetch it first (`F`) (see Compose, "A message's rendition").
 - `cs`: the Signatures dialog, in Mail from any pane; see Signatures.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".

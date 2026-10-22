@@ -6,7 +6,9 @@
 //! with the system opener, as the TUI's `to` and `tb` do, and leaves the
 //! handle unreleased, because the viewer just launched holds the file. A save
 //! copies each part into a directory the user names, with the `_1` rule for a
-//! name already taken, then releases the handle.
+//! name already taken, then releases the handle; an export does the same with
+//! the message itself, its `.eml` (`message.materialise_eml`, `mp export`,
+//! PERSO-174).
 //!
 //! A draft's attachments are the paths its `attachments:` frontmatter lists.
 //! The daemon reads, appends and removes them (`draft.attachments`,
@@ -37,6 +39,9 @@ use crate::session::{Door, SessionHandle};
 
 /// One materialisation: a store read and a file write in the daemon.
 const HANDLE_BUDGET: Duration = Duration::from_secs(20);
+/// A message's `.eml`, which for a row stored without its raw message (every
+/// Graph row) is a round trip to the server first.
+pub(crate) const EML_BUDGET: Duration = Duration::from_secs(90);
 const RELEASE_BUDGET: Duration = Duration::from_secs(5);
 /// A draft's attachment list read or rewritten by the daemon.
 const DRAFT_BUDGET: Duration = Duration::from_secs(10);
@@ -82,6 +87,17 @@ pub struct SavedFile {
 pub struct SaveFailure {
     pub part: u32,
     pub error: GuiError,
+}
+
+/// The `.eml` `message_export` wrote.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+pub struct ExportedMessage {
+    /// `<date>_<subject>.eml`, as the daemon named it.
+    pub name: String,
+    /// Where it landed, `_1` and all.
+    pub path: String,
 }
 
 /// What `attachment_save` came to, one part at a time.
@@ -211,7 +227,17 @@ fn opened(path: &Path) -> OpenedFile {
 /// One materialisation, its file checked to be the one file it names; the
 /// Markdown rendition (`daemon_files.rs`) is one too.
 pub(crate) fn materialise(door: &Door, method: &str, params: Value) -> Result<Handle, GuiError> {
-    let answer = call(door, method, params, HANDLE_BUDGET, Addressing::Resource)?;
+    materialise_within(door, method, params, HANDLE_BUDGET)
+}
+
+/// [`materialise`] with its own budget.
+fn materialise_within(
+    door: &Door,
+    method: &str,
+    params: Value,
+    budget: Duration,
+) -> Result<Handle, GuiError> {
+    let answer = call(door, method, params, budget, Addressing::Resource)?;
     let handle: Handle = crate::commands::decode(method, answer)?;
     safe_file_name(&handle.name)?;
     let file = Path::new(&handle.path);
@@ -308,6 +334,39 @@ pub fn attachment_save_on(
         dir: dir.display().to_string(),
         saved,
         failed,
+    })
+}
+
+/// Export the stored message `row_id` into `dest_dir` as its RFC 822 file,
+/// `<date>_<subject>.eml` (the TUI's `te`, `mp export`, PERSO-174): the
+/// daemon materialises it, the copy takes the `_1` rule of a save, and the
+/// handle is released once copied.
+pub fn message_export_on(
+    door: &Door,
+    account: &str,
+    row_id: i64,
+    dest_dir: &str,
+    home: Option<&Path>,
+) -> Result<ExportedMessage, GuiError> {
+    let dir = resolve_dir(dest_dir, home)?;
+    let handle = materialise_within(
+        door,
+        "message.materialise_eml",
+        json!({"account": account, "row_id": row_id}),
+        EML_BUDGET,
+    )?;
+    let copied = mp_core::parse::save_attachment(Path::new(&handle.path), &dir);
+    release(door, &handle.handle);
+    let path = copied.map_err(|e| {
+        GuiError::internal(format!(
+            "could not write {} into {}: {e:#}",
+            handle.name,
+            dir.display()
+        ))
+    })?;
+    Ok(ExportedMessage {
+        name: handle.name,
+        path: path.display().to_string(),
     })
 }
 
@@ -618,6 +677,20 @@ pub async fn attachment_save(
     .await
 }
 
+/// `dest_dir` absolute or `~`-relative, as `attachment_save`'s.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn message_export(
+    session: State<'_, SessionHandle>,
+    account: String,
+    row_id: i64,
+    dest_dir: String,
+) -> Result<ExportedMessage, GuiError> {
+    with_door(&session, move |_, door| {
+        message_export_on(door, &account, row_id, &dest_dir, home_dir().as_deref())
+    })
+    .await
+}
+
 /// `null` when the message has no HTML part.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn html_open(
@@ -852,6 +925,41 @@ mod tests {
         assert!(fixture.opened().is_empty());
         assert!(attachment_save_on(&door, "work", 1001, &[], "~/out", Some(&home)).is_err());
         assert!(attachment_save_on(&door, "work", 1001, &[0], "out", Some(&home)).is_err());
+    }
+
+    /// `te` (PERSO-174): the daemon's `.eml`, named by the export rule,
+    /// copied with the `_1` rule, its handle released; a relative directory
+    /// or a row the store does not hold writes nothing.
+    #[test]
+    fn export_copies_the_messages_eml_and_releases_its_handle() {
+        let (door, fixture) = fixture_door();
+        let home = scratch("export");
+        let first = message_export_on(&door, "work", 1001, "~/out", Some(&home)).unwrap();
+        assert_eq!(first.name, "2026-09-29_Quarterly ledger review.eml");
+        let path = home.join("out/2026-09-29_Quarterly ledger review.eml");
+        assert_eq!(first.path, path.display().to_string());
+        let eml = fs::read_to_string(&path).unwrap();
+        assert!(
+            eml.starts_with("From: Ivana Petrova <ivana@example.com>\r\n"),
+            "{eml}"
+        );
+        assert!(eml.contains("\r\n\r\nHi,\r\n"), "{eml}");
+        let again = message_export_on(&door, "work", 1001, "~/out", Some(&home)).unwrap();
+        assert_eq!(
+            again.path,
+            home.join("out/2026-09-29_Quarterly ledger review_1.eml")
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            calls_of(&fixture, "message.materialise_eml"),
+            vec![json!({"account": "work", "row_id": 1001}); 2]
+        );
+        assert_eq!(calls_of(&fixture, "message.release_handle").len(), 2);
+        assert!(message_export_on(&door, "work", 1001, "out", Some(&home)).is_err());
+        let gone = message_export_on(&door, "work", 9999, "~/out", Some(&home)).unwrap_err();
+        assert!(matches!(gone, GuiError::NotFound { .. }), "{gone:?}");
+        assert!(fixture.opened().is_empty());
     }
 
     #[test]

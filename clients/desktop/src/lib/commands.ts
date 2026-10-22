@@ -32,6 +32,7 @@ import type {
   DraftStatusBatch,
   EditorLaunch,
   EditorSetting,
+  ExportedMessage,
   FetchOutcome,
   FixtureSimulation,
   GuiEvent,
@@ -184,16 +185,20 @@ export const draftReply = (
 ): Promise<DraftCreated> =>
   invoke<DraftCreated>("draft_reply", { account, row_id, all, headers: headers ?? null });
 
-/** `signature` names one, `no_signature` asks for none, and neither is the account's default. */
+/**
+ * `signature` names one, `no_signature` asks for none, and neither is the account's default;
+ * `as_attachment` carries the message as its `.eml` instead of its parts (`mp forward --as-attachment`).
+ */
 export const draftForward = (
   account: string,
   row_id: number,
   headers?: DraftHeaders,
-  opts: { signature?: string; no_signature?: boolean } = {},
+  opts: { signature?: string; no_signature?: boolean; as_attachment?: boolean } = {},
 ): Promise<DraftCreated> =>
   invoke<DraftCreated>("draft_forward", {
     account,
     row_id,
+    as_attachment: opts.as_attachment ?? null,
     headers: headers ?? null,
     signature: opts.signature ?? null,
     no_signature: opts.no_signature ?? null,
@@ -426,6 +431,10 @@ export const attachmentOpen = (account: string, row_id: number, part: number): P
 /** Copy `parts` into `dest_dir` (absolute or `~`), with the `_1` rule for a name already taken. */
 export const attachmentSave = (account: string, row_id: number, parts: number[], dest_dir: string): Promise<SavedAttachments> =>
   invoke<SavedAttachments>("attachment_save", { account, row_id, parts, dest_dir });
+
+/** Copy the message's own `<date>_<subject>.eml` into `dest_dir` (absolute or `~`), as `mp export` does. */
+export const messageExport = (account: string, row_id: number, dest_dir: string): Promise<ExportedMessage> =>
+  invoke<ExportedMessage>("message_export", { account, row_id, dest_dir });
 
 /** The daemon's browser rendition, opened; null for a message with no HTML part. */
 export const htmlOpen = (account: string, row_id: number): Promise<OpenedFile | null> =>

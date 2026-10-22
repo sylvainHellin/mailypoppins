@@ -34,6 +34,7 @@ export type { EditorRoute } from "./EditorRoute";
 export type { EditorSetting } from "./EditorSetting";
 export type { EditorSource } from "./EditorSource";
 export type { EffectiveConfig } from "./EffectiveConfig";
+export type { ExportedMessage } from "./ExportedMessage";
 export type { FetchOutcome } from "./FetchOutcome";
 export type { GuiError } from "./GuiError";
 export type { GuiEvent } from "./GuiEvent";

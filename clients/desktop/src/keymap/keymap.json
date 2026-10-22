@@ -164,6 +164,10 @@
         "action": "Forward"
       },
       {
+        "key": "cF",
+        "action": "Forward as attachment (.eml)"
+      },
+      {
         "key": "tt",
         "action": "Show conversation (thread)"
       },
@@ -178,6 +182,10 @@
       {
         "key": "ts",
         "action": "Save attachment to disk"
+      },
+      {
+        "key": "te",
+        "action": "Export message as .eml"
       },
       {
         "key": "tb",

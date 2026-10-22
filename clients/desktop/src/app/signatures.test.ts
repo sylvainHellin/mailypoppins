@@ -56,7 +56,7 @@ describe("the signature listings", () => {
     const s = run(booted(), { type: "open_compose", dialog: { kind: "new", account: "home" } });
     expect(signaturesWanted(s)).toBe("home");
     expect(isStale(s.signatures.home)).toBe(true);
-    const fwd = run(booted(), { type: "open_compose", dialog: { kind: "forward", account: "work", row_id: 1001, subject: "Fwd: x" } });
+    const fwd = run(booted(), { type: "open_compose", dialog: { kind: "forward", account: "work", row_id: 1001, subject: "Fwd: x", as_attachment: false } });
     expect(signaturesWanted(fwd)).toBe("work");
     expect(isStale(fwd.signatures.work)).toBe(true);
     const edit = run(booted(), {
