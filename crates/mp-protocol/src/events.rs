@@ -18,6 +18,24 @@ use serde::{Deserialize, Serialize};
 /// The `kind` a completed sync tick travels as.
 pub const KIND_SYNC_COMPLETED: &str = "sync.completed";
 
+/// The `kind` an account's runtime readiness travels as: `ready` once it
+/// serves, `blocked` when it cannot.
+pub const KIND_ACCOUNT_STATE_CHANGED: &str = "account.state_changed";
+
+/// The payload of an [`KIND_ACCOUNT_STATE_CHANGED`] event: the account, the
+/// runtime state the snapshot's `accounts[].state` also uses, and the reason
+/// when it is `blocked`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountStateChanged {
+    /// The configured account name.
+    pub account: String,
+    /// `opening`, `ready` or `blocked`.
+    pub state: crate::state::AccountState,
+    /// Why the runtime cannot serve, on `blocked` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// One message a tick ingested into an inbox, as the desktop notification of
 /// #0009 reads it (P5-U8).
 ///

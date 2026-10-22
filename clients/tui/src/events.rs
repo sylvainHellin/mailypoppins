@@ -47,10 +47,11 @@ use serde_json::json;
 
 use mp_protocol::diagnostic::{CheckStatus, HealthCheck};
 use mp_protocol::events::{
-    Arrival, MutationsRolledBack, SyncCompleted, KIND_DAEMON_SHUTTING_DOWN,
-    KIND_DIAGNOSTIC_CHECK_CHANGED, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID,
-    KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED, KIND_SEND_HOLD_CANCELLED,
-    KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK, KIND_SYNC_COMPLETED,
+    AccountStateChanged, Arrival, MutationsRolledBack, SyncCompleted, KIND_ACCOUNT_STATE_CHANGED,
+    KIND_DAEMON_SHUTTING_DOWN, KIND_DIAGNOSTIC_CHECK_CHANGED, KIND_DRAFT_CHANGED,
+    KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK, KIND_OPERATION_FINISHED,
+    KIND_SEND_HOLD_CANCELLED, KIND_SEND_HOLD_FIRED, KIND_SEND_HOLD_STARTED, KIND_SEND_HOLD_TICK,
+    KIND_SYNC_COMPLETED,
 };
 use mp_protocol::send::HoldStatus;
 use mp_protocol::state::Bootstrap;
@@ -317,6 +318,7 @@ impl App {
             | KIND_SEND_HOLD_FIRED
             | KIND_SEND_HOLD_CANCELLED => self.apply_hold(event),
             KIND_DAEMON_SHUTTING_DOWN => self.apply_shutting_down(),
+            KIND_ACCOUNT_STATE_CHANGED => self.apply_account_state(event),
             KIND_DIAGNOSTIC_CHECK_CHANGED => {
                 // A payload that is not a check is skipped rather than rendered
                 // as a line of JSON: the kind promises one, and a daemon that
@@ -578,6 +580,29 @@ impl App {
     /// caller.
     fn apply_shutting_down(&mut self) -> Applied {
         self.set_status_level("Daemon stopping".to_string(), StatusLevel::Warning);
+        Applied::Ignored
+    }
+
+    /// An account's runtime moved: `blocked` marks it for the account picker
+    /// and `ready` clears the mark, the desktop's `runtime_state` patch.
+    ///
+    /// [`Applied::Ignored`] for the reason [`Self::apply_shutting_down`]
+    /// gives: nothing is reloaded and nothing is refetched, and the drain
+    /// repaints for any event it handled. The counts are not touched: a
+    /// runtime that becomes ready announces what it ingests through the
+    /// counts invalidations that follow.
+    fn apply_account_state(&mut self, event: &EventEnvelope) -> Applied {
+        let change: AccountStateChanged = match serde_json::from_value(event.payload.clone()) {
+            Ok(change) => change,
+            Err(e) => {
+                log::warn!("[events] an account.state_changed did not decode: {e}");
+                return Applied::Ignored;
+            }
+        };
+        if let Some(index) = self.account_index(&change.account) {
+            self.accounts[index].blocked =
+                change.state == mp_protocol::state::AccountState::Blocked;
+        }
         Applied::Ignored
     }
 

@@ -814,6 +814,39 @@ fn a_reconnect_re_bootstraps_before_it_accepts_the_new_instance() {
     );
 }
 
+/// `account.state_changed` marks an account blocked and a later `ready` clears
+/// it, which is what the account picker reads to say `blocked` rather than
+/// `opening`; nothing is called and nothing is reloaded.
+#[test]
+fn an_account_state_change_marks_the_runtime_blocked_and_ready_clears_it() {
+    let fixture = Fixture::new();
+    seed_inbox();
+    let mut app = app_on_inbox(&fixture);
+    watermarked(&mut app);
+    fixture.forget();
+
+    let applied = app.apply_event(&envelope(
+        INSTANCE,
+        WATERMARK + 1,
+        "account.state_changed",
+        json!({"account": ACCOUNT, "state": "blocked", "reason": "another engine holds the lock"}),
+    ));
+    assert_eq!(applied, Applied::Ignored, "nothing to reload");
+    assert!(app.accounts[0].blocked);
+
+    app.apply_event(&envelope(
+        INSTANCE,
+        WATERMARK + 2,
+        "account.state_changed",
+        json!({"account": ACCOUNT, "state": "ready"}),
+    ));
+    assert!(!app.accounts[0].blocked);
+    assert!(
+        fixture.methods().is_empty(),
+        "the payload is the whole answer; no call follows it"
+    );
+}
+
 /// A disconnect is shown and calls nobody.
 ///
 /// The warning lands in the activity log, which is where the TUI says it is
@@ -841,10 +874,7 @@ fn a_disconnect_is_shown_and_calls_nobody() {
         last.message, "The daemon is not reachable; reconnecting...",
         "a client with no session says it is not being told about new mail"
     );
-    assert!(
-        matches!(last.level, StatusLevel::Warning),
-        "as a warning"
-    );
+    assert!(matches!(last.level, StatusLevel::Warning), "as a warning");
     assert!(
         fixture.methods().is_empty(),
         "a dead session is not a reason to open a store or to call anything else"
@@ -1380,6 +1410,7 @@ fn account_state(name: &str) -> crate::tui::app::AccountState {
         selection: std::collections::HashSet::new(),
         search_query: String::new(),
         opening: false,
+        blocked: false,
         has_unseen: false,
         sync_health: crate::sync_health::SyncHealth::default(),
     }

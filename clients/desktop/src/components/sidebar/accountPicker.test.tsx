@@ -4,7 +4,7 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
-import { mock } from "@/test/tauri-mock";
+import { emitEnvelope, mock } from "@/test/tauri-mock";
 
 const picker = () => screen.findByRole("dialog", { name: "Switch account" });
 const row = (name: RegExp) => screen.getByRole("button", { name });
@@ -90,6 +90,23 @@ describe("the account picker", () => {
     await screen.findByRole("dialog", { name: "Command palette" });
     await user.keyboard("Switch account{Enter}");
     expect(await picker()).toBeInTheDocument();
+  });
+
+  it("marks an account whose last sync failed, and follows a sync.completed", async () => {
+    const { user } = renderApp(1400, () => {
+      const home = mock.bootstrap.snapshot.accounts.find((a) => a.name === "home");
+      if (home) home.sync_health = { state: "failed" };
+    });
+    await shellReady();
+    await user.keyboard("ga");
+    const dialog = await picker();
+    const home = row(/^home, /);
+    expect(home).toHaveAccessibleName(/^home, last sync failed, /);
+    expect(home.querySelector('[data-slot="sync-failed"]')).toHaveClass("text-warning");
+    expect(row(/^work, /)).not.toHaveAccessibleName(/last sync failed/);
+    expect(within(dialog).getAllByTitle("Last sync failed")).toHaveLength(1);
+    act(() => emitEnvelope("sync.completed", { account: "home", error: null, new_inbox_mail: [] }));
+    await waitFor(() => expect(row(/^home, /)).not.toHaveAccessibleName(/last sync failed/));
   });
 
   it("with one account ga and the palette open nothing", async () => {

@@ -274,6 +274,7 @@ mod tests {
             selection: std::collections::HashSet::new(),
             search_query: String::new(),
             opening: false,
+            blocked: false,
             has_unseen: false,
             sync_health,
         }

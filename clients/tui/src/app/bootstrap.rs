@@ -41,7 +41,7 @@
 //! why a resync and a reconnect are spelled "bootstrap again" rather than
 //! "clear a flag".
 
-use mp_protocol::state::{Bootstrap, MailboxRow};
+use mp_protocol::state::{AccountState as WireAccountState, Bootstrap, MailboxRow};
 
 use super::{AccountState, App, MailboxInfo, MailboxKind, StatusLevel};
 
@@ -193,6 +193,10 @@ impl App {
             else {
                 continue;
             };
+            // The runtime's own state lands on every bootstrap, an account
+            // that already opened included: a runtime can block after it
+            // served, and the picker says so.
+            self.accounts[index].blocked = account.state == WireAccountState::Blocked;
             if !resync && !self.accounts[index].opening {
                 continue;
             }
@@ -222,7 +226,7 @@ impl App {
             }
             // Ready clears the #0003 marker; `opening` and `blocked` both
             // leave it, because neither is an account whose counts can be
-            // trusted and the TUI has one loading state, not three.
+            // trusted. `blocked` is told apart above, for the picker.
             state.opening = !account.state.is_ready();
 
             if index == self.active_account {
@@ -290,7 +294,7 @@ fn mailbox_info(template: &[MailboxInfo], row: &MailboxRow) -> MailboxInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mp_protocol::state::{AccountSnapshot, AccountState as WireAccountState, Snapshot};
+    use mp_protocol::state::{AccountSnapshot, Snapshot};
     use std::collections::BTreeMap;
 
     fn row(role: &str, slug: &str, label: &str, total: u64) -> MailboxRow {
@@ -378,6 +382,38 @@ mod tests {
             &bootstrap("fixture", WireAccountState::Opening, four_rows()),
         );
         assert!(app.accounts[0].opening);
+        assert!(!app.accounts[0].blocked, "opening is not blocked");
+    }
+
+    /// A `blocked` snapshot is told apart from an opening one, for the account
+    /// picker, and a later snapshot that reports the runtime ready clears it,
+    /// on an account that already opened as well.
+    #[test]
+    fn a_blocked_snapshot_marks_the_account_blocked_until_a_ready_one() {
+        let _data = mp_core::config::test_env::TestDataDir::new();
+        let mut app = App::from_bootstrap(
+            config("fixture"),
+            &bootstrap("fixture", WireAccountState::Blocked, four_rows()),
+        );
+        assert!(app.accounts[0].blocked);
+        assert!(
+            app.accounts[0].opening,
+            "a blocked account's counts are not trusted"
+        );
+
+        app.apply_bootstrap(&bootstrap("fixture", WireAccountState::Ready, four_rows()));
+        assert!(!app.accounts[0].blocked);
+        assert!(!app.accounts[0].opening);
+
+        app.apply_bootstrap(&bootstrap(
+            "fixture",
+            WireAccountState::Blocked,
+            four_rows(),
+        ));
+        assert!(
+            app.accounts[0].blocked,
+            "a runtime that blocks after it served is marked too"
+        );
     }
 
     /// The label and the slug are the wire's; the icon and the kind are the

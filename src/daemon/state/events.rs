@@ -38,7 +38,8 @@
 use std::collections::VecDeque;
 
 use mp_protocol::events::{
-    KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK, KIND_SYNC_COMPLETED,
+    KIND_ACCOUNT_STATE_CHANGED, KIND_DRAFT_CHANGED, KIND_DRAFT_INVALID, KIND_MUTATIONS_ROLLED_BACK,
+    KIND_SYNC_COMPLETED,
 };
 use serde_json::{json, Value};
 
@@ -114,9 +115,6 @@ pub enum Event {
         payload: Value,
     },
 }
-
-/// The kind a readiness or blocked change travels as.
-const KIND_ACCOUNT_STATE_CHANGED: &str = "account.state_changed";
 
 impl Event {
     /// The one bridge from the daemon's vocabulary to the wire's.

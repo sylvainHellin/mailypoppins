@@ -943,6 +943,14 @@ pub struct AccountState {
     /// `BgResult::AccountOpened` once the background open has read the real
     /// counts. The sidebar shows a loading marker while it is set.
     pub opening: bool,
+    /// Whether the daemon reports this account's runtime as `blocked`: it
+    /// cannot serve, for instance because another engine holds its lock.
+    /// From the bootstrap snapshot and each `account.state_changed`, so the
+    /// account picker can say `blocked` rather than `opening`, as the
+    /// desktop's does. Independent of [`Self::opening`], which is the counts'
+    /// loading marker: a ready account whose runtime later blocks keeps its
+    /// counts and still says so.
+    pub blocked: bool,
     /// Outcome of this account's last completed sync (#0071). Written when
     /// that account's own `BgResult::Fetch`/`BgResult::Sync` lands, so it
     /// survives every later success of a *different* account: the exact race
@@ -1016,6 +1024,7 @@ impl AccountState {
             search_query: String::new(),
             has_unseen: false,
             opening: true,
+            blocked: false,
             sync_health: mp_core::sync_health::SyncHealth::default(),
         }
     }
@@ -1049,6 +1058,7 @@ impl AccountState {
             search_query: String::new(),
             has_unseen: false,
             opening: false,
+            blocked: false,
             sync_health: mp_core::sync_health::SyncHealth::default(),
         }
     }

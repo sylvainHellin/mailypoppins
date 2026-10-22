@@ -282,10 +282,10 @@ pub(super) fn render_account_picker(
     );
 
     const CURRENT_TAG: &str = "  current";
-    // An account whose store is opening or blocked (`AccountState::opening`,
-    // the TUI's one not-ready state), where the desktop names the runtime state.
-    const NOT_READY_TAG: &str = "  not ready";
     const UNSEEN_TAG: &str = "  \u{25cf}";
+    // The account's last sync failed (`SyncHealth::Failed`, #0071), the
+    // desktop picker's warning mark.
+    const SYNC_FAILED_TAG: &str = "  sync failed";
     // The digit column: `1` to `9`, blank past the ninth account.
     const DIGIT_W: usize = 3;
     let inner_width = inner.width as usize;
@@ -300,7 +300,14 @@ pub(super) fn render_account_picker(
                 " ".repeat(DIGIT_W)
             };
             let current = i == active;
-            let tags = if acct.opening { NOT_READY_TAG.len() } else { 0 }
+            let runtime = runtime_tag(acct);
+            let sync_failed = acct.sync_health.is_failed();
+            let tags = runtime.map_or(0, str::len)
+                + if sync_failed {
+                    SYNC_FAILED_TAG.len()
+                } else {
+                    0
+                }
                 + if current { CURRENT_TAG.len() } else { 0 }
                 + if acct.has_unseen {
                     UNSEEN_TAG.chars().count()
@@ -322,10 +329,16 @@ pub(super) fn render_account_picker(
                 Span::styled(digit, Style::default().fg(theme::active().text_faint)),
                 Span::styled(name, name_style),
             ];
-            if acct.opening {
+            if let Some(tag) = runtime {
                 spans.push(Span::styled(
-                    NOT_READY_TAG,
+                    tag,
                     Style::default().fg(theme::active().text_muted),
+                ));
+            }
+            if sync_failed {
+                spans.push(Span::styled(
+                    SYNC_FAILED_TAG,
+                    Style::default().fg(theme::active().warning),
                 ));
             }
             if current {
@@ -353,6 +366,19 @@ pub(super) fn render_account_picker(
             )),
             footer_area,
         );
+    }
+}
+
+/// The account picker's runtime tag, the desktop's runtime word: `blocked`
+/// when the daemon says the account's runtime cannot serve, `opening` while
+/// its counts have not landed, nothing once it serves.
+fn runtime_tag(acct: &crate::app::AccountState) -> Option<&'static str> {
+    if acct.blocked {
+        Some("  blocked")
+    } else if acct.opening {
+        Some("  opening")
+    } else {
+        None
     }
 }
 
@@ -1226,9 +1252,10 @@ mod tests {
 
     /// The account picker (`ga`, #0147): one row per account in config order
     /// with its digit, `current` on the active account, the dot on a
-    /// background account with new mail, `not ready` on an account that is
-    /// opening or blocked, and the cursor row in the selection style; past the
-    /// ninth account the digit column is blank.
+    /// background account with new mail, the runtime's `blocked` or `opening`
+    /// as the desktop names it, `sync failed` in the warning colour on an
+    /// account whose last sync failed, and the cursor row in the selection
+    /// style; past the ninth account the digit column is blank.
     #[test]
     fn account_picker_lists_the_accounts_with_digit_current_and_new_mail_dot() {
         let mut accounts: Vec<AccountState> = ["work", "home", "club", "lab"]
@@ -1236,6 +1263,11 @@ mod tests {
             .map(AccountState::for_tests)
             .collect();
         accounts[1].has_unseen = true;
+        accounts[1].sync_health = mp_core::sync_health::SyncHealth::default()
+            .updated(Err("IMAP login failed"), chrono::Local::now());
+        // Blocked wins over the loading marker a blocked account also keeps.
+        accounts[2].blocked = true;
+        accounts[2].opening = true;
         accounts[3].opening = true;
         let picker = AccountPicker { selected: 1 };
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
@@ -1257,13 +1289,20 @@ mod tests {
         };
         assert!(rows[row("Switch account")].contains("esc close"));
         assert!(rows[row("1  work")].contains("1  work  current"));
-        assert!(rows[row("2  home")].contains("2  home  \u{25cf}"));
+        assert!(rows[row("2  home")].contains("2  home  sync failed  \u{25cf}"));
         let club = &rows[row("3  club")];
+        assert!(club.contains("3  club  blocked"), "{club}");
         assert!(
-            !club.contains("current") && !club.contains('\u{25cf}') && !club.contains("not ready"),
+            !club.contains("current") && !club.contains('\u{25cf}') && !club.contains("opening"),
             "{club}"
         );
-        assert!(rows[row("4  lab")].contains("4  lab  not ready"));
+        let lab = &rows[row("4  lab")];
+        assert!(lab.contains("4  lab  opening"), "{lab}");
+        assert!(!lab.contains("sync failed"), "{lab}");
+        let failed_y = row("2  home") as u16;
+        let failed_x = rows[failed_y as usize].find("sync failed").unwrap();
+        let failed_x = rows[failed_y as usize][..failed_x].chars().count() as u16;
+        assert_eq!(buffer[(failed_x, failed_y)].fg, theme::active().warning);
         assert!(rows[row("j/k nav")].contains("1-9 jump  Enter switch  Esc cancel"));
 
         // The cursor row's name carries the selection style, the others not.
