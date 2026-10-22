@@ -2,7 +2,9 @@
 // of a server-only hit (clients/desktop/docs/reader.md, "Attachments"): the
 // TUI's `to`, `ts`, `te`, `tb`, `ta` and `e` on a received message, and its
 // search overlay's `f`, here `F`. What the keys, the palette and the buttons run;
-// the dialogs call the helpers at the bottom.
+// the dialogs call the helpers at the bottom. A server-only hit is addressed
+// as `message_fetch` addresses it, and the daemon reads its parts, its view
+// and its `.eml` from the server's copy without ingesting it (PERSO-155).
 
 import type { Dispatch } from "react";
 import type { Action } from "@/app/reducer";
@@ -14,23 +16,25 @@ import {
   type AppState,
   type AttachmentItem,
   type AttachmentOwner,
-  type ExportSource,
   type SearchHit,
 } from "@/app/state";
 import { isOpenable } from "@/app/search";
 import { viewInEditor } from "@/app/compose";
 import * as cmd from "@/lib/commands";
-import { asGuiError, type Attachment, type DraftAttachments } from "@/lib/gui-types";
+import { asGuiError, type Attachment, type DraftAttachments, type MessageSource } from "@/lib/gui-types";
 import { homeDir, openPicker } from "@/lib/tauri";
 
-/** What an attachment key acts on: the cursor's message, a server-only hit, or the Drafts cursor draft. */
+/**
+ * What an attachment key acts on: the cursor's message, which a server-only
+ * hit is too, by its `source`, or the Drafts cursor draft. `hit` is the
+ * search hit under the cursor, whose markup `tb` opens.
+ */
 type Subject =
-  | { kind: "message"; account: string; row_id: number; subject: string }
-  | { kind: "hit"; account: string; hit: SearchHit }
+  | { kind: "message"; account: string; source: MessageSource; subject: string; hit: SearchHit | null }
   | { kind: "draft"; account: string; draftId: string; subject: string; valid: boolean };
 
-export const FETCH_FIRST = "This message is on the server only: fetch it first (F)";
 export const NO_HTML = "No HTML version available";
+export const NO_MESSAGE_ID = "This hit carries no Message-ID; the server cannot be asked for it";
 
 function notice(dispatch: Dispatch<Action>, text: string): void {
   dispatch({ type: "notice", text });
@@ -46,11 +50,25 @@ function cursorHit(s: AppState): SearchHit | null {
   return s.search.hits.find((h) => h.key === s.selection.hit) ?? null;
 }
 
-function cursorSubject(s: AppState): Subject | null {
+/** A search hit's address: its row once the store holds one, else the hit itself. */
+function hitSource(hit: SearchHit): MessageSource | null {
+  if (hit.row_id !== null) return { kind: "row", row_id: hit.row_id };
+  if (hit.message_id !== null) return { kind: "hit", mailbox: hit.mailbox, message_id: hit.message_id };
+  return null;
+}
+
+function cursorSubject(s: AppState, dispatch: Dispatch<Action>): Subject | null {
   const account = s.search?.account ?? s.selection.account;
   if (!account) return null;
   const hit = cursorHit(s);
-  if (hit) return { kind: "hit", account: hit.account, hit };
+  if (hit) {
+    const source = hitSource(hit);
+    if (!source) {
+      notice(dispatch, NO_MESSAGE_ID);
+      return null;
+    }
+    return { kind: "message", account: hit.account, source, subject: hit.subject || "(no subject)", hit };
+  }
   if (!s.search && draftsShown(s) && s.selection.draft) {
     const row = filteredDrafts(s.messages.data, "").find((d) => d.id === s.selection.draft);
     if (!row) return null;
@@ -60,14 +78,19 @@ function cursorSubject(s: AppState): Subject | null {
   const m = s.selection.message;
   if (!m) return null;
   const meta = s.reader.key === readerKey(account, m.row_id) ? s.reader.meta : null;
-  return { kind: "message", account, row_id: m.row_id, subject: meta?.subject ?? "(no subject)" };
+  return { kind: "message", account, source: { kind: "row", row_id: m.row_id }, subject: meta?.subject ?? "(no subject)", hit: null };
 }
 
-/** A message's parts: the reader's headers when they are this message's, else `message.get`'s. */
-async function partsOf(s: AppState, account: string, row_id: number): Promise<Attachment[]> {
-  const meta = s.reader.key === readerKey(account, row_id) ? s.reader.meta : null;
-  if (meta) return meta.attachments;
-  return (await cmd.messageHtmlMeta(account, row_id)).attachments;
+/**
+ * A message's parts: the reader's headers when they are this row's, else
+ * `message.get`'s, which for a server-only hit lists the server copy's.
+ */
+async function partsOf(s: AppState, account: string, source: MessageSource): Promise<Attachment[]> {
+  if (source.kind === "row") {
+    const meta = s.reader.key === readerKey(account, source.row_id) ? s.reader.meta : null;
+    if (meta) return meta.attachments;
+  }
+  return cmd.messageAttachments(account, source);
 }
 
 /** The real attachments first, then the body's inline images; `part` stays the daemon's index. */
@@ -90,9 +113,8 @@ export function draftItemsOf(list: DraftAttachments): AttachmentItem[] {
  * TUI's; a draft lists the files its frontmatter names (ATT-04).
  */
 export async function openAttachment(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
-  const subj = cursorSubject(s);
+  const subj = cursorSubject(s, dispatch);
   if (!subj) return;
-  if (subj.kind === "hit") return notice(dispatch, isOpenable(subj.hit) ? "Open the result first" : FETCH_FIRST);
   let owner: AttachmentOwner;
   let items: AttachmentItem[];
   try {
@@ -101,8 +123,8 @@ export async function openAttachment(s: AppState, dispatch: Dispatch<Action>): P
       owner = { kind: "draft", account: subj.account, draftId: subj.draftId };
       items = draftItemsOf(await cmd.draftAttachments(subj.account, subj.draftId));
     } else {
-      owner = { kind: "message", account: subj.account, row_id: subj.row_id };
-      items = messageItems(await partsOf(s, subj.account, subj.row_id));
+      owner = { kind: "message", account: subj.account, source: subj.source };
+      items = messageItems(await partsOf(s, subj.account, subj.source));
     }
   } catch (e: unknown) {
     return failed(dispatch, subj.account, `Attachments failed: ${asGuiError(e).message}`);
@@ -114,18 +136,17 @@ export async function openAttachment(s: AppState, dispatch: Dispatch<Action>): P
 
 /** `ts`: the Save dialog, every part checked, the last directory offered. */
 export async function saveAttachment(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
-  const subj = cursorSubject(s);
+  const subj = cursorSubject(s, dispatch);
   if (!subj) return;
-  if (subj.kind === "hit") return notice(dispatch, isOpenable(subj.hit) ? "Open the result first" : FETCH_FIRST);
   if (subj.kind === "draft") return notice(dispatch, "A draft's attachments are files already; t o opens one");
   let items: AttachmentItem[];
   try {
-    items = messageItems(await partsOf(s, subj.account, subj.row_id));
+    items = messageItems(await partsOf(s, subj.account, subj.source));
   } catch (e: unknown) {
     return failed(dispatch, subj.account, `Attachments failed: ${asGuiError(e).message}`);
   }
   if (items.length === 0) return notice(dispatch, "No attachments");
-  dispatch({ type: "open_attachments", dialog: { kind: "save", account: subj.account, row_id: subj.row_id, subject: subj.subject, items } });
+  dispatch({ type: "open_attachments", dialog: { kind: "save", account: subj.account, source: subj.source, subject: subj.subject, items } });
 }
 
 /**
@@ -136,22 +157,10 @@ export async function saveAttachment(s: AppState, dispatch: Dispatch<Action>): P
  * ingesting it. A draft is a file already.
  */
 export function exportMessage(s: AppState, dispatch: Dispatch<Action>): void {
-  const subj = cursorSubject(s);
+  const subj = cursorSubject(s, dispatch);
   if (!subj) return;
   if (subj.kind === "draft") return notice(dispatch, "Export needs a received message; a draft is a file already");
-  let source: ExportSource;
-  let subject: string;
-  if (subj.kind === "hit") {
-    const { hit } = subj;
-    subject = hit.subject || "(no subject)";
-    if (hit.row_id !== null) source = { kind: "row", row_id: hit.row_id };
-    else if (hit.message_id !== null) source = { kind: "hit", mailbox: hit.mailbox, message_id: hit.message_id };
-    else return notice(dispatch, "This hit carries no Message-ID; cannot export it");
-  } else {
-    source = { kind: "row", row_id: subj.row_id };
-    subject = subj.subject;
-  }
-  dispatch({ type: "open_attachments", dialog: { kind: "export", account: subj.account, source, subject } });
+  dispatch({ type: "open_attachments", dialog: { kind: "export", account: subj.account, source: subj.source, subject: subj.subject } });
 }
 
 /**
@@ -160,7 +169,7 @@ export function exportMessage(s: AppState, dispatch: Dispatch<Action>): void {
  * in the default browser.
  */
 export async function openHtml(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
-  const subj = cursorSubject(s);
+  const subj = cursorSubject(s, dispatch);
   if (!subj) return;
   if (subj.kind === "draft") {
     if (!subj.valid) return notice(dispatch, "This draft does not parse; fix it in the editor first");
@@ -172,12 +181,12 @@ export async function openHtml(s: AppState, dispatch: Dispatch<Action>): Promise
     return notice(dispatch, "Opened in browser");
   }
   try {
-    if (subj.kind === "hit") {
-      const html = subj.hit.source?.html_body;
+    if (subj.source.kind === "hit") {
+      const html = subj.hit?.source?.html_body;
       if (!html) return notice(dispatch, NO_HTML);
       await cmd.hitHtmlOpen(html);
     } else {
-      const file = await cmd.htmlOpen(subj.account, subj.row_id);
+      const file = await cmd.htmlOpen(subj.account, subj.source.row_id);
       if (!file) return notice(dispatch, NO_HTML);
     }
   } catch (e: unknown) {
@@ -189,20 +198,19 @@ export async function openHtml(s: AppState, dispatch: Dispatch<Action>): Promise
 /**
  * `e` on a received message (PERSO-92, the TUI's read-only view): the daemon
  * writes its Markdown rendition, read-only, and it opens by a draft's route
- * (`viewInEditor`). A server-only hit has no row to render, so it asks for
- * the fetch first; a draft is the caller's (`e` edits it).
+ * (`viewInEditor`). A server-only hit's is the daemon's rendering of the
+ * server's copy (PERSO-155); a draft is the caller's (`e` edits it).
  */
 export async function openMarkdown(s: AppState, dispatch: Dispatch<Action>): Promise<void> {
-  const subj = cursorSubject(s);
+  const subj = cursorSubject(s, dispatch);
   if (!subj || subj.kind === "draft") return;
-  if (subj.kind === "hit") return notice(dispatch, FETCH_FIRST);
-  await viewInEditor(dispatch, subj.account, subj.row_id, s.compose);
+  await viewInEditor(dispatch, subj.account, subj.source, s.compose);
 }
 
 /** `ta`, Drafts only: the path dialog, until the native picker arrives. */
 export function attachFile(s: AppState, dispatch: Dispatch<Action>): void {
   if (!draftsShown(s) || s.search) return notice(dispatch, "Attach file (t a) is only available in Drafts");
-  const subj = cursorSubject(s);
+  const subj = cursorSubject(s, dispatch);
   if (!subj || subj.kind !== "draft") return;
   if (!subj.valid) return notice(dispatch, "This draft does not parse; fix it in the editor first");
   const busy = sendingRefusal(s, [{ account: subj.account, draft: subj.draftId }]);
@@ -243,7 +251,7 @@ export async function openItem(owner: AttachmentOwner, item: AttachmentItem, dis
   try {
     const file =
       owner.kind === "message"
-        ? await cmd.attachmentOpen(owner.account, owner.row_id, item.part)
+        ? await cmd.attachmentOpen(owner.account, owner.source, item.part)
         : await cmd.draftAttachmentOpen(owner.account, owner.draftId, item.part);
     notice(dispatch, `Opened: ${file.name}`);
     return null;
@@ -264,7 +272,7 @@ function files(n: number): string {
  */
 export async function saveParts(
   account: string,
-  row_id: number,
+  source: MessageSource,
   parts: number[],
   dir: string,
   dispatch: Dispatch<Action>,
@@ -272,7 +280,7 @@ export async function saveParts(
   if (parts.length === 0) return "Pick at least one attachment to save";
   let saved;
   try {
-    saved = await cmd.attachmentSave(account, row_id, parts, dir.trim());
+    saved = await cmd.attachmentSave(account, source, parts, dir.trim());
   } catch (e: unknown) {
     return asGuiError(e).message;
   }
@@ -293,13 +301,10 @@ export async function saveParts(
  * Export the message into `dir` as typed; resolves to why nothing was
  * written, or null. The notice names the file as it landed.
  */
-export async function exportTo(account: string, source: ExportSource, dir: string, dispatch: Dispatch<Action>): Promise<string | null> {
+export async function exportTo(account: string, source: MessageSource, dir: string, dispatch: Dispatch<Action>): Promise<string | null> {
   let exported;
   try {
-    exported =
-      source.kind === "row"
-        ? await cmd.messageExport(account, source.row_id, dir.trim())
-        : await cmd.hitExport(account, source.mailbox, source.message_id, dir.trim());
+    exported = await cmd.messageExport(account, source, dir.trim());
   } catch (e: unknown) {
     return asGuiError(e).message;
   }

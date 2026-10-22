@@ -91,6 +91,7 @@ fn export_into(dir: &Path) -> usize {
         attachments::SaveFailure,
         attachments::SavedAttachments,
         attachments::ExportedMessage,
+        attachments::MessageSource,
         attachments::DraftAttachment,
         attachments::DraftAttachments,
         calendar::RsvpSettled,

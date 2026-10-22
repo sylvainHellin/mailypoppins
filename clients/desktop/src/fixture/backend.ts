@@ -695,12 +695,45 @@ function emlName(subject: string, date: string | null): string {
 }
 
 /** Part `part` of a stored row, or the daemon's -32602. */
-function partOf(method: string, account: string, rowId: number, part: number): string {
-  const hit = findRow(account, rowId);
-  if (!hit) throw refusedRow(method, `no message has row_id ${rowId}`);
-  const parts = hit[1].attachments ?? [];
-  if (part >= parts.length) throw refusedRow(method, `row ${rowId} has ${parts.length} attachments, no part ${part}`);
+/** A command's `source`: a stored row, or a server-only hit (PERSO-155). */
+type Source = { kind: "row"; row_id: number } | { kind: "hit"; mailbox: string; message_id: string };
+
+/** The one server-only message the fixture's server holds, as the daemon parses its copy. */
+const SERVER_ONLY_ID = "<server-only@fixture.example>";
+const SERVER_ONLY_PARTS = [{ name: "server-only-notes.txt", size: 31, inline: false }];
+
+/** The parts of `source`: a row's, or the server copy's; any other hit is not on the server. */
+function partsOfSource(method: string, account: string, source: Source): { name: string; size: number; inline: boolean }[] {
+  if (source.kind === "hit") {
+    for (const rows of Object.values(mock.rows[account] ?? {})) {
+      const r = rows.find((x) => x.message_id === source.message_id);
+      if (r) return (r.attachments ?? []).map((a) => ({ ...a, inline: a.inline ?? false }));
+    }
+    if (source.message_id !== SERVER_ONLY_ID) {
+      throw { kind: "protocol", message: `${method}: the server no longer has ${source.message_id}`, code: -32603 };
+    }
+    return SERVER_ONLY_PARTS;
+  }
+  const hit = findRow(account, source.row_id);
+  if (!hit) throw refusedRow(method, `no message has row_id ${source.row_id}`);
+  return (hit[1].attachments ?? []).map((a) => ({ ...a, inline: a.inline ?? false }));
+}
+
+/** Part `part` of `source`, by name. */
+function partOfSource(method: string, account: string, source: Source, part: number): string {
+  const parts = partsOfSource(method, account, source);
+  if (part >= parts.length) throw refusedRow(method, `the message has ${parts.length} attachments, no part ${part}`);
   return parts[part].name;
+}
+
+/** The read-only view's file name; a row the store lost is `MESSAGE_GONE`, a hit off the server a refusal. */
+function markdownName(account: string, source: Source): string {
+  if (source.kind === "hit") {
+    partsOfSource("message.materialise_markdown", account, source);
+    return "server-only-match.md";
+  }
+  if (!findRow(account, source.row_id)) throw { kind: "not_found", message: MESSAGE_GONE, code: null };
+  return `message-${source.row_id}.md`;
 }
 
 /** The hold the mock arms for a send, 20 s as the daemon's default window. */
@@ -1160,8 +1193,17 @@ function fwdSubject(subject: string): string {
 function draftFromRow(cmd: string, account: string, args: Record<string, unknown>): DraftCreated {
   knownAccount(cmd, account);
   const method = cmd === "draft_reply" ? "draft.reply" : "draft.forward";
-  const hit = findRow(account, Number(args.row_id));
-  if (!hit) throw refusedRow(method, `${account} holds no message with row id ${String(args.row_id)}`);
+  const source = args.source as Source | undefined;
+  if (source?.kind === "hit") {
+    // The daemon builds the forward from the server's copy (PERSO-155).
+    partsOfSource(method, account, source);
+    const headers = args.headers as { to: string; cc: string; bcc: string; subject: string } | null | undefined;
+    const f = headers ?? { to: "", cc: "", bcc: "", subject: "Fwd: Server-only match" };
+    return writeDraft(account, { ...f, body: "> A message only the server holds." }, null);
+  }
+  const rowId = source?.kind === "row" ? source.row_id : Number(args.row_id);
+  const hit = findRow(account, rowId);
+  if (!hit) throw refusedRow(method, `${account} holds no message with row id ${String(rowId)}`);
   const row = hit[1];
   const headers = args.headers as { to: string; cc: string; bcc: string; subject: string } | null | undefined;
   const reply = cmd === "draft_reply";
@@ -1409,11 +1451,6 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "draft_reply":
     case "draft_forward":
       return draftFromRow(cmd, account, args);
-    case "draft_forward_hit": {
-      // The daemon downloads the hit's `.eml` and builds the forward from it.
-      knownAccount(cmd, account);
-      return writeDraft(account, { to: "", cc: "", subject: "Fwd: Server-only match" }, null);
-    }
     case "draft_from_message": {
       knownAccount(cmd, account);
       const m = args.message as DraftMessage;
@@ -1462,8 +1499,10 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       draftChanged(account, d);
       return { account, id: d.id, selector: d.selector, path: d.path, status: d.status };
     }
+    case "message_attachments":
+      return partsOfSource("message.get", account, args.source as Source);
     case "attachment_open": {
-      const name = partOf("message.materialise_attachment", account, Number(args.row_id), Number(args.part));
+      const name = partOfSource("message.materialise_attachment", account, args.source as Source, Number(args.part));
       const path = `/fixture/runtime/handles/h-${mock.nextHandle++}/${name}`;
       mock.opened.push(path);
       return { name, path };
@@ -1475,7 +1514,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const out: { dir: string; saved: unknown[]; failed: unknown[] } = { dir, saved: [], failed: [] };
       for (const part of args.parts as number[]) {
         try {
-          const name = partOf("message.materialise_attachment", account, Number(args.row_id), part);
+          const name = partOfSource("message.materialise_attachment", account, args.source as Source, part);
           out.saved.push({ part, name, path: saveName(dir, name) });
         } catch (error) {
           out.failed.push({ part, error });
@@ -1487,18 +1526,16 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       const typed = String(args.dest_dir).trim();
       const dir = expandHome(typed);
       if (!dir.startsWith("/")) throw { kind: "protocol", message: `\`${typed}\` is not an absolute path; start it with / or ~`, code: null };
-      const rowId = Number(args.row_id);
-      const hit = findRow(account, rowId);
-      if (!hit) throw refusedRow("message.materialise_eml", `no message has row_id ${rowId}`);
+      const source = args.source as Source;
+      if (source.kind === "hit") {
+        // The daemon's copy of the server's raw message, named off its own headers.
+        partsOfSource("message.materialise_eml", account, source);
+        const name = emlName("Server-only match", "Mon, 3 Mar 2025 09:00:00 +0100");
+        return { name, path: saveName(dir, name) };
+      }
+      const hit = findRow(account, source.row_id);
+      if (!hit) throw refusedRow("message.materialise_eml", `no message has row_id ${source.row_id}`);
       const name = emlName(hit[1].subject ?? "", hit[1].date_display ?? null);
-      return { name, path: saveName(dir, name) };
-    }
-    case "hit_export": {
-      // The daemon's copy of the server's raw message, named off its own headers.
-      const typed = String(args.dest_dir).trim();
-      const dir = expandHome(typed);
-      if (!dir.startsWith("/")) throw { kind: "protocol", message: `\`${typed}\` is not an absolute path; start it with / or ~`, code: null };
-      const name = emlName("Server-only match", "Mon, 3 Mar 2025 09:00:00 +0100");
       return { name, path: saveName(dir, name) };
     }
     case "html_open": {
@@ -1658,15 +1695,11 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       return { editor: `code --wait '${path}'`, source: "probe", fixture: mock.editorFixture };
     }
     case "message_markdown_path": {
-      const rowId = Number(args.row_id);
-      if (!findRow(account, rowId)) throw { kind: "not_found", message: MESSAGE_GONE, code: null };
-      const name = `message-${rowId}.md`;
+      const name = markdownName(account, args.source as Source);
       return { name, path: `/fixture/runtime/handles/h-${mock.nextHandle++}/${name}` };
     }
     case "message_markdown_open": {
-      const rowId = Number(args.row_id);
-      if (!findRow(account, rowId)) throw { kind: "not_found", message: MESSAGE_GONE, code: null };
-      const path = `/fixture/runtime/handles/h-${mock.nextHandle++}/message-${rowId}.md`;
+      const path = `/fixture/runtime/handles/h-${mock.nextHandle++}/${markdownName(account, args.source as Source)}`;
       mock.editorOpens.push(path);
       const failure = mock.editorFailure;
       mock.editorFailure = null;

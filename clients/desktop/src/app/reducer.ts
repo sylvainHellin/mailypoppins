@@ -26,6 +26,7 @@ import type {
   MailboxListing,
   MessageList,
   MessageMeta,
+  MessageSource,
   MovedTo,
   SyncMode,
   VersionInfo,
@@ -318,9 +319,9 @@ export type Action =
   // The embedded sessions (app/compose.ts and components/compose/TerminalHost.tsx).
   /**
    * Open the draft in the embedded editor, or show its running one; a dead one spawns again.
-   * `view` opens a received message's read-only rendition instead, under `viewId(row_id)`.
+   * `view` opens a received message's read-only rendition instead, under `viewId(source)`.
    */
-  | { type: "compose_embedded"; account: string; draftId: string; path: string; view?: { row_id: number } }
+  | { type: "compose_embedded"; account: string; draftId: string; path: string; view?: { source: MessageSource } }
   | { type: "compose_started"; account: string; draftId: string; spawn: number; session: number; editor: string }
   | { type: "compose_spawn_failed"; account: string; draftId: string; spawn: number; error: GuiError }
   | { type: "compose_exited"; account: string; draftId: string; spawn: number; code: number | null; signal: number | null }
@@ -1057,7 +1058,7 @@ function embeddedAt(s: AppState, key: string, spawn: number) {
  * fresh session whose pane spawns on mount. Another session the reader
  * showed keeps running in the background.
  */
-function composeEmbedded(s: AppState, account: string, draftId: string, path: string, view?: { row_id: number }): AppState {
+function composeEmbedded(s: AppState, account: string, draftId: string, path: string, view?: { source: MessageSource }): AppState {
   const key = targetKey({ account, draft: draftId });
   const prev = s.compose[key];
   if (isRunning(prev)) return withFocus({ ...s, composeShown: key }, "reader");

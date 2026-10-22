@@ -50,6 +50,7 @@ export type { MailboxKind } from "./MailboxKind";
 export type { MailboxListing } from "./MailboxListing";
 export type { MessageList } from "./MessageList";
 export type { MessageMeta } from "./MessageMeta";
+export type { MessageSource } from "./MessageSource";
 export type { MessageText } from "./MessageText";
 export type { MovedTo } from "./MovedTo";
 export type { MutationAck } from "./MutationAck";

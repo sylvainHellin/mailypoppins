@@ -99,8 +99,7 @@ The type blocks in this document are for reading, and the generated files are th
 | `draft_discard` | `account`, `ids` | `DraftDiscardBatch` |
 | `draft_create` | `account`, `name`, `signature?`, `no_signature?`, `headers?: DraftHeaders`, `body?` | `DraftCreated` |
 | `draft_reply` | `account`, `row_id`, `all`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
-| `draft_forward` | `account`, `row_id`, `as_attachment?`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
-| `draft_forward_hit` | `account`, `mailbox`, `message_id` | `DraftCreated` |
+| `draft_forward` | `account`, `source`, `as_attachment?`, `headers?`, `signature?`, `no_signature?` | `DraftCreated` |
 | `draft_from_message` | `account`, `kind: DraftKind`, `message: DraftMessage` | `DraftCreated` |
 | `draft_path` | `account`, `id` | `DraftLocation` |
 | `draft_approve` | `account`, `ids` | `DraftStatusBatch` |
@@ -125,8 +124,8 @@ The type blocks in this document are for reading, and the generated files are th
 | `setting_set` | `key` (`SettingKey`), `value` (or `null` to remove) | `string \| null`, the value the key holds afterwards; an unknown key is `not_found`, a value the key cannot hold `setup` |
 | `config_open` | none | `EditorLaunch`; `not_found` when the daemon has no `config.toml` |
 | `log_open` | none | `EditorLaunch`; `not_found` when the daemon's log file does not exist yet |
-| `message_markdown_open` | `account`, `row_id` | `EditorLaunch`; `not_found` when the store no longer holds the row |
-| `message_markdown_path` | `account`, `row_id` | `OpenedFile`, the rendition's file for `terminal_spawn`; `not_found` when the store no longer holds the row |
+| `message_markdown_open` | `account`, `source` | `EditorLaunch`; `not_found` when the store no longer holds the row |
+| `message_markdown_path` | `account`, `source` | `OpenedFile`, the rendition's file for `terminal_spawn`; `not_found` when the store no longer holds the row |
 | `config_get` | none | `ConfigSnapshot` |
 | `config_reload` | none | `ConfigSwap`; a file that does not load is `protocol` with code -32007 and the daemon's sentence |
 | `config_set_password` | `account`, `kind` (`"smtp"` or `"imap"`), `value` | `SecretStored` |
@@ -141,10 +140,10 @@ The type blocks in this document are for reading, and the generated files are th
 | `outbox_retry` | `account`, `row_id` | `{ operation_id }` |
 | `outbox_discard` | `account`, `row_id` | `OutboxDiscarded` |
 | `message_fetch` | `account`, `mailbox` (label or server name), `message_id` | `FetchOutcome`, once the fetch has ended |
-| `attachment_open` | `account`, `row_id`, `part` | `OpenedFile` |
-| `attachment_save` | `account`, `row_id`, `parts`, `dest_dir` (absolute or `~`) | `SavedAttachments` |
-| `message_export` | `account`, `row_id`, `dest_dir` (absolute or `~`) | `ExportedMessage` |
-| `hit_export` | `account`, `mailbox`, `message_id`, `dest_dir` (absolute or `~`) | `ExportedMessage` |
+| `message_attachments` | `account`, `source` | `Attachment[]`, the parts in `part`'s order |
+| `attachment_open` | `account`, `source`, `part` | `OpenedFile` |
+| `attachment_save` | `account`, `source`, `parts`, `dest_dir` (absolute or `~`) | `SavedAttachments` |
+| `message_export` | `account`, `source`, `dest_dir` (absolute or `~`) | `ExportedMessage` |
 | `html_open` | `account`, `row_id` | `OpenedFile`, or `null` for a message with no HTML part |
 | `hit_html_open` | `html` | `OpenedFile` |
 | `draft_html_open` | `account`, `id` | `OpenedFile` |
@@ -446,7 +445,7 @@ None computes a path: the daemon's answer names the file it uses.
 
 - `config_open` calls `config.get` and opens its `path`; a `state` of `absent` is refused before any editor starts, as `not_found` "There is no config.toml yet; add an account first", and an `invalid` file opens, since the editor is where it gets fixed.
 - `log_open` calls `diagnostic.log_path`, the daemon's dated log (`mailypoppins-<date>.log`), and refuses a file that does not exist yet with `not_found` "No log file found at <path>".
-- `message_markdown_path` calls `message.materialise_markdown {account, row_id}`, which writes the store's Markdown view of the row (frontmatter and the plain text, mode 0444, named after the subject) as a handle of the family the attachments use (see Attachments), and answers its file as an `OpenedFile`; a row the store no longer holds (`-32602`) is `not_found` "Open failed: that message is no longer in the store", the TUI's line.
+- `message_markdown_path` calls `message.materialise_markdown` with its `source`'s address, `{account, row_id}` or `{account, hit}` (PERSO-155), which writes the store's Markdown view of the row (frontmatter and the plain text, mode 0444, named after the subject) as a handle of the family the attachments use (see Attachments), and answers its file as an `OpenedFile`; a row the store no longer holds (`-32602`) is `not_found` "Open failed: that message is no longer in the store", the TUI's line.
 - `message_markdown_open` does the same and opens the `path` in the external editor.
   The handle is left to expire after its ten minutes, as an opened attachment's is: neither route waits for the editor, which has read the file by then.
 
@@ -566,8 +565,8 @@ A draft is a Markdown file with YAML frontmatter in the account's drafts directo
 It passes `headers` and a non-blank `body` to `draft.create`, which writes the file whole: the recipients and subject in the frontmatter, the body above the signature.
 `draft_reply` and `draft_forward` address the source by `row_id` and pass `headers` to the daemon, which then needs all four fields; an empty string clears one.
 They pass `signature` and `no_signature` as `draft_create` does, and neither means the account's default, which the daemon resolves.
-`draft_from_message` builds a reply, reply-all or forward from a server-only search hit (`DraftMessage`, the hit's own field names), with no attachments.
-`draft_forward_hit` is that hit's forward as attachment (PERSO-174): `draft.forward` with `source: {hit: {message_id, mailbox}}` and `as_attachment`, the daemon downloading the `.eml` and building the forward from it, waiting as long as an export.
+`draft_from_message` builds a reply or reply-all from a server-only search hit (`DraftMessage`, the hit's own field names), with no attachments.
+`draft_forward` takes a `MessageSource`, `{kind: "row", row_id}` or `{kind: "hit", mailbox, message_id}`: a server-only hit is `draft.forward` with `source: {hit: {message_id, mailbox}}`, inline or `as_attachment`, the daemon building the forward from the server's copy, its parts carried, and waiting as long as an export (PERSO-174, PERSO-155); `headers` applies to either, so the forward wizard asks for a hit's recipients as for a row's.
 
 `draft_set_recipients` is client-side, like the TUI's `ce`: it resolves the file through `draft.path` and rewrites the `to`, `cc`, `bcc` and `subject` lines with `mp_core::draft::rewrite_draft_recipients`, which leaves the body and every other field byte for byte.
 An absent `subject` keeps the draft's own, and the signature is not re-spliced.
@@ -701,7 +700,7 @@ A part that fails lands in `failed` with its `GuiError`, and the others still go
 
 `message_export` is the same copy for the message itself (PERSO-174): `message.materialise_eml` writes its raw RFC 822 bytes as `<date>_<subject>.eml`, `mp export`'s file, and the copy into `dest_dir` takes the `_1` rule before the handle is released.
 A row stored without its raw message (every Graph row) is answered from the server, so the call waits up to 90 seconds, as `draft_forward` with `as_attachment` does, which attaches the same bytes.
-`hit_export` is the same copy for a server-only search hit, `message.materialise_eml` addressed by `hit: {message_id, mailbox}`, which the daemon answers from the server without ingesting anything.
+Every command of this section takes a `MessageSource`, and a server-only search hit is `{kind: "hit", mailbox, message_id}`, which goes to the daemon as `hit: {message_id, mailbox}`: `message_attachments` (`message.get` without a body), `attachment_open`, `attachment_save` and `message_export` are then answered from the server's copy, without ingesting anything (PERSO-174, PERSO-155), and wait as long as an export.
 
 ```ts
 type OpenedFile = { name: string; path: string };
@@ -712,7 +711,7 @@ type SavedAttachments = {
 };
 ```
 
-A server-only search hit has no row, so there is nothing to materialise; its markup is the hit's `html_body`.
+A server-only search hit's markup is the hit's own `html_body`, so its browser rendition is written here rather than by the daemon.
 `hit_html_open` writes it with `mp_core::parse::ensure_utf8_charset` and `inject_csp_meta`, as the TUI's `html_temp_file` does, to `<app cache>/renditions/hit-<hash>/message.html`, one directory per markup, and opens it.
 The app cache is Tauri's `app_cache_dir`, `~/Library/Caches/dev.mailypoppins.desktop/` on macOS; the fixture uses `cache/` under its run directory.
 On unix `renditions/` and each `hit-<hash>/` are 0700, tightened if found wider (`mp_core::config::create_private_dir_all`), and `message.html` is 0600, as the daemon's handles and the TUI's temp files are.

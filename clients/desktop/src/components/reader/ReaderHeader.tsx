@@ -24,7 +24,7 @@ function Field({ name, value }: { name: string; value: string | null }) {
  */
 export function ReaderHeader({ meta }: { meta: MessageMeta }) {
   const dispatch = useDispatch();
-  const owner = { kind: "message" as const, account: meta.account, row_id: meta.row_id };
+  const owner = { kind: "message" as const, account: meta.account, source: { kind: "row" as const, row_id: meta.row_id } };
   const items = messageItems(meta.attachments);
   return (
     <header className="flex flex-col gap-3 border-b border-border px-5 py-4">
@@ -81,7 +81,7 @@ export function ReaderHeader({ meta }: { meta: MessageMeta }) {
                 onClick={() =>
                   dispatch({
                     type: "open_attachments",
-                    dialog: { kind: "save", account: meta.account, row_id: meta.row_id, subject: meta.subject ?? "(no subject)", items: [item] },
+                    dialog: { kind: "save", account: meta.account, source: owner.source, subject: meta.subject ?? "(no subject)", items: [item] },
                   })
                 }
               >

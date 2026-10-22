@@ -22,6 +22,7 @@ import { formatSize } from "@/components/list/format";
 import { attachPath, exportTo, openItem, pickPath, saveParts } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
 import type { AttachmentDialog as Dialogs, AttachmentItem, AttachmentOwner } from "@/app/state";
+import type { MessageSource } from "@/lib/gui-types";
 
 export const PICKER_NOTE = "Browse opens the system picker.";
 
@@ -181,6 +182,11 @@ function OpenList({
 }
 
 /** The Save dialog: which parts, and the directory, the last one used offered first. */
+/** A message source as a React key: its row id, or the hit's Message-ID. */
+function sourceKey(source: MessageSource): string {
+  return source.kind === "row" ? String(source.row_id) : source.message_id;
+}
+
 function SaveForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "save" }>; inputRef: React.RefObject<HTMLInputElement | null> }) {
   const s = useAppState();
   const dispatch = useDispatch();
@@ -194,7 +200,7 @@ function SaveForm({ dialog, inputRef }: { dialog: Extract<Dialogs, { kind: "save
     if (busy) return;
     setBusy(true);
     const parts = dialog.items.map((i) => i.part).filter((p) => checked.includes(p));
-    const refusal = await saveParts(dialog.account, dialog.row_id, parts, dir, dispatch);
+    const refusal = await saveParts(dialog.account, dialog.source, parts, dir, dispatch);
     setBusy(false);
     setError(refusal);
   };
@@ -475,10 +481,10 @@ export function AttachmentsDialog({ dialog, onOpenChange }: AttachmentsDialogPro
             firstRef={firstRef}
           />
         ) : d?.kind === "save" ? (
-          <SaveForm key={`${d.account}/${d.row_id}/${d.items.map((i) => i.part).join(",")}`} dialog={d} inputRef={fieldRef} />
+          <SaveForm key={`${d.account}/${sourceKey(d.source)}/${d.items.map((i) => i.part).join(",")}`} dialog={d} inputRef={fieldRef} />
         ) : d?.kind === "export" ? (
           <ExportForm
-            key={`${d.account}/${d.source.kind === "row" ? d.source.row_id : d.source.message_id}`}
+            key={`${d.account}/${sourceKey(d.source)}`}
             dialog={d}
             inputRef={fieldRef}
           />

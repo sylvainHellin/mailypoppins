@@ -17,11 +17,12 @@ import { conversationDraft, filteredDrafts, isStale, readerKey, summaryDraft, ty
 
 /**
  * A server-only search hit: the store holds no row, so there is no body to
- * show, and a reply or a forward is built from the hit's own headers. Its
- * `.eml`, forwarded as attachment or exported, is the server's copy, which
- * the daemon downloads without ingesting it (PERSO-174).
- * Fetch (`F`) downloads it into the store, after which the reader opens it;
- * its markup opens in the browser as it came.
+ * show, and a reply is built from the hit's own headers. Its attachments,
+ * its read-only view, its `.eml` and a forward of it come from the server's
+ * copy, which the daemon downloads without ingesting it (PERSO-174,
+ * PERSO-155); a forward asks for its recipients first, as a stored
+ * message's does. Fetch (`F`) downloads it into the store, after which the
+ * reader opens it; its markup opens in the browser as it came.
  */
 function ServerHitSummary({ hit }: { hit: SearchHit }) {
   const s = useAppState();
@@ -41,7 +42,13 @@ function ServerHitSummary({ hit }: { hit: SearchHit }) {
           <ReplyAll aria-hidden="true" />
           Reply all
         </Button>
-        <Button size="sm" variant="ghost" title="Forward (cf)" disabled={!src} onClick={() => compose.forward(src, dispatch)}>
+        <Button
+          size="sm"
+          variant="ghost"
+          title="Forward (cf)"
+          disabled={!src || hit.message_id === null}
+          onClick={() => compose.forward(src, dispatch)}
+        >
           <Forward aria-hidden="true" />
           Forward
         </Button>
@@ -94,8 +101,8 @@ function ServerHitSummary({ hit }: { hit: SearchHit }) {
       </dl>
       <p className="flex items-center gap-2 text-muted-foreground">
         <Cloud aria-hidden="true" className="size-4" />
-        This message is on the server only; the store has no copy to show. Fetch (F) downloads it with its attachments; a reply or a
-        forward before that quotes it with none.
+        This message is on the server only; the store has no copy to show. Its attachments (t o, t s), its read-only view (e) and a
+        forward come from the server's copy; Fetch (F) downloads it into the store.
       </p>
     </article>
   );

@@ -24,7 +24,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
-use crate::attachments::OpenedFile;
+use crate::attachments::{MessageSource, OpenedFile};
 use crate::commands::{call, with_door};
 use crate::editor::{self, EditorLaunch, Lookup};
 use crate::error::{Addressing, GuiError};
@@ -95,19 +95,21 @@ pub fn log_open_on(
 /// What `message_markdown_open` says when the row is gone, the TUI's words.
 pub const MESSAGE_GONE: &str = "Open failed: that message is no longer in the store";
 
-/// Write the Markdown rendition of the stored message `row_id` of `account`
-/// (mode 0444, named after the subject) and answer its file, for the
-/// embedded terminal to open; `not_found` with [`MESSAGE_GONE`] when the
-/// store no longer holds it.
+/// Write the Markdown rendition of `source` in `account` (mode 0444, named
+/// after the subject) and answer its file, for the embedded terminal to open;
+/// `not_found` with [`MESSAGE_GONE`] when the store no longer holds a row. A
+/// server-only hit's is the daemon's rendering of the server's copy
+/// (PERSO-155).
 pub fn message_markdown_path_on(
     door: &Door,
     account: &str,
-    row_id: i64,
+    source: &MessageSource,
 ) -> Result<OpenedFile, GuiError> {
-    match crate::attachments::materialise(
+    match crate::attachments::materialise_within(
         door,
         "message.materialise_markdown",
-        json!({"account": account, "row_id": row_id}),
+        source.address(account),
+        source.budget(),
     ) {
         Ok(handle) => Ok(OpenedFile {
             name: handle.name,
@@ -115,23 +117,22 @@ pub fn message_markdown_path_on(
         }),
         Err(GuiError::NotFound {
             code: Some(-32602), ..
-        }) => Err(GuiError::not_found(MESSAGE_GONE)),
+        }) if matches!(source, MessageSource::Row { .. }) => Err(GuiError::not_found(MESSAGE_GONE)),
         Err(e) => Err(e),
     }
 }
 
-/// Open the Markdown rendition of the stored message `row_id` of `account`
-/// in the external editor (the TUI's `e` on a received message, on the
-/// external route); `not_found` with [`MESSAGE_GONE`] when the store no
-/// longer holds it.
+/// Open the Markdown rendition of `source` in `account` in the external
+/// editor (the TUI's `e` on a received message, on the external route);
+/// `not_found` with [`MESSAGE_GONE`] when the store no longer holds a row.
 pub fn message_markdown_open_on(
     door: &Door,
     lookup: &Lookup,
     account: &str,
-    row_id: i64,
+    source: &MessageSource,
     window: Duration,
 ) -> Result<EditorLaunch, GuiError> {
-    let file = message_markdown_path_on(door, account, row_id)?;
+    let file = message_markdown_path_on(door, account, source)?;
     editor::open_on(fixture_of(door), lookup, &file.path, window)
 }
 
@@ -159,10 +160,10 @@ pub async fn config_open(
 pub async fn message_markdown_path(
     session: State<'_, SessionHandle>,
     account: String,
-    row_id: i64,
+    source: MessageSource,
 ) -> Result<OpenedFile, GuiError> {
     with_door(&session, move |_, door| {
-        message_markdown_path_on(door, &account, row_id)
+        message_markdown_path_on(door, &account, &source)
     })
     .await
 }
@@ -174,7 +175,7 @@ pub async fn message_markdown_open(
     app: AppHandle,
     session: State<'_, SessionHandle>,
     account: String,
-    row_id: i64,
+    source: MessageSource,
 ) -> Result<EditorLaunch, GuiError> {
     let settings = editor::settings_file(&app)?;
     with_door(&session, move |_, door| {
@@ -182,7 +183,7 @@ pub async fn message_markdown_open(
             door,
             &lookup_for(&settings),
             &account,
-            row_id,
+            &source,
             editor::EXIT_WINDOW,
         )
     })
@@ -233,6 +234,31 @@ mod tests {
     }
 
     const WINDOW: Duration = Duration::from_millis(100);
+
+    fn row(row_id: i64) -> MessageSource {
+        MessageSource::Row { row_id }
+    }
+
+    /// `e` on a server-only hit opens the daemon's rendering of the server's
+    /// copy, as on a row, instead of asking for a fetch first (PERSO-155).
+    #[test]
+    fn message_markdown_path_on_a_server_only_hit_is_the_daemons_rendition() {
+        let (door, f) = fixture_door();
+        let hit = MessageSource::Hit {
+            mailbox: "Archive".to_string(),
+            message_id: "<server-only@fixture.example>".to_string(),
+        };
+        let file = message_markdown_path_on(&door, "work", &hit).expect("written");
+        let text = std::fs::read_to_string(&file.path).expect("written by the materialiser");
+        assert!(text.contains("A message only the server holds."), "{text}");
+        assert!(Path::new(&file.path).starts_with(f.root().join("handles")));
+        let gone = MessageSource::Hit {
+            mailbox: "Archive".to_string(),
+            message_id: "<nowhere@example.com>".to_string(),
+        };
+        let err = message_markdown_path_on(&door, "work", &gone).expect_err("not on the server");
+        assert_ne!(err, GuiError::not_found(MESSAGE_GONE), "{err:?}");
+    }
 
     #[test]
     fn config_open_on_journals_the_editor_on_the_daemons_path() {
@@ -290,7 +316,7 @@ mod tests {
     fn message_markdown_open_on_journals_the_editor_on_the_daemons_rendition() {
         let (door, f) = fixture_door();
         let launch =
-            message_markdown_open_on(&door, &lookup(), "work", 1001, WINDOW).expect("opened");
+            message_markdown_open_on(&door, &lookup(), "work", &row(1001), WINDOW).expect("opened");
         assert_eq!(launch.pid, None, "a fixture spawns nothing");
         let opens = f.editor_opens();
         assert_eq!(opens.len(), 1);
@@ -315,7 +341,7 @@ mod tests {
     #[test]
     fn message_markdown_path_on_answers_the_read_only_rendition_and_opens_nothing() {
         let (door, f) = fixture_door();
-        let file = message_markdown_path_on(&door, "work", 1001).expect("written");
+        let file = message_markdown_path_on(&door, "work", &row(1001)).expect("written");
         assert_eq!(file.name, "quarterly-ledger-review.md");
         let path = Path::new(&file.path);
         assert!(path.starts_with(f.root().join("handles")), "{path:?}");
@@ -329,15 +355,15 @@ mod tests {
             f.editor_opens().is_empty(),
             "the embedded route's terminal_spawn opens it, not this command"
         );
-        let err = message_markdown_path_on(&door, "work", 999_999).expect_err("gone");
+        let err = message_markdown_path_on(&door, "work", &row(999_999)).expect_err("gone");
         assert_eq!(err, GuiError::not_found(MESSAGE_GONE));
     }
 
     #[test]
     fn message_markdown_open_on_a_row_the_store_lost_is_not_found_and_opens_nothing() {
         let (door, f) = fixture_door();
-        let err =
-            message_markdown_open_on(&door, &lookup(), "work", 999_999, WINDOW).expect_err("gone");
+        let err = message_markdown_open_on(&door, &lookup(), "work", &row(999_999), WINDOW)
+            .expect_err("gone");
         assert_eq!(err, GuiError::not_found(MESSAGE_GONE));
         assert!(f.editor_opens().is_empty());
     }

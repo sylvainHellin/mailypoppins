@@ -1285,25 +1285,29 @@ pub fn draft_reply_on(
     )
 }
 
-/// A forward of the stored message `row_id`, carrying its attachments, or
-/// with `as_attachment` the message itself as its `.eml` (the TUI's `cF`,
-/// `mp forward --as-attachment`, PERSO-174), which may come from the server
-/// first and waits as long as an export does.
+/// A forward of `source`, carrying its attachments, or with `as_attachment`
+/// the message itself as its `.eml` (the TUI's `cF`, `mp forward
+/// --as-attachment`, PERSO-174), which may come from the server first and
+/// waits as long as an export does. A server-only hit is forwarded by the
+/// daemon from the server's copy, ingesting nothing, with the forward
+/// wizard's headers as a stored row's is (PERSO-155).
+#[allow(clippy::too_many_arguments)]
 pub fn draft_forward_on(
     door: &Door,
     account: &str,
-    row_id: i64,
+    source: &crate::attachments::MessageSource,
     as_attachment: bool,
     headers: Option<&DraftHeaders>,
     signature: Option<&str>,
     no_signature: bool,
 ) -> Result<DraftCreated, GuiError> {
-    let mut params = json!({"account": account, "source": {"row_id": row_id}});
-    let budget = if as_attachment {
+    let mut params = json!({"account": account, "source": source.draft_source()});
+    if as_attachment {
         params["as_attachment"] = json!(true);
-        crate::attachments::EML_BUDGET
-    } else {
-        DRAFT_BUDGET
+    }
+    let budget = match (as_attachment, source) {
+        (false, crate::attachments::MessageSource::Row { .. }) => DRAFT_BUDGET,
+        _ => crate::attachments::EML_BUDGET,
     };
     draft_from_row_on(
         door,
@@ -1316,35 +1320,9 @@ pub fn draft_forward_on(
     )
 }
 
-/// A forward as attachment of a server-search hit the store holds no row
-/// for (PERSO-174): `draft.forward` with the hit as its source, addressed as
-/// `message_fetch` addresses it, so the daemon downloads the server's raw
-/// copy for the `.eml` and builds the forward from it, ingesting nothing.
-/// No wizard asks for recipients first, as for the hit's other drafts.
-pub fn draft_forward_hit_on(
-    door: &Door,
-    account: &str,
-    mailbox: &str,
-    message_id: &str,
-) -> Result<DraftCreated, GuiError> {
-    draft_from_row_on(
-        door,
-        "draft.forward",
-        json!({
-            "account": account,
-            "source": {"hit": {"message_id": message_id, "mailbox": mailbox}},
-            "as_attachment": true,
-        }),
-        None,
-        None,
-        false,
-        crate::attachments::EML_BUDGET,
-    )
-}
-
-/// A reply, reply-all or forward of a message the store holds no row for (a
+/// A reply or reply-all to a message the store holds no row for (a
 /// server-only search hit), built from the hit itself. It carries no
-/// attachments.
+/// attachments; a forward of the same hit is [`draft_forward_on`]'s.
 pub fn draft_from_message_on(
     door: &Door,
     account: &str,
@@ -2004,7 +1982,7 @@ pub async fn draft_reply(
 pub async fn draft_forward(
     session: State<'_, SessionHandle>,
     account: String,
-    row_id: i64,
+    source: crate::attachments::MessageSource,
     as_attachment: Option<bool>,
     headers: Option<DraftHeaders>,
     signature: Option<String>,
@@ -2014,7 +1992,7 @@ pub async fn draft_forward(
         draft_forward_on(
             door,
             &account,
-            row_id,
+            &source,
             as_attachment.unwrap_or(false),
             headers.as_ref(),
             signature.as_deref(),
@@ -2033,19 +2011,6 @@ pub async fn draft_from_message(
 ) -> Result<DraftCreated, GuiError> {
     with_door(&session, move |_, door| {
         draft_from_message_on(door, &account, kind, &message)
-    })
-    .await
-}
-
-#[tauri::command(rename_all = "snake_case")]
-pub async fn draft_forward_hit(
-    session: State<'_, SessionHandle>,
-    account: String,
-    mailbox: String,
-    message_id: String,
-) -> Result<DraftCreated, GuiError> {
-    with_door(&session, move |_, door| {
-        draft_forward_hit_on(door, &account, &mailbox, &message_id)
     })
     .await
 }
@@ -3289,7 +3254,7 @@ mod tests {
         let forward = draft_forward_on(
             &d,
             "work",
-            1001,
+            &row(1001),
             false,
             Some(&headers("x@example.com", "", "Fwd: x")),
             None,
@@ -3304,11 +3269,57 @@ mod tests {
         assert!(!body.contains(mp_core::draft::SIG_START), "{body}");
     }
 
+    fn row(row_id: i64) -> crate::attachments::MessageSource {
+        crate::attachments::MessageSource::Row { row_id }
+    }
+
+    fn server_only() -> crate::attachments::MessageSource {
+        crate::attachments::MessageSource::Hit {
+            mailbox: "Archive".to_string(),
+            message_id: "<server-only@fixture.example>".to_string(),
+        }
+    }
+
+    /// The forward wizard over a server-only hit: `draft.forward` with the
+    /// hit as its source and the wizard's headers, inline, as over a stored
+    /// row, so both clients ask for a hit's recipients first (PERSO-155).
+    #[test]
+    fn a_server_only_hit_forwards_inline_with_the_wizards_headers() {
+        let (d, f) = fixture_door();
+        let created = draft_forward_on(
+            &d,
+            "work",
+            &server_only(),
+            false,
+            Some(&headers("x@example.com", "", "Fwd: Server-only match")),
+            None,
+            false,
+        )
+        .expect("the inline forward of a server-only hit");
+        let (method, params) = f.calls().last().cloned().expect("call");
+        assert_eq!(method, "draft.forward");
+        assert_eq!(
+            params["source"],
+            json!({"hit": {"message_id": "<server-only@fixture.example>", "mailbox": "Archive"}})
+        );
+        assert!(params.get("as_attachment").is_none(), "{params}");
+        let draft = parsed(&created.path);
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("x@example.com"));
+        assert_eq!(draft.frontmatter.subject, "Fwd: Server-only match");
+        assert!(
+            draft
+                .body_markdown
+                .contains("A message only the server holds."),
+            "{}",
+            draft.body_markdown
+        );
+    }
+
     #[test]
     fn a_forward_carries_the_attachments_and_a_hit_is_built_from_itself() {
         let (d, _f) = fixture_door();
         let forward =
-            draft_forward_on(&d, "work", 1001, false, None, None, false).expect("forward");
+            draft_forward_on(&d, "work", &row(1001), false, None, None, false).expect("forward");
         let draft = parsed(&forward.path);
         assert!(
             draft.body_markdown.contains("Fixture GmbH"),
@@ -3356,7 +3367,7 @@ mod tests {
         let forward = draft_forward_on(
             &d,
             "work",
-            1001,
+            &row(1001),
             true,
             Some(&headers(
                 "x@example.com",
@@ -3389,7 +3400,7 @@ mod tests {
             mp_core::draft::ATTACHED_FORWARD_BODY == mp_core::draft::ForwardBody::Quoted
         );
 
-        let hit = draft_forward_hit_on(&d, "work", "Archive", "<server-only@fixture.example>")
+        let hit = draft_forward_on(&d, "work", &server_only(), true, None, None, false)
             .expect("the forward of a server-only hit");
         let (method, params) = f.calls().last().cloned().expect("call");
         assert_eq!(method, "draft.forward");
@@ -3412,12 +3423,17 @@ mod tests {
             attachments[0].ends_with("2025-03-03_Server-only match.eml"),
             "{attachments:?}"
         );
+        let nowhere = crate::attachments::MessageSource::Hit {
+            mailbox: "Archive".to_string(),
+            message_id: "<nowhere@example.com>".to_string(),
+        };
         assert!(
-            draft_forward_hit_on(&d, "work", "Archive", "<nowhere@example.com>").is_err(),
+            draft_forward_on(&d, "work", &nowhere, true, None, None, false).is_err(),
             "a hit the server does not have writes no draft"
         );
 
-        let plain = draft_forward_on(&d, "work", 1001, false, None, None, false).expect("forward");
+        let plain =
+            draft_forward_on(&d, "work", &row(1001), false, None, None, false).expect("forward");
         let (_, params) = f.calls().last().cloned().expect("call");
         assert!(params.get("as_attachment").is_none(), "{params}");
         assert!(parsed(&plain.path)

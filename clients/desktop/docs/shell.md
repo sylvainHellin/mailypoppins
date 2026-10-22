@@ -150,7 +150,7 @@ When the store's index can answer the query, `search_local` runs first and its e
 The results are the list pane's, so the keys that act on a hit are the list's (LST-09 in docs/parity-matrix.md), and the TUI's results pane, headers and body are the list and the reader.
 Hits stream in from `message.server_hit`; a hit or a finish that overtakes the `search_server_start` answer is held in `search.early` and replayed once the id is known.
 Cancel calls `search_server_cancel`; leaving a running search (Escape, a new query, another mailbox) cancels it too.
-A server-only hit (`row_id: null`) is listed with a "server only" badge and has no body to open until `F` fetches it into the store ([reader.md](reader.md), "Drafts and server-only hits").
+A server-only hit (`row_id: null`) is listed with a "server only" badge and has no body to open until `F` fetches it into the store, though its parts, its read-only view, its `.eml` and a forward of it come from the server's copy without one ([reader.md](reader.md), "Drafts and server-only hits").
 The cursor still lands on it (`selection.hit`, by the hit's key), so it can be replied to or forwarded from its own headers; it cannot be marked, and no mutation names it.
 Escape, from the list or the field, returns to the mailbox list with the selection it had before the search; choosing a mailbox or an account ends the search as well.
 A `rebootstrapped` keeps the search and its hits: the selection to restore goes through the same rules as a live one, a local search runs again after a daemon restart (row ids are per instance), and a server search waits for the `operation_settled` or `operation_dropped` the Rust layer's re-query sends.
@@ -237,7 +237,7 @@ The lifetimes are one table, `LIFETIME_MS` in `src/app/activity.ts`, whose `noti
 
 - An applied batch, a cancelled hold and an operation this window stopped waiting for inform: they leave after eight seconds (`READ_MS`).
 - A failed batch (with each row put back and the daemon's reason), a rollback, a refused hold cancel, a failed or dropped sync, a draft that could not be written or an editor that did not open, a send or an outbox retry that failed, went to only some recipients or was interrupted, a refused retry or discard, and a contact rebuild that kept the cached index are `role="alert"` notices that leave after twenty seconds (`STICKY_MS`); the failure stays in the activity log, and a failed send in the outbox.
-- The notice line at the bottom centre ("Copied …", "Opened …", "This message is on the server only: fetch it first (F)", a refused open or a preference that was not saved) leaves after eight seconds whatever its level, as the TUI's status line has one timer.
+- The notice line at the bottom centre ("Copied …", "Opened …", a refused open or a preference that was not saved) leaves after eight seconds whatever its level, as the TUI's status line has one timer.
 - The reader's blocked-link notice is a warning and leaves after eight seconds too; a newer blocked link starts the time again ([reader.md](reader.md)).
 - A hold card's plain end leaves after three seconds (`HOLD_END_MS`), its failure or partial delivery after twenty, and the update card's failure after twenty, as its Dismiss does.
 - Every notice of the activity area has a Dismiss button, and so have a hold card's failure and the blocked-link notice.
@@ -289,8 +289,8 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 | `cn` | New draft: the wizard | any pane | `signature_list`, then `draft_create` and, with no inline body, the editor |
 | `r`, `cr` | Reply | list, reader | `draft_reply` (`all: false`) or `draft_from_message` (`reply`), then the editor |
 | `ca` | Reply all | list, reader | `draft_reply` (`all: true`) or `draft_from_message` (`reply_all`), then the editor |
-| `cf` | Forward: the wizard, or at once for a server-only hit | list, reader | `signature_list`, then `draft_forward` with `headers` and the signature, or `draft_from_message` (`forward`), then the editor |
-| `cF` | Forward as attachment: the same wizard, the message carried as its `.eml` instead of its parts (PERSO-174); a server-only hit is forwarded at once, the daemon downloading its `.eml` | list, reader | `signature_list`, then `draft_forward` with `as_attachment`, `headers` and the signature, or `draft_forward_hit`, then the editor |
+| `cf` | Forward: the wizard, for a stored message and a server-only hit alike (PERSO-155) | list, reader | `signature_list`, then `draft_forward` with the message's `source`, `headers` and the signature, then the editor |
+| `cF` | Forward as attachment: the same wizard, the message carried as its `.eml` instead of its parts (PERSO-174); a server-only hit's `.eml` is the server's copy, which the daemon downloads | list, reader | `signature_list`, then `draft_forward` with the message's `source`, `as_attachment`, `headers` and the signature, then the editor |
 | `e` | Edit the draft in the editor; on a received message, open its Markdown rendition read-only by the same route, the TUI's `e` (PERSO-92); Enter focuses the reader | list, reader | `draft_path`, then the editor; `message_markdown_path`, then the embedded editor, or `message_markdown_open` |
 | `ce` | Edit recipients, in Drafts or on a conversation's draft member | list, reader | `draft_set_recipients`, the dialog filled from the listed row, or from `draft_preview` for a draft member |
 | `cA` | Approve, in Drafts or on a conversation's draft member | list, reader | `draft_approve` |
@@ -301,7 +301,7 @@ Each save reaches the list as the watcher's `draft.changed` or `draft.invalid`, 
 
 The keys are the TUI's (`clients/tui/src/app/keymap.rs`), and like its MESSAGE and List keys they do nothing from the sidebar.
 `ce`, `cA`, `cD` and `cX` outside the Drafts list say that they are only available in Drafts, in the TUI's words, except that `ce`, `cA` and `cD` reach a conversation's draft member as the TUI's do (PERSO-146).
-A reply or a forward acts on the cursor row, or on the server-only hit under the cursor, which has no row: `draft_from_message` then builds the draft from the hit's headers and bodies, with no attachments.
+A reply or a forward acts on the cursor row, or on the server-only hit under the cursor, which has no row: `draft_from_message` then builds a reply from the hit's headers and bodies, with no attachments, and a forward asks for its recipients in the wizard as a stored message's does and is `draft_forward` with the hit as its source, which the daemon builds from the server's copy, its parts carried (PERSO-155), as the TUI's search overlay does.
 On a draft, reply and forward say that a draft has nothing to quote.
 
 ### A message's rendition
@@ -1123,7 +1123,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - In the Contacts view: `j`/`k`, `gg`/`G` move, `/` focuses the search, Enter and `n` compose to the contact, `v` sends it as a vCard, `c` copies its address, `r` rebuilds the index (see Contacts).
 - In the Calendar view: `j`/`k`, `gg`/`G` move, Enter and `e` open the entry's `invite.ics` in the editor, `t` shows or hides past events, `r` reads the agenda again (see Calendar).
 - `cn`, `r`, `cr`, `ca`, `cf`, `cF`, `e`, `ce`, `cA`, `cD`: compose, from the list or the reader (`cn` from anywhere); see Compose.
-  On a received message `e` opens its Markdown rendition read-only instead, by a draft's route, the TUI's `e`, and Enter focuses the reader (PERSO-92); on a server-only hit it says to fetch it first (`F`) (see Compose, "A message's rendition").
+  On a received message `e` opens its Markdown rendition read-only instead, by a draft's route, the TUI's `e`, and Enter focuses the reader (PERSO-92); on a server-only hit it opens the daemon's rendition of the server's copy, with no fetch first (PERSO-155) (see Compose, "A message's rendition").
 - `cs`: the Signatures dialog, in Mail from any pane; see Signatures.
 - `x`: send the cursor draft, from any pane, the TUI's global key; `cX`: send all approved drafts, from the list or the reader; see Compose, "Send".
 - `to`, `ts`, `tb`: open an attachment, save attachments, open the HTML in the browser (on a draft, the HTML its send would build), from the list or the reader (the TUI's MESSAGE keys); `ta`: attach a file to the Drafts cursor draft; see [reader.md](reader.md), "Attachments".

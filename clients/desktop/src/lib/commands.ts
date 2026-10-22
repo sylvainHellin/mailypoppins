@@ -32,6 +32,7 @@ import type {
   DraftStatusBatch,
   EditorLaunch,
   EditorSetting,
+  Attachment,
   ExportedMessage,
   FetchOutcome,
   FixtureSimulation,
@@ -44,6 +45,7 @@ import type {
   MailboxListing,
   MessageList,
   MessageMeta,
+  MessageSource,
   MessageText,
   MutationBatch,
   OpenedFile,
@@ -188,29 +190,26 @@ export const draftReply = (
 /**
  * `signature` names one, `no_signature` asks for none, and neither is the account's default;
  * `as_attachment` carries the message as its `.eml` instead of its parts (`mp forward --as-attachment`).
+ * A server-only hit is forwarded by the daemon from the server's copy, ingesting nothing (PERSO-155).
  */
 export const draftForward = (
   account: string,
-  row_id: number,
+  source: MessageSource,
   headers?: DraftHeaders,
   opts: { signature?: string; no_signature?: boolean; as_attachment?: boolean } = {},
 ): Promise<DraftCreated> =>
   invoke<DraftCreated>("draft_forward", {
     account,
-    row_id,
+    source,
     as_attachment: opts.as_attachment ?? null,
     headers: headers ?? null,
     signature: opts.signature ?? null,
     no_signature: opts.no_signature ?? null,
   });
 
-/** A reply, reply-all or forward of a server-only search hit, with no attachments. */
+/** A reply or reply-all to a server-only search hit, built from the hit itself. */
 export const draftFromMessage = (account: string, kind: DraftKind, message: DraftMessage): Promise<DraftCreated> =>
   invoke<DraftCreated>("draft_from_message", { account, kind, message });
-
-/** A server-only hit forwarded as its `.eml`, which the daemon downloads (PERSO-174). */
-export const draftForwardHit = (account: string, mailbox: string, message_id: string): Promise<DraftCreated> =>
-  invoke<DraftCreated>("draft_forward_hit", { account, mailbox, message_id });
 
 export const draftPath = (account: string, id: string): Promise<DraftLocation> =>
   invoke<DraftLocation>("draft_path", { account, id });
@@ -278,18 +277,19 @@ export const logOpen = (): Promise<EditorLaunch> => invoke<EditorLaunch>("log_op
 /**
  * Writes a received message's Markdown rendition (`message.materialise_markdown`,
  * mode 0444) and answers its file, which the embedded route's `terminal_spawn`
- * opens, the TUI's `e`; `not_found` when the store no longer holds the row.
+ * opens, the TUI's `e`; `not_found` when the store no longer holds the row. A
+ * server-only hit's is the daemon's rendering of the server's copy (PERSO-155).
  */
-export const messageMarkdownPath = (account: string, row_id: number): Promise<OpenedFile> =>
-  invoke<OpenedFile>("message_markdown_path", { account, row_id });
+export const messageMarkdownPath = (account: string, source: MessageSource): Promise<OpenedFile> =>
+  invoke<OpenedFile>("message_markdown_path", { account, source });
 
 /**
  * Opens a received message's Markdown rendition (`message.materialise_markdown`,
  * read-only) in the resolved external editor, the TUI's `e` on the external
  * route; `not_found` when the store no longer holds the row.
  */
-export const messageMarkdownOpen = (account: string, row_id: number): Promise<EditorLaunch> =>
-  invoke<EditorLaunch>("message_markdown_open", { account, row_id });
+export const messageMarkdownOpen = (account: string, source: MessageSource): Promise<EditorLaunch> =>
+  invoke<EditorLaunch>("message_markdown_open", { account, source });
 
 /** The daemon's configuration (`config.get`): its file, its state and the part the Settings view shows. */
 export const configGet = (): Promise<ConfigSnapshot> => invoke<ConfigSnapshot>("config_get");
@@ -428,21 +428,24 @@ export const syncTrigger = (account: string, mode: SyncMode): Promise<OperationS
 
 // Attachments and the browser rendition (docs/rust-layer.md, "Attachments").
 
-/** Open part `part` of a stored message with the system opener. */
-export const attachmentOpen = (account: string, row_id: number, part: number): Promise<OpenedFile> =>
-  invoke<OpenedFile>("attachment_open", { account, row_id, part });
+// A `source` is a stored row or a server-only hit, whose parts and `.eml` the
+// daemon reads from the server's copy without ingesting it (PERSO-155).
+
+/** A message's parts, in the order `part` addresses them. */
+export const messageAttachments = (account: string, source: MessageSource): Promise<Attachment[]> =>
+  invoke<Attachment[]>("message_attachments", { account, source });
+
+/** Open part `part` of a message with the system opener. */
+export const attachmentOpen = (account: string, source: MessageSource, part: number): Promise<OpenedFile> =>
+  invoke<OpenedFile>("attachment_open", { account, source, part });
 
 /** Copy `parts` into `dest_dir` (absolute or `~`), with the `_1` rule for a name already taken. */
-export const attachmentSave = (account: string, row_id: number, parts: number[], dest_dir: string): Promise<SavedAttachments> =>
-  invoke<SavedAttachments>("attachment_save", { account, row_id, parts, dest_dir });
+export const attachmentSave = (account: string, source: MessageSource, parts: number[], dest_dir: string): Promise<SavedAttachments> =>
+  invoke<SavedAttachments>("attachment_save", { account, source, parts, dest_dir });
 
 /** Copy the message's own `<date>_<subject>.eml` into `dest_dir` (absolute or `~`), as `mp export` does. */
-export const messageExport = (account: string, row_id: number, dest_dir: string): Promise<ExportedMessage> =>
-  invoke<ExportedMessage>("message_export", { account, row_id, dest_dir });
-
-/** A server-only hit's `.eml`, downloaded by the daemon and not ingested (PERSO-174). */
-export const hitExport = (account: string, mailbox: string, message_id: string, dest_dir: string): Promise<ExportedMessage> =>
-  invoke<ExportedMessage>("hit_export", { account, mailbox, message_id, dest_dir });
+export const messageExport = (account: string, source: MessageSource, dest_dir: string): Promise<ExportedMessage> =>
+  invoke<ExportedMessage>("message_export", { account, source, dest_dir });
 
 /** The daemon's browser rendition, opened; null for a message with no HTML part. */
 export const htmlOpen = (account: string, row_id: number): Promise<OpenedFile | null> =>

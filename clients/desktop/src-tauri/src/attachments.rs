@@ -17,9 +17,12 @@
 //! resolves it: `~` against the home directory, a relative entry against the
 //! draft file's own directory (ATT-03).
 //!
-//! A server-only search hit has no row to materialise; its markup is in the
-//! hit, and is written with the charset and CSP tags the TUI adds into this
-//! app's cache directory before the browser opens it. A draft's send
+//! Every received-message command takes a [`MessageSource`]: a stored row, or
+//! a server-only search hit addressed as `message_fetch` addresses it, whose
+//! parts, view and `.eml` the daemon reads from the server's copy without
+//! ingesting it (PERSO-155), as the TUI's search overlay asks for them. A
+//! hit's markup is in the hit, and is written with the charset and CSP tags
+//! the TUI adds into this app's cache directory before the browser opens it. A draft's send
 //! rendition (`draft.html`, PERSO-136) is inline in the answer too, and goes
 //! the same way, one directory per draft id.
 
@@ -58,6 +61,54 @@ const RENDITION_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 // ---------------------------------------------------------------------------
 // Result shapes
 // ---------------------------------------------------------------------------
+
+/// The received message a command acts on: a stored row, or a server-search
+/// hit the store holds no row for, by its `Message-ID` and the sidebar label
+/// it was found under, the address `message.fetch` takes (PERSO-155).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export_to = "gui/"))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MessageSource {
+    Row { row_id: i64 },
+    Hit { mailbox: String, message_id: String },
+}
+
+impl MessageSource {
+    /// The address keys of a `message.*` call, `row_id` or `hit`, beside
+    /// `account`.
+    pub(crate) fn address(&self, account: &str) -> Value {
+        let mut params = json!({"account": account});
+        match self {
+            MessageSource::Row { row_id } => params["row_id"] = json!(row_id),
+            MessageSource::Hit {
+                mailbox,
+                message_id,
+            } => params["hit"] = json!({"message_id": message_id, "mailbox": mailbox}),
+        }
+        params
+    }
+
+    /// A draft's `source` object for the same message.
+    pub(crate) fn draft_source(&self) -> Value {
+        match self {
+            MessageSource::Row { row_id } => json!({"row_id": row_id}),
+            MessageSource::Hit {
+                mailbox,
+                message_id,
+            } => json!({"hit": {"message_id": message_id, "mailbox": mailbox}}),
+        }
+    }
+
+    /// How long a materialisation may take: a row is a store read, a hit a
+    /// download of the server's copy first.
+    pub(crate) fn budget(&self) -> Duration {
+        match self {
+            MessageSource::Row { .. } => HANDLE_BUDGET,
+            MessageSource::Hit { .. } => EML_BUDGET,
+        }
+    }
+}
 
 /// A file handed to the system opener.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -231,7 +282,7 @@ pub(crate) fn materialise(door: &Door, method: &str, params: Value) -> Result<Ha
 }
 
 /// [`materialise`] with its own budget.
-fn materialise_within(
+pub(crate) fn materialise_within(
     door: &Door,
     method: &str,
     params: Value,
@@ -263,33 +314,62 @@ fn release(door: &Door, handle: &str) {
     }
 }
 
-/// Open part `part` of the stored message `row_id` (ATT-01, the TUI's `to`).
-/// The handle stays live for its lifetime, since the viewer holds the file.
+/// The parts of `source` in the order `part` addresses them: `message.get`
+/// without a body, which for a server-only hit lists the server copy's parts
+/// (PERSO-155).
+pub fn message_attachments_on(
+    door: &Door,
+    account: &str,
+    source: &MessageSource,
+) -> Result<Vec<crate::commands::Attachment>, GuiError> {
+    let mut params = source.address(account);
+    params["body"] = json!(false);
+    let answer = call(
+        door,
+        "message.get",
+        params,
+        source.budget(),
+        Addressing::Resource,
+    )?;
+    serde_json::from_value(answer["attachments"].clone())
+        .map_err(|e| GuiError::protocol(format!("message.get's attachments did not decode: {e}")))
+}
+
+/// The `message.materialise_attachment` parameters of part `part`.
+fn part_params(account: &str, source: &MessageSource, part: u32) -> Value {
+    let mut params = source.address(account);
+    params["part"] = json!(part);
+    params
+}
+
+/// Open part `part` of `source` (ATT-01, the TUI's `to`). The handle stays
+/// live for its lifetime, since the viewer holds the file.
 pub fn attachment_open_on(
     door: &Door,
     account: &str,
-    row_id: i64,
+    source: &MessageSource,
     part: u32,
 ) -> Result<OpenedFile, GuiError> {
-    let handle = materialise(
+    let handle = materialise_within(
         door,
         "message.materialise_attachment",
-        json!({"account": account, "row_id": row_id, "part": part}),
+        part_params(account, source, part),
+        source.budget(),
     )?;
     let path = PathBuf::from(&handle.path);
     open_file(door, &path)?;
     Ok(opened(&path))
 }
 
-/// Save `parts` of the stored message `row_id` into `dest_dir` (ATT-02, the
-/// TUI's `ts`), in the order given. Two parts under one name, or a name the
+/// Save `parts` of `source` into `dest_dir` (ATT-02, the TUI's `ts`), in the
+/// order given. Two parts under one name, or a name the
 /// directory already has, become `name_1.ext` and on; each handle is
 /// released once its file is copied. A part that fails is in `failed` and
 /// the rest go ahead.
 pub fn attachment_save_on(
     door: &Door,
     account: &str,
-    row_id: i64,
+    source: &MessageSource,
     parts: &[u32],
     dest_dir: &str,
     home: Option<&Path>,
@@ -301,10 +381,11 @@ pub fn attachment_save_on(
     let mut saved = Vec::new();
     let mut failed = Vec::new();
     for &part in parts {
-        let handle = match materialise(
+        let handle = match materialise_within(
             door,
             "message.materialise_attachment",
-            json!({"account": account, "row_id": row_id, "part": part}),
+            part_params(account, source, part),
+            source.budget(),
         ) {
             Ok(handle) => handle,
             Err(error) => {
@@ -337,54 +418,25 @@ pub fn attachment_save_on(
     })
 }
 
-/// Export the stored message `row_id` into `dest_dir` as its RFC 822 file,
-/// `<date>_<subject>.eml` (the TUI's `te`, `mp export`, PERSO-174): the
-/// daemon materialises it, the copy takes the `_1` rule of a save, and the
-/// handle is released once copied.
+/// Export `source` into `dest_dir` as its RFC 822 file, `<date>_<subject>.eml`
+/// (the TUI's `te`, `mp export`, PERSO-174): the daemon materialises it, from
+/// the server's raw copy for a server-only hit, which it ingests nothing for;
+/// the copy takes the `_1` rule of a save, and the handle is released once
+/// copied.
 pub fn message_export_on(
     door: &Door,
     account: &str,
-    row_id: i64,
-    dest_dir: &str,
-    home: Option<&Path>,
-) -> Result<ExportedMessage, GuiError> {
-    export_on(
-        door,
-        json!({"account": account, "row_id": row_id}),
-        dest_dir,
-        home,
-    )
-}
-
-/// [`message_export_on`] for a server-search hit the store holds no row for,
-/// addressed as `message_fetch` addresses it: the daemon downloads the
-/// server's raw copy and ingests nothing, so the hit stays a hit.
-pub fn hit_export_on(
-    door: &Door,
-    account: &str,
-    mailbox: &str,
-    message_id: &str,
-    dest_dir: &str,
-    home: Option<&Path>,
-) -> Result<ExportedMessage, GuiError> {
-    export_on(
-        door,
-        json!({"account": account, "hit": {"message_id": message_id, "mailbox": mailbox}}),
-        dest_dir,
-        home,
-    )
-}
-
-/// `message.materialise_eml` over `address`, copied into `dest_dir` with the
-/// `_1` rule, its handle released.
-fn export_on(
-    door: &Door,
-    address: Value,
+    source: &MessageSource,
     dest_dir: &str,
     home: Option<&Path>,
 ) -> Result<ExportedMessage, GuiError> {
     let dir = resolve_dir(dest_dir, home)?;
-    let handle = materialise_within(door, "message.materialise_eml", address, EML_BUDGET)?;
+    let handle = materialise_within(
+        door,
+        "message.materialise_eml",
+        source.address(account),
+        EML_BUDGET,
+    )?;
     let copied = mp_core::parse::save_attachment(Path::new(&handle.path), &dir);
     release(door, &handle.handle);
     let path = copied.map_err(|e| {
@@ -672,15 +724,28 @@ pub fn draft_attachment_open_on(
 // The commands
 // ---------------------------------------------------------------------------
 
+/// The parts of a stored message or a server-only hit, `part`'s order.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn message_attachments(
+    session: State<'_, SessionHandle>,
+    account: String,
+    source: MessageSource,
+) -> Result<Vec<crate::commands::Attachment>, GuiError> {
+    with_door(&session, move |_, door| {
+        message_attachments_on(door, &account, &source)
+    })
+    .await
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn attachment_open(
     session: State<'_, SessionHandle>,
     account: String,
-    row_id: i64,
+    source: MessageSource,
     part: u32,
 ) -> Result<OpenedFile, GuiError> {
     with_door(&session, move |_, door| {
-        attachment_open_on(door, &account, row_id, part)
+        attachment_open_on(door, &account, &source, part)
     })
     .await
 }
@@ -690,7 +755,7 @@ pub async fn attachment_open(
 pub async fn attachment_save(
     session: State<'_, SessionHandle>,
     account: String,
-    row_id: i64,
+    source: MessageSource,
     parts: Vec<u32>,
     dest_dir: String,
 ) -> Result<SavedAttachments, GuiError> {
@@ -698,7 +763,7 @@ pub async fn attachment_save(
         attachment_save_on(
             door,
             &account,
-            row_id,
+            &source,
             &parts,
             &dest_dir,
             home_dir().as_deref(),
@@ -712,33 +777,11 @@ pub async fn attachment_save(
 pub async fn message_export(
     session: State<'_, SessionHandle>,
     account: String,
-    row_id: i64,
+    source: MessageSource,
     dest_dir: String,
 ) -> Result<ExportedMessage, GuiError> {
     with_door(&session, move |_, door| {
-        message_export_on(door, &account, row_id, &dest_dir, home_dir().as_deref())
-    })
-    .await
-}
-
-/// A server-only hit's `.eml`; `dest_dir` as `message_export`'s.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn hit_export(
-    session: State<'_, SessionHandle>,
-    account: String,
-    mailbox: String,
-    message_id: String,
-    dest_dir: String,
-) -> Result<ExportedMessage, GuiError> {
-    with_door(&session, move |_, door| {
-        hit_export_on(
-            door,
-            &account,
-            &mailbox,
-            &message_id,
-            &dest_dir,
-            home_dir().as_deref(),
-        )
+        message_export_on(door, &account, &source, &dest_dir, home_dir().as_deref())
     })
     .await
 }
@@ -940,17 +983,26 @@ mod tests {
         assert!(!path.exists());
     }
 
+    const ROW: MessageSource = MessageSource::Row { row_id: 1001 };
+
+    fn server_only() -> MessageSource {
+        MessageSource::Hit {
+            mailbox: "Archive".to_string(),
+            message_id: "<server-only@fixture.example>".to_string(),
+        }
+    }
+
     #[test]
     fn open_materialises_the_part_and_hands_the_daemons_file_to_the_opener() {
         let (door, fixture) = fixture_door();
-        let file = attachment_open_on(&door, "work", 1001, 0).unwrap();
+        let file = attachment_open_on(&door, "work", &ROW, 0).unwrap();
         assert_eq!(file.name, "ledger-q3.pdf");
         assert!(Path::new(&file.path).is_file());
         assert!(Path::new(&file.path).starts_with(fixture.root().join("handles")));
         assert_eq!(fixture.opened(), vec![file.path.clone()]);
         // The viewer holds the file: no release.
         assert!(calls_of(&fixture, "message.release_handle").is_empty());
-        let missing = attachment_open_on(&door, "work", 1001, 3).unwrap_err();
+        let missing = attachment_open_on(&door, "work", &ROW, 3).unwrap_err();
         assert!(matches!(missing, GuiError::NotFound { .. }), "{missing:?}");
         assert_eq!(fixture.opened().len(), 1);
     }
@@ -959,14 +1011,14 @@ mod tests {
     fn save_applies_the_underscore_rule_and_releases_each_handle() {
         let (door, fixture) = fixture_door();
         let home = scratch("save");
-        let first = attachment_save_on(&door, "work", 1001, &[0], "~/out", Some(&home)).unwrap();
+        let first = attachment_save_on(&door, "work", &ROW, &[0], "~/out", Some(&home)).unwrap();
         assert_eq!(first.dir, home.join("out").display().to_string());
         assert_eq!(first.saved.len(), 1);
         assert_eq!(
             first.saved[0].path,
             home.join("out/ledger-q3.pdf").display().to_string()
         );
-        let again = attachment_save_on(&door, "work", 1001, &[0, 4], "~/out", Some(&home)).unwrap();
+        let again = attachment_save_on(&door, "work", &ROW, &[0, 4], "~/out", Some(&home)).unwrap();
         assert_eq!(
             again.saved[0].path,
             home.join("out/ledger-q3_1.pdf").display().to_string()
@@ -975,8 +1027,8 @@ mod tests {
         assert_eq!(again.failed[0].part, 4);
         assert_eq!(calls_of(&fixture, "message.release_handle").len(), 2);
         assert!(fixture.opened().is_empty());
-        assert!(attachment_save_on(&door, "work", 1001, &[], "~/out", Some(&home)).is_err());
-        assert!(attachment_save_on(&door, "work", 1001, &[0], "out", Some(&home)).is_err());
+        assert!(attachment_save_on(&door, "work", &ROW, &[], "~/out", Some(&home)).is_err());
+        assert!(attachment_save_on(&door, "work", &ROW, &[0], "out", Some(&home)).is_err());
     }
 
     /// `te` (PERSO-174): the daemon's `.eml`, named by the export rule,
@@ -986,7 +1038,7 @@ mod tests {
     fn export_copies_the_messages_eml_and_releases_its_handle() {
         let (door, fixture) = fixture_door();
         let home = scratch("export");
-        let first = message_export_on(&door, "work", 1001, "~/out", Some(&home)).unwrap();
+        let first = message_export_on(&door, "work", &ROW, "~/out", Some(&home)).unwrap();
         assert_eq!(first.name, "2026-09-29_Quarterly ledger review.eml");
         let path = home.join("out/2026-09-29_Quarterly ledger review.eml");
         assert_eq!(first.path, path.display().to_string());
@@ -996,7 +1048,7 @@ mod tests {
             "{eml}"
         );
         assert!(eml.contains("\r\n\r\nHi,\r\n"), "{eml}");
-        let again = message_export_on(&door, "work", 1001, "~/out", Some(&home)).unwrap();
+        let again = message_export_on(&door, "work", &ROW, "~/out", Some(&home)).unwrap();
         assert_eq!(
             again.path,
             home.join("out/2026-09-29_Quarterly ledger review_1.eml")
@@ -1008,8 +1060,15 @@ mod tests {
             vec![json!({"account": "work", "row_id": 1001}); 2]
         );
         assert_eq!(calls_of(&fixture, "message.release_handle").len(), 2);
-        assert!(message_export_on(&door, "work", 1001, "out", Some(&home)).is_err());
-        let gone = message_export_on(&door, "work", 9999, "~/out", Some(&home)).unwrap_err();
+        assert!(message_export_on(&door, "work", &ROW, "out", Some(&home)).is_err());
+        let gone = message_export_on(
+            &door,
+            "work",
+            &MessageSource::Row { row_id: 9999 },
+            "~/out",
+            Some(&home),
+        )
+        .unwrap_err();
         assert!(matches!(gone, GuiError::NotFound { .. }), "{gone:?}");
         assert!(fixture.opened().is_empty());
     }
@@ -1021,15 +1080,8 @@ mod tests {
     fn a_server_only_hit_exports_through_its_message_id() {
         let (door, fixture) = fixture_door();
         let home = scratch("hit-export");
-        let exported = hit_export_on(
-            &door,
-            "work",
-            "Archive",
-            "<server-only@fixture.example>",
-            "~/out",
-            Some(&home),
-        )
-        .unwrap();
+        let exported =
+            message_export_on(&door, "work", &server_only(), "~/out", Some(&home)).unwrap();
         assert_eq!(exported.name, "2025-03-03_Server-only match.eml");
         let eml = fs::read_to_string(&exported.path).unwrap();
         assert!(
@@ -1044,15 +1096,43 @@ mod tests {
             })]
         );
         assert_eq!(calls_of(&fixture, "message.release_handle").len(), 1);
-        assert!(hit_export_on(
-            &door,
-            "work",
-            "Archive",
-            "<nowhere@example.com>",
-            "~/out",
-            Some(&home)
-        )
-        .is_err());
+        let nowhere = MessageSource::Hit {
+            mailbox: "Archive".to_string(),
+            message_id: "<nowhere@example.com>".to_string(),
+        };
+        assert!(message_export_on(&door, "work", &nowhere, "~/out", Some(&home)).is_err());
+    }
+
+    /// `to` and `ts` on a server-only hit list, open and save the server
+    /// copy's parts through the same calls as a row's, with the hit's
+    /// address, instead of asking for a fetch first (PERSO-155).
+    #[test]
+    fn a_server_only_hits_parts_are_listed_opened_and_saved() {
+        let (door, fixture) = fixture_door();
+        let parts = message_attachments_on(&door, "work", &server_only()).unwrap();
+        assert_eq!(parts.len(), 1, "{parts:?}");
+        assert_eq!(parts[0].name, "server-only-notes.txt");
+        let address = json!({"message_id": "<server-only@fixture.example>", "mailbox": "Archive"});
+        assert_eq!(
+            calls_of(&fixture, "message.get"),
+            vec![json!({"account": "work", "hit": address, "body": false})]
+        );
+
+        let opened = attachment_open_on(&door, "work", &server_only(), 0).unwrap();
+        assert_eq!(opened.name, "server-only-notes.txt");
+        assert_eq!(fixture.opened(), vec![opened.path.clone()]);
+
+        let home = scratch("hit-save");
+        let saved =
+            attachment_save_on(&door, "work", &server_only(), &[0], "~/out", Some(&home)).unwrap();
+        assert_eq!(
+            saved.saved[0].path,
+            home.join("out/server-only-notes.txt").display().to_string()
+        );
+        assert_eq!(
+            calls_of(&fixture, "message.materialise_attachment"),
+            vec![json!({"account": "work", "hit": address, "part": 0}); 2]
+        );
     }
 
     #[test]

@@ -119,7 +119,7 @@ describe("the compose wizard", () => {
     await user.selectOptions(signature, "none");
     await user.click(within(dialog).getByRole("button", { name: /Forward and edit/ }));
     await waitFor(() => expect(callsOf("draft_forward")).toHaveLength(1));
-    expect(callsOf("draft_forward")[0]).toMatchObject({ account: "work", row_id: 1002, signature: null, no_signature: true });
+    expect(callsOf("draft_forward")[0]).toMatchObject({ account: "work", source: { kind: "row", row_id: 1002 }, signature: null, no_signature: true });
   });
 
   it("an untouched signature select sends neither field, so the daemon resolves the account default", async () => {
@@ -135,7 +135,7 @@ describe("the compose wizard", () => {
     await user.keyboard("kim@example.com");
     await user.click(within(dialog).getByRole("button", { name: /Forward and edit/ }));
     await waitFor(() => expect(callsOf("draft_forward")).toHaveLength(1));
-    expect(callsOf("draft_forward")[0]).toMatchObject({ account: "work", row_id: 1002, signature: null, no_signature: null });
+    expect(callsOf("draft_forward")[0]).toMatchObject({ account: "work", source: { kind: "row", row_id: 1002 }, signature: null, no_signature: null });
   });
 
   it("refuses a draft with no recipient, as the TUI does, and stays open", async () => {

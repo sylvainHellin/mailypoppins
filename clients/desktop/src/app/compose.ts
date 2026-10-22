@@ -28,7 +28,7 @@ import {
 import * as cmd from "@/lib/commands";
 import { getCurrentWindow } from "@/lib/tauri";
 import { tauriBridge } from "@/lib/terminal";
-import { asGuiError, fixtureNotice, type DraftHeaders } from "@/lib/gui-types";
+import { asGuiError, fixtureNotice, type DraftHeaders, type MessageSource } from "@/lib/gui-types";
 import type { DraftCreated, DraftKind, DraftMessage } from "@/protocol/types";
 
 /** What a reply or a forward is built from: a stored row, or a server-only hit's own headers. */
@@ -135,26 +135,28 @@ async function embeddedRoute(): Promise<boolean> {
  * `e` on a received message (PERSO-92, the TUI's read-only view): the
  * daemon writes its Markdown rendition, mode 0444, and it opens by a
  * draft's route. On the embedded route it is a session of `state.compose`
- * under `viewId(row_id)`, in the reader area's terminal pane as a draft's
+ * under `viewId(source)`, in the reader area's terminal pane as a draft's
  * editor is, and its exit brings the message back; a view of the same
  * message still running is shown again rather than spawned twice. On the
  * external route `message_markdown_open` hands it to the external editor
- * and keeps no session. A row the store lost is a warning notice.
+ * and keeps no session. A row the store lost is a warning notice. A
+ * server-only hit's rendition is the daemon's, of the server's copy
+ * (PERSO-155), with no fetch first.
  */
 export async function viewInEditor(
   dispatch: Dispatch<Action>,
   account: string,
-  row_id: number,
+  source: MessageSource,
   sessions: AppState["compose"] = {},
 ): Promise<void> {
-  const running = sessions[targetKey({ account, draft: viewId(row_id) })];
+  const running = sessions[targetKey({ account, draft: viewId(source) })];
   if (running && isRunning(running)) {
-    dispatch({ type: "compose_embedded", account, draftId: running.draftId, path: running.path, view: { row_id } });
+    dispatch({ type: "compose_embedded", account, draftId: running.draftId, path: running.path, view: { source } });
     return;
   }
-  if (await embeddedRoute()) return viewEmbedded(dispatch, account, row_id);
+  if (await embeddedRoute()) return viewEmbedded(dispatch, account, source);
   try {
-    const launch = await cmd.messageMarkdownOpen(account, row_id);
+    const launch = await cmd.messageMarkdownOpen(account, source);
     notice(dispatch, fixtureNotice(launch) ?? `Opened the message read-only in ${launch.editor}`);
   } catch (e: unknown) {
     viewFailed(dispatch, account, e);
@@ -162,10 +164,10 @@ export async function viewInEditor(
 }
 
 /** Write the rendition afresh and open it in a new embedded session. */
-async function viewEmbedded(dispatch: Dispatch<Action>, account: string, row_id: number): Promise<void> {
+async function viewEmbedded(dispatch: Dispatch<Action>, account: string, source: MessageSource): Promise<void> {
   try {
-    const file = await cmd.messageMarkdownPath(account, row_id);
-    dispatch({ type: "compose_embedded", account, draftId: viewId(row_id), path: file.path, view: { row_id } });
+    const file = await cmd.messageMarkdownPath(account, source);
+    dispatch({ type: "compose_embedded", account, draftId: viewId(source), path: file.path, view: { source } });
   } catch (e: unknown) {
     viewFailed(dispatch, account, e);
   }
@@ -184,7 +186,7 @@ function viewFailed(dispatch: Dispatch<Action>, account: string, e: unknown): vo
  * message's rendition is written afresh first, since its handle expires.
  */
 export function reopen(c: ComposeSession, dispatch: Dispatch<Action>): void {
-  if (c.view) void viewEmbedded(dispatch, c.account, c.view.row_id);
+  if (c.view) void viewEmbedded(dispatch, c.account, c.view.source);
   else if (c.kind === "embedded") dispatch({ type: "compose_embedded", account: c.account, draftId: c.draftId, path: c.path });
   else void openInEditor(dispatch, c.account, c.draftId, c.path);
 }
@@ -287,7 +289,7 @@ async function created(dispatch: Dispatch<Action>, account: string, what: string
   await openInEditor(dispatch, draft.account, draft.id, draft.path);
 }
 
-const FROM_HIT: Record<"reply" | "reply_all" | "forward", DraftKind> = { reply: "reply", reply_all: "reply_all", forward: "forward" };
+const FROM_HIT: Record<"reply" | "reply_all", DraftKind> = { reply: "reply", reply_all: "reply_all" };
 
 /**
  * `r`, `cr`, `ca`: the TUI writes the reply and goes straight to the
@@ -310,33 +312,34 @@ export function reply(src: ComposeSource | null, all: boolean, dispatch: Dispatc
 /**
  * `cf`: the TUI asks for the recipients first, with the subject it will
  * write, and the draft keeps them over what the builder derives. A
- * server-only hit is forwarded at once, as the TUI's search overlay does:
- * `draft_from_message` takes no recipients.
+ * server-only hit asks for them too, as the TUI's search overlay does
+ * (PERSO-155): `draft_forward` takes the hit as its source, and the daemon
+ * builds the forward from the server's copy, its parts carried, ingesting
+ * nothing.
  *
  * `cF` (`asAttachment`) is the same wizard over `draft_forward`'s
- * `as_attachment`, the message carried as its `.eml` (PERSO-174); a
- * server-only hit goes at once through `draft_forward_hit`, the daemon
- * downloading its `.eml` without ingesting it.
+ * `as_attachment`, the message carried as its `.eml` (PERSO-174).
  */
 export function forward(src: ComposeSource | null, dispatch: Dispatch<Action>, asAttachment = false): void {
   if (!src) {
     notice(dispatch, "Forward needs a received message; a draft has none to quote");
     return;
   }
+  let source: MessageSource;
+  let subject: string;
   if (src.kind === "hit") {
-    if (asAttachment) {
-      if (src.message_id === null) return notice(dispatch, "This hit carries no Message-ID; cannot forward it as attachment");
-      void created(dispatch, src.account, "Forward failed", cmd.draftForwardHit(src.account, src.mailbox, src.message_id));
-      return;
-    }
-    void created(dispatch, src.account, "Forward failed", cmd.draftFromMessage(src.account, FROM_HIT.forward, src.message));
-    return;
+    if (src.message_id === null) return notice(dispatch, "This hit carries no Message-ID; cannot forward it");
+    source = { kind: "hit", mailbox: src.mailbox, message_id: src.message_id };
+    subject = src.message.subject;
+  } else {
+    source = { kind: "row", row_id: src.row_id };
+    subject = src.subject;
   }
   const dialog: ComposeDialog = {
     kind: "forward",
     account: src.account,
-    row_id: src.row_id,
-    subject: fwdSubject(src.subject),
+    source,
+    subject: fwdSubject(subject),
     as_attachment: asAttachment,
   };
   dispatch({ type: "open_compose", dialog });
@@ -573,7 +576,7 @@ export async function submitCompose(dialog: ComposeDialog, fields: ComposeFields
     const sig = fields.signature;
     const signature = sig === null ? { no_signature: true } : sig ? { signature: sig } : {};
     if (dialog.kind === "forward") {
-      draft = await cmd.draftForward(account, dialog.row_id, headers, { ...signature, as_attachment: dialog.as_attachment });
+      draft = await cmd.draftForward(account, dialog.source, headers, { ...signature, as_attachment: dialog.as_attachment });
     } else {
       const body = fields.body?.trim() ? fields.body : undefined;
       draft = await cmd.draftCreate(account, draftName(headers.subject), { ...signature, headers, ...(body ? { body } : {}) });

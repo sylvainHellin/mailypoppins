@@ -1456,15 +1456,26 @@ impl State {
     /// part is `-32602`.
     fn materialise(&mut self, method: &str, params: &Value) -> Result<Value> {
         let account = param_str(method, params, "account")?.to_string();
-        if method == "message.materialise_eml" && !params["hit"].is_null() {
-            let row = self.hit_row(method, &account, &params["hit"])?;
-            let (name, bytes) = fixture_eml(&row);
-            return self.write_handle(&name, &bytes);
-        }
-        let row_id = param_row_id(method, params)?;
-        let (_, row) = self
-            .row(&account, row_id)
-            .ok_or_else(|| refused(method, -32602, &format!("no message has row_id {row_id}")))?;
+        let hit_row;
+        let (row_id, row) = if !params["hit"].is_null() {
+            // A server-search hit: the held row, or the server's copy
+            // (PERSO-174, PERSO-155); its markup is the hit's own.
+            if method == "message.materialise_html" {
+                return Err(refused(
+                    method,
+                    -32602,
+                    "hit is not an address of this method",
+                ));
+            }
+            hit_row = self.hit_row(method, &account, &params["hit"])?.1;
+            (hit_row["id"].as_i64().unwrap_or_default(), &hit_row)
+        } else {
+            let row_id = param_row_id(method, params)?;
+            let (_, row) = self.row(&account, row_id).ok_or_else(|| {
+                refused(method, -32602, &format!("no message has row_id {row_id}"))
+            })?;
+            (row_id, row)
+        };
         let (name, bytes) = if method == "message.materialise_markdown" {
             markdown_rendition(row_id, row)
         } else if method == "message.materialise_eml" {
@@ -1597,7 +1608,7 @@ impl State {
     /// daemon reads one (PERSO-174): the stored row once the store has caught
     /// up, else the fixture's one server-only message as `message.fetch`
     /// would land it; any other `Message-ID` is the server not having it.
-    fn hit_row(&self, method: &str, account: &str, hit: &Value) -> Result<Value> {
+    fn hit_row(&self, method: &str, account: &str, hit: &Value) -> Result<(String, Value)> {
         let message_id = hit["message_id"]
             .as_str()
             .filter(|id| !id.trim().is_empty())
@@ -1606,13 +1617,14 @@ impl State {
             .as_str()
             .ok_or_else(|| refused(method, -32602, "hit is {message_id, mailbox}"))?;
         let held = self.messages.get(account).and_then(|boxes| {
-            boxes
-                .values()
-                .flatten()
-                .find(|row| row["message_id"] == message_id)
+            boxes.iter().find_map(|(slug, rows)| {
+                rows.iter()
+                    .find(|row| row["message_id"] == message_id)
+                    .map(|row| (slug.clone(), row.clone()))
+            })
         });
-        if let Some(row) = held {
-            return Ok(row.clone());
+        if let Some(held) = held {
+            return Ok(held);
         }
         let server = server_only_hit(account, "");
         if server["message_id"] != message_id {
@@ -1622,15 +1634,25 @@ impl State {
                 &format!("the server no longer has {message_id}"),
             ));
         }
-        Ok(json!({
-            "message_id": message_id, "from": server["from"], "to": server["to"],
-            "cc": null, "reply_to": null, "subject": "Server-only match",
-            "date_display": server["date_display"], "body": server["body_text"],
-        }))
+        // The server's copy, as the daemon parses it (PERSO-155): one part,
+        // under the selector a fetch would land it as.
+        let bare = message_id.trim_matches(['<', '>']);
+        Ok((
+            "archive".to_string(),
+            json!({
+                "id": 0, "message_id": message_id, "from": server["from"], "to": server["to"],
+                "cc": null, "reply_to": null, "subject": "Server-only match",
+                "date_display": server["date_display"], "body": server["body_text"],
+                "flags": server["flags"], "is_invite": false,
+                "selector": format!("mp://{account}/archive/{bare}"),
+                "attachments": [{"name": "server-only-notes.txt", "size": 31}],
+            }),
+        ))
     }
 
-    /// The daemon's forward as attachment of a server-search hit: the `.eml`
-    /// of [`Self::hit_row`], and the forward built from that row.
+    /// The daemon's forward of a server-search hit: as attachment, the `.eml`
+    /// of [`Self::hit_row`], and the forward built from that row; inline
+    /// (PERSO-155), that row's forward carrying its parts.
     fn forward_hit(
         &mut self,
         method: &str,
@@ -1638,14 +1660,35 @@ impl State {
         params: &Value,
         dir: &Path,
     ) -> Result<Answered> {
+        let (_, row) = self.hit_row(method, account, &params["source"]["hit"])?;
         if params["as_attachment"] != true {
-            return Err(refused(
-                method,
-                -32602,
-                "a hit source is forwarded with as_attachment only",
-            ));
+            let bare = row["message_id"]
+                .as_str()
+                .unwrap_or_default()
+                .trim_matches(['<', '>'])
+                .to_string();
+            let parts_dir = self.root.join("attachments").join(account).join(&bare);
+            let mut attachments = Vec::new();
+            for part in row["attachments"].as_array().into_iter().flatten() {
+                let name = part["name"].as_str().unwrap_or("part");
+                fs::create_dir_all(&parts_dir)?;
+                let file = parts_dir.join(name);
+                fs::write(&file, format!("fixture attachment {name}\n"))?;
+                attachments.push(file);
+            }
+            let message = row_message(&row, attachments, None);
+            let signature = self.signature_for(account, params);
+            fs::create_dir_all(dir)?;
+            let built = mp_core::draft::create_forward_draft_from(
+                &message,
+                FIXTURE_FROM,
+                Some(dir),
+                signature.as_deref(),
+            )?;
+            let headers = recipient_headers(method, params)?;
+            let (id, path) = self.finish_built(&built, headers.as_ref())?;
+            return self.created(account, &id, &path, None);
         }
-        let row = self.hit_row(method, account, &params["source"]["hit"])?;
         let (name, bytes) = fixture_eml(&row);
         let bare = row["message_id"]
             .as_str()
@@ -3232,6 +3275,11 @@ impl Fixture {
                     self.emit_locked(&mut s, kind, payload);
                 }
                 Ok(answer)
+            }
+            "message.get" if !params["hit"].is_null() => {
+                let account = param_str(method, &params, "account")?;
+                let (mailbox, row) = s.hit_row(method, account, &params["hit"])?;
+                Ok(shown(account, &mailbox, &row, params["body"] != false))
             }
             "message.get" => {
                 let account = param_str(method, &params, "account")?;

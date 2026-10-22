@@ -165,7 +165,7 @@ describe("the reader's attachments", () => {
     await user.keyboard("j");
     const list = await within(reader()).findByRole("list", { name: "Attachments" });
     await user.click(within(list).getByRole("button", { name: "Open ledger-q3.pdf" }));
-    await waitFor(() => expect(argsOf("attachment_open")).toEqual([{ account: "work", row_id: 1001, part: 0 }]));
+    await waitFor(() => expect(argsOf("attachment_open")).toEqual([{ account: "work", source: { kind: "row", row_id: 1001 }, part: 0 }]));
     expect(await screen.findByText("Opened: ledger-q3.pdf")).toBeInTheDocument();
 
     await user.click(within(list).getByRole("button", { name: "Save ledger-q3.pdf" }));
@@ -175,7 +175,7 @@ describe("the reader's attachments", () => {
     expect(dir).toHaveValue("~/Downloads");
     await user.keyboard("{Enter}");
     await waitFor(() =>
-      expect(argsOf("attachment_save")).toEqual([{ account: "work", row_id: 1001, parts: [0], dest_dir: "~/Downloads" }]),
+      expect(argsOf("attachment_save")).toEqual([{ account: "work", source: { kind: "row", row_id: 1001 }, parts: [0], dest_dir: "~/Downloads" }]),
     );
     expect(await screen.findByText("Saved 1 file to ~/Downloads")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -207,7 +207,7 @@ describe("the reader's attachments", () => {
     expect(within(dialog).getByRole("button", { name: "Save" })).toHaveFocus();
     await user.keyboard("{Enter}");
     await waitFor(() =>
-      expect(argsOf("attachment_save")).toEqual([{ account: "work", row_id: 1001, parts: [0], dest_dir: "~/Mail/Q3" }]),
+      expect(argsOf("attachment_save")).toEqual([{ account: "work", source: { kind: "row", row_id: 1001 }, parts: [0], dest_dir: "~/Mail/Q3" }]),
     );
   });
 
@@ -256,7 +256,7 @@ describe("the reader's attachments", () => {
     await user.keyboard("{Enter}");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(argsOf("message_export").map((a) => a?.dest_dir)).toEqual(["Mail", "~/Mail/Archive"]);
-    expect(argsOf("message_export")[1]).toEqual({ account: "work", row_id: 1001, dest_dir: "~/Mail/Archive" });
+    expect(argsOf("message_export")[1]).toEqual({ account: "work", source: { kind: "row", row_id: 1001 }, dest_dir: "~/Mail/Archive" });
     expect(await screen.findByText("Exported 2026-09-29_Quarterly ledger review.eml to ~/Mail/Archive")).toBeInTheDocument();
     // The next save offers the directory the export used.
     await user.keyboard("ts");
@@ -272,7 +272,7 @@ describe("the reader's attachments", () => {
     await user.click(within(toolbar).getByRole("button", { name: "Export .eml" }));
     const dialog = await screen.findByRole("dialog", { name: "Export message" });
     await user.click(within(dialog).getByRole("button", { name: "Export" }));
-    await waitFor(() => expect(argsOf("message_export")).toEqual([{ account: "work", row_id: 1001, dest_dir: "~/Downloads" }]));
+    await waitFor(() => expect(argsOf("message_export")).toEqual([{ account: "work", source: { kind: "row", row_id: 1001 }, dest_dir: "~/Downloads" }]));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     await user.click(within(toolbar).getByRole("button", { name: "Forward as attachment" }));
     const wizard = await screen.findByRole("dialog", { name: "Forward as attachment" });
@@ -288,7 +288,7 @@ describe("the reader's attachments", () => {
     const picker = await screen.findByRole("dialog", { name: "Open attachment" });
     await waitFor(() => expect(within(picker).getByRole("button", { name: "Open ledger-q3.pdf" })).toHaveFocus());
     await user.click(within(picker).getByRole("button", { name: "Open notes.txt" }));
-    await waitFor(() => expect(argsOf("attachment_open")).toEqual([{ account: "work", row_id: 1001, part: 1 }]));
+    await waitFor(() => expect(argsOf("attachment_open")).toEqual([{ account: "work", source: { kind: "row", row_id: 1001 }, part: 1 }]));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
     // j/k and the arrows walk the parts, stopping at either end; Enter opens the focused one.
@@ -309,7 +309,7 @@ describe("the reader's attachments", () => {
     expect(ledger).toHaveFocus();
     await user.keyboard("j{Enter}");
     await waitFor(() => expect(argsOf("attachment_open")).toHaveLength(2));
-    expect(argsOf("attachment_open")[1]).toEqual({ account: "work", row_id: 1001, part: 1 });
+    expect(argsOf("attachment_open")[1]).toEqual({ account: "work", source: { kind: "row", row_id: 1001 }, part: 1 });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
     await user.keyboard("ts");
@@ -319,7 +319,7 @@ describe("the reader's attachments", () => {
     await user.click(within(save).getByRole("checkbox", { name: /ledger-q3\.pdf/ }));
     await user.click(within(save).getByRole("button", { name: "Save" }));
     await waitFor(() =>
-      expect(argsOf("attachment_save")).toEqual([{ account: "work", row_id: 1001, parts: [1], dest_dir: "~/Downloads" }]),
+      expect(argsOf("attachment_save")).toEqual([{ account: "work", source: { kind: "row", row_id: 1001 }, parts: [1], dest_dir: "~/Downloads" }]),
     );
   });
 
@@ -420,8 +420,11 @@ describe("a server-only hit in the reader", () => {
     const { user } = renderApp();
     await shellReady();
     await onServerOnlyHit(user);
+    // `to` needs no fetch: the daemon opens the server copy's part (PERSO-155).
     await user.keyboard("to");
-    expect(await screen.findByText("This message is on the server only: fetch it first (F)")).toBeInTheDocument();
+    const source = { kind: "hit", mailbox: "Archive", message_id: "<server-only@fixture.example>" };
+    await waitFor(() => expect(argsOf("attachment_open")).toEqual([{ account: "work", source, part: 0 }]));
+    expect(argsOf("message_fetch")).toEqual([]);
     await user.keyboard("F");
     await waitFor(() =>
       expect(argsOf("message_fetch")).toEqual([{ account: "work", mailbox: "Archive", message_id: "<server-only@fixture.example>" }]),

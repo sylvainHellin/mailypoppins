@@ -451,7 +451,7 @@ describe("compose keys (the TUI's)", () => {
     await waitFor(() => expect(callsOf("draft_forward")).toHaveLength(1));
     expect(callsOf("draft_forward")[0]).toMatchObject({
       account: "work",
-      row_id: 1002,
+      source: { kind: "row", row_id: 1002 },
       headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: Angebot Dachsanierung" },
     });
     await waitFor(() => expect(mock.editorOpens).toHaveLength(1));
@@ -470,14 +470,14 @@ describe("compose keys (the TUI's)", () => {
     await waitFor(() => expect(callsOf("draft_forward")).toHaveLength(1));
     expect(callsOf("draft_forward")[0]).toMatchObject({
       account: "work",
-      row_id: 1002,
+      source: { kind: "row", row_id: 1002 },
       as_attachment: true,
       headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: Angebot Dachsanierung" },
     });
     await waitFor(() => expect(mock.editorOpens).toHaveLength(1));
   });
 
-  it("on a server-only hit, e asks for the fetch first and opens no editor (PERSO-92)", async () => {
+  it("on a server-only hit, e, to and ts read the server's copy through the hit's address, with no fetch first (PERSO-155)", async () => {
     const { user } = renderApp();
     await shellReady();
     await user.click(screen.getByRole("searchbox", { name: /Filter this list/ }));
@@ -485,13 +485,27 @@ describe("compose keys (the TUI's)", () => {
     await waitFor(() => expect(callsOf("search_server_start")).toHaveLength(1));
     act(() => emitEnvelope("message.server_hit", { operation_id: "op-1", hit: serverOnlyHit("The old thread") }));
     await user.click(await screen.findByRole("option", { name: /The old thread/ }));
+    const source = { kind: "hit", mailbox: "Archive", message_id: "<server-only@fixture.example>" };
     await user.keyboard("e");
-    expect(await screen.findByText("This message is on the server only: fetch it first (F)")).toBeInTheDocument();
-    expect(callsOf("message_markdown_open")).toEqual([]);
-    expect(mock.editorOpens).toEqual([]);
+    await waitFor(() => expect(callsOf("message_markdown_open")).toEqual([{ account: "work", source }]));
+    await waitFor(() => expect(mock.editorOpens).toHaveLength(1));
+
+    // One part opens at once, as a row's single attachment does.
+    await user.keyboard("to");
+    await waitFor(() => expect(callsOf("attachment_open")).toEqual([{ account: "work", source, part: 0 }]));
+    expect(callsOf("message_attachments")).toEqual([{ account: "work", source }]);
+
+    await user.keyboard("ts");
+    const dialog = await screen.findByRole("dialog", { name: "Save attachment" });
+    await waitFor(() => expect(within(dialog).getByRole("textbox", { name: "Directory" })).toHaveFocus());
+    await user.keyboard("{Enter}");
+    await waitFor(() =>
+      expect(callsOf("attachment_save")).toEqual([{ account: "work", source, parts: [0], dest_dir: "~/Downloads" }]),
+    );
+    expect(callsOf("message_fetch")).toEqual([]);
   });
 
-  it("on a server-only hit, r, ca and cf build the draft from the hit's own headers", async () => {
+  it("on a server-only hit, r and ca build the draft from the hit's own headers, and cf and cF ask for the recipients first (PERSO-155)", async () => {
     const { user } = renderApp();
     await shellReady();
     await user.click(screen.getByRole("searchbox", { name: /Filter this list/ }));
@@ -505,7 +519,6 @@ describe("compose keys (the TUI's)", () => {
     expect(await within(reader).findByText(/This message is on the server only/)).toBeInTheDocument();
     await user.keyboard("r");
     await user.keyboard("ca");
-    await user.keyboard("cf");
     const message = {
       from: "Old Friend <old@example.com>",
       to: "me@example.com",
@@ -521,24 +534,37 @@ describe("compose keys (the TUI's)", () => {
       expect(callsOf("draft_from_message")).toEqual([
         { account: "work", kind: "reply", message },
         { account: "work", kind: "reply_all", message },
-        { account: "work", kind: "forward", message },
       ]),
     );
     expect(callsOf("draft_reply")).toEqual([]);
-    expect(callsOf("draft_forward")).toEqual([]);
-    expect(screen.queryByRole("dialog", { name: "Forward" })).toBeNull();
-    await waitFor(() => expect(mock.editorOpens).toHaveLength(3));
-    // cF carries the hit as its .eml, which the daemon downloads (PERSO-174).
-    await user.keyboard("cF");
-    await waitFor(() =>
-      expect(callsOf("draft_forward_hit")).toEqual([{ account: "work", mailbox: "Archive", message_id: "<server-only@fixture.example>" }]),
-    );
-    expect(callsOf("draft_from_message")).toHaveLength(3);
-    expect(screen.queryByRole("dialog", { name: "Forward as attachment" })).toBeNull();
+    await waitFor(() => expect(mock.editorOpens).toHaveLength(2));
+
+    // A forward asks for the recipients first, as a stored message's does,
+    // and the daemon builds it from the server's copy.
+    const source = { kind: "hit", mailbox: "Archive", message_id: "<server-only@fixture.example>" };
+    mock.failing.set("contact_search", new Error("off"));
+    for (const [keys, name, attached] of [
+      ["cf", "Forward", false],
+      ["cF", "Forward as attachment", true],
+    ] as const) {
+      await user.keyboard(keys);
+      const dialog = await screen.findByRole("dialog", { name });
+      expect(within(dialog).getByLabelText("Subject")).toHaveValue("Fwd: The old thread");
+      await waitFor(() => expect(within(dialog).getByLabelText("To")).toHaveFocus());
+      await user.keyboard("kim@example.com{Control>}{Enter}{/Control}");
+      await waitFor(() => expect(screen.queryByRole("dialog", { name })).toBeNull());
+      expect(callsOf("draft_forward").slice(-1)[0]).toMatchObject({
+        account: "work",
+        source,
+        headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: The old thread" },
+        ...(attached ? { as_attachment: true } : {}),
+      });
+    }
+    expect(callsOf("draft_from_message")).toHaveLength(2);
     await waitFor(() => expect(mock.editorOpens).toHaveLength(4));
   });
 
-  it("te on a server-only hit exports the server's .eml through hit_export, without a fetch (PERSO-174)", async () => {
+  it("te on a server-only hit exports the server's .eml through message_export's hit source, without a fetch (PERSO-174)", async () => {
     const { user } = renderApp();
     await shellReady();
     await user.click(screen.getByRole("searchbox", { name: /Filter this list/ }));
@@ -550,12 +576,8 @@ describe("compose keys (the TUI's)", () => {
     const dialog = await screen.findByRole("dialog", { name: "Export message" });
     await waitFor(() => expect(within(dialog).getByRole("textbox", { name: "Directory" })).toHaveFocus());
     await user.keyboard("{Enter}");
-    await waitFor(() =>
-      expect(callsOf("hit_export")).toEqual([
-        { account: "work", mailbox: "Archive", message_id: "<server-only@fixture.example>", dest_dir: "~/Downloads" },
-      ]),
-    );
-    expect(callsOf("message_export")).toEqual([]);
+    const source = { kind: "hit", mailbox: "Archive", message_id: "<server-only@fixture.example>" };
+    await waitFor(() => expect(callsOf("message_export")).toEqual([{ account: "work", source, dest_dir: "~/Downloads" }]));
     expect(callsOf("message_fetch")).toEqual([]);
     expect(await screen.findByText("Exported 2025-03-03_Server-only match.eml to ~/Downloads")).toBeInTheDocument();
 
@@ -564,11 +586,9 @@ describe("compose keys (the TUI's)", () => {
     await user.click(within(toolbar).getByRole("button", { name: "Export .eml" }));
     const again = await screen.findByRole("dialog", { name: "Export message" });
     await user.click(within(again).getByRole("button", { name: "Export" }));
-    await waitFor(() => expect(callsOf("hit_export")).toHaveLength(2));
+    await waitFor(() => expect(callsOf("message_export")).toHaveLength(2));
     await user.click(within(toolbar).getByRole("button", { name: "Forward as attachment" }));
-    await waitFor(() =>
-      expect(callsOf("draft_forward_hit")).toEqual([{ account: "work", mailbox: "Archive", message_id: "<server-only@fixture.example>" }]),
-    );
+    expect(await screen.findByRole("dialog", { name: "Forward as attachment" })).toBeInTheDocument();
   });
 
   it("e on a message opens its Markdown rendition in the editor and Enter focuses the reader; on a draft e edits it (PERSO-92)", async () => {
@@ -583,7 +603,9 @@ describe("compose keys (the TUI's)", () => {
     await waitFor(() => expect(callsOf("message_markdown_open")).toHaveLength(1));
     const [opened] = callsOf("message_markdown_open");
     expect(opened).toMatchObject({ account: "work" });
-    await waitFor(() => expect(mock.editorOpens).toEqual([`/fixture/runtime/handles/h-${mock.nextHandle - 1}/message-${opened?.row_id}.md`]));
+    await waitFor(() =>
+      expect(mock.editorOpens).toEqual([`/fixture/runtime/handles/h-${mock.nextHandle - 1}/message-${(opened?.source as { row_id: number } | undefined)?.row_id}.md`]),
+    );
     expect(await screen.findByText(/^Opened the message read-only in code --wait/)).toBeInTheDocument();
     // The list keeps the focus: `e` hands the message to the editor, not to the reader.
     expect(pane()).toBe("list");
@@ -785,7 +807,7 @@ describe("attachment keys (the TUI's t family) and F", () => {
     await shellReady();
     await user.keyboard("j");
     await user.keyboard("to");
-    await waitFor(() => expect(callsOf("attachment_open")).toEqual([{ account: "work", row_id: 1001, part: 0 }]));
+    await waitFor(() => expect(callsOf("attachment_open")).toEqual([{ account: "work", source: { kind: "row", row_id: 1001 }, part: 0 }]));
     await user.keyboard("{Tab}");
     await waitFor(() => expect(document.activeElement?.closest("[data-pane]")).toHaveAttribute("data-pane", "reader"));
     await user.keyboard("tb");
@@ -811,7 +833,7 @@ describe("attachment keys (the TUI's t family) and F", () => {
     await user.keyboard(":");
     let dialog = await screen.findByRole("dialog", { name: "Command palette" });
     await user.click(within(dialog).getAllByText("Open attachment")[0]);
-    await waitFor(() => expect(callsOf("attachment_open")).toEqual([{ account: "work", row_id: 1001, part: 0 }]));
+    await waitFor(() => expect(callsOf("attachment_open")).toEqual([{ account: "work", source: { kind: "row", row_id: 1001 }, part: 0 }]));
     await user.keyboard(":");
     dialog = await screen.findByRole("dialog", { name: "Command palette" });
     await user.click(within(dialog).getAllByText("Open HTML in browser")[0]);

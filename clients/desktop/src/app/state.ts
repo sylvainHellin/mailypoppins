@@ -32,6 +32,7 @@ import type {
   MailboxListing,
   MessageList,
   MessageMeta,
+  MessageSource,
   SearchForm,
   SecretKind,
   SignatureListing,
@@ -518,8 +519,8 @@ export type EmbeddedStatus =
  * mounts a fresh pane and so starts a fresh process on the same path.
  *
  * A received message's Markdown rendition (`e`, PERSO-92) opens on the
- * embedded route as a session too, with `view` naming its row and
- * `draftId` its `viewId`: it is read-only, saves nothing, and its exit
+ * embedded route as a session too, with `view` naming its row or its
+ * server-only hit (PERSO-155) and `draftId` its `viewId`: it is read-only, saves nothing, and its exit
  * brings the reader back to the message. On the external route it gets no
  * session, as `sc` and `sf` get none.
  */
@@ -533,7 +534,7 @@ export type ComposeSession = {
   editor: string | null;
   message: string | null;
   /** The received message whose read-only rendition this is; absent for a draft. */
-  view?: { row_id: number };
+  view?: { source: MessageSource };
 } & (
   | { kind: "external"; status: "opening" | "editing" | "error" }
   | { kind: "embedded"; session: number | null; status: EmbeddedStatus; spawn: number }
@@ -545,8 +546,8 @@ export type EmbeddedSession = Extract<ComposeSession, { kind: "embedded" }>;
  * The session id of a received message's rendition: a slash, which no
  * draft file name holds, keeps it apart from every draft's.
  */
-export function viewId(row_id: number): string {
-  return `message/${row_id}`;
+export function viewId(source: MessageSource): string {
+  return source.kind === "row" ? `message/${source.row_id}` : `message/hit/${source.message_id}`;
 }
 
 /** An embedded session whose child still runs. */
@@ -589,8 +590,12 @@ export type UpdateInfo = { current: string; last_check: string | null; reason: s
  */
 export type ComposeDialog =
   | { kind: "new"; account: string; to?: string }
-  /** `as_attachment`: `cF`, the message carried as its `.eml` (PERSO-174). */
-  | { kind: "forward"; account: string; row_id: number; subject: string; as_attachment: boolean }
+  /**
+   * `as_attachment`: `cF`, the message carried as its `.eml` (PERSO-174).
+   * `source` is a stored row or a server-only hit, whose recipients the
+   * wizard asks for alike (PERSO-155).
+   */
+  | { kind: "forward"; account: string; source: MessageSource; subject: string; as_attachment: boolean }
   | { kind: "recipients"; account: string; draftId: string; to: string; cc: string; bcc: string; subject: string };
 
 /** One attachment a dialog lists: a message's part, or a draft's entry by its index. */
@@ -599,7 +604,7 @@ export type AttachmentItem = { part: number; name: string; size: number | null; 
 
 /** Whose attachments an open dialog lists. */
 export type AttachmentOwner =
-  | { kind: "message"; account: string; row_id: number }
+  | { kind: "message"; account: string; source: MessageSource }
   | { kind: "draft"; account: string; draftId: string };
 
 /**
@@ -609,16 +614,10 @@ export type AttachmentOwner =
  */
 export type AttachmentDialog =
   | { kind: "open"; owner: AttachmentOwner; subject: string; items: AttachmentItem[] }
-  | { kind: "save"; account: string; row_id: number; subject: string; items: AttachmentItem[] }
+  | { kind: "save"; account: string; source: MessageSource; subject: string; items: AttachmentItem[] }
   /** `te`: the message itself as `<date>_<subject>.eml`, into a directory (PERSO-174). */
-  | { kind: "export"; account: string; source: ExportSource; subject: string }
+  | { kind: "export"; account: string; source: MessageSource; subject: string }
   | { kind: "attach"; account: string; draftId: string; subject: string };
-
-/**
- * What `te` exports: a stored row, or a server-only hit addressed as
- * `message_fetch` addresses it, whose `.eml` the daemon downloads (PERSO-174).
- */
-export type ExportSource = { kind: "row"; row_id: number } | { kind: "hit"; mailbox: string; message_id: string };
 
 /** The Save dialog's directory until one is used: `attachments.rs`'s `DEFAULT_SAVE_DIR`. */
 export const DEFAULT_SAVE_DIR = "~/Downloads";
