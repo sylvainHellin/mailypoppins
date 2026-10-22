@@ -18,6 +18,7 @@
       { "key": "gm", "action": "Go to mailboxes (sidebar)" },
       { "key": "gl", "action": "Go to message list" },
       { "key": "gr", "action": "Go to reader (body)" },
+      { "key": "gf", "action": "Go to mailbox (fuzzy picker)" },
       { "key": "ga", "action": "Switch account" },
       { "key": "ss", "action": "Quick sync" },
       { "key": "sS", "action": "Full sync" },

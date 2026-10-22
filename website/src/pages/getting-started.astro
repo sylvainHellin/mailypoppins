@@ -130,7 +130,7 @@ cargo install --path .`}
       <p>After setup, pull your emails from the server:</p>
       <CodeBlock lang="bash" code="mp sync" />
       <p>
-        This syncs all configured mailboxes (inbox, archive, sent, plus any extras).
+        This syncs every folder the account keeps: the inbox, sent and archive folders, every folder you created on the server, and the newest messages of the trash and junk folders.
         Each message becomes a row in the account's local store
         (<code>store.sqlite3</code>), with its text, its HTML and its attachments kept
         beside it as content-addressed blobs. Nothing is written as a mail file tree:

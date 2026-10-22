@@ -1,4 +1,4 @@
-%% 0141-mailbox-catalogue.tex -- mailbox auto-discovery as ticket 0141 proposes
+%% 0141-mailbox-catalogue.tex -- mailbox auto-discovery as ticket 0141 built
 %% it: the IMAP server lists every folder, the daemon keeps that list as a
 %% per-account catalogue with a resolved role, each folder gets a policy lane
 %% (sync, status-only, ignore), and the client's folder features read from it.
@@ -22,7 +22,7 @@
 % ===================================================================
 \node[tfcardtitlec=tfBlue] (sT) at (0,-0.5) {IMAP server};
 \node[tffield] (sF1) at (0,-1.1) {LIST "" "*"};
-\node[tffield] (sF2) at (0,-1.5) {\ RETURN (SPECIAL-USE)};
+\node[tffield] (sF2) at (0,-1.5) {\ STATUS per status-only};
 \coordinate (sSE) at (3.3,-1.6);
 \begin{scope}[on background layer]
   \node[tfcard, fit=(sT)(sF1)(sF2)(sSE)] (sCard) {};
@@ -71,16 +71,16 @@
 % sync
 \node[tfcardtitlec=tfGreen] (gT) at (12.6,-0.5) {sync};
 \node[gloss] (gS) at (12.6,-0.8) {every tick; IDLE on INBOX only};
-\node[folders] (gF) at (12.6,-1.2) {INBOX, Sent Items, Archive,\\Drafts, Spesen};
+\node[folders] (gF) at (12.6,-1.2) {INBOX, Sent Items, Archive, Spesen,\\INBOX/reimbursements, Read};
 % status-only
-\node[tfcardtitlec=tfOrange] (oT) at (12.6,-2.75) {status-only (lazy)};
-\node[gloss] (oS) at (12.6,-3.05) {counts only; full fetch when opened\\or on a full tick};
-\node[folders] (oF) at (12.6,-3.75) {Deleted Items, Junk Email,\\INBOX/reimbursements, Labels/*};
+\node[tfcardtitlec=tfOrange] (oT) at (12.6,-2.75) {status-only};
+\node[gloss] (oS) at (12.6,-3.05) {server counts; trash and junk fetch\\their newest 50 every tick};
+\node[folders] (oF) at (12.6,-3.75) {Deleted Items, Junk Email,\\Proton Labels/*};
 % ignore
 \node[tfcardtitlec=tfGray] (iT) at (12.6,-5.2) {ignore};
 \node[gloss] (iS) at (12.6,-5.5) {never selected};
-\node[folders] (iF) at (12.6,-5.9) {Calendar, Contacts, Tasks, Notes,\\Journal,
-  Sync Issues/*, \textbackslash Noselect\\parents, Proton All Mail, Starred};
+\node[folders] (iF) at (12.6,-5.9) {Calendar, Contacts, Tasks, Journal,\\Sync Issues/*,
+  \textbackslash Noselect parents, Drafts\\(until \#0143), All Mail, Starred};
 
 \begin{scope}[on background layer]
   \node[tfcardc=tfGreen,  fit=(gT)(gS)(gF)] (gCard) {};
@@ -105,9 +105,9 @@
 % ===================================================================
 \foreach \nm/\ttl/\gl/\y in {
     keys/{keys 1-9}/{bound to pinned roles\\or folders}/-0.5,
-    pick/{folder picker}/{fuzzy, over every\\catalogue entry}/-2.35,
-    srch/{search}/{local index first; server\\search on any catalogue folder}/-4.2,
-    move/{move targets}/{destination always synced}/-6.05} {
+    pick/{folder picker gf}/{fuzzy, over every\\listed folder}/-2.35,
+    srch/{search, sync, fetch}/{any catalogue folder\\by name}/-4.2,
+    move/{move targets}/{trash and junk tail synced}/-6.05} {
   \node[tfcardtitlec=tfBlue] (\nm T) at (20.6,\y) {\ttl};
   \node[gloss, text width=4.2cm] (\nm S) at (20.6,\y-0.3) {\gl};
   \coordinate (\nm E) at (24.9,\y-0.7);

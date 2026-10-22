@@ -190,8 +190,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MBX-01 List server mailboxes
 
 - Classification: diagnostics and maintenance
-- Source anchor: `mp list-mailboxes`, `src/main.rs`, `src/imap_client/mod.rs`
-- Daemon surface: `mailbox.list_server`
+- Source anchor: `mp list-mailboxes`, `src/main.rs`, `src/imap_client/mod.rs`, `src/catalogue/discover.rs`
+- Daemon surface: `mailbox.list_server`, whose rows carry the role and the policy the catalogue resolves (#0141)
 - GUI location: not required (diagnostics and maintenance)
 - Validation: manual, requires a live server; refusals and routing in `tests/daemon_sync_slice.rs`
 - Status: routed (P4-U10); GUI not started
@@ -253,6 +253,16 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Status: GUI shipped (M1, #0129), and the outbox line's count and link (M3, #0131)
 - Note: delivered through the bootstrap snapshot rather than a query.
 
+### MBX-08 Every server folder in the sidebar, and a picker to open one by name
+
+- Classification: GUI parity
+- Source anchor: the daemon's mailbox catalogue (`src/catalogue/`, #0141); TUI `gf` (`clients/tui/src/app/keymap.rs`, `open_folder_picker` in `clients/tui/src/app/keys.rs`)
+- Daemon surface: `mailbox.list` and the bootstrap's `mailboxes` rows with `server` and `policy`; a re-seeded hierarchy announced by `state.invalidate` and `state.remove` of `mailbox:<account>/<slug>`
+- GUI location: clients/desktop: the sidebar lists every folder the daemon does not ignore, with trash and junk icons; `gf` and the palette's "Go to mailbox (fuzzy picker)" open `FolderPicker`, which filters by label or server name and opens the mailbox; the account totals count `sync` mailboxes only (#0141)
+- Validation: `src/catalogue/tests.rs`, `src/daemon/methods/mailbox.rs` (`mailbox_list_serves_every_listed_folder_with_its_policy`), `src/daemon/runtime/publish.rs` (`a_new_folder_reseeds_the_account_and_is_announced`), `clients/tui/src/app/keys.rs` (`the_folder_picker_opens_any_mailbox_by_name`), `clients/tui/src/app/bootstrap.rs` (`a_recount_adopts_the_folders_a_tick_discovered`), `clients/desktop/src/components/sidebar/folderPicker.test.tsx`, `clients/desktop/src-tauri/src/commands.rs` (`account_totals_leave_counts_only_folders_out`)
+- Status: GUI shipped (#0141)
+- Note: the TUI adopts a changed hierarchy from the `mailbox.list` its recount reads, so a folder created on the server reaches the sidebar at the next full tick.
+
 ## Listing, filtering, and search
 
 ### LST-01 List received messages offline, grouped by mailbox
@@ -263,7 +273,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - GUI location: clients/desktop: the list pane shows the selected mailbox, the Drafts mailbox as the draft listing, and reads it again on a `state.invalidate` (M1, #0129)
 - Validation: `tests/cli_read_surface_integration.rs`, `tests/daemon_read_slice.rs`; `clients/desktop/src/app/events.test.tsx` (`refetches the shown list when its mailbox is invalidated`), `clients/desktop/src-tauri/src/commands.rs` (`the_drafts_mailbox_branches_to_the_draft_listing`), `clients/desktop/src-tauri/src/fixture.rs` (`listing_rows_decode_as_protocol_rows`)
 - Status: routed (P4-U4); GUI shipped (M1, #0129)
-- Note: the mailbox argument accepts a role, a slug, or the sidebar label, and the default lists every mailbox of the account. The name is resolved client-side against the configuration, so an unknown one is refused without a round trip and in the words it has always been refused in.
+- Note: the mailbox argument accepts a role, a slug, the sidebar label or the server name, and the default lists every mailbox of the account. The name is resolved against the daemon's `mailbox.list`, so every folder the server lists is reachable (#0141) and an unknown one is refused in the words it has always been refused in.
 
 ### LST-02 Navigate a list with per-item movement, top and bottom jumps, and half-page scrolling
 
@@ -349,6 +359,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Note: a server-only hit has no row to archive or to put the list cursor on, so `a` and the TUI's Enter say to fetch it first; every other key reads it through the daemon's `hit: {message_id, mailbox}` address, `message.get`, `message.materialise_attachment`, `message.materialise_markdown`, `message.materialise_eml` and `draft.forward`, which answer from the server's copy without ingesting it (PERSO-155).
   An account-wide search names no mailbox in all three clients, so the daemon runs its own account-wide search, one query across every folder on Graph (PERSO-155).
   Its `.eml` needs no fetch: `cF` and `te` (PERSO-174) address it as `f` does, `{message_id, mailbox}`, through `draft.forward`'s hit source and `message.materialise_eml`'s `hit`, and the daemon downloads the server's raw copy without ingesting it, so the hit stays a hit.
+  Since #0141 a hit from any folder the server lists is fetchable, stored under that folder's own key whatever its policy (`a_hit_from_any_server_folder_is_fetchable` in `src/daemon/methods/message_server.rs`).
   The desktop fetches with `F`, because `f` is the find family's prefix there (`fm`, `ff`), and replies to all with `ca` rather than the overlay's `R`.
 - Note: the overlay's reply, forward, archive, browser rendition and attachment keys are daemon methods since P5-U6; `f` and the three rendition keys joined them in P5-U10c-I1.
   `f` is `message.fetch` `{account, mailbox, message_id}`, a durable operation that is idempotent over a message the store already holds: it answers with that row and `already_present: true` and opens no session, so the overlay keeps its "Already in the local store" line by branching on a boolean rather than matching a refusal.

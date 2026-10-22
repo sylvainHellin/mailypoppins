@@ -3,7 +3,7 @@ id: 0141
 title: Discover every server mailbox, with a per-folder sync policy
 type: feature
 priority: next
-status: open
+status: done
 created: 2026-10-09
 ---
 
@@ -62,59 +62,68 @@ Ranked by how badly they would bite, with the code they touch.
 12. Config parsing.
     No `deny_unknown_fields` on `MailboxesConfig` (`crates/mp-core/src/config.rs:468-478`), so a new key is ignored by an older binary and a typo is ignored by every binary.
 
-## Proposed approach
+## Design
 
-The design is drawn in [figures/0141-mailbox-catalogue.tex](figures/0141-mailbox-catalogue.tex) (tex-fig; render with `~/code/side-projects/tex-fig/examples/build.sh`).
+The design is drawn in [figures/0141-mailbox-catalogue.tex](figures/0141-mailbox-catalogue.tex) (tex-fig; render with `~/code/side-projects/tex-fig/examples/build.sh`); the code is `src/catalogue/`, and `docs/plans/mailbox-discovery.md` maps it.
 
 1. Mailbox catalogue.
-   On connect and on every full tick, run `LIST "" "*"`, adding `RETURN (SUBSCRIBED SPECIAL-USE)` when LIST-EXTENDED is advertised, and store the result per account: server name (decoded for display), delimiter, attributes, role, policy.
-   `list_mailboxes_detailed` (`store_sync.rs:208-233`) already returns name, delimiter and attributes; nothing consumes the attributes yet, and `mp list-mailboxes` already shows the raw list.
-   Graph accounts fill the same catalogue from `list_folders()` and its well-known folder names (`src/graph.rs:505`).
+   The account runtime's first tick and every full tick run `LIST "" "*"` and store the answer in the store's additive `mailbox_listing` table (`src/catalogue/listing.rs`): name, delimiter, attributes, counts, and a `missing` mark for a folder the server stopped listing.
+   A whole-account `mp sync` and an account's first sync list too.
+   The plain `LIST` is enough: neither live server advertises SPECIAL-USE and both mark the role folders in a plain listing, so `RETURN (SPECIAL-USE)` is not sent.
+   `attribute_token` now spells the RFC 6154 attributes `\Sent`, `\Drafts`, `\Trash`, `\Junk`, `\Archive`, `\All` and `\Flagged`, where it used to fall through to a `Debug` rendering without the backslash.
+   Graph fills the same table from the whole folder tree (`GraphClient::list_folder_tree`, children as `Parent/Child`) and gives each well-known folder the attribute of its role.
+   Role and policy are not stored: `Catalogue::resolve` derives them from the stored listing and the live config on every read, so a config edit takes effect without a new `LIST`.
 2. Roles.
-   Resolve each role in this order: config override, then the SPECIAL-USE attribute, then a provider profile (Exchange, Proton Bridge), then a name heuristic (`Sent Items`, `Sent`, `Archive`, `Deleted Items`, `Junk Email`, `Spam`, `Trash`).
-   Add `drafts`, `trash` and `junk` roles beside `inbox`, `archive` and `sent`.
-   Today `attribute_token` (`store_sync.rs:~243`) passes `\Sent` and friends through as `Extension`, and LIST is issued without `RETURN (SPECIAL-USE)`.
-3. Per-folder policy: `sync`, `status-only` or `ignore`.
-   - `sync`: the role folders, every user folder, and anything pinned in config; synced every tick like Inbox.
-     On TUM that adds `Spesen`, `INBOX/reimbursements`, `Read`, `Scheduled` and `Archive1`, five more folder visits per tick.
-   - `status-only`: counts from STATUS, full fetch when the folder is opened or on a full tick with a small limit.
-     Default for the trash and junk folders (`Deleted Items`, `Junk Email`, `Trash`, `Spam`) and Proton's `Labels/*`.
-   - `ignore`: never selected.
-     Default for `\Noselect` and `\NonExistent`, Exchange's non-mail folders (`Calendar`, `Contacts`, `Tasks`, `Notes`, `Journal`, `RSS Feeds`, `Outbox`, `Conversation History`) and `Sync Issues/*`, Proton's `All Mail` and `Starred`.
-   Defaults come from the role and a built-in exclude list; config holds only overrides (globs plus a policy).
-   A folder that is a move destination is never `ignore` for pruning purposes (pitfall 2).
+   `inbox`, `archive`, `sent`, `drafts`, `trash` and `junk`, each resolved in this order: the config mapping (`[accounts.mailboxes.<role>]`), the attribute, then the names Exchange, Proton Bridge, Dovecot and Gmail give the folder (also under an `INBOX` parent).
+   A pinned `extra` never takes one of the three keyed roles, so its rows keep their key.
+3. Policy, per Sylvain's decision of 2026-10-22.
+   - `sync`: the role folders, every user folder and every pin; synced every tick like Inbox.
+   - `status-only`: the trash and junk folders and Proton's `Labels/*`; the sidebar shows the server's counts, read by one `STATUS (MESSAGES UNSEEN)` per folder after every tick.
+     The trash and junk folders also download their newest 50 messages every tick (`STATUS_ONLY_WINDOW`), so a message another client moved there lands in the same pass that prunes its source row (pitfall 2); such a capped target's short download does not hold the account's prune gate shut (`SyncTarget::window`).
+     A label folder downloads nothing, so no Proton message is stored twice.
+   - `ignore`: `\Noselect` and `\NonExistent`, `\All` and `\Flagged` views, Exchange's non-mail folders and their subtrees (`Calendar`, `Contacts`, `Tasks`, `Notes`, `Journal`, `RSS Feeds`, `RSS Subscriptions`, `Outbox`, `Conversation History`, `Sync Issues`), Proton's `All Mail` and `Starred`, the server drafts folder until #0143 mirrors it, and a folder whose name would shadow a role.
+   The exclude lists apply to the provider the listing looks like (Exchange by two of its non-mail folders, Bridge by its `Folders` and `Labels` parents), so a Dovecot folder called `Notes` syncs.
+   `[[accounts.mailboxes.override]]` entries (`match` glob, `policy`) change any of that except a pin, an unselectable folder and a shadowing name.
 4. Keys.
-   Key discovered folders by their server name as `MailboxRole::Other`, refuse a name that collides with a role or `DRAFTS_MAILBOX`, and record UIDVALIDITY so a vanished folder is marked `missing` rather than deleted, with rename matched by UIDVALIDITY plus Message-ID overlap.
+   `inbox`, `archive` and `sent` keep their role keys; every other folder is keyed by its server name, which is what an `extra` entry always keyed it by.
+   A folder whose name reads back as a role key or as the local drafts view (`Sent` beside the `\Sent` folder, the server `Drafts`) is ignored and refused by every resolver.
+   A folder the server stops listing is marked `missing`: its rows stay, it is neither synced nor shown, and it comes back when the server lists it again.
 5. Clients.
-   Number keys `1..=9` bind to roles and pinned folders; every catalogue entry is reachable from a fuzzy folder picker in the TUI and the desktop, as aerc and neomutt do.
-   The desktop badge counts `sync` folders only.
-6. Search and sync targets.
-   `resolve_targets` and `find_sync_target` (`src/daemon/methods/sync.rs:549-575`) accept any catalogue name, so `--mailbox Spesen` works without a config edit.
-   A default search reads the local index first and queries the server for the role set and the current folder, with a weighted quota instead of `limit / targets`.
+   `mailbox.list` and the bootstrap seeds come from `catalogue::sidebar`: Inbox, Drafts, Sent, Archive, then trash, junk, the pins, the other synced folders and the counts-only folders, each row with its `server` and `policy`.
+   The number keys reach the first nine; `gf` opens a fuzzy picker over every mailbox in the TUI and the desktop.
+   A tick that changes the hierarchy re-seeds the account and announces the new rows, which both clients re-read; the desktop's account totals count `sync` rows only.
+6. Search, sync, fetch and move.
+   `mp sync --mailbox`, a hook's `mailbox`, `message.list`, `message.search`, a move destination and `message.fetch` all resolve through the catalogue, so any folder the server lists is reachable without a config edit.
+   A server search that names no mailbox runs over the `sync` folders; a named folder of any policy is searched.
+   A server-search hit from any listed folder is fetchable and stored under that folder's key, a counts-only or ignored folder included.
+   The move, delete and flag paths and the Sent copy read the server name behind a key from the catalogue.
 7. Config.
-   Keep `[accounts.mailboxes.*]` working unchanged as role overrides and pins, and add `deny_unknown_fields` or a warning for unknown keys (PERSO-118).
+   `[accounts.mailboxes.inbox|archive|sent]` and the `extra` list keep working unchanged as pins; `drafts`, `trash` and `junk` name a role folder the server does not mark; unknown keys warn (PERSO-118).
+
+Not built: rename detection by UIDVALIDITY and Message-ID overlap (pitfall 9).
+A renamed folder is a new folder that syncs from scratch, and the old one stays `missing` with its rows.
 
 ## Decisions
 
 - A newly found user folder syncs every tick like Inbox; the trash and junk folders and Proton's label folders get counts only; Exchange's calendar and contact folders and Proton's `All Mail` and `Starred` are ignored (policy table above).
 - The catalogue and the folder roles land first, then the server drafts of [#0143](0143-server-drafts.md), which reuse the `drafts` role.
 
-## To verify before building
+## Verified before building
 
 - Answered by the draft probe of 2026-10-20 ([#0143](0143-server-drafts.md), "Probe results"): neither server advertises `SPECIAL-USE`, `CONDSTORE` or `QRESYNC`, and both offer `UIDPLUS`, `MOVE` and `IDLE`.
   Both mark `\Drafts`, `\Sent`, `\Trash` and `\Junk` in the plain LIST, which is all the role detection needs; Proton also marks `\Archive`, `\All` and `\Flagged`, and TUM's `Archive` carries no mark, so it stays a config entry.
   Proton's `Folders` and `Labels` parents carry `\Noselect`; TUM has none.
-- Whether the store deduplicates Proton label copies by Message-ID or keeps one row per folder.
-- How the sweep, the archive mutation and the sent copy resolve their folders (`find_server_name_for_role` callers were not traced).
+- The store keeps one row per `(mailbox, uid)` and does not deduplicate Proton label copies by Message-ID, which is why a label folder downloads nothing.
+- The move, the delete, the flag pass and the Sent copy resolved a store key to a server name through `find_server_name_for_role`, which falls back to the key itself; they now read the catalogue, which also knows a role found on the server.
 
 ## Acceptance
 
-- A folder that exists on the server is reachable by `mp sync --mailbox`, `mp search --mailbox` and the folder picker without a config edit.
-- A quick tick on TUM selects only the `sync` folders.
-- No Proton message is stored twice because of a label or `All Mail`.
-- A message moved into Junk or Deleted Items keeps a row.
-- A server folder named `Drafts`, `Sent` or `Archive` never shadows a role or the local drafts.
-- Existing configs keep working unchanged.
+- A folder that exists on the server is reachable by `mp sync --mailbox`, `mp search --mailbox` and the folder picker without a config edit (`mp_sync_mailbox_reaches_any_listed_folder`, `the_folder_picker_opens_any_mailbox_by_name`, `folderPicker.test.tsx`).
+- A quick tick on TUM selects only the `sync` folders, plus the 50-message tail of Deleted Items and Junk Email (`tum_syncs_its_role_and_user_folders_and_tails_trash_and_junk`).
+- No Proton message is stored twice because of a label or `All Mail` (`proton_never_downloads_a_label_all_mail_or_starred`).
+- A message moved into Junk or Deleted Items keeps a row (`a_windowed_targets_short_download_does_not_defer_the_prune`), as long as it is among the folder's newest 50.
+- A server folder named `Drafts`, `Sent` or `Archive` never shadows a role or the local drafts (`a_folder_named_like_a_role_never_shadows_it`).
+- Existing configs keep working unchanged (`an_existing_config_keeps_its_targets_and_its_keys`).
 
 ## Research
 
