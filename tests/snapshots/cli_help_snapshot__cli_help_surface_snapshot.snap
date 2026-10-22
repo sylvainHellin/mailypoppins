@@ -1,6 +1,5 @@
 ---
 source: tests/cli_help_snapshot.rs
-assertion_line: 102
 expression: out
 ---
 $ mp --help
@@ -270,9 +269,14 @@ The policy is how the daemon keeps the folder: sync, status-only or ignore; an i
 Usage: mp list-mailboxes [OPTIONS]
 
 Options:
-      --json               Print the listing as JSON on stdout
-  -A, --account <ACCOUNT>  Account to use
-  -h, --help               Print help
+      --json
+          Print the listing as JSON on stdout
+
+  -A, --account <ACCOUNT>
+          Account to use
+
+  -h, --help
+          Print help (see a summary with '-h')
 
 $ mp sync --help
 Sync mailboxes from the server into the local store
@@ -281,7 +285,7 @@ Usage: mp sync [OPTIONS]
 
 Options:
   -n, --limit <LIMIT>      Max messages per mailbox [default: 50]
-      --mailbox <MAILBOX>  Mailboxes to sync (default: INBOX, Archive, Sent)
+      --mailbox <MAILBOX>  Mailboxes to sync, by role, label or server name; any folder the server lists is accepted (default: every folder the account syncs)
       --dry-run            Show what would be ingested without writing anything
       --all-accounts       Sync every configured account (failures are named at the end; exit code 1 if any account failed)
   -A, --account <ACCOUNT>  Account to use
@@ -436,7 +440,7 @@ Arguments:
 
 Options:
       --mailbox <MAILBOX>
-          Mailbox to search: a configured one by role or label, or any folder the server lists by its server name (default: all the account's mailboxes, and on Exchange every folder; --local: configured ones only)
+          Mailbox to search: by role, label or server name, any folder the server lists (default: every folder the account syncs, and on Exchange every folder; --local: every mailbox the store holds)
 
       --from <FROM>
           Match the sender (from:)

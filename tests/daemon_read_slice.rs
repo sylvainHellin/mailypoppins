@@ -1022,7 +1022,6 @@ const SHOW_PARITY: &[&[&str]] = &[
     &["show", "mp://beta/inbox/only-in-beta@example.com"],
     &["show", "--json", "mp://beta/inbox/only-in-beta@example.com"],
     &["show", "nothing-here@example.com"],
-    &["show", "--mailbox", "nope", fixture::BERICHT],
     &["-A", "delta", "show", fixture::BERICHT],
 ];
 
@@ -1112,6 +1111,27 @@ fn every_read_command_answers_byte_identically_to_the_pre_daemon_binary() {
         let direct = slice.oracle(args);
         assert_byte_identical(&routed, &direct);
     }
+}
+
+/// `mp show --mailbox nope`: the one sanctioned deviation of the show rows
+/// (#0141). The pre-daemon binary answered a miss in a mailbox the account
+/// did not configure with the plain "no match"; the CLI now hands the miss to
+/// `message.fetch`, which may fetch from any folder the server lists, and the
+/// daemon's refusal of a folder the server never listed is appended to the
+/// same line. Everything else is byte-identical.
+#[test]
+fn a_show_in_a_mailbox_the_server_never_listed_appends_the_daemons_refusal() {
+    let slice = Slice::start();
+    let args = ["show", "--mailbox", "nope", fixture::BERICHT];
+    let routed = slice.routed(&args);
+    let direct = slice.oracle(&args);
+    assert_eq!(routed.status.code(), direct.status.code());
+    assert_eq!(routed.stdout, direct.stdout);
+    let direct_err = String::from_utf8_lossy(&direct.stderr).into_owned();
+    let routed_err = String::from_utf8_lossy(&routed.stderr).into_owned();
+    let expected = direct_err.trim_end().to_string()
+        + ", and the daemon will not fetch it: the server listed no folder 'nope' at the last sync; it lists INBOX, Team/Reports\n";
+    assert_eq!(routed_err, expected);
 }
 
 /// The message with no `Message-ID:` header is addressed by the synthetic id
