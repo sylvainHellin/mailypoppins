@@ -1,3 +1,4 @@
+// Local edit to shadcn's file: CommandDialog renders its sr-only title and description inside the popup, so they leave the page with it.
 import * as React from "react"
 import { Command as CommandPrimitive } from "cmdk"
 import { cn } from "cn"
@@ -54,9 +55,6 @@ function CommandDialog({
         )}
         showCloseButton={showCloseButton}
       >
-        {/* Inside the popup, so the title leaves the page with the dialog;
-            shadcn renders it beside the popup, where it stayed in the
-            accessibility tree while the dialog was closed. */}
         <DialogHeader className="sr-only">
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>

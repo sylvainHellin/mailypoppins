@@ -57,7 +57,10 @@ It draws in a dark or a light palette, chosen in Settings as dark, light or syst
 | `src/components/activity` | The activity log dialog |
 | `src/components/settings` | The Settings view, the password dialog, the config.toml banner, the account wizard and the device-code dialog |
 
-`components/ui` stays as shadcn generates it, with one local edit each in `dialog.tsx` and `sheet.tsx`: the overlay draws with the `overlay` token instead of `bg-black/10`, and a comment at the top of each file says so; a regenerated file has to keep it, or the colour guard fails.
+`components/ui` stays as shadcn generates it, with local edits in four files, each named by a comment at the top of the file; a regenerated file has to keep its edit.
+In `dialog.tsx` and `sheet.tsx` the overlay draws with the `overlay` token instead of `bg-black/10`, or the colour guard fails.
+In `button.tsx` the outline and ghost variants show `aria-pressed` with the selection colours, each with a `dark:` twin (`button.test.ts`).
+In `command.tsx` `CommandDialog` renders its sr-only title and description inside the popup, so they leave the accessibility tree when it closes (`a11y.test.tsx`).
 
 ## Model
 

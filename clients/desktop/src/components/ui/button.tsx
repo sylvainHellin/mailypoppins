@@ -1,3 +1,4 @@
+// Local edit to shadcn's file: the outline and ghost variants show aria-pressed with the selection colours, with a `dark:` twin (button.test.ts).
 import { Button as ButtonPrimitive } from "@base-ui/react/button"
 import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "cn"
