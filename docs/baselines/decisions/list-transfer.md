@@ -135,6 +135,8 @@ Adopted:
   - `Event::Replace { kind: "message.row", payload: {account, mailbox, message} }` for an inserted or
     updated row, keyed on the row id so a repeat replaces the client's row rather than appending a
     second one;
+    never published: a changed or new row reaches a client as a `counts` invalidate of its mailbox,
+    and the clients' `message.row` decoder was removed in the tidy-up of 2026-10-22;
   - `Event::Remove { resource: message(account, row_id) }` for a delete, and for a move out of the
     open mailbox, which is a remove from this list and a replace in another;
   - `Event::Invalidate { resource: mailbox listing, scope: {account, mailbox} }` as the coarse

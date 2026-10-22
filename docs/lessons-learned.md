@@ -2670,6 +2670,7 @@ Holding the rows of one statement to merge them with a second statement's rows l
 ## The daemon publishes no `message.row`
 
 Message changes reach clients only as a `counts`-scope `state.invalidate` of `mailbox:<account>/<mailbox>`, plus `draft.changed`, `state.remove` and `sync.completed` (`Event::from_change`, `src/daemon/state/events.rs`); a client that cannot fold row deltas in place, as the conversation list cannot, re-reads on the counts invalidate of any of the account's mailboxes, coalesced to one read in flight and one owed (PERSO-138).
+`mp_client::queries::MessageRowDelta` decoded a `message.row` replace that no protocol constant named until 2026-10-22, when the variant and the TUI's fold of it went; a delta is now only a `state.remove` of a message or a list-scope `state.invalidate`, both in `DOMAIN_KINDS`.
 
 ## `message.list_conversations` needs a row sink in process
 

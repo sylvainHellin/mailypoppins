@@ -1194,53 +1194,6 @@ mod tests {
     // Row deltas over the open list (P5-U4, the seam P5-U8 turns on)
     // -----------------------------------------------------------------------
 
-    /// One `message.row` event for the open mailbox lands in the list and in
-    /// the cache slot that shares its allocation, and owes no reload.
-    #[test]
-    fn a_row_delta_for_the_open_mailbox_lands_in_the_list_and_its_cache_slot() {
-        let _data = DataDir::new();
-        let mut app = app_with_warm_caches();
-
-        let delta = super::super::queries::MessageRowDelta::decode(&mp_protocol::EventEnvelope {
-            instance_id: "bg".to_string(),
-            revision: 3,
-            kind: "message.row".to_string(),
-            payload: serde_json::json!({
-                "account": "alice",
-                "mailbox": "archive",
-                "message": {
-                    "id": 7,
-                    "uid": 7,
-                    "message_id": "<seven@example.com>",
-                    "from": "Sender <s@example.com>",
-                    "to": "me@example.com",
-                    "cc": serde_json::Value::Null,
-                    "reply_to": serde_json::Value::Null,
-                    "bcc": serde_json::Value::Null,
-                    "subject": "Seven",
-                    "date_sort": "2024-01-01T09:00:00",
-                    "date_display": "Mon, 01 Jan 2024 09:00:00 +0000",
-                    "flags": {"seen": true, "answered": false, "forwarded": false, "flagged": false},
-                    "has_attachments": false,
-                    "is_invite": false,
-                },
-            }),
-        })
-        .expect("a message.row event decodes");
-
-        assert!(
-            apply_row_delta(&mut app, &delta),
-            "a replace owes no reload"
-        );
-        assert_eq!(app.emails.len(), 1);
-        assert_eq!(app.emails[0].subject, "Seven");
-        assert_eq!(
-            app.email_cache[1].as_ref().map(|rows| rows.len()),
-            Some(1),
-            "the cache slot moves with the list it shares an allocation with"
-        );
-    }
-
     /// An invalidate over the open mailbox's listing owes a reload, which goes
     /// through the same off-thread path a mailbox switch takes.
     #[test]

@@ -44,13 +44,16 @@
 //! # Row deltas
 //!
 //! [`MessageRowDelta`] is the event half of the whole-list transfer
-//! `docs/baselines/decisions/list-transfer.md` chose: `message.row` replaces a
-//! row, `state.remove` over `message:<account>/<mailbox>/<uid>` drops one,
-//! `state.invalidate` over `mailbox:<account>/<mailbox>` (outside the counts
-//! scope) owes a refetch. [`apply_row_delta`] folds one into a held
-//! `Vec<MessageListRow>`, which carries the uid a removal names, so this layer
-//! needs no uid index; a client whose own row type drops the uid (the TUI's
-//! `EmailEntry`) keeps one of its own.
+//! `docs/baselines/decisions/list-transfer.md` chose, in the two kinds the
+//! daemon publishes: `state.remove` over `message:<account>/<mailbox>/<uid>`
+//! drops a row, `state.invalidate` over `mailbox:<account>/<mailbox>` (outside
+//! the counts scope) owes a refetch. The decision's `message.row` replace was
+//! never published, and the protocol defines no such kind: a changed or new
+//! row reaches a client as a `counts` invalidate of its mailbox.
+//! [`apply_row_delta`] folds a delta into a held `Vec<MessageListRow>`, which
+//! carries the uid a removal names, so this layer needs no uid index; a client
+//! whose own row type drops the uid (the TUI's `EmailEntry`) keeps one of its
+//! own.
 
 use std::collections::HashMap;
 
@@ -444,15 +447,6 @@ pub fn calendar_events(q: &dyn Queries, account: &str) -> Result<Vec<AgendaEvent
 /// docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageRowDelta {
-    /// One row, as a fresh listing would carry it.
-    Replace {
-        /// The account it belongs to.
-        account: String,
-        /// The mailbox it belongs to.
-        mailbox: String,
-        /// The row itself, boxed because it is much the largest variant.
-        row: Box<MessageListRow>,
-    },
     /// One row is gone, named the way the daemon names it.
     Remove {
         /// The account it belonged to.
@@ -481,11 +475,6 @@ impl MessageRowDelta {
     /// count changes for one mailbox must not each refetch the open list.
     pub fn decode(event: &EventEnvelope) -> Option<MessageRowDelta> {
         match event.kind.as_str() {
-            "message.row" => Some(MessageRowDelta::Replace {
-                account: event.payload["account"].as_str()?.to_string(),
-                mailbox: event.payload["mailbox"].as_str()?.to_string(),
-                row: Box::new(row_from_wire(&event.payload["message"])),
-            }),
             KIND_REMOVE => {
                 let (account, mailbox, uid) =
                     message_resource(event.payload["resource"].as_str()?)?;
@@ -509,8 +498,7 @@ impl MessageRowDelta {
     /// The account this delta is about.
     pub fn account(&self) -> &str {
         match self {
-            MessageRowDelta::Replace { account, .. }
-            | MessageRowDelta::Remove { account, .. }
+            MessageRowDelta::Remove { account, .. }
             | MessageRowDelta::Invalidate { account, .. } => account,
         }
     }
@@ -518,8 +506,7 @@ impl MessageRowDelta {
     /// The mailbox this delta is about.
     pub fn mailbox(&self) -> &str {
         match self {
-            MessageRowDelta::Replace { mailbox, .. }
-            | MessageRowDelta::Remove { mailbox, .. }
+            MessageRowDelta::Remove { mailbox, .. }
             | MessageRowDelta::Invalidate { mailbox, .. } => mailbox,
         }
     }
@@ -534,9 +521,7 @@ impl MessageRowDelta {
 /// open list on each of them would put back exactly the per-event whole-list
 /// transfer the deltas exist to avoid.
 ///
-/// A replace of a held row (same `id`) lands where the row stands; a new row
-/// goes where a fresh listing would put it, the store's
-/// `date_sort DESC, id DESC`. A removal drops the row with that uid.
+/// A removal drops the row with that uid.
 pub fn apply_row_delta(
     held: &mut Vec<MessageListRow>,
     mailbox: &str,
@@ -546,20 +531,6 @@ pub fn apply_row_delta(
         return true;
     }
     match delta {
-        MessageRowDelta::Replace { row, .. } => {
-            match held.iter().position(|held| held.id == row.id) {
-                Some(at) => held[at] = (**row).clone(),
-                None => {
-                    let key = (row.date_sort.as_str(), row.id);
-                    let at = held
-                        .iter()
-                        .position(|held| (held.date_sort.as_str(), held.id) < key)
-                        .unwrap_or(held.len());
-                    held.insert(at, (**row).clone());
-                }
-            }
-            true
-        }
         MessageRowDelta::Remove { uid, .. } => {
             held.retain(|row| row.uid != *uid);
             true
@@ -861,30 +832,30 @@ mod tests {
         }
     }
 
+    /// Every kind a delta is decoded from is a domain kind the protocol
+    /// defines, and the decision's `message.row`, which the daemon never
+    /// published, decodes to nothing.
     #[test]
-    fn deltas_fold_into_a_held_list_in_store_order() {
-        let mut held = vec![row(3, 30, "2024-01-03"), row(1, 10, "2024-01-01")];
-
-        // A new row between the two.
-        let insert = MessageRowDelta::decode(&envelope(
+    fn deltas_decode_from_the_protocols_domain_kinds_only() {
+        for kind in [KIND_REMOVE, KIND_INVALIDATE] {
+            assert!(mp_protocol::events::is_domain_kind(kind), "{kind}");
+        }
+        let replace = envelope(
             "message.row",
             json!({"account": "a", "mailbox": "inbox",
                    "message": {"id": 2, "uid": 20, "date_sort": "2024-01-02"}}),
-        ))
-        .expect("a replace");
-        assert!(apply_row_delta(&mut held, "inbox", &insert));
-        assert_eq!(held.iter().map(|r| r.id).collect::<Vec<_>>(), vec![3, 2, 1]);
+        );
+        assert!(!mp_protocol::events::is_domain_kind(&replace.kind));
+        assert_eq!(MessageRowDelta::decode(&replace), None);
+    }
 
-        // A replace of a held row keeps its place.
-        let flip = MessageRowDelta::decode(&envelope(
-            "message.row",
-            json!({"account": "a", "mailbox": "inbox",
-                   "message": {"id": 1, "uid": 10, "date_sort": "2024-01-01",
-                               "flags": {"seen": true}}}),
-        ))
-        .expect("a replace");
-        assert!(apply_row_delta(&mut held, "inbox", &flip));
-        assert!(held[2].flags.seen);
+    #[test]
+    fn deltas_fold_into_a_held_list() {
+        let mut held = vec![
+            row(3, 30, "2024-01-03"),
+            row(2, 20, "2024-01-02"),
+            row(1, 10, "2024-01-01"),
+        ];
 
         // A remove by uid, which the typed row carries.
         let remove = MessageRowDelta::decode(&envelope(

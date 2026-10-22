@@ -525,43 +525,12 @@ pub fn decode_contacts(account: &str, answer: &Value) -> ContactsAnswer {
 ///
 /// `true` means the list is current again, `false` means the caller must
 /// re-list the mailbox through [`list_emails`]. A delta about another mailbox folds as a no-op and
-/// answers `true`. A replace records its uid first, whichever mailbox it is
-/// about, so a later remove of that row resolves.
+/// answers `true`.
 pub fn apply_row_delta(held: &mut Vec<EmailEntry>, mailbox: &str, delta: &MessageRowDelta) -> bool {
-    if let MessageRowDelta::Replace {
-        account,
-        mailbox: of,
-        row,
-    } = delta
-    {
-        remember_row(account, of, row);
-    }
     if delta.mailbox() != mailbox {
         return true;
     }
     match delta {
-        MessageRowDelta::Replace { mailbox, row, .. } => {
-            let entry = entry_from_row((**row).clone(), &status_for_mailbox(mailbox));
-            match entry
-                .msg
-                .and_then(|msg| held.iter().position(|row| row.msg == Some(msg)))
-            {
-                // The row is one the client already holds: replace it where it
-                // stands, so the list keeps its length and its order.
-                Some(at) => held[at] = entry,
-                // A row the client has not seen goes where a fresh listing
-                // would have put it, which is the store's order,
-                // `date_sort DESC, id DESC`.
-                None => {
-                    let at = held
-                        .iter()
-                        .position(|row| sort_key(row) < sort_key(&entry))
-                        .unwrap_or(held.len());
-                    held.insert(at, entry);
-                }
-            }
-            true
-        }
         MessageRowDelta::Remove {
             account,
             mailbox,
@@ -579,15 +548,6 @@ pub fn apply_row_delta(held: &mut Vec<EmailEntry>, mailbox: &str, delta: &Messag
         },
         MessageRowDelta::Invalidate { .. } => false,
     }
-}
-
-/// A row's place in the store's order: the sort date first, the row id as the
-/// tiebreak, both descending.
-fn sort_key(entry: &EmailEntry) -> (&str, i64) {
-    (
-        entry.date_sort.as_str(),
-        entry.msg.map(MessageRef::row_id).unwrap_or_default(),
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -613,16 +573,6 @@ fn remember_mailbox(account: &str, mailbox: &str, rows: &[MessageListRow]) {
     let table = rows.iter().map(|row| (row.uid, row.id)).collect();
     if let Ok(mut index) = row_ids().lock() {
         index.insert((account.to_string(), mailbox.to_string()), table);
-    }
-}
-
-/// Record one row, which is what a replace delta carries.
-fn remember_row(account: &str, mailbox: &str, row: &MessageListRow) {
-    if let Ok(mut index) = row_ids().lock() {
-        index
-            .entry((account.to_string(), mailbox.to_string()))
-            .or_default()
-            .insert(row.uid, row.id);
     }
 }
 

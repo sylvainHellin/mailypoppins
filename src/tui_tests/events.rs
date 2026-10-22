@@ -157,40 +157,6 @@ const WATERMARK: u64 = 10;
 // (a) one event, one model change
 // ---------------------------------------------------------------------------
 
-/// A `message.row` for the mailbox on screen lands in the list where a fresh
-/// listing would have put it, without a second `message.list`.
-///
-/// The delta half of this is P5-U4's and is already tested in `bg.rs`; what is
-/// new is that an *event* reaches it at all. Until P5-U8 the stream is
-/// connected and drained by nobody (P5-U2), so this is the first row anywhere
-/// that starts at an `EventEnvelope`.
-#[test]
-fn a_row_event_lands_in_the_open_list() {
-    let fixture = Fixture::new();
-    seed_inbox();
-    let mut app = app_on_inbox(&fixture);
-    watermarked(&mut app);
-    assert_eq!(app.emails.len(), 3, "the fixture seeds three inbox rows");
-
-    let applied = app.apply_event(&envelope(
-        INSTANCE,
-        WATERMARK + 1,
-        "message.row",
-        json!({
-            "account": ACCOUNT,
-            "mailbox": "inbox",
-            "message": wire_row(4, 4, "d", "2024-01-01T12:00:00"),
-        }),
-    ));
-
-    assert_eq!(applied, Applied::Rows);
-    assert_eq!(app.emails.len(), 4, "the arrival is in the list");
-    assert_eq!(
-        app.emails[0].subject, "d",
-        "the newest row goes where the store's order would have put it"
-    );
-}
-
 /// A count change is a `state.invalidate` over `mailbox:<account>/<slug>`
 /// scoped to `counts`, and it moves the sidebar and not the list.
 ///
@@ -247,12 +213,8 @@ fn a_duplicate_revision_is_dropped_without_a_word() {
     let applied = app.apply_event(&envelope(
         INSTANCE,
         WATERMARK,
-        "message.row",
-        json!({
-            "account": ACCOUNT,
-            "mailbox": "inbox",
-            "message": wire_row(4, 4, "d", "2024-01-01T12:00:00"),
-        }),
+        "state.remove",
+        json!({"resource": format!("message:{ACCOUNT}/inbox/2")}),
     ));
 
     assert_eq!(applied, Applied::Duplicate);
@@ -280,12 +242,8 @@ fn an_event_from_another_instance_is_refused() {
     let applied = app.apply_event(&envelope(
         "a-daemon-that-restarted",
         WATERMARK + 1,
-        "message.row",
-        json!({
-            "account": ACCOUNT,
-            "mailbox": "inbox",
-            "message": wire_row(4, 4, "d", "2024-01-01T12:00:00"),
-        }),
+        "state.remove",
+        json!({"resource": format!("message:{ACCOUNT}/inbox/2")}),
     ));
 
     assert_eq!(applied, Applied::Refused);
@@ -298,12 +256,8 @@ fn an_event_from_another_instance_is_refused() {
         app.apply_event(&envelope(
             INSTANCE,
             WATERMARK + 1,
-            "message.row",
-            json!({
-                "account": ACCOUNT,
-                "mailbox": "inbox",
-                "message": wire_row(4, 4, "d", "2024-01-01T12:00:00"),
-            })
+            "state.remove",
+            json!({"resource": format!("message:{ACCOUNT}/inbox/2")})
         )),
         Applied::Refused,
         "the refusal is sticky: only a fresh bootstrap clears it"
@@ -774,12 +728,8 @@ fn a_reconnect_re_bootstraps_before_it_accepts_the_new_instance() {
         app.apply_event(&envelope(
             INSTANCE,
             after,
-            "message.row",
-            json!({
-                "account": ACCOUNT,
-                "mailbox": "inbox",
-                "message": wire_row(4, 4, "d", "2024-01-01T12:00:00"),
-            })
+            "state.remove",
+            json!({"resource": format!("message:{ACCOUNT}/inbox/2")})
         )),
         Applied::Refused
     );
@@ -800,12 +750,8 @@ fn a_reconnect_re_bootstraps_before_it_accepts_the_new_instance() {
         app.apply_event(&envelope(
             INSTANCE,
             after,
-            "message.row",
-            json!({
-                "account": ACCOUNT,
-                "mailbox": "inbox",
-                "message": wire_row(4, 4, "d", "2024-01-01T12:00:00"),
-            })
+            "state.remove",
+            json!({"resource": format!("message:{ACCOUNT}/inbox/2")})
         )),
         Applied::Rows,
         "the new instance's revisions apply once a bootstrap has admitted them"
@@ -1529,27 +1475,6 @@ fn tick(saved: u64, skipped: u64, arrivals: &[(&str, &str)], error: Option<&str>
     // Two readers: a `sync.completed` event's payload *is* the outcome, and an
     // `operation.finished` result carries the same object under `outcome`.
     serde_json::to_value(&outcome).expect("a SyncCompleted serialises")
-}
-
-/// One `message.list` row, as the wire carries it (P5-U4's seven added fields
-/// included).
-fn wire_row(id: i64, uid: i64, subject: &str, date_sort: &str) -> Value {
-    json!({
-        "id": id,
-        "uid": uid,
-        "message_id": format!("<{subject}@example.com>"),
-        "from": format!("Sender {subject} <s@example.com>"),
-        "to": "me@example.com",
-        "cc": Value::Null,
-        "reply_to": Value::Null,
-        "bcc": Value::Null,
-        "subject": subject,
-        "date_sort": date_sort,
-        "date_display": "Mon, 01 Jan 2024 12:00:00 +0000",
-        "flags": {"seen": true, "answered": false, "forwarded": false, "flagged": false},
-        "has_attachments": false,
-        "is_invite": false,
-    })
 }
 
 /// A stream the test writes and the drain reads, which is the shape the session

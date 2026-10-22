@@ -1104,8 +1104,8 @@ fn the_move_picker_leaves_out_the_mailbox_a_member_lives_in() {
 }
 
 /// Any change of the account re-streams the list, in any mailbox: the
-/// `counts` invalidate the daemon announces a message change with, a row
-/// delta, the removal of a message or a draft, `draft.changed`. A burst costs
+/// `counts` invalidate the daemon announces a message change with, the
+/// removal of a message or a draft, `draft.changed`. A burst costs
 /// one stream in flight and one owed, and an expanded conversation is
 /// expanded again by the re-stream.
 #[test]
@@ -1113,8 +1113,6 @@ fn deltas_restream_the_list_coalesced() {
     let mut fx = Fixture::new();
     fx.char('l');
     fx.app.pending_actions.clear();
-    let row = json!({"id": fx.ids.first_reply, "uid": 1, "subject": "Re: Frage zum Bericht"});
-
     let mut revision = WATERMARK;
     let mut next = || {
         revision += 1;
@@ -1137,11 +1135,11 @@ fn deltas_restream_the_list_coalesced() {
     );
     assert!(fx.app.restream.owed);
 
-    for _ in 0..3 {
+    for uid in 1..=3 {
         fx.app.apply_event(&event(
             next(),
-            "message.row",
-            json!({"account": ACCOUNT, "mailbox": "sent", "message": row}),
+            "state.remove",
+            json!({"resource": format!("message:{ACCOUNT}/sent/{uid}")}),
         ));
     }
     fx.app.apply_event(&event(
@@ -1187,8 +1185,8 @@ fn deltas_restream_the_list_coalesced() {
     run_load(&mut fx.app);
     fx.app.apply_event(&event(
         next(),
-        "message.row",
-        json!({"account": "someone-else", "mailbox": "inbox", "message": row}),
+        "state.remove",
+        json!({"resource": "message:someone-else/inbox/1"}),
     ));
     fx.app.apply_event(&event(
         next(),

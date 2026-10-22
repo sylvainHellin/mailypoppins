@@ -549,19 +549,6 @@ fn an_unparseable_draft_still_lists_through_the_daemon() {
 // (d) row deltas over the held list
 // ---------------------------------------------------------------------------
 
-/// The `message.row` replace an updated row travels as, in the shape the
-/// decision fixes: `Event::Replace { kind: "message.row", payload: {account,
-/// mailbox, message} }`, where `message` is one row of the `message.list`
-/// answer.
-fn row_replace(mailbox: &str, message: Value) -> EventEnvelope {
-    EventEnvelope {
-        instance_id: "query-layer".to_string(),
-        revision: 7,
-        kind: "message.row".to_string(),
-        payload: json!({"account": ACCOUNT, "mailbox": mailbox, "message": message}),
-    }
-}
-
 /// One row of what `message.list` answers for `mailbox`, selected by subject.
 fn wire_row(fixture: &Fixture, mailbox: &str, subject: &str) -> Value {
     let answer = fixture
@@ -577,77 +564,6 @@ fn wire_row(fixture: &Fixture, mailbox: &str, subject: &str) -> Value {
         .find(|row| row["subject"] == json!(subject))
         .unwrap_or_else(|| panic!("{mailbox} has no row subject {subject:?}"))
         .clone()
-}
-
-/// A replace of a row the client already holds updates it where it stands: the
-/// list keeps its length and its order, and no `message.list` is owed.
-///
-/// This is the half of the whole-list decision that makes it cheap. A client
-/// that refetched on every revision move would pay 13.8 ms per sync event
-/// instead of the 2.5 kB a ten-row delta weighs
-/// (`docs/baselines/decisions/list-transfer.md`), which is inside W2's ceiling
-/// and is not what was chosen.
-#[test]
-fn a_row_delta_updates_the_held_list_without_a_refetch() {
-    let fixture = Fixture::new();
-    seed_inbox();
-
-    let mut held = list_emails(&fixture, ACCOUNT, "inbox").expect("the daemon lists inbox");
-    let before = held.len();
-
-    // The same row, seen again with `\Seen` set: the flag flip a sync tick
-    // produces, which is the commonest delta of all.
-    let mut row = wire_row(&fixture, "inbox", "a");
-    row["flags"]["seen"] = json!(true);
-    let delta = MessageRowDelta::decode(&row_replace("inbox", row))
-        .expect("a message.row event decodes to a delta");
-
-    assert!(
-        apply_row_delta(&mut held, "inbox", &delta),
-        "a row replace is folded into the held list, it does not owe a refetch: {delta:?}",
-    );
-    assert_eq!(held.len(), before, "a replace keeps the list's length");
-    let updated = held
-        .iter()
-        .find(|entry| entry.subject == "a")
-        .expect("the replaced row is still in the list");
-    assert!(updated.read, "the replaced row carries the new flag");
-    assert_eq!(
-        held.iter().map(|e| e.subject.clone()).collect::<Vec<_>>(),
-        vec!["c", "b", "a"],
-        "a replace keeps the list's order",
-    );
-}
-
-/// A replace naming a row the client does not hold inserts it where a fresh
-/// `message.list` would have put it. The oracle is that list: the delta path
-/// and the refetch path have to agree, or a session that stayed open would
-/// drift from one that reopened the mailbox.
-#[test]
-fn a_row_delta_inserts_a_new_row_where_a_refetch_would_have_put_it() {
-    let fixture = Fixture::new();
-    seed_inbox();
-    let mut held = list_emails(&fixture, ACCOUNT, "inbox").expect("the daemon lists inbox");
-
-    // A message that arrives between two list calls, dated between two rows the
-    // client holds so the insertion point is neither end.
-    ingest_fixture(
-        "inbox",
-        4,
-        &fixture_email("b-and-a-half", "Mon, 01 Jan 2024 10:30:00 +0000", false),
-    );
-    let delta = MessageRowDelta::decode(&row_replace(
-        "inbox",
-        wire_row(&fixture, "inbox", "b-and-a-half"),
-    ))
-    .expect("a message.row event decodes to a delta");
-
-    assert!(apply_row_delta(&mut held, "inbox", &delta), "{delta:?}");
-    same_entries(
-        &held,
-        &list_emails(&fixture, ACCOUNT, "inbox").expect("the refetch"),
-        "the delta path against the refetch path",
-    );
 }
 
 /// A remove drops the row and nothing else: `Event::Remove { resource }`, with
@@ -719,15 +635,18 @@ fn a_delta_about_another_mailbox_costs_the_open_list_nothing() {
     let mut held = list_emails(&fixture, ACCOUNT, "inbox").expect("the daemon lists inbox");
     let before: Vec<String> = held.iter().map(|e| e.subject.clone()).collect();
 
-    let delta = MessageRowDelta::decode(&row_replace(
-        "archive",
-        wire_row(&fixture, "archive", "old"),
-    ))
-    .expect("a message.row event decodes to a delta");
+    let uid = wire_row(&fixture, "archive", "old")["uid"].clone();
+    let delta = MessageRowDelta::decode(&EventEnvelope {
+        instance_id: "query-layer".to_string(),
+        revision: 10,
+        kind: "state.remove".to_string(),
+        payload: json!({"resource": format!("message:{ACCOUNT}/archive/{uid}")}),
+    })
+    .expect("a state.remove event over a message decodes to a delta");
 
     assert!(
         apply_row_delta(&mut held, "inbox", &delta),
-        "another mailbox's row owes the open list no refetch: {delta:?}",
+        "another mailbox's removal owes the open list no refetch: {delta:?}",
     );
     assert_eq!(
         held.iter().map(|e| e.subject.clone()).collect::<Vec<_>>(),
