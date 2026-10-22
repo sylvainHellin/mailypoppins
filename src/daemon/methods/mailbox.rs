@@ -180,7 +180,10 @@ async fn list_server(account: &AccountConfig) -> Result<Value, RpcError> {
     let mailboxes: Vec<Value> = listed
         .iter()
         .map(|folder| {
-            let resolved = catalogue.folders.iter().find(|f| f.server == folder.name);
+            let resolved = catalogue
+                .folders
+                .iter()
+                .find(|f| f.listed_as.as_deref() == Some(folder.name.as_str()));
             json!({
                 "name": folder.name,
                 "label": resolved.map(|f| f.label.clone()),

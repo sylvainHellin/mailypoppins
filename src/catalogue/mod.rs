@@ -224,8 +224,15 @@ impl Provider {
 /// One folder of the catalogue, resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Folder {
-    /// The name `SELECT` takes, as the server spells it.
+    /// The name `SELECT` takes, as the server spells it, or as config spells
+    /// a pinned `extra`.
     pub server: String,
+    /// The name the last listing gave the folder, `None` for a pin the server
+    /// never listed. It differs from `server` when config pins the folder
+    /// under another spelling: an `extra` whose case differs, or on Graph an
+    /// English well-known name (`Sent Items`) for a localized mailbox's folder
+    /// (`Gesendete Elemente`).
+    pub listed_as: Option<String>,
     /// What a person reads: the role's label, or the decoded server name.
     pub label: String,
     /// The store key its rows carry and a selector names.
@@ -326,7 +333,8 @@ impl Catalogue {
             .iter()
             .map(|f| Folder {
                 server: f.name.clone(),
-                label: utf7::decode(&f.name),
+                listed_as: Some(f.name.clone()),
+                label: decode_label(account, &f.name),
                 key: f.name.clone(),
                 role: None,
                 policy: FolderPolicy::Sync,
@@ -344,13 +352,11 @@ impl Catalogue {
         // it, and before #0141 nothing else was asked.
         let pins = pinned_names(account);
         for (_, server) in &pins {
-            if !folders
-                .iter()
-                .any(|f| f.server.eq_ignore_ascii_case(server))
-            {
+            if configured_folder(account, &folders, server).is_none() {
                 folders.push(Folder {
                     server: server.clone(),
-                    label: utf7::decode(server),
+                    listed_as: None,
+                    label: decode_label(account, server),
                     key: server.clone(),
                     role: None,
                     policy: FolderPolicy::Sync,
@@ -364,19 +370,22 @@ impl Catalogue {
                 });
             }
         }
-        for folder in &mut folders {
-            folder.pin = pins
-                .iter()
-                .position(|(_, server)| folder.server.eq_ignore_ascii_case(server));
-            if let Some((role, server)) = folder.pin.and_then(|i| pins.get(i)) {
-                // A pinned folder is present whatever the last `LIST` said, and
-                // an `extra` keeps the spelling config gave it as both its key
-                // and its SELECT name, which is what its rows are filed under.
-                folder.missing = false;
-                if matches!(role, MailboxRole::Other(_)) {
-                    folder.key = server.clone();
-                    folder.server = server.clone();
-                }
+        for (pin, (role, server)) in pins.iter().enumerate() {
+            let Some(index) = configured_folder(account, &folders, server) else {
+                continue;
+            };
+            let folder = &mut folders[index];
+            if folder.pin.is_some() {
+                continue;
+            }
+            // A pinned folder is present whatever the last `LIST` said, and
+            // an `extra` keeps the spelling config gave it as both its key
+            // and its SELECT name, which is what its rows are filed under.
+            folder.pin = Some(pin);
+            folder.missing = false;
+            if matches!(role, MailboxRole::Other(_)) {
+                folder.key = server.clone();
+                folder.server = server.clone();
             }
         }
 
@@ -419,9 +428,10 @@ impl Catalogue {
     /// The folder a person or a client named: its exact server name first,
     /// then a store key, a label and a server name case-insensitively, one
     /// tier at a time ([`mp_protocol::state::pick_mailbox`]), a present folder
-    /// before a missing one. The exact name leads because a label can repeat a
-    /// name: the folder the server marks `\Trash` is labelled `Trash`, and a
-    /// second folder may be called that.
+    /// before a missing one, and last the name the listing gave a folder config
+    /// pins under another spelling. The exact name leads because a label can
+    /// repeat a name: the folder the server marks `\Trash` is labelled
+    /// `Trash`, and a second folder may be called that.
     pub fn find(&self, wanted: &str) -> Option<&Folder> {
         let wanted = wanted.trim();
         let (present, missing): (Vec<&Folder>, Vec<&Folder>) =
@@ -438,6 +448,13 @@ impl Catalogue {
                 .iter()
                 .find(|f| f.server == wanted)
                 .or_else(|| mp_protocol::state::pick_mailbox(&folders, wanted, names))
+                .or_else(|| {
+                    folders.iter().find(|f| {
+                        f.listed_as
+                            .as_deref()
+                            .is_some_and(|listed| listed.eq_ignore_ascii_case(wanted))
+                    })
+                })
                 .copied()
         })
     }
@@ -654,6 +671,42 @@ fn pinned_names(account: &AccountConfig) -> Vec<(MailboxRole, String)> {
         .collect()
 }
 
+/// The folder a name in `config.toml` designates.
+///
+/// Its server name, case-insensitively. On Graph a well-known name comes
+/// first (`Inbox`, `Sent Items`, `Deleted Items`, `Junk Email`, `Archive`,
+/// `Drafts`): Graph resolves it to the well-known folder whatever the
+/// mailbox's language calls it ([`crate::graph::well_known_folder`]), so an
+/// English config on a German mailbox designates the folder listed as
+/// `Posteingang` with `\Inbox`, and pinning a second folder under the
+/// English name would sync the inbox twice.
+fn configured_folder(account: &AccountConfig, folders: &[Folder], name: &str) -> Option<usize> {
+    if account.auth_method == AuthMethod::Graph {
+        if let Some(attribute) = discover::graph_role_attribute(name) {
+            if let Some(i) = folders
+                .iter()
+                .position(|f| !f.missing && f.attribute(attribute))
+            {
+                return Some(i);
+            }
+        }
+    }
+    folders
+        .iter()
+        .position(|f| f.server.eq_ignore_ascii_case(name))
+}
+
+/// What a person reads for a folder named `name`: an IMAP name decoded from
+/// modified UTF-7 (RFC 3501 5.1.3), a Graph display name as it is, since
+/// Graph names are plain UTF-16 strings and `Q&A-2024` is a valid one.
+fn decode_label(account: &AccountConfig, name: &str) -> String {
+    if account.auth_method == AuthMethod::Graph {
+        name.to_string()
+    } else {
+        utf7::decode(name)
+    }
+}
+
 /// The folder's name without an `INBOX` parent, which is where Dovecot and
 /// Courier put the role folders (`INBOX.Sent`, `INBOX/Trash`).
 fn leaf_for_names(folder: &Folder) -> &str {
@@ -688,9 +741,8 @@ fn assign_roles(account: &AccountConfig, pins: &[(MailboxRole, String)], folders
                 && !(role.store_role().is_some() && extra_pin(f))
         };
         if let Some(mapping) = role.configured(account) {
-            if let Some(i) = folders
-                .iter()
-                .position(|f| f.role.is_none() && f.server.eq_ignore_ascii_case(&mapping.server))
+            if let Some(i) = configured_folder(account, folders, &mapping.server)
+                .filter(|&i| folders[i].role.is_none())
             {
                 return Some(i);
             }

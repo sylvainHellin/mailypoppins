@@ -513,6 +513,71 @@ fn a_graph_listing_resolves_its_roles_from_the_well_known_folders() {
     assert_eq!(policy_of(&catalogue, "Calendar"), FolderPolicy::Ignore);
 }
 
+/// #0141 review: an English config on a German Graph mailbox. Graph resolves
+/// `Inbox` and `Sent Items` to the well-known folders, which the listing names
+/// `Posteingang` and `Gesendete Elemente`, so each pin is that folder rather
+/// than a second target syncing it again. A role config (`trash`) and an
+/// `extra` naming a well-known folder merge the same way, and the folder
+/// stays findable by the name the listing gave it.
+#[test]
+fn a_graph_pin_by_its_english_name_is_the_localized_role_folder() {
+    let account = AccountConfig {
+        auth_method: AuthMethod::Graph,
+        mailboxes: MailboxesConfig {
+            inbox: mapping("Inbox"),
+            sent: mapping("Sent Items"),
+            trash: mapping("Deleted Items"),
+            extra: Some(vec![MailboxMapping {
+                server: "Junk Email".to_string(),
+            }]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let catalogue = Catalogue::resolve(
+        &account,
+        &[
+            listed("Posteingang", &["\\Inbox"]),
+            listed("Gesendete Elemente", &["\\Sent"]),
+            listed("Gelöschte Elemente", &["\\Trash"]),
+            listed("Junk-E-Mail", &["\\Junk"]),
+            listed("Projekte", &[]),
+        ],
+    );
+    assert_eq!(
+        targets(&catalogue),
+        vec![
+            ("inbox".to_string(), "Posteingang".to_string(), None),
+            ("sent".to_string(), "Gesendete Elemente".to_string(), None),
+            ("Junk Email".to_string(), "Junk Email".to_string(), None),
+            (
+                "Gelöschte Elemente".to_string(),
+                "Gelöschte Elemente".to_string(),
+                Some(STATUS_ONLY_WINDOW)
+            ),
+            ("Projekte".to_string(), "Projekte".to_string(), None),
+        ],
+        "one target per folder, the pins first"
+    );
+    assert_eq!(catalogue.folders.len(), 5, "no folder added for a pin");
+    assert_eq!(
+        catalogue.role(FolderRole::Trash).unwrap().server,
+        "Gelöschte Elemente"
+    );
+    assert_eq!(catalogue.find("Junk-E-Mail").unwrap().key, "Junk Email");
+}
+
+/// A Graph display name is plain text: `Q&A-2024` is not modified UTF-7.
+#[test]
+fn a_graph_display_name_is_never_utf7_decoded() {
+    let account = AccountConfig {
+        auth_method: AuthMethod::Graph,
+        ..Default::default()
+    };
+    let catalogue = Catalogue::resolve(&account, &[listed("Gel&APY-scht", &[])]);
+    assert_eq!(catalogue.folders[0].label, "Gel&APY-scht");
+}
+
 /// Acceptance: a folder that exists on the server is reachable by
 /// `mp sync --mailbox` without a config edit, whatever its policy; one the
 /// server does not list, or cannot select, is refused with the names it does

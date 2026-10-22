@@ -974,7 +974,7 @@ fn iso_to_rfc2822(iso: &str) -> String {
 /// (PERSO-173). A localized display name ("Gesendete
 /// Elemente") is not listed: [`GraphClient::folder_path`] resolves it through
 /// the folder list.
-fn well_known_folder(folder: &str) -> Option<&'static str> {
+pub(crate) fn well_known_folder(folder: &str) -> Option<&'static str> {
     let lower = folder.trim().to_lowercase();
     Some(match lower.as_str() {
         "inbox" => "inbox",

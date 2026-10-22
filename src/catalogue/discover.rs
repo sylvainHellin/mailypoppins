@@ -31,6 +31,17 @@ const GRAPH_WELL_KNOWN: [(&str, &str); 6] = [
     ("junkemail", "\\Junk"),
 ];
 
+/// The attribute of the role folder a config name designates on Graph, for a
+/// name Graph resolves to a well-known folder (`Sent Items`, `inbox`), `None`
+/// for any other name (#0141).
+pub(crate) fn graph_role_attribute(name: &str) -> Option<&'static str> {
+    let well_known = crate::graph::well_known_folder(name)?;
+    GRAPH_WELL_KNOWN
+        .iter()
+        .find(|(known, _)| *known == well_known)
+        .map(|(_, attribute)| *attribute)
+}
+
 /// Every folder an IMAP server lists.
 pub async fn imap_listing(imap: &ImapConfig) -> Result<Vec<ListedFolder>> {
     Ok(crate::imap_client::list_mailboxes_detailed(imap)

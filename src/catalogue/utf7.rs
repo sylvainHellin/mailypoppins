@@ -3,7 +3,9 @@
 //! A server spells `Gelöscht` as `Gel&APY-scht` on the wire, and that spelling
 //! is what `SELECT` takes and what the store keys the folder by; only the label
 //! a person reads is decoded. A malformed run is shown as the server sent it,
-//! since a label is not the place to refuse a folder.
+//! since a label is not the place to refuse a folder. Only IMAP names are
+//! decoded: a Graph display name is plain text, where `Q&A-2024` means what it
+//! says.
 
 /// The display form of a modified UTF-7 mailbox name.
 pub fn decode(name: &str) -> String {
@@ -32,6 +34,10 @@ pub fn decode(name: &str) -> String {
 }
 
 /// One `&...-` run: modified base64 (`,` for `/`, no padding) of UTF-16BE.
+///
+/// `None` for a run that is not one: a character outside the alphabet, a run
+/// too short to yield a byte (`Q&A-2024`), an odd byte count, or set bits left
+/// over after the last whole byte, which a real encoder pads with zeros.
 fn decode_run(run: &str) -> Option<String> {
     let mut bits: u32 = 0;
     let mut nbits = 0;
@@ -53,7 +59,7 @@ fn decode_run(run: &str) -> Option<String> {
             bits &= (1 << nbits) - 1;
         }
     }
-    if bytes.len() % 2 != 0 {
+    if bytes.is_empty() || bytes.len() % 2 != 0 || bits != 0 {
         return None;
     }
     let units: Vec<u16> = bytes
@@ -80,5 +86,14 @@ mod tests {
     fn a_malformed_run_is_shown_as_sent() {
         assert_eq!(decode("bad&!!-name"), "bad&!!-name");
         assert_eq!(decode("open&APY"), "open&APY");
+    }
+
+    /// #0141 review: a run that yields no byte, or leaves set bits over, is
+    /// not modified UTF-7, so the name reads as the server sent it.
+    #[test]
+    fn a_run_without_a_whole_character_is_shown_as_sent() {
+        assert_eq!(decode("Q&A-2024"), "Q&A-2024");
+        assert_eq!(decode("R&D-Team"), "R&D-Team");
+        assert_eq!(decode("x&APZ-y"), "x&APZ-y", "leftover bits are not zero");
     }
 }
