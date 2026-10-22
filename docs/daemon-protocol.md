@@ -105,7 +105,7 @@ The families, all of them reserved here and served over the phases of the migrat
 - `calendar.*` for agenda queries, invitations, RSVP, updates, and cancellations. This build serves `calendar.events`, `calendar.rebuild` and `calendar.rsvp`.
 - `signature.*` for list, read, create, update, rename, delete, and per-account default selection. This build serves `signature.list` `{account}` -> `{account, names, default}` (`mp_protocol::signature::SignatureListing`), a query any configured account answers, store or not: the sorted names under `<config>/signatures/` and the account's default, `null` when it has none or its file is gone.
 - `hook.*` for the mail hooks of `[[accounts.hooks]]` (#0135). This build serves `hook.list`, `hook.replay` and `hook.test`.
-- `config.*` for safe reads, validation, updates, reload, account setup, authentication, and secret writes. This build serves nine methods: `config.add_account`, `config.cutover`, `config.get`, `config.init`, `config.oauth2_login`, `config.reload`, `config.reset_secrets`, `config.set_password` and `config.validate`.
+- `config.*` for safe reads, validation, updates, reload, account setup, authentication, and secret writes. This build serves ten methods: `config.add_account`, `config.cutover`, `config.get`, `config.init`, `config.oauth2_login`, `config.probe`, `config.reload`, `config.reset_secrets`, `config.set_password` and `config.validate`.
 - `operation.*` for long-running operation status and cancellation.
 - `diagnostic.*` for logs, health, and support information. This build serves five methods: `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `diagnostic.store_gc` and `diagnostic.support_bundle`. The sweep is here rather than under a `store.*` family because there is no such family, which is the name `docs/parity-matrix.md` SYN-08 already carried.
 - `daemon.*` for status and graceful lifecycle control.
@@ -117,7 +117,7 @@ The families, all of them reserved here and served over the phases of the migrat
 Every method registered on the dispatcher declares a kind, and the kind fixes what its answer carries beyond `result`: a `revision`, which is the daemon state revision the call moved to, and `affected`, the resources whose cached copies the call invalidated (`account:work`, `mailbox:work/inbox`, `message:work/inbox/41`).
 Both are daemon-side facts and do not appear in the JSON-RPC `result`; they are what the daemon fans out as `state.event` notifications, so a client that applied an event never has to guess which of its caches went stale.
 
-- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `account.credentials`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `signature.list`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
+- **Query** reads and changes nothing, so its answer carries no revision and no affected resource. `account.list`, `account.credentials`, `mailbox.list`, `mailbox.list_server`, `message.get`, `message.html`, `message.list`, `message.ics`, `message.invite`, `message.list_server`, `message.search`, `message.thread`, `message.release_handle`, `calendar.events`, `operation.status`, `state.bootstrap`, `draft.list`, `draft.path`, `draft.preview`, `draft.validate`, `send.outbox_list`, `send.hold_status`, `contact.search`, `contact.stats`, `config.get`, `config.probe`, `config.validate`, `diagnostic.health`, `diagnostic.log_path`, `diagnostic.logs`, `hook.list`, `hook.test`, `signature.list`, `draft.attachments` and `draft.html` are the queries this build serves. The two `*.list_server` queries open a session on the account's mail server rather than reading the store, and are queries all the same: they write nothing, here or there.
 - **Command** changes state at once, so its answer carries the revision the change moved the daemon to and at least one affected resource. A command that changed nothing observable is a query, and a command with an empty `affected` would leave every client stale with no event to fix it. `operation.cancel`, `config.reload`, `config.set_password`, `config.add_account`, `config.init`, `config.reset_secrets`, the five `message.*` mutations (`message.archive`, `message.delete`, `message.move`, `message.set_flag`, `message.set_read`), `send.outbox_discard`, `send.cancel_hold` and the nine `draft.*` writers are the commands this build serves; a reload that reconciled nothing is the one case with an empty `affected`, and it still announces itself with a `config.changed` event.
 - **Operation** runs long enough to be worth cancelling and observes a cancellation token. `sync.quick`, `sync.full`, `sync.watch`, `message.fetch`, `message.list_conversations`, `message.list_stream`, `message.search_server`, `send.approved`, `send.draft`, `send.invite`, `send.outbox_retry`, `contact.rebuild`, `calendar.rebuild`, `calendar.rsvp`, `diagnostic.store_gc`, `diagnostic.support_bundle`, `config.cutover`, `config.oauth2_login` and `hook.replay` are the operations this build serves, and the `test.operation` hook registers one more. Cancelling is the method's own answer, `operation_cancelled` (`-32008`) with `{operation_id}`, never a cancellation imposed on it from outside: a method that has already committed a write reports the write rather than being reported as cancelled behind its own back.
 - **ClientIntegration** is work only the client's process can do, such as opening a browser or revealing a file. The daemon answers with the instruction and the client carries it out.
@@ -643,15 +643,16 @@ The address refusals are `message.get`'s, and the account refusals are `-32005` 
 ### The `config.*` family
 
 The daemon owns the configuration: it is the only component that parses a complete `config.toml`, and `config.*` is how a client reads it, checks an edit, swaps it, adds an account, stores a password, logs in, resets the secrets and migrates a file-era account.
-Nine methods, all of them `durable`, because a configuration swap undone by a disconnect would leave the daemon serving a configuration nobody chose.
+Ten methods, all of them `durable`, because a configuration swap undone by a disconnect would leave the daemon serving a configuration nobody chose.
 
 | method | kind | params | result |
 |---|---|---|---|
 | `config.add_account` | command | `{account: {…}}` | `{added, updated, removed}` |
 | `config.cutover` | operation | `{account, dry_run}` | `{account, dry_run, drafts: {imported: [path], already_indexed, skipped: [line], collisions: [line]}, remnants: [{path, md_files, bytes}]}` |
 | `config.get` | query | `{}` | `{revision, path, state, config}` |
-| `config.init` | command | `{account: {…}, secrets_backend?, theme?, notifications?}` | `{added, updated, removed, path}` |
-| `config.oauth2_login` | operation | `{account}` | `{stored, account, kind, key}` |
+| `config.init` | command | `{account: {…}, replace?, secrets_backend?, theme?, notifications?}` | `{added, updated, removed, path}` |
+| `config.oauth2_login` | operation | `{account, candidate?: {…}}` | `{stored, account, kind, key}` |
+| `config.probe` | query | `{account: {…}, check, password?}` | `{ok: true, mailboxes?}` or `{ok: false, error}` |
 | `config.reload` | command | `{}` | `{added, updated, removed}` |
 | `config.reset_secrets` | command | `{}` | `{removed: [path]}` |
 | `config.set_password` | command | `{account, kind, value}` | `{stored, account, kind, key}` |
@@ -695,10 +696,20 @@ The previous snapshot stays live, its runtimes keep serving and keep their engin
 
 **`config.init` and `config.add_account` carry no secret and validate before they write.**
 The candidate document is built in memory, validated, and only then written, so a refusal leaves `config.toml` byte-identical.
-`config.init` refuses an existing file with `-32602` naming it, because `mp config init` asks "Overwrite? [y/N]" and a daemon has nobody to ask; `config.add_account` refuses a missing file with `-32602` naming `config.init`, and a duplicate account name with `-32602` naming the name.
+`config.init` refuses an existing file with `-32602` naming it unless `replace` is `true`, because `mp config init` asks "Overwrite? [y/N]" in the client and a daemon has nobody to ask; `config.add_account` refuses a missing file with `-32602` naming `config.init`, and a duplicate account name with `-32602` naming the name.
 The daemon-era equivalent of the wizard's password prompt is a second call to `config.set_password`: one path into the secrets backend is one path to audit.
 
-The two wizards are the exception, and the one place a client still writes a secret itself: `src/config_cmd/init.rs` calls `secrets::set_secret` directly (lines 227, 286, 633 and 673) for the passwords it prompts for, because the prompting loop has no wire shape and its intermediate answers steer the next prompt. It is one of the seventeen residue rows `tests/architecture_boundaries.rs` records, and it goes when the wizard protocol lands.
+**The setup wizards run on these methods.** `mp config init` and `mp config add-account` prompt in the client and do everything else here: `config.probe` tests a login or lists the server's mailboxes for the account being described, `config.oauth2_login` with a `candidate` signs it in, `config.init` or `config.add_account` writes it, and `config.set_password` stores each password the user typed, once the account exists.
+Nothing is written until the last prompt is answered, so an abandoned wizard leaves `config.toml` and the secrets backend as they were.
+
+**`config.probe` dials an account the configuration does not hold yet.** `account` is the block `config.init` and `config.add_account` take, read through the same loader, so a probe and the write that follows agree about every default; `check` is `smtp` (log in and hang up, sending nothing), `imap` (log in and out), `graph` (acquire the Graph client) or `mailboxes` (the server's mailbox names, or a Graph account's folder names, in the server's order).
+A password account sends `password` for `smtp`, `imap` and `mailboxes`; an `oauth2` or `graph` account is probed with the token cached under its name.
+A server that refuses is an answer, `{ok: false, error}`, rather than a refusal of the call, because the wizard prints it and asks again; a check that cannot run (an unknown `check`, a password account with no password, SMTP on a Graph account) is `-32602`.
+The password is used for the one session and dropped: never stored, logged or echoed, and the parameters' `Debug` prints `<redacted>` for it.
+It is a query, as `mailbox.list_server` is: it writes nothing here or on the server.
+
+**`config.oauth2_login` takes a `candidate`.** The block is read through the loader and used instead of the configured account of the same name, with the same three refusals, so the wizard signs an account in before writing it; the token is cached under `account`, where the account it then writes finds it.
+A candidate named other than `account` is `-32602`.
 
 **`config.set_password` publishes no event.**
 A stored password changes nothing a client can observe, because `config.get` said `<redacted>` before and says `<redacted>` after; its `affected` names `account:<name>` so a client holding a per-account view re-reads what depends on credentials.

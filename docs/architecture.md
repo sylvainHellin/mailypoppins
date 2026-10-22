@@ -176,9 +176,9 @@ Both allow-lists are records, not ceilings: a removed import or a removed call f
 Re-record a deliberate change with `UPDATE_TUI_ENGINE_IMPORTS=1 cargo test --test architecture_boundaries`, which rewrites both fixtures.
 Neither is feature-gated and both pass on the pre-daemon tree, and `engine_imports` takes the client source root as an argument, which is what let P5-U10f re-point it at `clients/tui/src` without a rewrite.
 
-The third (P4-U15) walks the client-side sources - `src/main.rs`, `src/cutover.rs`, `src/config_cmd/` - for the 23 symbols that open a store, a secret backend, a network backend or an engine lock, and compares the result against `CLI_ENGINE_RESIDUE`, an inline table whose third column is why each survivor is still there.
-Nine rows in two groups: the startup preamble (which runs before any socket and on the no-daemon list too) and the two `config.toml` wizards (one interactive transaction).
-The server leg of `mp search` (`docs/parity-matrix.md` LST-06) left with PERSO-175, when `mp search` became a client of `message.search_server`, and `mp config show`'s secret and token probes when it became a client of `account.credentials`.
+The third (P4-U15) walks the client-side sources - `src/main.rs`, the `src/*_cmd.rs` handlers, `src/cutover.rs`, `src/config_cmd/` - for the 23 symbols that open a store, a secret backend, a network backend or an engine lock, and compares the result against `CLI_ENGINE_RESIDUE`, an inline table whose third column is why each survivor is still there.
+Three rows in one group, the startup preamble, which runs before any socket and on the no-daemon list too.
+The server leg of `mp search` (`docs/parity-matrix.md` LST-06) left with PERSO-175, when `mp search` became a client of `message.search_server`; `mp config show`'s secret and token probes when it became a client of `account.credentials`, and the two setup wizards when they became clients of `config.probe`, `config.oauth2_login`, `config.init`, `config.add_account` and `config.set_password` (the daemon leftovers, 2026-10-22).
 The TUI is outside this list because it is outside this crate: `clients/tui` cannot reach any of the 23 symbols, which is what the first two halves record.
 There is no `UPDATE_` switch for it: an entry is added by hand, with its reason, or it is not added.
 

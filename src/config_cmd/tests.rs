@@ -1,440 +1,160 @@
-use super::init::{build_add_account_toml, build_init_toml};
+//! The candidates the setup wizards hand the daemon, read back through the
+//! loader the daemon reads them with
+//! (`daemon::methods::config::candidate_account`), so what a wizard describes
+//! is what `config.toml` ends up holding.
 
-#[test]
-fn test_build_init_toml_basic() {
-    let toml = build_init_toml(
-        "main",
-        "user@example.com",
-        "smtp.example.com",
-        465,
-        "user@example.com",
-        false,
-        "",
-        993,
-        "",
-        "INBOX",
-        "Archive",
-        "Sent",
-        &[],
-        None,
-    );
+use serde_json::Value;
 
-    assert!(toml.contains("[email]"));
-    assert!(toml.contains("font_family = \"Helvetica, Arial, sans-serif\""));
-    assert!(toml.contains("[[accounts]]"));
-    assert!(toml.contains("name = \"main\""));
-    assert!(toml.contains("default_from = \"user@example.com\""));
-    assert!(toml.contains("[accounts.smtp]"));
-    assert!(toml.contains("host = \"smtp.example.com\""));
-    assert!(toml.contains("port = 465"));
-    assert!(toml.contains("[accounts.imap]"));
-    assert!(toml.contains("port = 993"));
-    // Removed: [accounts.directories], local = "..."
-    assert!(!toml.contains("[accounts.directories]"));
-    assert!(!toml.contains("local ="));
-    assert!(toml.contains("[accounts.mailboxes.inbox]"));
-    assert!(toml.contains("server = \"INBOX\""));
-    assert!(toml.contains("[accounts.mailboxes.archive]"));
-    assert!(toml.contains("[accounts.mailboxes.sent]"));
-    // No accept_invalid_certs when false
-    assert!(!toml.contains("accept_invalid_certs"));
+use super::init::{graph_candidate, imap_candidate, ImapAnswers, Mailboxes, Probe};
+use crate::config::{AccountConfig, AuthMethod};
+use crate::daemon::methods::config::candidate_account;
+
+fn loaded(candidate: &Value) -> AccountConfig {
+    candidate_account(candidate).expect("the candidate loads")
 }
 
-#[test]
-fn test_build_init_toml_proton_bridge() {
-    let toml = build_init_toml(
-        "proton",
-        "user@proton.me",
-        "127.0.0.1",
-        1025,
-        "user@proton.me",
-        true,
-        "127.0.0.1",
-        1143,
-        "user@proton.me",
-        "INBOX",
-        "All Mail",
-        "Sent",
-        &[],
-        None,
-    );
-
-    assert!(toml.contains("accept_invalid_certs = true"));
-    assert!(toml.contains("host = \"127.0.0.1\""));
-    assert!(toml.contains("port = 1025"));
-    assert!(toml.contains("port = 1143"));
-    let imap_section = toml.find("[accounts.imap]").unwrap();
-    let after_imap = &toml[imap_section..];
-    assert!(after_imap.contains("host = \"127.0.0.1\""));
+fn mapped() -> Mailboxes {
+    Mailboxes {
+        inbox: "INBOX".into(),
+        archive: "Archive".into(),
+        sent: "Sent".into(),
+        extra: vec!["Projects".into()],
+    }
 }
 
-#[test]
-fn test_build_init_toml_imap_host_omitted_when_empty() {
-    let toml = build_init_toml(
-        "main",
-        "user@example.com",
-        "smtp.example.com",
-        465,
-        "user@example.com",
-        false,
-        "",
-        993,
-        "",
-        "INBOX",
-        "Archive",
-        "Sent",
-        &[],
-        None,
-    );
-
-    let imap_pos = toml.find("[accounts.imap]").unwrap();
-    let imap_end = toml[imap_pos..]
-        .find("\n[")
-        .map(|p| imap_pos + p)
-        .unwrap_or(toml.len());
-    let imap_section = &toml[imap_pos..imap_end];
-    assert!(!imap_section.contains("host ="));
+fn answers() -> ImapAnswers {
+    ImapAnswers {
+        name: "main".into(),
+        default_from: "me@example.com".into(),
+        smtp_host: "smtp.example.com".into(),
+        smtp_port: 465,
+        smtp_username: "me@example.com".into(),
+        imap_host: String::new(),
+        imap_port: 993,
+        imap_username: String::new(),
+        accept_invalid_certs: false,
+        oauth2: None,
+        mailboxes: mapped(),
+    }
 }
 
+/// A password account: SMTP as typed, an empty IMAP host and username left
+/// out so the loader falls back to the SMTP ones, and the four mappings.
 #[test]
-fn test_build_init_toml_with_extra_mailboxes() {
-    let extras = vec!["Junk".to_string(), "Trash".to_string()];
-    let toml = build_init_toml(
-        "main",
-        "user@example.com",
-        "smtp.example.com",
-        465,
-        "user@example.com",
-        false,
-        "",
-        993,
-        "",
-        "INBOX",
-        "Archive",
-        "Sent",
-        &extras,
-        None,
-    );
-
-    assert!(toml.contains("[[accounts.mailboxes.extra]]"));
-    assert!(toml.contains("server = \"Junk\""));
-    assert!(toml.contains("server = \"Trash\""));
-    // Local paths are now derived from the data dir, not stored in config.
-    assert!(!toml.contains("local ="));
-}
-
-#[test]
-fn test_build_init_toml_parseable() {
-    let toml_str = build_init_toml(
-        "test",
-        "test@example.com",
-        "smtp.example.com",
-        465,
-        "test@example.com",
-        false,
-        "",
-        993,
-        "",
-        "INBOX",
-        "Archive",
-        "Sent",
-        &[],
-        None,
-    );
-
-    // Verify the generated TOML is actually parseable as a valid GlobalConfig
-    let config: crate::config::GlobalConfig =
-        toml::from_str(&toml_str).expect("Generated TOML should be parseable as GlobalConfig");
-    // Every key the generator writes is one the load reads.
+fn a_password_candidate_loads_with_its_fallbacks_and_mailboxes() {
+    let account = loaded(&imap_candidate(&answers()));
+    assert_eq!(account.name, "main");
+    assert_eq!(account.auth_method, AuthMethod::Password);
+    assert_eq!(account.smtp.host, "smtp.example.com");
+    assert_eq!(account.smtp.port, 465);
     assert_eq!(
-        crate::config::config_warnings(&toml_str),
-        Vec::<String>::new()
+        account.imap.host, "",
+        "an empty host is left to the fallback"
     );
-    assert_eq!(config.accounts.len(), 1);
-    assert_eq!(config.accounts[0].name, "test");
-    assert_eq!(config.accounts[0].default_from, "test@example.com");
-    assert_eq!(config.accounts[0].smtp.host, "smtp.example.com");
+    assert_eq!(account.imap.username, "");
+    assert_eq!(account.imap.port, 993);
+    assert!(account.oauth2.is_none());
+    assert_eq!(account.mailboxes.inbox.as_ref().unwrap().server, "INBOX");
+    assert_eq!(
+        account.mailboxes.archive.as_ref().unwrap().server,
+        "Archive"
+    );
+    assert_eq!(account.mailboxes.sent.as_ref().unwrap().server, "Sent");
+    let extra: Vec<&str> = account
+        .mailboxes
+        .extra
+        .as_ref()
+        .expect("extra")
+        .iter()
+        .map(|m| m.server.as_str())
+        .collect();
+    assert_eq!(extra, ["Projects"]);
 }
 
+/// Proton Bridge: both servers accept the bridge's self-signed certificate.
 #[test]
-fn test_build_add_account_toml_basic() {
-    let block = build_add_account_toml(
-        "work",
-        "work@corp.com",
-        "smtp.corp.com",
-        587,
-        "work@corp.com",
-        false,
-        "imap.corp.com",
-        993,
-        "work@corp.com",
-        "INBOX",
-        "Archive",
-        "Sent",
-        &[],
-        None,
-    );
-
-    assert!(block.starts_with("\n[[accounts]]"));
-    assert!(block.contains("name = \"work\""));
-    assert!(block.contains("default_from = \"work@corp.com\""));
-    assert!(block.contains("host = \"smtp.corp.com\""));
-    assert!(block.contains("host = \"imap.corp.com\""));
-    assert!(!block.contains("[accounts.directories]"));
-    assert!(!block.contains("local ="));
+fn a_proton_candidate_accepts_invalid_certs_on_both_servers() {
+    let account = loaded(&imap_candidate(&ImapAnswers {
+        smtp_host: "127.0.0.1".into(),
+        smtp_port: 1025,
+        imap_host: "127.0.0.1".into(),
+        imap_port: 1143,
+        accept_invalid_certs: true,
+        ..answers()
+    }));
+    assert!(account.smtp.accept_invalid_certs);
+    assert!(account.imap.accept_invalid_certs);
+    assert_eq!(account.imap.host, "127.0.0.1");
+    assert_eq!(account.imap.port, 1143);
 }
 
+/// Exchange over OAuth2: `auth_method = "oauth2"` and the app registration.
 #[test]
-fn test_build_add_account_toml_appended_is_valid() {
-    let base = build_init_toml(
-        "main",
-        "main@example.com",
-        "smtp.example.com",
-        465,
-        "main@example.com",
-        false,
-        "",
-        993,
-        "",
-        "INBOX",
-        "Archive",
-        "Sent",
-        &[],
-        None,
-    );
-
-    let addition = build_add_account_toml(
-        "work",
-        "work@corp.com",
-        "smtp.corp.com",
-        587,
-        "work@corp.com",
-        false,
-        "imap.corp.com",
-        993,
-        "work@corp.com",
-        "INBOX",
-        "Archive",
-        "Sent",
-        &[],
-        None,
-    );
-
-    let combined = format!("{}{}", base, addition);
-    let config: crate::config::GlobalConfig =
-        toml::from_str(&combined).expect("Combined TOML should be parseable");
-    // Every key the generator writes is one the load reads.
+fn an_exchange_candidate_carries_its_app_registration() {
+    let account = loaded(&imap_candidate(&ImapAnswers {
+        oauth2: Some(("client".into(), "tenant".into())),
+        ..answers()
+    }));
+    assert_eq!(account.auth_method, AuthMethod::OAuth2);
+    let oauth2 = account.oauth2.expect("oauth2");
     assert_eq!(
-        crate::config::config_warnings(&combined),
-        Vec::<String>::new()
+        (oauth2.client_id.as_str(), oauth2.tenant_id.as_str()),
+        ("client", "tenant")
     );
-    assert_eq!(config.accounts.len(), 2);
-    assert_eq!(config.accounts[0].name, "main");
-    assert_eq!(config.accounts[1].name, "work");
 }
 
+/// A probe made before the mailboxes are chosen carries no mapping, and still
+/// loads.
 #[test]
-fn test_build_init_toml_oauth2_exchange() {
-    let toml_str = build_init_toml(
-        "work",
-        "user@example.com",
-        "smtp.office365.com",
-        587,
-        "user@example.com",
-        false,
-        "outlook.office365.com",
-        993,
-        "",
-        "INBOX",
-        "Archive",
-        "Sent Items",
-        &[],
-        Some(("test-client-id", "test-tenant-id")),
-    );
-
-    assert!(toml_str.contains("auth_method = \"oauth2\""));
-    assert!(toml_str.contains("[accounts.oauth2]"));
-    assert!(toml_str.contains("client_id = \"test-client-id\""));
-    assert!(toml_str.contains("tenant_id = \"test-tenant-id\""));
-    assert!(toml_str.contains("host = \"smtp.office365.com\""));
-    assert!(toml_str.contains("host = \"outlook.office365.com\""));
-    assert!(toml_str.contains("port = 587"));
-
-    let config: crate::config::GlobalConfig =
-        toml::from_str(&toml_str).expect("OAuth2 TOML should be parseable");
-    // Every key the generator writes is one the load reads.
-    assert_eq!(
-        crate::config::config_warnings(&toml_str),
-        Vec::<String>::new()
-    );
-    assert_eq!(config.accounts[0].name, "work");
-    assert_eq!(
-        config.accounts[0].auth_method,
-        crate::config::AuthMethod::OAuth2
-    );
-    let oauth2 = config.accounts[0].oauth2.as_ref().unwrap();
-    assert_eq!(oauth2.client_id, "test-client-id");
-    assert_eq!(oauth2.tenant_id, "test-tenant-id");
+fn a_candidate_without_mailboxes_loads_for_a_probe() {
+    let candidate = imap_candidate(&ImapAnswers {
+        mailboxes: Mailboxes::default(),
+        ..answers()
+    });
+    assert!(candidate.get("mailboxes").is_none(), "{candidate}");
+    assert!(loaded(&candidate).mailboxes.inbox.is_none());
 }
 
-#[test]
-fn test_build_init_toml_password_no_oauth2_section() {
-    let toml_str = build_init_toml(
-        "test",
-        "test@example.com",
-        "smtp.example.com",
-        465,
-        "test@example.com",
-        false,
-        "",
-        993,
-        "",
-        "INBOX",
-        "Archive",
-        "Sent",
-        &[],
-        None,
-    );
-
-    assert!(!toml_str.contains("auth_method"));
-    assert!(!toml_str.contains("[accounts.oauth2]"));
-
-    let config: crate::config::GlobalConfig =
-        toml::from_str(&toml_str).expect("Password TOML should be parseable");
-    // Every key the generator writes is one the load reads.
-    assert_eq!(
-        crate::config::config_warnings(&toml_str),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        config.accounts[0].auth_method,
-        crate::config::AuthMethod::Password
-    );
-    assert!(config.accounts[0].oauth2.is_none());
-}
-
-/// The wizard's completion block promises a directory that exists.
-///
-/// The file-era block printed an inbox, a sent and an archive directory that
-/// nothing created; this pins the replacement, whose first line is the account
-/// directory the store and its blobs are written into.
-#[test]
-fn account_data_paths_creates_the_directory_it_prints() {
-    let _tmp = crate::config::test_env::TestDataDir::new();
-
-    let acct_dir = crate::config::account_dir("wizard");
-    assert!(!acct_dir.exists());
-    super::init::print_account_data_paths("wizard");
-
-    assert!(acct_dir.is_dir(), "{} was not created", acct_dir.display());
-    assert_eq!(
-        crate::config::store_path("wizard").parent(),
-        Some(acct_dir.as_path())
-    );
-    assert_eq!(
-        crate::config::blobs_dir("wizard").parent(),
-        Some(acct_dir.as_path())
-    );
-    assert_eq!(
-        crate::config::drafts_dir("wizard").parent(),
-        Some(acct_dir.as_path())
-    );
-}
-
-/// A display name with quotes and a comma, and a server mailbox name with a
-/// backslash, are wizard answers like any other: the generated TOML parses and
-/// hands both back unchanged, on the init path and on the add-account path.
+/// A display name with quotes and a comma, and server mailbox names with a
+/// backslash or quotes, are wizard answers like any other: the block the
+/// daemon writes from them loads and hands them back unchanged.
 #[test]
 fn wizard_answers_needing_toml_escapes_round_trip() {
     let from = "\"Doe, Jane\" <j@x>";
-    let odd_box = "Back\\slash";
-    let extra = vec![odd_box.to_string(), "Say \"hi\"".to_string()];
-    let base = build_init_toml(
-        "main",
-        from,
-        "smtp.example.com",
-        465,
-        from,
-        false,
-        "",
-        993,
-        "",
-        odd_box,
-        "Archive",
-        "Sent",
-        &extra,
-        None,
-    );
-    let addition = build_add_account_toml(
-        "work",
-        from,
-        "smtp.corp.com",
-        587,
-        "work@corp.com",
-        false,
-        "imap.corp.com",
-        993,
-        "work@corp.com",
-        "INBOX",
-        odd_box,
-        "Sent",
-        &extra,
-        Some(("client\"id", "tenant\\id")),
-    );
-    let combined = format!("{base}{addition}");
-    super::init::ensure_config_parses(&combined).expect("the escaped config parses");
-    let config: crate::config::GlobalConfig =
-        toml::from_str(&combined).expect("the escaped config parses");
-    // Every key the generator writes is one the load reads.
-    assert_eq!(
-        crate::config::config_warnings(&combined),
-        Vec::<String>::new()
-    );
-
-    assert_eq!(config.accounts.len(), 2);
-    for account in &config.accounts {
-        assert_eq!(account.default_from, from);
-        let extras: Vec<&str> = account
-            .mailboxes
-            .extra
-            .as_ref()
-            .expect("extra mailboxes")
-            .iter()
-            .map(|m| m.server.as_str())
-            .collect();
-        assert_eq!(extras, vec![odd_box, "Say \"hi\""]);
-    }
-    assert_eq!(config.accounts[0].smtp.username, from);
-    assert_eq!(
-        config.accounts[0].mailboxes.inbox.as_ref().unwrap().server,
-        odd_box
-    );
-    assert_eq!(
-        config.accounts[1]
-            .mailboxes
-            .archive
-            .as_ref()
-            .unwrap()
-            .server,
-        odd_box
-    );
-    let oauth2 = config.accounts[1].oauth2.as_ref().expect("oauth2 section");
+    let odd = "Back\\slash";
+    let mailboxes = Mailboxes {
+        inbox: odd.into(),
+        archive: "Archive".into(),
+        sent: "Sent".into(),
+        extra: vec![odd.into(), "Say \"hi\"".into()],
+    };
+    let account = loaded(&imap_candidate(&ImapAnswers {
+        default_from: from.into(),
+        smtp_username: from.into(),
+        oauth2: Some(("client\"id".into(), "tenant\\id".into())),
+        mailboxes: mailboxes.clone(),
+        ..answers()
+    }));
+    assert_eq!(account.default_from, from);
+    assert_eq!(account.smtp.username, from);
+    assert_eq!(account.mailboxes.inbox.as_ref().unwrap().server, odd);
+    let oauth2 = account.oauth2.expect("oauth2");
     assert_eq!(
         (oauth2.client_id.as_str(), oauth2.tenant_id.as_str()),
         ("client\"id", "tenant\\id")
     );
 
-    let graph = super::init::build_graph_account_toml(
-        "g", from, "client", "tenant", odd_box, "Archive", "Sent", &extra,
-    );
-    let config: crate::config::GlobalConfig = toml::from_str(&graph).expect("graph block parses");
-    // Every key the generator writes is one the load reads.
-    assert_eq!(crate::config::config_warnings(&graph), Vec::<String>::new());
-    assert_eq!(config.accounts[0].default_from, from);
-    assert_eq!(
-        config.accounts[0].mailboxes.inbox.as_ref().unwrap().server,
-        odd_box
-    );
+    let graph = loaded(&graph_candidate("g", from, "client", "tenant", &mailboxes));
+    assert_eq!(graph.default_from, from);
+    let extra: Vec<&str> = graph
+        .mailboxes
+        .extra
+        .as_ref()
+        .expect("extra")
+        .iter()
+        .map(|m| m.server.as_str())
+        .collect();
+    assert_eq!(extra, [odd, "Say \"hi\""]);
 }
 
 /// PERSO-164: Enter at the Graph wizard's client ID and tenant prompts writes
@@ -459,31 +179,29 @@ fn graph_wizard_defaults_to_the_mailypoppins_app_and_common() {
     ] {
         let client_id = crate::oauth2::client_id_or_default(client_in);
         let tenant_id = crate::oauth2::tenant_or_default(tenant_in);
-        let block = super::init::build_graph_account_toml(
+        let account = loaded(&graph_candidate(
             "work",
             "me@example.com",
             &client_id,
             &tenant_id,
-            "Inbox",
-            "Archive",
-            "Sent Items",
-            &[],
-        );
-        super::init::ensure_config_parses(&block).expect("the graph block parses");
-        let config: crate::config::GlobalConfig =
-            toml::from_str(&block).expect("graph block parses");
-        // Every key the generator writes is one the load reads.
-        assert_eq!(crate::config::config_warnings(&block), Vec::<String>::new());
-        let graph = crate::config::GraphConfig::load(&config.accounts[0]).expect("graph config");
+            &mapped(),
+        ));
+        assert_eq!(account.auth_method, AuthMethod::Graph);
+        let graph = crate::config::GraphConfig::load(&account).expect("graph config");
         assert_eq!(graph.client_id, client_out);
         assert_eq!(graph.tenant_id, tenant_out);
     }
 }
 
-/// The backstop before every write: text the loader would reject is refused
-/// with an error that says nothing was written.
+/// A `config.probe` answer reads into a [`Probe`], a failure with its reason
+/// and a listing with its names.
 #[test]
-fn a_config_that_does_not_parse_is_refused() {
-    let err = super::init::ensure_config_parses("[[accounts]]\nname = \"a\"b\"\n").unwrap_err();
-    assert!(format!("{err:#}").contains("not written"), "{err:#}");
+fn a_probe_answer_reads_its_verdict_reason_and_names() {
+    let failed = Probe::from_answer(&serde_json::json!({"ok": false, "error": "refused"}));
+    assert!(!failed.ok);
+    assert_eq!(failed.error.as_deref(), Some("refused"));
+    let listed =
+        Probe::from_answer(&serde_json::json!({"ok": true, "mailboxes": ["INBOX", "Sent"]}));
+    assert!(listed.ok);
+    assert_eq!(listed.mailboxes, ["INBOX", "Sent"]);
 }

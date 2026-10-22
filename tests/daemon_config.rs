@@ -219,10 +219,10 @@
 //!   first swap's lists from a client that was slow to read, and the lists are
 //!   the whole payload.
 //! - **A runtime is started against an account directory the daemon creates if
-//!   it is missing.** `mp config init` already promises this
-//!   (`src/config_cmd/init.rs::print_account_data_paths`, "The directory itself
-//!   is created here"), and an account added by a hand edit must come up the
-//!   same way as one added through `config.add_account`.
+//!   it is missing.** `mp config init` prints that directory as the account's
+//!   (`src/config_cmd/init.rs::print_account_data_paths`), and an account added
+//!   by a hand edit must come up the same way as one added through
+//!   `config.add_account`.
 //! - **`config.init` and `config.add_account` carry no secret.** The wizard
 //!   they mirror collects a password in the same pass, and the daemon-era
 //!   equivalent is two calls: the account, then `config.set_password`. One path
@@ -230,10 +230,11 @@
 //!   params object that a daemon may reasonably log as "the account that was
 //!   added" is a secret in a log line waiting to happen.
 //! - **`config.init` refuses an existing `config.toml` with `-32602` naming the
-//!   path.** `mp config init` asks "Overwrite? [y/N]" and a daemon has nobody
-//!   to ask; the daemon table has no "already exists" code, and inventing one
-//!   in a T unit would put a number on the wire that the protocol fixtures
-//!   (P2-U2) never pinned. The file is left byte-identical.
+//!   path, unless the caller sends `replace: true`.** `mp config init` asks
+//!   "Overwrite? [y/N]" in the client, the one process with somebody to ask,
+//!   and sends the answer; the daemon table has no "already exists" code, and
+//!   inventing one would put a number on the wire that the protocol fixtures
+//!   (P2-U2) never pinned. A refused file is left byte-identical.
 //! - **`config.add_account` without a `config.toml` is `-32602` naming
 //!   `config.init`**, for the mirror-image reason: appending to a file that
 //!   does not exist is `config.init`'s job, and guessing every global setting
@@ -324,14 +325,16 @@ const SECRET: &str = "s3cr3t-vodka-2f7a-never-logged";
 ///
 /// Six when this suite was written (P3b-U8); nine since the admin slice
 /// (P4-U14) added `config.cutover`, `config.oauth2_login` and
-/// `config.reset_secrets`, whose own contract is `tests/daemon_admin_slice.rs`.
-/// Only the list moved: every assertion below is about the six this suite owns.
-const CONFIG_METHODS: [&str; 9] = [
+/// `config.reset_secrets`, whose own contract is `tests/daemon_admin_slice.rs`;
+/// ten since `config.probe`, the setup wizards' connection test (the daemon
+/// leftovers, 2026-10-22), whose contract is below.
+const CONFIG_METHODS: [&str; 10] = [
     "config.add_account",
     "config.cutover",
     "config.get",
     "config.init",
     "config.oauth2_login",
+    "config.probe",
     "config.reload",
     "config.reset_secrets",
     "config.set_password",
@@ -2123,6 +2126,149 @@ async fn config_set_password_stores_through_the_existing_backend() {
     )
     .await;
     assert_eq!(imap["key"], json!(SecretKind::Imap.secret_key("alpha")));
+}
+
+/// `config.probe` dials a candidate account's servers through the daemon and
+/// answers a refused session as `{ok: false, error}`, writes nothing, and
+/// never lets the password into its answer or the daemon's log. The server is
+/// a localhost port nothing listens on, so no test reaches the network.
+#[tokio::test]
+async fn config_probe_answers_a_refused_session_and_never_echoes_the_password() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let before = sandbox.read_config();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a localhost port")
+        .local_addr()
+        .expect("its address")
+        .port();
+    let _daemon = sandbox.start_daemon().await;
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+
+    let mut candidate = account_params("probe");
+    candidate["smtp"]["host"] = json!("127.0.0.1");
+    candidate["smtp"]["port"] = json!(closed);
+    candidate["imap"]["host"] = json!("127.0.0.1");
+    candidate["imap"]["port"] = json!(closed);
+    for check in ["smtp", "imap", "mailboxes"] {
+        let answer = call_ok(
+            &mut conn,
+            "config.probe",
+            json!({"account": candidate, "check": check, "password": SECRET}),
+        )
+        .await;
+        assert_eq!(answer["ok"], json!(false), "{check}: {answer}");
+        let error = answer["error"].as_str().unwrap_or_default();
+        assert!(!error.is_empty(), "{check} says why: {answer}");
+        assert!(!answer.to_string().contains(SECRET), "{check}: {answer}");
+    }
+
+    let missing = call_err(
+        &mut conn,
+        "config.probe",
+        json!({"account": candidate, "check": "smtp"}),
+    )
+    .await;
+    assert_eq!(
+        missing.code, -32602,
+        "a password account needs its password: {missing:?}"
+    );
+    let unknown = call_err(
+        &mut conn,
+        "config.probe",
+        json!({"account": candidate, "check": "pop3", "password": SECRET}),
+    )
+    .await;
+    assert_eq!(unknown.code, -32602, "{unknown:?}");
+    assert!(!unknown.message.contains(SECRET), "{unknown:?}");
+
+    assert_eq!(
+        sandbox.read_config(),
+        before,
+        "a probe writes no configuration"
+    );
+    assert!(!sandbox.secrets_path().exists(), "and stores no password");
+    sandbox.stop_daemon();
+    assert!(
+        !sandbox.log_text().contains(SECRET),
+        "the daemon's log never holds the password"
+    );
+}
+
+/// `config.init` writes over an existing `config.toml` when the caller says
+/// `replace`, which is `mp config init`'s "Overwrite? [y/N]" answered yes;
+/// without it the file stays, as `config_init_refuses_to_overwrite_an_existing_config`
+/// pins.
+#[tokio::test]
+async fn config_init_replaces_an_existing_config_only_when_asked() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let _daemon = sandbox.start_daemon().await;
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+
+    let result = call_ok(
+        &mut conn,
+        "config.init",
+        json!({"account": account_params("delta"), "replace": true}),
+    )
+    .await;
+    assert_eq!(result["added"], json!(["delta"]), "{result}");
+    assert_eq!(result["removed"], json!(["alpha"]), "{result}");
+    let written = sandbox.read_config();
+    assert!(written.contains("name = \"delta\""), "{written}");
+    assert!(!written.contains("name = \"alpha\""), "{written}");
+
+    let stray = call_err(
+        &mut conn,
+        "config.init",
+        json!({"account": account_params("echo"), "overwrite": true}),
+    )
+    .await;
+    assert_eq!(
+        stray.code, -32602,
+        "an unknown parameter is refused: {stray:?}"
+    );
+}
+
+/// `config.oauth2_login` signs in a `candidate` the configuration does not
+/// hold yet, the setup wizard's account, with the refusals of a configured
+/// one: a password account and a candidate under another name are refused
+/// before any provider is asked.
+#[tokio::test]
+async fn config_oauth2_login_takes_a_candidate_with_the_configured_refusals() {
+    let sandbox = Sandbox::with_accounts(&["alpha"]);
+    let _daemon = sandbox.start_daemon().await;
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+
+    let password = call_err(
+        &mut conn,
+        "config.oauth2_login",
+        json!({"account": "newbie", "candidate": account_params("newbie")}),
+    )
+    .await;
+    assert_eq!(password.code, -32602, "{password:?}");
+    assert!(
+        password.message.contains("uses auth_method = \"password\""),
+        "the configured account's sentence: {password:?}"
+    );
+
+    let renamed = call_err(
+        &mut conn,
+        "config.oauth2_login",
+        json!({"account": "other", "candidate": account_params("newbie")}),
+    )
+    .await;
+    assert_eq!(renamed.code, -32602, "{renamed:?}");
+
+    let unknown = call_err(
+        &mut conn,
+        "config.oauth2_login",
+        json!({"account": "newbie"}),
+    )
+    .await;
+    assert_eq!(
+        unknown.code,
+        ErrorCode::AccountUnknown.code(),
+        "without a candidate the account must be configured: {unknown:?}"
+    );
 }
 
 /// `account.credentials` answers whether each password and token is there,

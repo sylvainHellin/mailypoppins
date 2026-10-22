@@ -346,14 +346,16 @@ const DIAGNOSTIC_METHODS: [&str; 5] = [
     "diagnostic.support_bundle",
 ];
 
-/// The config family after this slice: the six shipped methods plus the three
-/// this one adds, still in method-name order.
-const CONFIG_METHODS: [&str; 9] = [
+/// The config family: the six shipped methods, the three this slice added, and
+/// `config.probe`, the setup wizards' connection test (the daemon leftovers,
+/// 2026-10-22), still in method-name order.
+const CONFIG_METHODS: [&str; 10] = [
     "config.add_account",
     "config.cutover",
     "config.get",
     "config.init",
     "config.oauth2_login",
+    "config.probe",
     "config.reload",
     "config.reset_secrets",
     "config.set_password",
@@ -894,12 +896,9 @@ fn the_retention_sweep_is_a_diagnostic_method() {
 /// The config family grows by three, keeps its order, and keeps every one of
 /// the six it already served.
 #[test]
-fn the_config_family_grows_by_three() {
+fn the_config_family_is_the_declared_ten() {
     let names: Vec<&str> = CONFIG_METHOD_SPECS.iter().map(|spec| spec.name).collect();
-    assert_eq!(
-        names, CONFIG_METHODS,
-        "the family serves exactly these nine"
-    );
+    assert_eq!(names, CONFIG_METHODS, "the family serves exactly these ten");
 
     let mut sorted = names.clone();
     sorted.sort_unstable();
@@ -2262,6 +2261,53 @@ fn mp_config_add_account_refuses_without_a_configuration() {
         stderr(&ours)
     );
     daemon.stop();
+}
+
+/// `ACC-02`: the wizard past its first prompt tests the SMTP login through the
+/// daemon (`config.probe`), and a run the server refuses and the user gives up
+/// on writes nothing: no account in `config.toml`, no secret.
+///
+/// The server is a localhost port nothing listens on, so the probe is refused
+/// at once and no test reaches the network. The password is piped, which is
+/// what a wizard reads when stdin is not a terminal, and the run is routed
+/// under `MAILYPOPPINS_DAEMON_REQUIRE`, so the client did no engine work.
+#[test]
+fn mp_config_add_account_tests_the_login_through_the_daemon_and_writes_nothing_when_it_fails() {
+    let slice = Slice::start();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a localhost port")
+        .local_addr()
+        .expect("its address")
+        .port();
+    let before = std::fs::read_to_string(slice.root().join("config.toml")).expect("config.toml");
+    let secret = "never-stored-wizard-secret";
+    let input = format!("1\nprobe\n127.0.0.1\n{closed}\nme@example.com\n\n{secret}\nn\n");
+
+    let out = slice.routed_with_stdin(&["config", "add-account"], &input);
+
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let text = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        text.contains("Testing SMTP connection... FAILED"),
+        "the probe ran and failed:\n{text}"
+    );
+    assert!(
+        stderr(&out).contains("SMTP connection test failed. Aborting setup."),
+        "{text}"
+    );
+    assert!(
+        !text.contains(secret),
+        "the password is never echoed:\n{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(slice.root().join("config.toml")).expect("config.toml"),
+        before,
+        "an abandoned wizard leaves config.toml as it was"
+    );
+    assert!(
+        !fixture::secrets_file(slice.root()).exists(),
+        "and stores no password"
+    );
 }
 
 /// `ACC-05`: the password is read by the client, and a run that cannot read

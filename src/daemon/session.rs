@@ -500,6 +500,7 @@ mod tests {
                 "config.get".to_string(),
                 "config.init".to_string(),
                 "config.oauth2_login".to_string(),
+                "config.probe".to_string(),
                 "config.reload".to_string(),
                 "config.reset_secrets".to_string(),
                 "config.set_password".to_string(),

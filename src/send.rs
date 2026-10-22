@@ -2360,6 +2360,23 @@ pub fn build_invite_mime_body(plain: &str, html: String, ics: &str) -> MultiPart
         .singlepart(build_ics_attachment(ics))
 }
 
+/// Connect to the SMTP server `smtp_config` names, authenticate and hang up,
+/// sending nothing: the connection test `config.probe` runs for a wizard
+/// before an account is written. The transport is [`build_smtp_transport`]'s,
+/// so the test applies the policy a submission would.
+pub async fn test_smtp_connection(smtp_config: &SmtpConfig) -> Result<()> {
+    let transport = build_smtp_transport(smtp_config)?;
+    if transport.test_connection().await? {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "{}:{} did not accept the connection",
+            smtp_config.host,
+            smtp_config.port
+        ))
+    }
+}
+
 /// Build the SMTP transport (implicit TLS on :465, STARTTLS otherwise),
 /// honouring the account's OAuth2/password auth and `accept_invalid_certs`
 /// opt-in. The single transport builder behind [`submit`], so every SMTP

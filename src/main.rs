@@ -3610,21 +3610,6 @@ async fn routed_config_state() -> Result<(PathBuf, bool, GlobalConfig)> {
     ))
 }
 
-/// Tell the daemon to re-read a `config.toml` a wizard just wrote.
-///
-/// Best-effort and silent: the wizard's own output is what the user reads, and
-/// a reload that failed leaves the daemon on the previous snapshot, which the
-/// next command reports for itself.
-async fn reload_config_quietly() {
-    let mut connection = daemon_connection().await;
-    if let Err(e) = daemon_try_call(&mut connection, "config.reload", serde_json::json!({})).await {
-        warn!(
-            "[client] the daemon could not reload the new configuration: {}",
-            e.message
-        );
-    }
-}
-
 /// `mp config show`: the effective configuration, rendered from `config.get`,
 /// and whether each password and token is stored, from `account.credentials`.
 async fn routed_config_show() -> Result<()> {
@@ -3787,27 +3772,40 @@ async fn routed_oauth2_login(global: &GlobalConfig, account: Option<&str>) -> Re
             .clone(),
     };
 
-    let mut connection = operation_session().await;
-    let started = daemon_try_call(
-        &mut connection,
-        "config.oauth2_login",
-        serde_json::json!({"account": name}),
-    )
-    .await
-    .map_err(|error| anyhow!("{}", error.message))?;
-
     let graph = global
         .accounts
         .iter()
         .find(|a| a.name == name)
         .is_some_and(|a| a.auth_method == AuthMethod::Graph);
+    let mut connection = operation_session().await;
+    sign_in(
+        &mut connection,
+        serde_json::json!({"account": name}),
+        &name,
+        graph,
+    )
+    .await
+}
+
+/// One `config.oauth2_login`, its start line, the device code as the daemon
+/// reports it and the stored line: `mp config oauth2-login`'s rendering, and
+/// the setup wizards' sign-in of a candidate account.
+async fn sign_in(
+    connection: &mut mp_client::Connection,
+    params: serde_json::Value,
+    name: &str,
+    graph: bool,
+) -> Result<()> {
+    let started = daemon_try_call(connection, "config.oauth2_login", params)
+        .await
+        .map_err(|error| anyhow!("{}", error.message))?;
     println!(
         "{}",
-        paint(&mp_client::format::oauth2_start_line(&name, graph))
+        paint(&mp_client::format::oauth2_start_line(name, graph))
     );
 
     let id = wire_str(&started["operation_id"]).to_string();
-    let settled = await_operation(&mut connection, &id, |payload| {
+    let settled = await_operation(connection, &id, |payload| {
         if payload["phase"].as_str()
             == Some(mailypoppins::daemon::methods::config::DEVICE_CODE_PHASE)
         {
@@ -3819,10 +3817,90 @@ async fn routed_oauth2_login(global: &GlobalConfig, account: Option<&str>) -> Re
     .await;
     match settled {
         Settled::Done(_) => {
-            println!("{}", paint(&mp_client::format::oauth2_stored_line(&name)));
+            println!("{}", paint(&mp_client::format::oauth2_stored_line(name)));
             Ok(())
         }
         Settled::Failed(message) => Err(anyhow!("{message}")),
+    }
+}
+
+/// How long one connection test or mailbox listing may take: it dials a
+/// server, so the store-read budget is too short for a slow one.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The setup wizards' door onto the daemon (`mailypoppins::config_cmd`).
+struct DaemonWizard {
+    connection: mp_client::Connection,
+}
+
+impl mailypoppins::config_cmd::WizardDaemon for DaemonWizard {
+    async fn probe(
+        &mut self,
+        candidate: &serde_json::Value,
+        check: &str,
+        password: Option<&str>,
+    ) -> Result<mailypoppins::config_cmd::Probe> {
+        let mut params = serde_json::json!({"account": candidate, "check": check});
+        if let Some(password) = password {
+            params["password"] = serde_json::json!(password);
+        }
+        let answer =
+            daemon_try_call_within(&mut self.connection, "config.probe", params, PROBE_TIMEOUT)
+                .await
+                .map_err(|error| anyhow!("{}", error.message))?;
+        Ok(mailypoppins::config_cmd::Probe::from_answer(&answer))
+    }
+
+    async fn sign_in(&mut self, candidate: &serde_json::Value) -> Result<()> {
+        let name = wire_str(&candidate["name"]).to_string();
+        let graph = candidate["auth_method"] == "graph";
+        sign_in(
+            &mut self.connection,
+            serde_json::json!({"account": name, "candidate": candidate}),
+            &name,
+            graph,
+        )
+        .await
+    }
+
+    async fn init(&mut self, candidate: &serde_json::Value, replace: bool) -> Result<PathBuf> {
+        // The two globals the wizard has always written, so a file it makes
+        // reads the same as before the daemon wrote it.
+        let answer = daemon_try_call(
+            &mut self.connection,
+            "config.init",
+            serde_json::json!({
+                "account": candidate,
+                "replace": replace,
+                "theme": mailypoppins::tui::theme::DEFAULT_THEME_NAME,
+                "notifications": false,
+            }),
+        )
+        .await
+        .map_err(|error| anyhow!("{}", error.message))?;
+        Ok(PathBuf::from(wire_str(&answer["path"])))
+    }
+
+    async fn add_account(&mut self, candidate: &serde_json::Value) -> Result<()> {
+        daemon_try_call(
+            &mut self.connection,
+            "config.add_account",
+            serde_json::json!({"account": candidate}),
+        )
+        .await
+        .map_err(|error| anyhow!("{}", error.message))?;
+        Ok(())
+    }
+
+    async fn set_password(&mut self, account: &str, kind: &str, value: &str) -> Result<()> {
+        daemon_try_call(
+            &mut self.connection,
+            "config.set_password",
+            serde_json::json!({"account": account, "kind": kind, "value": value}),
+        )
+        .await
+        .map_err(|error| anyhow!("{}", error.message))?;
+        Ok(())
     }
 }
 
@@ -4977,8 +5055,10 @@ async fn main() -> Result<()> {
                 // branch prove it routed (P4-U14).
                 ConfigAction::Init { .. } => {
                     let (path, exists, _) = routed_config_state().await?;
-                    cmd_config_init(&path, exists)?;
-                    reload_config_quietly().await;
+                    let mut wizard = DaemonWizard {
+                        connection: operation_session().await,
+                    };
+                    cmd_config_init(&mut wizard, &path, exists).await?;
                 }
                 ConfigAction::Show { .. } => routed_config_show().await?,
                 ConfigAction::SetPassword { which } => {
@@ -4993,8 +5073,10 @@ async fn main() -> Result<()> {
                     let (path, exists, config) = routed_config_state().await?;
                     let names: Vec<String> =
                         config.accounts.iter().map(|a| a.name.clone()).collect();
-                    cmd_config_add_account(&path, exists, &names)?;
-                    reload_config_quietly().await;
+                    let mut wizard = DaemonWizard {
+                        connection: operation_session().await,
+                    };
+                    cmd_config_add_account(&mut wizard, &path, exists, &names).await?;
                 }
                 ConfigAction::Oauth2Login => {
                     let acct_name = cli.account.clone();

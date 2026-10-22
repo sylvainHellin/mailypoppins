@@ -23,6 +23,7 @@
 pub mod account;
 pub mod calendar;
 pub mod config;
+pub mod config_probe;
 pub mod contact;
 pub mod diagnostic;
 pub mod draft;

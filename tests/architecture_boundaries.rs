@@ -825,51 +825,15 @@ const ENGINE_SYMBOLS: [&str; 23] = [
 /// is still there.
 ///
 /// `(file, symbol, reason)`, sorted by file then symbol. Read it as the answer
-/// to "why is the Phase 4 gate not at literal zero": two groups, each with a
-/// cause that outlives this unit. The server leg of `mp search` (`LST-06`)
-/// went when it moved onto `message.search_server` (PERSO-175), and
-/// `mp config show`'s secret column and token line when they moved onto
-/// `account.credentials`.
-const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 9] = [
-    // (d) The two wizards. They call `config.get` (`routed_config_state` in
-    //     `src/main.rs`) for the path, whether the file exists and the account
-    //     names, and do the rest themselves: the prompting, the connection
-    //     tests between the prompts, the password writes and the file write are
-    //     one interactive transaction. Splitting it needs a wizard protocol,
-    //     which no unit of Phase 4 contracted. `config.init` and
-    //     `config.add_account` are served and are what such a protocol would
-    //     build on, but no wizard calls either; only `tests/daemon_config.rs`
-    //     exercises them (`BACKLOG.md`).
-    (
-        "src/config_cmd/helpers.rs",
-        "SmtpTransport::",
-        "the wizards' SMTP connection test, run between two prompts",
-    ),
-    (
-        "src/config_cmd/helpers.rs",
-        "imap_client::",
-        "the wizards' IMAP connection test, run between two prompts",
-    ),
-    (
-        "src/config_cmd/init.rs",
-        "GraphClient::",
-        "the wizards' Graph connection test, run between two prompts",
-    ),
-    (
-        "src/config_cmd/init.rs",
-        "device_code_flow(",
-        "the wizards' inline OAuth2 login, run between two prompts",
-    ),
-    (
-        "src/config_cmd/init.rs",
-        "imap_client::",
-        "the wizards' mailbox listing, which the next prompt offers as its choices",
-    ),
-    (
-        "src/config_cmd/init.rs",
-        "set_secret(",
-        "the wizards store the password they have just prompted for",
-    ),
+/// to "why is the Phase 4 gate not at literal zero": one group, the startup
+/// preamble, with a cause that outlives the migration. The server leg of
+/// `mp search` (`LST-06`) went when it moved onto `message.search_server`
+/// (PERSO-175); `mp config show`'s secret column and token line when they
+/// moved onto `account.credentials`, and the two setup wizards when they moved
+/// onto `config.probe`, `config.oauth2_login`, `config.init`,
+/// `config.add_account` and `config.set_password` (the daemon leftovers,
+/// 2026-10-22).
+const CLI_ENGINE_RESIDUE: [(&str, &str, &str); 3] = [
     // (b) The startup preamble, which runs before any socket and on the
     //     no-daemon list too (`mp config path`, `mp daemon *`). Routing it would
     //     move bytes on commands that must never need a daemon.

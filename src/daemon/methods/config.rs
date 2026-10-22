@@ -1,8 +1,10 @@
 //! The `config.*` family: read, validate, swap, and the one path into the
 //! secrets backend (P3b-U8).
 //!
-//! Six methods, declared once in [`CONFIG_METHOD_SPECS`] and registered from
-//! it, so a method cannot be served under a name the array does not carry.
+//! Ten methods, declared once in [`CONFIG_METHOD_SPECS`] and registered from
+//! it, so a method cannot be served under a name the array does not carry;
+//! the six of P3b-U8 are described here, the admin slice's three and
+//! `config.probe` ([`super::config_probe`]) where they are served.
 //! Every one of them is [`CancelScope::Durable`]: a configuration swap that
 //! undid itself because the client that asked for it exited would leave the
 //! daemon serving a configuration nobody chose.
@@ -23,7 +25,8 @@
 //!   write it, so a refusal leaves the file byte-identical, and both carry no
 //!   secret: the daemon-era equivalent of the wizard's password prompt is a
 //!   second call to `config.set_password`, and one path into the secrets
-//!   backend is one path to audit.
+//!   backend is one path to audit. `config.init` writes over an existing
+//!   file only when the caller sends `replace: true`.
 
 use std::fs;
 use std::path::Path;
@@ -55,8 +58,13 @@ use super::super::dispatch::{
 /// leak something about the value they stand in for.
 pub const REDACTED: &str = "<redacted>";
 
-/// The nine methods this family serves, in the name order the dispatcher's
+/// The ten methods this family serves, in the name order the dispatcher's
 /// table keeps.
+///
+/// `config.probe` came with the daemon leftovers (2026-10-22): the setup
+/// wizards dial the account the user is describing before it is written, and
+/// a session on a mail server is the daemon's to open
+/// ([`super::config_probe`]).
 ///
 /// The admin slice (P4-U14) added the last three: `config.cutover`, because
 /// `docs/parity-matrix.md` MIG-01 offers exactly two homes for `mp cutover` and
@@ -65,12 +73,13 @@ pub const REDACTED: &str = "<redacted>";
 /// device-code flow is authentication against the configured account; and
 /// `config.reset_secrets`, because unlinking the secrets file and the token
 /// caches is one committed change with nothing to watch.
-pub const CONFIG_METHOD_SPECS: [MethodSpec; 9] = [
+pub const CONFIG_METHOD_SPECS: [MethodSpec; 10] = [
     MethodSpec::new("config.add_account", MethodKind::Command, 1),
     MethodSpec::new("config.cutover", MethodKind::Operation, 1),
     MethodSpec::new("config.get", MethodKind::Query, 1),
     MethodSpec::new("config.init", MethodKind::Command, 1),
     MethodSpec::new("config.oauth2_login", MethodKind::Operation, 1),
+    MethodSpec::new("config.probe", MethodKind::Query, 1),
     MethodSpec::new("config.reload", MethodKind::Command, 1),
     MethodSpec::new("config.reset_secrets", MethodKind::Command, 1),
     MethodSpec::new("config.set_password", MethodKind::Command, 1),
@@ -219,7 +228,7 @@ pub struct ConfigMethod {
     family: Arc<ConfigFamily>,
 }
 
-/// Register the nine methods from the one array that declares them.
+/// Register the ten methods from the one array that declares them.
 pub fn register(dispatcher: &mut Dispatcher, family: Arc<ConfigFamily>) {
     for spec in CONFIG_METHOD_SPECS {
         dispatcher.register(Arc::new(ConfigMethod {
@@ -258,6 +267,10 @@ impl Method for ConfigMethod {
                 "config.set_password" => set_password(&family, &params).await,
                 "config.add_account" => add_account(&family, &params).await,
                 "config.init" => init(&family, &params).await,
+                "config.probe" => {
+                    let params = super::config_probe::ProbeParams::from_params(&params)?;
+                    Ok(Outcome::query(super::config_probe::probe(params).await))
+                }
                 "config.reset_secrets" => reset_secrets(&family, &params),
                 "config.cutover" => {
                     let work = plan_cutover(&family, &params)?;
@@ -405,12 +418,28 @@ async fn add_account(family: &ConfigFamily, params: &Value) -> Result<Outcome, D
 
 /// Write a whole `config.toml` for a daemon that has none.
 ///
-/// An existing file is `-32602` naming it: `mp config init` asks "Overwrite?
-/// [y/N]" and a daemon has nobody to ask, and the daemon error table has no
-/// "already exists" code to invent one from.
+/// An existing file is `-32602` naming it unless `replace` is `true`, which is
+/// `mp config init`'s "Overwrite? [y/N]" answered yes in the client, the one
+/// process that has somebody to ask; the daemon error table has no "already
+/// exists" code to invent one from.
 async fn init(family: &ConfigFamily, params: &Value) -> Result<Outcome, DomainError> {
+    guard(
+        "config.init",
+        params,
+        &[
+            "account",
+            "notifications",
+            "replace",
+            "secrets_backend",
+            "theme",
+        ],
+    )?;
     let path = family.store.path().to_path_buf();
-    if path.exists() {
+    let replace = params
+        .get("replace")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if path.exists() && !replace {
         return Err(DomainError::invalid_params(format!(
             "a configuration already exists at {}; edit it and call config.reload",
             path.display()
@@ -436,6 +465,21 @@ async fn init(family: &ConfigFamily, params: &Value) -> Result<Outcome, DomainEr
     let mut result = plan.to_json();
     result["path"] = json!(path.display().to_string());
     Ok(command(family, result, plan.affected()))
+}
+
+/// The account a candidate `[[accounts]]` block describes, read through the
+/// loader a written file goes through, so a probe or a sign-in of a
+/// candidate and the write that follows it agree about every default.
+pub fn candidate_account(candidate: &Value) -> Result<crate::config::AccountConfig, DomainError> {
+    let block = account_block(candidate)?;
+    let loaded: GlobalConfig = toml::from_str(&block).map_err(|e| {
+        DomainError::invalid_params(format!("the candidate account does not load: {e}"))
+    })?;
+    loaded
+        .accounts
+        .into_iter()
+        .next()
+        .ok_or_else(|| DomainError::invalid_params("account is a required object parameter"))
 }
 
 /// One account's `[[accounts]]` block, as a user would have written it.
@@ -834,21 +878,42 @@ struct OAuth2Work {
 /// The unknown-account message is the command's rather than
 /// [`super::account::configured_account`]'s, because it is the sentence the user
 /// reads and a routed command may not reword it.
+///
+/// `candidate` signs in an account that is not configured yet: the setup
+/// wizard's `[[accounts]]` block, read through the loader, used instead of the
+/// configured account of that name, and named `account` like it. The token is
+/// cached under that name, so the account the wizard then writes finds it.
 fn plan_oauth2(family: &ConfigFamily, params: &Value) -> Result<OAuth2Work, DomainError> {
-    guard("config.oauth2_login", params, &["account"])?;
+    guard("config.oauth2_login", params, &["account", "candidate"])?;
     let name = string_param(params, "account")?;
     let snapshot = family.store.snapshot();
-    let account = snapshot
-        .accounts
-        .iter()
-        .find(|account| account.name == name)
-        .ok_or_else(|| {
-            DomainError::new(
-                ErrorCode::AccountUnknown,
-                format!("Account '{name}' not found in config"),
-                Some(json!({"account": name})),
-            )
-        })?;
+    let candidate = match params.get("candidate") {
+        None | Some(Value::Null) => None,
+        Some(block) => {
+            let account = candidate_account(block)?;
+            if account.name != name {
+                return Err(DomainError::invalid_params(format!(
+                    "the candidate is named {}, not {name}",
+                    account.name
+                )));
+            }
+            Some(account)
+        }
+    };
+    let account = match &candidate {
+        Some(account) => account,
+        None => snapshot
+            .accounts
+            .iter()
+            .find(|account| account.name == name)
+            .ok_or_else(|| {
+                DomainError::new(
+                    ErrorCode::AccountUnknown,
+                    format!("Account '{name}' not found in config"),
+                    Some(json!({"account": name})),
+                )
+            })?,
+    };
 
     let auth = &account.auth_method;
     if *auth != crate::config::AuthMethod::OAuth2 && *auth != crate::config::AuthMethod::Graph {
@@ -934,14 +999,14 @@ fn string_param(params: &Value, name: &str) -> Result<String, DomainError> {
 mod tests {
     use super::*;
 
-    /// The nine specs are the nine names, in the order the dispatcher keeps.
+    /// The ten specs are the ten names, in the order the dispatcher keeps.
     #[test]
     fn the_specs_are_declared_in_name_order() {
         let names: Vec<&str> = CONFIG_METHOD_SPECS.iter().map(|spec| spec.name).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
-        assert_eq!(names.len(), 9);
+        assert_eq!(names.len(), 10);
     }
 
     /// The rendered block parses back into the account it described, quoting
