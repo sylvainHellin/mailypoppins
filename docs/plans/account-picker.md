@@ -1,6 +1,7 @@
-# Design: an account picker on `ga`, and other accounts collapsed in the desktop sidebar
+# Design: an account picker on `ga`, and other accounts collapsed in the sidebar
 
-> Status: proposed (2026-10-22), implementation not started. Ticket [#0147](../tickets/0147-account-picker.md). Implementer-facing.
+> Status: proposed (2026-10-22), implementation not started.
+> The ticket is [#0147](../tickets/0147-account-picker.md).
 > The plan proceeds on the recommendation of every decision under "Decisions for the owner", so a worker can start at Unit 1 without waiting.
 > Citations name a symbol and its file; line numbers are hints from 2026-10-22 and move with the code.
 > Research: [account picker scouting](../../.agents/research/2026-10-22-account-picker-scouting.md), [chord timeout scouting](../../.agents/research/2026-10-22-chord-timeout-scouting.md), [prior art](../../.agents/research/2026-10-22-chord-timeout-and-account-picker-prior-art.md).
@@ -99,7 +100,11 @@ The keybinding redesign already described `ga` as "Switch account (picker)" ([ke
 - An account's mailboxes show when `accountExpanded(s, name)` is true: `s.sidebarExpanded[name] ?? name === s.selection.account`.
 - `sidebarExpanded: Record<string, boolean>` is a new `AppState` field, empty at start and never saved (Decision 3).
 - A new reducer action `toggle_account_expanded { account }` stores the opposite of the current value as an override.
-- A new post-step `followExpansion` in the exported `reducer`, beside `followCalendar` and `followContacts`, deletes the override of the account that just became selected, so a switch always opens the new account even if it was collapsed by hand, and the account left behind falls back to collapsed unless the user had expanded it by hand.
+- A new post-step `followExpansion` in the exported `reducer`, beside `followCalendar` and `followContacts`, runs when the selected account changes and deletes the override of the newly selected account only when that override is `false`, so a switch always opens the new account even if it was collapsed by hand.
+- A `true` override stays in place, so an account expanded by hand stays expanded after it is selected and then left.
+- An account with no override falls back to collapsed once it is no longer selected.
+- Trace, starting on `work` with no overrides: a header click on `home` stores `home: true`; selecting `home` keeps that override, and `work` collapses to its default; selecting `work` again opens `work` by default and leaves `home` expanded through its `true` override.
+- Without the header click, the same two switches leave `home` collapsed, since it never had an override.
 - `AccountGroup` gets `expanded` and `onToggle` props and an `inboxUnread` number; its label becomes a button with a chevron, `aria-expanded` and `aria-controls`, and a click toggles the group without switching account.
 - A collapsed group draws only its label row with the inbox unread count, plus the `OutboxState` line when it has something to say, so a failed send in a collapsed account stays visible.
 - `sidebarEntries` skips the mailboxes of a collapsed account, so `j`/`k` in the sidebar walk only what is drawn; the keyboard path to another account is `ga` (Decision 4).
@@ -149,6 +154,8 @@ Recommendation: remove the variant and the arm in Unit 1, since `ga` then a digi
 
 The TUI sidebar shows only the active account, which already hides the others completely.
 Adding a collapsed row per other account would show their new-mail dot without opening the picker, at the cost of sidebar height in a forty-column pane and a second account switcher.
+Sylvain asked for the collapse "especially for the GUI, but same for the TUI".
+The recommendation leaves the TUI unchanged because its sidebar already shows only the active account.
 Recommendation: no TUI sidebar change; the picker carries the account list and the dot.
 
 ## Work units
@@ -218,7 +225,10 @@ Files:
 
 Tests to add:
 
-- Reducer: at start only the selected account is expanded; `toggle_account_expanded` on `home` expands it; `select_account` to `home` then back to `work` leaves `home` expanded only if it had been expanded by hand; a hand-collapsed `home` expands when selected; `move_sidebar_cursor` never lands on a mailbox of a collapsed account.
+- Reducer: at start only the selected account is expanded; `toggle_account_expanded` on `home` expands it and stores `home: true`.
+- Reducer: `select_account` to `home` then back to `work` leaves `home` expanded after a header click on `home` (its `true` override survives both switches) and collapsed without one.
+- Reducer: a `false` override on `home` is deleted when `home` is selected, so a hand-collapsed `home` opens.
+- Reducer: `move_sidebar_cursor` never lands on a mailbox of a collapsed account.
 - Component, in a new `src/components/sidebar/sidebar.test.tsx` or beside the sidebar cases of `src/components/shell/a11y.test.tsx`: `home` renders with `aria-expanded="false"`, no mailbox rows and its inbox unread count; a click on its label expands it without changing the selected account; switching to `home` through the picker collapses `work`.
 
 Existing tests at risk: any test that clicks a mailbox of `home` in the sidebar without selecting `home` first now finds no such row.
@@ -253,7 +263,9 @@ The list under "Docs to change at ship time" below, in the same commit as the la
 - With one account, `ga` and the palette entry do nothing and the which-key popup does not list `ga`.
 - The desktop rows show each account's inbox unread count; the TUI rows show the new-mail dot.
 - The desktop sidebar starts with only the selected account expanded; other accounts show one header row with the inbox unread count and any outbox line.
-- Switching account expands the new account and collapses the old one unless the user expanded it by hand; a header click toggles an account without switching.
+- Switching account expands the new account even if it was collapsed by hand.
+- The account left behind collapses, unless the user had expanded it by hand, in which case it stays expanded.
+- A header click toggles an account without switching.
 - The TUI sidebar is unchanged.
 - `cargo test --workspace`, `pnpm test` and `pnpm build` pass; the help and palette golden frames and `tui-keys.json` are unchanged.
 

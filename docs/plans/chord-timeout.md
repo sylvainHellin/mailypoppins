@@ -1,6 +1,7 @@
 # Design: a configurable wait for key prefixes in the desktop app, longer by default
 
-> Status: proposed (2026-10-22), implementation not started. Ticket [#0148](../tickets/0148-chord-timeout.md). Implementer-facing.
+> Status: proposed (2026-10-22), implementation not started.
+> The ticket is [#0148](../tickets/0148-chord-timeout.md).
 > The plan proceeds on the recommendation of every decision under "Decisions for the owner", so a worker can start at Unit 1 without waiting.
 > Citations name a symbol and its file; line numbers are hints from 2026-10-22 and move with the code.
 > Research: [chord timeout scouting](../../.agents/research/2026-10-22-chord-timeout-scouting.md), [prior art](../../.agents/research/2026-10-22-chord-timeout-and-account-picker-prior-art.md), [account picker scouting](../../.agents/research/2026-10-22-account-picker-scouting.md).
@@ -55,7 +56,7 @@ Only the daemon's own settings (`config.toml`) are read-only there, with "Open c
 
 ## Design
 
-- A new `Prefs` field `prefixWaitMs: number | null`, where null means the prefix waits for the next key; the allowed values are `PREFIX_WAITS = [null, 5000, 3000, 1500]` in `state.ts`, and `DEFAULT_PREFS.prefixWaitMs` is null (Decisions 1 to 3).
+- A new `Prefs` field `prefixWaitMs: number | null`, where null means the prefix waits for the next key; the allowed values are `PREFIX_WAITS = [null, 5000, 3000, 1500]` in `state.ts`, and `DEFAULT_PREFS.prefixWaitMs` follows Decision 1, null on its recommendation (Decisions 1 to 3).
 - `loadPrefs` accepts only a value from `PREFIX_WAITS` and keeps the default for a missing or unknown one, so an old saved object and a hand-edited one both load.
 - A reducer action `prefix_wait_set { ms }` replaces the field; the existing `store.tsx` effect saves it.
 - In `useKeymap`, `arm` reads `ref.current.prefs.prefixWaitMs` and starts the timer only for a number; `take` applies the age check only for a number; `PREFIX_TIMEOUT_MS` goes.
@@ -76,6 +77,8 @@ A longer fixed value, 3 s, halves the chance of a late key but keeps the failure
 Waiting for the next key removes the failure: the popup stays up until the second key, Escape, a click, leaving the window or focusing a field.
 It is what the TUI has always done, so both clients would behave alike, and it is what Emacs, Helix and Zed do for a prefix that is not itself an action, which every mailypoppins prefix is (prior-art note, findings 2, 3 and 5).
 The cost is that a stray `g` stays armed until the next key, which the visible popup and Escape make cheap.
+Sylvain asked for a tunable timeout with a longer default.
+Recommending no timeout by default departs from that request, and 3 s is the option closest to it.
 Recommendation: wait for the next key by default; 3 s is the fallback if Sylvain prefers a lapse.
 
 ### 2. Preset values or a free number
@@ -126,7 +129,7 @@ Files:
 
 Tests to add or update:
 
-- `src/components/palette/prefixPopup.test.tsx`: the timeout case (around line 109) becomes two cases, one with `prefixWaitMs: 3000` in the stored prefs (expiry at 2999 ms and 3001 ms, and a late continuation does not resolve) and one with the default, where the popup is still up after a minute of fake time and `a` then replies to all.
+- `src/components/palette/prefixPopup.test.tsx`: the timeout case (around line 109) becomes two cases, one with `prefixWaitMs: 3000` in the stored prefs (expiry at 2999 ms and 3001 ms, and a late continuation does not resolve) and one with the default, which follows Decision 1: with the recommended null default the popup is still up after a minute of fake time and `a` then replies to all, and with a 3 s default this case pins the 3 s expiry instead.
 - The same file: Escape over an armed `c` hides the popup, keeps the selection and does not archive or reply.
 - The same file: a `pointerdown` on the list while `c` is armed hides the popup, and the next `a` archives.
 - A new `src/app/prefs.test.ts`, since `loadPrefs` has no test file of its own yet: a missing field, an unknown number and a string load as the default; each value of `PREFIX_WAITS` round-trips through `savePrefs` and `loadPrefs`.
@@ -144,14 +147,14 @@ Files:
 
 Tests to add, in `src/components/settings/settings.test.tsx` beside the `PREFS_KEY` persistence case (around line 207):
 
-- The row shows "Wait for the next key" pressed by default.
+- The row shows the default from Decision 1 pressed, "Wait for the next key" on its recommendation.
 - Pressing "3 s" presses it, stores `prefixWaitMs: 3000` under `PREFS_KEY`, and an armed `c` then expires after 3 s.
 
 Verify:
 
 - `pnpm vitest run src/components/settings`, then `pnpm test` and `pnpm build`.
 - The Tauri crate is untouched, so nothing here needs the Mac to build.
-- On the Mac after `scripts/install-local.sh`, in a real window: `c`, wait ten seconds, `a` replies to all; Settings to 1.5 s, `c`, wait two seconds, the popup is gone; `c` then Escape does nothing else; `c` then a click on a row cancels.
+- On the Mac after `scripts/install-local.sh`, in a real window with the recommended default: `c`, wait ten seconds, `a` replies to all; Settings to 1.5 s, `c`, wait two seconds, the popup is gone; `c` then Escape does nothing else; `c` then a click on a row cancels.
 
 ### Unit 3: docs at ship time
 
@@ -170,7 +173,8 @@ The list under "Docs to change at ship time" below, in the same commit as Unit 2
 
 ## Acceptance criteria
 
-- In the desktop app with default settings, after `c` the which-key popup stays until the next key, and `c`, a pause of any length, then `a` replies to all.
+- In the desktop app the prefix wait is configurable and its default is longer than today's 1.2 s, set by Decision 1.
+- With the recommended default, after `c` the which-key popup stays until the next key, and `c`, a pause of any length, then `a` replies to all; with the 3 s fallback, `c`, a pause under 3 s, then `a` replies to all.
 - Settings has a "Prefix keys" row with "Wait for the next key", 5 s, 3 s and 1.5 s; the choice applies to the next prefix without a restart and survives a restart.
 - With a timed choice, the popup and the pending prefix end together when the time is up.
 - Escape over a pending prefix cancels it and does nothing else; a click anywhere cancels it.

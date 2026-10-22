@@ -1,6 +1,6 @@
 ---
 id: 0147
-title: Account picker on ga in both clients, and other accounts collapsed in the desktop sidebar
+title: Account picker on ga in both clients, and other accounts collapsed in the sidebar
 type: feature
 priority: next
 status: open
@@ -29,7 +29,7 @@ Research:
 - `ga` and the palette's "Switch account" open a list of every account in both clients, the current one preselected; `j`/`k` move, Enter switches, `1` to `9` jump, Esc and `q` cancel.
 - With one account, `ga` does nothing and the which-key popup leaves it out.
 - The desktop sidebar starts with only the selected account expanded; switching expands the new account, and a header click toggles an account for the session.
-- The TUI sidebar is unchanged; the unreachable `KeyAction::JumpAccount` goes.
+- The TUI sidebar is unchanged, on the recommendation of the plan's Decision 6; the unreachable `KeyAction::JumpAccount` goes.
 - `cargo test --workspace`, `pnpm test` and `pnpm build` pass, with the help and palette golden frames and `tui-keys.json` unchanged.
 
 ## Status

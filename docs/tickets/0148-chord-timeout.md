@@ -1,6 +1,6 @@
 ---
 id: 0148
-title: Desktop key prefixes wait for the second key by default, with the wait set in Settings
+title: Configurable prefix wait in the desktop app with a longer default
 type: feature
 priority: next
 status: open
@@ -17,7 +17,7 @@ The TUI never times out a prefix and is not affected.
 ## Plan
 
 [docs/plans/chord-timeout.md](../plans/chord-timeout.md) holds the design, six owner decisions with a recommendation each, three work units, the docs to change and the risks.
-It recommends waiting for the second key by default, as the TUI does, with 5 s, 3 s and 1.5 s as the other choices, stored in the desktop's localStorage `Prefs`.
+Its Decision 1 sets the default and recommends waiting for the second key, as the TUI does, with 5 s, 3 s and 1.5 s as the other choices, stored in the desktop's localStorage `Prefs`.
 
 Research:
 
@@ -27,7 +27,8 @@ Research:
 
 ## Acceptance criteria, in short
 
-- By default, `c`, a pause of any length, then `a` replies to all, and the popup stays up until the second key.
+- The prefix wait is configurable and its default, set by the plan's Decision 1, is longer than today's 1.2 s.
+- With the recommended default, `c`, a pause of any length, then `a` replies to all, and the popup stays up until the second key.
 - Settings has a "Prefix keys" row with four choices that applies at once and survives a restart; a timed choice ends the popup and the prefix together.
 - Escape over a pending prefix cancels it and does nothing else; a click cancels it.
 - The activity log's `gg` and the TUI are unchanged.
