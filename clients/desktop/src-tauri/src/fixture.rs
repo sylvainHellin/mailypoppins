@@ -3250,11 +3250,19 @@ impl Fixture {
                     .map(|(mailbox, r)| server_hit(&account, mailbox, r))
                     .collect();
                 hits.push(server_only_hit(&account, &query));
+                // The daemon's cut (PERSO-175): the newest `limit`, and
+                // `truncated` when more matched.
+                let truncated = hits.len() > limit;
                 hits.truncate(limit);
                 drop(s);
-                Ok(
-                    json!({"operation_id": self.start_server_search(account, params["query"].clone(), hits)}),
-                )
+                Ok(json!({
+                    "operation_id": self.start_server_search(
+                        account,
+                        params["query"].clone(),
+                        hits,
+                        truncated,
+                    )
+                }))
             }
             "operation.status" => {
                 let id = param_str(method, &params, "operation_id")?;
@@ -4199,6 +4207,7 @@ impl Fixture {
         account: String,
         query: Value,
         hits: Vec<Value>,
+        truncated: bool,
     ) -> String {
         let id = {
             let mut s = self.state();
@@ -4244,7 +4253,8 @@ impl Fixture {
                 let result = json!({
                     "account": account, "query": query, "hits": total,
                     "deduplicated": 0, "unreachable": [],
-                    "coverage": coverage, "local_terms": local_terms
+                    "coverage": coverage, "local_terms": local_terms,
+                    "truncated": truncated, "capped": false
                 });
                 fixture.settle(&op, "succeeded", Some(result));
             }

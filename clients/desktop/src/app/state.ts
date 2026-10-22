@@ -275,11 +275,19 @@ export type SearchState = {
   error: string | null;
   /**
    * The settled summary: hits the server counted, mailboxes it could not
-   * reach, and the terms the local store answered rather than the server
+   * reach, the terms the local store answered rather than the server
    * (`local_terms` of a `coverage: "local"` settle, PERSO-131), empty when the
-   * server answered every term.
+   * server answered every term, and whether the limit cut the answer
+   * (`truncated`) or Microsoft Graph's 1000-result cap did (`capped`,
+   * PERSO-175).
    */
-  summary: { hits: number; unreachable: number; localTerms: string[] } | null;
+  summary: {
+    hits: number;
+    unreachable: number;
+    localTerms: string[];
+    truncated: boolean;
+    capped: boolean;
+  } | null;
   /**
    * Server signals that arrived before `search_server_start` answered with
    * their id; the Rust layer registers the id before it answers, so its

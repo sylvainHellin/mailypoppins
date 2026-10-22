@@ -7,11 +7,12 @@ import type { UnreachableMailbox } from "./UnreachableMailbox";
  *
  * The hits are not here: each streamed as a `message.server_hit` event while
  * the search ran. What settles is the count, the hits dropped because the
- * local pass was already showing them, the mailboxes that refused, and the
+ * local pass was already showing them, the mailboxes that refused, the
  * coverage (PERSO-131): on a plain IMAP server `has:attachment` has no search
  * key, so the daemon keeps only the hits the local store marks as carrying an
- * attachment, and an un-synced message cannot be among them. The two fields
- * mean what `mp search --json`'s do (PERSO-122).
+ * attachment, and an un-synced message cannot be among them; the two fields
+ * mean what `mp search --json`'s do (PERSO-122). Last, whether the limit cut
+ * the answer and whether Graph's cap did (PERSO-175).
  */
 export type ServerSearchSettled = {
 /**
@@ -43,4 +44,16 @@ coverage: SearchCoverage,
  * The terms the store answered, in the grammar's own spelling
  * (`has:attachment`), and `[]` when the server answered every term.
  */
-local_terms: Array<string>, };
+local_terms: Array<string>,
+/**
+ * More matched than the hits hold: a mailbox matched more than the
+ * limit, or the merge of every mailbox's newest hits cut some
+ * (PERSO-175). Absent from an older daemon, which reads as `false`.
+ */
+truncated: boolean,
+/**
+ * Microsoft Graph's [`GRAPH_SEARCH_CAP`] stopped a mailbox's search short
+ * of the limit, which no larger limit gets past: only a narrower query
+ * reaches the rest.
+ */
+capped: boolean, };

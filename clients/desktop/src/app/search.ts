@@ -300,6 +300,9 @@ function summaryOf(result: unknown): SearchState["summary"] {
     hits: typeof r.hits === "number" ? r.hits : 0,
     unreachable: Array.isArray(r.unreachable) ? r.unreachable.length : 0,
     localTerms,
+    // A daemon that predates PERSO-175 sends neither: an answer it never cut.
+    truncated: r.truncated === true,
+    capped: r.capped === true,
   };
 }
 

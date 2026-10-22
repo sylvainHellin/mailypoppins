@@ -189,6 +189,59 @@ describe("server search", () => {
     expect(status()).toHaveTextContent(/^0 results on the server$/);
   });
 
+  it("says when the limit cut the answer, in mp search's words with the search bar's remedy (PERSO-175)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await searchServer(user, "handover");
+    event("message.server_hit", { operation_id: "op-1", hit: serverHit("Inbox", 1005, "Re: BIM model handover") });
+    const list = await results();
+    await waitFor(() => expect(within(list).getAllByRole("option")).toHaveLength(1));
+    event("operation.finished", {
+      operation_id: "op-1",
+      state: "succeeded",
+      result: {
+        account: "work",
+        query: "handover",
+        hits: 1,
+        deduplicated: 0,
+        unreachable: [],
+        coverage: "server",
+        local_terms: [],
+        truncated: true,
+        capped: false,
+      },
+    });
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
+    expect(status()).toHaveTextContent(
+      /^1 result on the server\. More results than the 1 shown: narrow the search to see the rest\.$/,
+    );
+  });
+
+  it("names Microsoft Graph's cap instead when it, not the limit, cut the answer", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await searchServer(user, "handover");
+    event("operation.finished", {
+      operation_id: "op-1",
+      state: "succeeded",
+      result: {
+        account: "work",
+        query: "handover",
+        hits: 0,
+        deduplicated: 0,
+        unreachable: [],
+        coverage: "server",
+        local_terms: [],
+        truncated: true,
+        capped: true,
+      },
+    });
+    await waitFor(() => expect(status()).toHaveAttribute("data-status", "done"));
+    expect(status()).toHaveTextContent(
+      "0 results on the server. Microsoft Graph stops a search at 1000 results: narrow the query (after:, before:, in:) to reach the rest.",
+    );
+  });
+
   it("the server leg of a local search keeps its hits and excludes them", async () => {
     const { user } = renderApp();
     await shellReady();

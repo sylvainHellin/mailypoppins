@@ -17,7 +17,8 @@ function describe(search: SearchState): string {
       // The CLI's caveat (PERSO-122): un-synced mail is not covered by a term the store answered.
       const localTerms = search.summary?.localTerms ?? [];
       const local = localTerms.length ? ` (local store only: ${localTerms.join(", ")})` : "";
-      return `${results} ${where}${local}${unreachable ? `, ${unreachable} mailbox${unreachable === 1 ? "" : "es"} unreachable` : ""}`;
+      const line = `${results} ${where}${local}${unreachable ? `, ${unreachable} mailbox${unreachable === 1 ? "" : "es"} unreachable` : ""}`;
+      return `${line}${cutNote(search)}`;
     }
     case "cancelled":
       return `Server search cancelled, ${results}`;
@@ -26,6 +27,21 @@ function describe(search: SearchState): string {
     case "dropped":
       return `The server search was dropped: ${search.error ?? "the daemon restarted"}`;
   }
+}
+
+/**
+ * The sentence after a server search the limit or Microsoft Graph's cap cut
+ * (PERSO-175), in the words of `mp search` and the TUI footer, with a
+ * narrower search as the remedy, since the search bar takes no limit.
+ */
+function cutNote(search: SearchState): string {
+  if (search.summary?.capped) {
+    return ". Microsoft Graph stops a search at 1000 results: narrow the query (after:, before:, in:) to reach the rest.";
+  }
+  if (search.summary?.truncated) {
+    return `. More results than the ${search.hits.length} shown: narrow the search to see the rest.`;
+  }
+  return "";
 }
 
 /** A failure in the parser's lines (a message with a caret line under the query), or null. */
