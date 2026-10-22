@@ -283,7 +283,7 @@ Forget a chord and `:` or `Ctrl+p` opens a command palette over every runnable a
 | `tc` | Conversation view on / off for this account |
 | `ff`/`fm` | Search all mail / Filter the current list |
 | `ss`/`sS` | Quick sync / Full sync |
-| `ga`/`gm` | Switch account / Go to the sidebar |
+| `ga`/`gm` | Account picker / Go to the sidebar |
 | `1`-`9` | Jump to mailbox |
 | `:` or `Ctrl+p` | Command palette |
 | `?` | Help |

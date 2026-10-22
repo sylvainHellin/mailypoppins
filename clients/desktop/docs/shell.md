@@ -111,6 +111,16 @@ An account the bootstrap picked (the snapshot's first) is marked `selectionAuto`
 | `operation_settled`, `operation_dropped` | by `kind`: the server search settles or shows as dropped, a sync settles (a notice when it failed or was dropped), a send (`send`, `send_approved`), a retry (`outbox_retry`), an RSVP (`rsvp`), an invitation (`send_invite`), a contact rebuild (`contact_rebuild`) or a sign-in (`oauth2_login`) settles or says it was interrupted |
 | `link_intercepted` | the intercept log, and the reader footer's notice |
 
+### Accounts in the sidebar
+
+The sidebar draws the mailboxes of the selected account and of any account expanded by hand; every other account is one header row with its inbox's unread count, plus its outbox line when something waits or failed (#0147).
+`sidebarExpanded` holds the hand toggles by account name for the session, never in the prefs, so each start expands only the selected account (`accountExpanded`).
+A click on an account's header (`toggle_account_expanded`) expands or collapses it without selecting it; selecting an account expands it even if it was collapsed by hand, and an account expanded by hand stays expanded after it is left (`followExpansion`, a post-step of the reducer).
+The sidebar cursor walks only the mailboxes drawn, so `j`/`k` skip a collapsed account and a cursor on an account that collapses falls back to the selection.
+The keyboard path to another account is `ga`, or the palette's "Switch account": the account picker (`components/sidebar/AccountPicker.tsx`, the `account_picker` overlay) lists every account in config order with its digit, its inbox's unread count and the current one marked.
+`j`/`k` and the arrows move and clamp, Enter or a click switches and opens the account's inbox, `1` to `9` switch to the nth account, Escape and `q` close it; picking the current account only closes it, so an open search survives.
+With one account `ga` opens nothing and the which-key popup leaves it out.
+
 ## Search
 
 The list header's field filters the shown list as it is typed, as before.
@@ -655,7 +665,7 @@ Only the shown list is read: one that went stale behind another view is read whe
 ## Calendar
 
 The Calendar view lists the agenda of the selection's account, the TUI's Calendar view (CAL-02, CAL-03).
-It follows the selection's account: the palette's "Switch account" shows the next account's agenda, and the scope stays.
+It follows the selection's account: an account picked with `ga` or the palette's "Switch account" shows its agenda, and the scope stays.
 
 ### The agenda
 
@@ -1074,10 +1084,11 @@ Tab and Shift+Tab cycle the panes the way the TUI does (forward sidebar, list, r
 The pane the model holds as focused (`state.focus`) carries `data-focused="true"` on its `data-pane` root (`usePaneFocused` in `src/hooks/use-pane-focused.ts`), whether or not the DOM focus is inside it, and `index.css` draws it as one 1px `ring` line just inside the pane's edge (`sidebar-ring` on the sidebar), above its content, the reader's frame included, and never taking a click; a full-pane view's region carries the list's mark.
 The ring is rounded only where the pane's corner is the inset card's: the list's right corners and the reader's left ones, which meet across the splitter, are square, a banner or the narrow bar above the pane row squares the top corners, and a pane alone in the row (zoomed, narrow, a full-pane view) and the sidebar keep all four (PERSO-95).
 Inside a pane focus is a roving tabindex: `j`/`k` or the arrows move the one tab stop, which is the selected row (`aria-selected="true"`) or the sidebar cursor.
+An account's header in the sidebar is a button with `aria-expanded` and `tabindex="-1"`, reached by pointer, as the outbox line is.
 Every list row (message, draft, search hit) carries `aria-posinset` and `aria-setsize`, and every row is mounted: `useWindow` stays in the tree but is off in M1, since a `G` or `gg` past its overscan unmounted the focused row and dropped DOM focus.
 The filter field is reached with `/`, and Escape leaves it for the list.
-Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the New invitation form, the Signatures dialog with its delete confirmation, the activity log, the password dialog, the account wizard and the device-code dialog) are Base UI dialogs: they trap focus while open and return it when closed.
-The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the activity log on its lines, the password dialog in its Password field, the account wizard on its first provider and each later step in its first field, the device-code dialog on "Cancel sign-in", the Signatures dialog's name field once `n` or `r` shows it, and the New invitation form in To, or on Cancel for a Graph account.
+Dialogs (palette, key help, restart confirmation, the archive, delete, approve, demote, send, retry and discard confirmation, the move picker, the account picker, the compose wizard, the recipients dialog, the attachment picker, Save and Attach file dialogs, the RSVP choice, the New invitation form, the Signatures dialog with its delete confirmation, the activity log, the password dialog, the account wizard and the device-code dialog) are Base UI dialogs: they trap focus while open and return it when closed.
+The compose dialogs start in To, a new draft to a contact in Subject, the Save and Attach file dialogs in their path field, whose note is its description, the account picker on the current account, the attachment picker on its first file, the RSVP choice and the Signatures dialog on their listbox, the activity log on its lines, the password dialog in its Password field, the account wizard on its first provider and each later step in its first field, the device-code dialog on "Cancel sign-in", the Signatures dialog's name field once `n` or `r` shows it, and the New invitation form in To, or on Cancel for a Graph account.
 The listboxes are `aria-multiselectable`: with no mark, `aria-selected` is the cursor row; once a row is marked, it is the marked rows, and the cursor is the focused row.
 A row's mark box (`role="checkbox"`, "Mark") and its "Unread" and "Flagged" toggles (`aria-pressed`) are pointer affordances with `tabindex="-1"`, so the list keeps its one tab stop; their keys are `v`, `u` and `*`.
 A row with a change the daemon has not confirmed is `aria-busy` and says "change pending" in its name; a draft being sent says "being sent".
@@ -1091,7 +1102,7 @@ The keymap follows the TUI's, from the generated `keymap.json`:
 - `j`/`k`, arrows: move in the focused pane (the sidebar cursor, the list selection, or scroll the reader).
 - `J`/`K`, `gj`/`gk`: next and previous message from any pane.
 - `Enter`: open the mailbox under the cursor, or open the message in the reader and mark it read.
-- `Tab`/`Shift+Tab`: cycle panes; `gm`: the sidebar; `gr`: the reader, a desktop key; `Space m`: Mail and its list; `Space c`, `Space a`: Contacts and Calendar (see Views); `ga`: next account.
+- `Tab`/`Shift+Tab`: cycle panes; `gm`: the sidebar; `gr`: the reader, a desktop key; `Space m`: Mail and its list; `Space c`, `Space a`: Contacts and Calendar (see Views); `ga`: the account picker (see Model, "Accounts in the sidebar").
 - `1`-`9`: the selected account's nth mailbox.
 - `gg`/`G`, `Home`/`End`, `Ctrl+d`/`Ctrl+u`, `PageDown`/`PageUp`: jumps in the list or the reader.
 - `:` or `Ctrl+p`: the command palette; `?`: key help; `z`: zoom the focused list or reader; `/` or `fm`: the filter; `y`: copy the selector, or in Drafts and on a conversation's draft member the draft's file path (PERSO-100, #0142).

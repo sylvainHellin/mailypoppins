@@ -77,6 +77,7 @@ import {
   type Refusal,
 } from "@/app/pending";
 import {
+  accountExpanded,
   accountNames,
   conversationEntries,
   conversationModeOn,
@@ -282,7 +283,8 @@ export type Action =
   | { type: "move_sidebar_cursor"; delta: number }
   | { type: "sidebar_enter" }
   | { type: "jump_mailbox"; index: number }
-  | { type: "next_account" }
+  | { type: "open_account_picker" }
+  | { type: "toggle_account_expanded"; account: string }
   | { type: "focus"; pane: Pane }
   | { type: "pane_focused"; pane: Pane }
   | { type: "cycle_focus"; dir: 1 | -1 }
@@ -899,10 +901,30 @@ function threadLoaded(s: AppState, a: Extract<Action, { type: "thread_loaded" | 
 }
 
 /** Flattened sidebar entries, for the cursor. */
+/** The sidebar's keyboard stops: the mailboxes it draws, so none of a collapsed account. */
 function sidebarEntries(s: AppState): { account: string; slug: string }[] {
-  return accountNames(s).flatMap((account) =>
-    mailboxSlugs(s, account).map((slug) => ({ account, slug })),
-  );
+  return accountNames(s)
+    .filter((account) => accountExpanded(s, account))
+    .flatMap((account) => mailboxSlugs(s, account).map((slug) => ({ account, slug })));
+}
+
+/**
+ * The sidebar follows the selection's account (ticket 0147): a switch opens the
+ * account now selected even if it was collapsed by hand, while an account
+ * expanded by hand stays so after it is left. A keyboard cursor on an account
+ * that is now collapsed falls back to the selection.
+ */
+function followExpansion(prev: AppState, next: AppState): AppState {
+  let s = next;
+  const account = s.selection.account;
+  if (account && account !== prev.selection.account && s.sidebarExpanded[account] === false) {
+    const sidebarExpanded = { ...s.sidebarExpanded };
+    delete sidebarExpanded[account];
+    s = { ...s, sidebarExpanded };
+  }
+  const cursor = s.sidebarCursor;
+  if (cursor && !accountExpanded(s, cursor.account)) s = { ...s, sidebarCursor: null };
+  return s;
 }
 
 function parseResource(resource: string): { family: string; parts: string[] } {
@@ -1102,7 +1124,6 @@ const LEAVES_EDITOR: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "move_selection",
   "sidebar_enter",
   "jump_mailbox",
-  "next_account",
   "clear_selection",
   "search_local",
   "search_server",
@@ -1537,7 +1558,6 @@ const USER_SELECTION: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "move_selection",
   "sidebar_enter",
   "jump_mailbox",
-  "next_account",
   "clear_selection",
   "search_local",
   "search_server",
@@ -1579,9 +1599,9 @@ const LEAVES_OUTBOX: ReadonlySet<Action["type"]> = new Set<Action["type"]>([
   "search_run",
 ]);
 
-/** The reducer; the Calendar and Contacts views follow the selection's account after every action. */
+/** The reducer; the Calendar and Contacts views and the sidebar follow the selection's account after every action. */
 export function reducer(s: AppState, a: Action): AppState {
-  const next = followContacts(followCalendar(reduce(s, a)));
+  const next = followExpansion(s, followContacts(followCalendar(reduce(s, a))));
   return LEAVES_EDITOR.has(a.type) ? composeFollow(s, next, a) : next;
 }
 
@@ -1767,13 +1787,11 @@ function reduce(s: AppState, a: Action): AppState {
       if (!slug) return s;
       return withFocus(selectMailbox(s, account, slug), "list");
     }
-    case "next_account": {
-      const names = accountNames(s);
-      if (names.length === 0) return s;
-      const i = s.selection.account ? names.indexOf(s.selection.account) : -1;
-      const account = names[(i + 1) % names.length];
-      return reducer(s, { type: "select_account", account });
-    }
+    // `ga` (ticket 0147): the account picker, which switches through `select_account`.
+    case "open_account_picker":
+      return accountNames(s).length < 2 ? s : reduce(s, { type: "overlay", overlay: "account_picker" });
+    case "toggle_account_expanded":
+      return { ...s, sidebarExpanded: { ...s.sidebarExpanded, [a.account]: !accountExpanded(s, a.account) } };
 
     case "focus":
       return withFocus(s, a.pane);

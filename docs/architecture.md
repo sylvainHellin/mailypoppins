@@ -607,7 +607,7 @@ And `ENGINE_MODULES` lost `secrets` and `oauth2`: they have lived in `mp-core` s
 Config uses an `[[accounts]]` array.
 Each account has independent IMAP/SMTP settings and mailbox mappings, and its own store, blob directory and secrets keys (`smtp-password-{name}`, `imap-password-{name}`).
 Signature files are shared across accounts; what is per-account is which one is the default (`app_state`).
-The TUI shows one account at a time, switching via backtick or Ctrl+1-9, and watches all of them for new mail simultaneously.
+The TUI shows one account at a time, switching through the `ga` account picker, and watches all of them for new mail simultaneously.
 CLI commands target an account via `--account` and default to the first.
 
 ## Selector contract

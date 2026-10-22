@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { actionTargets, progressAction, reducer, type Action } from "@/app/reducer";
 import { runAction } from "@/app/actions";
 import { ACTIVITY_CAP } from "@/app/pending";
-import { isStale, listKey, type AppState } from "@/app/state";
+import { accountExpanded, isStale, listKey, type AppState } from "@/app/state";
 import { CLOSE_OUTBOX_FIRST } from "@/app/outbox";
 import { BACK_TO_MAIL_FIRST, hiddenByView, hiddenNotice } from "@/app/views";
 import { openableHits } from "@/app/search";
@@ -223,7 +223,7 @@ describe("the reducer", () => {
     it("keeps a choice made between a failed list_accounts and its retry", () => {
       let s = booted();
       s = run(s, { type: "accounts_failed", gen: s.accounts.gen, error: { kind: "timeout", message: "slow" } });
-      s = run(s, { type: "next_account" });
+      s = run(s, { type: "select_account", account: "home" });
       expect(s.selection.account).toBe("home");
       s = run(s, { type: "accounts_loaded", gen: s.accounts.gen, accounts: accounts("work") });
       expect(s.selection).toMatchObject({ account: "home", mailbox: "inbox" });
@@ -1011,7 +1011,7 @@ describe("mutations and pending state", () => {
       expect(run(contacts, { type: "search_local", query: "x" }).view).toBe("mail");
       expect(run(contacts, { type: "open_outbox", account: "work" }).view).toBe("mail");
       expect(run(contacts, { type: "clear_selection" })).toMatchObject({ view: "mail", focus: "list" });
-      const other = run(contacts, { type: "next_account" });
+      const other = run(contacts, { type: "select_account", account: "home" });
       expect(other.view).toBe("contacts");
       expect(other.selection.account).toBe("home");
     });
@@ -1165,5 +1165,61 @@ describe("the embedded editor over a full-pane view", () => {
     const shown = run(kept, { type: "compose_show", account: "work", draftId: "d1" });
     expect(shown.view).toBe("mail");
     expect(shown.composeShown).toBe("work#draft:d1");
+  });
+});
+
+describe("the account picker and the sidebar's collapsed accounts (ticket 0147)", () => {
+  const oneAccount = (): AppState =>
+    run(flatState(), {
+      type: "gui_event",
+      event: { type: "rebootstrapped", cause: "subscribed", bootstrap: withoutAccount(fixtures.bootstrap, "home") },
+    });
+
+  it("open_account_picker opens the overlay with two accounts and is a no-op with one", () => {
+    expect(run(booted(), { type: "open_account_picker" }).overlay).toBe("account_picker");
+    const one = oneAccount();
+    expect(run(one, { type: "open_account_picker" })).toBe(one);
+  });
+
+  it("expands only the selected account at start, and a toggle stores an override", () => {
+    const s = booted();
+    expect(accountExpanded(s, "work")).toBe(true);
+    expect(accountExpanded(s, "home")).toBe(false);
+    const t = run(s, { type: "toggle_account_expanded", account: "home" });
+    expect(t.sidebarExpanded).toEqual({ home: true });
+    expect(accountExpanded(t, "home")).toBe(true);
+    expect(t.selection.account).toBe("work");
+  });
+
+  it("keeps an account expanded by hand after it is selected and left, and collapses one that was not", () => {
+    const there = (s: AppState) => run(s, { type: "select_account", account: "home" }, { type: "select_account", account: "work" });
+    const plain = there(booted());
+    expect(accountExpanded(plain, "home")).toBe(false);
+    expect(accountExpanded(plain, "work")).toBe(true);
+    const kept = there(run(booted(), { type: "toggle_account_expanded", account: "home" }));
+    expect(accountExpanded(kept, "home")).toBe(true);
+    expect(accountExpanded(kept, "work")).toBe(true);
+  });
+
+  it("opens a hand-collapsed account when it is selected", () => {
+    let s = run(booted(), { type: "toggle_account_expanded", account: "home" }, { type: "toggle_account_expanded", account: "home" });
+    expect(s.sidebarExpanded).toEqual({ home: false });
+    s = run(s, { type: "select_account", account: "home" });
+    expect(s.sidebarExpanded).toEqual({});
+    expect(accountExpanded(s, "home")).toBe(true);
+    expect(accountExpanded(s, "work")).toBe(false);
+  });
+
+  it("walks the sidebar cursor over the expanded accounts only", () => {
+    let s = run(booted(), { type: "focus", pane: "sidebar" });
+    for (let i = 0; i < 10; i++) {
+      s = run(s, { type: "move_sidebar_cursor", delta: 1 });
+      expect(s.sidebarCursor?.account).toBe("work");
+    }
+    s = run(s, { type: "toggle_account_expanded", account: "home" }, { type: "move_sidebar_cursor", delta: 1 });
+    expect(s.sidebarCursor).toEqual({ account: "home", slug: "inbox" });
+    // Collapsing the cursor's account drops the cursor back to the selection.
+    s = run(s, { type: "toggle_account_expanded", account: "home" });
+    expect(s.sidebarCursor).toBeNull();
   });
 });

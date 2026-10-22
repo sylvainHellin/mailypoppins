@@ -6,17 +6,19 @@ import { ViewEntries } from "@/components/sidebar/ViewEntries";
 import { kindOfRole } from "@/components/sidebar/icons";
 import { useAppState, useDispatch } from "@/app/store";
 import { usePaneFocused } from "@/hooks/use-pane-focused";
-import { accountNames, type AppState, type View } from "@/app/state";
+import { accountExpanded, accountNames, type AppState, type View } from "@/app/state";
 import type { AccountState, SyncHealthState } from "@/protocol/types";
 import { outboxSummary, type OutboxSummary } from "@/app/outbox";
 import { installUpdate, updateEntryLabel } from "@/app/updates";
 
-type AccountView = {
+export type AccountView = {
   name: string;
   runtime: AccountState;
   health: SyncHealthState;
   outbox: OutboxSummary;
   mailboxes: SidebarMailbox[] | null;
+  /** The inbox's unread count, the account's new mail; null before its mailboxes are known. */
+  inboxUnread: number | null;
 };
 
 export function sidebarModel(s: AppState): AccountView[] {
@@ -41,6 +43,7 @@ export function sidebarModel(s: AppState): AccountView[] {
       // invalidation; `list_accounts` only moves on a bootstrap.
       outbox: outboxSummary(s, name),
       mailboxes,
+      inboxUnread: mailboxes ? (mailboxes.find((m) => m.kind === "inbox")?.unread ?? 0) : null,
     };
   });
 }
@@ -54,6 +57,7 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
     [dispatch],
   );
   const onOpenOutbox = useCallback((account: string) => dispatch({ type: "open_outbox", account }), [dispatch]);
+  const onToggle = useCallback((account: string) => dispatch({ type: "toggle_account_expanded", account }), [dispatch]);
   const onOpenView = useCallback((view: Exclude<View, "mail">) => dispatch({ type: "switch_view", view }), [dispatch]);
   const onActivity = useCallback(() => dispatch({ type: "overlay", overlay: "activity" }), [dispatch]);
   // Outside Mail no mailbox is the current page, and the digits jump nowhere.
@@ -96,6 +100,9 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
               mailShown={mail}
               onOpenOutbox={onOpenOutbox}
               mailboxes={a.mailboxes}
+              inboxUnread={a.inboxUnread}
+              expanded={accountExpanded(s, a.name)}
+              onToggle={onToggle}
               selected={s.selection}
               cursor={cursor}
               digits={mail && a.name === selectedAccount}

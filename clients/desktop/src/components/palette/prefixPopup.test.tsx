@@ -79,6 +79,17 @@ describe("the prefix popup", () => {
     expect(rows()).toEqual([["gg / G", "Jump to top / bottom"]]);
   });
 
+  it("g leaves ga out with one account, since there is no other to switch to", async () => {
+    const { user } = renderApp(1400, () => {
+      mock.accounts = mock.accounts.filter((a) => a.name === "work");
+      mock.bootstrap.snapshot.accounts = mock.bootstrap.snapshot.accounts.filter((a) => a.name === "work");
+      delete mock.bootstrap.snapshot.mailboxes.home;
+    });
+    await shellReady();
+    await user.keyboard("g");
+    expect(rows().map(([k]) => k)).toEqual(["gm", "gj / gk", "gg / G", "gr", "go"]);
+  });
+
   it("Space lists the view family", async () => {
     const { user } = renderApp();
     await shellReady();

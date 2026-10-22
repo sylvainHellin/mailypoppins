@@ -216,6 +216,8 @@ describe("V in the Calendar view", () => {
     const { user } = renderApp();
     await shellReady();
     await user.keyboard("ga");
+    await screen.findByRole("dialog", { name: "Switch account" });
+    await user.keyboard("2");
     await user.keyboard(" a");
     const agenda = await screen.findByRole("listbox", { name: "Agenda" });
     await within(agenda).findByRole("option", { name: /Dentist/ });

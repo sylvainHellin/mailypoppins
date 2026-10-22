@@ -112,6 +112,8 @@ describe("the New invitation form", () => {
     const { user } = renderApp();
     await shellReady();
     await user.keyboard("ga");
+    await screen.findByRole("dialog", { name: "Switch account" });
+    await user.keyboard("2");
     await user.keyboard(":");
     await user.keyboard("New invitation");
     await user.keyboard("{Enter}");

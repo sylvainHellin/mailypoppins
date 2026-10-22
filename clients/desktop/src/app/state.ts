@@ -191,6 +191,7 @@ export type Overlay =
   | "device_code"
   | "compose_leave"
   | "server_search"
+  | "account_picker"
   | null;
 
 /**
@@ -758,6 +759,12 @@ export type AppState = {
    */
   searchSeq: number;
   sidebarCursor: { account: string; slug: string } | null;
+  /**
+   * The sidebar's hand-set expansion per account name, for the session only
+   * (ticket 0147): an account with no entry is expanded while it is selected and
+   * collapsed otherwise (`accountExpanded`).
+   */
+  sidebarExpanded: Record<string, boolean>;
   focus: Pane;
   /** Moves whenever the DOM focus should follow `focus` (keyboard-driven). */
   focusSeq: number;
@@ -953,6 +960,7 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     search: null,
     searchSeq: 0,
     sidebarCursor: null,
+    sidebarExpanded: {},
     focus: "list",
     focusSeq: 0,
     history: [],
@@ -1066,6 +1074,11 @@ export const readerKey = (account: string, rowId: number): string => `${account}
 export function accountNames(s: AppState): string[] {
   if (s.accounts.data) return s.accounts.data.map((a) => a.name);
   return s.bootstrap?.snapshot.accounts.map((a) => a.name) ?? [];
+}
+
+/** Whether the sidebar shows the account's mailboxes: a hand toggle, else only the selected account. */
+export function accountExpanded(s: AppState, account: string): boolean {
+  return s.sidebarExpanded[account] ?? account === s.selection.account;
 }
 
 /** An account's mailboxes: the listing once loaded, else the snapshot's rows. */

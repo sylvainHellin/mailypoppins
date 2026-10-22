@@ -171,7 +171,7 @@ describe("the Calendar view's model", () => {
   });
 
   it("follows the selection's account while it shows, and carries the scope over", () => {
-    let s = run(inCalendar(), { type: "calendar_toggle_past" }, { type: "next_account" });
+    let s = run(inCalendar(), { type: "calendar_toggle_past" }, { type: "select_account", account: "home" });
     expect(s.view).toBe("calendar");
     expect(s.calendarView).toMatchObject({ account: "home", cursor: null, showPast: true });
     expect(isStale(s.calendar.home)).toBe(true);

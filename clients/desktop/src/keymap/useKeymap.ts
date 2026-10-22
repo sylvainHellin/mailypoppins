@@ -10,7 +10,7 @@
 import { useEffect, useRef, type Dispatch } from "react";
 import { flushSync } from "react-dom";
 import type { Action } from "@/app/reducer";
-import { conversationDraft, draftsShown, liveHolds, screenFor, type AppState } from "@/app/state";
+import { accountNames, conversationDraft, draftsShown, liveHolds, screenFor, type AppState } from "@/app/state";
 import { hiddenNotice } from "@/app/views";
 import { FILTER_INPUT_ID, HALF_PAGE, PAGE, READER_SCROLL_ID, runAction } from "@/app/actions";
 import { CONTACTS_SEARCH_ID } from "@/app/contacts";
@@ -108,7 +108,7 @@ const MAIL_COMBOS: Record<string, ActionId> = {
   gm: "focus_sidebar",
   // Desktop only: the TUI reaches its body pane by Tab alone, and has no `gr`.
   gr: "focus_reader",
-  ga: "next_account",
+  ga: "open_account_picker",
   // Desktop only: the TUI has no outbox view, and no `go`.
   go: "open_outbox",
   gj: "next_message",
@@ -162,6 +162,8 @@ export function prefixRuns(s: AppState, combo: string): ActionId | null {
   const id = resolvePrefix(s, combo);
   if (id === null || id === "notice") return null;
   if (hiddenNotice(s, id)) return null;
+  // With one account the picker has nothing to offer, as the TUI's guard says.
+  if (id === "open_account_picker" && accountNames(s).length < 2) return null;
   if (DRAFTS_ONLY.has(id) && !draftsShown(s) && !(DRAFT_MEMBER_TOO.has(id) && conversationDraft(s))) return null;
   return id;
 }

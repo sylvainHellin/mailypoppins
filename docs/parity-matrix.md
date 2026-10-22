@@ -148,7 +148,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: the global arguments `-A/--account`, `-s/--signature`, `--no-signature` in `src/main.rs` (`no_signature`, `src/main.rs:41`), `src/signatures.rs`
 - Daemon surface: an account parameter on every domain method, `signature.list`, `state.bootstrap`
-- GUI location: clients/desktop: the sidebar lists every account, and `ga` or a mailbox chosen in it selects the active account (M1, #0129); a new draft's signature is chosen in the `cn` wizard's Signature select, filled from `signature_list` with the account's default preselected and "none" last (M3, #0131)
+- GUI location: clients/desktop: the sidebar lists every account, the selected one expanded, and the `ga` account picker or a mailbox chosen in the sidebar selects the active account (M1, #0129; #0147); a new draft's signature is chosen in the `cn` wizard's Signature select, filled from `signature_list` with the account's default preselected and "none" last (M3, #0131)
 - Validation: `tests/cli_help_snapshot.rs` pins the global arguments; `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`), `clients/desktop/src/components/compose/compose.test.tsx` (`has the TUI's fields, the default signature preselected, and a none option`, `none carries no signature`)
 - Status: GUI shipped (M1, #0129) for the account selector and (M3, #0131) for a new draft's signature; a reply or a forward has no signature choice, since `draft.reply` and `draft.forward` take no signature argument
 - Note: the GUI equivalent is the active-account selector plus a per-composition signature choice.
@@ -201,8 +201,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Classification: GUI parity
 - Source anchor: TUI `j/k` and `Enter` (`clients/tui/src/app/keymap.rs:636`), `gm` (`clients/tui/src/app/keymap.rs:590`), `clients/tui/src/ui/sidebar.rs`
 - Daemon surface: `state.bootstrap` mailbox summaries, `message.list_stream` on selection (#0138)
-- GUI location: clients/desktop: the sidebar lists each account's mailboxes, `gm` focuses it, `j`/`k` move its cursor, and Enter or a click opens the mailbox with the cursor on its top row, as the TUI's `switch_mailbox` does (M1, #0129; PERSO-94)
-- Validation: TUI golden frames under `clients/tui/src/`; `clients/desktop/src/app/reducer.test.ts` (`puts the cursor on the top row of a mailbox once its list lands`), `clients/desktop/src/keymap/keymap.test.tsx` (`the sidebar cursor moves with j and Enter opens the mailbox`), `clients/desktop/src/components/shell/a11y.test.tsx` (`marks the selected mailbox as the current page`)
+- GUI location: clients/desktop: the sidebar lists the mailboxes of the selected account and of any account expanded by a click on its header, the others collapsed to one header row with the inbox's unread count (#0147); `gm` focuses it, `j`/`k` move its cursor, and Enter or a click opens the mailbox with the cursor on its top row, as the TUI's `switch_mailbox` does (M1, #0129; PERSO-94)
+- Validation: TUI golden frames under `clients/tui/src/`; `clients/desktop/src/app/reducer.test.ts` (`puts the cursor on the top row of a mailbox once its list lands`, `walks the sidebar cursor over the expanded accounts only`), `clients/desktop/src/components/sidebar/accountPicker.test.tsx` (`starts with only the selected account expanded, and a header click toggles one without selecting it`), `clients/desktop/src/keymap/keymap.test.tsx` (`the sidebar cursor moves with j and Enter opens the mailbox`), `clients/desktop/src/components/shell/a11y.test.tsx` (`marks the selected mailbox as the current page`)
 - Status: GUI shipped (M1, #0129)
 
 ### MBX-03 Jump to a mailbox by digit 1 through 9
@@ -217,11 +217,11 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MBX-04 Switch account
 
 - Classification: GUI parity
-- Source anchor: TUI `ga` (`clients/tui/src/app/keymap.rs:591`), guarded by `Guard::MultiAccount` so it appears only with more than one configured account
+- Source anchor: TUI `ga`, the KEYMAP row of `KeyAction::SwitchAccount` in `clients/tui/src/app/keymap.rs`, guarded by `Guard::MultiAccount` so it appears only with more than one configured account; it opens the account picker, `Overlay::Account` (#0147)
 - Daemon surface: `account.list`, a second `state.bootstrap`
-- GUI location: clients/desktop: `ga` selects the next account and opens its inbox, and a mailbox chosen in the sidebar selects the account it belongs to (M1, #0129)
-- Validation: TUI golden frames; `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`)
-- Status: GUI shipped (M1, #0129)
+- GUI location: clients/desktop: `ga` and the palette's "Switch account" open the account picker, which lists every account with its inbox's unread count; `j`/`k` move, Enter switches and opens the account's inbox, `1` to `9` switch directly, Escape and `q` cancel; a mailbox chosen in the sidebar selects the account it belongs to (M1, #0129; #0147)
+- Validation: TUI golden frame `golden_account_picker` and the account picker tests in `clients/tui/src/app/keys.rs`; `clients/desktop/src/app/reducer.test.ts` (`keeps a choice made between a failed list_accounts and its retry`, `stays with the user's account across a later re-bootstrap`, `open_account_picker opens the overlay with two accounts and is a no-op with one`), `clients/desktop/src/components/sidebar/accountPicker.test.tsx`
+- Status: GUI shipped (M1, #0129; picker #0147)
 
 ### MBX-05 Switch between the Mail, Contacts, and Calendar views
 
@@ -1474,9 +1474,8 @@ The source anchors below are the entry points the plan created; the daemon, the 
 ## Anchor corrections
 
 Every anchor above was resolved against the tree at `f8af44b`.
-Four moved or were imprecise in the plan's inventory and are corrected here.
+Three moved or were imprecise in the plan's inventory and are corrected here.
 
-- `MBX-04`: `clients/tui/src/app/keymap.rs:592` is a section comment; the `ga` binding is at line 591.
 - `ACC-11`: the `{{SIGNATURE}}` marker is not in `src/signatures.rs`; the splice and strip logic lives at `src/send.rs:185-268`, with the preview substitution at `clients/tui/src/ui/preview.rs:71`.
   `src/signatures.rs` holds the file and default lookup only.
 - `MSG-08`: `queue_mark_open_read` is defined at `clients/tui/src/app/mod.rs:1230`; `clients/tui/src/app/keys.rs` calls it (lines 322 and 336), which is what the inventory's wording describes.

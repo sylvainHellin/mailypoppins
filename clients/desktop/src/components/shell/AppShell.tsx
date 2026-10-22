@@ -14,6 +14,7 @@ import { ComposeWizard } from "@/components/compose/ComposeWizard";
 import { ComposeLeaveDialog } from "@/components/compose/ComposeLeaveDialog";
 import { TerminalHost, TerminalSlotProvider } from "@/components/compose/TerminalHost";
 import { AttachmentsDialog } from "@/components/attachments/AttachmentsDialog";
+import { AccountPicker } from "@/components/sidebar/AccountPicker";
 import { RsvpDialog } from "@/components/calendar/RsvpDialog";
 import { NewInvitationDialog } from "@/components/calendar/NewInvitationDialog";
 import { ServerSearchDialog } from "@/components/search/ServerSearchDialog";
@@ -119,6 +120,7 @@ export function AppShell() {
       />
       <ComposeWizard dialog={s.overlay === "compose" ? s.composeDialog : null} onOpenChange={close} />
       <AttachmentsDialog dialog={s.overlay === "attachments" ? s.attachDialog : null} onOpenChange={close} />
+      <AccountPicker open={s.overlay === "account_picker"} onOpenChange={close} />
       <RsvpDialog dialog={s.overlay === "rsvp" ? s.rsvpDialog : null} onOpenChange={close} />
       <NewInvitationDialog dialog={s.overlay === "invite" ? s.inviteDialog : null} onOpenChange={close} />
       <ServerSearchDialog dialog={s.overlay === "server_search" ? s.serverSearchDialog : null} onOpenChange={close} />

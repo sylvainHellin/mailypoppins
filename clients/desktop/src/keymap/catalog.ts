@@ -20,7 +20,7 @@ export type ActionId =
   | "toggle_help"
   | "toggle_zoom"
   | "open_palette"
-  | "next_account"
+  | "open_account_picker"
   | "next_message"
   | "prev_message"
   | "open_message"
@@ -143,7 +143,7 @@ const BY_ACTION: Record<string, Binding> = {
   "New draft": { id: "new_draft" },
   "Manage signatures": { id: "manage_signatures" },
   "Go to mailboxes (sidebar)": { id: "focus_sidebar" },
-  "Switch account": { id: "next_account" },
+  "Switch account": { id: "open_account_picker" },
   "Quick sync": { id: "quick_sync" },
   "Full sync": { id: "full_sync" },
   "Activity log overlay": { id: "activity_log" },
