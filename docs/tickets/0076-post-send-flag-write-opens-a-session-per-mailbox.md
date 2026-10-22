@@ -77,7 +77,7 @@ Both directions landed, because direction 2 needs a server op and the cheapest c
 - **The op.** `ServerOp::SetAnswered { message_id, mailboxes, answered }` (`src/ops.rs`), kind `set_answered`, the one multi-mailbox op: a source is one store row per mailbox and the same server message in each, so naming the list lets the drain write them all over a single session.
   `imap_client::add_flag_in_mailboxes` (`src/imap_client/batch.rs`) is that session: open once, SELECT/SEARCH/`UID STORE +FLAGS` per folder, logout.
   Idempotent (`+FLAGS` on a flag that may already be set is a no-op) and not-found tolerant per folder, so a crash replay converges; the drain's typed `NotFoundOnServer` convergence covers the rest.
-  Graph enqueues nothing at all: the send path passes an empty mailbox list, and the Graph arm of `run_op` is a logged `Ok` for safety.
+  Graph enqueued nothing at first; PERSO-171 gave it the same op (see the Graph section below).
 - **The rollback is `Rollback::None`, and that is the considered answer.** The answered bit records something that happened: the reply left the building. A server that refuses the `UID STORE` does not make that untrue, so rolling the local bit back would replace a true statement the next sync can correct with a false one. This is also the one op kind whose local half is written on the tail of a delivered send, so an automatic undo there is the last thing wanted. Convergence is the sync, which restates every flag the server holds over the whole window.
 - **The send path.** `send::mark_source_after_send` now reads the source's rows, deduplicates their server folders (`server_mailboxes_of`) and calls `pending_ops::apply_post_send_flag`, which commits the local flag on every copy and the single op in one transaction. No IMAP session is opened on the send path at all; the cost is one `COMMIT`. Every error is still logged and swallowed, the function still returns `()`, and the enqueue happens strictly after delivery and touches no `outbox` row, so the #0063 exactly-once submission marker is untouched by this path.
 
@@ -86,6 +86,22 @@ Both directions landed, because direction 2 needs a server op and the cheapest c
 - One IMAP session for a source held in N mailboxes: `pending_ops::a_post_send_flag_writes_every_copy_and_queues_one_op` pins two folders on one op; `send::the_server_mailbox_list_is_deduplicated` pins the dedup.
 - A send cannot be failed, delayed or retried by the flag write: `pending_ops::a_refused_post_send_flag_never_re_sends_the_message` drives the flag op past its retry budget after a recorded submission and asserts the outbox row keeps its terminal state, `sweep_pending_sends` finds nothing resubmittable, the answered bit stands and the refusal is visible as a `failed` queue row.
 - `a_post_send_flag_replay_converges` pins the crash replay.
+
+### Graph (PERSO-171, 2026-10-22)
+
+A Graph send now queues the same `set_answered` op, with the source's server folders on it for the record.
+The Graph arm of `run_op` writes the three MAPI properties Outlook keeps the history in, on every server copy of the source the Message-ID lookup returns (`graph::mark_last_verb_graph`): `PidTagLastVerbExecuted` (Integer 0x1081: 102 reply, 103 reply all, 104 forward), `PidTagLastVerbExecutionTime` (SystemTime 0x1082, now) and `PidTagIconIndex` (Integer 0x1080: 261 replied, 262 forwarded).
+The op carries a `reply_all` field, absent from older payloads and read as a plain reply; the draft does not record which command built it, so `send::answers_all` calls a reply with more than one address across To and Cc a reply to all.
+A source the mailbox no longer holds is the typed not-found the drain converges on; any other failure is retried and parked like every op, after the send has already returned.
+
+Live test on the EVOQS account, 2026-10-22, on the PERSO-144 "threading 1" message (`<n4i1gRvEJODGF3OdGpBWDokFERSMj7jdt67q@...>`, an Inbox and an Archive copy) with `examples/graph_answered_probe.rs`:
+
+- Read before: HTTP 200, neither the message nor its reply carried any of the three properties.
+- PATCH of all three on the Inbox copy: HTTP 200.
+- Read back: HTTP 200, `0x1081` = 102, `0x1082` = the PATCH time, `0x1080` = 261.
+- `mark_last_verb_graph(Reply)` through the library: both copies written and read back the same.
+
+Whether Outlook on the web then draws the replied arrow was not checked.
 
 ### Known gap N5 unchanged
 

@@ -9,10 +9,15 @@
 //! access token through the cached OAuth2 token, the path the daemon takes.
 //! Every message carrying the given Message-ID is read (all folders); with
 //! `--patch <folder-name>` the copy in that folder is written to "replied"
-//! (102, now, 261) and read back. It opens no store and takes no engine lock.
+//! (102, now, 261) by hand and read back, and with `--library-reply` every
+//! copy is written through [`mailypoppins::graph::mark_last_verb_graph`], the
+//! daemon's own path. `--listing <folder>` writes nothing: it measures what
+//! the folder enumeration and the delta answer when asked for 0x1081. It
+//! opens no store and takes no engine lock, so it runs beside a live daemon.
 //!
 //! ```text
-//! cargo run --example graph_answered_probe -- <account> <message-id> [--patch <folder-name>]
+//! cargo run --example graph_answered_probe -- <account> <message-id> [--patch <folder-name> | --library-reply]
+//! cargo run --example graph_answered_probe -- <account> --listing [folder]
 //! ```
 
 use anyhow::{anyhow, bail, Context, Result};

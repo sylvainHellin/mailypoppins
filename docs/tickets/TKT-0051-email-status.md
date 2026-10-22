@@ -26,7 +26,8 @@ The axis below is therefore separate state and `EmailStatus` stays as #0064 left
 - **No schema bump.** The column is already `TEXT` and sync pass 1 restates the flags of the whole window on every pass, so a store written by an older build heals itself on the next sync.
   A bump would have cost every user a full re-download for a column that was already there.
 - **Server is truth, per backend.** IMAP states the whole flag set, so `ingest::apply_flags` writes what the server listed: a reply undone in another client comes back as undone here.
-  Graph answers `isRead` and nothing else (answered lives in extended MAPI properties), so `ingest::apply_seen_flags` merges only that bit and cannot erase the other two.
+  Graph has no answered flag; Outlook keeps the last reply or forward in the MAPI property `PidTagLastVerbExecuted`, which only holds the last verb.
+  `ingest::apply_graph_flags` (PERSO-171) therefore replaces the read bit and only ever adds the answered and forwarded bits, so it cannot erase one.
   That asymmetry is deliberate and is the reason the two entry points exist.
 - **Automatic update on send, not on draft creation.** A reply draft records `in_reply_to:` and a forward records `forwarded_from:` (the source's `Message-ID`); `send::mark_source_after_send` reads one of them after a successful submission, flags every local copy of the source, then issues `UID STORE +FLAGS` per mailbox.
   Marking at draft creation would claim an answer for a draft that is abandoned.
@@ -47,6 +48,14 @@ The axis below is therefore separate state and `EmailStatus` stays as #0064 left
 - `EmailFrontmatter::{in_reply_to, forwarded_from}`, written by the reply and forward builders, read once by the post-send hook.
 - `imap_client::add_flag_on_server`, the `+FLAGS` write.
 - TUI marker column with the precedence above (`tui/ui/list.rs::status_marker`).
+
+## Graph history (PERSO-171, 2026-10-22)
+
+- Graph sync reads `PidTagLastVerbExecuted` (Integer 0x1081) as an expanded extended property: 102 and 103 set `\Answered`, 104 sets `$Forwarded`, any other verb sets nothing.
+- The by-id download and server search carry it in the same `$expand` as the PERSO-147 threading properties (`graph::MESSAGE_EXPAND`), so a message replied to in Outlook lands answered.
+- The folder enumeration that restates `isRead` carries it alone (`graph::LAST_VERB_EXPAND`), about 6 bytes a message on the EVOQS inbox, so a held row turns answered on the next enumeration.
+- `/messages/delta` refuses any `$expand` (HTTP 400), so a quick pass that walks the delta does not see a reply made in Outlook; the next full enumeration does, which runs on a manual full sync, on a delta that reports a removal, and when a delta token is dropped.
+- The send half is in [#0076](0076-post-send-flag-write-opens-a-session-per-mailbox.md): a Graph send writes the same property on the server.
 
 ## Verification
 

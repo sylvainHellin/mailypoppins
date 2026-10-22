@@ -178,7 +178,6 @@ Settled deferrals for the daemon migration, recorded here because the Phase 0 ga
 - [#0063 Send durability gaps, Graph half](docs/tickets/0063-send-durability-gaps.md) -- bug _(the SMTP halves shipped; scope item 3, resumable Graph `pending_send` rows, waits with the backend)_
 - Graph sends over the `sendMail` size limit lose threading -- bug _(a message whose base64 MIME exceeds `MIME_SEND_MAX_BASE64_BYTES`, 3.5 MB, falls back to the JSON payload, which carries no In-Reply-To, References or our Message-ID; `createReply`, or a MIME draft plus upload sessions for the attachments, would keep them; PERSO-144 follow-up)_
 - Gmail rows without usable headers do not thread by `X-GM-THRID` -- feature _(the Graph half of PERSO-147 shipped; the Gmail half needs an `async-imap` accessor for the attribute and waits for a Gmail account; see step 7 of [#0142](docs/tickets/0142-conversation-list.md))_
-- After a Graph reply the answered flag stays local -- bug _(PERSO-171; the send path enqueues no server op and Graph sync reads only `isRead`; the MAPI `PidTagLastVerbExecuted` extended property is the candidate, unverified)_
 - Graph search returns at most 1000 hits with no notice -- bug _(`search_messages` reads one page and clamps `$top` to 1000, so `--limit 2500` quietly returns 1000; page through `@odata.nextLink` or print a note; PERSO-173 review)_
 
 The parity half of [#0059](docs/tickets/0059-syncbackend-trait.md) is parked with it: the trait and the engine shipped, but `graph.rs` still runs its own loop rather than being a second `SyncBackend`.

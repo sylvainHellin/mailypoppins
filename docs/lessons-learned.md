@@ -2828,3 +2828,11 @@ The script now passes `StrictHostKeyChecking=accept-new`: a first connection rec
 Exchange gives every file attachment a `contentId`, a PDF included, so a content id is no sign of an inline part; what marks one is the HTML body naming it by `cid:` URL.
 Graph's `hasAttachments` is false for a message whose only attachments are inline (lesson of 88342da1), so a fix that marks stored attachments cannot reach those rows: they have none, and need their attachment list fetched with content.
 A Gmail forward of an Outlook mail can carry an `image007.png` whose content id no longer matches the `cid:image007.png@...` its HTML references; it stays a listed attachment, and nothing renders it inline in any client either.
+
+## Exchange accepts Outlook's reply and forward properties through a Graph PATCH, and the delta cannot read them (PERSO-171, 2026-10-22)
+
+Graph has no answered flag, but `PATCH /me/messages/{id}` with `singleValueExtendedProperties` setting `Integer 0x1081` (`PidTagLastVerbExecuted`, 102 reply, 103 reply all, 104 forward), `SystemTime 0x1082` (`PidTagLastVerbExecutionTime`, an ISO 8601 UTC string) and `Integer 0x1080` (`PidTagIconIndex`, 261 replied, 262 forwarded) returns HTTP 200 on Exchange Online with the `Mail.ReadWrite` scope, and a read-back returns all three unchanged; measured on the EVOQS account.
+An integer property's value goes in and comes back as a JSON string (`"102"`), and a message Outlook never replied to carries no `singleValueExtendedProperties` key at all.
+The folder listing accepts `$expand=singleValueExtendedProperties($filter=id eq 'Integer 0x1081')` beside `$orderby`, for 1.2 KB more on a 200-message page of 74 KB, and one `$filter` may mix `String` and `Integer` property ids.
+`/messages/delta` refuses this `$expand` with the same HTTP 400 as the threading properties, so a delta pass cannot see a reply made in Outlook; only a full enumeration or a download can.
+The property holds the last verb alone, so a forward after a reply reads 104, and a sync that let it clear `\Answered` would erase a true reply: the merge only ever adds a history bit.
