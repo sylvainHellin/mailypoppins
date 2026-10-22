@@ -1,71 +1,97 @@
 <script lang="ts">
-  // The three clients of the one daemon, as tabs. Every panel is in the
-  // server-rendered HTML; the tabs only toggle which one shows.
+  // The clients, one at a time in a window frame, picked with a segmented
+  // switch. The view advances on its own every few seconds: a CSS progress
+  // bar runs for INTERVAL and its animationend moves to the next client.
+  // Hovering or focusing the block pauses the bar, a click on the switch
+  // stops the rotation, and prefers-reduced-motion removes the animation,
+  // so no animationend fires and nothing rotates.
+  // Every panel sits in the same grid cell, so the frame keeps the height of
+  // the tallest one and the page does not jump when the view changes.
   interface Props {
     hasDesktopShot: boolean;
   }
 
   let { hasDesktopShot }: Props = $props();
 
-  const tabs = [
-    { id: 'tui', label: 'Terminal', caption: 'Mailboxes, list and reader in three panes, driven by Vim keys, over SSH as well.' },
-    { id: 'cli', label: 'Command line', caption: 'Every action is a command, for your scripts and for your agent.' },
+  const INTERVAL_S = 8;
+
+  const clients = [
+    { id: 'tui', label: 'Terminal app', caption: 'Mailboxes, the message list and the reader sit side by side. The app also runs over SSH.' },
+    { id: 'cli', label: 'Command line', caption: 'Search, reply, edit and send from the shell. Scripts and agents use these commands too.' },
     ...(hasDesktopShot
-      ? [{ id: 'desktop', label: 'Mac app', caption: 'A native window with the same keys and a real Neovim for each draft.' }]
+      ? [{ id: 'desktop', label: 'Mac app', caption: 'The Mac app uses the same keys as the terminal app and opens each draft in Neovim.' }]
       : []),
   ];
 
   let active = $state('tui');
+  let rotating = $state(true);
+  let paused = $state(false);
 
-  function onKey(event: KeyboardEvent, index: number) {
-    const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
-    if (!step) return;
-    event.preventDefault();
-    const next = tabs[(index + step + tabs.length) % tabs.length];
-    active = next.id;
-    document.getElementById(`tab-${next.id}`)?.focus();
+  function pick(id: string) {
+    active = id;
+    rotating = false;
+  }
+
+  function advance() {
+    const i = clients.findIndex((c) => c.id === active);
+    active = clients[(i + 1) % clients.length].id;
   }
 </script>
 
-<div class="clients">
+<div
+  class="clients"
+  role="group"
+  aria-label="The mailypoppins clients"
+  onpointerenter={() => (paused = true)}
+  onpointerleave={() => (paused = false)}
+  onfocusin={() => (paused = true)}
+  onfocusout={() => (paused = false)}
+>
+  <fieldset class="switch">
+    <legend class="visually-hidden">Show a client</legend>
+    {#each clients as c (c.id)}
+      <label class="seg" class:on={active === c.id}>
+        <input
+          type="radio"
+          name="client"
+          value={c.id}
+          checked={active === c.id}
+          onchange={() => pick(c.id)}
+        />
+        <span class="seg-label">{c.label}</span>
+        {#if rotating && active === c.id}
+          {#key active}
+            <span
+              class="seg-progress"
+              class:paused
+              style={`animation-duration: ${INTERVAL_S}s`}
+              onanimationend={advance}
+              aria-hidden="true"
+            ></span>
+          {/key}
+        {/if}
+      </label>
+    {/each}
+  </fieldset>
+
   <div class="frame">
-    <div class="bar">
-      <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-      <div class="tablist" role="tablist" aria-label="Clients">
-        {#each tabs as tab, i (tab.id)}
-          <button
-            id={`tab-${tab.id}`}
-            role="tab"
-            class="tab"
-            aria-selected={active === tab.id}
-            aria-controls={`panel-${tab.id}`}
-            tabindex={active === tab.id ? 0 : -1}
-            onclick={() => (active = tab.id)}
-            onkeydown={(e) => onKey(e, i)}
-          >
-            {tab.label}
-          </button>
-        {/each}
-      </div>
+    <div class="bar" aria-hidden="true">
+      <span class="dots"><i></i><i></i><i></i></span>
+      <span class="title">{clients.find((c) => c.id === active)?.label}</span>
     </div>
 
-    {#each tabs as tab (tab.id)}
-      <div
-        id={`panel-${tab.id}`}
-        role="tabpanel"
-        aria-labelledby={`tab-${tab.id}`}
-        class="panel"
-        hidden={active !== tab.id}
-      >
-        {#if tab.id === 'tui'}
-          <img
-            src="/tui-screenshot.png"
-            alt="The terminal client: mailboxes, message list and reading pane"
-            width="2496"
-            height="1356"
-            loading="lazy"
-          />
-        {:else if tab.id === 'cli'}
+    <div class="stack" aria-live={rotating ? 'off' : 'polite'}>
+      {#each clients as c (c.id)}
+        <div class="panel" class:shown={active === c.id} aria-hidden={active !== c.id}>
+          {#if c.id === 'tui'}
+            <img
+              src="/tui-screenshot.png"
+              alt="The terminal app: mailboxes, message list and reading pane"
+              width="2496"
+              height="1356"
+              loading="lazy"
+            />
+          {:else if c.id === 'cli'}
 <pre class="term" aria-label="A command-line session"><span class="p">$</span> mp search --local 'from:ada invoice'
 <span class="dim">"from:ada invoice" in work (1 hit):</span>
 <span class="dim">────────────────────────────────────────────────────────</span>
@@ -84,21 +110,123 @@ mp://work/drafts/3f9c27a1d4e8b605
 
 <span class="p">$</span> mp mark-approved mp://work/drafts/3f9c27a1d4e8b605
 <span class="p">$</span> mp send mp://work/drafts/3f9c27a1d4e8b605</pre>
-        {:else}
-          <img
-            src="/desktop-screenshot.png"
-            alt="The Mac app: sidebar, message list and reader"
-            loading="lazy"
-          />
-        {/if}
-      </div>
-    {/each}
+          {:else}
+            <img
+              src="/desktop-screenshot.png"
+              alt="The Mac app: sidebar, message list and reader"
+              loading="lazy"
+            />
+          {/if}
+        </div>
+      {/each}
+    </div>
   </div>
 
-  <p class="caption">{tabs.find((t) => t.id === active)?.caption}</p>
+  <p class="caption">{clients.find((c) => c.id === active)?.caption}</p>
 </div>
 
 <style>
+  .switch {
+    display: flex;
+    width: fit-content;
+    margin: 0 auto var(--space-6);
+    padding: 4px;
+    gap: 4px;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    background: var(--color-surface);
+  }
+
+  .seg {
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border-radius: 999px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease;
+  }
+
+  .seg:hover {
+    color: var(--color-text);
+  }
+
+  /* A radio dot, so the control reads as a choice of one. */
+  .seg input {
+    appearance: none;
+    margin: 0;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1.5px solid currentColor;
+    display: grid;
+    place-content: center;
+    cursor: pointer;
+  }
+
+  .seg input::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-cta);
+    transform: scale(0);
+    transition: transform 0.15s ease;
+  }
+
+  .seg input:checked::before {
+    transform: scale(1);
+  }
+
+  .seg input:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  .seg.on {
+    background: var(--color-code-header);
+    color: #f4f1e8;
+  }
+
+  .seg.on input {
+    border-color: var(--color-cta);
+  }
+
+  /* Inset from the rounded ends, so the whole run stays visible. */
+  .seg-progress {
+    position: absolute;
+    left: var(--space-4);
+    right: var(--space-4);
+    bottom: 4px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--color-cta);
+    transform-origin: left;
+    animation-name: fill;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;
+  }
+
+  .seg-progress.paused {
+    animation-play-state: paused;
+  }
+
+  @keyframes fill {
+    from { transform: scaleX(0); }
+    to { transform: scaleX(1); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .seg-progress {
+      display: none;
+    }
+  }
+
   .frame {
     border: 1px solid var(--color-code-border);
     border-radius: 10px;
@@ -108,9 +236,10 @@ mp://work/drafts/3f9c27a1d4e8b605
   }
 
   .bar {
+    position: relative;
     display: flex;
-    align-items: stretch;
-    gap: var(--space-4);
+    align-items: center;
+    height: 2.25rem;
     padding: 0 var(--space-4);
     background: var(--color-code-header);
     border-bottom: 1px solid var(--color-code-border);
@@ -118,7 +247,6 @@ mp://work/drafts/3f9c27a1d4e8b605
 
   .dots {
     display: flex;
-    align-items: center;
     gap: 6px;
   }
 
@@ -129,47 +257,44 @@ mp://work/drafts/3f9c27a1d4e8b605
     background: rgba(244, 241, 232, 0.2);
   }
 
-  .tablist {
-    display: flex;
-    gap: var(--space-1);
-  }
-
-  .tab {
-    font: inherit;
-    font-size: 0.875rem;
-    font-weight: 500;
-    padding: var(--space-3) var(--space-3);
-    border: 0;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-    background: none;
+  .title {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 0.8125rem;
     color: var(--color-code-label);
-    cursor: pointer;
   }
 
-  .tab:hover {
-    color: #f4f1e8;
+  .stack {
+    display: grid;
   }
 
-  .tab[aria-selected='true'] {
-    color: #f4f1e8;
-    border-bottom-color: var(--color-cta);
+  .panel {
+    grid-area: 1 / 1;
+    align-self: center;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.35s ease, visibility 0s linear 0.35s;
   }
 
-  .tab:focus-visible {
-    outline-offset: -2px;
-  }
-
-  .caption {
-    text-align: center;
-    color: var(--color-text-muted);
-    margin: var(--space-4) 0 0;
+  .panel.shown {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 0.35s ease;
   }
 
   .panel img {
     display: block;
     width: 100%;
     height: auto;
+  }
+
+  .caption {
+    text-align: center;
+    color: var(--color-text-muted);
+    margin: var(--space-4) auto 0;
+    max-width: 40rem;
+    min-height: 3.2em;
   }
 
   .term {
@@ -196,8 +321,8 @@ mp://work/drafts/3f9c27a1d4e8b605
       padding: var(--space-4);
     }
 
-    .dots {
-      display: none;
+    .seg {
+      padding: var(--space-2) var(--space-3);
     }
   }
 </style>

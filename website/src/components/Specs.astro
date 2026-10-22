@@ -3,27 +3,27 @@
 const specs = [
   {
     term: 'Platforms',
-    detail: 'The Mac app runs on Apple silicon. The terminal app and the command line run on macOS (Apple silicon) and Linux (x86_64).',
+    detail: 'The Mac app runs on Apple silicon. The terminal app and the command line run on macOS and on Linux (x86_64).',
   },
   {
     term: 'Accounts',
-    detail: 'IMAP and SMTP with any provider, Gmail and Proton Mail Bridge included. Microsoft 365 over OAuth2, or the Graph API where a tenant blocks IMAP.',
+    detail: 'Any IMAP and SMTP provider works, including Gmail and Proton Mail Bridge. Microsoft 365 connects over OAuth2, or through the Graph API where a tenant blocks IMAP.',
   },
   {
     term: 'Calendar',
-    detail: 'Sends meeting invitations and answers the ones you receive, as standard iMIP messages.',
+    detail: 'mailypoppins sends meeting invitations and answers the ones you receive. Both use the standard iMIP format.',
   },
   {
     term: 'Storage',
-    detail: 'Drafts are Markdown files with YAML frontmatter. Received mail sits in a local SQLite store with full-text search, readable offline.',
+    detail: 'Drafts are Markdown files with YAML frontmatter. Received mail is stored in a local SQLite database with full-text search. You can read and search it offline.',
   },
   {
     term: 'Automation',
-    detail: 'JSON output for listing, search and show, IMAP IDLE for new mail, and hooks that run your command when a matching message arrives.',
+    detail: '<code>mp list</code>, <code>mp search</code> and <code>mp show</code> print JSON with <code>--json</code>. IMAP IDLE delivers new mail as it arrives. Hooks run your own command when a matching message comes in.',
   },
   {
     term: 'Stack',
-    detail: 'Written in Rust, with ratatui for the terminal app and Tauri for the Mac app. MIT licensed.',
+    detail: 'mailypoppins is written in Rust, with ratatui for the terminal app and Tauri for the Mac app. It is MIT licensed.',
   },
 ];
 ---
@@ -35,7 +35,7 @@ const specs = [
       {specs.map((s) => (
         <div class="item">
           <dt>{s.term}</dt>
-          <dd>{s.detail}</dd>
+          <dd set:html={s.detail} />
         </div>
       ))}
     </dl>

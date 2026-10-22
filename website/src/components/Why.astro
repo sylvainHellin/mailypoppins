@@ -8,15 +8,15 @@ const pillars = [
     points: [
       {
         title: 'Write in your editor',
-        body: 'Every draft is a Markdown file that opens in Vim, Neovim or any modal editor. The Mac app runs Neovim inside its window.',
+        body: 'Every draft is a Markdown file that opens in your <code>$EDITOR</code>, Vim and Neovim included. The Mac app runs Neovim inside its window.',
       },
       {
         title: 'Vim keys throughout',
         body: 'j and k, gg, / and a Space leader move you through mailboxes, threads and drafts.',
       },
       {
-        title: 'Three clients, one behaviour',
-        body: 'The terminal app, the Mac app and the command line drive the same mailbox with the same actions. A change in one shows in the others at once, and the two apps share their keys.',
+        title: 'All clients share one mailbox',
+        body: 'The terminal app, the command line and the Mac app work on the same mailbox. A change made in one appears in the others at once.',
       },
     ],
   },
@@ -27,18 +27,18 @@ const pillars = [
     points: [
       {
         title: 'Context on demand',
-        body: 'It searches your mail for a contact or the history of a thread.',
+        body: 'Your agent searches your whole mail history for the information it needs to help you.',
       },
       {
-        title: 'A second pair of eyes',
-        body: 'It proofreads and reviews your drafts, or writes a first reply when you ask.',
+        title: 'A co-author for your emails',
+        body: 'It proofreads and edits your drafts, or prepares replies for you to review. It edits the draft files themselves, without any copy and paste.',
       },
       {
-        title: 'Nothing slips',
-        body: 'It tells you what you missed and what still waits for your answer.',
+        title: 'Stay updated',
+        body: 'Ask it which emails still wait for your answer.',
       },
     ],
-    note: 'A draft leaves only once you mark it approved.',
+    note: 'mailypoppins sends a draft only after you mark it approved.',
   },
 ];
 ---
@@ -55,7 +55,7 @@ const pillars = [
           {p.points.map((pt) => (
             <li>
               <h3>{pt.title}</h3>
-              <p>{pt.body}</p>
+              <p set:html={pt.body} />
             </li>
           ))}
         </ul>

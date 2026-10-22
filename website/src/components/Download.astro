@@ -10,7 +10,6 @@ const latest = 'https://github.com/sylvainHellin/mailypoppins/releases/latest/do
   <div class="content-wide">
     <header class="start-head">
       <h2 id="start-heading">Get started</h2>
-      <p class="lead">Three steps from download to your inbox.</p>
     </header>
 
     <ol class="steps">
@@ -20,15 +19,15 @@ const latest = 'https://github.com/sylvainHellin/mailypoppins/releases/latest/do
           <h3>Install</h3>
           <div class="options">
             <div class="option">
-              <p>The Mac app, for Apple silicon. It brings its own <code>mp</code> and updates itself.</p>
+              <p>The Mac app runs on Apple silicon, includes <code>mp</code> and updates itself.</p>
               <a class="btn btn-primary" href={`${latest}/mailypoppins-desktop-aarch64-apple-darwin.dmg`}>Download .dmg</a>
-              <p class="note">Not signed yet: allow it once under System Settings, Privacy &amp; Security (<a href="/getting-started/#mac-app">how</a>).</p>
+              <p class="note">The app is not signed yet, so macOS asks you to allow it once in System Settings &gt; Privacy &amp; Security. <a href="/getting-started/#mac-app">The guide shows how</a>.</p>
             </div>
             <div class="option">
-              <p>The terminal app and the command line, on macOS and Linux:</p>
+              <p>Homebrew installs the terminal app and the command line on macOS and Linux:</p>
               <CodeBlock lang="bash" code={`brew tap sylvainHellin/mailypoppins\nbrew install mailypoppins`} />
               <p class="note">
-                Or a binary for
+                You can also download a binary for
                 <a href={`${latest}/mailypoppins-aarch64-apple-darwin.tar.gz`}>macOS arm64</a>,
                 <a href={`${latest}/mailypoppins-x86_64-unknown-linux-gnu.tar.gz`}>Linux x86_64</a> or
                 <a href={`${latest}/mailypoppins-x86_64-unknown-linux-musl.tar.gz`}>Linux x86_64 static</a>.
