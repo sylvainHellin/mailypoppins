@@ -44,3 +44,10 @@ Why: the headers are what IMAP rows and the outbox's own Sent rows thread by, so
 Rejected: `conversationId` as the only signal (Graph and IMAP copies of one conversation would split); `conversationId` first (Exchange groups by its own rules, and a header match is exact); `internetMessageHeaders` (twenty times the payload for the same two values); a schema version bump (drops every store and re-downloads every body).
 Source: PERSO-147 brief from Vera's session, live probe of the EVOQS mailbox on 2026-10-22 (`examples/graph_thread_probe.rs`).
 Status: accepted
+
+## 2026-10-22 - The desktop prefix chord waits 5 s by default for its second key, configurable in Settings
+
+Why: the 1.2 s wait was too short, so a late second key fired its flat action (`a` after `c` archived instead of replying to all); 5 s leaves room for a slow second key while an accidental prefix still lapses on its own. Ticket [#0148](docs/tickets/0148-chord-timeout.md), plan `docs/plans/chord-timeout.md`.
+Rejected: no timeout by default (an accidental prefix keeps the which-key overlay up until Escape; it stays a choice in Settings); 3 s (less room for the second key).
+Source: chat with Sylvain, 2026-10-22.
+Status: accepted

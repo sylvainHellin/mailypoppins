@@ -1,6 +1,6 @@
 ---
 id: 0148
-title: Configurable prefix wait in the desktop app with a longer default
+title: Configurable prefix wait in the desktop app, 5 s by default
 type: feature
 priority: next
 status: open
@@ -16,8 +16,9 @@ The TUI never times out a prefix and is not affected.
 
 ## Plan
 
-[docs/plans/chord-timeout.md](../plans/chord-timeout.md) holds the design, six owner decisions with a recommendation each, three work units, the docs to change and the risks.
-Its Decision 1 sets the default and recommends waiting for the second key, as the TUI does, with 5 s, 3 s and 1.5 s as the other choices, stored in the desktop's localStorage `Prefs`.
+[docs/plans/chord-timeout.md](../plans/chord-timeout.md) holds the design, six owner decisions, three work units, the docs to change and the risks.
+Sylvain settled its Decision 1 on 2026-10-22: the prefix waits 5 s by default for its second key.
+Settings offers "Wait for the next key", 5 s, 3 s and 1.5 s, stored in the desktop's localStorage `Prefs`.
 
 Research:
 
@@ -27,9 +28,9 @@ Research:
 
 ## Acceptance criteria, in short
 
-- The prefix wait is configurable and its default, set by the plan's Decision 1, is longer than today's 1.2 s.
-- With the recommended default, `c`, a pause of any length, then `a` replies to all, and the popup stays up until the second key.
-- Settings has a "Prefix keys" row with four choices that applies at once and survives a restart; a timed choice ends the popup and the prefix together.
+- The prefix wait is configurable in Settings and defaults to 5 s.
+- With the default, `c`, a pause of 4 s, then `a` replies to all; after 5 s without a key the popup closes and the prefix lapses.
+- Settings has a "Prefix keys" row with four choices, 5 s pressed by default, that applies at once and survives a restart; a timed choice ends the popup and the prefix together.
 - Escape over a pending prefix cancels it and does nothing else; a click cancels it.
 - The activity log's `gg` and the TUI are unchanged.
 - `pnpm test` and `pnpm build` pass.
@@ -37,4 +38,4 @@ Research:
 ## Status
 
 Implementation has not started.
-The worker starts from the plan's first work unit, Unit 1 (the wait in `Prefs` and the keymap), proceeding on the plan's recommendations unless Sylvain has overruled one in this ticket.
+The worker starts from the plan's first work unit, Unit 1 (the wait in `Prefs` and the keymap), proceeding on Decision 1 as settled and on the plan's recommendations for the others.
