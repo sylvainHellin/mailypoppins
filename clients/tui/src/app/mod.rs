@@ -2270,27 +2270,6 @@ impl App {
         serde_json::from_value(answer).map_err(|e| format!("reading signature.list: {e}"))
     }
 
-    /// The Markdown block a compose wizard splices for the signature `name`,
-    /// or for the account's default when it names none: the file the daemon
-    /// reads (`signature.read`, after `signature.list` for the default),
-    /// through the conversion the daemon's draft writers apply. `None` when
-    /// there is no such signature or it is empty.
-    pub fn compose_signature_markdown(&self, name: Option<&str>) -> Option<String> {
-        let chosen = match name {
-            Some(name) => name.to_string(),
-            None => self
-                .signature_listing(&self.account_config.name)
-                .ok()
-                .and_then(|listing| listing.default)?,
-        };
-        let file = self
-            .signature_call("signature.read", serde_json::json!({ "name": chosen }))
-            .map_err(|e| log::warn!("[signatures] signature.read for a compose wizard: {e}"))
-            .ok()?;
-        let content = file["content"].as_str()?.trim_end();
-        (!content.is_empty()).then(|| mp_core::config::signature_source_to_markdown(content))
-    }
-
     /// Ask the daemon for the open signatures overlay's listing and apply it,
     /// after the overlay's own change, an `$EDITOR` round trip, or another
     /// client's (`signature.changed`, `signature.removed`).

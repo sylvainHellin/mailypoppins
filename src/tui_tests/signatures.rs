@@ -241,24 +241,6 @@ fn a_cancelled_signature_delete_returns_to_the_list() {
     assert_eq!(overlay(&mut app).names, ["casual", "work"]);
 }
 
-/// A compose wizard's signature block is the daemon's file, the named one or
-/// the account's default, through the draft writers' Markdown conversion.
-#[test]
-fn a_compose_wizard_takes_its_signature_block_from_the_daemon() {
-    let _fx = fixture();
-    let app = app_with_signatures(&["work", "casual"]);
-    crate::signatures::set_default_signature("work", Some("casual")).expect("default");
-    let named = app
-        .compose_signature_markdown(Some("work"))
-        .expect("a block");
-    assert!(named.contains("work"), "{named}");
-    let default = app
-        .compose_signature_markdown(None)
-        .expect("the default's block");
-    assert!(default.contains("casual"), "{default}");
-    assert_eq!(app.compose_signature_markdown(Some("missing")), None);
-}
-
 /// Another client's delete reaches an open overlay: the watcher's
 /// `signature.removed` makes it ask the daemon again.
 #[test]

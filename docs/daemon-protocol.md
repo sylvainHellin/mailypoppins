@@ -737,7 +737,7 @@ The backend is opened on first use rather than at startup, because a first run h
 The daemon watches every account's drafts directory and the signatures directory, so a draft written by `$EDITOR`, by an agent or by the daemon itself reaches every client as an event without anybody asking.
 The watcher is described in [daemon-operations.md](daemon-operations.md); what it produces on the wire is the three kinds below and the snapshot rows above.
 
-The family is the fifteen methods below, all served from protocol 1 and all durable: a draft written half way because its caller hung up is what this family must never produce.
+The family is the sixteen methods below, all served from protocol 1 and all durable: a draft written half way because its caller hung up is what this family must never produce.
 
 | method | kind | params | result |
 |---|---|---|---|
@@ -755,6 +755,7 @@ The family is the fifteen methods below, all served from protocol 1 and all dura
 | `draft.path` | query | `{account, id\|selector}` | `DraftLocation` |
 | `draft.preview` | query | `{account, id\|selector, full?}` | `DraftPreview` |
 | `draft.reply` | command | `{account, source, all?, headers?, no_signature?, signature?}` | `DraftCreated` |
+| `draft.set_headers` | command | `{account, id\|selector, headers?, splice_signature?, no_signature?, signature?}` | `DraftLocation` |
 | `draft.validate` | query | `{account, id?\|selector?}` | `DraftValidation` |
 
 The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they are wire shapes, so they live in the crate a client links rather than in the daemon crate a client must never link.
@@ -802,6 +803,15 @@ There is no `headers` override: the compose wizard writes its recipients over a 
 A `signature` it names, unless `no_signature` drops it, is recorded in the draft's `signature:` frontmatter as well as spliced into the body, so a later header edit preselects it.
 It exists for a compose wizard that collects the recipients and the subject *before* the draft is written and keeps them over the ones the builder derived; without it such a client would have to build the draft through the daemon and then rewrite the file behind its back.
 A partial object is `-32602`: which fields the override covers is not a thing to leave ambiguous.
+
+**A draft's headers are the daemon's to rewrite.**
+`draft.set_headers` is the header edit of an existing draft, the TUI's `ce` and the desktop's recipients dialog, which both rewrote the file in the client before it.
+Its `headers` is `{to?, cc?, bcc?, subject?}`: a field it names is rewritten, an empty string clears it, and a field it leaves out keeps what the file has, so a dialog that edits the recipients alone sends no subject.
+The body and every other frontmatter key stay byte for byte.
+`splice_signature: true` also replaces the body's signature block with the one `signature` and `no_signature` select, resolved as `draft.create` resolves them (none named is the account default), and records the name in `signature:`; without it the body is not touched.
+It answers the draft's `DraftLocation`, refuses a `sent` draft with `-32602` (`Cannot edit the headers of an already sent email`), a file that will not parse with `-32010`, and a field that is not a string with `-32602`.
+The write reaches clients as the watcher's `draft.changed`, like any other write to the file, and on an account that mirrors its drafts it is a change the next push carries to the server ([#0143](tickets/0143-server-drafts.md)).
+It is declared in `DRAFT_HEADERS_METHOD_SPECS`, an array of its own for the reason `DRAFT_FROM_MESSAGE_METHOD_SPECS` is one.
 
 **A draft's attachment list is the daemon's to rewrite.**
 `DraftAttachments` is `{account, id, path, attachments}`, each entry `{index, entry, path, exists}`: the entry as the file spells it, where the send path finds it (`~` against the daemon's home, a relative entry against the draft's directory) and whether a file, or a directory whose regular files a send attaches, is there.
@@ -1618,3 +1628,7 @@ The capability list grew by the new names, which is the derivation working rathe
 The daemon leftovers' TUI follow-up (2026-10-22) added two members and one write, additively; no field was renamed or dropped and no method was added.
 A `contact.search` and `contact.stats` row carries `first_seen` and `last_seen`, the RFC 3339 timestamps of the first and the latest message the address appeared in, which the TUI's detail pane shows and its local ranking of a typed query reads.
 `draft.create` records a `signature` it was asked for, and not dropped by `no_signature`, in the draft's `signature:` frontmatter, which is what the TUI wrote when its compose wizard wrote the file itself.
+
+The header edit (2026-10-23) added `draft.set_headers`, one command, additively; no field was renamed, none was dropped, and no command's output moved.
+`draft.set_headers` `{account, id|selector, headers?, splice_signature?, no_signature?, signature?}` -> `DraftLocation` rewrites the fields of `{to?, cc?, bcc?, subject?}` it names and re-splices the signature block when asked; its shape is in [the family's section](#the-draft-family).
+It replaces the TUI's `ce` and the desktop's recipients dialog writing the file in the client; the constant is `mp_protocol::draft::METHOD_DRAFT_SET_HEADERS`, the desktop asks for it at the handshake, and the capability list grew by its name.

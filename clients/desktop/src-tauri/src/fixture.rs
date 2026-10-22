@@ -2061,6 +2061,55 @@ impl State {
                 });
                 Ok((answer, events))
             }
+            "draft.set_headers" => {
+                // The daemon's header edit: the fields `headers` names, the
+                // rest as the file has them, and the signature re-spliced
+                // only when asked.
+                let id = param_str(method, params, "id")?;
+                let entry = self.parseable(method, &account, id)?;
+                if entry.status == "sent" {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        "Cannot edit the headers of an already sent email",
+                    ));
+                }
+                let path = PathBuf::from(&entry.path);
+                let fm = mp_core::draft::parse_email_draft(&path)?.frontmatter;
+                let headers = &params["headers"];
+                let field = |key: &str, current: Option<String>| {
+                    headers[key]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| current.unwrap_or_default())
+                };
+                let edit = DraftRecipientEdit {
+                    to: field("to", fm.to),
+                    cc: field("cc", fm.cc),
+                    bcc: field("bcc", fm.bcc),
+                    subject: field("subject", Some(fm.subject)),
+                };
+                mp_core::draft::rewrite_draft_recipients(&path, &edit)?;
+                if params["splice_signature"] == true {
+                    let name = params["signature"]
+                        .as_str()
+                        .filter(|_| params["no_signature"] != true);
+                    mp_core::draft::rewrite_draft_signature(
+                        &path,
+                        self.signature_for(&account, params).as_deref(),
+                        name,
+                    )?;
+                }
+                self.rescan();
+                let answer = DraftLocation {
+                    account: account.clone(),
+                    id: entry.id.clone(),
+                    selector: entry.selector.clone(),
+                    path: entry.path.clone(),
+                    status: entry.status.clone(),
+                };
+                Ok((serde_json::to_value(answer)?, self.watch_events(&path)))
+            }
             "draft.path" => {
                 let id = param_str(method, params, "id")?;
                 let entry = self.draft(method, &account, id)?;
@@ -3459,6 +3508,7 @@ impl Fixture {
             | "draft.demote"
             | "draft.validate"
             | "draft.preview"
+            | "draft.set_headers"
             | "draft.html" => {
                 let (answer, events) = s.draft_method(method, &params)?;
                 for (kind, payload) in events {
@@ -5147,16 +5197,6 @@ impl Fixture {
         text.push_str(CONFIG_INVALID_LINE);
         text.push('\n');
         fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
-    }
-
-    /// A client wrote the draft file at `path` (a recipient rewrite): publish
-    /// what the daemon's watcher would, `draft.changed` or `draft.invalid`.
-    pub fn file_written(&self, path: &Path) {
-        let mut s = self.state();
-        s.rescan();
-        for (kind, payload) in s.watch_events(path) {
-            self.emit_locked(&mut s, kind, payload);
-        }
     }
 
     /// Another window edited the signature `work`: a line appended to it and

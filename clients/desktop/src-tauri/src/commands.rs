@@ -1212,25 +1212,6 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(
         .map_err(|e| GuiError::protocol(format!("{method} did not decode: {e}")))
 }
 
-/// Tell a fixture door that a client wrote a draft file, which the daemon's
-/// watcher would notice on its own.
-pub(crate) fn written(door: &Door, path: &str) {
-    if let Door::Fixture(fixture) = door {
-        fixture.file_written(std::path::Path::new(path));
-    }
-}
-
-/// Rewrite the recipients and the subject of the draft file at `path` in
-/// place, through the helper the TUI's `ce` uses: the body and every other
-/// frontmatter field stay byte for byte.
-fn rewrite_recipients(door: &Door, path: &str, edit: &DraftRecipientEdit) -> Result<(), GuiError> {
-    mp_core::draft::rewrite_draft_recipients(std::path::Path::new(path), edit).map_err(|e| {
-        GuiError::protocol(format!("could not rewrite the recipients of {path}: {e:#}"))
-    })?;
-    written(door, path);
-    Ok(())
-}
-
 /// `draft.create`: a draft named `name` in the account's drafts directory,
 /// written whole by the daemon with the wizard's `headers` and its inline
 /// `body` above the signature. A name already taken is the daemon's
@@ -1505,10 +1486,10 @@ pub fn signature_list_on(door: &Door, account: &str) -> Result<SignatureListing,
     decode("signature.list", answer)
 }
 
-/// Rewrite the recipients (and, when given, the subject) of the draft `id`
-/// in place, client-side as the TUI's `ce` does; the body is not touched and
-/// the signature is not re-spliced. The daemon's watcher publishes the
-/// change as `draft.changed`.
+/// Rewrite the recipients (and, unless `keep_subject`, the subject) of the
+/// draft `id` in place: the daemon's `draft.set_headers`, the call the TUI's
+/// `ce` makes. The body is not touched and the signature is not re-spliced;
+/// the daemon's watcher publishes the change as `draft.changed`.
 pub fn draft_set_recipients_on(
     door: &Door,
     account: &str,
@@ -1516,15 +1497,20 @@ pub fn draft_set_recipients_on(
     headers: &DraftHeaders,
     keep_subject: bool,
 ) -> Result<DraftLocation, GuiError> {
-    let location = draft_path_on(door, account, id)?;
-    let mut edit = headers.edit();
+    let mut wire = headers.wire();
     if keep_subject {
-        let draft = mp_core::draft::parse_email_draft(std::path::Path::new(&location.path))
-            .map_err(|e| GuiError::protocol(format!("{} does not parse: {e:#}", location.path)))?;
-        edit.subject = draft.frontmatter.subject;
+        if let Some(fields) = wire.as_object_mut() {
+            fields.remove("subject");
+        }
     }
-    rewrite_recipients(door, &location.path, &edit)?;
-    Ok(location)
+    let answer = call(
+        door,
+        mp_protocol::draft::METHOD_DRAFT_SET_HEADERS,
+        json!({"account": account, "id": id, "headers": wire}),
+        MUTATION_BUDGET,
+        Addressing::Resource,
+    )?;
+    decode(mp_protocol::draft::METHOD_DRAFT_SET_HEADERS, answer)
 }
 
 /// Every hold the daemon carries, or `account`'s.

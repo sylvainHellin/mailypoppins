@@ -492,3 +492,106 @@ async fn a_draft_attaches_lists_and_detaches_its_files() {
     let out_of_range = call_err(&mut conn, "draft.detach", with(json!({"index": 3}))).await;
     assert_eq!(out_of_range.code, -32602);
 }
+
+// ---------------------------------------------------------------------------
+// 9. A draft's headers
+// ---------------------------------------------------------------------------
+
+/// `draft.set_headers` is the header edit of the TUI's `ce` and the desktop's
+/// recipients dialog: the fields `headers` names are rewritten, the others
+/// and the body stay as they were, `splice_signature` replaces the signature
+/// block with the one named, and a sent draft or an unknown id is refused.
+#[tokio::test]
+async fn a_drafts_headers_are_rewritten_by_the_daemon() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let draft = created(
+        &mut conn,
+        "draft.create",
+        json!({
+            "account": fixture::ACCOUNT,
+            "name": "kopf",
+            "no_signature": true,
+            "body": "Der Text bleibt.\n",
+            "headers": {"to": "a@example.com", "cc": "c@example.com", "bcc": "", "subject": "Alt"},
+        }),
+    )
+    .await;
+    let path = Path::new(&draft.path);
+    let body_before = body_of(&draft);
+
+    let location: mp_protocol::draft::DraftLocation = serde_json::from_value(
+        call(
+            &mut conn,
+            "draft.set_headers",
+            json!({
+                "account": fixture::ACCOUNT,
+                "id": draft.id,
+                "headers": {"to": "b@example.com", "bcc": "chef@example.com"},
+            }),
+        )
+        .await,
+    )
+    .expect("a DraftLocation");
+    assert_eq!(location.id, draft.id);
+    assert_eq!(location.path, draft.path);
+    let parsed = parse_email_draft(path).expect("it parses");
+    assert_eq!(parsed.frontmatter.to.as_deref(), Some("b@example.com"));
+    assert_eq!(
+        parsed.frontmatter.cc.as_deref(),
+        Some("c@example.com"),
+        "a field left out keeps its value"
+    );
+    assert_eq!(parsed.frontmatter.bcc.as_deref(), Some("chef@example.com"));
+    assert_eq!(parsed.frontmatter.subject, "Alt");
+    assert_eq!(parsed.body_markdown, body_before, "the body is untouched");
+
+    call(
+        &mut conn,
+        "draft.set_headers",
+        json!({
+            "account": fixture::ACCOUNT,
+            "id": draft.id,
+            "headers": {"cc": "", "subject": "Neu"},
+            "splice_signature": true,
+            "signature": SIGNATURE,
+        }),
+    )
+    .await;
+    let parsed = parse_email_draft(path).expect("it parses");
+    assert_eq!(parsed.frontmatter.cc, None, "an empty string clears it");
+    assert_eq!(parsed.frontmatter.subject, "Neu");
+    assert!(parsed.body_markdown.contains("Der Text bleibt."));
+    assert!(
+        parsed.body_markdown.contains(SIGNATURE_LINE),
+        "the named signature is spliced: {}",
+        parsed.body_markdown
+    );
+    assert_eq!(parsed.frontmatter.signature.as_deref(), Some(SIGNATURE));
+
+    let unknown = call_err(
+        &mut conn,
+        "draft.set_headers",
+        json!({"account": fixture::ACCOUNT, "id": "nope", "headers": {"to": "x@example.com"}}),
+    )
+    .await;
+    assert_eq!(unknown.code, -32602);
+    let wrong = call_err(
+        &mut conn,
+        "draft.set_headers",
+        json!({"account": fixture::ACCOUNT, "id": draft.id, "headers": {"to": 3}}),
+    )
+    .await;
+    assert_eq!(wrong.code, -32602);
+
+    let text = std::fs::read_to_string(path).expect("the file");
+    std::fs::write(path, text.replace("status: draft", "status: sent")).expect("mark it sent");
+    let sent = call_err(
+        &mut conn,
+        "draft.set_headers",
+        json!({"account": fixture::ACCOUNT, "id": draft.id, "headers": {"to": "x@example.com"}}),
+    )
+    .await;
+    assert_eq!(sent.code, -32602);
+    assert!(sent.message.contains("already sent"), "{}", sent.message);
+}

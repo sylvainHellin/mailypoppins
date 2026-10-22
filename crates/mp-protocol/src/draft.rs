@@ -239,6 +239,11 @@ pub struct DraftPreview {
 /// The method name of the draft's HTML rendition (PERSO-136).
 pub const METHOD_DRAFT_HTML: &str = "draft.html";
 
+/// The method name of the header edit of an existing draft: `{account,
+/// id|selector, headers: {to?, cc?, bcc?, subject?}, splice_signature?,
+/// signature?, no_signature?}`, answered with a [`DraftLocation`].
+pub const METHOD_DRAFT_SET_HEADERS: &str = "draft.set_headers";
+
 /// The `result` of `draft.html`: the `text/html` part `send.draft` would send
 /// for this draft, as a browser rendition, inline in the answer (PERSO-136).
 ///

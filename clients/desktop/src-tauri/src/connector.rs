@@ -167,6 +167,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "draft.attach",
     "draft.detach",
     "draft.html",
+    "draft.set_headers",
 ];
 
 /// Why a connect failed, for the connection screen.
@@ -1230,6 +1231,7 @@ mod tests {
             "draft.preview",
             "draft.approve",
             "draft.demote",
+            "draft.set_headers",
             "send.draft",
             "send.approved",
             "send.outbox_list",

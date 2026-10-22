@@ -1653,57 +1653,13 @@ fn submit_compose_wizard(
         subject: wizard.subject.clone(),
     };
 
-    // Editing an existing draft's recipients/subject rewrites the file in
-    // place and does NOT open $EDITOR -- the whole point is a quick,
-    // fuzzy-finder edit of the header fields.
+    // Editing an existing draft's recipients/subject is the daemon's
+    // `draft.set_headers`, which rewrites the file in place; it does NOT open
+    // $EDITOR -- the whole point is a quick, fuzzy-finder edit of the header
+    // fields.
     if let ComposeMode::EditDraft { id } = &wizard.mode {
         let id = id.clone();
-        let Some(path) = indexed_draft_path(app, &id) else {
-            return Ok(());
-        };
-        match mp_core::draft::rewrite_draft_recipients(&path, &edit) {
-            Ok(()) => {
-                // Re-splice the signature block only when the selection changed
-                // from what the wizard opened with (#0106) or the selected file
-                // was edited from the wizard (#0107), so a plain recipient edit
-                // leaves the body untouched.
-                let sig_changed = wizard.signature_needs_respice();
-                if sig_changed {
-                    let (sig_md, sig_name) = wizard_signature(app, &wizard);
-                    if let Err(e) = mp_core::draft::rewrite_draft_signature(
-                        &path,
-                        sig_md.as_deref(),
-                        sig_name.as_deref(),
-                    ) {
-                        app.set_status_level(
-                            format!("Signature update failed: {e}"),
-                            StatusLevel::Error,
-                        );
-                    }
-                }
-                let account = app.account_config.name.clone();
-                // The file changed, so the cached listing is stale; the
-                // reload reads it back through `draft.list`, which scans the
-                // directory fresh, and the selector is the draft's own id
-                // either way.
-                if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
-                    app.invalidate_cache_idx(idx);
-                }
-                app.reload_current_mailbox();
-                let msg = if sig_changed {
-                    format!(
-                        "Recipients and signature updated: {}",
-                        Selector::for_draft(&account, &id)
-                    )
-                } else {
-                    format!("Recipients updated: {}", Selector::for_draft(&account, &id))
-                };
-                app.set_status(msg);
-            }
-            Err(e) => {
-                app.set_status_level(format!("Recipient update failed: {e}"), StatusLevel::Error);
-            }
-        }
+        submit_header_edit(app, &wizard, &id, &edit);
         return Ok(());
     }
 
@@ -1877,17 +1833,91 @@ fn create_draft_from_wizard(
     ))
 }
 
-/// The effective signature Markdown and name for a compose wizard (#0106):
-/// the selected signature file, resolved fresh so an `$EDITOR` edit made from
-/// the wizard is picked up (#0107). Honours the global `include_signature`
-/// toggle so a New draft written with signatures turned off carries none, as
-/// before. The file is the daemon's ([`App::compose_signature_markdown`]).
-fn wizard_signature(app: &App, wizard: &ComposeWizard) -> (Option<String>, Option<String>) {
-    if !app.global_config.email.include_signature {
-        return (None, None);
+/// The compose wizard's header edit of the existing draft `id` (`ce`):
+/// `draft.set_headers`, the call the desktop's recipients dialog makes, and
+/// a status line naming the outcome.
+///
+/// The signature block is re-spliced only when the selection changed from
+/// what the wizard opened with (#0106) or the selected file was edited from
+/// the wizard (#0107), so a plain recipient edit leaves the body untouched.
+pub fn submit_header_edit(
+    app: &mut App,
+    wizard: &ComposeWizard,
+    id: &str,
+    edit: &DraftRecipientEdit,
+) {
+    let account = app.account_config.name.clone();
+    let sig_changed = wizard.signature_needs_respice();
+    let params = set_headers_params(
+        &account,
+        id,
+        edit,
+        sig_changed.then(|| {
+            (
+                app.global_config.email.include_signature,
+                wizard.signature_name.clone(),
+            )
+        }),
+    );
+    match daemon_door(app).call(mp_protocol::draft::METHOD_DRAFT_SET_HEADERS, params) {
+        Ok(_) => {
+            // The file changed, so the cached listing is stale; the reload
+            // reads it back through `draft.list`, which scans the directory
+            // fresh, and the selector is the draft's own id either way.
+            if let Some(idx) = app.find_mailbox_by_kind(MailboxKind::Drafts) {
+                app.invalidate_cache_idx(idx);
+            }
+            app.reload_current_mailbox();
+            let selector = Selector::for_draft(&account, id);
+            app.set_status(if sig_changed {
+                format!("Recipients and signature updated: {selector}")
+            } else {
+                format!("Recipients updated: {selector}")
+            });
+        }
+        Err(e) => {
+            let why = match mp_client::session::refusal(&e) {
+                Some(refused) => refused.message.clone(),
+                None => format!("{e:#}"),
+            };
+            app.set_status_level(
+                format!("Recipient update failed: {why}"),
+                StatusLevel::Error,
+            );
+        }
     }
-    let name = wizard.signature_name.clone();
-    (app.compose_signature_markdown(name.as_deref()), name)
+}
+
+/// The `draft.set_headers` parameters of a header edit: all four fields, and,
+/// when the signature changed, the re-splice with the wizard's selection as
+/// `(include_signature, name)`. With signatures turned off the block is
+/// dropped (`no_signature`), and no name means the account default, which is
+/// what `draft.create` resolves for a new draft.
+fn set_headers_params(
+    account: &str,
+    id: &str,
+    edit: &DraftRecipientEdit,
+    signature: Option<(bool, Option<String>)>,
+) -> serde_json::Value {
+    let mut params = json!({
+        "account": account,
+        "id": id,
+        "headers": {
+            "to": edit.to,
+            "cc": edit.cc,
+            "bcc": edit.bcc,
+            "subject": edit.subject,
+        },
+    });
+    if let Some((include, name)) = signature {
+        params["splice_signature"] = json!(true);
+        if !include {
+            params["no_signature"] = json!(true);
+        } else if let Some(name) = name {
+            params["signature"] = json!(name);
+        }
+    }
+    params
 }
 
 /// Normalize a recipient-list field on wizard submit:
@@ -2830,6 +2860,34 @@ mod tests {
         );
     }
 
+    /// A header edit asks `draft.set_headers` for all four fields, and for a
+    /// re-splice only when the signature changed: with signatures off it drops
+    /// the block, with no name it takes the account default.
+    #[test]
+    fn a_header_edit_asks_the_daemon_for_the_fields_and_the_resplice() {
+        let edit = DraftRecipientEdit {
+            to: "a@example.com".to_string(),
+            cc: String::new(),
+            bcc: "b@example.com".to_string(),
+            subject: "Hi".to_string(),
+        };
+        let plain = set_headers_params("work", "d1", &edit, None);
+        assert_eq!(
+            plain,
+            json!({"account": "work", "id": "d1", "headers": {
+                "to": "a@example.com", "cc": "", "bcc": "b@example.com", "subject": "Hi",
+            }})
+        );
+        let off = set_headers_params("work", "d1", &edit, Some((false, Some("x".into()))));
+        assert_eq!(off["splice_signature"], json!(true));
+        assert_eq!(off["no_signature"], json!(true));
+        assert!(off.get("signature").is_none());
+        let default = set_headers_params("work", "d1", &edit, Some((true, None)));
+        assert_eq!(default["splice_signature"], json!(true));
+        assert!(default.get("signature").is_none());
+        assert!(default.get("no_signature").is_none());
+    }
+
     // -----------------------------------------------------------------------
     // Editing the signature *file* from the wizard (#0107)
     // -----------------------------------------------------------------------
@@ -2902,8 +2960,18 @@ mod tests {
             "an in-place file edit still has to reach the draft"
         );
 
-        // What the submit path then does with that decision.
+        // What the submit path then asks the daemon for with that decision,
+        // and the re-splice `draft.set_headers` runs on it.
         let sig_name = app.compose_wizard().unwrap().signature_name.clone();
+        let edit = DraftRecipientEdit {
+            to: "bob@example.com".to_string(),
+            cc: String::new(),
+            bcc: String::new(),
+            subject: "Re: hello".to_string(),
+        };
+        let params = set_headers_params("work", "d1", &edit, Some((true, sig_name.clone())));
+        assert_eq!(params["splice_signature"], json!(true));
+        assert_eq!(params["signature"], json!("work"));
         mp_core::draft::rewrite_draft_signature(&path, block().as_deref(), sig_name.as_deref())
             .unwrap();
 

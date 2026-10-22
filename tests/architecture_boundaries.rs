@@ -822,25 +822,15 @@ const TUI_DIRECT_REACHES: [&str; 22] = [
 /// creation (`signature.list`, `signature.read`, `signature.create`), the
 /// wizard's own draft writer (`draft.create`), `x`'s approval
 /// (`draft.validate`, `draft.approve`) and the attach prompt's append
-/// (`draft.attach`). A row that goes away is struck in the same commit.
-const TUI_DIRECT_RESIDUE: [(&str, &str, &str); 4] = [
+/// (`draft.attach`) and the compose wizard's header edit of an existing draft
+/// with its signature re-splice (`draft.set_headers`). A row that goes away
+/// is struck in the same commit.
+const TUI_DIRECT_RESIDUE: [(&str, &str, &str); 2] = [
     (
         "actions.rs",
         "fs::write(",
         "the HTML rendition and the invitation's .ics, written into this process's private \
          temp area for a browser or a calendar app to open; neither is a draft",
-    ),
-    (
-        "actions.rs",
-        "rewrite_draft_recipients(",
-        "the compose wizard's header edit of an existing draft (ce): no daemon method rewrites \
-         a draft's headers yet, and the desktop's recipients dialog makes the same write",
-    ),
-    (
-        "actions.rs",
-        "rewrite_draft_signature(",
-        "the same header edit's signature re-splice, which goes with the method that takes \
-         over the header rewrite",
     ),
     (
         "prefs.rs",

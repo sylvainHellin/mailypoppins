@@ -520,6 +520,81 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
         assert_eq!(indexed.subject.as_deref(), Some("Fwd: Report (for review)"));
     }
 
+    /// Edit recipients (`ce`) is the daemon's `draft.set_headers`: the TUI
+    /// names the draft by its `id:` and writes nothing itself, the daemon
+    /// rewrites the four fields and leaves the body alone, and the status line
+    /// names the draft.
+    #[test]
+    fn edit_recipients_rewrites_the_headers_through_the_daemon() {
+        use crate::tui::app::{ComposeField, ComposeMode, ComposeWizard};
+        let fx = Fixture::new();
+        let row = fx.ingest(&fixture_email("Hello"));
+        let source = fx.source(&row, false);
+        let (path, selector) = create_draft_from_source(
+            "alice",
+            "me@example.com",
+            &source,
+            DraftFromSource::Reply { all: false },
+            None,
+            None,
+        )
+        .unwrap();
+        let body_before = crate::draft::parse_email_draft(&path)
+            .unwrap()
+            .body_markdown;
+
+        let mut app = App::default_for_tests();
+        app.account_config.name = "alice".to_string();
+        app.session = Some(fx.session());
+        let id = fx.resolve(&selector).id;
+        let wizard = ComposeWizard {
+            mode: ComposeMode::EditDraft { id: id.clone() },
+            to: "erin@example.com".to_string(),
+            cc: String::new(),
+            bcc: "boss@example.com".to_string(),
+            subject: "Re: Hello, again".to_string(),
+            body: String::new(),
+            focus: ComposeField::To,
+            signature_name: None,
+            signature_initial: None,
+            signature_edited: false,
+            available_signatures: Vec::new(),
+            suggestions: Vec::new(),
+            suggestion_idx: 0,
+            contacts: None,
+        };
+        let edit = DraftRecipientEdit {
+            to: wizard.to.clone(),
+            cc: wizard.cc.clone(),
+            bcc: wizard.bcc.clone(),
+            subject: wizard.subject.clone(),
+        };
+        submit_header_edit(&mut app, &wizard, &id, &edit);
+
+        let draft = crate::draft::parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("erin@example.com"));
+        assert_eq!(draft.frontmatter.bcc.as_deref(), Some("boss@example.com"));
+        assert_eq!(draft.frontmatter.subject, "Re: Hello, again");
+        assert_eq!(draft.body_markdown, body_before, "the body is untouched");
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|s| s.starts_with("Recipients updated: mp://alice/drafts/")),
+            "{:?}",
+            app.status_message
+        );
+
+        // A draft the daemon does not hold is refused in its words.
+        submit_header_edit(&mut app, &wizard, "does-not-exist", &edit);
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|s| s.starts_with("Recipient update failed:")),
+            "{:?}",
+            app.status_message
+        );
+    }
+
     /// Edit recipients resolves the draft through the index by its `id:`, not
     /// through a path the list happened to be holding, and the index is
     /// refreshed so the row matches the file the wizard just rewrote.

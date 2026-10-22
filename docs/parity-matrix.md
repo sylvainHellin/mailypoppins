@@ -170,7 +170,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: the quote marker helpers (`QUOTE_MARKER`, legacy `{{SIGNATURE}}`, `is_quote_marker_line`) and the signature splice in `crates/mp-core/src/draft.rs`, their use in `markdown_to_html` and `plain_text_body` in `src/send.rs`, the file and default lookup in `src/signatures.rs`
-- Daemon surface: `draft.create`, `draft.reply`, `draft.forward`, and `draft.set_recipients` all re-splice
+- Daemon surface: `draft.create`, `draft.reply`, `draft.forward`, and `draft.set_headers` with `splice_signature` all re-splice
 - GUI location: clients/desktop: `draft_create` and `draft_forward` pass the new-draft and forward wizards' `signature` or `no_signature`, and the daemon splices it into the draft; a reply carries the account's default (M3, #0131)
 - Validation: `tests/draft_integration.rs`, `tests/daemon_gui_gaps.rs` (`a_reply_and_a_forward_carry_the_signature_they_name_or_none`), plus the marker assertions in `clients/tui/src/actions.rs` unit tests; `clients/desktop/src-tauri/src/commands.rs` (`validate_preview_and_signatures_answer_from_the_files`, `a_reply_and_a_forward_carry_the_signature_chosen_or_none`), `clients/desktop/src/components/compose/compose.test.tsx` (`the forward wizard picks a signature too, and none forwards without one`)
 - Status: GUI shipped (M3, #0131) for a new draft and a forward; the desktop's `ce` rewrites the recipients and never re-splices, since its recipients dialog has no signature select, where the TUI's re-splices a changed signature
@@ -734,12 +734,12 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 
 - Classification: GUI parity
 - Source anchor: TUI `ce` in the drafts mailbox (`clients/tui/src/app/keymap.rs:1330`)
-- Daemon surface: `draft.set_recipients`, which re-splices the signature block
-- GUI location: clients/desktop: `ce` in Drafts, the palette and the draft preview's Edit recipients open the "Edit recipients" dialog filled from the listed draft row, Bcc included, and its submit calls `draft_set_recipients`, which rewrites the `to`, `cc`, `bcc` and `subject` lines client-side with `mp_core::draft::rewrite_draft_recipients` (M3, #0131; shell.md, "The recipients dialog")
-- Validation: TUI golden frames; `edit_recipients_finds_the_draft_through_the_index` (`src/tui_tests/actions_store.rs`); `clients/desktop/src/keymap/keymap.test.tsx` (`ce opens the recipients dialog filled from the listed draft, Bcc included`), `clients/desktop/src/components/compose/compose.test.tsx` (`rewrites the recipients and keeps the subject when it did not change`), `clients/desktop/src-tauri/src/commands.rs` (`set_recipients_rewrites_the_header_and_keeps_the_body`)
+- Daemon surface: `draft.set_headers`, which rewrites the fields it names and re-splices the signature block when asked
+- GUI location: clients/desktop: `ce` in Drafts, the palette and the draft preview's Edit recipients open the "Edit recipients" dialog filled from the listed draft row, Bcc included, and its submit calls `draft_set_recipients`, which is `draft.set_headers` with the subject left out when it did not change (M3, #0131; shell.md, "The recipients dialog")
+- Validation: TUI golden frames; `edit_recipients_rewrites_the_headers_through_the_daemon` (`src/tui_tests/actions_store.rs`), `a_header_edit_asks_the_daemon_for_the_fields_and_the_resplice` (`clients/tui/src/actions.rs`); `tests/daemon_gui_gaps.rs` (`a_drafts_headers_are_rewritten_by_the_daemon`); `clients/desktop/src/keymap/keymap.test.tsx` (`ce opens the recipients dialog filled from the listed draft, Bcc included`), `clients/desktop/src/components/compose/compose.test.tsx` (`rewrites the recipients and keeps the subject when it did not change`), `clients/desktop/src-tauri/src/commands.rs` (`set_recipients_rewrites_the_header_and_keeps_the_body`)
 - Status: GUI shipped (M3, #0131) for the recipients and the subject; the dialog has no signature select, so it never re-splices the signature the TUI's `ce` re-splices when it changed
-- Note: `draft.set_recipients` is not built and the rewrite is still a client-side write to the file `draft.path` resolved (P5-U6 routed the resolution, not the write).
-  It reaches no engine module, so the engine gates do not name it; `TUI_DIRECT_RESIDUE` in `tests/architecture_boundaries.rs` does, as the TUI's two draft writes left (`rewrite_draft_recipients` and `rewrite_draft_signature`), and what it costs is a second drafts-index refresh the daemon could have done in one.
+- Note: neither client writes the file: both call `draft.set_headers`, and the TUI's `ce` passes `splice_signature` when the wizard's signature changed.
+  The write is the daemon's, so a mirrored draft's header edit is pushed like any other change to the file (#0143).
 
 ### DFT-12 Watch draft files and refresh the derived index after an external edit
 

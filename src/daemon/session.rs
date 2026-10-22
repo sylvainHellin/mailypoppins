@@ -528,6 +528,7 @@ mod tests {
                 "draft.path".to_string(),
                 "draft.preview".to_string(),
                 "draft.reply".to_string(),
+                "draft.set_headers".to_string(),
                 "draft.validate".to_string(),
                 "hook.list".to_string(),
                 "hook.replay".to_string(),

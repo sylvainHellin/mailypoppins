@@ -127,6 +127,17 @@ pub const DRAFT_ATTACHMENT_METHOD_SPECS: [MethodSpec; 3] = [
 pub const DRAFT_HTML_METHOD_SPECS: [MethodSpec; 1] =
     [MethodSpec::new("draft.html", MethodKind::Query, 1)];
 
+/// The header edit of an existing draft: what the TUI's `ce` and the
+/// desktop's recipients dialog did by rewriting the file in the client.
+///
+/// A durable command, in an array of its own for the reason
+/// [`DRAFT_FROM_MESSAGE_METHOD_SPECS`] is one.
+pub const DRAFT_HEADERS_METHOD_SPECS: [MethodSpec; 1] = [MethodSpec::new(
+    mp_protocol::draft::METHOD_DRAFT_SET_HEADERS,
+    MethodKind::Command,
+    1,
+)];
+
 /// One of the ten, selected by its own [`MethodSpec`].
 ///
 /// One type for the family because they share every dependency and differ only
@@ -159,6 +170,7 @@ pub fn register(
         .chain(DRAFT_FROM_MESSAGE_METHOD_SPECS)
         .chain(DRAFT_ATTACHMENT_METHOD_SPECS)
         .chain(DRAFT_HTML_METHOD_SPECS)
+        .chain(DRAFT_HEADERS_METHOD_SPECS)
     {
         dispatcher.register(Arc::new(DraftMethod {
             spec,
@@ -211,6 +223,7 @@ impl Method for DraftMethod {
                 "draft.path" => path(&params, accounts),
                 "draft.preview" => preview(&params, accounts, email),
                 "draft.reply" => from_source(&params, accounts, email, true, None),
+                "draft.set_headers" => set_headers(&params, accounts, email),
                 _ => validate(&params, accounts),
             };
             let result = result.map_err(DomainError::from)?;
@@ -992,6 +1005,95 @@ fn recipient_headers(params: &Value) -> Result<Option<DraftRecipientEdit>, RpcEr
         bcc: field("bcc")?,
         subject: field("subject")?,
     }))
+}
+
+/// The `result` of `draft.set_headers`: the draft's `to`, `cc`, `bcc` and
+/// `subject` rewritten in place, and its signature block re-spliced when the
+/// caller asks for it.
+///
+/// `headers` names the fields to change; a field it leaves out keeps what the
+/// file has, and an empty string clears it. The body and every other
+/// frontmatter key stay byte for byte, as [`crate::draft::rewrite_draft_recipients`]
+/// keeps them. `splice_signature: true` replaces the signature block with the
+/// one `signature` and `no_signature` select, resolved as `draft.create`
+/// resolves them, and records the name in `signature:`; without it the body is
+/// not touched.
+///
+/// The write is a change to the file like any other, so the watcher publishes
+/// it as `draft.changed`, and on an account that mirrors its drafts the push
+/// follows (#0143). A sent draft is refused.
+fn set_headers(
+    params: &Value,
+    accounts: &[AccountConfig],
+    email: &EmailSettings,
+) -> Result<Value, RpcError> {
+    let account = configured(accounts, &string_param(params, "account")?)?;
+    let name = account.name.clone();
+    let row = resolve(&name, &addressed_one(params, &name)?)?;
+    let draft = crate::draft::parse_email_draft(&row.path)
+        .map_err(|_| refuse_unparseable(&name, &row.id, &row.path))?;
+    let status = draft.frontmatter.status.to_string();
+    if status == "sent" {
+        return Err(RpcError {
+            code: super::INVALID_PARAMS,
+            message: "Cannot edit the headers of an already sent email".to_string(),
+            data: Some(json!({"account": name, "id": row.id, "status": status})),
+        });
+    }
+    let headers = match params.get("headers") {
+        None | Some(Value::Null) => serde_json::Map::new(),
+        Some(Value::Object(headers)) => headers.clone(),
+        Some(_) => {
+            return Err(invalid_params(
+                "headers is an object of any of to, cc, bcc and subject",
+            ))
+        }
+    };
+    let field = |key: &str, current: Option<&str>| -> Result<String, RpcError> {
+        match headers.get(key) {
+            None | Some(Value::Null) => Ok(current.unwrap_or_default().to_string()),
+            Some(Value::String(value)) => Ok(value.clone()),
+            Some(_) => Err(invalid_params(format!("headers.{key} is a string"))),
+        }
+    };
+    let fm = &draft.frontmatter;
+    let edit = DraftRecipientEdit {
+        to: field("to", fm.to.as_deref())?,
+        cc: field("cc", fm.cc.as_deref())?,
+        bcc: field("bcc", fm.bcc.as_deref())?,
+        subject: field("subject", Some(&fm.subject))?,
+    };
+    let splice = flag(params, "splice_signature")?;
+
+    crate::draft::rewrite_draft_recipients(&row.path, &edit).map_err(|e| {
+        internal(format!(
+            "rewriting the headers of {}: {e:#}",
+            row.path.display()
+        ))
+    })?;
+    if splice {
+        crate::draft::rewrite_draft_signature(
+            &row.path,
+            signature_of(account, params, email).as_deref(),
+            named_signature(params),
+        )
+        .map_err(|e| {
+            internal(format!(
+                "rewriting the signature of {}: {e:#}",
+                row.path.display()
+            ))
+        })?;
+    }
+    to_value(
+        "draft.set_headers",
+        &DraftLocation {
+            account: name.clone(),
+            id: row.id.clone(),
+            selector: Selector::for_draft(&name, &row.id).to_string(),
+            path: row.path.display().to_string(),
+            status,
+        },
+    )
 }
 
 /// The answer of the four methods that write a new draft, with the subject
