@@ -2333,7 +2333,7 @@ cmdk's `Command.Input` also sets `aria-labelledby` to its own label, which overr
 
 ## The desktop fixture JSON has two readers
 
-`clients/desktop/src/test/tauri-mock.ts` imports `clients/desktop/fixtures/*.json` as the wire shapes they hold (`drafts.json` as a `DraftListing` per account), beside the Rust fixture that compiles them in.
+`clients/desktop/src/fixture/backend.ts` imports `clients/desktop/fixtures/*.json` as the wire shapes they hold (`drafts.json` as a `DraftListing` per account), beside the Rust fixture that compiles them in.
 Reshaping one for the Rust side alone broke 74 vitest tests at once, so data only the Rust fixture needs goes into a file of its own (`draft-bodies.json`, `signatures.json`).
 
 ## A Tab onto a Base UI focus guard moves focus a frame later
