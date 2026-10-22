@@ -141,6 +141,9 @@ pub struct DraftMethod {
     pub watch: Arc<DraftWatch>,
     /// The state whose revision a command reports.
     pub canonical: Arc<crate::daemon::state::CanonicalState>,
+    /// The server copies downloaded lately, which a forward of a hit shares
+    /// with the reads before it.
+    pub copies: Arc<crate::daemon::server_copies::ServerCopies>,
 }
 
 /// Register the family from the one array that declares it.
@@ -149,6 +152,7 @@ pub fn register(
     config: Arc<ConfigStore>,
     watch: Arc<DraftWatch>,
     canonical: Arc<crate::daemon::state::CanonicalState>,
+    copies: Arc<crate::daemon::server_copies::ServerCopies>,
 ) {
     for spec in DRAFT_METHOD_SPECS
         .into_iter()
@@ -161,6 +165,7 @@ pub fn register(
             config: Arc::clone(&config),
             watch: Arc::clone(&watch),
             canonical: Arc::clone(&canonical),
+            copies: Arc::clone(&copies),
         }));
     }
 }
@@ -180,6 +185,10 @@ impl Method for DraftMethod {
             let snapshot = self.config.snapshot();
             let accounts = snapshot.accounts.as_slice();
             let email = &snapshot.config.email;
+            let server = super::message_eml::ServerLeg {
+                secrets: snapshot.config.secrets_backend,
+                copies: &self.copies,
+            };
             let result = match self.spec.name {
                 "draft.approve" => self.set_status(&params, accounts, true),
                 "draft.attach" => attach(&params, accounts),
@@ -190,23 +199,9 @@ impl Method for DraftMethod {
                 "draft.demote" => self.set_status(&params, accounts, false),
                 "draft.discard" => discard(&params, accounts),
                 "draft.forward" => match flag(&params, "as_attachment") {
-                    Ok(true) => {
-                        forward_as_attachment(
-                            &params,
-                            accounts,
-                            email,
-                            snapshot.config.secrets_backend,
-                        )
-                        .await
-                    }
+                    Ok(true) => forward_as_attachment(&params, accounts, email, server).await,
                     Ok(false) if hit_source(&params) => {
-                        forward_hit_inline(
-                            &params,
-                            accounts,
-                            email,
-                            snapshot.config.secrets_backend,
-                        )
-                        .await
+                        forward_hit_inline(&params, accounts, email, server).await
                     }
                     Ok(false) => from_source(&params, accounts, email, false, None),
                     Err(e) => Err(e),
@@ -804,7 +799,7 @@ async fn forward_hit_inline(
     params: &Value,
     accounts: &[AccountConfig],
     email: &EmailSettings,
-    secrets: crate::secrets::SecretsBackendKind,
+    server: super::message_eml::ServerLeg<'_>,
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?.clone();
@@ -816,7 +811,7 @@ async fn forward_hit_inline(
         ));
     }
     let hit = super::message_eml::Hit::from_param(&account, &source["hit"])?;
-    let fetched = match super::message_eml::hit_message(&account, &hit, secrets).await? {
+    let fetched = match super::message_eml::hit_message(&account, &hit, server).await? {
         super::message_eml::HitMessage::Held(row) => {
             let mut params = params.clone();
             params["source"] = json!({"row_id": row.id});
@@ -861,21 +856,21 @@ async fn forward_as_attachment(
     params: &Value,
     accounts: &[AccountConfig],
     email: &EmailSettings,
-    secrets: crate::secrets::SecretsBackendKind,
+    server: super::message_eml::ServerLeg<'_>,
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?.clone();
     let source = params.get("source").cloned().unwrap_or(Value::Null);
     if let Some(hit) = source.get("hit").filter(|v| !v.is_null()) {
         let hit = super::message_eml::Hit::from_param(&account, hit)?;
-        return forward_hit_as_attachment(params, &account, email, &hit, secrets).await;
+        return forward_hit_as_attachment(params, &account, email, &hit, server).await;
     }
     let row = {
         let store = Store::open(crate::config::store_path(&name))
             .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
         address_received(&source, &store, &name)?.0
     };
-    let (bytes, _pinned) = super::message_eml::raw_of_row(&account, &row, secrets).await?;
+    let (bytes, _pinned) = super::message_eml::raw_of_row(&account, &row, server).await?;
     let dir =
         crate::parse::stable_attachments_dir(&crate::config::account_dir(&name), &row.message_id);
     crate::config::create_private_dir_all(&dir)
@@ -898,7 +893,7 @@ async fn forward_hit_as_attachment(
     account: &AccountConfig,
     email: &EmailSettings,
     hit: &super::message_eml::Hit,
-    secrets: crate::secrets::SecretsBackendKind,
+    server: super::message_eml::ServerLeg<'_>,
 ) -> Result<Value, RpcError> {
     let name = account.name.as_str();
     let source = params.get("source").cloned().unwrap_or(Value::Null);
@@ -908,7 +903,7 @@ async fn forward_hit_as_attachment(
             "hit is an address of its own; send it without row_id, id or selector",
         ));
     }
-    let (filename, bytes, _pinned) = super::message_eml::raw_of_hit(account, hit, secrets).await?;
+    let (filename, bytes, _pinned) = super::message_eml::raw_of_hit(account, hit, server).await?;
     let fetched = crate::parse::parse_rfc822_to_fetched_email(&bytes).ok_or_else(|| {
         internal(format!(
             "the server's copy of {} in {name} does not parse as a message",

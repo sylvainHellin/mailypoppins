@@ -391,6 +391,9 @@ impl DaemonState {
         // a promise this daemon changed its mind about.
         let handles = Arc::new(super::handles::HandleTable::from_env());
         let holds = Arc::new(super::hold::HoldScheduler::new());
+        let copies = Arc::new(super::server_copies::ServerCopies::new(
+            super::methods::message_eml::server_fetcher(),
+        ));
         // Built here because it needs the instance metadata, the configuration
         // and the runtime table, and held by the canonical state so a bootstrap
         // can project the checks that are not `ok`. The state holds it back
@@ -420,6 +423,7 @@ impl DaemonState {
                 handles: Arc::clone(&handles),
                 holds: Arc::clone(&holds),
                 diagnostics: Arc::clone(&diagnostics),
+                copies,
             },
         );
         DaemonState {

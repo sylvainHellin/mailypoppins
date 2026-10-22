@@ -522,12 +522,18 @@ pub async fn reconcile(
     runtimes: &Arc<RuntimeTable>,
     canonical: &Arc<CanonicalState>,
     watch: &Arc<super::watch::DraftWatch>,
+    copies: &super::server_copies::ServerCopies,
     state: ConfigState,
     config: GlobalConfig,
 ) -> Reconcile {
     let previous = store.snapshot();
     let plan = Reconcile::between(&previous.config, &config);
 
+    // A copy downloaded for a removed account, or for one whose server or
+    // credentials may have changed, is not the account's any more.
+    for account in plan.removed.iter().chain(&plan.updated) {
+        copies.forget_account(account);
+    }
     for account in &plan.removed {
         stop_account(runtimes, account).await;
         canonical.publish(super::state::events::Event::Remove {
@@ -1034,11 +1040,14 @@ mod tests {
             "a second first sync is not spawned beside the first"
         );
 
+        let (fetcher, _) = super::super::server_copies::tests::counting(b"raw");
+        let copies = super::super::server_copies::ServerCopies::new(fetcher);
         let plan = reconcile(
             &store,
             &runtimes,
             &canonical,
             &watch,
+            &copies,
             ConfigState::Ok,
             document(600),
         )
@@ -1058,6 +1067,75 @@ mod tests {
         assert!(!runtimes.first_sync_running(account));
         assert!(runtimes.take_failure(account));
         assert!(!runtimes.take_failure(account));
+    }
+
+    /// A swap drops the server copies of an account it removes or changes,
+    /// and keeps the ones of an account it leaves alone (PERSO-155).
+    #[tokio::test]
+    async fn a_swap_forgets_the_server_copies_of_a_removed_or_changed_account() {
+        use super::super::server_copies::{tests::counting, Request, ServerCopies};
+
+        let canonical = Arc::new(CanonicalState::new(
+            super::super::state::InstanceId::new("test"),
+            Vec::new(),
+        ));
+        let runtimes = Arc::new(RuntimeTable::default());
+        let watch = Arc::new(super::super::watch::DraftWatch::new(
+            super::super::watch::WatchRoots::new(),
+            super::super::watch::WatchConfig::default(),
+        ));
+        let accounts = |kept_interval: u64, changed_interval: u64, removed: bool| {
+            let mut text = format!(
+                "[[accounts]]\nname = \"zz-kept\"\n\n[accounts.imap]\nsync_interval_secs = {kept_interval}\n\n\
+                 [[accounts]]\nname = \"zz-changed\"\n\n[accounts.imap]\nsync_interval_secs = {changed_interval}\n"
+            );
+            if !removed {
+                text.push_str("\n[[accounts]]\nname = \"zz-removed\"\n");
+            }
+            parse(&text)
+        };
+        // No account runtimes, so the swap starts and stops nothing.
+        let store = ConfigStore::new(
+            PathBuf::from("/c/config.toml"),
+            ConfigState::Ok,
+            accounts(300, 300, false),
+            false,
+        );
+        let (fetcher, calls) = counting(b"raw");
+        let copies = ServerCopies::new(fetcher);
+        let request = |account: &str| Request {
+            account: AccountConfig {
+                name: account.to_string(),
+                ..Default::default()
+            },
+            secrets: Default::default(),
+            message_id: "<m@x>".to_string(),
+            mailbox: "sent".to_string(),
+        };
+        for account in ["zz-kept", "zz-changed", "zz-removed"] {
+            copies.get(request(account)).await.expect("a copy");
+        }
+        assert_eq!(copies.len(), 3);
+
+        let plan = reconcile(
+            &store,
+            &runtimes,
+            &canonical,
+            &watch,
+            &copies,
+            ConfigState::Ok,
+            accounts(300, 600, true),
+        )
+        .await;
+        assert_eq!(plan.updated, vec!["zz-changed".to_string()]);
+        assert_eq!(plan.removed, vec!["zz-removed".to_string()]);
+        assert_eq!(copies.len(), 1);
+        copies.get(request("zz-kept")).await.expect("a copy");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the kept account's copy is served without a download"
+        );
     }
 
     /// Startup starts share the swap lock, so one in flight does not hold up

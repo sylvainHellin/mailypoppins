@@ -16,7 +16,8 @@
 //!    account, a `BODY.PEEK[]` by `Message-ID` for an IMAP one. Nothing is
 //!    written back to the store: the export is a copy for the user, and
 //!    giving a Graph row a raw blob would change what every reader of that
-//!    row parses.
+//!    row parses. A copy downloaded in the last two minutes is served again
+//!    ([`ServerCopies`]), so the reads of one hit share one download.
 //!
 //! A server-search hit with no row is addressed as `message.fetch` addresses
 //! it, `hit: {message_id, mailbox}`, and goes straight to the second source:
@@ -41,6 +42,7 @@ use super::super::dispatch::{
     CancelToken, ClientCtx, Dispatcher, DomainError, Method, MethodKind, MethodSpec, Outcome,
 };
 use super::super::handles::{reap, HandleKind, HandleTable};
+use super::super::server_copies::{Fetcher, Request, ServerCopies};
 use super::{internal, invalid_params, string_param};
 
 /// The method, in an array of its own as the Markdown rendition is
@@ -60,6 +62,8 @@ pub struct MessageEml {
     pub config: Arc<ConfigStore>,
     /// The daemon's one handle table, shared with the other materialisers.
     pub handles: Arc<HandleTable>,
+    /// The server copies downloaded lately, shared with every read of a hit.
+    pub copies: Arc<ServerCopies>,
 }
 
 impl Method for MessageEml {
@@ -76,22 +80,72 @@ impl Method for MessageEml {
         Box::pin(async move {
             reap(&self.handles, Utc::now());
             let snapshot = self.config.snapshot();
-            materialise_eml(
-                &params,
-                &snapshot.accounts,
-                snapshot.config.secrets_backend,
-                &self.handles,
-            )
-            .await
-            .map(Outcome::query)
-            .map_err(DomainError::from)
+            let server = ServerLeg {
+                secrets: snapshot.config.secrets_backend,
+                copies: &self.copies,
+            };
+            materialise_eml(&params, &snapshot.accounts, server, &self.handles)
+                .await
+                .map(Outcome::query)
+                .map_err(DomainError::from)
         })
     }
 }
 
 /// Register the method on `dispatcher`.
-pub fn register(dispatcher: &mut Dispatcher, config: Arc<ConfigStore>, handles: Arc<HandleTable>) {
-    dispatcher.register(Arc::new(MessageEml { config, handles }));
+pub fn register(
+    dispatcher: &mut Dispatcher,
+    config: Arc<ConfigStore>,
+    handles: Arc<HandleTable>,
+    copies: Arc<ServerCopies>,
+) {
+    dispatcher.register(Arc::new(MessageEml {
+        config,
+        handles,
+        copies,
+    }));
+}
+
+/// What a read that may go to the server needs beside the account: the
+/// backend its credentials are in, and the copies downloaded lately, which a
+/// run of reads on one hit shares ([`ServerCopies`]).
+#[derive(Clone, Copy)]
+pub(super) struct ServerLeg<'a> {
+    pub(super) secrets: crate::secrets::SecretsBackendKind,
+    pub(super) copies: &'a ServerCopies,
+}
+
+impl ServerLeg<'_> {
+    /// The server's copy of `message_id` in the mailbox keyed `mailbox`,
+    /// downloaded once for the reads of the next couple of minutes.
+    async fn download(
+        &self,
+        account: &AccountConfig,
+        message_id: &str,
+        mailbox: &str,
+    ) -> Result<Vec<u8>, RpcError> {
+        self.copies
+            .get(Request {
+                account: account.clone(),
+                secrets: self.secrets,
+                message_id: message_id.to_string(),
+                mailbox: mailbox.to_string(),
+            })
+            .await
+    }
+}
+
+/// The daemon's [`Fetcher`]: the credentials opened, then [`fetch_raw`].
+pub fn server_fetcher() -> Fetcher {
+    Arc::new(|request: Request| {
+        Box::pin(async move {
+            let name = request.account.name.as_str();
+            super::open_secrets(name, request.secrets)?;
+            fetch_raw(&request.account, &request.message_id, &request.mailbox)
+                .await
+                .map_err(|e| super::server_error(name, &e))
+        })
+    })
 }
 
 /// The `result` of `message.materialise_eml`, addressed as `message.get`
@@ -101,15 +155,15 @@ pub fn register(dispatcher: &mut Dispatcher, config: Arc<ConfigStore>, handles: 
 async fn materialise_eml(
     params: &Value,
     accounts: &[AccountConfig],
-    secrets: crate::secrets::SecretsBackendKind,
+    server: ServerLeg<'_>,
     handles: &HandleTable,
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?.clone();
     let (filename, bytes, pinned) = match hit_address(&account, params)? {
-        Some(hit) => raw_of_hit(&account, &hit, secrets).await?,
+        Some(hit) => raw_of_hit(&account, &hit, server).await?,
         None => {
-            let (row, bytes, pinned) = raw_message(&account, params, secrets).await?;
+            let (row, bytes, pinned) = raw_message(&account, params, server).await?;
             (name_of_row(&row), bytes, pinned)
         }
     };
@@ -128,14 +182,14 @@ async fn materialise_eml(
 async fn raw_message(
     account: &AccountConfig,
     params: &Value,
-    secrets: crate::secrets::SecretsBackendKind,
+    server: ServerLeg<'_>,
 ) -> Result<(MessageRow, Vec<u8>, Vec<String>), RpcError> {
     let name = account.name.as_str();
     let row = {
         let store = open_store(name)?;
         super::message::address(params, &store, name)?
     };
-    let (bytes, pinned) = raw_of_row(account, &row, secrets).await?;
+    let (bytes, pinned) = raw_of_row(account, &row, server).await?;
     Ok((row, bytes, pinned))
 }
 
@@ -148,7 +202,7 @@ async fn raw_message(
 pub(super) async fn raw_of_row(
     account: &AccountConfig,
     row: &MessageRow,
-    secrets: crate::secrets::SecretsBackendKind,
+    server: ServerLeg<'_>,
 ) -> Result<(Vec<u8>, Vec<String>), RpcError> {
     let name = account.name.as_str();
     let stored = {
@@ -160,10 +214,9 @@ pub(super) async fn raw_of_row(
     if let Some((bytes, hash)) = stored {
         return Ok((bytes, vec![hash]));
     }
-    super::open_secrets(name, secrets)?;
-    let bytes = fetch_raw(account, &row.message_id, &row.mailbox)
-        .await
-        .map_err(|e| super::server_error(name, &e))?;
+    let bytes = server
+        .download(account, &row.message_id, &row.mailbox)
+        .await?;
     Ok((bytes, Vec::new()))
 }
 
@@ -234,17 +287,16 @@ impl Hit {
 pub(super) async fn raw_of_hit(
     account: &AccountConfig,
     hit: &Hit,
-    secrets: crate::secrets::SecretsBackendKind,
+    server: ServerLeg<'_>,
 ) -> Result<(String, Vec<u8>, Vec<String>), RpcError> {
     let name = account.name.as_str();
     if let Some(row) = held_row(name, hit)? {
-        let (bytes, pinned) = raw_of_row(account, &row, secrets).await?;
+        let (bytes, pinned) = raw_of_row(account, &row, server).await?;
         return Ok((name_of_row(&row), bytes, pinned));
     }
-    super::open_secrets(name, secrets)?;
-    let bytes = fetch_raw(account, &hit.message_id, &hit.mailbox)
-        .await
-        .map_err(|e| super::server_error(name, &e))?;
+    let bytes = server
+        .download(account, &hit.message_id, &hit.mailbox)
+        .await?;
     Ok((name_of_raw(&bytes), bytes, Vec::new()))
 }
 
@@ -297,16 +349,15 @@ pub(super) enum HitMessage {
 pub(super) async fn hit_message(
     account: &AccountConfig,
     hit: &Hit,
-    secrets: crate::secrets::SecretsBackendKind,
+    server: ServerLeg<'_>,
 ) -> Result<HitMessage, RpcError> {
     let name = account.name.as_str();
     if let Some(row) = held_row(name, hit)? {
         return Ok(HitMessage::Held(Box::new(row)));
     }
-    super::open_secrets(name, secrets)?;
-    let bytes = fetch_raw(account, &hit.message_id, &hit.mailbox)
-        .await
-        .map_err(|e| super::server_error(name, &e))?;
+    let bytes = server
+        .download(account, &hit.message_id, &hit.mailbox)
+        .await?;
     let email = crate::parse::parse_rfc822_to_fetched_email(&bytes).ok_or_else(|| {
         internal(format!(
             "the server's copy of {} in {name} does not parse as a message",
@@ -337,7 +388,7 @@ fn as_row_params(params: &Value, row: &MessageRow) -> Value {
 pub(super) async fn get_hit(
     params: &Value,
     accounts: &[AccountConfig],
-    secrets: crate::secrets::SecretsBackendKind,
+    server: ServerLeg<'_>,
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?.clone();
@@ -347,7 +398,7 @@ pub(super) async fn get_hit(
         Some(_) => return Err(invalid_params("body is a boolean")),
     };
     let hit = hit_address(&account, params)?.ok_or_else(|| invalid_params("hit is required"))?;
-    let (mailbox, email) = match hit_message(&account, &hit, secrets).await? {
+    let (mailbox, email) = match hit_message(&account, &hit, server).await? {
         HitMessage::Held(row) => {
             return super::message::get(&as_row_params(params, &row), accounts)
         }
@@ -372,7 +423,7 @@ pub(super) async fn get_hit(
 pub(super) async fn materialise_hit(
     params: &Value,
     accounts: &[AccountConfig],
-    secrets: crate::secrets::SecretsBackendKind,
+    server: ServerLeg<'_>,
     handles: &HandleTable,
     kind: HandleKind,
 ) -> Result<Value, RpcError> {
@@ -390,7 +441,7 @@ pub(super) async fn materialise_hit(
         ),
         _ => None,
     };
-    let (mailbox, email) = match hit_message(&account, &hit, secrets).await? {
+    let (mailbox, email) = match hit_message(&account, &hit, server).await? {
         HitMessage::Held(row) => {
             return super::message::materialise(
                 &as_row_params(params, &row),
@@ -545,5 +596,74 @@ JVBERi0xLjQK\r\n\
         assert!(view.starts_with("---\n"), "{view}");
         assert!(view.contains("mailbox: sent"), "{view}");
         assert!(view.contains("The list"), "{view}");
+    }
+
+    /// Listing a server-only hit, cutting each of its parts, opening its view
+    /// and exporting it download the server's copy once: every read after
+    /// the first is served from the daemon's recent copies (PERSO-155).
+    #[tokio::test]
+    async fn a_hits_reads_share_one_download() {
+        use std::sync::atomic::Ordering;
+
+        let data = tempfile::tempdir().expect("tempdir");
+        // Thread-local, and the test runs on its own thread's runtime, so
+        // every store and handle path below resolves into the temp tree.
+        let _data = crate::config::test_env::DataDirOverride::set(data.path());
+        let account = AccountConfig {
+            name: "tum".to_string(),
+            ..Default::default()
+        };
+        // A ready account with no row for the hit, which is a server-only hit.
+        let store_file = crate::config::store_path(&account.name);
+        std::fs::create_dir_all(store_file.parent().expect("a parent")).expect("account dir");
+        drop(Store::open(&store_file).expect("the store"));
+        let accounts = vec![account];
+
+        let (fetcher, downloads) = crate::daemon::server_copies::tests::counting(RAW);
+        let copies = ServerCopies::new(fetcher);
+        let server = ServerLeg {
+            secrets: Default::default(),
+            copies: &copies,
+        };
+        let handles = HandleTable::new(std::time::Duration::from_secs(60));
+        let hit = serde_json::json!({"message_id": "<loc-day@example.com>", "mailbox": "sent"});
+        let params = |extra: Value| {
+            let mut params = serde_json::json!({"account": "tum", "hit": hit});
+            for (key, value) in extra.as_object().expect("an object") {
+                params[key] = value.clone();
+            }
+            params
+        };
+
+        let shown = get_hit(&params(serde_json::json!({})), &accounts, server)
+            .await
+            .expect("the hit's record");
+        let parts = shown["attachments"].as_array().expect("attachments").len();
+        assert_eq!(parts, 2);
+        for part in 0..parts {
+            materialise_hit(
+                &params(serde_json::json!({"part": part})),
+                &accounts,
+                server,
+                &handles,
+                HandleKind::Attachment,
+            )
+            .await
+            .expect("a part");
+        }
+        materialise_hit(
+            &params(serde_json::json!({})),
+            &accounts,
+            server,
+            &handles,
+            HandleKind::Markdown,
+        )
+        .await
+        .expect("the view");
+        materialise_eml(&params(serde_json::json!({})), &accounts, server, &handles)
+            .await
+            .expect("the export");
+
+        assert_eq!(downloads.load(Ordering::SeqCst), 1);
     }
 }

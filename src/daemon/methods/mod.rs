@@ -80,6 +80,8 @@ pub struct Shared {
     pub holds: Arc<super::hold::HoldScheduler>,
     /// The health checks, the log reader and the bundle writer (P6-U8).
     pub diagnostics: Arc<super::diagnostics::Diagnostics>,
+    /// The server copies of messages downloaded lately (PERSO-155).
+    pub copies: Arc<super::server_copies::ServerCopies>,
 }
 
 /// Register every domain method this build serves.
@@ -99,6 +101,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         handles,
         holds,
         diagnostics,
+        copies,
     } = shared;
     dispatcher.register(Arc::new(account::AccountList {
         config: Arc::clone(&config),
@@ -109,7 +112,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
     dispatcher.register(Arc::new(mailbox::MailboxListServer {
         config: Arc::clone(&config),
     }));
-    message::register_reads(dispatcher, Arc::clone(&config));
+    message::register_reads(dispatcher, Arc::clone(&config), Arc::clone(&copies));
     message::register_stream(dispatcher, Arc::clone(&config), Arc::clone(&operations));
     message::register_invites(dispatcher, Arc::clone(&config));
     message::register_mutations(
@@ -118,8 +121,18 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         Arc::clone(&canonical),
         Arc::clone(&runtimes),
     );
-    message::register_handles(dispatcher, Arc::clone(&config), Arc::clone(&handles));
-    message_eml::register(dispatcher, Arc::clone(&config), handles);
+    message::register_handles(
+        dispatcher,
+        Arc::clone(&config),
+        Arc::clone(&handles),
+        Arc::clone(&copies),
+    );
+    message_eml::register(
+        dispatcher,
+        Arc::clone(&config),
+        handles,
+        Arc::clone(&copies),
+    );
     dispatcher.register(Arc::new(message::MessageListServer {
         config: Arc::clone(&config),
     }));
@@ -141,6 +154,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         Arc::clone(&config),
         Arc::clone(&watch),
         Arc::clone(&canonical),
+        Arc::clone(&copies),
     );
     self::send::register(
         dispatcher,
@@ -168,6 +182,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
             watch,
             operations: Arc::clone(&operations),
             diagnostics,
+            copies,
         }),
     );
     dispatcher.register(Arc::new(self::state::StateBootstrap::new(

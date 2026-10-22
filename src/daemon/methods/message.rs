@@ -65,6 +65,7 @@ use super::super::handles::{
     handle_dir, reap, remove_handle_dir, HandleId, HandleKind, HandleTable,
 };
 use super::super::operations::{OperationHandle, OperationRegistry};
+use super::super::server_copies::ServerCopies;
 use super::super::state::ConnectionId;
 use super::{internal, invalid_params, only_params, string_param};
 
@@ -115,6 +116,9 @@ pub struct MessageReadMethod {
     pub spec: MethodSpec,
     /// The live configuration, so a reload is visible to the next call.
     pub config: Arc<super::super::config::ConfigStore>,
+    /// The server copies downloaded lately, which a hit's `message.get`
+    /// shares with the reads that follow it.
+    pub copies: Arc<ServerCopies>,
 }
 
 impl Method for MessageReadMethod {
@@ -140,8 +144,11 @@ impl Method for MessageReadMethod {
                 // A server-search hit with no row is read from the server's
                 // copy, the one read of this family with a server leg.
                 "message.get" if super::message_eml::addresses_hit(&params) => {
-                    let secrets = self.config.snapshot().config.secrets_backend;
-                    super::message_eml::get_hit(&params, &accounts, secrets).await
+                    let server = super::message_eml::ServerLeg {
+                        secrets: self.config.snapshot().config.secrets_backend,
+                        copies: &self.copies,
+                    };
+                    super::message_eml::get_hit(&params, &accounts, server).await
                 }
                 "message.get" => get(&params, &accounts),
                 "message.list" => list_off_thread(&params, &accounts).await,
@@ -155,7 +162,11 @@ impl Method for MessageReadMethod {
 }
 
 /// Register the five read methods on `dispatcher`.
-pub fn register_reads(dispatcher: &mut Dispatcher, config: Arc<super::super::config::ConfigStore>) {
+pub fn register_reads(
+    dispatcher: &mut Dispatcher,
+    config: Arc<super::super::config::ConfigStore>,
+    copies: Arc<ServerCopies>,
+) {
     for spec in MESSAGE_READ_METHOD_SPECS
         .into_iter()
         .chain(MESSAGE_THREAD_METHOD_SPECS)
@@ -164,6 +175,7 @@ pub fn register_reads(dispatcher: &mut Dispatcher, config: Arc<super::super::con
         dispatcher.register(Arc::new(MessageReadMethod {
             spec,
             config: Arc::clone(&config),
+            copies: Arc::clone(&copies),
         }));
     }
 }
@@ -2025,6 +2037,9 @@ pub struct MessageHandleMethod {
     pub config: Arc<super::super::config::ConfigStore>,
     /// The daemon's one handle table, shared with the sweep that reads its pins.
     pub handles: Arc<HandleTable>,
+    /// The server copies downloaded lately: a hit's parts and view are cut
+    /// from one download.
+    pub copies: Arc<ServerCopies>,
 }
 
 impl Method for MessageHandleMethod {
@@ -2054,11 +2069,14 @@ impl Method for MessageHandleMethod {
                     } else {
                         HandleKind::Attachment
                     };
-                    let secrets = self.config.snapshot().config.secrets_backend;
+                    let server = super::message_eml::ServerLeg {
+                        secrets: self.config.snapshot().config.secrets_backend,
+                        copies: &self.copies,
+                    };
                     super::message_eml::materialise_hit(
                         &params,
                         &self.config.accounts(),
-                        secrets,
+                        server,
                         &self.handles,
                         kind,
                     )
@@ -2094,6 +2112,7 @@ pub fn register_handles(
     dispatcher: &mut Dispatcher,
     config: Arc<super::super::config::ConfigStore>,
     handles: Arc<HandleTable>,
+    copies: Arc<ServerCopies>,
 ) {
     for spec in MESSAGE_HANDLE_METHOD_SPECS
         .into_iter()
@@ -2103,6 +2122,7 @@ pub fn register_handles(
             spec,
             config: Arc::clone(&config),
             handles: Arc::clone(&handles),
+            copies: Arc::clone(&copies),
         }));
     }
 }

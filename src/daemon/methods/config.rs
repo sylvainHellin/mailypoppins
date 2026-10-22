@@ -209,6 +209,8 @@ pub struct ConfigFamily {
     pub operations: Arc<crate::daemon::operations::OperationRegistry>,
     /// The health checks a swap re-evaluates (P6-U8).
     pub diagnostics: Arc<crate::daemon::diagnostics::Diagnostics>,
+    /// The server copies a swap drops for a removed or changed account.
+    pub copies: Arc<crate::daemon::server_copies::ServerCopies>,
 }
 
 /// One served method of the family, dispatched by the name its spec declares.
@@ -588,6 +590,7 @@ async fn swap(family: &ConfigFamily, source: Source) -> Result<(Reconcile, u64),
         &family.runtimes,
         &family.canonical,
         &family.watch,
+        &family.copies,
         state,
         config,
     )
