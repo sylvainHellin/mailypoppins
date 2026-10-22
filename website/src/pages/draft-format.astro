@@ -242,10 +242,12 @@ Email body here.`;
       </p>
       <Code code={forwardExample} lang="markdown" theme={codeTheme} />
       <p>
-        <code>mp forward --as-attachment</code> (<code>cF</code> in the TUI, Forward as
-        attachment in the desktop app) attaches the original as one
+        <code>mp forward --as-attachment</code> (<code>cF</code> in the TUI and its server
+        search, Forward as attachment in the desktop app) attaches the original as one
         <code>&lt;date&gt;_&lt;subject&gt;.eml</code> file instead of its attachments, which
-        travel inside it with the quoted thread. The body is the same quoted forward.
+        travel inside it with the quoted thread. The body is the same quoted forward. A
+        server search result the local store does not hold needs no fetch first: the
+        original is downloaded from the server for the attachment.
       </p>
     </section>
 
@@ -308,7 +310,8 @@ Email body here.`;
         <code>to</code> to open one in the default app (it is written to a private temp directory
         first) or <code>ts</code> to save it to a directory you choose, and from the CLI use
         <code>mp save &lt;selector&gt; --output &lt;dir&gt;</code>.
-        To keep the whole message as a file, press <code>te</code> in the TUI or use
+        To keep the whole message as a file, press <code>te</code> in the TUI (also on a
+        server search result), Export .eml in the desktop app, or use
         <code>mp export &lt;selector&gt; --output &lt;dir&gt;</code>: either writes its raw
         RFC 822 source as <code>&lt;date&gt;_&lt;subject&gt;.eml</code>, which any mail client opens.
       </p>

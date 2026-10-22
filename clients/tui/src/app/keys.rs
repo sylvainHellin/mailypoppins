@@ -1243,7 +1243,28 @@ impl App {
             return None;
         }
 
+        // `te` and `cF`, the list's own keys for the hit under the cursor
+        // (PERSO-174); any other key after `t` or `c` drops the prefix.
+        match (self.pending_prefix, key.code) {
+            (Some('t'), KeyCode::Char('e')) => {
+                self.pending_prefix = None;
+                self.push_action(Action::SearchResultExport);
+                return None;
+            }
+            (Some('c'), KeyCode::Char('F')) => {
+                self.pending_prefix = None;
+                self.push_action(Action::SearchResultForwardAsAttachment);
+                return None;
+            }
+            (Some('t' | 'c'), _) => self.pending_prefix = None,
+            _ => {}
+        }
+
         match key.code {
+            KeyCode::Char(prefix @ ('t' | 'c')) => {
+                self.pending_prefix = Some(prefix);
+                return None;
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.server_search_index < len - 1 {
                     self.server_search_index += 1;
@@ -2612,7 +2633,7 @@ impl App {
     }
 
     /// Open the directory picker overlay with the given source files.
-    fn open_dir_picker(&mut self, sources: Vec<PathBuf>) {
+    pub(crate) fn open_dir_picker(&mut self, sources: Vec<PathBuf>) {
         let default_dir = self
             .last_save_dir
             .clone()

@@ -1897,6 +1897,12 @@ pub enum Action {
     SearchResultFetch,
     SearchResultReply(bool),
     SearchResultForward,
+    /// `cF` in the overlay: forward the hit as its `.eml` (PERSO-174), a
+    /// server-only one through `draft.forward`'s hit source.
+    SearchResultForwardAsAttachment,
+    /// `te` in the overlay: the hit's `.eml` into the directory picker
+    /// (PERSO-174), a server-only one downloaded by the daemon, not ingested.
+    SearchResultExport,
     SearchResultArchive,
     SearchResultOpenInBrowser,
     OpenHtmlInBrowser(PathBuf),
@@ -2010,7 +2016,9 @@ impl Action {
             Action::SearchResultOpen => true,
             // `handle_search_result_action` -> `search_result_draft` ->
             // `write_draft_and_edit`.
-            Action::SearchResultReply(_) | Action::SearchResultForward => true,
+            Action::SearchResultReply(_)
+            | Action::SearchResultForward
+            | Action::SearchResultForwardAsAttachment => true,
 
             // Everything else stays inside the alternate screen. Browser and
             // attachment opens go through `parse::open_file_with_system`,
@@ -2044,6 +2052,7 @@ impl Action {
             | Action::SearchResultJump
             | Action::SearchResultYankPath
             | Action::SearchResultFetch
+            | Action::SearchResultExport
             | Action::SearchResultArchive
             | Action::SearchResultOpenInBrowser
             | Action::OpenHtmlInBrowser(_)
@@ -2583,8 +2592,8 @@ mod tests {
     /// The full set of actions whose handler reaches `helpers::edit_file`,
     /// derived by reading `src/tui/actions.rs`. `EditCurrent` and
     /// `SearchResultOpen` go through `open_readonly_view`; `Reply`,
-    /// `SearchResultReply` and `SearchResultForward` through
-    /// `write_draft_and_edit`; `OpenLogFile`, `OpenConfigFile` and
+    /// `SearchResultReply`, `SearchResultForward` and
+    /// `SearchResultForwardAsAttachment` through `write_draft_and_edit`; `OpenLogFile`, `OpenConfigFile` and
     /// `OpenEventSource` edit inline in their own arm; `SendContactVcard`,
     /// `ComposeEditSignature`, `EditSignatureFile` and `ComposeWizardSubmit`
     /// through their named helpers.
@@ -2622,6 +2631,7 @@ mod tests {
             Action::SearchResultOpen,
             Action::SearchResultReply(false),
             Action::SearchResultForward,
+            Action::SearchResultForwardAsAttachment,
         ];
         for action in suspending {
             assert!(
@@ -2652,6 +2662,7 @@ mod tests {
             Action::SearchResultJump,
             Action::SearchResultYankPath,
             Action::SearchResultFetch,
+            Action::SearchResultExport,
             Action::SearchResultArchive,
             Action::SearchResultOpenInBrowser,
             Action::LoadMailbox {

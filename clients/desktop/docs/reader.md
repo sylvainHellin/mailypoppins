@@ -69,8 +69,8 @@ The TUI's `tt` is its thread view, which the desktop does not have yet; the KEYM
 ## The toolbar
 
 The open message's toolbar (`ReaderToolbar.tsx`, `role="toolbar"`, "Message actions") runs the same actions as the keys, on this message only, whatever the list has marked.
-Reply and Reply all write the reply with `draft_reply` and open it in the editor, Forward opens the forward wizard, and Archive, Delete, Move, Flag and Mark read or unread follow ([shell.md](shell.md), "Compose" and "Actions, dialogs and the activity area").
-Open in browser (`tb`) comes next, then the reader mode's HTML and Text (`tt`, see Text mode), and the Copy menu is last (INT-03).
+Reply and Reply all write the reply with `draft_reply` and open it in the editor, Forward and Forward as attachment (`cF`) open the forward wizard, and Archive, Delete, Move, Flag and Mark read or unread follow ([shell.md](shell.md), "Compose" and "Actions, dialogs and the activity area").
+Open in browser (`tb`) and Export .eml (`te`, the Export dialog) come next, then the reader mode's HTML and Text (`tt`, see Text mode), and the Copy menu is last (INT-03).
 
 The Copy menu (`ui/dropdown-menu.tsx`) has three items, each copying through `copyText` from its click:
 
@@ -166,7 +166,7 @@ On a draft, `to` opens one of its files, or picks among several in the same dial
 A file that does not parse gets no preview call: the pane says "This draft does not parse" with the listing's diagnostic, and only Edit in editor stays, since the editor is where it gets fixed.
 
 A server-only search hit has no row, so there is no body to load.
-The pane shows its sender, date and mailbox, says the message is on the server only, and offers Reply, Reply all and Forward, which `draft_from_message` builds from the hit's own headers, with no attachments.
+The pane shows its sender, date and mailbox, says the message is on the server only, and offers Reply, Reply all and Forward, which `draft_from_message` builds from the hit's own headers, with no attachments, then Forward as attachment and Export .eml, whose `.eml` the daemon downloads from the server (`draft_forward_hit`, `hit_export`), both disabled for a hit with no Message-ID.
 Its Fetch button, or `F`, is the TUI search overlay's `f`: `message_fetch` downloads the message into the store, the button says "Fetching…" meanwhile, and the hit then becomes the row it landed in, so the reader loads it like any stored message and the activity area says "Fetched into the local store".
 `F` on a hit the store already holds says "Already in the local store", and a refused fetch is an alert naming the daemon's reason.
 `to` and `ts` on a server-only hit say to fetch it first, since only a stored message has parts to materialise; `te` and `cF` need no fetch, since the daemon downloads the hit's `.eml` itself; Open in browser shows when the hit carries markup.

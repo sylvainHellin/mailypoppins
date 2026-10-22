@@ -1,4 +1,4 @@
-import { Cloud, CloudDownload, FileText, Forward, Globe, Reply, ReplyAll } from "lucide-react";
+import { Cloud, CloudDownload, FileDown, FileText, Forward, Globe, Paperclip, Reply, ReplyAll } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ComposeSummary, DraftPreview } from "@/components/compose/DraftPreview";
@@ -10,14 +10,16 @@ import { ReaderToolbar } from "@/components/reader/ReaderToolbar";
 import { InterceptedLinkNotice } from "@/components/reader/InterceptedLinkNotice";
 import { READER_SCROLL_ID } from "@/app/actions";
 import * as compose from "@/app/compose";
-import { fetchHit, openHtml } from "@/app/attachments";
+import { exportMessage, fetchHit, openHtml } from "@/app/attachments";
 import { useAppState, useDispatch } from "@/app/store";
 import { usePaneFocused } from "@/hooks/use-pane-focused";
 import { conversationDraft, filteredDrafts, isStale, readerKey, summaryDraft, type SearchHit } from "@/app/state";
 
 /**
  * A server-only search hit: the store holds no row, so there is no body to
- * show, and a reply or a forward is built from the hit's own headers.
+ * show, and a reply or a forward is built from the hit's own headers. Its
+ * `.eml`, forwarded as attachment or exported, is the server's copy, which
+ * the daemon downloads without ingesting it (PERSO-174).
  * Fetch (`F`) downloads it into the store, after which the reader opens it;
  * its markup opens in the browser as it came.
  */
@@ -46,6 +48,16 @@ function ServerHitSummary({ hit }: { hit: SearchHit }) {
         <Button
           size="sm"
           variant="ghost"
+          title="Forward as attachment (cF)"
+          disabled={!src || hit.message_id === null}
+          onClick={() => compose.forward(src, dispatch, true)}
+        >
+          <Paperclip aria-hidden="true" />
+          Forward as attachment
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
           title="Fetch into the local store (F)"
           disabled={fetching || hit.message_id === null}
           aria-busy={fetching || undefined}
@@ -60,6 +72,16 @@ function ServerHitSummary({ hit }: { hit: SearchHit }) {
             Open in browser
           </Button>
         ) : null}
+        <Button
+          size="sm"
+          variant="ghost"
+          title="Export message as .eml (t e)"
+          disabled={hit.message_id === null}
+          onClick={() => exportMessage(s, dispatch)}
+        >
+          <FileDown aria-hidden="true" />
+          Export .eml
+        </Button>
       </div>
       <h2 className="text-lg font-semibold break-words">{hit.subject || "(no subject)"}</h2>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">

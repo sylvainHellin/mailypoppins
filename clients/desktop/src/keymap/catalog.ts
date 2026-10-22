@@ -264,6 +264,10 @@ const SECTION_OVERRIDES: Record<string, Record<string, Binding>> = {
     // The overlay's own `w`: in the desktop client a hit is a list row, so
     // `cf` forwards it (MESSAGE).
     Forward: { badge: "later" },
+    // The overlay's `cF` and `te` are the MESSAGE keys already, a
+    // server-only hit's `.eml` downloaded by the daemon (PERSO-174).
+    "Forward as attachment (.eml)": { id: "forward_as_attachment", keys: ["cF"] },
+    "Export message as .eml": { id: "export_message", keys: ["te"] },
     // The form is a dialog: Tab and Shift+Tab move through its fields, and
     // Escape closes it (ServerSearchDialog.tsx).
     "Switch focus": { badge: "key" },

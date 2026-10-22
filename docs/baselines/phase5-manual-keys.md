@@ -19,6 +19,7 @@ A failing key is not a status this document may carry: it is a bug to fix before
 Seventeen of the twenty pass.
 The three that do not are the three whose effect leaves the process: the clipboard, a server-only search hit, and a browser over a message with an HTML part.
 Each says in its own row what a host with a display, a browser and a real account would have to press to close it.
+The result list's `cF` and `te` (PERSO-174) came after this walk; their rows say so and are not taken until the next walk presses them.
 
 ## The table
 
@@ -32,6 +33,8 @@ Each says in its own row what a host with a display, a browser and a real accoun
 | SERVER SEARCH | `y` | NOT TAKEN (owner-only) | The key ran and the overlay reported `access clipboard: Unknown error while interacting with the clipboard: X11 server connection timed out`. This host is headless, so `arboard` has no clipboard to write the path to. Needs a desktop session. |
 | SERVER SEARCH | `f` | NOT TAKEN (owner-only) | The key ran and the overlay reported `Already in the local store`, which is its documented answer for a hit that is not server-only. Every hit over an offline fixture is local, so the fetch leg (`ingest_search_hit`, `fetch_search_hit`, both still store and IMAP residue) needs an account with a server. |
 | SERVER SEARCH | `r / R` | pass | `r` wrote `accounts/alpha/drafts/2026-09-21-1411_sender-2286_re-steel-steel-2286.md` and `R` wrote the `-1` sibling beside it, both handed to the `$EDITOR` stub; the sidebar Drafts count rose with them. |
+| SERVER SEARCH | `cF` | NOT TAKEN (owner-only) | Added by PERSO-174 after this walk, so never pressed here. `src/tui_tests/actions_store.rs::the_search_overlays_te_exports_a_server_only_hits_eml` presses it against a daemon-backed app and sees `SearchResultForwardAsAttachment` queued; the forward of a server-only hit needs an account with a server to download its `.eml` from. |
+| SERVER SEARCH | `te` | NOT TAKEN (owner-only) | Added by PERSO-174 after this walk, so never pressed here. The same test presses it, sees `SearchResultExport` queued and reads the daemon's `.eml` byte for byte; a server-only hit the store has not caught up with needs an account with a server. |
 | SERVER SEARCH | `w` | pass | `w` wrote `accounts/alpha/drafts/2026-09-21-1411_sender-2286_fwd-steel-steel-2286.md` and opened it in the `$EDITOR` stub. |
 | SERVER SEARCH | `a` | pass | The hit left the result list, the cursor advanced to the next one, and `mp list-messages --mailbox archive` answers `mp://alpha/archive/alpha-bulk-4420@fixture.invalid` where the row had been in `Bulk`; the sidebar counts moved with it (Archive 102 to 103, Bulk 5000 to 4999). |
 | SERVER SEARCH | `b` | NOT TAKEN (owner-only) | The key ran, reached the daemon and was refused: `message.materialise_html failed: this message carries no HTML to render (-32602)`. No message the fixture generates carries an HTML part, and the host has no browser to hand one to. Needs a real account and a desktop session. |

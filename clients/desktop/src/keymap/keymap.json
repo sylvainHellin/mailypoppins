@@ -319,6 +319,14 @@
         "action": "Forward"
       },
       {
+        "key": "cF",
+        "action": "Forward as attachment (.eml)"
+      },
+      {
+        "key": "te",
+        "action": "Export message as .eml"
+      },
+      {
         "key": "a",
         "action": "Archive"
       },

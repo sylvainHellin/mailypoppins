@@ -154,7 +154,10 @@ pub fn route(action: &Action) -> ActionRoute {
         Action::SearchResultYankPath => ActionRoute::ClientOnly("the system clipboard"),
         Action::SearchResultFetch => ActionRoute::Daemon(&["message.fetch"]),
         Action::SearchResultReply(_) => ActionRoute::Daemon(&["draft.reply"]),
-        Action::SearchResultForward => ActionRoute::Daemon(&["draft.forward"]),
+        Action::SearchResultForward | Action::SearchResultForwardAsAttachment => {
+            ActionRoute::Daemon(&["draft.forward"])
+        }
+        Action::SearchResultExport => ActionRoute::Daemon(&["message.materialise_eml"]),
         Action::SearchResultArchive => ActionRoute::Daemon(&["message.archive"]),
         Action::SearchResultOpenInBrowser => ActionRoute::Daemon(&["message.materialise_html"]),
         Action::OpenHtmlInBrowser(_) => {
@@ -936,11 +939,28 @@ pub(super) fn eml_file(
     account: &str,
     row_id: i64,
 ) -> Result<PathBuf, String> {
+    materialised_eml(commands, json!({"account": account, "row_id": row_id}))
+}
+
+/// [`eml_file`] for a server-search hit the store holds no row for, the
+/// overlay's `te`: `message.materialise_eml`'s `hit` address, which the daemon
+/// answers from the server without ingesting anything, `mailbox` being the
+/// hit's sidebar label as `message.fetch` takes it (PERSO-174).
+pub(super) fn hit_eml_file(
+    commands: &dyn Queries,
+    account: &str,
+    message_id: &str,
+    mailbox: &str,
+) -> Result<PathBuf, String> {
+    materialised_eml(
+        commands,
+        json!({"account": account, "hit": {"message_id": message_id, "mailbox": mailbox}}),
+    )
+}
+
+fn materialised_eml(commands: &dyn Queries, address: serde_json::Value) -> Result<PathBuf, String> {
     let handle = commands
-        .call(
-            "message.materialise_eml",
-            json!({"account": account, "row_id": row_id}),
-        )
+        .call("message.materialise_eml", address)
         .map_err(|e| format!("{e:#}"))?;
     handle["path"]
         .as_str()
@@ -1782,7 +1802,7 @@ mod tests {
     use mp_core::draft::DraftFromSource;
     use serde_json::{json, Value};
 
-    use super::{draft_from_message, draft_from_source, eml_file};
+    use super::{draft_from_message, draft_from_source, eml_file, hit_eml_file};
     use crate::queries::Queries;
 
     /// A door that records every call and answers each with `answer`.
@@ -1899,5 +1919,24 @@ mod tests {
         );
         let pathless = Recorder::answering(json!({}));
         assert!(eml_file(&pathless, "alice", 7).is_err());
+
+        // The overlay's `te` on a server-only hit addresses it as
+        // `message.fetch` does (PERSO-174).
+        let hit = Recorder::answering(json!({
+            "handle": "h2", "path": "/run/handles/h2/2025-03-03_Old.eml",
+            "name": "2025-03-03_Old.eml", "bytes": 10, "expires_at": "x",
+        }));
+        let path = hit_eml_file(&hit, "alice", "<old@example.com>", "Archive").unwrap();
+        assert_eq!(path.to_str(), Some("/run/handles/h2/2025-03-03_Old.eml"));
+        assert_eq!(
+            *hit.calls.borrow(),
+            vec![(
+                "message.materialise_eml".to_string(),
+                json!({
+                    "account": "alice",
+                    "hit": {"message_id": "<old@example.com>", "mailbox": "Archive"},
+                })
+            )]
+        );
     }
 }

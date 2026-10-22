@@ -1408,6 +1408,13 @@ pub static KEYMAP: &[KeyBinding] = &[
     ),
     manual("r / R", KeyCtx::ServerSearch, "Reply / Reply-all", false),
     manual("w", KeyCtx::ServerSearch, "Forward", false),
+    manual(
+        "cF",
+        KeyCtx::ServerSearch,
+        "Forward as attachment (.eml)",
+        false,
+    ),
+    manual("te", KeyCtx::ServerSearch, "Export message as .eml", false),
     manual("a", KeyCtx::ServerSearch, "Archive", false),
     manual("b", KeyCtx::ServerSearch, "Open HTML in browser", false),
     manual("o", KeyCtx::ServerSearch, "Open attachment", false),

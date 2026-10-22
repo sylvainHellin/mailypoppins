@@ -1107,6 +1107,8 @@ pub(super) fn handle_action(
         | Action::SearchResultYankPath
         | Action::SearchResultReply(_)
         | Action::SearchResultForward
+        | Action::SearchResultForwardAsAttachment
+        | Action::SearchResultExport
         | Action::SearchResultArchive
         | Action::SearchResultOpenInBrowser => {
             handle_search_result_action(app, terminal, action)?;
@@ -2035,6 +2037,23 @@ fn handle_search_result_action(
             )?;
         }
 
+        Action::SearchResultForwardAsAttachment => {
+            search_result_draft(
+                app,
+                terminal,
+                DraftFromSource::Forward {
+                    as_attachment: true,
+                },
+                "Forward as attachment",
+            )?;
+        }
+
+        Action::SearchResultExport => {
+            if let Some(path) = search_result_eml_file(app) {
+                app.open_dir_picker(vec![path]);
+            }
+        }
+
         Action::SearchResultArchive => {
             archive_search_hit(app, &daemon_door(app));
         }
@@ -2042,6 +2061,33 @@ fn handle_search_result_action(
         _ => {}
     }
     Ok(())
+}
+
+/// The selected server-search hit as its `.eml`, for the overlay's `te` to
+/// hand to the directory picker as the list's `te` does, or `None` with the
+/// overlay's status line saying why (PERSO-174).
+///
+/// A hit that resolved is its row's export; a server-only one is addressed as
+/// `f` addresses it, and the daemon downloads the server's copy without
+/// ingesting it, so the hit stays a hit.
+pub fn search_result_eml_file(app: &mut App) -> Option<PathBuf> {
+    let hit = app.server_search_results.get(app.server_search_index)?;
+    let account = app.account_config.name.clone();
+    let door = daemon_door(app);
+    let file = match (hit.entry.msg, hit.fetched.message_id.as_deref()) {
+        (Some(msg), _) => commands::eml_file(&door, &account, msg.row_id()),
+        (None, Some(message_id)) => {
+            commands::hit_eml_file(&door, &account, message_id, &hit.source_label)
+        }
+        (None, None) => Err("This hit carries no Message-ID; cannot export it".to_string()),
+    };
+    match file {
+        Ok(path) => Some(path),
+        Err(e) => {
+            app.server_search_status = Some(format!("Export failed: {e}"));
+            None
+        }
+    }
 }
 
 /// Archive the selected server-search hit (`a` in the overlay).

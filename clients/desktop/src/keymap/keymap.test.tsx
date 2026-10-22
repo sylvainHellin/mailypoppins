@@ -543,6 +543,17 @@ describe("compose keys (the TUI's)", () => {
     expect(callsOf("message_export")).toEqual([]);
     expect(callsOf("message_fetch")).toEqual([]);
     expect(await screen.findByText("Exported 2025-03-03_Server-only match.eml to ~/Downloads")).toBeInTheDocument();
+
+    // The hit's own toolbar has both, as the open message's does.
+    const toolbar = within(screen.getByRole("complementary", { name: "Reader" })).getByRole("toolbar", { name: "Message actions" });
+    await user.click(within(toolbar).getByRole("button", { name: "Export .eml" }));
+    const again = await screen.findByRole("dialog", { name: "Export message" });
+    await user.click(within(again).getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(callsOf("hit_export")).toHaveLength(2));
+    await user.click(within(toolbar).getByRole("button", { name: "Forward as attachment" }));
+    await waitFor(() =>
+      expect(callsOf("draft_forward_hit")).toEqual([{ account: "work", mailbox: "Archive", message_id: "<server-only@fixture.example>" }]),
+    );
   });
 
   it("e on a message opens its Markdown rendition in the editor and Enter focuses the reader; on a draft e edits it (PERSO-92)", async () => {

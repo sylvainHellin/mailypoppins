@@ -264,6 +264,21 @@ describe("the reader's attachments", () => {
     expect(within(save).getByRole("textbox", { name: "Directory" })).toHaveValue("~/Mail/Archive");
   });
 
+  it("the toolbar's Export .eml and Forward as attachment run te and cF on the open message (PERSO-174)", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("j");
+    const toolbar = await within(reader()).findByRole("toolbar", { name: "Message actions" });
+    await user.click(within(toolbar).getByRole("button", { name: "Export .eml" }));
+    const dialog = await screen.findByRole("dialog", { name: "Export message" });
+    await user.click(within(dialog).getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(argsOf("message_export")).toEqual([{ account: "work", row_id: 1001, dest_dir: "~/Downloads" }]));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await user.click(within(toolbar).getByRole("button", { name: "Forward as attachment" }));
+    const wizard = await screen.findByRole("dialog", { name: "Forward as attachment" });
+    expect(within(wizard).getByLabelText("Subject")).toHaveValue("Fwd: Quarterly ledger review");
+  });
+
   it("to opens one attachment at once and picks among several; ts saves the checked parts", async () => {
     const { user } = renderApp(1400, twoParts);
     await shellReady();

@@ -76,6 +76,8 @@ Live only while `held_send` is set, ahead of the table dispatch in `dispatch_nor
 - `r` (1208) replies to the hit.
 - `R` (1211) replies to all.
 - `w` (1214) forwards it.
+- `cF`, added by PERSO-174 after the freeze, forwards it as its `.eml`.
+- `te`, added by PERSO-174 after the freeze, hands its `.eml` to the dir picker.
 - `a` (1217) archives it.
 - `b` (1220) opens its HTML part in the browser.
 - `o` (1223) opens the attachment picker in Open mode over the hit.

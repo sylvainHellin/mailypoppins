@@ -1344,6 +1344,51 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
         assert_eq!(std::fs::read(&sources[0]).unwrap(), raw);
     }
 
+    /// The search overlay's `te` and `cF` (PERSO-174) queue the hit's export
+    /// and its forward as attachment, `e` still opens it, and the export of a
+    /// server-only hit is the daemon's `.eml` for its Message-ID, here one the
+    /// store has caught up with since the search.
+    #[test]
+    fn the_search_overlays_te_exports_a_server_only_hits_eml() {
+        use crate::tui::app::{Action, Overlay, SearchOverlayFocus, SearchResultEntry};
+        let fx = Fixture::new();
+        let raw = b"From: Alice <alice@example.com>\r\nTo: me@example.com\r\n\
+            Subject: Quarterly report\r\nDate: Mon, 01 Jan 2024 12:00:00 +0000\r\n\
+            Message-ID: <q@example.com>\r\n\r\nThe numbers.\r\n";
+        let row = fx.ingest_raw(raw);
+        let mut app = app_on_row(&fx, &row);
+        let mut entry = app.emails[0].clone();
+        entry.msg = None;
+        app.server_search_results = vec![SearchResultEntry {
+            entry,
+            fetched: crate::parse::parse_rfc822_to_fetched_email(raw).unwrap(),
+            source_label: "Inbox".to_string(),
+        }];
+        app.server_search_index = 0;
+        app.overlay = Overlay::Search;
+        app.server_search_focus = SearchOverlayFocus::List;
+
+        for (chord, want) in [
+            ("te", Action::SearchResultExport),
+            ("cF", Action::SearchResultForwardAsAttachment),
+            ("e", Action::SearchResultOpen),
+        ] {
+            app.pending_actions.clear();
+            press(&mut app, chord);
+            let queued: Vec<String> = app
+                .pending_actions
+                .iter()
+                .map(|a| format!("{a:?}"))
+                .collect();
+            assert_eq!(queued, [format!("{want:?}")], "{chord}");
+        }
+
+        let path = crate::tui::actions::search_result_eml_file(&mut app)
+            .unwrap_or_else(|| panic!("no .eml: {:?}", app.server_search_status));
+        assert_eq!(path.file_name().unwrap(), "2024-01-01_Quarterly report.eml");
+        assert_eq!(std::fs::read(&path).unwrap(), raw);
+    }
+
     /// `cf` and `cF` open the one forward wizard; `cF`'s carries the message
     /// as its `.eml` (PERSO-174).
     #[test]

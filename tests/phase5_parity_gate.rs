@@ -832,9 +832,10 @@ fn the_manual_rows_are_exactly_what_this_runs_binary_dumps() {
     );
     assert_eq!(
         derived.len(),
-        20,
-        "Phase 0 counted 20 documented-only Manual rows (15 server search, 5 activity log); a new \
-         one needs a `docs/baselines/pre-daemon/manual-keys.md` row and a checklist row"
+        22,
+        "Phase 0 counted 20 documented-only Manual rows (15 server search, 5 activity log), and \
+         PERSO-174 added the server search's `cF` and `te`; a new one needs a \
+         `docs/baselines/pre-daemon/manual-keys.md` row and a checklist row"
     );
 }
 

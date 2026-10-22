@@ -1,10 +1,26 @@
-import { Archive, ChevronDown, Copy, FolderInput, Forward, Globe, Mail, MailOpen, Reply, ReplyAll, Star, StarOff, Trash2 } from "lucide-react";
+import {
+  Archive,
+  ChevronDown,
+  Copy,
+  FileDown,
+  FolderInput,
+  Forward,
+  Globe,
+  Mail,
+  MailOpen,
+  Paperclip,
+  Reply,
+  ReplyAll,
+  Star,
+  StarOff,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { copyFromMessage } from "@/app/interop";
 import { openMessageTarget, runMutation, type MutationActionId } from "@/app/actions";
 import * as compose from "@/app/compose";
-import { openHtml } from "@/app/attachments";
+import { exportMessage, openHtml } from "@/app/attachments";
 import { READER_MODE_LABELS, READER_MODES, saveReaderMode } from "@/app/readerMode";
 import { useAppState, useDispatch } from "@/app/store";
 import { targetKey } from "@/app/state";
@@ -12,10 +28,11 @@ import type { MessageMeta } from "@/lib/gui-types";
 
 /**
  * The open message's actions, the same the keys run: Reply and Reply all
- * open the editor on the new draft, Forward asks for the recipients first,
- * Archive and Delete ask first, Move opens the picker. They act on this
- * message only, whatever the list has marked. Open in browser hands the
- * daemon's rendition to the default browser. Copy is a menu of the sender's
+ * open the editor on the new draft, Forward and Forward as attachment ask
+ * for the recipients first, Archive and Delete ask first, Move opens the
+ * picker. They act on this message only, whatever the list has marked. Open
+ * in browser hands the daemon's rendition to the default browser, and Export
+ * .eml opens the Export dialog (`te`, PERSO-174). Copy is a menu of the sender's
  * address, the `mp://` link (what `y` copies) and the subject. HTML | Text
  * is the reader mode (`tt`), the current one pressed.
  */
@@ -47,6 +64,10 @@ export function ReaderToolbar({ meta }: { meta: MessageMeta }) {
         <Forward aria-hidden="true" />
         Forward
       </Button>
+      <Button size="sm" variant="ghost" title="Forward as attachment (cF)" onClick={() => compose.forward(src, dispatch, true)}>
+        <Paperclip aria-hidden="true" />
+        Forward as attachment
+      </Button>
       <Button size="sm" variant="ghost" title="Archive (a)" onClick={() => run("archive")}>
         <Archive aria-hidden="true" />
         Archive
@@ -70,6 +91,10 @@ export function ReaderToolbar({ meta }: { meta: MessageMeta }) {
       <Button size="sm" variant="ghost" title="Open HTML in browser (t b)" onClick={() => void openHtml(s, dispatch)}>
         <Globe aria-hidden="true" />
         Open in browser
+      </Button>
+      <Button size="sm" variant="ghost" title="Export message as .eml (t e)" onClick={() => exportMessage(s, dispatch)}>
+        <FileDown aria-hidden="true" />
+        Export .eml
       </Button>
       <div role="group" aria-label="Reader mode" className="flex">
         {READER_MODES.map((mode, i) => (
