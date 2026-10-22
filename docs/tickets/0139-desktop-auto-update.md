@@ -7,7 +7,7 @@ status: in-progress
 created: 2026-10-04
 ---
 
-Stage 1 shipped 2026-10-08 (merged in 1826f1f); the first end-to-end update over two tagged releases is PERSO-102, stage 2 and the stage 1 leftovers are PERSO-107.
+Stage 1 shipped 2026-10-08 (merged in 1826f1f); stage 2 was built 2026-10-22 (PERSO-107); the first end-to-end update over two tagged releases is PERSO-102, and stage 3 waits on #0012.
 
 Plane PERSO-85.
 It extends [#0132](0132-gui-distribution-and-release.md), whose release job ships the unsigned DMGs this ticket teaches to update themselves.
@@ -95,8 +95,11 @@ Scope decided on 2026-10-22 (decision log, same date): the three items below, an
 
 - After an install the new app's first connect can meet the old daemon, after "Later" and a quit.
   The app records `{from, to}` in `update-state.json` at install, and a version mismatch whose daemon version is `from` restarts the daemon without the blocking screen; any other mismatch still shows it.
+  Built as: the connect restarts quietly only when this app's version and the `mp` it would start are both `to`, so the old app's reconnects in the Later window still get the screen; the record is cleared before the restart, so it runs once, and by any handshake with a daemon of `to` (`connector::check_version`, `updates::restarts_quietly`).
 - The release job stops marking a prerelease tag as the latest release.
+  Built as: a tag with a hyphen (`v0.12.0-rc.1`) is created with `--prerelease`, keeps its `latest.json` asset, is never marked latest, and skips the Homebrew tap; `tests/release_workflow.rs` runs the steps' scripts against both kinds of tag.
 - A manual update check after "Later" says that a restart is pending.
+  Built as: once this run installed an update, `update_check` answers `restart_pending` without reaching the endpoint, and the notice line says "mailypoppins 0.12.0 is installed; restart to finish the update".
 
 An install-at-quit setting (a `desktop.json` key, a Settings toggle, the download kept for the exit path) waits until a few manual updates have gone through cleanly, since it replaces the app unseen.
 
@@ -151,7 +154,7 @@ Self-update works without an Apple account; the first install from a browser dow
   The app does not use it while the sidecar exists (the sidecar comes before `PATH` in `resolve_mp_binary`), but a daemon that `mp` starts is refused by the app with the restart screen, and the restart screen's Restart replaces it with the bundled version; the "do not combine" rule of `docs/release-process.md` ("`mp` on PATH from the app") stays the answer, and the symlink route follows the app through every update.
 - After a swap, the old daemon goes on running the old binary, which was moved to the plugin's backup location.
 - Without the stop in step 5, the new app's first connect meets that daemon, the probe reads the new `mp --version` (the cache key changed with size and modification time), and the user gets the blocking restart screen; its Restart already fixes it.
-  Stopping the daemon before the relaunch avoids the screen; Stage 2's `{from, to}` record avoids it after "Later" and a quit.
+  Stopping the daemon before the relaunch avoids the screen; stage 2's `{from, to}` record avoids it after "Later" and a quit, or when the stop did not land.
 - In the "Later" window the old app runs over the new bundle's files: a reconnect probes the new `mp` and shows the restart screen, and an embedded editor started then reads the new `nvim/` resources.
   Both are recoverable, and the indicator says a restart is pending.
 - A daemon run by `mp daemon install-service` has `KeepAlive` with `SuccessfulExit` false (`src/daemon/templates/dev.mailypoppins.daemon.plist`), so a clean `daemon.stop` is not restarted by launchd; through the documented symlink the service path follows the bundle.
@@ -163,10 +166,12 @@ Rust unit tests, no window and no network:
 - The cooldown and skip decision as a pure function of `last_check`, now, `skipped_version` and the manual flag.
 - The "should check at all" rule: debug build, fixture mode, not in a bundle.
 - `update-state.json` read and write, a missing or broken file reading as empty.
-- The Stage 2 mismatch rule: a daemon of the recorded `from` version restarts quietly, any other version still shows the screen.
+- The stage 2 mismatch rule: a daemon of the recorded `from` version restarts quietly, any other version still shows the screen; the record is taken once and settled by a daemon of `to`.
+- The same rule against a real daemon (`live_daemon_quiet_restart_after_an_update`, ignored, run with `MP_DESKTOP_MP_BIN`), with a wrapper `mp` playing the new bundle's.
+- The release workflow's prerelease rule, by running the steps' own scripts with a stand-in `gh` (`tests/release_workflow.rs`).
 - A `latest.json` built by the workflow's `jq` command from a sample `.sig` file parses with the plugin's own manifest type.
 
-Vitest: the sidebar entry, the palette commands, the progress card and the Restart now / Later choice against a mocked command.
+Vitest: the sidebar entry, the palette commands, the progress card, the Restart now / Later choice against a mocked command, and the restart-pending answer of a check after Later.
 
 On the Mac, with two real tags (a test pair such as `v0.11.0-rc.1` and `-rc.2` would be prereleases and invisible to `releases/latest`, so use a fork or a throwaway repository with its own `endpoints`):
 
@@ -175,7 +180,7 @@ On the Mac, with two real tags (a test pair such as `v0.11.0-rc.1` and `-rc.2` w
 - `xattr -l /Applications/mailypoppins.app` after the update shows no `com.apple.quarantine`, and the relaunch opens without the Privacy & Security step.
 - `codesign -dv /Applications/mailypoppins.app` reports an ad-hoc signature before and after.
 - With an account on `keyring` and Terminal.app as the editor route, note whether the Keychain or the Automation prompt returns after the update.
-- The daemon after Restart now is version N+1 (`mp daemon status` through the bundled binary), and "Later" followed by a quit and a launch gives the restart screen once.
+- The daemon after Restart now is version N+1 (`mp daemon status` through the bundled binary), and "Later" followed by a quit and a launch gives no restart screen, with the daemon at N+1 after the connecting screen.
 - From a standard (non-admin) account, the admin-password fallback appears and a cancel leaves the old app working.
 - A dry run of the workflow on the throwaway repository: the `.app.tar.gz` and `.sig` assets, a valid `latest.json`, and the "latest" flag moved only after it.
   Verified on the real repository with v0.11.0 instead (2026-10-08): every asset present, the manifest's `signature` equal to the `.sig` asset, `version:0.11.0` in its trusted comment, and the release marked latest by `desktop-manifest`.
