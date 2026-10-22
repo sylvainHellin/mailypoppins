@@ -249,6 +249,90 @@ async fn a_server_search_hit_is_exported_through_its_message_id() {
     }
 }
 
+/// `message.get`, `message.materialise_markdown` and
+/// `message.materialise_attachment` take the same hit address, so every
+/// action on a server-only hit reads it through the daemon without a fetch
+/// first: a hit the store has caught up with is answered by its row, one it
+/// has not by the server's copy, which the test has no server for, so that
+/// refusal is the server leg's (PERSO-155).
+#[tokio::test]
+async fn a_server_search_hit_is_read_and_materialised_through_its_message_id() {
+    let (tmp, _daemon) = seeded();
+    let (mut conn, _) = connect(tmp.path()).await;
+    let held = json!({"message_id": "<deal@example.com>", "mailbox": "inbox"});
+    let missing = json!({"message_id": "<only-on-the-server@example.com>", "mailbox": "inbox"});
+    let call = async |conn: &mut Connection, method: &str, params: Value| match within(
+        method,
+        conn.call(method, params),
+    )
+    .await
+    {
+        Ok(value) => Ok(value),
+        Err(ClientError::Rpc(error)) => Err(error),
+        Err(other) => panic!("{method}: expected a result or a typed RPC error, got {other:?}"),
+    };
+
+    let shown = call(
+        &mut conn,
+        "message.get",
+        json!({"account": fixture::ACCOUNT, "hit": held, "body": false}),
+    )
+    .await
+    .expect("a hit the store holds is read as its row");
+    assert_eq!(
+        shown["selector"],
+        json!(format!("mp://{}/inbox/deal@example.com", fixture::ACCOUNT))
+    );
+    assert!(shown.get("body").is_none(), "body: false is honoured");
+
+    let view = call(
+        &mut conn,
+        "message.materialise_markdown",
+        json!({"account": fixture::ACCOUNT, "hit": held}),
+    )
+    .await
+    .expect("a held hit's view");
+    let text = fs::read_to_string(view["path"].as_str().expect("path")).expect("the view");
+    assert!(text.contains("Elsevier DEAL"), "{text}");
+
+    let error = call(
+        &mut conn,
+        "message.materialise_attachment",
+        json!({"account": fixture::ACCOUNT, "hit": held, "part": 0}),
+    )
+    .await
+    .expect_err("the held message carries no attachment");
+    assert_eq!(error.code, -32602, "{error:?}");
+
+    for (method, extra) in [
+        ("message.get", json!({})),
+        ("message.materialise_markdown", json!({})),
+        ("message.materialise_attachment", json!({"part": 0})),
+    ] {
+        let mut params = json!({"account": fixture::ACCOUNT, "hit": missing});
+        for (key, value) in extra.as_object().expect("an object") {
+            params[key] = value.clone();
+        }
+        let error = call(&mut conn, method, params)
+            .await
+            .expect_err("there is no server to read the hit from");
+        assert_eq!(
+            error.code, -32603,
+            "{method}: a server leg failure, got {error:?}"
+        );
+        assert_eq!(error.data, Some(json!({"account": fixture::ACCOUNT})));
+
+        let error = call(
+            &mut conn,
+            method,
+            json!({"account": fixture::ACCOUNT, "id": "inbox/5", "hit": held, "part": 0}),
+        )
+        .await
+        .expect_err("a hit beside a row address is refused");
+        assert_eq!(error.code, -32602, "{method}: {error:?}");
+    }
+}
+
 /// The `attachments:` entries of a draft file, unquoted.
 ///
 /// Line ends are normalised first: a draft built from a CRLF message is
@@ -378,11 +462,70 @@ async fn a_server_search_hit_forwards_as_attachment() {
         fs::read_dir(&drafts).map(|d| d.count()).unwrap_or(0),
         before
     );
+}
 
-    let inline = within(
+/// An inline forward takes a hit too, with the wizard's recipients and
+/// subject, so a forward of a server-only hit asks for its recipients first
+/// in every client as a stored row's does: a held hit is that row's forward,
+/// and one only the server holds is refused when there is no server, writing
+/// nothing (PERSO-155).
+#[tokio::test]
+async fn a_server_search_hit_forwards_inline_with_the_wizards_headers() {
+    let (tmp, _daemon) = seeded();
+    let (mut conn, _) = connect(tmp.path()).await;
+    let headers = json!({"to": "bob@example.com", "cc": "", "bcc": "", "subject": "FYI"});
+    let created = within(
         "draft.forward",
         conn.call(
             "draft.forward",
+            json!({
+                "account": fixture::ACCOUNT,
+                "source": {"hit": {"message_id": "<deal@example.com>", "mailbox": "inbox"}},
+                "headers": headers,
+            }),
+        ),
+    )
+    .await
+    .expect("the inline forward of a held hit is written");
+    assert_eq!(created["subject"], json!("FYI"));
+    let draft = fs::read_to_string(created["path"].as_str().expect("path")).expect("the draft");
+    assert!(draft.contains("bob@example.com"), "{draft}");
+    assert!(
+        draft.contains("the answer"),
+        "the forward quotes the body: {draft}"
+    );
+    assert!(
+        attachments_of(&draft).is_empty(),
+        "no .eml is attached: {draft}"
+    );
+
+    let drafts = fixture::account_dir(tmp.path(), fixture::ACCOUNT).join("drafts");
+    let before = fs::read_dir(&drafts).map(|d| d.count()).unwrap_or(0);
+    let refused = within(
+        "draft.forward",
+        conn.call(
+            "draft.forward",
+            json!({
+                "account": fixture::ACCOUNT,
+                "source": {"hit": {"message_id": "<only-on-the-server@example.com>", "mailbox": "inbox"}},
+                "headers": headers,
+            }),
+        ),
+    )
+    .await;
+    match refused {
+        Err(ClientError::Rpc(error)) => assert_eq!(error.code, -32603, "{error:?}"),
+        other => panic!("a hit with no server is refused, got {other:?}"),
+    }
+    assert_eq!(
+        fs::read_dir(&drafts).map(|d| d.count()).unwrap_or(0),
+        before
+    );
+
+    let reply = within(
+        "draft.reply",
+        conn.call(
+            "draft.reply",
             json!({
                 "account": fixture::ACCOUNT,
                 "source": {"hit": {"message_id": "<deal@example.com>", "mailbox": "inbox"}},
@@ -390,9 +533,9 @@ async fn a_server_search_hit_forwards_as_attachment() {
         ),
     )
     .await;
-    match inline {
+    match reply {
         Err(ClientError::Rpc(error)) => assert_eq!(error.code, -32602, "{error:?}"),
-        other => panic!("an inline forward of a hit source is refused, got {other:?}"),
+        other => panic!("a reply to a hit source is refused, got {other:?}"),
     }
 }
 

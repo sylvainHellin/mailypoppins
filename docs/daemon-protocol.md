@@ -395,6 +395,9 @@ A message is addressed by exactly one of `id`, `row_id` and `selector`; naming n
 `id` is the `"<mailbox>/<uid>"` of the handle methods, taken literally, because a GUI holding a listed row has no selector to spell.
 `row_id` is the `id` a `message.list` row carries, for a client whose held row is named by it and by nothing else: the TUI's preview is such a client, and re-deriving a `"<mailbox>/<uid>"` on every cursor move would make it carry a second identity for the same row.
 A `row_id` no message has is `-32602` like every other address that names nothing.
+A server-search hit with no row is a fourth address, `hit: {message_id, mailbox}`, the one `message.fetch` and `message.materialise_eml` take and never beside the other three (PERSO-155).
+A hit the store has caught up with is that row's record; any other is read from the server's copy, downloaded as `message.materialise_eml` downloads it and parsed as a sync parses it, and answers the record a stored row of that mailbox would print, under the selector a fetch would land it as, with the parsed parts in the order `message.materialise_attachment` takes them.
+Nothing is ingested, so the hit stays a hit; this is the one read of the family with a server leg, and its failure is `-32603` with `{account}`.
 `selector` is the grammar `mp show` takes from a user (`<message-id>`, `<mailbox>/<message-id>`, `mp://<account>/<mailbox>/<message-id>`), resolved daemon-side the way `resolve_received_arg` resolves it, with the optional `mailbox` narrowing it exactly as `mp show --mailbox` does: the resolution needs the store the client no longer has.
 Which *account* a selector names stays a client-side decision, because `Selector::parse` needs no store.
 An unknown uid, a malformed id, a mailbox the account does not have and a selector that resolves to nothing are all `-32602`, in the resolution's own words, so a routed `mp show` reports what the pre-daemon one reported.
@@ -526,9 +529,9 @@ A client cannot read an account's blob store, so the daemon writes the bytes it 
 
 | method | kind | params | result |
 |---|---|---|---|
-| `message.materialise_attachment` | client_integration | `{account, row_id\|id\|selector, mailbox?, part}` | `{handle, path, name, bytes, expires_at}` |
+| `message.materialise_attachment` | client_integration | `{account, row_id\|id\|selector, mailbox?, part}` or `{account, hit: {message_id, mailbox}, part}` | `{handle, path, name, bytes, expires_at}` |
 | `message.materialise_html` | client_integration | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
-| `message.materialise_markdown` | client_integration | `{account, row_id\|id\|selector, mailbox?}` | `{handle, path, name, bytes, expires_at}` |
+| `message.materialise_markdown` | client_integration | `{account, row_id\|id\|selector, mailbox?}` or `{account, hit: {message_id, mailbox}}` | `{handle, path, name, bytes, expires_at}` |
 | `message.materialise_eml` | client_integration | `{account, row_id\|id\|selector, mailbox?}` or `{account, hit: {message_id, mailbox}}` | `{handle, path, name, bytes, expires_at}` |
 | `message.release_handle` | query | `{handle}` | `{}` |
 
@@ -573,6 +576,7 @@ That server leg is why it is a method of its own in the code (`methods::message_
 It also takes a server-search hit with no row, `hit: {message_id, mailbox}`, the address `message.fetch` takes and instead of `row_id`, `id` or `selector`: a hit the store has since caught up with is that row's export, and any other is the server leg above, named off the bytes' own `Subject:` and `Date:`; nothing is ingested, so the hit stays a hit.
 
 All four address a message as `message.get` does: exactly one of `row_id`, `id` and `selector`, with `mailbox` narrowing a selector.
+`message.materialise_attachment` and `message.materialise_markdown` take `message.get`'s `hit` address too (PERSO-155): a held hit is its row's file, and any other is cut from the server's copy, a part by its index in `message.get`'s list of that hit and the view rendered as a stored row's is, read-only, named `message.md` when the subject slugs to nothing; nothing is pinned, since no blob was read.
 `row_id` is documented here because this is the method whose call site holds one, and the other two accept it because the whole family resolves an address through one helper; widening them was additive and free (P5-U10c).
 The TUI holds a `MessageRef`, which is the synthetic row key and nothing else (#0050), and making it spell `"<mailbox>/<uid>"` would make it carry a second identity for every listed row.
 A message with no stored body renders with an empty body rather than refusing, because `render_markdown` degrades the way `mp show` does.
@@ -725,7 +729,9 @@ The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they ar
 The bytes are `message.materialise_eml`'s, so a Graph row is fetched from the server first, and they are written to `<account>/attachments/<message-id>/<date>_<subject>.eml`, where a forward's carried parts already go; the draft lists that one file instead of the original's parts, which are inside it, and the `.eml` extension is what makes the send label the part `message/rfc822`.
 The body is the usual forward's, quoted header block included; `mp_core::draft::ATTACHED_FORWARD_BODY` is the one line that would make it Outlook's, the signature alone.
 A source whose bytes cannot be had is `-32603` with `{account}` and writes no draft.
-With `as_attachment` the source may also be a server-search hit with no row, `{hit: {message_id, mailbox}}`: the `.eml` is `message.materialise_eml`'s for that hit, and the forward's headers and quoted body are parsed out of it by the same builder; a reply or an inline forward of a hit goes through `draft.create_from_message` instead, and a hit source there is `-32602`.
+The source of a forward may also be a server-search hit with no row, `{hit: {message_id, mailbox}}`: with `as_attachment` the `.eml` is `message.materialise_eml`'s for that hit, and the forward's headers and quoted body are parsed out of it by the same builder.
+An inline forward of a hit (PERSO-155) is the held row's forward when the store has caught up with it, and otherwise is built from the server's copy, carrying its parts, which `draft.create_from_message` cannot; `headers` applies to both, so a client's forward wizard asks for the recipients of a hit as it does for a stored row.
+A reply to a hit goes through `draft.create_from_message`, and a hit source on `draft.reply` is `-32602`.
 
 **`draft.create_from_message` is the one draft built from a message rather than from a row.**
 A server-search hit that resolved to no local row has no `messages.id`, no uid and no selector, and its content is the fetch the client is already rendering; `draft.reply` and `draft.forward` cannot build that draft, because every form of their `source` is an address into the store.

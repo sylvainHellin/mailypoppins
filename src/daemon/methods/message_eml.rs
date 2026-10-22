@@ -106,17 +106,8 @@ async fn materialise_eml(
 ) -> Result<Value, RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(accounts, &name)?.clone();
-    let (filename, bytes, pinned) = match params.get("hit").filter(|v| !v.is_null()) {
-        Some(hit) => {
-            let addressed = |key: &str| !matches!(params.get(key), None | Some(Value::Null));
-            if addressed("row_id") || addressed("id") || addressed("selector") {
-                return Err(invalid_params(
-                    "hit is an address of its own; send it without row_id, id or selector",
-                ));
-            }
-            let hit = Hit::from_param(&account, hit)?;
-            raw_of_hit(&account, &hit, secrets).await?
-        }
+    let (filename, bytes, pinned) = match hit_address(&account, params)? {
+        Some(hit) => raw_of_hit(&account, &hit, secrets).await?,
         None => {
             let (row, bytes, pinned) = raw_message(&account, params, secrets).await?;
             (name_of_row(&row), bytes, pinned)
@@ -246,14 +237,7 @@ pub(super) async fn raw_of_hit(
     secrets: crate::secrets::SecretsBackendKind,
 ) -> Result<(String, Vec<u8>, Vec<String>), RpcError> {
     let name = account.name.as_str();
-    let held = {
-        let store = open_store(name)?;
-        read::find_by_message_id(&store, name, &hit.message_id)
-            .map_err(|e| internal(format!("looking up {} in {name}: {e:#}", hit.message_id)))?
-            .into_iter()
-            .next()
-    };
-    if let Some(row) = held {
+    if let Some(row) = held_row(name, hit)? {
         let (bytes, pinned) = raw_of_row(account, &row, secrets).await?;
         return Ok((name_of_row(&row), bytes, pinned));
     }
@@ -262,6 +246,199 @@ pub(super) async fn raw_of_hit(
         .await
         .map_err(|e| super::server_error(name, &e))?;
     Ok((name_of_raw(&bytes), bytes, Vec::new()))
+}
+
+/// The row the store has caught up with since the search found `hit`, by its
+/// `Message-ID` across the account, as `message.fetch` looks one up.
+fn held_row(name: &str, hit: &Hit) -> Result<Option<MessageRow>, RpcError> {
+    let store = open_store(name)?;
+    Ok(read::find_by_message_id(&store, name, &hit.message_id)
+        .map_err(|e| internal(format!("looking up {} in {name}: {e:#}", hit.message_id)))?
+        .into_iter()
+        .next())
+}
+
+/// Whether `params` address a server-search hit, `hit: {message_id,
+/// mailbox}`, rather than a row: the dispatch test of the reads and the
+/// materialisers that take one.
+pub(super) fn addresses_hit(params: &Value) -> bool {
+    params.get("hit").is_some_and(|hit| !hit.is_null())
+}
+
+/// The hit `params` address, or `None` when they address a row; a hit beside
+/// a row address is the caller disagreeing with themselves, `-32602`.
+fn hit_address(account: &AccountConfig, params: &Value) -> Result<Option<Hit>, RpcError> {
+    let Some(hit) = params.get("hit").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let addressed = |key: &str| !matches!(params.get(key), None | Some(Value::Null));
+    if addressed("row_id") || addressed("id") || addressed("selector") {
+        return Err(invalid_params(
+            "hit is an address of its own; send it without row_id, id or selector",
+        ));
+    }
+    Hit::from_param(account, hit).map(Some)
+}
+
+/// What a hit is read from: the row the store has caught up with since the
+/// search, or the server's copy, parsed as a sync parses it, with the mailbox
+/// key the hit was found in.
+pub(super) enum HitMessage {
+    Held(Box<MessageRow>),
+    Server {
+        mailbox: String,
+        email: Box<crate::parse::FetchedEmail>,
+    },
+}
+
+/// [`HitMessage`] of `hit`: the held row when there is one, which opens no
+/// session, else the server's copy, downloaded as `message.materialise_eml`
+/// downloads it and ingesting nothing, so the hit stays a hit.
+pub(super) async fn hit_message(
+    account: &AccountConfig,
+    hit: &Hit,
+    secrets: crate::secrets::SecretsBackendKind,
+) -> Result<HitMessage, RpcError> {
+    let name = account.name.as_str();
+    if let Some(row) = held_row(name, hit)? {
+        return Ok(HitMessage::Held(Box::new(row)));
+    }
+    super::open_secrets(name, secrets)?;
+    let bytes = fetch_raw(account, &hit.message_id, &hit.mailbox)
+        .await
+        .map_err(|e| super::server_error(name, &e))?;
+    let email = crate::parse::parse_rfc822_to_fetched_email(&bytes).ok_or_else(|| {
+        internal(format!(
+            "the server's copy of {} in {name} does not parse as a message",
+            hit.message_id
+        ))
+    })?;
+    Ok(HitMessage::Server {
+        mailbox: hit.mailbox.clone(),
+        email: Box::new(email),
+    })
+}
+
+/// `params` with the hit replaced by the row the store holds for it, so a
+/// held hit is answered by the row path verbatim.
+fn as_row_params(params: &Value, row: &MessageRow) -> Value {
+    let mut params = params.clone();
+    if let Some(object) = params.as_object_mut() {
+        object.remove("hit");
+        object.insert("row_id".to_string(), Value::from(row.id));
+    }
+    params
+}
+
+/// `message.get` of a server-search hit, `{account, hit: {message_id,
+/// mailbox}, body?}`: the held row's record, or the record of the server's
+/// copy ([`crate::read_cmd::shown_fetched`]), whose attachment list is the
+/// `part` order `message.materialise_attachment`'s `hit` address takes.
+pub(super) async fn get_hit(
+    params: &Value,
+    accounts: &[AccountConfig],
+    secrets: crate::secrets::SecretsBackendKind,
+) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    let account = super::account::ready_account(accounts, &name)?.clone();
+    let wants_body = match params.get("body") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(body)) => *body,
+        Some(_) => return Err(invalid_params("body is a boolean")),
+    };
+    let hit = hit_address(&account, params)?.ok_or_else(|| invalid_params("hit is required"))?;
+    let (mailbox, email) = match hit_message(&account, &hit, secrets).await? {
+        HitMessage::Held(row) => {
+            return super::message::get(&as_row_params(params, &row), accounts)
+        }
+        HitMessage::Server { mailbox, email } => (mailbox, email),
+    };
+    let shown = crate::read_cmd::shown_fetched(&name, &mailbox, &email);
+    let mut result = serde_json::to_value(&shown)
+        .map_err(|e| internal(format!("serialising {}: {e}", hit.message_id)))?;
+    if !wants_body {
+        if let Some(object) = result.as_object_mut() {
+            object.remove("body");
+        }
+    }
+    Ok(result)
+}
+
+/// `message.materialise_attachment` and `message.materialise_markdown` of a
+/// server-search hit: the held row's file, or one cut from the server's copy,
+/// an attachment by its `part` in [`get_hit`]'s list and the read-only view
+/// by [`read::render_fetched_markdown`]. Nothing is pinned, since no blob of
+/// the store was read.
+pub(super) async fn materialise_hit(
+    params: &Value,
+    accounts: &[AccountConfig],
+    secrets: crate::secrets::SecretsBackendKind,
+    handles: &HandleTable,
+    kind: HandleKind,
+) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    let account = super::account::ready_account(accounts, &name)?.clone();
+    let hit = hit_address(&account, params)?.ok_or_else(|| invalid_params("hit is required"))?;
+    // The part is checked before any download, as the row path checks it
+    // before reading a blob.
+    let part = match kind {
+        HandleKind::Attachment => Some(
+            params
+                .get("part")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| invalid_params("part is a required non-negative integer"))?,
+        ),
+        _ => None,
+    };
+    let (mailbox, email) = match hit_message(&account, &hit, secrets).await? {
+        HitMessage::Held(row) => {
+            return super::message::materialise(
+                &as_row_params(params, &row),
+                accounts,
+                handles,
+                kind,
+            )
+        }
+        HitMessage::Server { mailbox, email } => (mailbox, email),
+    };
+    let (filename, bytes, mode) = server_file(&email, &mailbox, part)?;
+    super::message::write_handle(handles, kind, &name, &filename, &bytes, &[], mode)
+}
+
+/// The file [`materialise_hit`] writes for the server's copy of a hit: part
+/// `part` of its attachments, or with no part its read-only view, with the
+/// mode the handle gets.
+fn server_file(
+    email: &crate::parse::FetchedEmail,
+    mailbox: &str,
+    part: Option<u64>,
+) -> Result<(String, Vec<u8>, u32), RpcError> {
+    let Some(part) = part else {
+        return Ok((
+            super::message::markdown_name(&email.subject, "message.md"),
+            read::render_fetched_markdown(email, mailbox).into_bytes(),
+            // #0075's rule, as for a row's view: the buffer opens read-only.
+            0o444,
+        ));
+    };
+    let attachment = usize::try_from(part)
+        .ok()
+        .and_then(|part| email.attachments.get(part))
+        .ok_or_else(|| {
+            invalid_params(format!(
+                "part {part} is not one of this message's {} attachments",
+                email.attachments.len()
+            ))
+        })?;
+    // Sanitised as a stored part's name is: this is the seam that turns a name
+    // a sender chose into a path.
+    Ok((
+        super::message::safe_filename(&crate::parse::sanitize_attachment_filename(
+            &attachment.filename,
+        )),
+        attachment.content.clone(),
+        0o644,
+    ))
 }
 
 fn open_store(name: &str) -> Result<Store, RpcError> {
@@ -294,4 +471,79 @@ async fn fetch_raw(
     let (_uid, raw, _email) = found?
         .ok_or_else(|| anyhow::anyhow!("the server no longer has {message_id} in {server_name}"))?;
     Ok(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A message with a PDF and an inline logo the HTML body shows by
+    /// `cid:`, as a server hands it over.
+    const RAW: &[u8] = b"From: Alice <alice@example.com>\r\n\
+To: me@example.com\r\n\
+Subject: LOC Day // Teilnehmer\r\n\
+Date: Wed, 12 Nov 2025 09:00:00 +0100\r\n\
+Message-ID: <loc-day@example.com>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"outer\"\r\n\
+\r\n\
+--outer\r\n\
+Content-Type: multipart/related; boundary=\"inner\"\r\n\
+\r\n\
+--inner\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<p>The list</p><img src=\"cid:logo@x\">\r\n\
+--inner\r\n\
+Content-Type: image/png\r\n\
+Content-ID: <logo@x>\r\n\
+Content-Disposition: inline; filename=\"logo.png\"\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+iVBORw0KGgo=\r\n\
+--inner--\r\n\
+--outer\r\n\
+Content-Type: application/pdf\r\n\
+Content-Disposition: attachment; filename=\"../teilnehmer.pdf\"\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+JVBERi0xLjQK\r\n\
+--outer--\r\n";
+
+    /// The server's copy of a hit is listed, cut into parts and rendered as
+    /// a stored row of its mailbox would be: `message.get`'s part order is
+    /// the order `part` addresses, a part's name is sanitised, and the view
+    /// opens read-only (PERSO-155).
+    #[test]
+    fn a_hits_server_copy_lists_cuts_and_renders_like_a_row() {
+        let email = crate::parse::parse_rfc822_to_fetched_email(RAW).expect("the raw parses");
+        let shown = crate::read_cmd::shown_fetched("tum", "sent", &email);
+        assert_eq!(shown.selector, "mp://tum/sent/loc-day@example.com");
+        assert_eq!(shown.mailbox, "sent");
+        let listed: Vec<(&str, bool)> = shown
+            .attachments
+            .iter()
+            .map(|att| (att.name.as_str(), att.inline))
+            .collect();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert!(listed.contains(&("logo.png", true)), "{listed:?}");
+
+        for (part, att) in shown.attachments.iter().enumerate() {
+            let (name, bytes, mode) =
+                server_file(&email, "sent", Some(part as u64)).expect("a listed part");
+            assert_eq!(bytes.len() as u64, att.size, "part {part}");
+            assert!(!name.contains('/'), "a part's name is sanitised: {name}");
+            assert_eq!(mode, 0o644);
+        }
+        let refused = server_file(&email, "sent", Some(2)).expect_err("there is no part 2");
+        assert_eq!(refused.code, -32602);
+
+        let (name, view, mode) = server_file(&email, "sent", None).expect("the view");
+        assert_eq!(name, "loc-day-teilnehmer.md");
+        assert_eq!(mode, 0o444);
+        let view = String::from_utf8(view).expect("UTF-8");
+        assert!(view.starts_with("---\n"), "{view}");
+        assert!(view.contains("mailbox: sent"), "{view}");
+        assert!(view.contains("The list"), "{view}");
+    }
 }

@@ -199,6 +199,15 @@ impl Method for DraftMethod {
                         )
                         .await
                     }
+                    Ok(false) if hit_source(&params) => {
+                        forward_hit_inline(
+                            &params,
+                            accounts,
+                            email,
+                            snapshot.config.secrets_backend,
+                        )
+                        .await
+                    }
                     Ok(false) => from_source(&params, accounts, email, false, None),
                     Err(e) => Err(e),
                 },
@@ -774,6 +783,65 @@ fn from_source(
     )
 }
 
+/// Whether a `draft.forward` names a server-search hit as its source.
+fn hit_source(params: &Value) -> bool {
+    params
+        .get("source")
+        .and_then(|source| source.get("hit"))
+        .is_some_and(|hit| !hit.is_null())
+}
+
+/// `draft.forward` of a server-search hit, inline (PERSO-155): the forward
+/// the compose wizard writes for a stored row, recipients and subject
+/// included, for a hit the client holds no row for.
+///
+/// A hit the store has caught up with since the search is that row's forward
+/// verbatim, carried parts and all. One it has not is built from the server's
+/// copy, as `message.materialise_eml` downloads it and ingesting nothing, and
+/// carries that copy's parts, which `draft.create_from_message` cannot: the
+/// hit a client holds streams no parts.
+async fn forward_hit_inline(
+    params: &Value,
+    accounts: &[AccountConfig],
+    email: &EmailSettings,
+    secrets: crate::secrets::SecretsBackendKind,
+) -> Result<Value, RpcError> {
+    let name = string_param(params, "account")?;
+    let account = super::account::ready_account(accounts, &name)?.clone();
+    let source = params.get("source").cloned().unwrap_or(Value::Null);
+    let given = |key: &str| !matches!(source.get(key), None | Some(Value::Null));
+    if given("row_id") || given("id") || given("selector") {
+        return Err(invalid_params(
+            "hit is an address of its own; send it without row_id, id or selector",
+        ));
+    }
+    let hit = super::message_eml::Hit::from_param(&account, &source["hit"])?;
+    let fetched = match super::message_eml::hit_message(&account, &hit, secrets).await? {
+        super::message_eml::HitMessage::Held(row) => {
+            let mut params = params.clone();
+            params["source"] = json!({"row_id": row.id});
+            return from_source(&params, accounts, email, false, None);
+        }
+        super::message_eml::HitMessage::Server { email: fetched, .. } => fetched,
+    };
+    let account_dir = crate::config::account_dir(&name);
+    let built = crate::draft::source_from_fetched(&account_dir, &fetched, true)
+        .map_err(|e| internal(format!("reading {}: {e:#}", hit.message_id)))?;
+    let headers = recipient_headers(params)?;
+    let (draft, written) = crate::draft::create_draft_from_source(
+        &name,
+        &account.default_from,
+        &built,
+        crate::draft::DraftFromSource::Forward {
+            as_attachment: false,
+        },
+        headers.as_ref(),
+        signature_of(&account, params, email).as_deref(),
+    )
+    .map_err(|e| internal(format!("writing the draft of {name}: {e:#}")))?;
+    created(&name, &written.key, &draft, None)
+}
+
 /// `draft.forward` with `as_attachment: true` (PERSO-174): the forward draft
 /// [`from_source`] writes, carrying the source as one `message/rfc822` part
 /// (its `.eml`, quoted thread and attachments inside) instead of the
@@ -1185,8 +1253,8 @@ fn address_received(
     let given = |key: &str| !matches!(source.get(key), None | Some(Value::Null));
     if given("hit") {
         return Err(invalid_params(
-            "a hit source is forwarded with as_attachment only; a server-only hit is \
-             replied to or forwarded inline through draft.create_from_message",
+            "a hit source is forwarded, not replied to; a server-only hit is replied to \
+             through draft.create_from_message",
         ));
     }
     if given("row_id") {

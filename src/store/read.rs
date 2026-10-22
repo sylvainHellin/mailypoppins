@@ -1483,13 +1483,49 @@ pub fn render_markdown(store: &Store, blobs: &BlobStore, row: &MessageRow) -> St
         forwarded: flags.forwarded,
         attachments: (!attachments.is_empty()).then_some(attachments),
     };
+    view_markdown(
+        &frontmatter,
+        &load_body(store, blobs, row.id).unwrap_or_default(),
+    )
+}
+
+/// [`render_markdown`] of a message the store holds no row for: a
+/// server-search hit, parsed from the server's copy, found in `mailbox`.
+///
+/// The same frontmatter and body a stored row of `mailbox` would render, so
+/// the read-only view of a hit reads like the one of the row a fetch of it
+/// would land as.
+pub fn render_fetched_markdown(email: &crate::parse::FetchedEmail, mailbox: &str) -> String {
+    let attachments: Vec<String> = email
+        .attachments
+        .iter()
+        .map(|att| att.filename.clone())
+        .collect();
+    let frontmatter = ViewFrontmatter {
+        from: email.from.clone(),
+        to: email.to.clone(),
+        cc: present(email.cc.as_deref()),
+        subject: email.subject.clone(),
+        date: present(Some(email.date.as_str())),
+        message_id: present(email.message_id.as_deref()),
+        mailbox: mailbox.to_string(),
+        read: email.flags.seen,
+        answered: email.flags.answered,
+        forwarded: email.flags.forwarded,
+        attachments: (!attachments.is_empty()).then_some(attachments),
+    };
+    view_markdown(&frontmatter, &email.body_text)
+}
+
+/// The read-only view's text: the frontmatter fenced, a blank line, the body,
+/// and a final newline.
+fn view_markdown(frontmatter: &ViewFrontmatter, body: &str) -> String {
     // A struct of owned strings and bools has no serialization failure mode;
     // `dump::to_ndjson` leans on the same fact.
-    let yaml = serde_yaml::to_string(&frontmatter).expect("the view frontmatter serializes");
+    let yaml = serde_yaml::to_string(frontmatter).expect("the view frontmatter serializes");
 
     // serde_yaml 0.9 emits no document markers, so the fences are added here,
     // which is what the file-era writer did too.
-    let body = load_body(store, blobs, row.id).unwrap_or_default();
     let mut out = format!("---\n{yaml}---\n\n{body}");
     if !out.ends_with('\n') {
         out.push('\n');

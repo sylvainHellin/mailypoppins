@@ -137,6 +137,12 @@ impl Method for MessageReadMethod {
         Box::pin(async move {
             let accounts = self.config.accounts();
             let result = match self.spec.name {
+                // A server-search hit with no row is read from the server's
+                // copy, the one read of this family with a server leg.
+                "message.get" if super::message_eml::addresses_hit(&params) => {
+                    let secrets = self.config.snapshot().config.secrets_backend;
+                    super::message_eml::get_hit(&params, &accounts, secrets).await
+                }
                 "message.get" => get(&params, &accounts),
                 "message.list" => list_off_thread(&params, &accounts).await,
                 "message.thread" => thread(&params, &accounts),
@@ -2038,6 +2044,26 @@ impl Method for MessageHandleMethod {
             // without a periodic tick to be late.
             reap(&self.handles, Utc::now());
             let result = match self.spec.name {
+                // A server-search hit with no row: its parts and its view come
+                // from the server's copy (`super::message_eml`).
+                "message.materialise_attachment" | "message.materialise_markdown"
+                    if super::message_eml::addresses_hit(&params) =>
+                {
+                    let kind = if self.spec.name == "message.materialise_markdown" {
+                        HandleKind::Markdown
+                    } else {
+                        HandleKind::Attachment
+                    };
+                    let secrets = self.config.snapshot().config.secrets_backend;
+                    super::message_eml::materialise_hit(
+                        &params,
+                        &self.config.accounts(),
+                        secrets,
+                        &self.handles,
+                        kind,
+                    )
+                    .await
+                }
                 "message.materialise_attachment" => materialise(
                     &params,
                     &self.config.accounts(),
@@ -2090,7 +2116,7 @@ pub fn register_handles(
 /// `"<mailbox>/<uid>"` out of a `ShownMessage` and re-listing the mailbox to
 /// find the uid would be a second query to answer a question the daemon already
 /// answers.
-fn materialise(
+pub(super) fn materialise(
     params: &Value,
     accounts: &[AccountConfig],
     handles: &HandleTable,
@@ -2148,19 +2174,22 @@ fn markdown_file(
     let rendition = read::render_markdown(store, blobs, row);
     let pinned = row.body_blob.iter().cloned().collect();
     (
-        markdown_name(row.subject.as_deref().unwrap_or_default(), row.id),
+        markdown_name(
+            row.subject.as_deref().unwrap_or_default(),
+            &format!("message-{}.md", row.id),
+        ),
         rendition.into_bytes(),
         pinned,
     )
 }
 
 /// The file name of a Markdown rendition: the subject slugified, or
-/// `message-<row_id>.md` when the slug is empty.
+/// `fallback` (`message-<row_id>.md` for a row) when the slug is empty.
 ///
 /// The row id is in the fallback rather than in every name because a subject
 /// is what a user recognises; two messages sharing one subject collide on a
 /// name and not on a path, since every handle owns its own directory.
-fn markdown_name(subject: &str, row_id: i64) -> String {
+pub(super) fn markdown_name(subject: &str, fallback: &str) -> String {
     let slug: String = subject
         .to_lowercase()
         .chars()
@@ -2171,7 +2200,7 @@ fn markdown_name(subject: &str, row_id: i64) -> String {
         .take(40)
         .collect();
     if slug.is_empty() {
-        format!("message-{row_id}.md")
+        fallback.to_string()
     } else {
         format!("{slug}.md")
     }
@@ -2391,7 +2420,7 @@ fn inline_html(account: &str, row_id: i64, rendition: String) -> Result<Value, R
 
 /// A sanitised name that is still a name: `.` and `..` are directory entries
 /// every path has, and joining either would leave the handle's own directory.
-fn safe_filename(name: &str) -> String {
+pub(super) fn safe_filename(name: &str) -> String {
     match name {
         "." | ".." => "attachment.bin".to_string(),
         other => other.to_string(),

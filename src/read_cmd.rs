@@ -130,6 +130,53 @@ fn flag_tokens(flags: crate::types::MessageFlags) -> Vec<String> {
     out
 }
 
+/// The record `message.get` answers for a server-search hit the store holds
+/// no row for, parsed from the server's copy found in `mailbox` (a mailbox
+/// key): the record a stored row of `mailbox` would print, under the selector
+/// a fetch of it would land as.
+///
+/// The attachments are the parsed message's parts in their own order, which
+/// is the `part` `message.materialise_attachment`'s `hit` address takes, each
+/// marked inline by the rule ingest marks a stored part with.
+pub fn shown_fetched(
+    account: &str,
+    mailbox: &str,
+    email: &crate::parse::FetchedEmail,
+) -> ShownMessage {
+    let message_id = email.message_id.clone().unwrap_or_default();
+    let html_lower = email.html_body.as_deref().map(str::to_ascii_lowercase);
+    let attachments = email
+        .attachments
+        .iter()
+        .map(|att| ShownAttachment {
+            name: att.filename.clone(),
+            size: att.content.len() as u64,
+            inline: crate::parse::is_inline_image(
+                html_lower.as_deref(),
+                att.content_id.as_deref(),
+                &att.filename,
+                &att.content,
+            ),
+        })
+        .collect();
+    ShownMessage {
+        selector: Selector::new(account, mailbox, crate::selector::message_key(&message_id))
+            .to_string(),
+        account: account.to_string(),
+        mailbox: mailbox.to_string(),
+        message_id,
+        from: present(Some(&email.from)),
+        to: present(Some(&email.to)),
+        cc: present(email.cc.as_deref()),
+        subject: present(Some(&email.subject)),
+        date: present(Some(&email.date)),
+        flags: flag_tokens(email.flags),
+        invite: email.event.is_some(),
+        attachments,
+        body: Some(email.body_text.clone()).filter(|body| !body.is_empty()),
+    }
+}
+
 /// Collect one message for `mp show`, body included.
 ///
 /// The body is read through [`read::load_body`], which degrades: a row whose
