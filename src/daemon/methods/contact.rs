@@ -20,11 +20,14 @@
 //! to the contact, subject `Contact: <name>`, no signature, with the contact's
 //! vCard written under the drafts directory's `_vcards/` and attached.
 //!
-//! A row is `{address, display_name, sent_to, sent_cc, received, score}`: the
-//! field names of [`crate::contacts::Contact`] plus the match score, because
-//! `mp contacts search --parsable` prints `address\tdisplay_name` and a
-//! renamed pair would make the tab-delimited line a translation rather than a
-//! projection (`ANO-8`).
+//! A row is `{address, display_name, sent_to, sent_cc, received, first_seen,
+//! last_seen, score}`: the field names of [`crate::contacts::Contact`] plus the
+//! match score, because `mp contacts search --parsable` prints
+//! `address\tdisplay_name` and a renamed pair would make the tab-delimited
+//! line a translation rather than a projection (`ANO-8`). The two timestamps
+//! are what the TUI's detail pane shows and the ranking's recency reads, so a
+//! client that lists the whole index with an empty query can rank a typed
+//! query over it as the daemon would.
 //!
 //! `contact.rebuild` is an [`MethodKind::Operation`] and the two reads are
 //! queries. A rebuild walks every row of every mailbox of the account and
@@ -269,6 +272,8 @@ fn rows(matches: &[MatchResult<'_>]) -> Vec<Value> {
                 "sent_to": m.contact.sent_to,
                 "sent_cc": m.contact.sent_cc,
                 "received": m.contact.received,
+                "first_seen": m.contact.first_seen,
+                "last_seen": m.contact.last_seen,
                 "score": m.score,
             })
         })

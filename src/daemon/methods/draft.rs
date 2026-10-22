@@ -560,9 +560,14 @@ fn html(
 ///
 /// `body` and `headers` are the compose wizard's (#0131): the text typed
 /// inline, above the signature, and the recipients and subject, with
-/// `draft.forward`'s contract. Both are optional, so `mp new` and the TUI write
-/// the skeleton as before; with them the file is complete in one call rather
-/// than rewritten by the client behind the daemon's back.
+/// `draft.forward`'s contract. Both are optional, so `mp new` writes the
+/// skeleton as before; with them the file is complete in one call rather than
+/// rewritten by the client behind the daemon's back.
+///
+/// A `signature` the caller names is recorded in the draft's `signature:`
+/// frontmatter as well as spliced into its body, which is what the TUI's
+/// wizard wrote when it wrote the file itself: a later header edit preselects
+/// the signature the draft carries rather than the account default.
 pub(super) fn create(
     params: &Value,
     accounts: &[AccountConfig],
@@ -612,6 +617,14 @@ pub(super) fn create(
     if let Some(headers) = headers {
         crate::draft::rewrite_draft_recipients(&path, &headers)
             .map_err(|e| internal(format!("writing the headers of {}: {e:#}", path.display())))?;
+    }
+    if let Some(name) = named_signature(params) {
+        crate::draft::set_draft_signature_name(&path, name).map_err(|e| {
+            internal(format!(
+                "writing the signature of {}: {e:#}",
+                path.display()
+            ))
+        })?;
     }
 
     created(&account.name, &id, &path, None)
@@ -1364,6 +1377,18 @@ pub(super) fn signature_of(
         params.get("signature").and_then(Value::as_str),
         email,
     )
+}
+
+/// The signature a writer's `signature` parameter names, unless
+/// `no_signature` drops it.
+fn named_signature(params: &Value) -> Option<&str> {
+    if matches!(params.get("no_signature"), Some(Value::Bool(true))) {
+        return None;
+    }
+    params
+        .get("signature")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
 }
 
 /// An optional boolean parameter, absent and `null` both meaning `false`.

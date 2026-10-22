@@ -1042,6 +1042,8 @@ async fn contact_search_answers_the_rows_the_parsable_projection_is_built_from()
             "sent_to",
             "sent_cc",
             "received",
+            "first_seen",
+            "last_seen",
             "score",
         ] {
             assert!(

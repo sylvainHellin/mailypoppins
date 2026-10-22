@@ -360,6 +360,19 @@ pub fn set_draft_id(path: &Path, id: &str) -> Result<()> {
     rewrite_frontmatter_scalars_at(path, &[("id", FieldWrite::Set(yaml_dq_escape(id)))])
 }
 
+/// Record the name of the signature a draft was written with in its
+/// `signature:` frontmatter, in place, leaving the body alone.
+///
+/// `draft.create` writes it when the caller named a signature, so a compose
+/// wizard that later edits the draft's headers preselects the signature the
+/// draft carries rather than the account default (#0106).
+pub fn set_draft_signature_name(path: &Path, name: &str) -> Result<()> {
+    rewrite_frontmatter_scalars_at(
+        path,
+        &[("signature", FieldWrite::Set(yaml_dq_escape(name)))],
+    )
+}
+
 /// Which draft a [`SourceMessage`] is turned into.
 ///
 /// It lives beside the source rather than beside the builder that consumes it

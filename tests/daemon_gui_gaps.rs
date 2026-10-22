@@ -208,6 +208,9 @@ async fn a_new_draft_is_written_with_its_body_and_its_headers() {
         text < signature,
         "the body sits above the signature: {body}"
     );
+    // The signature it was written with is named in the frontmatter, so a
+    // later header edit preselects it rather than the account default.
+    assert_eq!(parsed.frontmatter.signature.as_deref(), Some(SIGNATURE));
 
     // Absent, both leave the skeleton `mp new` has always written.
     let bare = created(
@@ -219,6 +222,7 @@ async fn a_new_draft_is_written_with_its_body_and_its_headers() {
     let parsed = parse_email_draft(Path::new(&bare.path)).expect("it parses");
     assert_eq!(parsed.frontmatter.to, None);
     assert_eq!(parsed.body_markdown.trim(), "");
+    assert_eq!(parsed.frontmatter.signature, None, "no signature, no name");
 
     // A partial override is refused before anything is written.
     let refused = call_err(
