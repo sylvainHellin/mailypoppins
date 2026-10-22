@@ -22,7 +22,7 @@ The whole round trip, dispatch included, is 1% of it.
 The workload is W1 of [../pre-daemon/workloads.md](../pre-daemon/workloads.md), reduced to the part
 a socket can change: one envelope plus its body for `<alpha-inbox-42@fixture.invalid>`, read through
 `mailypoppins::store::read` on both sides of the comparison.
-The harness is the P1a-U1 spike, `spikes/ipc-bench`, whose README documents the stage split.
+The harness is the P1a-U1 spike, `spikes/ipc-bench`, whose README documents the stage split (deleted on 2026-10-22, last in the tree at `014b9ba2`).
 
 Conditions, pinned as ticket [#0108](../../tickets/0108-coalesce-key-events.md) requires:
 
@@ -130,6 +130,8 @@ harness.
 Worth one more look only if a Phase 5 list refetch misses its budget by a margin of this size.
 
 ## Reproducing
+
+`spikes/ipc-bench` was deleted on 2026-10-22; check out `014b9ba2` (`git worktree add /var/tmp/ipc-bench 014b9ba2`) to run these commands.
 
 ```sh
 cargo run --release --example mkfixture -- --out /tmp/mp-ipc-fixture --rows 5000

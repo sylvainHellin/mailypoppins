@@ -139,6 +139,8 @@ and one short one (a preview), which is the shape the pool has to keep from coll
 
 ## Reproducing
 
+`spikes/ipc-bench` was deleted on 2026-10-22; check out `014b9ba2` (`git worktree add /var/tmp/ipc-bench 014b9ba2`) to run these commands.
+
 ```sh
 cargo run --release --example mkfixture -- --out /tmp/mp-ipc-fixture --rows 5000
 cp -a /tmp/mp-ipc-fixture /tmp/mp-ipc-fixture-pool   # the writer mutates its fixture

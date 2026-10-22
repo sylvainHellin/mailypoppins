@@ -197,6 +197,8 @@ This file measures the transfer, not the paint that follows it.
 
 ## Reproducing
 
+`spikes/ipc-bench` was deleted on 2026-10-22; check out `014b9ba2` (`git worktree add /var/tmp/ipc-bench 014b9ba2`) to run these commands.
+
 ```sh
 cargo run --release --example mkfixture -- --out /tmp/mp-ipc-fixture --rows 5000
 cd spikes/ipc-bench

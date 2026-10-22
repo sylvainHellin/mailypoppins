@@ -1,7 +1,7 @@
 # Bootstrap ordering, what Phase 3a must reproduce
 
 Unit P1a-U6 of `.agents/workflow/native-gui-daemon/plan.md`, ticket #0119, carried out of the spike so the algorithm survives it.
-The prototype and its forced-race tests live in `spikes/ipc-bench/src/bootstrap.rs` and `spikes/ipc-bench/tests/bootstrap_race.rs`, with the API fixed in `spikes/ipc-bench/tests/BOOTSTRAP_CONTRACT.md`.
+The prototype and its forced-race tests lived in `spikes/ipc-bench/src/bootstrap.rs` and `spikes/ipc-bench/tests/bootstrap_race.rs`, with the API fixed in `spikes/ipc-bench/tests/BOOTSTRAP_CONTRACT.md`, until the spike was deleted on 2026-10-22; `git show 014b9ba2:spikes/ipc-bench/<path>` reads them.
 This file is the part Phase 3a implements against the real hub.
 
 ## The two rules
