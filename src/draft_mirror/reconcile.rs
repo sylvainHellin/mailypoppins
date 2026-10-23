@@ -598,6 +598,12 @@ fn apple_mail_edit<'c>(
         .in_reply_to
         .as_deref()
         .map(|mid| bare_message_id(mid).to_string());
+    // A forward imported from Outlook, whose copy names its source in
+    // `In-Reply-To`, keeps that source in `forwarded_from:`.
+    let forwarded = fm
+        .forwarded_from
+        .as_deref()
+        .map(|mid| bare_message_id(mid).to_string());
     let mut candidates = copies.iter().filter(|c| {
         c.uid > since
             && !claimed.contains(&c.uid)
@@ -606,7 +612,8 @@ fn apple_mail_edit<'c>(
                 .is_none_or(|mid| !linked.contains(mid))
             && c.subject.trim() == fm.subject.trim()
             && c.recipients == recipients
-            && c.in_reply_to == reply
+            && (c.in_reply_to == reply
+                || (reply.is_none() && forwarded.is_some() && c.in_reply_to == forwarded))
     });
     let first = candidates.next()?;
     candidates.next().is_none().then_some(first)
@@ -841,7 +848,7 @@ fn apply_foreign(
     crate::draft::rewrite_draft_recipients(
         path,
         &crate::draft::DraftRecipientEdit {
-            to: email.to.clone(),
+            to: copy_to(email, raw),
             cc: email.cc.clone().unwrap_or_default(),
             bcc: header_value(raw, "Bcc").unwrap_or_default(),
             subject: email.subject.clone(),
@@ -1242,7 +1249,7 @@ fn import_foreign(
     crate::draft::rewrite_draft_recipients(
         &staging,
         &crate::draft::DraftRecipientEdit {
-            to: email.to.clone(),
+            to: copy_to(&email, raw),
             cc: email.cc.clone().unwrap_or_default(),
             bcc: header_value(raw, "Bcc").unwrap_or_default(),
             subject: email.subject.clone(),
@@ -1250,7 +1257,14 @@ fn import_foreign(
     )?;
     crate::draft::set_draft_server_message_id(&staging, &format!("<{message_id}>"))?;
     if let Some(parent) = &copy.in_reply_to {
-        crate::draft::set_draft_in_reply_to(&staging, &format!("<{parent}>"))?;
+        // Outlook names the forwarded message in `In-Reply-To` too; the
+        // subject is what tells a forward from a reply, and a forward flags
+        // its source `$Forwarded` and threads into nothing.
+        if is_forward_subject(&copy.subject) {
+            crate::draft::set_draft_forwarded_from(&staging, &format!("<{parent}>"))?;
+        } else {
+            crate::draft::set_draft_in_reply_to(&staging, &format!("<{parent}>"))?;
+        }
     }
     attach_parts(mirror, &staging, &email, false)?;
     let hash = file_hash(&std::fs::read(&staging)?);
@@ -1261,6 +1275,26 @@ fn import_foreign(
         mirror.account.name
     );
     Ok(Some((id, hash)))
+}
+
+/// The `To` of a copy: empty when it has no `To` header, as a draft another
+/// client saved before a recipient was chosen has, where the message parser
+/// would answer a placeholder.
+fn copy_to(email: &crate::parse::FetchedEmail, raw: &[u8]) -> String {
+    if header_value(raw, "To").is_some() {
+        email.to.clone()
+    } else {
+        String::new()
+    }
+}
+
+/// Whether a subject is a forward's: it opens with `FW:`, `Fwd:` or `WG:`
+/// (Outlook's German), in any case.
+fn is_forward_subject(subject: &str) -> bool {
+    let lower = subject.trim_start().to_ascii_lowercase();
+    ["fw:", "fwd:", "wg:"]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
 }
 
 /// A draft file name the directory does not hold yet.

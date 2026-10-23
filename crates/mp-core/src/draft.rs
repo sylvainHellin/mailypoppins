@@ -405,9 +405,6 @@ pub fn mark_conflict_copy(path: &Path, id: &str, conflict_of: &str) -> Result<()
     )
 }
 
-/// Record the `Message-ID` a draft answers in its `in_reply_to:`
-/// frontmatter, in place (#0143's import of a reply started in another
-/// client).
 /// A draft file's text with its `bcc:` emptied, for a carrier that must not
 /// hold the blind copies (#0143): the key stays, so [`set_draft_bcc`] puts the
 /// value back on the same line.
@@ -427,10 +424,26 @@ pub fn draft_with_bcc(content: &str, bcc: &str, quoted: bool) -> Result<String> 
     rewrite_frontmatter_scalars(content, &[("bcc", FieldWrite::Set(value))])
 }
 
+/// Record the `Message-ID` a draft answers in its `in_reply_to:`
+/// frontmatter, in place (#0143's import of a reply started in another
+/// client).
 pub fn set_draft_in_reply_to(path: &Path, message_id: &str) -> Result<()> {
     rewrite_frontmatter_scalars_at(
         path,
         &[("in_reply_to", FieldWrite::Set(yaml_dq_escape(message_id)))],
+    )
+}
+
+/// Record the `Message-ID` a draft forwards in its `forwarded_from:`
+/// frontmatter, in place (#0143's import of a forward started in another
+/// client), which is what flags the source `$Forwarded` once it is sent.
+pub fn set_draft_forwarded_from(path: &Path, message_id: &str) -> Result<()> {
+    rewrite_frontmatter_scalars_at(
+        path,
+        &[(
+            "forwarded_from",
+            FieldWrite::Set(yaml_dq_escape(message_id)),
+        )],
     )
 }
 

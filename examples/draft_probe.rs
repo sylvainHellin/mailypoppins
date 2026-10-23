@@ -1191,6 +1191,8 @@ fn structure_parts(part: &mailparse::ParsedMail<'_>, path: &str, out: &mut Strin
                 "<blockquote",
                 "OutlookMessageHeader",
                 "x_divRplyFwdMsg",
+                "mail-editor-reference-message-container",
+                "solid none none",
             ]
             .into_iter()
             .filter(|w| body.contains(w))

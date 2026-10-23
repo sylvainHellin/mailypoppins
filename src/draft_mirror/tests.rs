@@ -1994,3 +1994,78 @@ fn a_send_that_fails_after_its_claim_is_pushed_again_and_never_retired() {
     assert_eq!(folder.live().len(), 1, "pushed again: {:?}", folder.log);
     assert!(fx.row("d1").is_some());
 }
+
+// ---------------------------------------------------------------------------
+// A forward started in Outlook mobile (TUM Drafts, 2026-10-23)
+// ---------------------------------------------------------------------------
+
+/// A forward as Outlook mobile saves it before a recipient is chosen: no `To`
+/// header, `FW:` in the subject, `In-Reply-To` naming the forwarded message,
+/// one `text/html` part whose quoted message sits in
+/// `div#mail-editor-reference-message-container` under a bordered From/Sent
+/// block.
+fn outlook_mobile_forward() -> Vec<u8> {
+    b"From: Sylvain Hellin <me@tum.de>\r\nSubject: FW: Master's thesis\r\n\
+Message-ID: <71174d11-mobile@tum.de>\r\nReferences: <root@tum.de> <parent@tum.de>\r\n\
+In-Reply-To: <parent@tum.de>\r\nMIME-Version: 1.0\r\n\
+Content-Type: text/html; charset=utf-8\r\n\r\n\
+<html><body><div dir=\"ltr\">Zur Info, siehe unten.</div>\
+<div id=\"ms-outlook-mobile-signature\" dir=\"ltr\"><div><b>Sylvain</b></div></div>\
+<div id=\"mail-editor-reference-message-container\">\
+<div style=\"padding: 3pt 0in 0in; border-width: 1pt medium medium; border-style: solid none none;\">\
+<div><b>From: </b>Tina<br><b>Sent: </b>Wednesday<br><b>To: </b>Sylvain<br>\
+<b>Subject: </b>AW: Master's thesis<br></div></div>\
+<div id=\"mail-editor-reference-message-body\"><p>Die Arbeit ist eingereicht.</p></div>\
+</div></body></html>\r\n"
+        .to_vec()
+}
+
+/// The forward imports as a forward: the quoted message below mp's quote
+/// marker, an empty `to:` rather than a placeholder address, and
+/// `forwarded_from:` rather than `in_reply_to:`, so the send flags the source
+/// `$Forwarded` and does not thread the forward into its conversation.
+#[test]
+fn an_outlook_mobile_forward_imports_as_a_forward_with_its_quote_marked() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    folder.put(&outlook_mobile_forward());
+
+    assert_eq!(reconciled(&fx, &mut folder).imported, 1);
+    let local = local_drafts("tum").pop().expect("imported");
+    let fm = &local.draft.frontmatter;
+    assert!(
+        fm.to.as_deref().is_none_or(|to| to.trim().is_empty()),
+        "no To header is an empty to: {:?}",
+        fm.to
+    );
+    assert_eq!(fm.subject, "FW: Master's thesis");
+    assert_eq!(fm.forwarded_from.as_deref(), Some("<parent@tum.de>"));
+    assert_eq!(fm.in_reply_to, None, "a forward answers nothing");
+
+    let body = &local.draft.body_markdown;
+    let marker = body
+        .find(crate::draft::QUOTE_MARKER)
+        .unwrap_or_else(|| panic!("a quote marker: {body}"));
+    assert!(body[..marker].contains("Zur Info"), "{body}");
+    assert!(!body[..marker].contains("eingereicht"), "{body}");
+    assert!(
+        body[marker..].contains("Die Arbeit ist eingereicht."),
+        "{body}"
+    );
+
+    // A reply under the same headers stays a reply.
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    let reply = String::from_utf8(outlook_mobile_forward())
+        .unwrap()
+        .replace("Subject: FW: ", "Subject: AW: ")
+        .replace("71174d11-mobile", "71174d12-mobile");
+    folder.put(reply.as_bytes());
+    reconciled(&fx, &mut folder);
+    let local = local_drafts("tum").pop().expect("imported");
+    assert_eq!(
+        local.draft.frontmatter.in_reply_to.as_deref(),
+        Some("<parent@tum.de>")
+    );
+    assert_eq!(local.draft.frontmatter.forwarded_from, None);
+}

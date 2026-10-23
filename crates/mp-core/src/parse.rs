@@ -604,8 +604,11 @@ pub fn neutralize_draft_marks(html: &str) -> String {
 
 /// Where a draft's own text ends in the HTML of its server copy (#0143): mp's
 /// quote marker when the comment survived, Apple Mail's cited block quote,
-/// Outlook's reply header (`divRplyFwdMsg`) or its append-on-send block,
-/// whichever comes first. `None` for a draft that quotes nothing.
+/// Outlook's reply header (`divRplyFwdMsg`), its append-on-send block,
+/// Outlook mobile's quoted-message container
+/// (`mail-editor-reference-message-container`), or the bordered block
+/// Outlook opens a quoted header with ([`quoted_header_block`]), whichever
+/// comes first. `None` for a draft that quotes nothing.
 pub fn draft_reply_boundary(html: &str) -> Option<usize> {
     let lower = html.to_ascii_lowercase();
     let mut found: Vec<usize> = Vec::new();
@@ -619,13 +622,69 @@ pub fn draft_reply_boundary(html: &str) -> Option<usize> {
         "id=divrplyfwdmsg",
         "id=\"appendonsend\"",
         "id=appendonsend",
+        "id=\"mail-editor-reference-message-container\"",
+        "id=mail-editor-reference-message-container",
     ] {
         if let Some(at) = lower.find(id) {
             // The tag the attribute sits in starts the boundary.
             found.push(lower[..at].rfind('<').unwrap_or(at));
         }
     }
+    found.extend(quoted_header_block(&lower));
     found.into_iter().min()
+}
+
+/// The labels a quoted header block opens with, by the language Outlook
+/// writes it in: the sender, then the date.
+const QUOTED_FROM: [&str; 5] = ["from:", "von:", "de :", "de:", "da:"];
+const QUOTED_SENT: [&str; 6] = [
+    "sent:",
+    "gesendet:",
+    "date:",
+    "datum:",
+    "envoyé :",
+    "inviato:",
+];
+
+/// The first `<div>` of `lower` (lowercased HTML) whose style draws a top
+/// border and whose text opens with a sender label followed by a date label
+/// (`From:` and `Sent:`, `Von:` and `Gesendet:`): the header block Outlook
+/// puts above a quoted message when it writes no `divRplyFwdMsg`. A bordered
+/// block of the draft's own text does not open with those labels.
+fn quoted_header_block(lower: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find("<div") {
+        let start = from + rel;
+        from = start + 4;
+        let Some(close) = lower[start..].find('>') else {
+            break;
+        };
+        let tag = &lower[start..start + close];
+        let bordered = tag.contains("border-top:")
+            || (tag.contains("border-style") && tag.contains("solid none none"));
+        if !bordered {
+            continue;
+        }
+        // The block's first few hundred characters of text, tags dropped.
+        let mut text = String::new();
+        let mut in_tag = false;
+        for c in lower[start + close + 1..].chars().take(600) {
+            match c {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                c if !in_tag => text.push(c),
+                _ => {}
+            }
+        }
+        let text = text.replace("&nbsp;", " ").replace('\u{a0}', " ");
+        let opened = text.trim_start();
+        let sender = QUOTED_FROM.iter().any(|label| opened.starts_with(label));
+        let dated = QUOTED_SENT.iter().any(|label| opened.contains(label));
+        if sender && dated {
+            return Some(start);
+        }
+    }
+    None
 }
 
 /// The Markdown of a draft's own text in the HTML of a server copy edited in
@@ -3052,9 +3111,22 @@ Content-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n--B--\r\n"
             "<p>hi</p><blockquote type=\"cite\"><p>q</p></blockquote>",
             "<p>hi</p><div id=\"divRplyFwdMsg\" dir=\"ltr\">From</div>",
             "<p>hi</p><div class=x id=appendonsend></div>",
+            "<p>hi</p><div id=\"mail-editor-reference-message-container\"><div>From</div></div>",
+            "<p>hi</p><div style=\"border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0cm 0cm 0cm\">\
+             <p class=MsoNormal><b>From:</b> Robin<br><b>Sent:</b> Monday</p></div><p>q</p>",
+            "<p>hi</p><div style=\"padding: 3pt 0in 0in; border-width: 1pt medium medium; \
+             border-style: solid none none;\"><div><b>Von:</b> Robin<br><b>Gesendet:</b> \
+             Montag</div></div>",
         ] {
             assert_eq!(draft_reply_boundary(html), Some(9), "{html}");
         }
+        // A bordered block that is no quoted header is the draft's own text.
+        assert_eq!(
+            draft_reply_boundary(
+                "<p>hi</p><div style=\"border-top:solid #ccc 1pt\"><p>Termine: Montag</p></div>"
+            ),
+            None
+        );
     }
 
     /// A foreign edit's HTML becomes the Markdown a draft has: emphasis,

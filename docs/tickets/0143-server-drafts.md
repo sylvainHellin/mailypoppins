@@ -340,7 +340,7 @@ The converter lives in `crates/mp-core/src/parse.rs` beside `html_to_plain`, con
 
 - `skip_tags` for `script`, `style` and `head`, without which the text of a `<style>` block leaks into the body;
 - a handler for Word's fake lists, the `mso-list` paragraphs whose number sits inside `<![if !supportLists]>`, turning them into Markdown lists;
-- handlers for the quote wrappers, Apple Mail's `blockquote type="cite"` and Outlook's `div#divRplyFwdMsg` and `div#appendonsend`, which map back to the `QUOTE_MARKER` section;
+- handlers for the quote wrappers, Apple Mail's `blockquote type="cite"`, Outlook's `div#divRplyFwdMsg` and `div#appendonsend`, Outlook mobile's `div#mail-editor-reference-message-container`, and the top-bordered block Outlook opens a quoted `From:`/`Sent:` header with, which map back to the `QUOTE_MARKER` section;
 - a trim of trailing `&nbsp;`.
 
 Only the part above the quote boundary is replaced.
@@ -418,7 +418,8 @@ The reconcile imports it as a new file in the drafts directory:
 
 - a fresh `id:`, and `server_message_id` taken from the draft's own Message-ID;
 - a `draft_sync` row for the copy;
-- `to`, `cc`, `bcc`, `subject`, `from`, `reply_to` from its headers, and `in_reply_to:` from its `In-Reply-To`;
+- `to`, `cc`, `bcc`, `subject`, `from`, `reply_to` from its headers, a missing `To` as an empty `to:`, since Outlook mobile saves a forward before a recipient is chosen;
+- `in_reply_to:` from its `In-Reply-To`, or `forwarded_from:` when the subject opens with `FW:`, `Fwd:` or `WG:` in any case: Outlook names a forward's source in `In-Reply-To` too, and the key decides whether the send flags the source `\Answered` and threads into its conversation, or flags it `$Forwarded` and starts a conversation of its own;
 - `status: draft`;
 - the body through the pull's converter, and the attachments as files as above.
 
