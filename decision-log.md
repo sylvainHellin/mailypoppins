@@ -227,3 +227,10 @@ Rejected: building the IMAP half on an assumption about the servers.
 Source: the #0141 implementation and its review, orchestrator brief of 2026-10-22; Sylvain may veto any of them.
 Status: accepted
 
+
+## 2026-10-23 - The dark theme's warning colour is #FF7212
+
+Why: the previous orange failed the contrast check against the grey panels; #FF7212 passes it with the panels unchanged, in the TUI and the desktop app.
+Rejected: keeping the old orange and darkening the grey panels instead.
+Source: Sylvain, chat of 2026-10-23.
+Status: accepted
