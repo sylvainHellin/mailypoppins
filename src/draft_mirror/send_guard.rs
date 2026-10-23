@@ -50,7 +50,7 @@
 //! sends again, as its owed-push scan would push it again anyway.
 
 use anyhow::{anyhow, bail, Result};
-use log::info;
+use log::{info, warn};
 
 use super::folder::DraftsFolder;
 use super::{drafts_mailbox, mirror_enabled};
@@ -82,9 +82,26 @@ fn outcome_unknown(mailbox: &str, why: &str) -> anyhow::Error {
     )
 }
 
+/// Log a refused send at WARN, naming the account, the draft and the
+/// `Message-ID` of its server copy: the error goes back to the client that
+/// asked, and without this line the daemon log kept no trace of it.
+fn log_refusal(account: &AccountConfig, draft: &EmailDraft, e: &anyhow::Error) {
+    let id = draft.frontmatter.id.as_deref().unwrap_or("(no id)");
+    let message_id = draft
+        .frontmatter
+        .server_message_id
+        .as_deref()
+        .unwrap_or_default();
+    warn!(
+        "[drafts] refused the send of {}/{id} ({message_id}): {e:#}",
+        account.name
+    );
+}
+
 /// Claim `draft`'s server copy in `folder` before a send, or refuse the send.
 /// `Ok` means the send may go ahead: the draft is not mirrored, this session
-/// removed its copy, or an earlier claim of this machine's did.
+/// removed its copy, or an earlier claim of this machine's did. Every refusal
+/// is logged at WARN.
 pub async fn claim_for_send<F: DraftsFolder>(
     store: &Store,
     account: &AccountConfig,
@@ -94,6 +111,20 @@ pub async fn claim_for_send<F: DraftsFolder>(
     if !guards(account, draft) {
         return Ok(());
     }
+    let claimed = claim(store, account, folder, draft).await;
+    if let Err(e) = &claimed {
+        log_refusal(account, draft, e);
+    }
+    claimed
+}
+
+/// [`claim_for_send`] for a draft the guard covers, without the log.
+async fn claim<F: DraftsFolder>(
+    store: &Store,
+    account: &AccountConfig,
+    folder: &mut F,
+    draft: &EmailDraft,
+) -> Result<()> {
     let name = &account.name;
     let message_id = draft
         .frontmatter
@@ -162,9 +193,16 @@ pub async fn guard_send(account: &AccountConfig, draft: &EmailDraft) -> Result<(
     if !guards(account, draft) {
         return Ok(());
     }
-    let imap =
-        crate::config::ImapConfig::load(account).map_err(|e| unreachable(&account.name, e))?;
-    let store = Store::open(crate::config::store_path(&account.name))?;
+    let opened = crate::config::ImapConfig::load(account)
+        .map_err(|e| unreachable(&account.name, e))
+        .and_then(|imap| Ok((imap, Store::open(crate::config::store_path(&account.name))?)));
+    let (imap, store) = match opened {
+        Ok(opened) => opened,
+        Err(e) => {
+            log_refusal(account, draft, &e);
+            return Err(e);
+        }
+    };
     let mut folder = super::folder::ImapDraftsFolder::new(imap);
     claim_for_send(&store, account, &mut folder, draft).await
 }

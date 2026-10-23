@@ -46,6 +46,7 @@ All notable changes to this project are documented in this file.
 - A draft approved on one machine is approved on the other, when the copy it reads is mp's own, unedited and with every attachment; an edit in another client brings it back as `status: draft`, and on Proton, whose Bridge drops mp's headers, the approval does not travel (#0143).
   A send of a mirrored draft claims its server copy first, so an approved draft held on two machines goes out once; the send refuses when the Drafts folder cannot be reached.
   A draft sent or discarded elsewhere is never pushed back to Drafts, even when the send key approves it before its refused send, so the claim can never find a fresh copy of it and send it again.
+  Every send the guard refuses is logged as a warning naming the account, the draft and its `Message-ID`.
 - Sent and discarded drafts move to `drafts/.retired/` for 30 days, and their server copies are removed seconds later (#0143).
   A draft whose server copy was sent or deleted in another client moves there once two syncs in a row miss the copy, and comes back if the copy does.
 - A draft's server copy carries nothing in its body beyond the message itself, so a copy sent unedited from another client reveals no Bcc and no frontmatter; mp's own bookkeeping rides in `X-Mailypoppins-Draft-Source` headers, without the Bcc (#0143).

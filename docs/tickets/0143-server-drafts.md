@@ -407,6 +407,7 @@ A send of a draft with a `server_message_id` on an account that mirrors therefor
 - After the claim the draft's `draft_sync` row is forgotten, so a send that then fails leaves a draft the owed-push scan pushes again, and the reconcile does not retire an unsent file as one whose copy went.
 - A Drafts folder that cannot be reached, or a server without `UIDPLUS`, refuses the send with an error that says so: nothing then shows that the other machine has not sent the draft, so the send does not fall through.
   The cost is that a mirrored draft cannot be sent while its IMAP server is unreachable even when SMTP is; `[accounts.drafts] mirror = false` turns the guard off with the mirror.
+- Every refusal, a claim that failed or came up short included, is logged at WARN with the account, the draft id and the copy's `Message-ID` (`send_guard::log_refusal`), since the error otherwise reaches only the client that asked; `mp send-approved` prints each refused draft as its own `✗` line with the refusal.
 - The outbox's `DeleteDraft` stays queued after the send and finds nothing, a not-found the drain counts as converged.
 - Not closed: two sends whose reads of the copy both come before either one's `UID EXPUNGE`, a window of one round trip, both see the expunge and both go ahead; plain IMAP offers no test-and-set without `CONDSTORE`, which neither server has.
 

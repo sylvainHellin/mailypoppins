@@ -3231,3 +3231,8 @@ A push that read "no copy under the draft's `Message-ID`" as "nothing to replace
 Had it drained before the claim, the claim would have taken that copy and sent the draft twice.
 A row that names a copy under the current UIDVALIDITY, with no copy left at all, means the draft was sent or discarded elsewhere; `push::push` now does nothing for it and leaves the file to the reconcile's copy-gone retirement.
 Any code that writes a server copy must ask whether the copy it replaces is still there before treating its absence as a clean slate.
+
+## An operation's error reaches its client, not the daemon log (2026-10-23)
+
+`OperationHandle::fail` hands the error to the client that started the operation and writes nothing to the daemon log, so the send guard's first live refusal on the home server left no line in either daemon's log, only the TUI's status line.
+A refusal that matters for reconstructing an incident later (the send guard's, in `send_guard::log_refusal`) logs itself at WARN with the account, the draft and the `Message-ID` before it returns.

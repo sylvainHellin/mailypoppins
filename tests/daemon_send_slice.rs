@@ -1713,6 +1713,18 @@ fn the_batch_wordings_are_the_lines_mp_send_approved_prints() {
         "⚠ (sent but failed to update status: permission denied)"
     );
 
+    // A draft the send guard refused is its own line, with the refusal.
+    let mut refused = all_delivered();
+    refused.recipients.clear();
+    refused.status_line = "this draft's server copy is no longer in Drafts: it was sent or \
+                           discarded on another machine"
+        .to_string();
+    assert_eq!(
+        send_approved_line(&refused),
+        "✗ this draft's server copy is no longer in Drafts: it was sent or discarded on another \
+         machine"
+    );
+
     let outcome = ApprovedOutcome {
         account: fixture::ACCOUNT.to_string(),
         results: vec![all_delivered(), partly_delivered()],

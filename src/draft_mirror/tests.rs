@@ -2224,3 +2224,86 @@ fn an_outlook_mobile_forward_imports_as_a_forward_with_its_quote_marked() {
     );
     assert_eq!(local.draft.frontmatter.forwarded_from, None);
 }
+
+// ---------------------------------------------------------------------------
+// Every refusal of the send guard is in the daemon log (2026-10-23)
+// ---------------------------------------------------------------------------
+
+/// The warnings the drafts mirror logged in this test binary, captured by a
+/// logger installed once; tests tell theirs apart by a draft id of their own.
+fn mirror_warnings() -> Vec<String> {
+    use std::sync::{Mutex, OnceLock};
+    struct Capture(Mutex<Vec<String>>);
+    impl log::Log for Capture {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Warn
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata())
+                && record.target().starts_with("mailypoppins::draft_mirror")
+            {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} {}", record.level(), record.args()));
+            }
+        }
+        fn flush(&self) {}
+    }
+    static CAPTURE: OnceLock<&'static Capture> = OnceLock::new();
+    let capture = CAPTURE.get_or_init(|| {
+        let capture: &'static Capture = Box::leak(Box::new(Capture(Mutex::new(Vec::new()))));
+        log::set_logger(capture).expect("no other logger in the test binary");
+        log::set_max_level(log::LevelFilter::Warn);
+        capture
+    });
+    capture.0.lock().unwrap().clone()
+}
+
+/// Each refusal names the account, the draft and its `Message-ID` in a
+/// warning: one sent elsewhere, an unreachable folder, a claim that failed.
+#[test]
+fn every_send_guard_refusal_is_logged_as_a_warning() {
+    mirror_warnings();
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    for id in ["logged-gone", "logged-unreachable", "logged-claim"] {
+        fx.write(id, id, "", "eins");
+        block_on(push::push(&fx.mirror(1), &mut folder, id)).unwrap();
+    }
+    let mid = |id: &str| {
+        find_local("tum", id)
+            .unwrap()
+            .draft
+            .frontmatter
+            .server_message_id
+            .unwrap()
+    };
+    let gone_mid = mid("logged-gone");
+    block_on(push::delete(&mut folder, "Drafts", &gone_mid)).unwrap();
+    guard(&fx.store, &fx.account, &mut folder, "logged-gone").unwrap_err();
+
+    folder.fail_select = true;
+    guard(&fx.store, &fx.account, &mut folder, "logged-unreachable").unwrap_err();
+    folder.fail_select = false;
+
+    folder.fail_claim = true;
+    guard(&fx.store, &fx.account, &mut folder, "logged-claim").unwrap_err();
+
+    let warnings = mirror_warnings();
+    for (id, why) in [
+        ("logged-gone", "sent or discarded on another machine"),
+        ("logged-unreachable", "could not be reached"),
+        ("logged-claim", "outcome unknown"),
+    ] {
+        let message_id = mid(id);
+        assert!(
+            warnings.iter().any(|line| line.starts_with("WARN")
+                && line.contains("tum/")
+                && line.contains(id)
+                && line.contains(&message_id)
+                && line.contains(why)),
+            "{id}: {warnings:#?}"
+        );
+    }
+}
