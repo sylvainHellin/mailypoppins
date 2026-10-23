@@ -3203,3 +3203,18 @@ A retry that is parked again retires the draft's older failed row (`supersede_fa
 A second draft of one file name retired because its copy went landed as `angebot.copy-gone-2.md`, which a reader matching `ends_with(".copy-gone")` took for a tombstone, so the copy that came back was deleted.
 `reconcile::copy_gone_name` writes the names and `reconcile::copy_gone_original` reads them, `.copy-gone` with an optional `-<n>`, and a unit test round-trips every count.
 Conflict copies were already safe: `daemon::watch::has_conflict_copy` accepts `.conflict` followed by anything starting with `-`.
+
+## A quiet reconcile is not a dead one (2026-10-23)
+
+The drafts reconcile that runs inside a sync tick logs nothing above `debug` when it finds nothing to do, so a daemon log at `info` shows no trace of it.
+Before suspecting a reconcile that never runs, check for the scheduler's `[scheduler] <account> ...; ticking` lines: a tick that ran is a reconcile that ran.
+
+## A queued op outside a mutation method waits for the next tick (2026-10-23)
+
+A `pending_ops` row that a mutation method queues is drained seconds later because the method calls `AccountRuntime::request_drain`.
+A row queued anywhere else (a send settling its draft, the watcher, a reconcile) sits until the account's next sync tick, up to `imap.sync_interval_secs`, unless that code path calls `request_drain` itself; the send method's `drain_after_send` exists for exactly this.
+
+## `resolve_attachment_paths` does not check that a file is there (2026-10-23)
+
+`send::resolve_attachment_paths` joins an entry to the draft's directory and expands a folder, but a plain path comes back whether or not a file exists at it.
+Code that needs to know whether an attachment is present here, such as the drafts mirror deciding whether an approval travelled with its attachments, checks each path with `is_file()`.
