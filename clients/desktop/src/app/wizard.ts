@@ -1,5 +1,5 @@
 // The account wizard (ACC-01, ACC-02; clients/desktop/docs/shell.md,
-// "Account wizard"): the CLI wizard's four provider presets
+// "Account wizard"): the CLI wizard's three provider presets
 // (src/config_cmd/init.rs), the form's steps, what each step checks before
 // it lets the user on, the connection test and the mailbox defaults it runs
 // through `config.probe` as the CLI does, and the `AccountDraft` the review
@@ -20,7 +20,7 @@ import {
   type SecretKind,
 } from "@/lib/gui-types";
 
-export type Preset = "imap" | "proton" | "microsoft365" | "graph";
+export type Preset = "imap" | "proton" | "graph";
 
 export type PresetInfo = {
   label: string;
@@ -44,7 +44,7 @@ export type PresetInfo = {
 export const PRESETS: Record<Preset, PresetInfo> = {
   imap: {
     label: "IMAP and SMTP",
-    hint: "Any provider with IMAP and SMTP and a password.",
+    hint: "Any provider with IMAP and SMTP and a password, on-premises Exchange included.",
     auth: "password",
     name: "main",
     smtpHost: "",
@@ -70,20 +70,6 @@ export const PRESETS: Record<Preset, PresetInfo> = {
     archive: "Archive",
     sent: "Sent",
   },
-  microsoft365: {
-    label: "Microsoft 365 (OAuth2, IMAP and SMTP)",
-    hint: "Needs an Azure Entra ID app registration (docs/exchange-setup.md); you sign in with a device code.",
-    auth: "oauth2",
-    name: "exchange",
-    smtpHost: "smtp.office365.com",
-    smtpPort: "587",
-    imapHost: "outlook.office365.com",
-    imapPort: "993",
-    invalidCerts: false,
-    inbox: "INBOX",
-    archive: "Archive",
-    sent: "Sent",
-  },
   graph: {
     label: "Microsoft 365 (Graph API)",
     hint: "Signs in through the shared mailypoppins app with a device code; no IMAP or SMTP server, no app registration of your own.",
@@ -100,7 +86,7 @@ export const PRESETS: Record<Preset, PresetInfo> = {
   },
 };
 
-export const PRESET_ORDER: Preset[] = ["imap", "proton", "microsoft365", "graph"];
+export const PRESET_ORDER: Preset[] = ["imap", "proton", "graph"];
 
 /**
  * The shared mailypoppins app registration a Graph account signs in through
@@ -115,15 +101,6 @@ export const MAILYPOPPINS_CLIENT_ID = "439d7ebd-7898-4df2-b2d6-88bb61e2597b";
  * crates/mp-core/src/oauth2.rs).
  */
 export const DEFAULT_TENANT = "common";
-
-/**
- * Whether the preset may leave the client and tenant IDs empty for the
- * mailypoppins app and `common`: Graph only, since the shared app carries
- * Graph permissions and no IMAP or SMTP ones.
- */
-export function hasDefaultApp(preset: Preset): boolean {
-  return PRESETS[preset].auth === "graph";
-}
 
 export type WizardForm = {
   preset: Preset;
@@ -223,9 +200,13 @@ export function usesServers(preset: Preset): boolean {
   return PRESETS[preset].auth !== "graph";
 }
 
-/** Whether the preset signs in with a device code rather than a password. */
+/**
+ * Whether the preset signs in with a device code rather than a password:
+ * Graph only, whose empty client and tenant IDs are the mailypoppins app and
+ * `common`.
+ */
 export function signsIn(preset: Preset): boolean {
-  return PRESETS[preset].auth !== "password";
+  return PRESETS[preset].auth === "graph";
 }
 
 /** An account name: it names the account in `mp://` links and its directory on disk. */
@@ -237,8 +218,6 @@ export const nameTaken = (name: string): string => `An account named ${name} is 
 export const HOST_EMPTY = "The SMTP host is required";
 export const USERNAME_EMPTY = "The SMTP username is required";
 export const FROM_EMPTY = "The email address is required";
-export const CLIENT_EMPTY = "The app registration's client ID is required";
-export const TENANT_EMPTY = "The tenant ID is required";
 export const MAILBOX_EMPTY = "A server mailbox name is required";
 export const PASSWORD_EMPTY = "Type the password to test the login";
 export const mailboxTwice = (name: string, role: string): string => `${name} is already the ${role} mailbox`;
@@ -294,10 +273,6 @@ export function stepErrors(step: WizardStep, form: WizardForm, taken: readonly s
       if (!port(form.smtp_port)) out.smtp_port = PORT_BAD;
       if (blank(form.smtp_username)) out.smtp_username = USERNAME_EMPTY;
       if (!port(form.imap_port)) out.imap_port = PORT_BAD;
-    }
-    if (signsIn(form.preset) && !hasDefaultApp(form.preset)) {
-      if (blank(form.client_id)) out.client_id = CLIENT_EMPTY;
-      if (blank(form.tenant_id)) out.tenant_id = TENANT_EMPTY;
     }
   }
   if (step === "mailboxes" || step === "review") {
@@ -384,24 +359,16 @@ export type PlannedCheck = { check: ProbeCheck; password: SecretKind | null; req
  * The CLI wizard's probes, in its order. A password preset tests the SMTP
  * login, which must pass; then the IMAP login, which must pass with a
  * password of its own and is a warning with the SMTP one; then lists the
- * mailboxes with the IMAP password. An OAuth2 preset, once signed in, tests
- * the SMTP login with the staged token, a warning since a tenant may withhold
- * SMTP AUTH, then lists the mailboxes; a Graph one tests the Graph client
- * first. Only a password login stops the wizard: the CLI asks again for
- * those, and goes on past a failed token test or mailbox list, the names
- * then typed.
+ * mailboxes with the IMAP password. A Graph preset, once signed in, tests
+ * the Graph client, then lists the folders. Only a password login stops the
+ * wizard: the CLI asks again for those, and goes on past a failed Graph test
+ * or mailbox list, the names then typed.
  */
 export function probePlan(preset: Preset, sameImap: boolean): PlannedCheck[] {
   const auth = PRESETS[preset].auth;
   if (auth === "graph") {
     return [
       { check: "graph", password: null, required: false },
-      { check: "mailboxes", password: null, required: false },
-    ];
-  }
-  if (auth === "oauth2") {
-    return [
-      { check: "smtp", password: null, required: false },
       { check: "mailboxes", password: null, required: false },
     ];
   }
@@ -461,29 +428,18 @@ export async function runConnectionTest(
   return { result: { key: connectionKey(form, secrets.sameImap), runs, listed, passed } };
 }
 
-/**
- * What the user reads when an OAuth2 account's SMTP test fails; the CLI
- * wizard says the same (`OAUTH2_SMTP_WARNING` in src/config_cmd/init.rs).
- */
-export const OAUTH2_SMTP_WARNING =
-  "The sign-in may lack SMTP access: a tenant that disables SMTP AUTH refuses it. Setup goes on, and sending fails until an administrator enables SMTP AUTH for the mailbox.";
-
 /** A server's reason as a sentence: a period added only when it ends in none. */
 export function asSentence(text: string): string {
   const t = text.trim();
   return /[.!?]$/.test(t) ? t : `${t}.`;
 }
 
-/**
- * What one probe found, in plain words. `token` says the account signs in
- * rather than sending a password, whose failed SMTP test is a warning.
- */
-export function checkLine(run: CheckRun, sameImap: boolean, token = false): string {
+/** What one probe found, in plain words. */
+export function checkLine(run: CheckRun, sameImap: boolean): string {
   const why = asSentence(run.error ?? "no reason given");
   switch (run.check) {
     case "smtp":
-      if (run.ok) return "SMTP: the server accepted the login.";
-      return token ? `SMTP: the test failed. ${why} ${OAUTH2_SMTP_WARNING}` : `SMTP: the login failed. ${why}`;
+      return run.ok ? "SMTP: the server accepted the login." : `SMTP: the login failed. ${why}`;
     case "imap":
       if (run.ok) return "IMAP: the server accepted the login.";
       return sameImap
@@ -524,7 +480,7 @@ export function accountDraft(form: WizardForm): AccountDraft {
   if (from) draft.default_from = from;
   if (p.auth !== "password") {
     draft.auth_method = p.auth;
-    const fallback = (v: string, d: string) => (hasDefaultApp(form.preset) && t(v) === "" ? d : t(v));
+    const fallback = (v: string, d: string) => (t(v) === "" ? d : t(v));
     draft.oauth2 = {
       client_id: fallback(form.client_id, MAILYPOPPINS_CLIENT_ID),
       tenant_id: fallback(form.tenant_id, DEFAULT_TENANT),

@@ -113,7 +113,7 @@ describe("the account wizard", () => {
     const imap = within(dialog).getByRole("radio", { name: /^IMAP and SMTP/ });
     await waitFor(() => expect(imap).toHaveFocus());
     expect(imap).toBeChecked();
-    expect(within(dialog).getAllByRole("radio")).toHaveLength(4);
+    expect(within(dialog).getAllByRole("radio")).toHaveLength(3);
     expect(within(dialog).getByRole("radio", { name: /Proton Mail/ })).toHaveAccessibleDescription(/bridge password/);
     expect(within(dialog).getByRole("list", { name: "Steps" }).querySelector("[aria-current='step']")).toHaveTextContent("1. Provider");
     expect(within(dialog).getByRole("list", { name: "Steps" })).toHaveTextContent("4. Connection");
@@ -317,18 +317,24 @@ describe("the account wizard", () => {
     expect(stepOf(dialog)).toBe("connection");
   });
 
+  it("offers Microsoft 365 through Graph only: no Microsoft OAuth2 over IMAP and SMTP", async () => {
+    const { dialog } = await openWizard();
+    const radios = within(dialog)
+      .getAllByRole("radio")
+      .map((r) => r.getAttribute("value") ?? "");
+    expect(radios).toEqual(["imap", "proton", "graph"]);
+    expect(within(dialog).queryByRole("radio", { name: /OAuth2/ })).toBeNull();
+    expect(within(dialog).getByRole("radio", { name: /Graph API/ })).toBeInTheDocument();
+  });
+
   it("a Microsoft 365 account signs its candidate in on the Connection step, tests it, and the write promotes the sign-in", async () => {
     const { user, probe, dialog, writeText } = await openWizard();
-    await user.click(within(dialog).getByRole("radio", { name: /OAuth2, IMAP and SMTP/ }));
+    await user.click(within(dialog).getByRole("radio", { name: /Graph API/ }));
     await next(user, dialog);
     expect(within(dialog).getByLabelText("Account name")).toHaveValue("exchange");
+    await fill(user, dialog, "Email address", "me@contoso.com");
     await next(user, dialog);
-    expect(within(dialog).getByLabelText("SMTP host")).toHaveValue("smtp.office365.com");
-    expect(within(dialog).getByLabelText("SMTP port")).toHaveValue("587");
-    await fill(user, dialog, "SMTP username", "me@contoso.com");
-    await next(user, dialog);
-    expect(within(dialog).getByLabelText("Client ID")).toHaveAccessibleDescription(/client ID is required/);
-    expect(within(dialog).getByLabelText("Tenant ID")).toHaveAccessibleDescription(/tenant ID is required/);
+    expect(within(dialog).queryByLabelText("SMTP host")).toBeNull();
     await fill(user, dialog, "Client ID", "client-1");
     await fill(user, dialog, "Tenant ID", "contoso.com");
     await next(user, dialog);
@@ -342,10 +348,8 @@ describe("the account wizard", () => {
           candidate: {
             name: "exchange",
             default_from: "me@contoso.com",
-            auth_method: "oauth2",
+            auth_method: "graph",
             oauth2: { client_id: "client-1", tenant_id: "contoso.com" },
-            smtp: { host: "smtp.office365.com", port: 587, username: "me@contoso.com" },
-            imap: { host: "outlook.office365.com", port: 993 },
           },
         },
       ]),
@@ -367,13 +371,13 @@ describe("the account wizard", () => {
       settleSignIn();
     });
     // Stored: the test runs at once, with the staged token.
-    await waitFor(() => expect(within(dialog).getByRole("list", { name: "Connection test" })).toHaveTextContent("Mailboxes: the server listed 7."));
+    await waitFor(() => expect(within(dialog).getByRole("list", { name: "Connection test" })).toHaveTextContent("Mailboxes: the server listed"));
     const candidate = (callsOf("config_oauth2_login")[0] as { candidate: unknown }).candidate;
     expect(callsOf("config_probe")).toEqual([
-      { account: candidate, check: "smtp" },
+      { account: candidate, check: "graph" },
       { account: candidate, check: "mailboxes" },
     ]);
-    expect(within(dialog).getByRole("list", { name: "Connection test" })).toHaveTextContent("SMTP: the server accepted the login.");
+    expect(within(dialog).getByRole("list", { name: "Connection test" })).toHaveTextContent("Graph: the sign-in reaches the mailbox.");
     expect(within(dialog).getByText("Signed in. The token waits for the account to be written.")).toBeInTheDocument();
     expect(probe.state.signIn).toBeNull();
     expect(probe.state.activityLog.map((e) => e.text).join("\n")).not.toMatch(/OAuth2 token acquired/);
@@ -382,7 +386,7 @@ describe("the account wizard", () => {
     await next(user, dialog);
     await user.click(within(dialog).getByRole("button", { name: "Add account" }));
     await waitFor(() => expect(callsOf("config_add_account")).toHaveLength(1));
-    expect((callsOf("config_add_account")[0]?.account as { auth_method: string }).auth_method).toBe("oauth2");
+    expect((callsOf("config_add_account")[0]?.account as { auth_method: string }).auth_method).toBe("graph");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add account" })).toBeNull());
     expect(probe.state.notice).toBe("Added the account exchange; its sign-in is stored");
     // Promoted by the write; no second sign-in, no password.

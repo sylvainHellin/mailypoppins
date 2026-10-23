@@ -2,7 +2,7 @@
 
 /**
  * What a finished sign-in settles with: where the token went, never what
- * it is. `kind` is `oauth2` (IMAP/SMTP) or `graph`.
+ * it is. `kind` is `graph`, the one account that signs in.
  */
 export type OAuth2Stored = { stored: boolean, account: string, kind: string,
 /**

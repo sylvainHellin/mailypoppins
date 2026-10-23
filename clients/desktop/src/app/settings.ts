@@ -45,6 +45,14 @@ export function usesPassword(account: ConfigAccount): boolean {
   return account.auth_method === "password" || account.auth_method === "";
 }
 
+/**
+ * What an account naming the retired `auth_method = "oauth2"` (Microsoft
+ * sign-in over IMAP and SMTP) shows instead of its sign-in: the daemon keeps
+ * it blocked, and config.toml is where it is switched.
+ */
+export const RETIRED_OAUTH2_LINE =
+  'This sign-in is no longer supported, so the account does not sync. In config.toml, set auth_method = "graph" for Microsoft 365, or remove the auth_method line and set a password for on-premises Exchange.';
+
 // ---------------------------------------------------------------------------
 // The model
 // ---------------------------------------------------------------------------

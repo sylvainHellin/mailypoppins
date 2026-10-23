@@ -507,9 +507,9 @@ struct State {
     /// Every `config.set_password`, its value redacted, oldest first.
     password_writes: Vec<Value>,
     /// The sign-ins waiting for `oauth_approve` or `oauth_deny`, by
-    /// operation id: the account, the token's kind, and whether it is a
-    /// candidate's, whose token is staged.
-    oauth_logins: BTreeMap<String, (String, &'static str, bool)>,
+    /// operation id: the account, and whether it is a candidate's, whose
+    /// token is staged.
+    oauth_logins: BTreeMap<String, (String, bool)>,
     /// The candidates whose approved sign-in is staged, until the write
     /// that promotes it.
     staged_sign_ins: BTreeSet<String>,
@@ -3043,8 +3043,9 @@ impl Fixture {
                 }))
             }
             // The daemon's `account.credentials`: presence only. A password is
-            // there once this fixture stored it, and an OAuth2 or Graph
-            // account's token is taken to be cached and valid.
+            // there once this fixture stored it, a Graph account's token is
+            // taken to be cached and valid, and an account naming the retired
+            // `oauth2` mode reports nothing.
             "account.credentials" => {
                 only(method, &params, &["account"])?;
                 let stored = |account: &str, kind: &str| {
@@ -3062,13 +3063,13 @@ impl Fixture {
                         let name = a["name"].as_str().unwrap_or_default();
                         let auth = a["auth_method"].as_str().unwrap_or("password");
                         let auth = if auth.is_empty() { "password" } else { auth };
-                        let graph = auth == "graph";
+                        let password = auth == "password";
                         json!({
                             "account": name,
                             "auth_method": auth,
-                            "smtp_password": (!graph).then(|| stored(name, "smtp")),
-                            "imap_password": (!graph).then(|| stored(name, "imap")),
-                            "token": (auth != "password").then_some("valid"),
+                            "smtp_password": password.then(|| stored(name, "smtp")),
+                            "imap_password": password.then(|| stored(name, "imap")),
+                            "token": (auth == "graph").then_some("valid"),
                         })
                     })
                     .collect();
@@ -3261,20 +3262,26 @@ impl Fixture {
                     ));
                 };
                 let account = &account;
-                let kind = match account["auth_method"].as_str() {
-                    Some("oauth2") => "oauth2",
-                    Some("graph") => "graph",
+                match account["auth_method"].as_str() {
+                    Some("graph") => {}
+                    Some("oauth2") => {
+                        return Err(refused(
+                            method,
+                            -32602,
+                            &mp_core::config::retired_oauth2_message(&name),
+                        ))
+                    }
                     _ => {
                         return Err(refused(
                             method,
                             -32602,
                             &format!(
-                                "Account '{name}' uses auth_method = \"password\", not \"oauth2\" or \"graph\". \
-                                 Set auth_method = \"oauth2\" or \"graph\" in config.toml to use OAuth2."
+                                "Account '{name}' uses auth_method = \"password\", not \"graph\". \
+                                 Set auth_method = \"graph\" in config.toml to sign in to Microsoft 365."
                             ),
                         ))
                     }
-                };
+                }
                 let oauth2 = &account["oauth2"];
                 if !oauth2.is_object() {
                     return Err(refused(
@@ -3301,7 +3308,7 @@ impl Fixture {
                         "scope": "durable", "progress": null, "result": null, "error": null
                     }),
                 );
-                s.oauth_logins.insert(id.clone(), (name, kind, staged));
+                s.oauth_logins.insert(id.clone(), (name, staged));
                 let delay = s.device_code_delay;
                 drop(s);
                 let fixture = Arc::clone(self);
@@ -3326,6 +3333,13 @@ impl Fixture {
                     ));
                 }
                 let name = param_str(method, account, "name")?.to_string();
+                if account["auth_method"] == "oauth2" {
+                    return Err(refused(
+                        method,
+                        -32602,
+                        &mp_core::config::retired_oauth2_message(&name),
+                    ));
+                }
                 let check = match params["check"].as_str() {
                     Some(c @ ("smtp" | "imap" | "graph" | "mailboxes")) => c,
                     _ => {
@@ -3367,7 +3381,7 @@ impl Fixture {
                     ));
                 }
                 let staged = s.staged_sign_ins.contains(&name);
-                if auth != "password" && s.configured(&name).is_some() && !staged {
+                if graph && s.configured(&name).is_some() && !staged {
                     return Err(refused(
                         method,
                         -32602,
@@ -3379,7 +3393,7 @@ impl Fixture {
                         ),
                     ));
                 }
-                if auth != "password" && !staged {
+                if graph && !staged {
                     return Ok(json!({
                         "ok": false,
                         "error": format!(
@@ -4837,7 +4851,7 @@ impl Fixture {
     /// `oauth_approve` and `oauth_deny`: every sign-in still waiting ends,
     /// stored or declined.
     fn simulate_oauth(&self, approve: bool) -> Result<()> {
-        let waiting: Vec<(String, (String, &'static str, bool))> = {
+        let waiting: Vec<(String, (String, bool))> = {
             let mut s = self.state();
             std::mem::take(&mut s.oauth_logins).into_iter().collect()
         };
@@ -4848,13 +4862,13 @@ impl Fixture {
         if waiting.is_empty() {
             return Err(anyhow!("no sign-in is waiting for the provider"));
         }
-        for (id, (account, kind, staged)) in waiting {
+        for (id, (account, staged)) in waiting {
             if approve {
                 if staged {
                     self.state().staged_sign_ins.insert(account.clone());
                 }
                 let result = json!({
-                    "stored": true, "staged": staged, "account": account, "kind": kind,
+                    "stored": true, "staged": staged, "account": account, "kind": "graph",
                     "key": format!("oauth2-token-{account}"),
                 });
                 self.settle(&id, "succeeded", Some(result));

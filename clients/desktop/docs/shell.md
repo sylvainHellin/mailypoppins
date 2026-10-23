@@ -853,7 +853,7 @@ The handoff reloads nothing: a saved change reaches the daemon with its next `co
 
 ## Settings
 
-The Settings view shows the daemon's configuration, stores account passwords (ACC-05), signs OAuth2 and Graph accounts in (ACC-06) and adds accounts through the account wizard (ACC-01, ACC-02).
+The Settings view shows the daemon's configuration, stores account passwords (ACC-05), signs Graph accounts in (ACC-06) and adds accounts through the account wizard (ACC-01, ACC-02).
 The daemon has no per-key writer, so a setting changes in config.toml, through the editor, and takes effect with Reload.
 
 ### Entry points
@@ -896,12 +896,13 @@ The TUI's own theme is the `theme` key of config.toml (OBS-07), which the deskto
 
 ### Accounts
 
-One card per configured account, named after it: how it signs in ("Password", "Microsoft 365 (OAuth2)", "Microsoft 365 (Graph)"), its From address, its SMTP and IMAP servers as `host:port as username` (none for Graph), and the app registration's client and tenant for OAuth2 and Graph.
+One card per configured account, named after it: how it signs in ("Password", "Microsoft 365 (Graph)"), its From address, its SMTP and IMAP servers as `host:port as username` (none for Graph), and the app registration's client and tenant for Graph.
+An account whose config.toml still names the retired `auth_method = "oauth2"` reads "Microsoft OAuth2 over IMAP (retired)", says how to switch it in config.toml, and offers no button; the daemon keeps it blocked.
 Each card carries a "Conversation view" switch, On or Off; Off adds the account to `prefs.flatListAccounts` (#0142; see Model); `tc` flips the same choice for the selected account.
 A password account has "Set SMTP password" and "Set IMAP password".
-An OAuth2 or Graph account has "Sign in", which opens the device-code dialog on a new sign-in of that account (see Account wizard); while a sign-in runs, it shows that one again instead, with a notice when it is another account's.
+A Graph account has "Sign in", which opens the device-code dialog on a new sign-in of that account (see Account wizard); while a sign-in runs, it shows that one again instead, with a notice when it is another account's.
 Below the cards "Add account" opens the account wizard, as does the palette's "Add account".
-Whether each password and token is stored comes from `account_credentials` (`account.credentials`), which answers presence only, never a value: a password account's card says "SMTP password" and "IMAP password" are "stored" or "not set", the IMAP one "uses the SMTP password" when only that one is stored, as `mp config show` says it; an OAuth2 or Graph card says "Token" is "signed in", "expired, sign in again", "unreadable, sign in again" or "not signed in on this machine".
+Whether each password and token is stored comes from `account_credentials` (`account.credentials`), which answers presence only, never a value: a password account's card says "SMTP password" and "IMAP password" are "stored" or "not set", the IMAP one "uses the SMTP password" when only that one is stored, as `mp config show` says it; a Graph card says "Token" is "signed in", "expired, sign in again", "unreadable, sign in again" or "not signed in on this machine".
 `state.credentials` is read while the view shows, and goes stale with the configuration, after a stored password and after a sign-in settles.
 
 ### The password dialog
@@ -998,14 +999,13 @@ The pure half is `app/wizard.ts`: the presets, the per-step checks, the probes t
 
 ### Steps
 
-1. Provider: a radio group with the CLI's four presets, each with its hint.
-   "IMAP and SMTP" suggests ports 465 and 993.
+1. Provider: a radio group with the CLI's three presets, each with its hint.
+   "IMAP and SMTP" suggests ports 465 and 993, and is the one for on-premises Exchange.
    "Proton Mail (Proton Bridge)" fills 127.0.0.1:1025 and 127.0.0.1:1143 with `accept_invalid_certs`.
-   "Microsoft 365 (OAuth2, IMAP and SMTP)" fills smtp.office365.com:587 and outlook.office365.com:993 and signs in with a device code.
-   "Microsoft 365 (Graph API)" has no server at all, and its mailboxes default to Inbox, Archive and Sent Items.
+   "Microsoft 365 (Graph API)" has no server at all, signs in with a device code, and its mailboxes default to Inbox, Archive and Sent Items.
    Switching the preset replaces the provider's values and keeps the name the user typed, the usernames and the app registration.
 2. Identity: the account name, and the From address ("Email address" for Graph, where it is required).
-3. Servers: SMTP host, port and username, IMAP host, port and username, then for both Microsoft 365 presets the client ID and the tenant ID; Graph shows only the last two.
+3. Servers: SMTP host, port and username, IMAP host, port and username; Graph shows the client ID and the tenant ID instead.
 4. Connection: the test, before anything is written (see "The connection test").
 5. Mailboxes: the server names of Inbox, Archive and Sent, then Drafts, Trash and Junk, and the policy overrides, one `<pattern> <sync|status-only|ignore>` per line (#0141).
    When the test listed the server's mailboxes, each role is a select over that list, preselected as the CLI does: for Inbox, Archive and Sent in turn, the first of the CLI's preferred names the server lists, compared without case (INBOX; Archive, archive, All Mail; Sent, Sent Items, Sent Messages, INBOX.Sent; for Graph Inbox, Archive, Sent Items), else the first mailbox the roles before did not take, else the provider's usual name.
@@ -1020,9 +1020,8 @@ The pure half is `app/wizard.ts`: the presets, the per-step checks, the probes t
 Next checks the step, and Enter in a field is Next.
 A refused step marks each field `aria-invalid`, ties its sentence to it with `aria-describedby`, and focuses the first one.
 The name must be non-empty, letters, digits, `.`, `-` and `_` starting with a letter or a digit, and not already configured.
-The SMTP host, the SMTP username and valid ports are required for the three IMAP presets; an empty IMAP host or username falls back to the SMTP one.
-The client ID and the tenant ID are required for the OAuth2 preset.
-The Graph preset may leave both empty, as the CLI wizard does: the client ID then becomes the shared mailypoppins app (`MAILYPOPPINS_CLIENT_ID`) and the tenant `common`, and the review shows "the mailypoppins app, tenant common".
+The SMTP host, the SMTP username and valid ports are required for the two IMAP presets; an empty IMAP host or username falls back to the SMTP one.
+The Graph preset may leave the client ID and the tenant ID empty, as the CLI wizard does: the client ID then becomes the shared mailypoppins app (`MAILYPOPPINS_CLIENT_ID`) and the tenant `common`, and the review shows "the mailypoppins app, tenant common".
 One server mailbox plays one role: Archive or Sent naming the Inbox's mailbox, or Drafts, Trash or Junk naming one of the three, is refused with "<name> is already the <role> mailbox", since the CLI's pickers offer only what the roles before did not take; Drafts, Trash and Junk may share one.
 The review runs every check again and jumps to the step of the first failure.
 
@@ -1037,11 +1036,11 @@ The SMTP login must pass, and so must an IMAP login with its own password; a fai
 The SMTP password failing for IMAP is a warning, as in the CLI: the line says to untick the box or set the IMAP password in Settings later, and the wizard goes on.
 The passwords stay in the component and are sent to `config_probe` only; an edit of either clears the result.
 
-A Microsoft 365 preset says Microsoft signs the account in first, and its button is "Sign in": `config_oauth2_login` with the draft as `candidate`, which the daemon signs in under a staged token (`candidates/<name>`) and no configured account's.
+The Microsoft 365 (Graph) preset says Microsoft signs the account in first, and its button is "Sign in": `config_oauth2_login` with the draft as `candidate`, which the daemon signs in under a staged token (`candidates/<name>`) and no configured account's.
 The sign-in is a candidate one in `state.signIn`: it opens no `device_code` overlay and leaves no notice, and the wizard shows its code inline with the device-code dialog's view (verification page, code, "Copy code", "Open verification page") and "Cancel sign-in".
 Back and the button wait while it runs.
-Stored, it says "Signed in. The token waits for the account to be written." and the test runs at once: `smtp` then `mailboxes` for the OAuth2 preset, `graph` then `mailboxes` for Graph, none of which stops the wizard, as in the CLI.
-A refused SMTP test of the OAuth2 preset is a warning, since a tenant that disables SMTP AUTH leaves the sign-in without SMTP access; its line says so and that sending fails until an administrator enables it, the CLI's `OAUTH2_SMTP_WARNING` word for word.
+Stored, it says "Signed in. The token waits for the account to be written."
+The test then runs at once: `graph` then `mailboxes`, neither of which stops the wizard, as in the CLI.
 Failed, the alert says "The sign-in of <name> failed: <why>" and the button signs in again; cancelled, the sign-in is forgotten.
 
 Each probe the test ran is one line in the list "Connection test", with a check mark when it passed, a cross for a failure that stops the wizard and a warning sign for one that does not, in plain words with the server's sentence: "SMTP: the server accepted the login.", "SMTP: the login failed. <the server's sentence>", "Mailboxes: the server listed 7.", "Mailboxes: the server's list could not be read. <why> Type the names on the next step.".
@@ -1054,7 +1053,7 @@ The daemon refusing the probe itself shows in the alert: a token candidate named
 
 Nothing is written before the review's button.
 It calls `config_add_account`, or `config_init` when `config_get` answered `absent`; the daemon promotes a staged sign-in of that name as it writes.
-The draft carries exactly the keys the daemon's `account_block` reads: `auth_method` only for the Microsoft 365 presets, `oauth2` with them, no server for Graph, and the From address defaulting to the SMTP username.
+The draft carries exactly the keys the daemon's `account_block` reads: `auth_method` only for the Graph preset, `oauth2` with it, no server for Graph, and the From address defaulting to the SMTP username.
 A refusal (a taken name, a block the daemon does not load) shows in the wizard's alert, and the wizard stays open with nothing stored.
 Then each password the test used goes to `config_set_password`, the SMTP one and the IMAP one when it has its own, now that the account exists.
 On success the notice line says "Added the account <name>; its password is stored" (or "its SMTP and IMAP passwords are stored", or "its sign-in is stored"), or "Wrote config.toml with the account <name>; ...", and the dialog closes.

@@ -7,10 +7,11 @@ import type { ConfigServer } from "./ConfigServer";
  */
 export type ConfigAccount = { name: string, default_from: string,
 /**
- * `password`, `oauth2` or `graph`.
+ * `password` or `graph`; `oauth2` for an account that still names the
+ * retired mode, which the daemon keeps blocked.
  */
 auth_method: string, smtp: ConfigServer, imap: ConfigServer,
 /**
- * The app registration of an `oauth2` or `graph` account.
+ * The app registration of a `graph` account.
  */
 oauth2: ConfigOAuth2 | null, };

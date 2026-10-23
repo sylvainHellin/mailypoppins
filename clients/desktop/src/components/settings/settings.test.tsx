@@ -6,6 +6,7 @@ import { AppShell } from "@/components/shell/AppShell";
 import { StoreProvider, useAppState } from "@/app/store";
 import { PREFS_KEY } from "@/app/prefs";
 import type { AppState } from "@/app/state";
+import { RETIRED_OAUTH2_LINE } from "@/app/settings";
 import { shellReady } from "@/test/render";
 import { setWidth } from "@/test/setup";
 import { CONFIG_INVALID_AT, CONFIG_INVALID_MESSAGE, emitEnvelope, mock, MOCK_CONFIG_PATH, REDACTED, resetMock, simulateConfigAbsent } from "@/test/tauri-mock";
@@ -102,7 +103,18 @@ describe("the Settings view", () => {
     expect(within(group).getByRole("button", { name: "Follow the app" })).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("offers Sign in on the OAuth2 and Graph cards and Add account below them, both live", async () => {
+  it("an account naming the retired Microsoft OAuth2 over IMAP says how to switch and offers no sign-in", async () => {
+    resetMock();
+    mock.config.accounts.push({ ...mock.config.accounts[0], name: "office", auth_method: "oauth2", oauth2: null });
+    const { view } = await openSettingsKeeping();
+    const office = card(view, "office");
+    expect(within(office).getByText("Microsoft OAuth2 over IMAP (retired)")).toBeInTheDocument();
+    expect(within(office).getByText(RETIRED_OAUTH2_LINE)).toBeInTheDocument();
+    expect(within(office).queryByRole("button", { name: "Sign in" })).toBeNull();
+    expect(within(office).queryByRole("button", { name: /password/ })).toBeNull();
+  });
+
+  it("offers Sign in on the Graph card and Add account below them, both live", async () => {
     const { user, view } = await openSettings();
     const home = card(view, "home");
     const signIn = within(home).getByRole("button", { name: "Sign in" });

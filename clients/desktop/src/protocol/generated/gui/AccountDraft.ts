@@ -25,6 +25,6 @@ name: string, default_from?: string,
  */
 auth_method?: AuthMethod,
 /**
- * The app registration of an `oauth2` or `graph` account.
+ * The app registration of a `graph` account.
  */
 oauth2?: ConfigOAuth2, smtp?: AccountDraftServer, imap?: AccountDraftServer, mailboxes?: AccountDraftMailboxes, };

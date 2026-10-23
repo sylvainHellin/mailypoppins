@@ -323,7 +323,7 @@ export const configAddAccount = (account: AccountDraft): Promise<ConfigSwap> => 
 export const configInit = (account: AccountDraft): Promise<ConfigInitialised> => invoke<ConfigInitialised>("config_init", { account });
 
 /**
- * Start the device-code sign-in of an `oauth2` or `graph` account, awaited
+ * Start the device-code sign-in of a `graph` account, awaited
  * as `oauth2_login`: its one `operation.progress` (phase `device_code`)
  * carries "<url> <code>", and it settles with an `OAuth2Stored`. With a
  * `candidate` (the wizard's draft, named `account`) the account need not be

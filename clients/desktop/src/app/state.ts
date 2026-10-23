@@ -690,7 +690,7 @@ export type PasswordDialog = { account: string; kind: SecretKind };
  * dialog's own state. The review writes the first config.toml when the
  * daemon has none, else appends.
  */
-export type AccountWizard = { preset: "imap" | "proton" | "microsoft365" | "graph" };
+export type AccountWizard = { preset: "imap" | "proton" | "graph" };
 
 /**
  * The device-code sign-in the `device_code` overlay shows, one at a time:

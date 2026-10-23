@@ -10,22 +10,24 @@ export type AccountCredential = {
  */
 account: string,
 /**
- * `password`, `oauth2` or `graph`, the account's `auth_method`.
+ * `password` or `graph`, the account's `auth_method`; `oauth2` for an
+ * account that still names the retired mode, which reports no secret.
  */
 auth_method: string,
 /**
- * Whether `smtp-password-<account>` is stored; `null` for a Graph
- * account, which has no SMTP transport.
+ * Whether `smtp-password-<account>` is stored; `null` for any account
+ * but a password one.
  */
 smtp_password: boolean | null,
 /**
  * Whether `imap-password-<account>` is stored, the IMAP key alone: an
  * account without one falls back to the SMTP password, which a client
- * says itself from the two booleans. `null` for a Graph account.
+ * says itself from the two booleans. `null` for any account but a
+ * password one.
  */
 imap_password: boolean | null,
 /**
- * The token cache's verdict for an `oauth2` or `graph` account, `null`
- * for a password account.
+ * The token cache's verdict for a `graph` account, `null` for any
+ * other.
  */
 token: TokenState | null, };

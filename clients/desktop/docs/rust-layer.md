@@ -462,7 +462,7 @@ type EffectiveConfig = { secrets_backend: string; email: { send_hold_secs: numbe
 type ConfigAccount = {
   name: string;
   default_from: string;
-  auth_method: string; // password, oauth2 or graph
+  auth_method: string; // password or graph; oauth2 for an account naming the retired mode
   smtp: ConfigServer;
   imap: ConfigServer;
   oauth2: { client_id: string; tenant_id: string } | null;
@@ -495,7 +495,7 @@ The value crosses this layer once, and these rules keep it there:
 `config_add_account` appends one `[[accounts]]` block and `config_init` writes a whole file with one; both take an `AccountDraft`, the daemon's `account` parameter.
 
 ```ts
-type AuthMethod = "password" | "oauth2" | "graph";
+type AuthMethod = "password" | "graph";
 type AccountDraft = {
   name: string;
   default_from?: string;
@@ -537,7 +537,7 @@ type ProbeAnswer = { ok: boolean; error: string | null; mailboxes: string[] }; /
 ```
 
 `smtp` connects, authenticates and hangs up, `imap` logs in and out, `graph` acquires the Graph client, and `mailboxes` lists the server's mailboxes (IMAP `LIST`) or the account's folders (Graph).
-A password account sends `password`; an `oauth2` or `graph` account is probed with the token its own candidate sign-in staged (see Sign-in), never a configured account's.
+A password account sends `password`; a `graph` account is probed with the token its own candidate sign-in staged (see Sign-in), never a configured account's.
 A server that refuses is an answer, `ok: false` with the server's or the transport's sentence, and the command resolves with it.
 The daemon refuses the call itself, as a `protocol` error with its sentence, for a password account with no password, a check the account cannot take (`smtp` of a Graph account), and a token candidate named like a configured account with no staged sign-in, the security fix that keeps a configured account's token from reaching a host the candidate names.
 The password follows `config_set_password`'s rules: `ProbeRequest` carries it with a hand-written `Debug` that prints `<redacted>`, the `tracing` lines name the account, the check and the verdict only, and the fixture's call record holds it redacted.
@@ -545,7 +545,7 @@ The budget is 90 s, for a connect, a login and a mailbox listing under the trans
 
 ### Sign-in
 
-`config_oauth2_login` starts the device-code flow of an `oauth2` or `graph` account, awaited as `oauth2_login`.
+`config_oauth2_login` starts the device-code flow of a `graph` account, awaited as `oauth2_login`.
 With a `candidate`, the account wizard's draft named `account`, the account need not be configured: the daemon signs the draft in and stages its token under `candidates/<account>` rather than the account's cache, `config_add_account` or `config_init` promotes it when it writes the account, and a wizard abandoned after its sign-in leaves every configured token as it was.
 The daemon refuses a candidate whose name is not `account` ("the candidate is named <x>, not <account>").
 The daemon refuses an unknown account ("Account '<name>' not found in config", `-32005`), a password account and an account with no client or tenant, each with its own sentence.
@@ -554,7 +554,7 @@ It reaches only the window that started the sign-in, as every progress does, and
 It settles with an `OAuth2Stored`, never the token:
 
 ```ts
-type OAuth2Stored = { stored: boolean; account: string; kind: string; key: string; staged: boolean }; // kind oauth2 or graph, key oauth2-token-<account>, staged for a candidate
+type OAuth2Stored = { stored: boolean; account: string; kind: string; key: string; staged: boolean }; // kind graph, key oauth2-token-<account>, staged for a candidate
 ```
 
 The dialog's Cancel is `operation_cancel`, which keeps the sign-in awaited, so its `cancelled` finish ends it the usual way; one already over answers `already_settled`.
@@ -1119,14 +1119,14 @@ The fixture publishes nothing else, where the daemon's swap also starts a runtim
 `config.init` does the same with a whole file, only where no `config.toml` exists, and adds `path` to its answer; otherwise it refuses with "a configuration already exists at <path>; edit it and call config.reload".
 `config_absent` is a daemon restarted on an empty configuration directory: it removes `<root>/config.toml`, every account from every answer (the bootstrap's accounts, mailboxes, drafts, outbox counts, holds and diagnostics, `account.list` and `config.get`), sets `state` to `absent` and `revision` to 0, and then runs `restart`.
 
-`config.oauth2_login` refuses as the daemon does: an unknown parameter, an account `config.json` does not configure (`-32005`), a password account, an account with no `oauth2` table, and one with an empty client or tenant, each with the daemon's sentence.
+`config.oauth2_login` refuses as the daemon does: an unknown parameter, an account `config.json` does not configure (`-32005`), a password account, an account naming the retired `oauth2` mode, an account with no `oauth2` table, and one with an empty client or tenant, each with the daemon's sentence.
 With a `candidate` it signs that block in instead (refusing one named otherwise than `account`), and an approved candidate sign-in is staged until `config.add_account` or `config.init` writes the account of that name.
 Otherwise it starts an operation and 0.3 s later publishes its one `operation.progress`, phase `device_code`, message `https://microsoft.com/devicelogin FXTR-CODE`, which `operation.status` keeps as its `progress`.
-The sign-in then waits: `oauth_approve` settles every waiting one with `{stored: true, account, kind, key: "oauth2-token-<account>"}`, `kind` `oauth2` or `graph` after the account's `auth_method`, and `oauth_deny` fails it with the provider's "Authorization was declined by the user.".
+The sign-in then waits: `oauth_approve` settles every waiting one with `{stored: true, account, kind: "graph", key: "oauth2-token-<account>"}`, and `oauth_deny` fails it with the provider's "Authorization was declined by the user.".
 Either is an error when no sign-in waits; `operation.cancel` ends one `cancelled`, and `restart` forgets it.
 
-`config.probe` refuses as the daemon does: an unknown parameter, a missing `account`, an unknown `check`, a check the account cannot take, a password account with no `password`, and a token candidate named like a configured account with no staged sign-in.
-A token candidate with no staged sign-in answers `ok: false`, "no OAuth2 sign-in is staged for the candidate <name>; sign in first".
+`config.probe` refuses as the daemon does: an unknown parameter, a missing `account`, an unknown `check`, a check the account cannot take, a password account with no `password`, a Graph candidate named like a configured account with no staged sign-in, and a candidate naming the retired `oauth2` mode, with the daemon's sentence on how to switch.
+A Graph candidate with no staged sign-in answers `ok: false`, "no OAuth2 sign-in is staged for the candidate <name>; sign in first".
 Every login passes but one whose password is `wrong-password` (`PROBE_WRONG_PASSWORD`), which answers `ok: false` with an SMTP 535 or an IMAP `AUTHENTICATIONFAILED` sentence (`probe_refused`).
 A `mailboxes` probe lists `INBOX, Archive, Drafts, Sent, Spam, Trash, Lists/rust` (`PROBE_IMAP_MAILBOXES`), or `Inbox, Archive, Drafts, Sent Items, Deleted Items, Junk Email` for a Graph candidate (`PROBE_GRAPH_FOLDERS`); the browser preview's mock answers the same.
 

@@ -27,8 +27,9 @@
 //!
 //! Before it writes, the wizard tests the candidate as the CLI wizard does
 //! (src/config_cmd/init.rs): `config.probe` dials the draft's servers with
-//! the password the user typed, or with the token the candidate's own
-//! sign-in staged (`config.oauth2_login` with the draft as `candidate`), and
+//! the password the user typed, or reaches Graph with the token the
+//! candidate's own sign-in staged (`config.oauth2_login` with the draft as
+//! `candidate`), and
 //! lists the server's mailboxes for the mailbox step. The probe's password is
 //! a [`ProbeRequest`], whose `Debug` redacts it as [`SetPassword`]'s does; a
 //! server that refuses is an answer ([`ProbeAnswer`] with `ok: false`), not
@@ -137,11 +138,12 @@ pub struct ConfigEmail {
 pub struct ConfigAccount {
     pub name: String,
     pub default_from: String,
-    /// `password`, `oauth2` or `graph`.
+    /// `password` or `graph`; `oauth2` for an account that still names the
+    /// retired mode, which the daemon keeps blocked.
     pub auth_method: String,
     pub smtp: ConfigServer,
     pub imap: ConfigServer,
-    /// The app registration of an `oauth2` or `graph` account.
+    /// The app registration of a `graph` account.
     pub oauth2: Option<ConfigOAuth2>,
 }
 
@@ -211,15 +213,14 @@ pub struct SecretStored {
     pub key: String,
 }
 
-/// How an account signs in, the daemon's `auth_method`.
+/// How an account the wizard writes signs in, the daemon's `auth_method`.
+/// The retired `oauth2` mode is not one: a draft naming it does not decode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMethod {
     Password,
-    #[serde(rename = "oauth2")]
-    OAuth2,
     Graph,
 }
 
@@ -246,7 +247,7 @@ pub struct AccountDraft {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub auth_method: Option<AuthMethod>,
-    /// The app registration of an `oauth2` or `graph` account.
+    /// The app registration of a `graph` account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub oauth2: Option<ConfigOAuth2>,
@@ -411,7 +412,7 @@ impl std::fmt::Debug for ProbeRequest {
 }
 
 /// What a finished sign-in settles with: where the token went, never what
-/// it is. `kind` is `oauth2` (IMAP/SMTP) or `graph`.
+/// it is. `kind` is `graph`, the one account that signs in.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export_to = "gui/"))]
@@ -890,7 +891,8 @@ mod tests {
         }
     }
 
-    /// The wizard's four presets (src/config_cmd/init.rs:80-146), filled in.
+    /// The wizard's three presets (`PROVIDERS` in src/config_cmd/init.rs),
+    /// filled in.
     fn presets() -> Vec<(&'static str, AccountDraft)> {
         let app = || ConfigOAuth2 {
             client_id: "00000000-0000-0000-0000-000000000001".into(),
@@ -924,18 +926,6 @@ mod tests {
                         ..standard_mailboxes("Sent")
                     }),
                     ..Default::default()
-                },
-            ),
-            (
-                "microsoft365",
-                AccountDraft {
-                    name: "exchange".into(),
-                    default_from: Some("me@contoso.com".into()),
-                    auth_method: Some(AuthMethod::OAuth2),
-                    oauth2: Some(app()),
-                    smtp: Some(server("smtp.office365.com", 587, "me@contoso.com", false)),
-                    imap: Some(server("outlook.office365.com", 993, "", false)),
-                    mailboxes: Some(standard_mailboxes("Sent")),
                 },
             ),
             (
@@ -979,12 +969,10 @@ mod tests {
                 "{preset}: an absent key is left out: {text}"
             );
         }
-        let graph = serde_json::to_value(&presets()[3].1).expect("graph");
+        let graph = serde_json::to_value(&presets()[2].1).expect("graph");
         assert_eq!(graph["auth_method"], "graph");
         assert!(graph.get("smtp").is_none() && graph.get("imap").is_none());
-        let oauth2 = serde_json::to_value(&presets()[2].1).expect("oauth2");
-        assert_eq!(oauth2["auth_method"], "oauth2");
-        assert_eq!(oauth2["oauth2"]["tenant_id"], "contoso.onmicrosoft.com");
+        assert_eq!(graph["oauth2"]["tenant_id"], "contoso.onmicrosoft.com");
         let proton = serde_json::to_value(&presets()[1].1).expect("proton");
         assert_eq!(proton["smtp"]["accept_invalid_certs"], true);
         assert_eq!(proton["mailboxes"]["junk"], "Spam");
@@ -1016,6 +1004,20 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// The retired Microsoft OAuth2 over IMAP and SMTP is not an
+    /// `auth_method` a draft can carry, so the wizard cannot write one; a
+    /// configured account naming it still shows, its word kept as a string.
+    #[test]
+    fn a_draft_naming_the_retired_oauth2_mode_is_refused() {
+        let draft = json!({"name": "x", "auth_method": "oauth2",
+            "oauth2": {"client_id": "c", "tenant_id": "common"}});
+        assert!(serde_json::from_value::<AccountDraft>(draft).is_err());
+        let shown: ConfigAccount =
+            serde_json::from_value(json!({"name": "x", "auth_method": "oauth2"}))
+                .expect("a configured retired account still decodes");
+        assert_eq!(shown.auth_method, "oauth2");
     }
 
     #[test]
@@ -1120,7 +1122,7 @@ mod tests {
         assert!(snapshot.config.accounts.is_empty());
         let bootstrap = f.call("state.bootstrap", json!({})).expect("bootstrap");
         assert_eq!(bootstrap["snapshot"]["accounts"], json!([]));
-        let (_, draft) = presets().remove(3);
+        let (_, draft) = presets().remove(2);
         let err = config_add_account_on(&door, &draft).expect_err("no file yet");
         assert_eq!(
             err.message(),
@@ -1250,7 +1252,7 @@ mod tests {
         use crate::fixture::PROBE_GRAPH_FOLDERS;
         let session = SessionHandle::new(true);
         let (door, f, _rx) = fixture_door();
-        let (_, mut draft) = presets().remove(3);
+        let (_, mut draft) = presets().remove(2);
         draft.name = "contoso".into();
         draft.mailboxes = None;
         let probe = |draft: &AccountDraft, check| {

@@ -14,6 +14,7 @@ import {
   saveEditorColors,
   saveEditorSetting,
   usesPassword,
+  RETIRED_OAUTH2_LINE,
   type EditorColors,
 } from "@/app/settings";
 import { signInOrShow } from "@/app/signin";
@@ -29,7 +30,7 @@ import type { AccountCredential, TokenState } from "@/protocol/types";
 
 const AUTH_LABELS: Record<string, string> = {
   password: "Password",
-  oauth2: "Microsoft 365 (OAuth2)",
+  oauth2: "Microsoft OAuth2 over IMAP (retired)",
   graph: "Microsoft 365 (Graph)",
 };
 
@@ -124,6 +125,7 @@ function AccountCard({
   onSignIn: () => void;
 }) {
   const password = usesPassword(account);
+  const retired = account.auth_method === "oauth2";
   const headingId = useId();
   return (
     <article aria-labelledby={headingId} data-account={account.name} className="rounded-lg border border-border px-3 py-2">
@@ -146,9 +148,10 @@ function AccountCard({
         ) : null}
         {credential?.token ? <Field label="Token">{TOKEN_LABELS[credential.token]}</Field> : null}
       </dl>
+      {retired ? <p className="mt-1 text-xs text-destructive">{RETIRED_OAUTH2_LINE}</p> : null}
       <ConversationViewSwitch account={account.name} on={conversations} onChange={onConversations} />
       <div className="mt-2 flex flex-wrap gap-2">
-        {password ? (
+        {retired ? null : password ? (
           (["smtp", "imap"] as const).map((kind) => (
             <Button key={kind} size="xs" variant="outline" onClick={() => onPassword(kind)}>
               <KeyRound aria-hidden="true" />

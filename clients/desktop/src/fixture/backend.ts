@@ -262,7 +262,7 @@ export const mock = {
   /** The effective configuration `config_get` answers. */
   config: clone(fixtures.config),
   /** The sign-ins `config_oauth2_login` started and no test ended yet, oldest first; `staged` for a wizard candidate's. */
-  signIns: [] as { operation_id: string; account: string; kind: "oauth2" | "graph"; staged: boolean }[],
+  signIns: [] as { operation_id: string; account: string; staged: boolean }[],
   /** The candidates whose approved sign-in is staged until `config_add_account` or `config_init` promotes it. */
   stagedSignIns: new Set<string>(),
   /** The next sign-in's operation id counter. */
@@ -364,10 +364,22 @@ export function settleSignIn(opts: { deny?: boolean } = {}): string {
     emitEnvelope("operation.finished", {
       operation_id: run.operation_id,
       state: "succeeded",
-      result: { stored: true, staged: run.staged, account: run.account, kind: run.kind, key: `oauth2-token-${run.account}` },
+      result: { stored: true, staged: run.staged, account: run.account, kind: "graph", key: `oauth2-token-${run.account}` },
     });
   }
   return run.operation_id;
+}
+
+/**
+ * The daemon's refusal of an account naming the retired `auth_method = "oauth2"`
+ * (`retired_oauth2_message` in crates/mp-core/src/config.rs).
+ */
+export function retiredOauth2Message(account: string): string {
+  return (
+    `account "${account}" uses auth_method = "oauth2" (Microsoft sign-in over IMAP and SMTP), which mailypoppins no longer supports. ` +
+    `For Microsoft 365, set auth_method = "graph" and run \`mp config oauth2-login --account ${account}\`; for on-premises Exchange, ` +
+    `remove the auth_method line and store the password with \`mp config set-password smtp --account ${account}\`.`
+  );
 }
 
 /** fixture.rs's `configure_account`: the account is served at once, ready, with Inbox, Archive and Sent. */
@@ -1785,19 +1797,20 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         state: mock.configState,
         config: clone(mock.config),
       } satisfies ConfigSnapshot;
-    // fixture.rs's `account.credentials`: a password is there once stored here, a token always valid.
+    // fixture.rs's `account.credentials`: a password is there once stored here, a Graph token always valid,
+    // and an account naming the retired `oauth2` mode reports nothing.
     case "account_credentials":
       return {
         accounts: mock.config.accounts.map((a) => {
           const auth = a.auth_method || "password";
-          const graph = auth === "graph";
+          const password = auth === "password";
           const stored = (kind: string) => mock.passwords.some((p) => p.account === a.name && p.kind === kind);
           return {
             account: a.name,
             auth_method: auth,
-            smtp_password: graph ? null : stored("smtp"),
-            imap_password: graph ? null : stored("imap"),
-            token: auth === "password" ? null : ("valid" as const),
+            smtp_password: password ? stored("smtp") : null,
+            imap_password: password ? stored("imap") : null,
+            token: auth === "graph" ? ("valid" as const) : null,
           };
         }),
       } satisfies AccountCredentials;
@@ -1827,15 +1840,16 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       }
       const a = candidate ?? mock.config.accounts.find((x) => x.name === account);
       if (!a) throw { kind: "not_found", code: -32005, message: `Account '${account}' not found in config` };
-      if (a.auth_method !== "oauth2" && a.auth_method !== "graph") {
+      if (a.auth_method === "oauth2") throw { kind: "protocol", code: -32602, message: retiredOauth2Message(account) };
+      if (a.auth_method !== "graph") {
         throw {
           kind: "protocol",
           code: -32602,
-          message: `Account '${account}' uses auth_method = "password", not "oauth2" or "graph". Set auth_method = "oauth2" or "graph" in config.toml to use OAuth2.`,
+          message: `Account '${account}' uses auth_method = "password", not "graph". Set auth_method = "graph" in config.toml to sign in to Microsoft 365.`,
         };
       }
       const operation_id = `fixture-oauth-${mock.nextSignIn++}`;
-      mock.signIns.push({ operation_id, account, kind: a.auth_method, staged: candidate !== undefined });
+      mock.signIns.push({ operation_id, account, staged: candidate !== undefined });
       return { operation_id };
     }
     // fixture.rs's `config.probe`: the daemon's refusals, then a verdict.
@@ -1855,10 +1869,10 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
         throw { kind: "protocol", code: -32602, message: "a password account is probed with its password" };
       }
       const staged = mock.stagedSignIns.has(name);
-      if (auth !== "password" && !staged && mock.config.accounts.some((a) => a.name === name)) {
+      if (auth === "graph" && !staged && mock.config.accounts.some((a) => a.name === name)) {
         throw { kind: "protocol", code: -32602, message: probeConfiguredRefusal(name) };
       }
-      if (auth !== "password" && !staged) {
+      if (auth === "graph" && !staged) {
         return { ok: false, error: `no OAuth2 sign-in is staged for the candidate ${name}; sign in first`, mailboxes: [] };
       }
       if (password === PROBE_WRONG_PASSWORD) return { ok: false, error: probeRefused(check), mailboxes: [] };

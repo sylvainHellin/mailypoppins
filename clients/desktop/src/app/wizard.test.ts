@@ -6,14 +6,12 @@ import {
   connectionKey,
   mailboxTwice,
   missingPasswordsLine,
-  OAUTH2_SMTP_WARNING,
   passwordKinds,
   probePlan,
   probeRefusalLine,
   runConnectionTest,
   withListing,
   writtenLine,
-  CLIENT_EMPTY,
   DEFAULT_TENANT,
   FROM_EMPTY,
   MAILYPOPPINS_CLIENT_ID,
@@ -25,10 +23,10 @@ import {
   parseOverrides,
   PORT_BAD,
   PRESET_ORDER,
+  PRESETS,
   presetForm,
   stepErrors,
   stepOf,
-  TENANT_EMPTY,
   USERNAME_EMPTY,
   withPreset,
   type WizardForm,
@@ -89,7 +87,7 @@ describe("the account wizard's checks", () => {
   });
 
   it("the IMAP presets need an SMTP host, a username and valid ports", () => {
-    for (const preset of ["imap", "proton", "microsoft365"] as const) {
+    for (const preset of ["imap", "proton"] as const) {
       const form = filled(preset);
       expect(stepErrors("servers", form, [])).toEqual({});
       const errors = stepErrors("servers", { ...form, smtp_host: " ", smtp_username: "", smtp_port: "70000", imap_port: "x" }, []);
@@ -100,9 +98,7 @@ describe("the account wizard's checks", () => {
     expect(stepErrors("servers", { ...filled("graph"), smtp_host: "" }, []).smtp_host).toBeUndefined();
   });
 
-  it("Microsoft 365 OAuth2 needs the client ID and the tenant ID, and Graph the email address", () => {
-    const errors = stepErrors("servers", { ...filled("microsoft365"), client_id: "", tenant_id: " " }, []);
-    expect(errors).toMatchObject({ client_id: CLIENT_EMPTY, tenant_id: TENANT_EMPTY });
+  it("Graph needs the email address and may leave the client ID and the tenant ID empty", () => {
     expect(stepErrors("servers", { ...filled("graph"), client_id: "", tenant_id: " " }, [])).toEqual({});
     expect(stepErrors("servers", { ...filled("imap"), client_id: "" }, []).client_id).toBeUndefined();
     expect(stepErrors("identity", { ...filled("graph"), default_from: "" }, []).default_from).toBe(FROM_EMPTY);
@@ -110,8 +106,18 @@ describe("the account wizard's checks", () => {
   });
 
   it("the review checks every step again", () => {
-    const errors = stepErrors("review", { ...filled("microsoft365"), name: "", tenant_id: "", sent: "" }, []);
-    expect(Object.keys(errors).sort()).toEqual(["name", "sent", "tenant_id"]);
+    const errors = stepErrors("review", { ...filled("imap"), name: "", smtp_host: "", sent: "" }, []);
+    expect(Object.keys(errors).sort()).toEqual(["name", "sent", "smtp_host"]);
+  });
+
+  it("offers Microsoft 365 through Graph only, and on-premises Exchange as a password account", () => {
+    expect(PRESET_ORDER).toEqual(["imap", "proton", "graph"]);
+    for (const preset of PRESET_ORDER) {
+      expect(PRESETS[preset].label).not.toMatch(/OAuth2/);
+      expect(PRESETS[preset].auth === "graph" || PRESETS[preset].auth === "password").toBe(true);
+      if (PRESETS[preset].label.includes("Microsoft")) expect(PRESETS[preset].auth).toBe("graph");
+    }
+    expect(PRESETS.imap.hint).toContain("on-premises Exchange");
   });
 });
 
@@ -130,12 +136,6 @@ describe("the account wizard's draft", () => {
     expect(proton.imap).toEqual({ host: "127.0.0.1", port: 1143, accept_invalid_certs: true });
     expect(proton.auth_method).toBeUndefined();
     expect(proton.oauth2).toBeUndefined();
-
-    const ms = accountDraft(filled("microsoft365"));
-    expect(ms.auth_method).toBe("oauth2");
-    expect(ms.oauth2).toEqual({ client_id: "client", tenant_id: "tenant" });
-    expect(ms.smtp).toMatchObject({ host: "smtp.office365.com", port: 587 });
-    expect(ms.imap).toEqual({ host: "outlook.office365.com", port: 993 });
 
     const graph = accountDraft(filled("graph"));
     expect(graph.auth_method).toBe("graph");
@@ -184,8 +184,8 @@ describe("the account wizard's draft", () => {
 
   it("a preset switch keeps who the user is and takes the provider's servers", () => {
     const typed = { ...presetForm("imap"), name: "mine", smtp_username: "me@example.com", smtp_host: "smtp.x" };
-    const ms = withPreset(typed, "microsoft365");
-    expect(ms).toMatchObject({ name: "mine", smtp_username: "me@example.com", smtp_host: "smtp.office365.com", smtp_port: "587" });
+    const proton = withPreset(typed, "proton");
+    expect(proton).toMatchObject({ name: "mine", smtp_username: "me@example.com", smtp_host: "127.0.0.1", smtp_port: "1025" });
     expect(withPreset(presetForm("imap"), "proton").name).toBe("proton");
   });
 });
@@ -203,10 +203,6 @@ describe("the account wizard's connection test", () => {
       { check: "smtp", password: "smtp", required: true },
       { check: "imap", password: "imap", required: true },
       { check: "mailboxes", password: "imap", required: false },
-    ]);
-    expect(probePlan("microsoft365", true)).toEqual([
-      { check: "smtp", password: null, required: false },
-      { check: "mailboxes", password: null, required: false },
     ]);
     expect(probePlan("graph", true).map((c) => [c.check, c.required])).toEqual([
       ["graph", false],
@@ -261,24 +257,6 @@ describe("the account wizard's connection test", () => {
     expect(checkLine({ ...imap, check: "mailboxes" }, true)).not.toContain("..");
     expect(checkLine({ ...imap, check: "graph" }, true)).not.toContain("..");
     expect(checkLine({ ...imap, check: "smtp", error: probeRefused("smtp") }, true)).toBe(`SMTP: the login failed. ${probeRefused("smtp")}.`);
-  });
-
-  it("a Microsoft 365 account's refused SMTP test is a warning that names SMTP AUTH, as in the CLI", async () => {
-    resetMock();
-    vi.mocked(invoke)
-      .mockImplementationOnce(async () => ({ ok: false, error: "535 5.7.139 SmtpClientAuthentication is disabled for the Tenant", mailboxes: [] }))
-      .mockImplementationOnce(async () => ({ ok: true, error: null, mailboxes: ["INBOX"] }));
-    const outcome = await runConnectionTest(filled("microsoft365"), secrets);
-    if (!("result" in outcome)) throw new Error("a result");
-    expect(outcome.result.passed).toBe(true);
-    expect(outcome.result.runs.map((r) => [r.check, r.ok, r.required])).toEqual([
-      ["smtp", false, false],
-      ["mailboxes", true, false],
-    ]);
-    expect(checkLine(outcome.result.runs[0], true, true)).toBe(
-      `SMTP: the test failed. 535 5.7.139 SmtpClientAuthentication is disabled for the Tenant. ${OAUTH2_SMTP_WARNING}`,
-    );
-    expect(OAUTH2_SMTP_WARNING).toContain("SMTP AUTH");
   });
 
   it("stops before the next probe once the wizard is gone", async () => {
@@ -336,7 +314,7 @@ describe("the account wizard's write", () => {
     expect(passwordKinds("graph", false)).toEqual([]);
     expect(writtenLine("a", "imap", false, true)).toBe("Added the account a; its password is stored");
     expect(writtenLine("a", "imap", true, false)).toBe("Wrote config.toml with the account a; its SMTP and IMAP passwords are stored");
-    expect(writtenLine("a", "microsoft365", false, true)).toBe("Added the account a; its sign-in is stored");
+    expect(writtenLine("a", "graph", false, true)).toBe("Added the account a; its sign-in is stored");
     expect(missingPasswordsLine("a", ["smtp", "imap"])).toBe(
       "Account a is configured, but its SMTP and IMAP passwords are not stored, so it cannot log in yet. Set them in Settings.",
     );

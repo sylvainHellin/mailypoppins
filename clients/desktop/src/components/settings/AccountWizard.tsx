@@ -2,8 +2,8 @@
 // connection, mailboxes and review, the questions the CLI wizard asks
 // (src/config_cmd/init.rs). The Connection step tests the candidate through
 // `config.probe` before anything is written: a password preset with the
-// passwords typed there, a Microsoft 365 preset once the candidate signed in
-// with a device code (`config_oauth2_login` with the draft), whose token the
+// passwords typed there, the Microsoft 365 (Graph) preset once the candidate
+// signed in with a device code (`config_oauth2_login` with the draft), whose token the
 // daemon keeps aside until the write promotes it. The Mailboxes step offers
 // the server's list with the CLI's defaults, and a typed name besides for
 // a server that lists fewer than it has roles. The review writes through
@@ -34,7 +34,6 @@ import {
   candidateDraft,
   checkLine,
   connectionKey,
-  hasDefaultApp,
   presetForm,
   runConnectionTest,
   signsIn,
@@ -119,7 +118,7 @@ const SELECT_CLASS =
 const TYPE_NAME = "\u0000type";
 
 /** The test's lines: a check mark, a cross for a failure that stops the wizard, a warning sign for one that does not. */
-function ConnectionLines({ result, sameImap, token }: { result: ConnectionResult; sameImap: boolean; token: boolean }) {
+function ConnectionLines({ result, sameImap }: { result: ConnectionResult; sameImap: boolean }) {
   return (
     <ul aria-label="Connection test" data-slot="connection-results" className="flex flex-col gap-1 text-sm">
       {result.runs.map((r) => (
@@ -130,7 +129,7 @@ function ConnectionLines({ result, sameImap, token }: { result: ConnectionResult
           className={r.ok ? "flex gap-2" : r.required ? "flex gap-2 text-destructive" : "flex gap-2 text-muted-foreground"}
         >
           <span aria-hidden="true">{r.ok ? "\u2713" : r.required ? "\u2717" : "\u26a0"}</span>
-          <span className="min-w-0 break-words">{checkLine(r, sameImap, token)}</span>
+          <span className="min-w-0 break-words">{checkLine(r, sameImap)}</span>
         </li>
       ))}
     </ul>
@@ -497,7 +496,7 @@ export function AccountWizardForm({ preset, init, taken, onCancel, onDone, first
             {text("imap_username", "IMAP username", { hint: "Empty uses the SMTP username." })}
           </>
         ) : null}
-        {signing && hasDefaultApp(form.preset) ? (
+        {signing ? (
           <>
             {text("client_id", "Client ID", {
               hint: "Empty uses the shared mailypoppins app; enter a client ID only for your organisation's own app registration.",
@@ -507,11 +506,6 @@ export function AccountWizardForm({ preset, init, taken, onCancel, onDone, first
               hint: `Empty uses ${DEFAULT_TENANT}, for any work, school or personal Microsoft account; or enter your directory (tenant) ID or domain.`,
               placeholder: DEFAULT_TENANT,
             })}
-          </>
-        ) : signing ? (
-          <>
-            {text("client_id", "Client ID", { hint: "The Azure Entra ID app registration's application (client) ID." })}
-            {text("tenant_id", "Tenant ID", { hint: "Your directory (tenant) ID or domain." })}
           </>
         ) : null}
       </>
@@ -573,7 +567,7 @@ export function AccountWizardForm({ preset, init, taken, onCancel, onDone, first
             Testing the connection…
           </p>
         ) : null}
-        {fresh && !busy ? <ConnectionLines result={fresh} sameImap={secrets.sameImap} token={signing} /> : null}
+        {fresh && !busy ? <ConnectionLines result={fresh} sameImap={secrets.sameImap} /> : null}
       </>
     );
   } else if (step === "mailboxes") {
