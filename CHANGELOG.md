@@ -54,6 +54,7 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 - A forward follows Outlook instead of Gmail, in the CLI, the TUI and the desktop app: the subject takes `FW: ` unless it already opens with `FW:`, `Fwd:` or `WG:`, and the original opens with its From, Sent, To, Cc (left out when empty) and Subject one per line, set bold under a thin #B5C4DF top border in the HTML part, with no `---------- Forwarded message ----------` line.
+- A forward as attachment (`mp forward --as-attachment`, `cF` in the TUI and the desktop app) has a body holding only the signature, as Outlook writes it, instead of the quoted original the attached `.eml` already carries (PERSO-174).
 - TUI `ce` and the desktop recipients dialog edit a draft's headers through `draft.set_headers` and no longer write the file themselves (#0143).
 - TUI: no password or OAuth token is read in the TUI's process any more; whether an account can sync or send is the daemon's `account.credentials` answer, and `mp` without a subcommand no longer opens the secrets backend.
 - TUI: the Contacts view and the compose wizard's recipient completion read the contact index from the daemon (`contact.search`) instead of the cache file, refresh on `contact.changed`, and say on the status line when the index build a search ran was refused.

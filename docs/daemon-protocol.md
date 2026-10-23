@@ -779,9 +779,9 @@ The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they ar
 
 **`as_attachment: true` forwards the source as one `.eml` part** (`mp forward --as-attachment`, PERSO-174).
 The bytes are `message.materialise_eml`'s, so a Graph row is fetched from the server first, and they are written to `<account>/attachments/<message-id>/<date>_<subject>.eml`, where a forward's carried parts already go; the draft lists that one file instead of the original's parts, which are inside it, and the `.eml` extension is what makes the send label the part `message/rfc822`.
-The body is the usual forward's, quoted header block included; `mp_core::draft::ATTACHED_FORWARD_BODY` is the one line that would make it Outlook's, the signature alone.
+The body is Outlook's, the signature alone, with no quote marker, header block or companion HTML (`mp_core::draft::ATTACHED_FORWARD_BODY`).
 A source whose bytes cannot be had is `-32603` with `{account}` and writes no draft.
-The source of a forward may also be a server-search hit with no row, `{hit: {message_id, mailbox}}`: with `as_attachment` the `.eml` is `message.materialise_eml`'s for that hit, and the forward's headers and quoted body are parsed out of it by the same builder.
+The source of a forward may also be a server-search hit with no row, `{hit: {message_id, mailbox}}`: with `as_attachment` the `.eml` is `message.materialise_eml`'s for that hit, and the forward's headers are parsed out of it by the same builder.
 An inline forward of a hit (PERSO-155) is the held row's forward when the store has caught up with it, and otherwise is built from the server's copy, carrying its parts as a stored row's forward carries them (an inline image the HTML shows by `cid:` left out, a repeated name written as `name_1`), which `draft.create_from_message` cannot; `headers` applies to both, so a client's forward wizard asks for the recipients of a hit as it does for a stored row.
 A reply to a hit goes through `draft.create_from_message`, and a hit source on `draft.reply` is `-32602`.
 

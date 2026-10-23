@@ -968,7 +968,7 @@ pub fn create_reply_draft_from(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForwardBody {
     /// The forwarded-message header block and the original's text, below the
-    /// quote marker: every forward's body.
+    /// quote marker: an inline forward's body.
     Quoted,
     /// Nothing but the signature, as Outlook writes a forward as attachment:
     /// the message travels whole as the attached `.eml`.
@@ -976,9 +976,10 @@ pub enum ForwardBody {
 }
 
 /// The body a forward as attachment carries (`mp forward --as-attachment`,
-/// PERSO-174): the one line that picks between the usual forward's quoted
-/// body and Outlook's empty one, for the daemon and every client's fixture.
-pub const ATTACHED_FORWARD_BODY: ForwardBody = ForwardBody::Quoted;
+/// PERSO-174): Outlook's, the signature alone, since the attached `.eml`
+/// already holds the message. The one line that picks the body, for the
+/// daemon and every client's fixture.
+pub const ATTACHED_FORWARD_BODY: ForwardBody = ForwardBody::Empty;
 
 /// Forward a message that is not a file: the #0050 path, used by
 /// `mp forward <selector>` over a store row.

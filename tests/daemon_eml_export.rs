@@ -359,7 +359,8 @@ fn attachments_of(draft: &str) -> Vec<String> {
 }
 
 /// A forward with `as_attachment` is the usual forward draft carrying one
-/// part, the source's own `.eml`, byte for byte.
+/// part, the source's own `.eml`, byte for byte, over a body that quotes
+/// nothing: Outlook's forward as attachment, the signature alone.
 #[tokio::test]
 async fn a_forward_as_attachment_carries_the_eml() {
     let (tmp, _daemon) = seeded();
@@ -381,10 +382,25 @@ async fn a_forward_as_attachment_carries_the_eml() {
         created["subject"],
         json!("FW: Re: Elsevier DEAL open access")
     );
-    let draft = fs::read_to_string(created["path"].as_str().expect("path")).expect("the draft");
+    let path = Path::new(created["path"].as_str().expect("path")).to_path_buf();
+    let draft = fs::read_to_string(&path).expect("the draft");
     assert!(
         draft.contains("forwarded_from: \"<deal@example.com>\""),
         "the send still flags the source as forwarded: {draft}"
+    );
+    let lf = draft.replace("\r\n", "\n");
+    let body = lf
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .expect("a draft opens with frontmatter")
+        .1;
+    assert!(
+        !body.contains(mailypoppins::draft::QUOTE_MARKER) && !body.contains("Sent:"),
+        "the body quotes nothing: {draft}"
+    );
+    assert!(
+        !path.with_extension("html").exists(),
+        "no companion quote either"
     );
     let attachments = attachments_of(&draft);
     assert_eq!(attachments.len(), 1, "one part, the .eml: {draft}");

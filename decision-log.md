@@ -269,3 +269,12 @@ The block is one `parse::draft_reply_boundary` already takes for the start of a 
 Rejected: Gmail's `Fwd:` prefix and its `---------- Forwarded message ----------` header, mp's layout until now; Outlook mobile's `Date:` label.
 Source: Sylvain, chat of 2026-10-23.
 Status: accepted
+
+## 2026-10-23 - A forward as attachment carries the signature alone in its body
+
+Why: the attached `.eml` already holds the whole message, and Outlook writes a forward as attachment with an empty body above the signature.
+The draft of `mp forward --as-attachment`, of `cF` in the TUI and of Forward as attachment in the desktop app holds the signature and nothing else: no quote marker, no header block, no companion HTML.
+Its subject takes `FW: ` like every forward.
+Rejected: the quoted body of an inline forward, which PERSO-174 shipped and which repeated the attachment's content.
+Source: Sylvain, chat of 2026-10-23.
+Status: accepted

@@ -3401,8 +3401,8 @@ mod tests {
     }
 
     /// `cF` (PERSO-174): `draft.forward` with `as_attachment`, and the draft
-    /// lists the message's `.eml` instead of its parts, under the body
-    /// `ATTACHED_FORWARD_BODY` names.
+    /// lists the message's `.eml` instead of its parts, over a body that
+    /// quotes nothing: the account's signature alone, as Outlook writes it.
     #[test]
     fn a_forward_as_attachment_carries_the_eml_instead_of_the_parts() {
         let (d, f) = fixture_door();
@@ -3436,11 +3436,15 @@ mod tests {
             eml.contains("Subject: Quarterly ledger review\r\n"),
             "{eml}"
         );
-        let quoted = draft.body_markdown.contains(mp_core::draft::QUOTE_MARKER);
-        assert_eq!(
-            quoted,
-            mp_core::draft::ATTACHED_FORWARD_BODY == mp_core::draft::ForwardBody::Quoted
+        assert!(
+            !draft.body_markdown.contains(mp_core::draft::QUOTE_MARKER)
+                && draft.body_markdown.contains("Fixture GmbH"),
+            "the signature alone: {}",
+            draft.body_markdown
         );
+        assert!(!std::path::Path::new(&forward.path)
+            .with_extension("html")
+            .exists());
 
         let hit = draft_forward_on(&d, "work", &server_only(), true, None, None, false)
             .expect("the forward of a server-only hit");
