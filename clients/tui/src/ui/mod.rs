@@ -72,6 +72,24 @@ struct LeftColumn {
     switcher: ratatui::layout::Rect,
 }
 
+/// Mailbox rows a capped sidebar still shows, whatever the terminal height.
+const SIDEBAR_MIN_MAILBOX_ROWS: u16 = 3;
+
+/// Height of the mailbox sidebar, and of the headers pane sized from it.
+///
+/// The sidebar wants a row per mailbox plus its borders, `spare` blank rows
+/// and the sync-failure block, but it is capped at a third of `available` so
+/// that an account with many folders does not squeeze the email list below it
+/// to a handful of rows. The sidebar scrolls to keep the open mailbox on
+/// screen (#0141), so the cap hides nothing for good; the floor keeps a few
+/// mailbox rows above the failure block on a short terminal.
+fn sidebar_height(app: &App, available: u16, spare: u16) -> u16 {
+    let fixed = 2 + sidebar::sync_health_rows(app);
+    let wanted = app.mailboxes.len() as u16 + spare + fixed;
+    let cap = (available / 3).max(fixed + SIDEBAR_MIN_MAILBOX_ROWS);
+    wanted.min(cap)
+}
+
 /// Split the left column into sidebar / middle / optional activity-log /
 /// bottom-left view switcher. The activity-log slot is preserved from the
 /// pre-#0033 layout (toggled by `!`) and only shown in the Mail view; the
@@ -167,10 +185,11 @@ pub fn view(app: &mut App, frame: &mut Frame) {
 
         if app.view == View::Mail {
             // Two border rows, one per mailbox, one spare, plus whatever the
-            // #0071 sync-failure block needs when there is a failure to show.
+            // #0071 sync-failure block needs when there is a failure to show,
+            // capped so the email list keeps most of the column.
             // The headers pane on the right is sized from the same number,
             // which is what keeps the two panes aligned.
-            let sidebar_height = (app.mailboxes.len() as u16) + 3 + sidebar::sync_health_rows(app);
+            let sidebar_height = sidebar_height(app, left_col.height, 1);
             let left = split_left_column(app, left_col, sidebar_height);
 
             sidebar::render_sidebar(app, frame, left.sidebar);
@@ -207,7 +226,7 @@ pub fn view(app: &mut App, frame: &mut Frame) {
             views::render_view_switcher(app, frame, left_rows[1]);
         }
     } else if show_sidebar && app.view == View::Mail {
-        let sidebar_height = (app.mailboxes.len() as u16) + 2 + sidebar::sync_health_rows(app);
+        let sidebar_height = sidebar_height(app, main_area.height, 0);
         let left = split_left_column(app, main_area, sidebar_height);
 
         sidebar::render_sidebar(app, frame, left.sidebar);
@@ -560,6 +579,30 @@ mod tests {
         let narrow_text: String = (0..16).map(|y| row_text(&narrow, y)).collect();
         assert!(!narrow_text.contains(" Mail "), "39 columns: list alone");
         assert!(narrow_text.contains(" Inbox "), "39 columns: list kept");
+    }
+
+    /// An account with many folders gets a sidebar of at most a third of the
+    /// column, so the email list below it keeps the room (and the headers pane
+    /// beside it stays aligned); an account with few keeps its natural height.
+    #[test]
+    fn the_sidebar_is_capped_so_the_email_list_keeps_the_room() {
+        let mut app = gf::mail_fixture();
+        let natural = app.mailboxes.len() as u16 + 3;
+        assert_eq!(super::sidebar_height(&app, 60, 1), natural);
+
+        app.mailboxes = (0..12)
+            .map(|i| crate::app::MailboxInfo {
+                label: format!("Folder{i:02}"),
+                icon: "*",
+                id: format!("f{i}"),
+                kind: crate::app::MailboxKind::Extra,
+                server_name: Some(format!("Folder{i:02}")),
+            })
+            .collect();
+        app.mailbox_counts = vec![0; 12];
+        assert_eq!(super::sidebar_height(&app, 30, 1), 10, "a third of 30");
+        assert_eq!(super::sidebar_height(&app, 90, 1), 15, "uncapped when tall");
+        assert_eq!(super::sidebar_height(&app, 9, 1), 5, "floor of 3 mailboxes");
     }
 
     /// No terminal is too small to paint: down to a single cell the frame and
