@@ -4328,10 +4328,6 @@ pub fn draft_mime_body(
 /// the link; the link is the `Message-ID`.
 pub const DRAFT_ID_HEADER: &str = "X-Mailypoppins-Draft-Id";
 
-/// The header that carries a draft's approval on its server copy, written
-/// only while [`crate::draft_mirror::approval_travels`] says approval travels.
-pub const DRAFT_STATUS_HEADER: &str = "X-Mailypoppins-Draft-Status";
-
 /// The message a draft's copy in the server's Drafts folder is (#0143).
 ///
 /// [`build_draft_message`]'s body, with what a draft may still lack allowed:
@@ -4429,11 +4425,10 @@ pub fn build_server_draft(
     if let Some(id) = draft.frontmatter.id.as_deref() {
         raw.extend_from_slice(format!("{DRAFT_ID_HEADER}: {id}\r\n").as_bytes());
     }
-    if crate::draft_mirror::approval_travels() {
-        raw.extend_from_slice(
-            format!("{DRAFT_STATUS_HEADER}: {}\r\n", draft.frontmatter.status).as_bytes(),
-        );
-    }
+    // No header of its own says whether the draft is approved: the status
+    // travels inside the carried file, which only a copy mp wrote holds
+    // together, while a header any client could have written would read the
+    // same from a copy mp never saw (`draft_mirror::approval_travels`).
     raw.extend_from_slice(&message.formatted());
     Ok(raw)
 }

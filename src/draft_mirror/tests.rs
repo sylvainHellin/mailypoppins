@@ -118,8 +118,8 @@ fn a_server_copy_keeps_the_bcc_the_id_and_the_reply_headers() {
     );
     assert!(header.contains("Danke!"), "{header}");
     assert!(
-        header_value(&raw, crate::send::DRAFT_STATUS_HEADER).is_none(),
-        "approval stays local while approval_travels() is false"
+        header_value(&raw, "X-Mailypoppins-Draft-Status").is_none(),
+        "the status travels inside the carried file, never in a header of its own"
     );
 
     // No recipient and no subject yet is still a draft the server can hold.
@@ -1562,4 +1562,243 @@ fn a_carried_draft_naming_another_message_id_is_read_as_foreign() {
         local.draft.frontmatter.server_message_id.as_deref(),
         Some("<mine@example.com>")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Approval travels (Sylvain, 2026-10-23)
+// ---------------------------------------------------------------------------
+
+fn approve(path: &std::path::Path) {
+    let text = std::fs::read_to_string(path)
+        .unwrap()
+        .replace("status: draft", "status: approved");
+    std::fs::write(path, text).unwrap();
+}
+
+fn status_of(machine: &Machine, id: &str) -> crate::types::EmailStatus {
+    let _guard = machine.enter();
+    find_local("tum", id)
+        .unwrap_or_else(|| panic!("{id} is here"))
+        .draft
+        .frontmatter
+        .status
+}
+
+/// A draft approved on one machine is approved on the other: through the
+/// import of a copy it has never seen, and through the pull of one it holds
+/// as a draft.
+#[test]
+fn an_approval_made_on_one_machine_is_approved_on_the_other() {
+    use crate::types::EmailStatus;
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    let path = {
+        let _guard = m1.enter();
+        let early = Fixture::write_in_current("early", "d-early", "", "Schon fertig");
+        approve(&early);
+        Fixture::write_in_current("angebot", "d1", "", "Hallo Robin")
+    };
+    m1.drain(&mut folder);
+    assert_eq!(m2.reconcile(&mut folder).imported, 2);
+    assert_eq!(
+        status_of(&m2, "d-early"),
+        EmailStatus::Approved,
+        "imported approved"
+    );
+    assert_eq!(status_of(&m2, "d1"), EmailStatus::Draft);
+
+    {
+        let _guard = m1.enter();
+        approve(&path);
+    }
+    m1.drain(&mut folder);
+    assert_eq!(m2.reconcile(&mut folder).pulled, 1);
+    assert_eq!(
+        status_of(&m2, "d1"),
+        EmailStatus::Approved,
+        "pulled approved"
+    );
+    m2.drain(&mut folder);
+    assert_eq!(folder.live().len(), 2, "no echo push: {:?}", folder.log);
+}
+
+/// An edit in another client of a copy whose approval travelled demotes the
+/// draft on both machines: nobody approved the text Outlook wrote.
+#[test]
+fn an_edit_in_another_client_demotes_a_travelled_approval() {
+    use crate::types::EmailStatus;
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    let mid = {
+        let _guard = m1.enter();
+        let path = Fixture::write_in_current("angebot", "d1", "", "Hallo Robin");
+        approve(&path);
+        path
+    };
+    m1.drain(&mut folder);
+    m2.reconcile(&mut folder);
+    assert_eq!(status_of(&m2, "d1"), EmailStatus::Approved);
+
+    let mid = {
+        let _guard = m1.enter();
+        mid_of(&mid)
+    };
+    let uid = folder.live()[0].uid;
+    folder.remove(uid);
+    folder.put(&outlook_copy(
+        &mid,
+        "robin@example.com",
+        "Angebot",
+        "<p>Hallo Robin, in Outlook umgeschrieben</p>",
+    ));
+    assert_eq!(m1.reconcile(&mut folder).pulled, 1);
+    assert_eq!(m2.reconcile(&mut folder).pulled, 1);
+    assert_eq!(
+        status_of(&m1, "d1"),
+        EmailStatus::Draft,
+        "demoted where approved"
+    );
+    assert_eq!(
+        status_of(&m2, "d1"),
+        EmailStatus::Draft,
+        "demoted where it travelled"
+    );
+}
+
+/// Approval comes only from a copy mp pushed and nobody edited since: a
+/// status header planted on a foreign copy, mp's mark without the carried
+/// file, or carrier headers on a copy without mp's mark all import a draft.
+#[test]
+fn a_planted_approval_on_a_foreign_copy_is_ignored() {
+    use crate::types::EmailStatus;
+    use base64::Engine;
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    let approved = "---\nid: \"d-planted\"\nto: robin@example.com\nsubject: Termin\n\
+                    status: approved\nserver_message_id: \"<planted-3@tum.de>\"\n---\n\nja\n";
+    let foreign = |mid: &str, extra_headers: &str, html: &str| -> Vec<u8> {
+        format!(
+            "Message-ID: <{mid}>\r\nSubject: Termin\r\nFrom: me@tum.de\r\n\
+             To: robin@example.com\r\n{extra_headers}MIME-Version: 1.0\r\n\
+             Content-Type: text/html; charset=utf-8\r\n\r\n<html><body>{html}</body></html>\r\n"
+        )
+        .into_bytes()
+    };
+    // A status header of mp's name on a copy Outlook wrote.
+    folder.put(&foreign(
+        "planted-1@tum.de",
+        "X-Mailypoppins-Draft-Status: approved\r\n",
+        "<p>ja</p>",
+    ));
+    // mp's mark, naming an approved file, with no file carried.
+    folder.put(&foreign(
+        "planted-2@tum.de",
+        "",
+        &format!(
+            "<p>ja</p>{}",
+            crate::parse::draft_copy_comment(&file_hash(approved.as_bytes()), None)
+        ),
+    ));
+    // The carried file of an approved draft, on a copy without mp's mark.
+    let encoded = base64::engine::general_purpose::STANDARD.encode(approved);
+    folder.put(&foreign(
+        "planted-3@tum.de",
+        &format!("{}: 1/1 {encoded}\r\n", super::carrier::SOURCE_HEADER),
+        "<p>ja</p>",
+    ));
+
+    assert_eq!(reconciled(&fx, &mut folder).imported, 3);
+    assert!(
+        find_local("tum", "d-planted").is_none(),
+        "not under the planted id"
+    );
+    for local in local_drafts("tum") {
+        assert_eq!(
+            local.draft.frontmatter.status,
+            EmailStatus::Draft,
+            "{}",
+            local.path.display()
+        );
+    }
+}
+
+/// Proton Bridge drops mp's headers at the APPEND, so the other machine reads
+/// the copy through its HTML: the draft arrives, and its approval does not.
+#[test]
+fn on_proton_an_approval_does_not_travel() {
+    use crate::types::EmailStatus;
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    let path = {
+        let _guard = m1.enter();
+        Fixture::write_in_current("angebot", "d1", "", "Hallo Robin")
+    };
+    m1.drain(&mut folder);
+    let bridged = |folder: &mut FakeFolder| {
+        for copy in &mut folder.copies {
+            copy.raw = without_mp_headers(&copy.raw);
+        }
+    };
+    bridged(&mut folder);
+    assert_eq!(m2.reconcile(&mut folder).imported, 1);
+    let theirs = {
+        let _guard = m2.enter();
+        local_drafts("tum").pop().unwrap().id
+    };
+
+    {
+        let _guard = m1.enter();
+        approve(&path);
+    }
+    m1.drain(&mut folder);
+    bridged(&mut folder);
+    let report = m2.reconcile(&mut folder);
+    assert_eq!(report.pulled, 1, "{report:?}");
+    assert_eq!(status_of(&m2, &theirs), EmailStatus::Draft);
+    assert_eq!(
+        status_of(&m1, "d1"),
+        EmailStatus::Approved,
+        "still approved where it was"
+    );
+}
+
+/// An attachment the copy does not carry, a file missing when the other
+/// machine pushed, means the draft here is not the one approved there; one
+/// the copy carries, written here under the stable attachments directory,
+/// keeps the approval.
+#[test]
+fn an_approval_travels_only_with_every_attachment() {
+    use crate::types::EmailStatus;
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    let carried = m1.dir.path().join("plan.pdf");
+    std::fs::write(&carried, b"%PDF-1.4 plan").unwrap();
+    {
+        let _guard = m1.enter();
+        let with = Fixture::write_in_current(
+            "with",
+            "d-with",
+            &format!("attachments:\n  - {}\n", carried.display()),
+            "Anbei der Plan",
+        );
+        approve(&with);
+        let without = Fixture::write_in_current(
+            "without",
+            "d-without",
+            "attachments:\n  - /nonexistent/mp-test/gone.pdf\n",
+            "Anbei nichts",
+        );
+        approve(&without);
+    }
+    m1.drain(&mut folder);
+    // The other machine has none of the first machine's files.
+    std::fs::remove_file(&carried).unwrap();
+
+    assert_eq!(m2.reconcile(&mut folder).imported, 2);
+    assert_eq!(status_of(&m2, "d-with"), EmailStatus::Approved);
+    assert_eq!(status_of(&m2, "d-without"), EmailStatus::Draft);
 }

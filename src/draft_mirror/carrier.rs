@@ -96,6 +96,20 @@ pub struct MpCopy {
     pub source: Option<Vec<u8>>,
 }
 
+impl MpCopy {
+    /// Whether the carried source is the file the copy was written from, byte
+    /// for byte: the headers travelled and the Bcc put back gives the very
+    /// bytes the mark names. Only such a copy hands on the file's approval
+    /// ([`super::approval_travels`]); a copy read through its HTML, or one
+    /// whose Bcc came back in another spelling, is close to the file and not
+    /// the file.
+    pub fn reproduces_file(&self) -> bool {
+        self.source
+            .as_deref()
+            .is_some_and(|source| file_hash(source) == self.file_hash)
+    }
+}
+
 /// What `raw` carries for mp, `None` for a copy edited elsewhere or one whose
 /// carrier does not hold together: a source that does not match the mark, or
 /// a draft whose `server_message_id` is not the copy's own `Message-ID`, is

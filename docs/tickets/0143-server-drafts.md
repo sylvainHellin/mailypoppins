@@ -319,6 +319,7 @@ As built, a drafts poll (`src/daemon/runtime/drafts_poll.rs`) runs the reconcile
 #### Pull
 
 A pull rewrites the body and the headers of the local file from the server copy and keeps every frontmatter key the server cannot carry: `id`, `status`, `signature`, `forwarded_from`, `event`, `server_message_id`.
+A copy that carries mp's source whole is that file, and its `status` comes with it ("Decisions", approval).
 It writes the file first and then the draft's `draft_sync` row, with the copy's UID and the hash of the bytes it wrote, so the watcher's settle of that write owes no push.
 
 The body comes from the `text/html` part when there is one, through an HTML-to-Markdown step, and from `text/plain` otherwise.
@@ -346,7 +347,7 @@ Only the part above the quote boundary is replaced.
 The text below `QUOTE_MARKER` and the companion `.html` stay as they are, because Outlook and Apple Mail rewrite a quoted thread in ways mp would not round-trip.
 The boundary in the server HTML is mp's own quote `<div>` when the comment survived, and otherwise the first of the quote wrappers above; the probe's dumps confirm the selectors.
 
-A pull into an `approved` draft demotes it to `status: draft`: a send must never carry content the user did not approve.
+A pull into an `approved` draft demotes it to `status: draft`, unless the pull writes, byte for byte and with every attachment, a file mp approved and pushed on the other machine: a send must never carry content the user did not approve.
 A pull into a draft with an open outbox row (`active_submission_for_draft`, `src/outbox.rs:773`) or an armed undo-send hold (`src/daemon/hold.rs`) waits until that settles.
 
 #### Conflict
@@ -487,11 +488,12 @@ No `state.invalidate` scope changes: drafts never travelled as invalidations, an
   Accepted risk until the live checks: a header that some client keeps on send carries the draft's frontmatter (without Bcc) and Markdown, whose text the recipients receive anyway.
 - Only mp's own mark counts: the last comment of the HTML part, followed by nothing but closing tags; a carried draft whose `server_message_id` is not the copy's `Message-ID`, or whose source does not hash to the mark, is read as a foreign copy; and the HTML a reply or a forward embeds has every `mp:copy` and `mp:source` comment renamed when its companion is written and when it is rendered (review finding B3).
 
-Open for Sylvain:
-
-- Whether `approved` travels to the server and the other machine.
-  Provisional default, as built: it does not. A push writes no status header, and a pull or an import keeps the local status, demoting an approved draft whose content changed.
-  The whole decision is one function, `draft_mirror::approval_travels()`; flipping it to `true` makes the push write `X-Mailypoppins-Draft-Status` and the pull and the import take the status of a copy mp pushed elsewhere.
+- Approval travels: a draft approved on one machine is approved on the other (Sylvain, 2026-10-23; `draft_mirror::approval_travels()`).
+  The status rides inside the carried source, so it is read only from a copy whose mark, source hash and `Message-ID` hold together as above, never from a header of its own: no `X-Mailypoppins-Draft-Status` is written, since a header any client could have set would read the same on a copy mp never wrote.
+  A pull or an import takes the carried status only when the source reproduces the pushed file byte for byte (the Bcc put back gives the file's hash) and every attachment entry is a file here or a part the copy carries under its name; anything else lands as `status: draft`.
+  An edit in Outlook, Apple Mail or the Proton app drops the mark, so it demotes the draft on both machines.
+  On Proton the approval does not travel: Bridge drops the `X-Mailypoppins-Draft-Source` headers at the APPEND, the other machine reads the copy through its HTML, which is a lossy conversion with no validated status, and the draft lands as `status: draft` to be approved again there.
+  Rejected for Proton: the status in the mark comment, which no source validates and any client could write, and which would approve a body converted from HTML rather than the one approved.
 
 ## Rollout steps
 
@@ -531,6 +533,8 @@ Installing it turns the mirror on for `tum` and `proton` at once, so the first d
 - [ ] Edit it in Neovim and in Outlook between two ticks; the draft takes Outlook's text and `<name>.conflict.md` holds yours.
 - [ ] Edit it in Apple Mail (a new `Message-ID`); the file follows the edit rather than a second draft appearing.
 - [ ] Approve a draft, edit it in Outlook; after the tick it is `status: draft` again.
+- [ ] On `tum`, approve a draft on the Mac; within a minute it is `approved` on the home server, and an Outlook edit of it makes it `draft` on both.
+- [ ] On `proton`, approve a draft on the Mac; on the home server it stays `draft`.
 - [ ] `mp send` a draft; its copy leaves Outlook's Drafts and the file is in `drafts/.retired/`.
 - [ ] Send a draft from Outlook, and delete one in Apple Mail; after two ticks both files are in `drafts/.retired/` and neither comes back.
 - [ ] On `tum`, open an mp draft's copy in Apple Mail with View, Message, Raw Source, without editing it: it carries `X-Mailypoppins-Draft-Source` headers and its HTML ends with `<!-- mp:copy v2 ... -->`, and the base64 of the headers decodes to the draft with an empty `bcc:`.
@@ -555,7 +559,7 @@ Installing it turns the mirror on for `tum` and `proton` at once, so the first d
 - [ ] Sending a draft with `mp send` removes its server copy; a failed delete retries and the copy is gone after the next sync that reaches the server.
 - [ ] Sending or deleting a draft in Outlook moves the local file to `drafts/.retired/`, and it is not imported back.
 - [ ] A draft started in Outlook appears in mp's Drafts view as a Markdown file, and the server Drafts folder no longer lists as a received mailbox.
-- [ ] A pull into an approved draft leaves it `status: draft`.
+- [ ] A pull of a copy edited elsewhere into an approved draft leaves it `status: draft`, and an approval made in mp on the other machine arrives with the draft on an account whose server keeps mp's headers.
 - [ ] Killing the daemon between APPEND and delete leaves one copy after the next drain.
 - [ ] `cargo test --workspace` passes, with tests over a fake IMAP Drafts folder for each reconcile case above.
 
@@ -580,6 +584,6 @@ Installing it turns the mirror on for `tum` and `proton` at once, so the first d
 ## Out of scope
 
 - Two clients sending the same draft at once, mp and Outlook: neither can see the other's submission, and the server copy's delete does not prevent it.
-- Mirroring signatures, approval state or the `event:` block of an invite draft.
+- Mirroring signatures or the `event:` block of an invite draft.
 - A three-way merge of conflicting edits; the conflict copy is the whole answer.
 - Drafts of an account with no server Drafts folder.

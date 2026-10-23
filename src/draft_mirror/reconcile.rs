@@ -626,7 +626,7 @@ fn is_the_file(mirror: &Mirror<'_>, local: &LocalDraft, raw: &[u8]) -> Result<bo
     std::fs::write(&staging, &local.bytes)?;
     let rendered = apply_foreign(&staging, &email, raw, Some(&local.draft.body_markdown))
         .and_then(|()| attach_parts(mirror, &staging, &email, false))
-        .and_then(|()| Ok(std::fs::read(&staging)?));
+        .and_then(|_| Ok(std::fs::read(&staging)?));
     std::fs::remove_file(&staging).ok();
     Ok(rendered.is_ok_and(|bytes| file_hash(&bytes) == local.hash))
 }
@@ -750,10 +750,11 @@ fn staging_path(target: &Path) -> PathBuf {
 /// draft's id kept; any other keeps the local frontmatter, takes its
 /// recipients and subject from the copy's headers, and replaces the body
 /// above the quote with the copy's HTML in Markdown, the quote below it
-/// staying the local one. Either way the status follows
-/// [`super::approval_travels`]: an approved draft is demoted, since a send
-/// must not carry content nobody approved. `relink` is a new `Message-ID` to
-/// record with the pull.
+/// staying the local one. The status is the carried file's when the pull
+/// writes exactly that file, attachments included, so an approval made on
+/// the other machine arrives with it ([`super::approval_travels`]); any
+/// other pull demotes an approved draft, since a send must not carry content
+/// nobody approved. `relink` is a new `Message-ID` to record with the pull.
 ///
 /// The file is hashed again just before the rename: a save made since the
 /// reconcile read it (it waited on the server in between) is never written
@@ -779,6 +780,9 @@ fn pull_into(
     let email = crate::parse::parse_rfc822_to_fetched_email(raw)
         .context("the server copy does not parse as a message")?;
     let staging = staging_path(&local.path);
+    let exact = carried
+        .as_ref()
+        .is_some_and(carrier::MpCopy::reproduces_file);
     let source = carried.and_then(|copy| copy.source);
     match &source {
         Some(bytes) => {
@@ -796,12 +800,12 @@ fn pull_into(
             }
         }
     }
+    let faithful = attach_parts(mirror, &staging, &email, source.is_some())?;
     settle_status(
         &staging,
         local.draft.frontmatter.status.clone(),
-        source.is_some(),
+        exact && faithful,
     )?;
-    attach_parts(mirror, &staging, &email, source.is_some())?;
     let written = std::fs::read(&staging)?;
 
     let current = std::fs::read(&local.path).ok();
@@ -855,15 +859,25 @@ fn apply_foreign(
 }
 
 /// The status a pulled or imported draft ends with.
-fn settle_status(path: &Path, local: EmailStatus, from_source: bool) -> Result<()> {
+///
+/// `as_approved` says the file at `path` is, byte for byte and attachments
+/// included, the file mp pushed elsewhere: then, while
+/// [`super::approval_travels`], it keeps the status that file had, approval
+/// included. Otherwise it keeps `local`, an approval demoted to a draft: the
+/// content is not what was approved, or not known to be.
+fn settle_status(path: &Path, local: EmailStatus, as_approved: bool) -> Result<()> {
     let pulled = crate::draft::parse_email_draft(path)?.frontmatter.status;
-    let wanted = if super::approval_travels() && from_source {
-        pulled.clone()
-    } else {
-        match local {
-            EmailStatus::Approved => EmailStatus::Draft,
-            other => other,
-        }
+    let wanted = match (
+        super::approval_travels() && as_approved,
+        pulled.clone(),
+        local,
+    ) {
+        // A sent draft is never pushed, so no copy should say so; one that
+        // does is read as an unfinished draft.
+        (true, EmailStatus::Sent, _) => EmailStatus::Draft,
+        (true, carried, _) => carried,
+        (false, _, EmailStatus::Approved) => EmailStatus::Draft,
+        (false, _, other) => other,
     };
     if pulled != wanted {
         match wanted {
@@ -888,21 +902,30 @@ fn settle_status(path: &Path, local: EmailStatus, from_source: bool) -> Result<(
 /// directory for the copy's `Message-ID`, where a forward's parts already go.
 /// An entry whose part the copy no longer carries is dropped, and its file
 /// left in place.
+///
+/// The answer says, for a copy carrying its source, whether the draft's
+/// attachments are still the source's: every entry resolves here, or the
+/// copy carries one part for each entry under its file name. An entry the
+/// copy does not carry (a file that was missing when the other machine
+/// pushed) means the draft is not what was approved there.
 fn attach_parts(
     mirror: &Mirror<'_>,
     path: &Path,
     email: &crate::parse::FetchedEmail,
     from_source: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let draft = crate::draft::parse_email_draft(path)?;
     let dir = path.parent().unwrap_or(Path::new("."));
     let entries = draft.frontmatter.attachments.clone().unwrap_or_default();
+    // An entry resolves when it names files that are here: a path joined to
+    // the directory is not yet a file, and the other machine's paths are
+    // mostly not.
     let resolves = |entry: &String| {
         crate::send::resolve_attachment_paths(std::slice::from_ref(entry), dir)
-            .is_ok_and(|paths| !paths.is_empty())
+            .is_ok_and(|paths| !paths.is_empty() && paths.iter().all(|p| p.is_file()))
     };
     if from_source && entries.iter().all(resolves) {
-        return Ok(());
+        return Ok(true);
     }
     let html = email.html_body.as_deref().unwrap_or_default();
     let parts: Vec<&crate::parse::AttachmentData> = email
@@ -924,6 +947,17 @@ fn attach_parts(
         &crate::config::account_dir(&mirror.account.name),
         &mid,
     );
+    let file_name = |entry: &String| {
+        Path::new(entry)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let mut entry_names: Vec<String> = entries.iter().map(file_name).collect();
+    let mut part_names: Vec<String> = parts.iter().map(|p| p.filename.clone()).collect();
+    entry_names.sort();
+    part_names.sort();
+    let faithful = from_source && entry_names == part_names;
     let mut wanted = Vec::new();
     for part in parts {
         let kept = entries.iter().find(|entry| {
@@ -931,8 +965,9 @@ fn attach_parts(
                 .ok()
                 .and_then(|paths| paths.into_iter().next())
                 .is_some_and(|p| {
-                    p.file_name().map(|n| n.to_string_lossy().into_owned())
-                        == Some(part.filename.clone())
+                    p.is_file()
+                        && p.file_name().map(|n| n.to_string_lossy().into_owned())
+                            == Some(part.filename.clone())
                 })
         });
         match kept {
@@ -946,7 +981,7 @@ fn attach_parts(
         }
     }
     if wanted == entries {
-        return Ok(());
+        return Ok(faithful);
     }
     for index in (0..entries.len()).rev() {
         crate::draft::remove_draft_attachment(path, index)?;
@@ -954,7 +989,7 @@ fn attach_parts(
     for entry in &wanted {
         crate::draft::append_draft_attachment(path, entry)?;
     }
-    Ok(())
+    Ok(faithful)
 }
 
 /// Keep the copy of a draft that was removed by hand in `drafts/.retired/`,
@@ -1045,8 +1080,11 @@ fn imported(
     raw: &[u8],
     present: &HashSet<String>,
 ) -> Result<Option<(String, String)>> {
-    let source = carrier::read(raw).and_then(|c| c.source);
-    let Some(bytes) = source else {
+    let carried = carrier::read(raw);
+    let exact = carried
+        .as_ref()
+        .is_some_and(carrier::MpCopy::reproduces_file);
+    let Some(bytes) = carried.and_then(|c| c.source) else {
         return import_foreign(mirror, copy, raw);
     };
     let email = crate::parse::parse_rfc822_to_fetched_email(raw);
@@ -1066,10 +1104,11 @@ fn imported(
     };
     let mid = format!("<{}>", copy.message_id.clone().unwrap_or_default());
     crate::draft::set_draft_server_message_id(&staging, &mid)?;
-    settle_status(&staging, EmailStatus::Draft, true)?;
-    if let Some(email) = &email {
-        attach_parts(mirror, &staging, email, true)?;
-    }
+    let faithful = match &email {
+        Some(email) => attach_parts(mirror, &staging, email, true)?,
+        None => false,
+    };
+    settle_status(&staging, EmailStatus::Draft, exact && faithful)?;
     let hash = file_hash(&std::fs::read(&staging)?);
     let target = unique_draft_path(&dir, &crate::parse::slugify_subject(&copy.subject), &id);
     place_new(&staging, &target)?;

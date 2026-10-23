@@ -194,7 +194,8 @@ Email body here.`;
         <code>bcc:</code> left out, and the Bcc travels only in the copy's own Bcc header.
       </p>
       <p>
-        Every sync also reads the server's Drafts folder back. An edit made in Outlook, Apple
+        Every sync, and a check once a minute between syncs, reads the server's Drafts folder
+        back. An edit made in Outlook, Apple
         Mail or the Proton app is written into the draft file: the recipients, the subject and
         the text above the quote, converted to Markdown, while the quoted thread below
         <code>&lt;!-- mp:quote --&gt;</code> stays as mp wrote it. A draft edited both here and
@@ -213,7 +214,14 @@ Email body here.`;
         conflict, or failed (the server refused the push; mp tries again fifteen minutes later,
         or at once after the next save).
         A conflict copy (<code>conflict_of</code>) is never pushed, and neither is a sent draft.
-        Approval stays local: a copy on the server carries no <code>status</code>.
+      </p>
+      <p>
+        A draft you approve on one machine is approved on your other machine too, as long as
+        the copy it reads is the one mp pushed, unedited and whole: an edit in Outlook, Apple
+        Mail or the Proton app, or an attachment the copy no longer carries, brings it back as
+        <code>status: draft</code>. On Proton the approval does not travel: Proton Bridge drops
+        the headers mp's own copy carries, so the other machine sees the text and not the
+        approval, and you approve the draft again there.
       </p>
       <p>
         <code>[accounts.drafts] mirror = false</code> in <code>config.toml</code> keeps an

@@ -32,17 +32,21 @@ use crate::store::Store;
 use crate::types::{EmailDraft, EmailStatus};
 
 /// Whether a draft's approval travels to its server copy and from there to mp
-/// on the other machine.
+/// on the other machine: yes, as Sylvain decided on 2026-10-23 (#0143).
 ///
-/// Open for Sylvain (#0143, "Open for Sylvain"); the provisional default is
-/// `false`: approval stays local, so a push writes no
-/// [`DRAFT_STATUS_HEADER`](crate::send::DRAFT_STATUS_HEADER) and a pull or an
-/// import never reads one. A pull into an approved draft demotes it either
-/// way, since a send must not carry content nobody approved. Flipping this one
-/// function is the whole change: the push writes the header, and the pull
-/// and the import take the status it carries.
+/// The status rides inside the draft file the copy carries
+/// ([`carrier`]), never in a header of its own, so it is read only from a
+/// copy mp pushed and nobody edited since: the HTML part still ends with
+/// mp's mark, the carried file hashes to it and names the copy's own
+/// `Message-ID`. A pull or an import takes that status only when the file it
+/// writes is the one that was approved, byte for byte, attachments included
+/// ([`carrier::MpCopy::reproduces_file`]); anything else (an edit in Outlook,
+/// Apple Mail or the Proton app, a copy whose headers Proton Bridge dropped,
+/// an attachment the copy no longer carries) demotes an approved draft to
+/// `status: draft`, since a send must not carry content nobody approved.
+/// `false` keeps approval local: every pull and import demotes.
 pub const fn approval_travels() -> bool {
-    false
+    true
 }
 
 /// Whether `account`'s drafts are mirrored: `[accounts.drafts] mirror`, on by
