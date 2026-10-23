@@ -6,17 +6,35 @@
 //! out of the Drafts folder, and goes ahead only when this session is the one
 //! that removed it.
 //!
-//! - No copy: the draft was sent or discarded on another machine or in
-//!   another client. The send is refused and the file left alone; the
+//! - A copy: the draft's `draft_sync` row is forgotten, then the copy is
+//!   removed with `UID STORE \Deleted` and `UID EXPUNGE`, and the send goes
+//!   ahead only when this session saw the untagged `EXPUNGE` of every copy
+//!   ([`DraftsFolder::claim`]).
+//! - A claim that fails, or that sees another session remove a copy, has an
+//!   unknown outcome: the copy may be gone by this session's hand (a
+//!   connection dropped after the `UID EXPUNGE`, another client's plain
+//!   `EXPUNGE` taking the copy this one had flagged, or a folder that kept
+//!   renumbering while the claim read the copy's sequence number) or by
+//!   another machine's send. The send is refused with "outcome unknown: check Sent and Drafts,
+//!   then send again or discard".
+//! - No copy and a row: the row says this machine last saw the copy and did
+//!   not remove it, so the draft was sent or discarded on another machine or
+//!   in another client. The send is refused and the file left alone; the
 //!   reconcile retires it once the copy has been missing twice.
-//! - A copy: it is removed with `UID STORE \Deleted` and `UID EXPUNGE`, and
-//!   the send goes ahead only when this session saw the untagged `EXPUNGE`
-//!   of every copy ([`DraftsFolder::claim`]). The draft's `draft_sync` row is
-//!   then forgotten, so a send that fails afterwards leaves a draft the
-//!   owed-push scan pushes again, and the reconcile does not take its missing
-//!   copy for a send elsewhere.
+//! - No copy and no row: this machine's own claim took the copy, and the
+//!   send after it failed or its outcome was unknown, or the push never
+//!   landed, or a rebuilt store dropped the row. The send goes ahead, since
+//!   the reconcile too holds such a draft for one never pushed.
 //! - A server that cannot be reached, or that offers no `UIDPLUS`: the send
 //!   is refused, since nothing then says the other machine has not sent it.
+//!
+//! Forgetting the row before the claim is the whole of the bookkeeping: a
+//! draft without a row is one the reconcile never retires as copy-gone and
+//! the owed-push scan pushes again, so whatever happens after the `STORE`,
+//! a crash included, leaves a draft this machine sends on a retry and that
+//! shows in Drafts again, never one presented as sent elsewhere. Should the
+//! other machine have sent it after all, its reconcile deletes the copy
+//! pushed again as a sent draft's and this one's then retires the file.
 //!
 //! The daemon runs the guard under the account runtime's turn, so no drain or
 //! reconcile of this machine runs between the claim and the submission.
@@ -24,7 +42,9 @@
 //! What remains open: two sends whose `UID FETCH` both precede either one's
 //! `UID EXPUNGE`, a window of one round trip, each see the expunge and both
 //! go ahead; plain IMAP has no test-and-set to close it without `CONDSTORE`,
-//! which neither server offers.
+//! which neither server offers. A store rebuilt after another machine sent
+//! the draft leaves it here with no copy and no row, which this machine
+//! sends again, as its owed-push scan would push it again anyway.
 
 use anyhow::{anyhow, bail, Result};
 use log::info;
@@ -51,9 +71,17 @@ fn unreachable(account: &str, e: anyhow::Error) -> anyhow::Error {
     )
 }
 
+/// The refusal when a claim did not show this session removing every copy.
+fn outcome_unknown(mailbox: &str, why: &str) -> anyhow::Error {
+    anyhow!(
+        "{why}; nothing was sent here and whether it went out from another machine is not \
+         known, outcome unknown: check Sent and Drafts in {mailbox}, then send again or discard"
+    )
+}
+
 /// Claim `draft`'s server copy in `folder` before a send, or refuse the send.
-/// `Ok` means the send may go ahead: the draft is not mirrored, or this
-/// session removed its copy.
+/// `Ok` means the send may go ahead: the draft is not mirrored, this session
+/// removed its copy, or an earlier claim of this machine's did.
 pub async fn claim_for_send<F: DraftsFolder>(
     store: &Store,
     account: &AccountConfig,
@@ -85,25 +113,40 @@ pub async fn claim_for_send<F: DraftsFolder>(
         .uids_of(message_id)
         .await
         .map_err(|e| unreachable(name, e))?;
+    let id = draft.frontmatter.id.as_deref();
     if uids.is_empty() {
+        let own = match id {
+            Some(id) => draft_sync::get(store, name, id)?.is_none(),
+            None => false,
+        };
+        if own {
+            info!(
+                "[drafts] {name}: {message_id} has no server copy and no row: its copy went \
+                 with an earlier claim of this machine's or never landed; sending"
+            );
+            return Ok(());
+        }
         bail!(
             "this draft's server copy is no longer in {mailbox}: it was sent or discarded on \
              another machine or in another client, so it was not sent again; the drafts \
              reconcile retires the file"
         );
     }
-    let claimed = folder
-        .claim(&uids)
-        .await
-        .map_err(|e| unreachable(name, e))?;
-    if claimed.len() != uids.len() {
-        bail!(
-            "another machine removed this draft's server copy while this send was claiming it: \
-             it is being sent or discarded there, so it was not sent here"
-        );
-    }
-    if let Some(id) = draft.frontmatter.id.as_deref() {
+    if let Some(id) = id {
         draft_sync::delete(store, name, id)?;
+    }
+    let claimed = folder.claim(&uids).await.map_err(|e| {
+        outcome_unknown(
+            &mailbox,
+            &format!("the claim of this draft's server copy did not complete ({e:#})"),
+        )
+    })?;
+    if claimed.len() != uids.len() {
+        return Err(outcome_unknown(
+            &mailbox,
+            "another session removed this draft's server copy while this send was claiming it, \
+             another machine sending it or another client tidying the folder",
+        ));
     }
     info!("[drafts] {name}: claimed the server copy of {message_id} (UIDs {uids:?}) for its send");
     Ok(())

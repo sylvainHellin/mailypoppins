@@ -1907,19 +1907,63 @@ fn two_machines_sending_one_approved_draft_send_it_once() {
     );
 }
 
-/// A copy another session expunged while this one claimed it means the other
-/// machine is sending: refused here.
+/// A copy another session expunged while this one claimed it may be the other
+/// machine sending or another client expunging the copy this one flagged: the
+/// send is refused with its outcome unknown, and the draft is neither retired
+/// nor refused again as sent elsewhere.
 #[test]
-fn a_copy_claimed_by_another_session_refuses_the_send() {
+fn a_copy_claimed_by_another_session_refuses_the_send_with_its_outcome_unknown() {
     let fx = Fixture::new();
-    fx.write("angebot", "d1", "", "eins");
+    let path = fx.write("angebot", "d1", "", "eins");
     let mut folder = FakeFolder::default();
     block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
     folder.claimed_elsewhere = true;
 
     let refused = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
-    assert!(refused.contains("another machine removed"), "{refused}");
-    assert!(fx.row("d1").is_some());
+    assert!(refused.contains("another session removed"), "{refused}");
+    assert!(refused.contains("outcome unknown"), "{refused}");
+    assert!(refused.contains("check Sent and Drafts"), "{refused}");
+    assert!(fx.row("d1").is_none());
+    for _ in 0..2 {
+        let report = reconciled(&fx, &mut folder);
+        assert_eq!(report.retired, 0, "{report:?}");
+    }
+    assert!(path.exists(), "never retired as copy-gone");
+    guard(&fx.store, &fx.account, &mut folder, "d1").expect("the user's retry goes ahead");
+}
+
+/// A connection that drops once the claim has removed the copy leaves a draft
+/// a retry sends, that is never retired as sent elsewhere, and that the
+/// owed-push scan puts back in Drafts.
+#[test]
+fn a_claim_that_fails_after_its_store_leaves_a_draft_a_retry_sends() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    folder.fail_claim = true;
+
+    let refused = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(refused.contains("outcome unknown"), "{refused}");
+    assert!(refused.contains("send again or discard"), "{refused}");
+    assert!(folder.live().is_empty(), "the copy went with the claim");
+    folder.fail_claim = false;
+
+    let retry = guard(&fx.store, &fx.account, &mut folder, "d1");
+    assert!(
+        retry.is_ok(),
+        "a retry is not refused as sent elsewhere: {retry:?}"
+    );
+    for _ in 0..2 {
+        let report = reconciled(&fx, &mut folder);
+        assert_eq!(report.retired, 0, "{report:?}");
+    }
+    assert!(path.exists(), "never retired as copy-gone");
+    assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 1);
+    block_on(push::push(&fx.mirror(2), &mut folder, "d1")).unwrap();
+    assert_eq!(folder.live().len(), 1, "back in Drafts: {:?}", folder.log);
+    guard(&fx.store, &fx.account, &mut folder, "d1").expect("the copy pushed again is claimed");
+    assert!(folder.live().is_empty());
 }
 
 /// A server that cannot be reached, or offers no UIDPLUS, says nothing about
