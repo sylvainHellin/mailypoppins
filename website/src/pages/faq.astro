@@ -46,8 +46,7 @@ import AccordionItem from '../components/AccordionItem.astro';
         <AccordionItem question="SMTP authentication failed">
           <p>
             Check your credentials with <code>mp config show</code> and re-run
-            <code>mp config set-password smtp</code> if needed. For OAuth2 accounts, try
-            <code>mp config oauth2-login</code> to refresh the token.
+            <code>mp config set-password smtp</code> if needed.
           </p>
         </AccordionItem>
 
@@ -104,21 +103,41 @@ import AccordionItem from '../components/AccordionItem.astro';
     </section>
 
     <section>
-      <h2 id="oauth2-exchange">OAuth2 / Exchange</h2>
+      <h2 id="oauth2-exchange">Microsoft 365 / Exchange</h2>
       <div class="accordion-group">
-        <AccordionItem question="IMAP is disabled for my organization">
+        <AccordionItem question="How do I connect a Microsoft 365 account?">
           <p>
-            Your Microsoft 365 tenant may have IMAP disabled. Contact IT to enable it, or use
-            <code>auth_method = "graph"</code> in your account config, which bypasses IMAP/SMTP
-            entirely and uses the Microsoft Graph API for all mail operations.
+            Choose "Microsoft 365 / Exchange Online (Graph API)" in <code>mp config init</code>,
+            or "Microsoft 365 (Graph API)" in the desktop wizard. The account uses the Microsoft
+            Graph API for all mail operations, with no IMAP or SMTP server, and signs in with a
+            device code through the built-in mailypoppins app.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="How do I connect an on-premises Exchange server?">
+          <p>
+            An Exchange server your organisation runs itself is a password account over IMAP
+            and SMTP: choose the standard IMAP/SMTP provider and enter the server names and
+            ports your organisation publishes.
+          </p>
+        </AccordionItem>
+
+        <AccordionItem question="My account with auth_method = &quot;oauth2&quot; stopped syncing">
+          <p>
+            Microsoft OAuth2 over IMAP and SMTP is retired. The config still loads and only that
+            account stays blocked. For Microsoft 365, set <code>auth_method = "graph"</code>,
+            remove the <code>[accounts.smtp]</code> and <code>[accounts.imap]</code> tables and run
+            <code>mp config oauth2-login --account &lt;name&gt;</code>. For on-premises Exchange,
+            remove the <code>auth_method</code> line and store the password with
+            <code>mp config set-password smtp --account &lt;name&gt;</code>.
           </p>
         </AccordionItem>
 
         <AccordionItem question="Needs admin consent for API permissions">
           <p>
-            The <code>IMAP.AccessAsUser.All</code> and <code>SMTP.Send</code> permissions often
-            require admin consent. Request your IT administrator to grant consent via Azure portal
-            &gt; Entra ID &gt; App registrations &gt; API permissions.
+            Until the mailypoppins publisher is verified with Microsoft, an administrator of your
+            organisation approves the app at the first sign-in by ticking "Consent on behalf of
+            your organization". Personal Microsoft accounts are not affected.
           </p>
         </AccordionItem>
 
@@ -127,14 +146,6 @@ import AccordionItem from '../components/AccordionItem.astro';
             Run <code>mp config oauth2-login --account &lt;name&gt;</code> to re-authenticate.
             Access tokens expire after roughly one hour and are auto-refreshed, but refresh tokens
             expire after approximately 90 days of inactivity.
-          </p>
-        </AccordionItem>
-
-        <AccordionItem question="AUTHENTICATE failed with OAuth2">
-          <p>
-            This can mean IMAP is disabled for the account, the token has wrong scopes, or admin
-            consent is missing. Check the app permissions in Azure and ensure IMAP is enabled. If
-            your tenant blocks IMAP, consider switching to <code>auth_method = "graph"</code>.
           </p>
         </AccordionItem>
       </div>

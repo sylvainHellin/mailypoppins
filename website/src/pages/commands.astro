@@ -73,9 +73,9 @@ const configCommands = [
   { command: 'mp config init', description: 'Interactive setup wizard' },
   { command: 'mp config show', description: 'Display config (passwords masked)' },
   { command: 'mp config set-password', description: 'Store a password in the active secrets backend (first account unless -A names one)' },
-  { command: 'mp config reset-secrets', description: 'Wipe the encrypted secrets file and OAuth2 token caches, then re-prompt for credentials (after a restore to a new machine, or when the secrets file no longer decrypts)' },
+  { command: 'mp config reset-secrets', description: 'Wipe the encrypted secrets file and Graph token caches, then re-prompt for credentials (after a restore to a new machine, or when the secrets file no longer decrypts)' },
   { command: 'mp config add-account', description: 'Add a new account to the existing config' },
-  { command: 'mp config oauth2-login', description: 'Run OAuth2 device code flow (first OAuth2 account unless -A names one)' },
+  { command: 'mp config oauth2-login', description: 'Sign a Microsoft 365 (Graph) account in with the OAuth2 device code flow (first Graph account unless -A names one)' },
   { command: 'mp config path', description: 'Print config file path' },
 ];
 

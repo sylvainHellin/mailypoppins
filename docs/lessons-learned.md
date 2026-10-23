@@ -3236,3 +3236,8 @@ Any code that writes a server copy must ask whether the copy it replaces is stil
 
 `OperationHandle::fail` hands the error to the client that started the operation and writes nothing to the daemon log, so the send guard's first live refusal on the home server left no line in either daemon's log, only the TUI's status line.
 A refusal that matters for reconstructing an incident later (the send guard's, in `send_guard::log_refusal`) logs itself at WARN with the account, the draft and the `Message-ID` before it returns.
+
+## A retired config value stays a variant, or every account goes down with it (2026-10-23)
+
+`GlobalConfig` deserializes in one piece, so deleting the `oauth2` variant from `AuthMethod` would make a config that still names it fail to parse, and the daemon then serves zero accounts (`ConfigState::Invalid`).
+The retired value is kept as `AuthMethod::RetiredOAuth2`, which every path that would run the account refuses with one sentence (`config::retired_oauth2_message`), and `start_account` records it as a failed start, so that account alone is `blocked` while the rest serve.

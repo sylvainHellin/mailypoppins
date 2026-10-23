@@ -1,10 +1,11 @@
-# Microsoft 365 / Exchange Online Setup (OAuth2)
+# Microsoft 365 and Exchange setup
 
-This guide walks through setting up the email CLI with a Microsoft 365 (Exchange Online) account using OAuth2 authentication.
+A Microsoft 365 (Exchange Online) account goes through Microsoft Graph (`auth_method = "graph"`).
+An on-premises Exchange server is a password account over IMAP and SMTP, like any other IMAP server.
 
-## Graph accounts: use the mailypoppins app
+## Microsoft 365: use the mailypoppins app
 
-A Graph account (`mp config init` or `mp config add-account`, option 4, or the desktop app's "Microsoft 365 (Graph API)" preset) needs no app registration of its own.
+A Graph account (`mp config init` or `mp config add-account`, option 3, or the desktop app's "Microsoft 365 (Graph API)" preset) needs no app registration of its own.
 mailypoppins has one shared multi-tenant registration (any Entra tenant plus personal Microsoft accounts) in its own `mailypoppins.onmicrosoft.com` tenant:
 
 - client ID `439d7ebd-7898-4df2-b2d6-88bb61e2597b`, built in as `MAILYPOPPINS_CLIENT_ID` in `crates/mp-core/src/oauth2.rs`;
@@ -25,144 +26,66 @@ The device-code, token and refresh endpoints all take the tenant as it is writte
 An existing account with its own client ID and tenant ID is read unchanged.
 
 Until the publisher is verified ([#0035](tickets/0035-graph-admin-approval.md)), only an organisation's admin can consent, by ticking "Consent on behalf of your organization" at the first device-code sign-in.
-The steps below are for IMAP and SMTP over OAuth2, or for an organisation that wants its own registration.
 
-## Prerequisites
-
-- A Microsoft 365 account (e.g., user@example.com)
-- Access to the Azure portal (https://portal.azure.com) for app registration
-- The email CLI installed
-
-## Step 1: Register an Azure Entra ID Application
-
-1. Go to https://portal.azure.com
-2. Navigate to "Microsoft Entra ID" (formerly Azure Active Directory)
-3. Select "App registrations" in the left sidebar
-4. Click "New registration"
-5. Fill in:
-   - Name: `mailypoppins` (or any descriptive name; this is the label in your tenant, nothing reads it back)
-   - Supported account types: "Accounts in this organizational directory only"
-   - Redirect URI: leave blank (not needed for device code flow)
-6. Click "Register"
-
-## Step 2: Enable Public Client Flows
-
-1. In the app registration, go to "Authentication" in the left sidebar
-2. Scroll down to "Advanced settings"
-3. Set "Allow public client flows" to **Yes**
-4. Click "Save"
-
-This is required for the device code flow used by the CLI.
-
-## Step 3: Add API Permissions
-
-1. Go to "API permissions" in the left sidebar
-2. Click "Add a permission"
-3. Select "APIs my organization uses"
-4. Search for and select "Office 365 Exchange Online"
-5. Select "Delegated permissions"
-6. Add these permissions:
-   - `IMAP.AccessAsUser.All` -- required for IMAP access
-   - `SMTP.Send` -- required for sending via SMTP
-7. Click "Add permissions"
-8. Also add from "Microsoft Graph":
-   - `offline_access` -- required for refresh tokens
-
-If you see "Needs admin approval" next to any permission, you need your IT admin to grant consent. Click "Grant admin consent for [org]" if you have admin rights, or request IT to do so.
-
-## Step 4: Note the IDs
-
-From the app registration "Overview" page, copy:
-- **Application (client) ID**: e.g., `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
-- **Directory (tenant) ID**: e.g., `yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy`
-
-## Step 5: Configure mailypoppins
-
-### Option A: Interactive Setup
-
-Run:
-```
-mp config init
-```
-Select "3. Microsoft 365 / Exchange Online (OAuth2 IMAP/SMTP)" and follow the prompts. You will be asked for the client_id and tenant_id, then the device code flow will start.
-
-### Option B: Manual Configuration
-
-Add to `~/.config/mailypoppins/config.toml`:
+The account block the wizard writes:
 
 ```toml
 [[accounts]]
 name = "work"
 default_from = "user@example.com"
-auth_method = "oauth2"
+auth_method = "graph"
 
 [accounts.oauth2]
-client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-tenant_id = "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
-
-[accounts.smtp]
-host = "smtp.office365.com"
-port = 587
-username = "user@example.com"
-
-[accounts.imap]
-host = "outlook.office365.com"
-port = 993
-username = "user@example.com"
-
-[accounts.directories]
-root = "~/notes/email/work"
-drafts = "drafts"
-
-[accounts.mailboxes.inbox]
-server = "INBOX"
-local = "inbox"
-
-[accounts.mailboxes.archive]
-server = "Archive"
-local = "archive"
-
-[accounts.mailboxes.sent]
-server = "Sent Items"
-local = "sent-items"
+client_id = "439d7ebd-7898-4df2-b2d6-88bb61e2597b"
+tenant_id = "common"
 ```
 
-Then run the device code flow to acquire a token:
+A Graph account has no `[accounts.smtp]` or `[accounts.imap]` table.
+After writing one by hand, sign it in with:
+
 ```
 mp config oauth2-login --account work
 ```
 
-## Step 6: Authenticate
+The CLI prints a URL and a code; open the URL, enter the code and sign in with the Microsoft account.
+The token is cached encrypted at `<mailypoppins_data_dir>/tokens/<account>.enc` (`~/Library/Application Support/mailypoppins/tokens/` on macOS).
+It is refreshed when it expires: access tokens last about an hour, refresh tokens about 90 days.
 
-When you run `mp config oauth2-login`, the CLI will:
-1. Display a URL and a code
-2. Open the URL in your browser (or display it for you to open manually)
-3. Enter the code and sign in with your Microsoft account
-4. Grant the requested permissions
+## Microsoft 365: an organisation's own app registration
 
-The token is cached encrypted at `<mailypoppins_data_dir>/tokens/<account>.enc` (e.g. `~/Library/Application Support/mailypoppins/tokens/` on macOS) and is automatically refreshed when it expires (access tokens last ~1 hour, refresh tokens ~90 days).
+An organisation that does not want to consent to the shared app registers its own:
+
+1. In the Azure portal (https://portal.azure.com), open "Microsoft Entra ID", then "App registrations", then "New registration".
+2. Name it `mailypoppins` (only a label in your tenant), choose "Accounts in this organizational directory only", leave the redirect URI blank, and register.
+3. Under "Authentication", "Advanced settings", set "Allow public client flows" to **Yes** and save: the device code flow needs it.
+4. Under "API permissions", add the delegated Microsoft Graph permissions `User.Read`, `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `offline_access` and `Calendars.ReadWrite`; grant admin consent if the portal says "Needs admin approval".
+5. Copy the "Application (client) ID" and the "Directory (tenant) ID" from the "Overview" page and type them at the wizard's two prompts, or into `[accounts.oauth2]`.
+
+## On-premises Exchange
+
+An Exchange server the organisation runs itself is reached over IMAP and SMTP with a password.
+Choose option 1, "Standard IMAP/SMTP with a password", in `mp config init`, or "IMAP and SMTP" in the desktop wizard, and enter the server names and ports the organisation publishes.
+The password is stored with `mp config set-password smtp --account <name>` (and `imap` when it differs).
+
+## Accounts that still say `auth_method = "oauth2"`
+
+The mode that signed in to Microsoft and then spoke IMAP and SMTP with XOAUTH2 is retired.
+A config that still names it loads, and that account stays blocked while every other account runs; `mp sync`, `mp config show`, the daemon log and the desktop Settings say how to switch:
+
+- for Microsoft 365, set `auth_method = "graph"`, remove the `[accounts.smtp]` and `[accounts.imap]` tables, keep `[accounts.oauth2]`, and run `mp config oauth2-login --account <name>`;
+- for on-premises Exchange, remove the `auth_method` line and `[accounts.oauth2]`, keep the server tables, and store the password with `mp config set-password smtp --account <name>`.
+
+Then restart the daemon with `mp daemon restart`, or press Reload in the desktop Settings.
 
 ## Troubleshooting
 
-### "IMAP is disabled for your organization"
-Your tenant may have IMAP disabled at the organization level. Contact IT to enable IMAP for your account, or check Exchange Admin Center > Mailboxes > [your mailbox] > Manage email apps.
-
 ### "Needs admin consent"
-The `IMAP.AccessAsUser.All` permission often requires admin consent. Request your IT administrator to grant consent via the Azure portal (Entra ID > App registrations > [your app] > API permissions > Grant admin consent).
+The tenant requires an administrator to consent to the app.
+Ask the IT administrator to consent at the first sign-in, or to grant consent in the Azure portal (Entra ID > App registrations > [your app] > API permissions > Grant admin consent).
 
 ### Token expired
-If you see "OAuth2 token expired" errors, run:
+If a Graph account reports an expired or missing token, run:
 ```
 mp config oauth2-login --account work
 ```
-to re-authenticate. Refresh tokens expire after ~90 days of inactivity.
-
-### "AUTHENTICATE failed"
-This can mean IMAP is disabled, the token has wrong scopes, or admin consent is missing. Check the app permissions and ensure IMAP is enabled for your account.
-
-## Exchange Online Server Details
-
-| Protocol | Host | Port |
-|----------|------|------|
-| IMAP (TLS) | outlook.office365.com | 993 |
-| SMTP (STARTTLS) | smtp.office365.com | 587 |
+Refresh tokens expire after about 90 days of inactivity.

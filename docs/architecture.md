@@ -376,7 +376,7 @@ A row that fails with proof that nothing went out (a clean pre-submission failur
 
 ## Sync backends
 
-Two transports, one ingest path and one `SyncResult` shape: IMAP/SMTP for password and OAuth2 XOAUTH2 accounts, Microsoft Graph REST for tenants that block IMAP/SMTP (see [auth.md](auth.md)).
+Two transports, one ingest path and one `SyncResult` shape: IMAP/SMTP for password accounts, on-premises Exchange included, and Microsoft Graph REST for Microsoft 365 accounts (see [auth.md](auth.md)).
 TUI actions branch on `app.is_graph()`.
 
 The shared half is `src/sync/` (#0059): the sync types (`SyncTarget`, `SyncResult`, `FreshObservation`, `MailboxFetch`), the `SyncBackend` trait, and `sync::engine::run_sync`, which is the orchestration itself: skip lists, ingest, arrival marks, the #0074 ingest-failure bound, flags, cursors and the deferred prune pass.
@@ -423,7 +423,7 @@ Deletions are the one thing the delta does not resolve: a `@removed` entry names
 
 ### Watchers
 
-One IMAP IDLE round per password or OAuth2 account, and one polling round per Graph account that compares the *set* of inbox ids rather than its cardinality.
+One IMAP IDLE round per password account, and one polling round per Graph account that compares the *set* of inbox ids rather than its cardinality.
 Both live in the daemon's account runtime since P5-U8 (`src/daemon/runtime/watcher.rs`), one per account beside its tick and its read pool, and both widen their retry interval after consecutive failures instead of hammering a server that is down.
 A round that sees the mailbox move runs one quick tick and publishes what changed as events, so every connected client converges without a tick-specific rule; a runtime whose engine lock is held by another process does not watch, because the engine holding it is watching the same mailbox.
 A watcher hears one mailbox, so each ready IMAP or Graph account also runs a scheduler (`src/daemon/runtime/scheduler.rs`, #0134): one quick tick once the account has gone `[accounts.imap] sync_interval_secs` (default 900, `0` off, at least 60) without a tick of any origin, which is what reaches the other mailboxes, a backed-off queued op, a deadline-cut body fetch, a dead IDLE connection and a daemon with no client.
@@ -442,7 +442,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `mp-core/signatures.rs` | App-managed signature files (#0107): one Markdown file per signature at `config_dir()/signatures/<name>.md`, the file stem being both key and display name. Name validation, list/read/write/create/rename/delete, the per-account default via `app_state`, and `migrate_config_signatures`, the one-time copy out of the legacy `[accounts.*.signatures]` tables. |
 | `mp-core/app_state.rs` | App-owned state that is not user-edited config (#0107): `<data_dir>/state.json`, pretty-printed JSON, load/save modelled on `contacts::cache`. Holds the per-account default signature; a missing or corrupt file means "nothing recorded" and is never fatal. |
 | `mp-core/secrets.rs` | Machine-bound encrypted secrets store (ChaCha20-Poly1305 + HKDF-SHA256). `SecretsBackend` trait with `EncryptedFileBackend` (default) and `KeyringBackend` (opt-in). See [secrets.md](secrets.md). |
-| `mp-core/oauth2.rs` | OAuth2 device-code flow, encrypted token cache at `tokens_dir()/<account>.enc`, refresh, XOAUTH2 SASL builder. Scope-parameterised (`IMAP_SMTP_SCOPES` vs `GRAPH_SCOPES`). |
+| `mp-core/oauth2.rs` | OAuth2 device-code flow of a Graph account, encrypted token cache at `tokens_dir()/<account>.enc`, refresh, `GRAPH_SCOPES`. |
 | `src/ingest.rs` | The receive-path writer: fetched message to one `messages` row plus blobs, FTS maintenance, cursors, `prune_vanished`, `apply_seen_flags`, `graph_uid` |
 | `mp-core/search.rs` | The unified search grammar (#0086a): one parser (`parse`) to one AST (`Query`/`Clause`/`Term`, plus the `in:`/`message-id:` directives), the CLI-flag builder (`from_cli`), and four renderers (`to_imap` with a `has:attachment` post-filter split, `to_gmail`/`to_gmail_search_command` for `X-GM-RAW`, `to_graph` for one Graph request, a KQL `$search` or the Message-ID `$filter`, never both, `to_fts` for the local index). Malformed queries return a caret-pointed `ParseError`. `fts_expression` survives as a thin renderer wrapper. `mp-core/imap_query.rs` beside it holds the three pure IMAP string helpers it shares with `imap_client::search` (`normalize_message_id`, `bracketed_message_id`, `parse_date_to_imap`). |
 | `mp-core/selector.rs` + `src/selector.rs` | The `mp://account/mailbox/key` grammar: parse, resolve, format. Namespace fixed by the command, never sniffed. Split at the resolvers: the grammar is in `mp-core`, the two indexed lookups stay beside the store. |
@@ -715,7 +715,7 @@ Layout under the data dir:
   accounts/<name>/drafts/*.md            # the only local truth
   accounts/<name>/attachments/<message-id>/   # materialised for forward drafts (#0006)
   accounts/<name>/contacts-cache.json
-  tokens/<name>.enc                      # OAuth2 / Graph encrypted refresh tokens
+  tokens/<name>.enc                      # Graph encrypted refresh tokens
   state.json                             # app state (#0107): per-account default signature
   logs/mailypoppins-YYYY-MM-DD.log       # capped at 200 MB in total (crates/mp-core/src/logfile.rs)
 ```

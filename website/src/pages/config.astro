@@ -212,7 +212,7 @@ sync_interval_secs = 900    # Seconds without a sync before the daemon runs one 
       <!-- Where data lives -->
       <h3 id="data-dir-section">Data directory (not configurable)</h3>
       <p>
-        Mail, drafts, contacts cache, OAuth2 tokens, and logs all live under a single
+        Mail, drafts, contacts cache, Graph tokens, and logs all live under a single
         OS-conventional app data directory:
       </p>
       <ul>
@@ -226,7 +226,7 @@ sync_interval_secs = 900    # Seconds without a sync before the daemon runs one 
   accounts/<name>/drafts/                # your drafts, one .md file each
   accounts/<name>/attachments/<msg-id>/  # attachments a forward carries into a draft
   accounts/<name>/contacts-cache.json    # contacts index
-  tokens/<name>.enc                      # OAuth2 tokens
+  tokens/<name>.enc                      # Graph tokens
   state.json                             # app state: each account's default signature
   logs/mailypoppins-YYYY-MM-DD.log       # daily logs, 200 MB at most in total`} />
       <p>
@@ -420,30 +420,20 @@ server = "Sent"
 [[accounts]]
 name = "work"
 default_from = "name@company.com"
-auth_method = "oauth2"
+auth_method = "graph"
 
 [accounts.oauth2]
-client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-tenant_id = "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
-
-[accounts.smtp]
-host = "smtp.office365.com"
-port = 587
-username = "name@company.com"
-
-[accounts.imap]
-host = "outlook.office365.com"
-port = 993
-username = "name@company.com"
+client_id = "439d7ebd-7898-4df2-b2d6-88bb61e2597b"  # the mailypoppins app
+tenant_id = "common"
 
 [accounts.mailboxes.inbox]
-server = "INBOX"
+server = "inbox"
 
 [accounts.mailboxes.archive]
-server = "Archive"
+server = "archive"
 
 [accounts.mailboxes.sent]
-server = "Sent Items"`} />
+server = "sentitems"`} />
     </section>
 
     <!-- Authentication Methods -->
@@ -451,7 +441,8 @@ server = "Sent Items"`} />
       <h2>Authentication Methods</h2>
       <p>
         Each account has an <code>auth_method</code> field that determines how
-        credentials are handled. Three methods are supported.
+        credentials are handled. Two methods are supported: a password over IMAP and
+        SMTP for every IMAP server, and the Graph API for Microsoft 365.
       </p>
 
       <h3 id="auth-password">1. Password (default)</h3>
@@ -466,6 +457,10 @@ server = "Sent Items"`} />
       <div class="code-inline">
         <Code code="mp config set-password" lang="bash" theme={codeTheme} />
       </div>
+      <p>
+        An on-premises Exchange server, one your organisation runs itself, is a password
+        account like any other IMAP server.
+      </p>
       <ConfigExample title="Password auth config" code={`[[accounts]]
 name = "personal"
 default_from = "me@example.com"
@@ -476,44 +471,12 @@ host = "smtp.example.com"
 port = 587
 username = "me@example.com"`} />
 
-      <h3 id="auth-oauth2">2. OAuth2 (IMAP/SMTP)</h3>
+      <h3 id="auth-graph">2. Graph API</h3>
       <p>
-        For Microsoft 365 / Exchange Online accounts that support IMAP and SMTP.
-        Requires an Azure Entra ID app registration with <code>IMAP.AccessAsUser.All</code>
-        and <code>SMTP.Send</code> delegated permissions. Tokens are cached at
-        <code>~/.email-cli/tokens/&lt;account&gt;.json</code> and refreshed automatically.
-        Access tokens last about 1 hour; refresh tokens expire after roughly 90 days of
-        inactivity.
-      </p>
-      <p>Run the device code flow to authenticate:</p>
-      <div class="code-inline">
-        <Code code="mp config oauth2-login --account work" lang="bash" theme={codeTheme} />
-      </div>
-      <ConfigExample title="OAuth2 (IMAP/SMTP) config" code={`[[accounts]]
-name = "work"
-default_from = "name@company.com"
-auth_method = "oauth2"
-
-[accounts.oauth2]
-client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-tenant_id = "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
-
-[accounts.smtp]
-host = "smtp.office365.com"
-port = 587
-username = "name@company.com"
-
-[accounts.imap]
-host = "outlook.office365.com"
-port = 993
-username = "name@company.com"`} />
-
-      <h3 id="auth-graph">3. Graph API</h3>
-      <p>
-        For tenants that block IMAP and SMTP entirely. Uses the Microsoft Graph REST API
+        For every Microsoft 365 (Exchange Online) account. Uses the Microsoft Graph REST API
         for all mail operations. No app registration of your own is needed: the client ID
         of the shared mailypoppins app is built in, and the setup wizard
-        (<code>mp config init</code> or <code>mp config add-account</code>, option 4) uses it
+        (<code>mp config init</code> or <code>mp config add-account</code>, option 3) uses it
         when you press Enter at the client ID prompt. The tenant defaults to
         <code>common</code>, which takes any work, school or personal Microsoft account;
         you can still enter your tenant ID or domain instead.
@@ -551,16 +514,22 @@ server = "archive"
 
 [accounts.mailboxes.sent]
 server = "sentitems"          # Not "Sent Items"`} />
+      <p>
+        Microsoft OAuth2 over IMAP and SMTP (<code>auth_method = "oauth2"</code>) is retired.
+        A config that still names it loads, and only that account stays blocked: set
+        <code>auth_method = "graph"</code> for Microsoft 365 and run
+        <code>mp config oauth2-login</code>, or remove the line and set a password for
+        on-premises Exchange.
+      </p>
     </section>
 
     <!-- Azure App Registration -->
     <section>
       <h2 id="azure-app">Azure App Registration</h2>
       <p>
-        OAuth2 (IMAP/SMTP) authentication requires registering an application in
-        Azure Entra ID (formerly Azure Active Directory). Graph accounts need one only when
-        your organisation wants its own app instead of the mailypoppins app. Here is a
-        condensed setup.
+        A Graph account needs an application registered in Azure Entra ID (formerly
+        Azure Active Directory) only when your organisation wants its own app instead of
+        the mailypoppins app. Here is a condensed setup.
       </p>
 
       <ol class="setup-steps">
@@ -577,18 +546,9 @@ server = "sentitems"          # Not "Sent Items"`} />
           "Allow public client flows" to Yes. This enables the device code flow.
         </li>
         <li>
-          Under API permissions, add delegated permissions:
-          <ul>
-            <li>
-              For OAuth2 (IMAP/SMTP): <code>IMAP.AccessAsUser.All</code> and
-              <code>SMTP.Send</code> from Office 365 Exchange Online, plus
-              <code>offline_access</code> from Microsoft Graph.
-            </li>
-            <li>
-              For Graph API: <code>Mail.Read</code>, <code>Mail.ReadWrite</code>, and
-              <code>Mail.Send</code> from Microsoft Graph, plus <code>offline_access</code>.
-            </li>
-          </ul>
+          Under API permissions, add the delegated Microsoft Graph permissions
+          <code>Mail.Read</code>, <code>Mail.ReadWrite</code>, <code>Mail.Send</code> and
+          <code>offline_access</code>.
         </li>
         <li>
           If permissions show "Needs admin consent", request your IT administrator to

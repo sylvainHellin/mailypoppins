@@ -28,7 +28,7 @@ A change made in one client shows up in the others at once.
 
 ## Features
 
-- IMAP and SMTP accounts, and Microsoft 365 through OAuth2 or the Graph API.
+- IMAP and SMTP accounts with a password, on-premises Exchange included, and Microsoft 365 through the Graph API.
 - Drafts as Markdown files with YAML frontmatter, opened in your `$EDITOR`; the desktop app runs Neovim inside its window.
 - An approval step before sending, an undo-send window and a durable outbox.
 - Conversations that gather a thread from Inbox, Sent, Archive and Drafts.

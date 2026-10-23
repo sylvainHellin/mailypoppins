@@ -1,6 +1,6 @@
 # Secrets storage
 
-mailypoppins stores SMTP/IMAP passwords and OAuth2 token caches encrypted at
+mailypoppins stores SMTP/IMAP passwords and Graph token caches encrypted at
 rest with a key derived from the host machine ID and the current user's UID.
 There is no prompt at runtime, no GPG dependency, and no Keychain ACL to
 break across rebuilds.
@@ -67,7 +67,7 @@ The plaintext is a TOML document of the form:
 ```
 
 The same crypto helpers (`secrets::encrypt_blob` / `secrets::decrypt_blob`)
-are reused by `oauth2.rs` to encrypt OAuth2 token caches at
+are reused by `oauth2.rs` to encrypt Graph token caches at
 `<mailypoppins_data_dir>/tokens/<account>.enc` (raw blob format -- the plaintext is
 JSON, not TOML, but the wrapping is identical).
 
@@ -87,7 +87,7 @@ Cannot decrypt secrets store on this machine. Run `mp config reset-secrets` to w
 2. Removes `~/.config/mailypoppins/secrets.enc`.
 3. Removes all `*.enc` files under `<mailypoppins_data_dir>/tokens/`.
 4. Walks each configured `[[accounts]]` and re-prompts for SMTP / IMAP
-   passwords. For OAuth2 / Graph accounts, prints a hint to re-run
+   passwords. For Graph accounts, prints a hint to re-run
    `mp config oauth2-login --account <name>`.
 
 ## Opting into the OS keyring

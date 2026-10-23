@@ -104,7 +104,7 @@ cargo install --path .`}
       <CodeBlock lang="bash" code="mp config init" />
       <p>The wizard walks through these steps:</p>
       <ol class="steps">
-        <li>Choose a provider: standard IMAP/SMTP, Microsoft 365 with OAuth2, or Graph API (Graph signs in through the built-in mailypoppins app, so press Enter at the client ID and tenant prompts; until the mailypoppins publisher is verified with Microsoft, an administrator of your organisation has to approve the app at the first sign-in, which personal Microsoft accounts do not need).</li>
+        <li>Choose a provider: standard IMAP/SMTP with a password (on-premises Exchange included), Proton Mail Bridge, or Microsoft 365 through the Graph API (Graph signs in through the built-in mailypoppins app, so press Enter at the client ID and tenant prompts; until the mailypoppins publisher is verified with Microsoft, an administrator of your organisation has to approve the app at the first sign-in, which personal Microsoft accounts do not need).</li>
         <li>Enter credentials (server host, port, username, email address).</li>
         <li>Automatic connection test to verify everything works.</li>
         <li>Mailbox discovery: the wizard lists server mailboxes and lets you assign the inbox, archive, and sent roles; "Type another name" takes a mailbox the server did not list, and a role with nothing left to pick asks for the name directly.</li>
@@ -117,8 +117,7 @@ cargo install --path .`}
         For Microsoft 365 accounts, the wizard runs the OAuth2 device code flow: it
         displays a URL and a code, you sign in via your browser, and the token is
         cached locally.
-        It then tests the SMTP login with that token: a tenant that disables SMTP AUTH
-        refuses it, and the wizard warns and goes on, since only sending needs it.
+        It then tests the Graph connection with that token and lists the account's folders.
       </p>
       <p>
         The wizard does not ask about signatures. A signature is a Markdown file in
@@ -259,7 +258,7 @@ Let me know if I missed anything.`}
       <ul class="next-links">
         <li><a href="/commands/">Commands</a>: full reference for every CLI command</li>
         <li><a href="/draft-format/">Draft Format</a>: frontmatter fields, status workflow, attachments</li>
-        <li><a href="/config/">Configuration</a>: multi-account setup, OAuth2, Graph API, signatures</li>
+        <li><a href="/config/">Configuration</a>: multi-account setup, Graph API, signatures</li>
         <li><a href="/faq/">FAQ</a>: troubleshooting and common questions</li>
       </ul>
     </section>

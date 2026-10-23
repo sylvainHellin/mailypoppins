@@ -13,7 +13,7 @@ It refuses uncommitted changes to tracked files unless given `--allow-dirty`, an
 
 ## Secrets
 
-By default, mailypoppins stores SMTP/IMAP passwords and OAuth2 tokens in a machine-bound encrypted file at `~/.config/mailypoppins/secrets.enc`.
+By default, mailypoppins stores SMTP/IMAP passwords and Graph tokens in a machine-bound encrypted file at `~/.config/mailypoppins/secrets.enc`.
 There is no Keychain prompt during `cargo install` and no codesign setup required.
 See [docs/secrets.md](docs/secrets.md) for the threat model, key derivation, and recovery procedure (`mp config reset-secrets`).
 
