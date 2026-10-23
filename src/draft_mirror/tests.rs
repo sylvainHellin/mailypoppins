@@ -1802,3 +1802,44 @@ fn an_approval_travels_only_with_every_attachment() {
     assert_eq!(status_of(&m2, "d-with"), EmailStatus::Approved);
     assert_eq!(status_of(&m2, "d-without"), EmailStatus::Draft);
 }
+
+/// An attachment entry that resolves here to a file whose bytes are not the
+/// ones the copy carries under that name is not what was approved there: the
+/// draft lands as a draft. The same name with the same bytes keeps the
+/// approval.
+#[test]
+fn an_approval_travels_only_when_the_local_attachment_bytes_match() {
+    use crate::types::EmailStatus;
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    let shared = tempfile::tempdir().unwrap();
+    let same = shared.path().join("same.pdf");
+    let differs = shared.path().join("plan.pdf");
+    std::fs::write(&same, b"%PDF-1.4 same").unwrap();
+    std::fs::write(&differs, b"%PDF-1.4 approved plan").unwrap();
+    {
+        let _guard = m1.enter();
+        let a = Fixture::write_in_current(
+            "same",
+            "d-same",
+            &format!("attachments:\n  - {}\n", same.display()),
+            "Anbei",
+        );
+        approve(&a);
+        let b = Fixture::write_in_current(
+            "differs",
+            "d-differs",
+            &format!("attachments:\n  - {}\n", differs.display()),
+            "Anbei der Plan",
+        );
+        approve(&b);
+    }
+    m1.drain(&mut folder);
+    // The path resolves on the other machine too, to another file.
+    std::fs::write(&differs, b"%PDF-1.4 a plan nobody approved").unwrap();
+
+    assert_eq!(m2.reconcile(&mut folder).imported, 2);
+    assert_eq!(status_of(&m2, "d-same"), EmailStatus::Approved);
+    assert_eq!(status_of(&m2, "d-differs"), EmailStatus::Draft);
+}

@@ -904,10 +904,12 @@ fn settle_status(path: &Path, local: EmailStatus, as_approved: bool) -> Result<(
 /// left in place.
 ///
 /// The answer says, for a copy carrying its source, whether the draft's
-/// attachments are still the source's: every entry resolves here, or the
-/// copy carries one part for each entry under its file name. An entry the
-/// copy does not carry (a file that was missing when the other machine
-/// pushed) means the draft is not what was approved there.
+/// attachments are still the source's: every entry that resolves here is a
+/// file whose bytes are those of the copy's part under the same name, every
+/// other entry is a part the copy carries under its file name, and the copy
+/// carries no part beyond those. A file here that differs from the part, or
+/// an entry the copy does not carry (a file that was missing when the other
+/// machine pushed), means the draft is not what was approved there.
 fn attach_parts(
     mirror: &Mirror<'_>,
     path: &Path,
@@ -917,16 +919,6 @@ fn attach_parts(
     let draft = crate::draft::parse_email_draft(path)?;
     let dir = path.parent().unwrap_or(Path::new("."));
     let entries = draft.frontmatter.attachments.clone().unwrap_or_default();
-    // An entry resolves when it names files that are here: a path joined to
-    // the directory is not yet a file, and the other machine's paths are
-    // mostly not.
-    let resolves = |entry: &String| {
-        crate::send::resolve_attachment_paths(std::slice::from_ref(entry), dir)
-            .is_ok_and(|paths| !paths.is_empty() && paths.iter().all(|p| p.is_file()))
-    };
-    if from_source && entries.iter().all(resolves) {
-        return Ok(true);
-    }
     let html = email.html_body.as_deref().unwrap_or_default();
     let parts: Vec<&crate::parse::AttachmentData> = email
         .attachments
@@ -937,6 +929,18 @@ fn attach_parts(
                 .is_none_or(|cid| !html.contains(&format!("cid:{}", cid.trim_matches(['<', '>']))))
         })
         .collect();
+    // An entry resolves when it names files that are here: a path joined to
+    // the directory is not yet a file, and the other machine's paths are
+    // mostly not. `resolve_attachment_paths` does not check that.
+    let resolved = |entry: &String| {
+        crate::send::resolve_attachment_paths(std::slice::from_ref(entry), dir)
+            .ok()
+            .filter(|paths| !paths.is_empty() && paths.iter().all(|p| p.is_file()))
+    };
+    let faithful = from_source && attachments_match(&entries, &parts, resolved);
+    if faithful && entries.iter().all(|entry| resolved(entry).is_some()) {
+        return Ok(true);
+    }
     let mid = draft
         .frontmatter
         .server_message_id
@@ -947,17 +951,6 @@ fn attach_parts(
         &crate::config::account_dir(&mirror.account.name),
         &mid,
     );
-    let file_name = |entry: &String| {
-        Path::new(entry)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
-    let mut entry_names: Vec<String> = entries.iter().map(file_name).collect();
-    let mut part_names: Vec<String> = parts.iter().map(|p| p.filename.clone()).collect();
-    entry_names.sort();
-    part_names.sort();
-    let faithful = from_source && entry_names == part_names;
     let mut wanted = Vec::new();
     for part in parts {
         let kept = entries.iter().find(|entry| {
@@ -990,6 +983,85 @@ fn attach_parts(
         crate::draft::append_draft_attachment(path, entry)?;
     }
     Ok(faithful)
+}
+
+/// Whether the attachment `entries` of a carried draft are exactly the
+/// `parts` its copy carries: each file an entry resolves to here (`resolved`)
+/// matches a part of the same file name byte for byte, each entry that
+/// resolves to nothing here matches a part of its file name, and no part is
+/// left over.
+fn attachments_match(
+    entries: &[String],
+    parts: &[&crate::parse::AttachmentData],
+    resolved: impl Fn(&String) -> Option<Vec<std::path::PathBuf>>,
+) -> bool {
+    let name_of = |path: &Path| {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    // What each entry stands for: a file name, and the bytes when the file
+    // is here. Byte-bound items are matched first, so a bare name never
+    // takes the part a file here needed.
+    let mut wanted: Vec<(String, Option<Vec<u8>>)> = Vec::new();
+    for entry in entries {
+        match resolved(entry) {
+            Some(paths) => {
+                for path in paths {
+                    let Ok(bytes) = std::fs::read(&path) else {
+                        return false;
+                    };
+                    wanted.push((name_of(&path), Some(bytes)));
+                }
+            }
+            None => wanted.push((name_of(Path::new(entry)), None)),
+        }
+    }
+    if wanted.len() != parts.len() {
+        return false;
+    }
+    wanted.sort_by_key(|(_, bytes)| bytes.is_none());
+    let mut used = vec![false; parts.len()];
+    wanted.iter().all(|(name, bytes)| {
+        let found = parts.iter().enumerate().position(|(at, part)| {
+            !used[at]
+                && part.filename == *name
+                && bytes
+                    .as_ref()
+                    .is_none_or(|bytes| same_attachment_bytes(bytes, &part.content))
+        });
+        found.map(|at| used[at] = true).is_some()
+    })
+}
+
+/// Whether a file here and the part a copy carries hold the same attachment.
+///
+/// Byte for byte, except for what the transfer does to a part sent as text:
+/// lettre sends an ASCII file as `7bit` or quoted-printable, which turns its
+/// line ends into CRLF and ends it with one, so a `.txt` or a `.csv` comes
+/// back with those line ends. Line ends are no content anyone approves;
+/// every other byte counts.
+fn same_attachment_bytes(local: &[u8], part: &[u8]) -> bool {
+    if local == part {
+        return true;
+    }
+    let normal = |bytes: &[u8]| {
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] == b'\r' && bytes.get(at + 1) == Some(&b'\n') {
+                at += 1;
+                continue;
+            }
+            out.push(bytes[at]);
+            at += 1;
+        }
+        while out.last() == Some(&b'\n') {
+            out.pop();
+        }
+        out
+    };
+    normal(local) == normal(part)
 }
 
 /// Keep the copy of a draft that was removed by hand in `drafts/.retired/`,

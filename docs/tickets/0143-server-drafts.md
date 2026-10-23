@@ -347,7 +347,7 @@ Only the part above the quote boundary is replaced.
 The text below `QUOTE_MARKER` and the companion `.html` stay as they are, because Outlook and Apple Mail rewrite a quoted thread in ways mp would not round-trip.
 The boundary in the server HTML is mp's own quote `<div>` when the comment survived, and otherwise the first of the quote wrappers above; the probe's dumps confirm the selectors.
 
-A pull into an `approved` draft demotes it to `status: draft`, unless the pull writes, byte for byte and with every attachment, a file mp approved and pushed on the other machine: a send must never carry content the user did not approve.
+A pull into an `approved` draft demotes it to `status: draft`, unless the carried source reproduces a file mp approved and pushed on the other machine, and every attachment is here or carried by the copy: a send must never carry content the user did not approve.
 A pull into a draft with an open outbox row (`active_submission_for_draft`, `src/outbox.rs:773`) or an armed undo-send hold (`src/daemon/hold.rs`) waits until that settles.
 
 #### Conflict
@@ -490,7 +490,7 @@ No `state.invalidate` scope changes: drafts never travelled as invalidations, an
 
 - Approval travels: a draft approved on one machine is approved on the other (Sylvain, 2026-10-23; `draft_mirror::approval_travels()`).
   The status rides inside the carried source, so it is read only from a copy whose mark, source hash and `Message-ID` hold together as above, never from a header of its own: no `X-Mailypoppins-Draft-Status` is written, since a header any client could have set would read the same on a copy mp never wrote.
-  A pull or an import takes the carried status only when the source reproduces the pushed file byte for byte (the Bcc put back gives the file's hash) and every attachment entry is a file here or a part the copy carries under its name; anything else lands as `status: draft`.
+  A pull or an import takes the carried status only when the carried source reproduces the pushed file (the Bcc put back gives the file's hash), and every attachment is here or carried by the copy: an attachment file that is here holds the bytes of the copy's part of the same name, line ends aside, and any other entry is a part the copy carries under its name; anything else lands as `status: draft`.
   An edit in Outlook, Apple Mail or the Proton app drops the mark, so it demotes the draft on both machines.
   On Proton the approval does not travel: Bridge drops the `X-Mailypoppins-Draft-Source` headers at the APPEND, the other machine reads the copy through its HTML, which is a lossy conversion with no validated status, and the draft lands as `status: draft` to be approved again there.
   Rejected for Proton: the status in the mark comment, which no source validates and any client could write, and which would approve a body converted from HTML rather than the one approved.

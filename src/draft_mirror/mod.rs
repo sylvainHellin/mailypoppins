@@ -38,12 +38,14 @@ use crate::types::{EmailDraft, EmailStatus};
 /// ([`carrier`]), never in a header of its own, so it is read only from a
 /// copy mp pushed and nobody edited since: the HTML part still ends with
 /// mp's mark, the carried file hashes to it and names the copy's own
-/// `Message-ID`. A pull or an import takes that status only when the file it
-/// writes is the one that was approved, byte for byte, attachments included
-/// ([`carrier::MpCopy::reproduces_file`]); anything else (an edit in Outlook,
-/// Apple Mail or the Proton app, a copy whose headers Proton Bridge dropped,
-/// an attachment the copy no longer carries) demotes an approved draft to
-/// `status: draft`, since a send must not carry content nobody approved.
+/// `Message-ID`. A pull or an import takes that status only when the carried
+/// source reproduces the pushed file ([`carrier::MpCopy::reproduces_file`]),
+/// and every attachment is here or carried by the copy, a file here holding
+/// the bytes of the copy's part of the same name; anything else (an edit in
+/// Outlook, Apple Mail or the Proton app, a copy whose headers Proton Bridge
+/// dropped, an attachment the copy does not carry or carries with other
+/// bytes) demotes an approved draft to `status: draft`, since a send must not
+/// carry content nobody approved.
 /// `false` keeps approval local: every pull and import demotes.
 pub const fn approval_travels() -> bool {
     true

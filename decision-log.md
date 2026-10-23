@@ -237,7 +237,12 @@ Status: accepted
 
 ## 2026-10-23 - A draft's approval travels to mp on the other machine through its server copy
 
-Why: a draft approved on the Mac should be sendable from the home server without approving it twice. The status rides inside the draft file the copy carries, so it is taken only from a copy mp pushed and nobody edited since, and only when the pull writes that file byte for byte with every attachment; an edit in Outlook, Apple Mail or the Proton app demotes the draft to `status: draft` on both machines. On Proton it does not travel, because Bridge drops the headers that carry the file and the copy's HTML holds no validated status. Ticket [#0143](docs/tickets/0143-server-drafts.md).
+Why: a draft approved on the Mac should be sendable from the home server without approving it twice.
+The status rides inside the draft file the copy carries, so it is taken only from a copy mp pushed and nobody edited since.
+A pull or an import takes it only when the carried source reproduces the pushed file, and every attachment is here or carried by the copy; an attachment file that is here must hold the bytes of the copy's part of the same name.
+An edit in Outlook, Apple Mail or the Proton app demotes the draft to `status: draft` on both machines.
+On Proton it does not travel, because Bridge drops the headers that carry the file and the copy's HTML holds no validated status.
+Ticket [#0143](docs/tickets/0143-server-drafts.md).
 Rejected: approval staying local (the build's provisional default, never logged as a decision); a status header of its own, which a copy mp never wrote could carry too; the status in the HTML mark for Proton, which nothing validates and which would approve a body converted from HTML.
 Source: Sylvain, chat of 2026-10-23.
 Status: accepted
