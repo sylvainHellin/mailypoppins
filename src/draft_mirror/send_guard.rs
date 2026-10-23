@@ -45,7 +45,10 @@
 //! What remains open: two sends whose `UID FETCH` both precede either one's
 //! `UID EXPUNGE`, a window of one round trip, each see the expunge and both
 //! go ahead; plain IMAP has no test-and-set to close it without `CONDSTORE`,
-//! which neither server offers. A store rebuilt after another machine sent
+//! which neither server offers. The same window holds between a push and a
+//! claim on two machines: a push whose `UID SEARCH` still sees the copy
+//! another machine's claim then expunges appends a fresh copy, which a later
+//! claim here could take. A store rebuilt after another machine sent
 //! the draft leaves it here with no copy and no row, which this machine
 //! sends again, as its owed-push scan would push it again anyway.
 
