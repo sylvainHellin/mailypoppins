@@ -12,7 +12,12 @@
 //! ```text
 //! cargo run --example draft_probe -- append <account>
 //! cargo run --example draft_probe -- dump <account> <id> --label "<step>"
+//! cargo run --example draft_probe -- list <account> [--structure <uid>]
 //! ```
+//!
+//! `list` is read-only: it EXAMINEs the Drafts folder and prints one line per
+//! message, and with `--structure` the MIME tree of one message and the
+//! reply or forward header block of its text, without the rest of the body.
 //!
 //! `append` records the folder's UIDNEXT and UIDVALIDITY before the APPEND in
 //! `/var/tmp/mp-draft-probe-<account>-<id>.json`, and keeps the appended bytes
@@ -79,6 +84,17 @@ enum Cmd {
         #[arg(long)]
         bcc: Option<String>,
     },
+    /// List every message of the account's Drafts folder, read-only (EXAMINE).
+    List {
+        account: String,
+        /// Server folder to list; default: the `\Drafts` folder, then `Drafts`.
+        #[arg(long)]
+        folder: Option<String>,
+        /// Print this UID's MIME tree and the header block of a quoted or
+        /// forwarded message in its text, and none of the rest of its body.
+        #[arg(long)]
+        structure: Option<u32>,
+    },
     /// Dump the copies of one probe draft and everything that appeared since its APPEND.
     Dump {
         account: String,
@@ -130,7 +146,9 @@ fn main() -> Result<()> {
         }
     }
     let account_name = match &args.cmd {
-        Cmd::Append { account, .. } | Cmd::Dump { account, .. } => account.clone(),
+        Cmd::Append { account, .. } | Cmd::Dump { account, .. } | Cmd::List { account, .. } => {
+            account.clone()
+        }
     };
     let account = global
         .accounts
@@ -141,7 +159,7 @@ fn main() -> Result<()> {
     // Read before any login, so a mistyped id fails without touching the server.
     let state = match &args.cmd {
         Cmd::Dump { id, .. } => Some(read_state(&account.name, id)?),
-        Cmd::Append { .. } => None,
+        Cmd::Append { .. } | Cmd::List { .. } => None,
     };
     // Loaded outside the runtime: an OAuth2 refresh blocks.
     let imap = ImapConfig::load(&account)?;
@@ -163,6 +181,9 @@ fn main() -> Result<()> {
                 let state = state.expect("read above for dump");
                 dump(&mut session, &state, label).await
             }
+            Cmd::List {
+                folder, structure, ..
+            } => list(&mut session, folder, structure).await,
         };
         session.logout().await.ok();
         result
@@ -968,6 +989,254 @@ fn text_parts(part: &mailparse::ParsedMail<'_>, path: &str, out: &mut String) {
     }
     for (n, sub) in part.subparts.iter().enumerate() {
         text_parts(sub, &format!("{path}.{}", n + 1), out);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// list
+// ---------------------------------------------------------------------------
+
+/// One line per message of the Drafts folder, over EXAMINE so nothing is
+/// marked or moved; with `structure`, that message's shape.
+async fn list(
+    session: &mut ImapSession,
+    folder: Option<String>,
+    structure: Option<u32>,
+) -> Result<()> {
+    let listed = list_folders(session).await?;
+    let folder = match folder {
+        Some(f) => f,
+        None => pick_folder(&listed, "Drafts", &["Drafts"])
+            .ok_or_else(|| anyhow!("no \\Drafts folder and no folder named Drafts"))?,
+    };
+    let attrs = listed
+        .iter()
+        .find(|(name, _)| *name == folder)
+        .map(|(_, attrs)| attrs.join(" "))
+        .unwrap_or_default();
+    let mbox = session
+        .examine(&folder)
+        .await
+        .map_err(|e| anyhow!("EXAMINE {folder}: {e}"))?;
+    println!(
+        "folder {folder} ({attrs}): EXISTS {} UIDVALIDITY {} UIDNEXT {}",
+        mbox.exists,
+        opt(mbox.uid_validity),
+        opt(mbox.uid_next)
+    );
+    if mbox.exists == 0 {
+        return Ok(());
+    }
+    let set = structure.map_or_else(|| "1:*".to_string(), |uid| uid.to_string());
+    let fetched = fetch_all(session, &set, "(UID FLAGS INTERNALDATE BODY.PEEK[])").await?;
+    for f in &fetched {
+        let Some(uid) = f.uid else { continue };
+        let Some(raw) = f.body() else { continue };
+        let flags: Vec<String> = f.flags().map(|fl| flag_token(&fl)).collect();
+        let Ok(parsed) = mailparse::parse_mail(raw) else {
+            println!("UID {uid} ({}) does not parse", flags.join(" "));
+            continue;
+        };
+        let get = |name: &str| header_of(&parsed, name).unwrap_or_else(|| "(absent)".into());
+        println!(
+            "UID {uid} ({}) {} | Message-ID {} | Subject {} | {}: {} | {} | {} | MIME {}",
+            flags.join(" "),
+            f.internal_date()
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_default(),
+            get("Message-ID"),
+            get("Subject"),
+            MARKER_HEADER,
+            get(MARKER_HEADER),
+            source_line(&parsed),
+            carrier_line(raw),
+            mime_shape(&parsed)
+        );
+        if structure == Some(uid) {
+            print!("{}", structure_of(&parsed));
+        }
+    }
+    Ok(())
+}
+
+/// The tags of an HTML body from `<body` on, each text run replaced by its
+/// length in brackets, so the layout prints and the words do not.
+fn tag_skeleton(html: &str) -> String {
+    let start = html.find("<body").unwrap_or(0);
+    let mut out = String::new();
+    let mut rest = &html[start..];
+    while let Some(open) = rest.find('<') {
+        let text = rest[..open].trim();
+        if !text.is_empty() && text != "&nbsp;" {
+            let _ = write!(out, "[{}]", text.len());
+        } else if text == "&nbsp;" {
+            out.push_str("&nbsp;");
+        }
+        let Some(close) = rest[open..].find('>') else {
+            break;
+        };
+        let tag = &rest[open..open + close + 1];
+        if tag.starts_with("<p") || tag.starts_with("<div") || tag.starts_with("<hr") {
+            out.push('\n');
+        }
+        out.push_str(tag);
+        rest = &rest[open + close + 1..];
+    }
+    out
+}
+
+/// A MIME tree on one line: `multipart/mixed[text/html, message/rfc822]`.
+fn mime_shape(part: &mailparse::ParsedMail<'_>) -> String {
+    if part.subparts.is_empty() {
+        return part.ctype.mimetype.clone();
+    }
+    format!(
+        "{}[{}]",
+        part.ctype.mimetype,
+        part.subparts
+            .iter()
+            .map(mime_shape)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Whether a text line is one of a quoted message's header lines, in the
+/// English or German Outlook and Apple Mail spell them.
+fn header_block_line(line: &str) -> bool {
+    const NAMES: [&str; 14] = [
+        "From:",
+        "Sent:",
+        "To:",
+        "Cc:",
+        "Subject:",
+        "Date:",
+        "Von:",
+        "Gesendet:",
+        "An:",
+        "Betreff:",
+        "Datum:",
+        "Begin forwarded message:",
+        "Anfang der weitergeleiteten",
+        "Original Message",
+    ];
+    let t = line.trim_start_matches(['>', ' ', '*']).trim();
+    NAMES
+        .iter()
+        .any(|n| t.starts_with(n) || t.contains("-----Original"))
+}
+
+/// A separator line: underscores, dashes, or the probe's `<hr>` stand-in.
+fn separator_line(line: &str) -> bool {
+    let t = line.trim();
+    t.len() >= 5 && t.chars().all(|c| matches!(c, '_' | '-' | '─' | '='))
+}
+
+/// The shape of one message: its MIME tree, its header names, and for each
+/// text part the quote wrappers its HTML carries and the header block of the
+/// message it quotes or forwards. Lines of the body that are neither are
+/// counted, not printed.
+fn structure_of(parsed: &mailparse::ParsedMail<'_>) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "  MIME:");
+    mime_tree(parsed, "1", 2, &mut out);
+    let names: Vec<String> = parsed.headers.iter().map(|h| h.get_key()).collect();
+    let _ = writeln!(out, "  header names: {}", names.join(", "));
+    for name in ["In-Reply-To", "References", "Thread-Topic", "Thread-Index"] {
+        let _ = writeln!(
+            out,
+            "  {name}: {}",
+            if header_of(parsed, name).is_some() {
+                "present"
+            } else {
+                "absent"
+            }
+        );
+    }
+    structure_parts(parsed, "1", &mut out);
+    out
+}
+
+fn structure_parts(part: &mailparse::ParsedMail<'_>, path: &str, out: &mut String) {
+    if part.ctype.mimetype == "message/rfc822" {
+        let inner = part.get_body_raw().unwrap_or_default();
+        if let Ok(inner) = mailparse::parse_mail(&inner) {
+            let names: Vec<String> = inner.headers.iter().map(|h| h.get_key()).collect();
+            let _ = writeln!(
+                out,
+                "  {path} message/rfc822: {} header(s) ({}), MIME {}",
+                names.len(),
+                names.join(", "),
+                mime_shape(&inner)
+            );
+        }
+        return;
+    }
+    if part.subparts.is_empty() {
+        let attachment = matches!(
+            part.get_content_disposition().disposition,
+            mailparse::DispositionType::Attachment
+        );
+        if !part.ctype.mimetype.starts_with("text/") || attachment {
+            return;
+        }
+        let body = part.get_body().unwrap_or_default();
+        let text = if part.ctype.mimetype == "text/html" {
+            let wrappers: Vec<&str> = [
+                "divRplyFwdMsg",
+                "appendonsend",
+                "<hr",
+                "border-top:solid",
+                "type=\"cite\"",
+                "<blockquote",
+                "OutlookMessageHeader",
+                "x_divRplyFwdMsg",
+            ]
+            .into_iter()
+            .filter(|w| body.contains(w))
+            .collect();
+            let _ = writeln!(
+                out,
+                "  {path} text/html, {} bytes, wrappers: {}, reply boundary at {}",
+                body.len(),
+                if wrappers.is_empty() {
+                    "none".to_string()
+                } else {
+                    wrappers.join(" ")
+                },
+                opt(mailypoppins::parse::draft_reply_boundary(&body))
+            );
+            let _ = writeln!(out, "  {path} tag skeleton of <body>, text as [bytes]:");
+            let _ = writeln!(out, "{}", tag_skeleton(&body));
+            mailypoppins::parse::html_to_plain(&body)
+        } else {
+            let _ = writeln!(
+                out,
+                "  {path} {}, {} bytes",
+                part.ctype.mimetype,
+                body.len()
+            );
+            body
+        };
+        let mut skipped = 0usize;
+        for (n, line) in text.lines().enumerate() {
+            if header_block_line(line) || separator_line(line) {
+                if skipped > 0 {
+                    let _ = writeln!(out, "    ({skipped} other non-empty line(s))");
+                    skipped = 0;
+                }
+                let _ = writeln!(out, "    line {}: {}", n + 1, line.trim_end());
+            } else if !line.trim().is_empty() {
+                skipped += 1;
+            }
+        }
+        if skipped > 0 {
+            let _ = writeln!(out, "    ({skipped} other non-empty line(s))");
+        }
+        return;
+    }
+    for (n, sub) in part.subparts.iter().enumerate() {
+        structure_parts(sub, &format!("{path}.{}", n + 1), out);
     }
 }
 
