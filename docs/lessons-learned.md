@@ -3218,3 +3218,9 @@ A row queued anywhere else (a send settling its draft, the watcher, a reconcile)
 
 `send::resolve_attachment_paths` joins an entry to the draft's directory and expands a folder, but a plain path comes back whether or not a file exists at it.
 Code that needs to know whether an attachment is present here, such as the drafts mirror deciding whether an approval travelled with its attachments, checks each path with `is_file()`.
+
+## async-imap routes mid-command EXPUNGEs to a side channel (2026-10-23)
+
+async-imap 0.11 sends an untagged `EXPUNGE` that arrives during `UID FETCH` or `UID STORE` to `Session::unsolicited_responses`, not to the command's own stream.
+That channel is bounded at 100 and silently drops once full, so code that relies on sequence numbers empties it before the command and checks it afterwards.
+async-imap also treats an EOF as a clean end of stream, so a dropped connection can look like an empty result instead of an error.
