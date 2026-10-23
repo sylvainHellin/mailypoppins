@@ -1146,29 +1146,33 @@ pub fn create_forward_draft_with(
     // The header is Outlook's: bold labels in a block under a thin #B5C4DF
     // top border, the bordered `From:`/`Sent:` block
     // `parse::draft_reply_boundary` takes for the start of a quote, then a
-    // blank line (the paragraph's bottom margin) and the original.
+    // blank line (the paragraph's bottom margin) and the original. A
+    // plain-text original gets the block too, over its text escaped and kept
+    // as its lines run, so its sent copy carries the border and a copy edited
+    // in Outlook still imports with the original below the quote marker.
     if body == ForwardBody::Quoted {
-        if let Some(html_content) = inbox
-            .html
-            .as_deref()
-            .map(crate::parse::neutralize_draft_marks)
-        {
-            let header_lines = header_fields
-                .iter()
-                .map(|(label, value)| format!("<b>{label}</b> {}", escape_html_text(value)))
-                .collect::<Vec<_>>()
-                .join("<br>\n");
-            let wrapped = format!(
-                "<div style=\"border:none;border-top:solid #B5C4DF 1.0pt;padding:3.0pt 0cm 0cm 0cm\">\n\
-                 <p style=\"margin:0 0 12.0pt 0\">{header_lines}</p>\n\
-                 </div>\n\
-                 <div>\n\
-                 {html_content}\n\
-                 </div>",
-            );
-            let draft_html = dest.with_extension("html");
-            fs::write(&draft_html, wrapped)?;
-        }
+        let header_lines = header_fields
+            .iter()
+            .map(|(label, value)| format!("<b>{label}</b> {}", escape_html_text(value)))
+            .collect::<Vec<_>>()
+            .join("<br>\n");
+        let original = match inbox.html.as_deref() {
+            Some(html) => format!(
+                "<div>\n{}\n</div>",
+                crate::parse::neutralize_draft_marks(html)
+            ),
+            None => format!(
+                "<div style=\"white-space:pre-wrap\">{}</div>",
+                escape_html_text(clean_body.trim())
+            ),
+        };
+        let wrapped = format!(
+            "<div style=\"border:none;border-top:solid #B5C4DF 1.0pt;padding:3.0pt 0cm 0cm 0cm\">\n\
+             <p style=\"margin:0 0 12.0pt 0\">{header_lines}</p>\n\
+             </div>\n\
+             {original}",
+        );
+        fs::write(dest.with_extension("html"), wrapped)?;
     }
 
     Ok(dest)
@@ -4172,10 +4176,10 @@ mod tests {
     /// The Markdown forward header puts each label on its own line, Outlook's
     /// order with no separator line, and ends each line but the last with a
     /// hard break (two trailing spaces), so the Markdown-rendered HTML part of
-    /// a forward without a companion shows one header field per line instead
-    /// of one long paragraph (PERSO-169). Two spaces rather than a trailing
-    /// backslash: the plain part is the Markdown as written, and a backslash
-    /// would show there. The values themselves stay as written.
+    /// a forward whose companion is gone shows one header field per line
+    /// instead of one long paragraph (PERSO-169). Two spaces rather than a
+    /// trailing backslash: the plain part is the Markdown as written, and a
+    /// backslash would show there. The values themselves stay as written.
     #[test]
     fn markdown_forward_header_puts_each_field_on_its_own_line() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4186,7 +4190,6 @@ mod tests {
         let path =
             create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), Some("Sylvain"))
                 .unwrap();
-        assert!(!path.with_extension("html").exists());
         let md = fs::read_to_string(&path).unwrap();
         let (_, body) = md.rsplit_once("---\n").unwrap();
         let expected = format!(
@@ -4201,6 +4204,43 @@ mod tests {
             local_sent()
         );
         assert_eq!(body, expected);
+    }
+
+    /// A forward of a plain-text original carries Outlook's bordered header
+    /// block in a companion HTML too, over the original escaped and kept as
+    /// its lines run, so the sent HTML shows the border and the quote is one
+    /// `parse::draft_reply_boundary` recognises; the Markdown keeps its quote
+    /// marker.
+    #[test]
+    fn a_plain_text_original_gets_the_bordered_html_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = SourceMessage {
+            html: None,
+            body: "Hi <team> & \"all\",\n\n  indented\n<!-- mp:quote -->".into(),
+            ..html_source("Zoë <zoe@example.de>")
+        };
+        let path =
+            create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None).unwrap();
+        let expected = format!(
+            "<div style=\"border:none;border-top:solid #B5C4DF 1.0pt;padding:3.0pt 0cm 0cm 0cm\">\n\
+            <p style=\"margin:0 0 12.0pt 0\"><b>From:</b> Zoë &lt;zoe@example.de&gt;<br>\n\
+            <b>Sent:</b> {}<br>\n\
+            <b>To:</b> Me &lt;me@example.com&gt;, Ops &amp; Co &lt;ops@x.com&gt;<br>\n\
+            <b>Cc:</b> carol@example.com<br>\n\
+            <b>Subject:</b> Q&amp;A &lt;draft&gt; &quot;v2&quot;</p>\n\
+            </div>\n\
+            <div style=\"white-space:pre-wrap\">Hi &lt;team&gt; &amp; &quot;all&quot;,\n\n  indented\n\
+            &lt;!-- mp:quote --&gt;</div>",
+            local_sent()
+        );
+        let html = companion_html(&path);
+        assert_eq!(html, expected);
+        assert!(fs::read_to_string(&path).unwrap().contains(QUOTE_MARKER));
+        let sent = format!("<p>Hi Kim</p>\n<div style=\"padding-top:1em\">\n{html}\n</div>");
+        assert_eq!(
+            crate::parse::draft_reply_boundary(&sent),
+            sent.find("<div style=\"border:none")
+        );
     }
 
     /// Outlook's forward as attachment (PERSO-174): the frontmatter a forward

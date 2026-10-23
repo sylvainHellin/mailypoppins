@@ -2225,6 +2225,67 @@ fn an_outlook_mobile_forward_imports_as_a_forward_with_its_quote_marked() {
     assert_eq!(local.draft.frontmatter.forwarded_from, None);
 }
 
+/// A forward mp wrote of a plain-text original, edited in Outlook: the note
+/// typed above the quote, saved back as one `text/html` part under a new
+/// Message-ID with none of mp's headers.
+fn outlook_edited_plain_forward() -> Vec<u8> {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = crate::draft::SourceMessage {
+        from: "Tina <tina@tum.de>".into(),
+        to: "me@tum.de".into(),
+        subject: "Master's thesis".into(),
+        message_id: Some("<parent@tum.de>".into()),
+        date: Some("Thu, 22 Oct 2026 14:03:00 +0200".into()),
+        body: "Die Arbeit ist eingereicht.\n\nViele Gruesse\nTina".into(),
+        ..Default::default()
+    };
+    let path =
+        crate::draft::create_forward_draft_from(&source, "me@tum.de", Some(tmp.path()), None)
+            .unwrap();
+    let draft = crate::draft::parse_email_draft(&path).unwrap();
+    let html = crate::send::draft_html_body(&draft, &EmailSettings::default(), None);
+    let quote = html
+        .find("<div style=\"padding-top:1em\">")
+        .expect("a quoted part");
+    let edited = format!(
+        "{}<p>Zur Info, siehe unten.</p>\n{}",
+        &html[..quote],
+        &html[quote..]
+    );
+    format!(
+        "From: Sylvain Hellin <me@tum.de>\r\nTo: kim@tum.de\r\nSubject: FW: Master's thesis\r\n\
+         Message-ID: <outlook-edit@tum.de>\r\nIn-Reply-To: <parent@tum.de>\r\nMIME-Version: 1.0\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\r\n{edited}\r\n"
+    )
+    .into_bytes()
+}
+
+/// An Outlook-edited copy of a forward of a plain-text original imports with
+/// the original below the quote marker: mp's companion HTML gave the sent
+/// copy the bordered From/Sent block the import takes for a quote.
+#[test]
+fn an_outlook_edited_forward_of_a_plain_text_original_imports_with_its_quote_marked() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    folder.put(&outlook_edited_plain_forward());
+
+    assert_eq!(reconciled(&fx, &mut folder).imported, 1);
+    let local = local_drafts("tum").pop().expect("imported");
+    assert_eq!(
+        local.draft.frontmatter.forwarded_from.as_deref(),
+        Some("<parent@tum.de>")
+    );
+    let body = &local.draft.body_markdown;
+    let marker = body
+        .find(crate::draft::QUOTE_MARKER)
+        .unwrap_or_else(|| panic!("a quote marker: {body}"));
+    assert!(body[..marker].contains("Zur Info"), "{body}");
+    assert!(!body[..marker].contains("eingereicht"), "{body}");
+    for kept in ["From:", "Tina", "Die Arbeit ist eingereicht."] {
+        assert!(body[marker..].contains(kept), "{kept}: {body}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Every refusal of the send guard is in the daemon log (2026-10-23)
 // ---------------------------------------------------------------------------
