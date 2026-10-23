@@ -45,7 +45,7 @@ pub struct DraftCreated {
     /// The message it answers, absent for a draft made from nothing.
     pub source: Option<DraftSource>,
     /// The `subject:` the file was written with (#0131): the builder's
-    /// `Re:` or `Fwd:` subject, the override `headers` gave, or `""` for a
+    /// `Re:` or `FW:` subject, the override `headers` gave, or `""` for a
     /// skeleton. Defaulted, so an answer from an older daemon still decodes.
     #[serde(default)]
     pub subject: String,
@@ -363,7 +363,7 @@ pub struct DraftMessage {
     /// predates the field still builds a reply to `From:`.
     #[serde(default)]
     pub reply_to: Option<String>,
-    /// The `Subject:` header, which the builder prefixes with `Re:` or `Fwd:`.
+    /// The `Subject:` header, which the builder prefixes with `Re:` or `FW:`.
     #[serde(default)]
     pub subject: String,
     /// The `Message-ID:` header, `null` for a server that returned none.

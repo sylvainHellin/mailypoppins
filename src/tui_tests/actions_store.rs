@@ -299,12 +299,9 @@ mod store_backed_drafts {
         .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("subject: \"Fwd: Report\""), "{content}");
+        assert!(content.contains("subject: \"FW: Report\""), "{content}");
         assert!(content.contains("to: \"\""), "{content}");
-        assert!(
-            content.contains("---------- Forwarded message ----------"),
-            "{content}"
-        );
+        assert!(content.contains("\nSent: "), "{content}");
         assert!(
             content.contains("From: Alice <alice@example.com>"),
             "{content}"
@@ -498,7 +495,7 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
                 to: "dave@example.com".to_string(),
                 cc: String::new(),
                 bcc: String::new(),
-                subject: "Fwd: Report (for review)".to_string(),
+                subject: "FW: Report (for review)".to_string(),
             }),
             None,
         )
@@ -507,17 +504,17 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("to: \"dave@example.com\""), "{content}");
         assert!(
-            content.contains("subject: \"Fwd: Report (for review)\""),
+            content.contains("subject: \"FW: Report (for review)\""),
             "{content}"
         );
         assert!(
-            content.contains("---------- Forwarded message ----------"),
+            content.contains("\nSent: "),
             "the body survives the header rewrite: {content}"
         );
 
         // The index holds the edited subject, not the derived one.
         let indexed = fx.resolve(&selector);
-        assert_eq!(indexed.subject.as_deref(), Some("Fwd: Report (for review)"));
+        assert_eq!(indexed.subject.as_deref(), Some("FW: Report (for review)"));
     }
 
     /// Edit recipients (`ce`) is the daemon's `draft.set_headers`: the TUI
@@ -670,7 +667,7 @@ Content-Transfer-Encoding: base64\r\n\r\ncGhvdG8tYnl0ZXM=\r\n\
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(
-            content.contains("subject: \"Fwd: Never synced\""),
+            content.contains("subject: \"FW: Never synced\""),
             "{content}"
         );
         assert!(content.contains("Original body"), "{content}");
@@ -1470,7 +1467,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
 
     /// The search overlay's `w` and `cF` open the forward wizard over a
     /// server-only hit, as the list's do over a row and the desktop's do over
-    /// either, with the hit's own `Fwd:` subject; cancelling it goes back to
+    /// either, with the hit's own `FW:` subject; cancelling it goes back to
     /// the overlay with the results as they were (PERSO-155).
     #[test]
     fn the_search_overlays_forward_opens_the_wizard_and_cancel_returns_to_it() {
@@ -1497,7 +1494,7 @@ Content-Transfer-Encoding: base64\r\nContent-Disposition: inline; filename=\"log
             crate::tui::actions::search_result_forward(&mut app, as_attachment);
             match &app.overlay {
                 Overlay::Compose(wizard) => {
-                    assert_eq!(wizard.subject, "Fwd: Report");
+                    assert_eq!(wizard.subject, "FW: Report");
                     match &wizard.mode {
                         ComposeMode::SearchForward(forward) => {
                             assert_eq!(forward.as_attachment, as_attachment);

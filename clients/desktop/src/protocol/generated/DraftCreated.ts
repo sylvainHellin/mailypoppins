@@ -28,7 +28,7 @@ path: string,
 source: DraftSource | null,
 /**
  * The `subject:` the file was written with (#0131): the builder's
- * `Re:` or `Fwd:` subject, the override `headers` gave, or `""` for a
+ * `Re:` or `FW:` subject, the override `headers` gave, or `""` for a
  * skeleton. Defaulted, so an answer from an older daemon still decodes.
  */
 subject: string, };

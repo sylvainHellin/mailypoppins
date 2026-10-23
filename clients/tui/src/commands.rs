@@ -973,7 +973,7 @@ pub(super) fn eml_file(
         .ok_or_else(|| "the message was materialised without a path".to_string())
 }
 
-/// The `Fwd:` subject the forward wizard opens with, built from the row's own
+/// The `FW:` subject the forward wizard opens with, built from the row's own
 /// subject rather than from the list entry, whose `(no subject)` placeholder
 /// must never reach a sent header.
 ///

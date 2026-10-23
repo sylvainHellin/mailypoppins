@@ -53,6 +53,7 @@ All notable changes to this project are documented in this file.
 - `draft.set_headers` rewrites an existing draft's recipients and subject in the daemon (#0143).
 
 ### Changed
+- A forward follows Outlook instead of Gmail, in the CLI, the TUI and the desktop app: the subject takes `FW: ` unless it already opens with `FW:`, `Fwd:` or `WG:`, and the original opens with its From, Sent, To, Cc (left out when empty) and Subject one per line, set bold under a thin #B5C4DF top border in the HTML part, with no `---------- Forwarded message ----------` line.
 - TUI `ce` and the desktop recipients dialog edit a draft's headers through `draft.set_headers` and no longer write the file themselves (#0143).
 - TUI: no password or OAuth token is read in the TUI's process any more; whether an account can sync or send is the daemon's `account.credentials` answer, and `mp` without a subcommand no longer opens the secrets backend.
 - TUI: the Contacts view and the compose wizard's recipient completion read the contact index from the daemon (`contact.search`) instead of the cache file, refresh on `contact.changed`, and say on the status line when the index build a search ran was refused.

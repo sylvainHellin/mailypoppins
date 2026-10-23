@@ -376,7 +376,7 @@ async fn a_forward_names_no_recipient_and_carries_no_attachment() {
     let draft = parse_email_draft(Path::new(&created.path)).expect("the written draft parses");
     assert_eq!(
         draft.frontmatter.subject,
-        format!("Fwd: {SUBJECT}"),
+        format!("FW: {SUBJECT}"),
         "a forward is prefixed the forward way"
     );
     assert_eq!(

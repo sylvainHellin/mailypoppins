@@ -3367,7 +3367,7 @@ mod tests {
             draft.body_markdown.contains("Fixture GmbH"),
             "no choice is the account's default signature"
         );
-        assert!(draft.frontmatter.subject.starts_with("Fwd:"));
+        assert!(draft.frontmatter.subject.starts_with("FW: "));
         assert!(draft.frontmatter.forwarded_from.is_some());
         let attachments = draft.frontmatter.attachments.unwrap_or_default();
         assert_eq!(attachments.len(), 1);
@@ -3436,7 +3436,7 @@ mod tests {
             eml.contains("Subject: Quarterly ledger review\r\n"),
             "{eml}"
         );
-        let quoted = draft.body_markdown.contains("Forwarded message");
+        let quoted = draft.body_markdown.contains(mp_core::draft::QUOTE_MARKER);
         assert_eq!(
             quoted,
             mp_core::draft::ATTACHED_FORWARD_BODY == mp_core::draft::ForwardBody::Quoted

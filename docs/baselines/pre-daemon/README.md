@@ -151,6 +151,7 @@ The sync and send slices (`tests/daemon_sync_slice.rs`, `tests/daemon_send_slice
 - `mp hooks list|test|replay` is new (#0135): it inspects, dry-runs and replays the mail hooks of `[[accounts.hooks]]` through the `hook.*` methods.
 - `-s, --signature` and `--no-signature` are no longer global: only `mp new`, `mp reply`, `mp forward` and `mp send --invite` take them, so the two flag-set tests of the send and sync slices leave them out of the subset check (decided 2026-10-22).
   `-A, --account` stays global and is refused, and hidden, on the commands that act on no account: `mp daemon`, `mp completions`, `mp dump-keys`, `mp account list` and `mp config init|show|add-account|reset-secrets|path`.
+- A forward's subject opens with Outlook's `FW: ` where the oracle writes `Fwd: ` (decided 2026-10-23), so the forward check of `tests/daemon_draft_slice.rs` expects the prefix by route.
 
 ## What is deliberately absent
 

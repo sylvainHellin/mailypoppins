@@ -148,7 +148,7 @@ fn a_forward_draft_carries_the_account_signature_above_the_forwarded_block() {
     assert!(content.contains(QUOTE_MARKER), "{content}");
     assert!(!content.contains(LEGACY_QUOTE_MARKER), "{content}");
     let sig_pos = content.find("-- \nSylvain").unwrap();
-    let fwd_pos = content.find("Forwarded message").unwrap();
+    let fwd_pos = content.find("\nSent: ").unwrap();
     assert!(
         sig_pos < fwd_pos,
         "signature must precede the forward: {content}"
@@ -365,11 +365,11 @@ fn test_create_forward_draft() {
 
     let content = fs::read_to_string(&draft_path).unwrap();
 
-    assert!(content.contains("subject: \"Fwd: Hello\""));
+    assert!(content.contains("subject: \"FW: Hello\""));
     assert!(content.contains("to: \"\""));
     assert!(content.contains(QUOTE_MARKER), "{content}");
     assert!(!content.contains(LEGACY_QUOTE_MARKER), "{content}");
-    assert!(content.contains("Forwarded message"));
+    assert!(content.contains("\nSent: "), "{content}");
     assert!(content.contains("From: alice@example.com"));
     assert!(content.contains("Forward me"));
 }
@@ -840,9 +840,9 @@ fn test_forward_draft_already_fwd_prefix() {
         create_forward_draft_from(&source, "me@example.com", Some(drafts.as_path()), None).unwrap();
 
     let content = fs::read_to_string(&draft_path).unwrap();
-    // Should not double the Fwd: prefix
+    // An existing forward prefix is not doubled
     assert!(content.contains("subject: \"Fwd: Original\""));
-    assert!(!content.contains("Fwd: Fwd:"));
+    assert!(!content.contains("Fwd: Fwd:") && !content.contains("FW: Fwd:"));
 }
 
 #[test]
@@ -860,7 +860,7 @@ fn test_forward_draft_with_companion_html() {
     assert!(draft_html.exists());
     let html = fs::read_to_string(&draft_html).unwrap();
     assert!(html.contains("Rich content"));
-    assert!(html.contains("Forwarded message"));
+    assert!(html.contains("<b>Sent:</b>"), "{html}");
 }
 
 // -----------------------------------------------------------------------

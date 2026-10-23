@@ -36,9 +36,9 @@ export type ComposeSource =
   | { kind: "row"; account: string; row_id: number; subject: string }
   | { kind: "hit"; account: string; message: DraftMessage; mailbox: string; message_id: string | null };
 
-/** The subject a forward shows before its draft exists, by `mp_core::draft::fwd_subject`'s rule. */
+/** The subject a forward shows before its draft exists, by `mp_core::draft::fwd_subject`'s rule: Outlook's `FW: `, once. */
 export function fwdSubject(subject: string): string {
-  return subject.toLowerCase().startsWith("fwd: ") ? subject : `Fwd: ${subject}`;
+  return /^\s*(fw|fwd|wg):/i.test(subject) ? subject : `FW: ${subject}`;
 }
 
 /** A stored message's subject, wherever the model shows it. */

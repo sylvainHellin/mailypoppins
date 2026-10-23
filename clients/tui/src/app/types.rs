@@ -1564,7 +1564,7 @@ pub enum ComposeMode {
 #[derive(Debug, Clone)]
 pub struct SearchForward {
     pub address: MessageAddress,
-    /// The `Fwd:` subject the hit's own subject makes, since a server-only
+    /// The `FW:` subject the hit's own subject makes, since a server-only
     /// hit has no row to read it from.
     pub subject: String,
     /// `cF`: the forward carries the message as its `.eml`.

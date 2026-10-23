@@ -379,7 +379,7 @@ async fn a_forward_as_attachment_carries_the_eml() {
     .expect("the forward is written");
     assert_eq!(
         created["subject"],
-        json!("Fwd: Re: Elsevier DEAL open access")
+        json!("FW: Re: Elsevier DEAL open access")
     );
     let draft = fs::read_to_string(created["path"].as_str().expect("path")).expect("the draft");
     assert!(
@@ -423,7 +423,7 @@ async fn a_server_search_hit_forwards_as_attachment() {
     .expect("the forward of a hit is written");
     assert_eq!(
         created["subject"],
-        json!("Fwd: Re: Elsevier DEAL open access")
+        json!("FW: Re: Elsevier DEAL open access")
     );
     let draft = fs::read_to_string(created["path"].as_str().expect("path")).expect("the draft");
     assert!(

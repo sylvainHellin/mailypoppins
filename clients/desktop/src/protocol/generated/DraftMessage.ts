@@ -38,7 +38,7 @@ cc: string | null,
  */
 reply_to: string | null,
 /**
- * The `Subject:` header, which the builder prefixes with `Re:` or `Fwd:`.
+ * The `Subject:` header, which the builder prefixes with `Re:` or `FW:`.
  */
 subject: string,
 /**

@@ -1248,7 +1248,7 @@ function replySubject(subject: string): string {
 }
 
 function fwdSubject(subject: string): string {
-  return subject.toLowerCase().startsWith("fwd: ") ? subject : `Fwd: ${subject}`;
+  return /^\s*(fw|fwd|wg):/i.test(subject) ? subject : `FW: ${subject}`;
 }
 
 function draftFromRow(cmd: string, account: string, args: Record<string, unknown>): DraftCreated {
@@ -1259,7 +1259,7 @@ function draftFromRow(cmd: string, account: string, args: Record<string, unknown
     // The daemon builds the forward from the server's copy (PERSO-155).
     partsOfSource(method, account, source);
     const headers = args.headers as { to: string; cc: string; bcc: string; subject: string } | null | undefined;
-    const f = headers ?? { to: "", cc: "", bcc: "", subject: "Fwd: Server-only match" };
+    const f = headers ?? { to: "", cc: "", bcc: "", subject: "FW: Server-only match" };
     return writeDraft(account, { ...f, body: "> A message only the server holds." }, null);
   }
   const rowId = source?.kind === "row" ? source.row_id : Number(args.row_id);

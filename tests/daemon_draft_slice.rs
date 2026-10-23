@@ -1688,7 +1688,7 @@ async fn draft_forward_carries_the_attachments() {
     .await;
     let document = fs::read_to_string(&created.path).expect("the forward file exists");
     assert!(
-        document.contains("subject: \"Fwd: Bericht über Anträge\""),
+        document.contains("subject: \"FW: Bericht über Anträge\""),
         "{document}"
     );
     for attachment in ["agenda.txt", "notes.pdf"] {
@@ -2506,8 +2506,11 @@ fn the_reply_and_forward_contract_holds_on_both_routes() {
     // test_create_forward_draft, test_forward_with_attachments.
     slice.for_each_binary_modulo_ids(&["forward", support::read_fixture::BERICHT], |run| {
         let document = fs::read_to_string(run.only_created()).expect("the forward file");
+        // The frozen pre-daemon oracle still writes Gmail's `Fwd:`; mp writes
+        // Outlook's `FW:` since the forward follows Outlook.
+        let prefix = if run.route == "routed" { "FW" } else { "Fwd" };
         assert!(
-            document.contains("subject: \"Fwd: Bericht über Anträge\""),
+            document.contains(&format!("subject: \"{prefix}: Bericht über Anträge\"")),
             "{}: {document}",
             run.route
         );

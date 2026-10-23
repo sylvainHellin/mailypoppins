@@ -256,3 +256,16 @@ A config that still says `auth_method = "oauth2"` loads, and only that account i
 Rejected: keeping the mode behind a flag; failing the whole config on the retired value, which would stop every other account.
 Source: Sylvain, chat of 2026-10-23.
 Status: accepted
+
+## 2026-10-23 - A forward from mp is laid out as Outlook writes it
+
+Why: a forward should read like one written in Outlook, which Sylvain uses at TUM; his own Outlook mobile forward on the TUM account is the reference.
+The subject takes `FW: `, and a subject that already opens with `FW:`, `Fwd:` or `WG:` keeps its prefix.
+Above the original stand an empty line and the signature.
+The original opens with a block under a 1pt solid #B5C4DF top border with a little top padding, holding bold English labels one per line: `From:`, `Sent:`, `To:`, `Cc:` (left out when the original had none) and `Subject:`; a blank line and the original body follow.
+The date label is `Sent:`, which Outlook desktop and Outlook on the web write in English; Outlook mobile writes `Date:` in the same bordered block.
+The plain-text part carries the same labels, one per line, without bold.
+The block is one `parse::draft_reply_boundary` already takes for the start of a quote, so a copy edited in Outlook imports with the original below the quote marker.
+Rejected: Gmail's `Fwd:` prefix and its `---------- Forwarded message ----------` header, mp's layout until now; Outlook mobile's `Date:` label.
+Source: Sylvain, chat of 2026-10-23.
+Status: accepted

@@ -363,8 +363,9 @@ describe("compose helpers", () => {
   });
 
   it("builds the forward subject by mp_core's rule and trims recipient separators", () => {
-    expect(fwdSubject("Hello")).toBe("Fwd: Hello");
-    expect(fwdSubject("fwd: Hello")).toBe("fwd: Hello");
+    expect(fwdSubject("Hello")).toBe("FW: Hello");
+    for (const kept of ["FW: Hello", "fwd: Hello", "Fwd:Hello", "WG: Hallo"]) expect(fwdSubject(kept)).toBe(kept);
+    expect(fwdSubject("Fwdx")).toBe("FW: Fwdx");
     expect(normalizeRecipients("a@example.com, b@example.com, ")).toBe("a@example.com, b@example.com");
   });
 });

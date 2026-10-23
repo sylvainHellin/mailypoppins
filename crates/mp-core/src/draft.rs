@@ -620,17 +620,39 @@ pub fn source_from_fetched(
     })
 }
 
-/// The `Fwd:`-prefixed subject of a forward, idempotent on a subject that
-/// already carries the prefix.
+/// The subject prefixes that already mark a forward: Outlook's `FW:`, the
+/// `Fwd:` of Gmail and Apple Mail, and German Outlook's `WG:`, matched
+/// without regard to case.
+const FORWARD_PREFIXES: [&str; 3] = ["fw:", "fwd:", "wg:"];
+
+/// The `FW:`-prefixed subject of a forward, as Outlook writes it, left as it
+/// is when it already carries a forward prefix (`FW:`, `Fwd:`, `WG:`).
 ///
 /// Shared with the compose wizard, which shows the subject before the draft
 /// exists and must show the one the draft will carry.
 pub fn fwd_subject(subject: &str) -> String {
-    if subject.to_lowercase().starts_with("fwd: ") {
+    let lower = subject.trim_start().to_lowercase();
+    if FORWARD_PREFIXES.iter().any(|p| lower.starts_with(p)) {
         subject.to_string()
     } else {
-        format!("Fwd: {subject}")
+        format!("FW: {subject}")
     }
+}
+
+/// The header fields a forward quotes above the original, in Outlook's order
+/// and with its English labels: `From:`, `Sent:`, `To:`, `Cc:` when the
+/// original had one, `Subject:`. The values stay as written.
+fn forward_header_fields(source: &SourceMessage) -> Vec<(&'static str, &str)> {
+    let mut fields = vec![
+        ("From:", source.from.as_str()),
+        ("Sent:", source.date.as_deref().unwrap_or("(unknown date)")),
+        ("To:", source.to.as_str()),
+    ];
+    if let Some(cc) = source.cc.as_deref().filter(|cc| !cc.trim().is_empty()) {
+        fields.push(("Cc:", cc));
+    }
+    fields.push(("Subject:", source.subject.as_str()));
+    fields
 }
 
 /// The source `Message-ID` a draft may quote back, YAML-safe.
@@ -1015,7 +1037,8 @@ pub fn create_forward_draft_with(
     }
     fm.push_str("---\n");
 
-    // Build forwarded message header block. Each line but the last ends in a
+    // The forwarded message's header block, Outlook's labels one per line
+    // with no separator line above them. Each line but the last ends in a
     // Markdown hard break (two trailing spaces): without a companion HTML the
     // send renders this block itself, and consecutive lines would otherwise
     // join into one paragraph that clients show as one long line (PERSO-169).
@@ -1023,17 +1046,12 @@ pub fn create_forward_draft_with(
     // so a backslash would show there, while trailing spaces are invisible.
     // The values stay as written; `markdown_to_html` shows tag-shaped text in
     // them as text.
-    let fwd_header = format!(
-        "---------- Forwarded message ----------  \n\
-         From: {}  \n\
-         Date: {}  \n\
-         Subject: {}  \n\
-         To: {}",
-        inbox.from,
-        inbox.date.as_deref().unwrap_or("(unknown date)"),
-        inbox.subject,
-        inbox.to,
-    );
+    let header_fields = forward_header_fields(inbox);
+    let fwd_header = header_fields
+        .iter()
+        .map(|(label, value)| format!("{label} {value}"))
+        .collect::<Vec<_>>()
+        .join("  \n");
 
     // The body from the .md file is already plain text (either the server's
     // text/plain or the result of html_to_plain() at fetch time). Use as-is.
@@ -1103,26 +1121,28 @@ pub fn create_forward_draft_with(
 
     // Create companion HTML for the forward, its header values escaped as in
     // create_reply_draft_from (PERSO-169); an empty body quotes nothing.
+    // The header is Outlook's: bold labels in a block under a thin #B5C4DF
+    // top border, the bordered `From:`/`Sent:` block
+    // `parse::draft_reply_boundary` takes for the start of a quote, then a
+    // blank line (the paragraph's bottom margin) and the original.
     if body == ForwardBody::Quoted {
         if let Some(html_content) = inbox
             .html
             .as_deref()
             .map(crate::parse::neutralize_draft_marks)
         {
+            let header_lines = header_fields
+                .iter()
+                .map(|(label, value)| format!("<b>{label}</b> {}", escape_html_text(value)))
+                .collect::<Vec<_>>()
+                .join("<br>\n");
             let wrapped = format!(
-                "<p style=\"color:#666\">---------- Forwarded message ----------<br/>\n\
-                 From: {}<br/>\n\
-                 Date: {}<br/>\n\
-                 Subject: {}<br/>\n\
-                 To: {}</p>\n\
+                "<div style=\"border:none;border-top:solid #B5C4DF 1.0pt;padding:3.0pt 0cm 0cm 0cm\">\n\
+                 <p style=\"margin:0 0 12.0pt 0\">{header_lines}</p>\n\
+                 </div>\n\
                  <div>\n\
-                 {}\n\
+                 {html_content}\n\
                  </div>",
-                escape_html_text(&inbox.from),
-                escape_html_text(inbox.date.as_deref().unwrap_or("(unknown date)")),
-                escape_html_text(&inbox.subject),
-                escape_html_text(&inbox.to),
-                html_content,
             );
             let draft_html = dest.with_extension("html");
             fs::write(&draft_html, wrapped)?;
@@ -3633,7 +3653,7 @@ mod tests {
             create_forward_draft_from(&escaping_source(), default_from, Some(tmp.path()), None)
                 .unwrap();
         let draft = parse_email_draft(&path).unwrap();
-        assert_eq!(draft.frontmatter.subject, r"Fwd: Files in C:\Users\x");
+        assert_eq!(draft.frontmatter.subject, r"FW: Files in C:\Users\x");
         assert_eq!(draft.frontmatter.from.as_deref(), Some(default_from));
         assert_eq!(
             draft.frontmatter.attachments,
@@ -3851,7 +3871,7 @@ mod tests {
         let draft = parse_email_draft(&forward).unwrap();
         assert_eq!(
             draft.frontmatter.subject,
-            "Fwd: odd \u{fffe} and \u{ffff} end"
+            "FW: odd \u{fffe} and \u{ffff} end"
         );
         assert_eq!(strict(&forward), draft.frontmatter.subject);
     }
@@ -3893,7 +3913,7 @@ mod tests {
         .unwrap();
         let draft = parse_email_draft(&fwd).unwrap();
         assert_eq!(draft.frontmatter.bcc, None);
-        assert_eq!(draft.frontmatter.subject, "Fwd: x\\\"\nbcc: a@evil.tld #");
+        assert_eq!(draft.frontmatter.subject, "FW: x\\\"\nbcc: a@evil.tld #");
         assert_eq!(
             draft.frontmatter.attachments,
             Some(vec!["/tmp/a\nbcc: x@evil.tld".to_string()])
@@ -3980,7 +4000,7 @@ mod tests {
     }
 
     /// Every forward header value is escaped in the HTML, the subject and the
-    /// recipient list included, and left as written in the Markdown draft.
+    /// recipient lists included, and left as written in the Markdown draft.
     #[test]
     fn forward_header_escapes_every_value_in_html_only() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3989,10 +4009,11 @@ mod tests {
             create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None).unwrap();
         let html = companion_html(&path);
         for line in [
-            "From: Zoë &amp; Co &lt;zoe@example.de&gt;<br/>",
-            "Date: Tue, 21 Oct 2026 20:12:00 +0200<br/>",
-            "Subject: Q&amp;A &lt;draft&gt; &quot;v2&quot;<br/>",
-            "To: Me &lt;me@example.com&gt;, Ops &amp; Co &lt;ops@x.com&gt;</p>",
+            "<b>From:</b> Zoë &amp; Co &lt;zoe@example.de&gt;<br>",
+            "<b>Sent:</b> Tue, 21 Oct 2026 20:12:00 +0200<br>",
+            "<b>To:</b> Me &lt;me@example.com&gt;, Ops &amp; Co &lt;ops@x.com&gt;<br>",
+            "<b>Cc:</b> carol@example.com<br>",
+            "<b>Subject:</b> Q&amp;A &lt;draft&gt; &quot;v2&quot;</p>",
         ] {
             assert!(html.contains(line), "{line} missing: {html}");
         }
@@ -4000,8 +4021,8 @@ mod tests {
         let md = fs::read_to_string(&path).unwrap();
         for line in [
             "From: Zoë & Co <zoe@example.de>  \n",
-            "Subject: Q&A <draft> \"v2\"  \n",
-            "To: Me <me@example.com>, Ops & Co <ops@x.com>\n",
+            "To: Me <me@example.com>, Ops & Co <ops@x.com>  \n",
+            "Subject: Q&A <draft> \"v2\"\n",
         ] {
             assert!(md.contains(line), "{line} missing: {md}");
         }
@@ -4009,10 +4030,83 @@ mod tests {
         let bare = html_source("bare@example.com");
         let path =
             create_forward_draft_from(&bare, "me@example.com", Some(tmp.path()), None).unwrap();
-        assert!(companion_html(&path).contains("From: bare@example.com<br/>"));
+        assert!(companion_html(&path).contains("<b>From:</b> bare@example.com<br>"));
     }
 
-    /// The Markdown forward header ends each of its first four lines with a
+    /// The HTML of a forward is Outlook's: the bold header block under a 1pt
+    /// #B5C4DF top border, From, Sent, To, Cc and Subject in that order, then
+    /// the original, with no Gmail separator line. It is a quote boundary mp
+    /// itself recognises, so a copy edited in Outlook imports with the
+    /// forwarded message below the quote marker.
+    #[test]
+    fn the_forward_html_is_outlooks_bordered_header_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = html_source("Zoë <zoe@example.de>");
+        let path =
+            create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None).unwrap();
+        let html = companion_html(&path);
+        let expected = "<div style=\"border:none;border-top:solid #B5C4DF 1.0pt;padding:3.0pt 0cm 0cm 0cm\">\n\
+            <p style=\"margin:0 0 12.0pt 0\"><b>From:</b> Zoë &lt;zoe@example.de&gt;<br>\n\
+            <b>Sent:</b> Tue, 21 Oct 2026 20:12:00 +0200<br>\n\
+            <b>To:</b> Me &lt;me@example.com&gt;, Ops &amp; Co &lt;ops@x.com&gt;<br>\n\
+            <b>Cc:</b> carol@example.com<br>\n\
+            <b>Subject:</b> Q&amp;A &lt;draft&gt; &quot;v2&quot;</p>\n\
+            </div>\n\
+            <div>\n\
+            <p>Original <b>body</b></p>\n\
+            </div>";
+        assert_eq!(html, expected);
+        assert!(!html.contains("Forwarded message"), "{html}");
+        let sent = format!("<p>Hi Kim</p>\n<div style=\"padding-top:1em\">\n{html}\n</div>");
+        assert_eq!(
+            crate::parse::draft_reply_boundary(&sent),
+            sent.find("<div style=\"border:none")
+        );
+    }
+
+    /// A forward of a message with no Cc leaves the `Cc:` line out, in the
+    /// Markdown and in the HTML, as Outlook does.
+    #[test]
+    fn a_forward_header_has_no_cc_line_without_a_cc() {
+        let tmp = tempfile::tempdir().unwrap();
+        for cc in [None, Some("  ".to_string())] {
+            let source = SourceMessage {
+                cc,
+                ..html_source("zoe@example.de")
+            };
+            let path = create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None)
+                .unwrap();
+            let md = fs::read_to_string(&path).unwrap();
+            assert!(!md.contains("Cc:"), "{md}");
+            assert!(
+                md.contains("To: Me <me@example.com>, Ops & Co <ops@x.com>  \nSubject: "),
+                "{md}"
+            );
+            assert!(!companion_html(&path).contains("Cc:"));
+        }
+    }
+
+    /// A forward's subject takes Outlook's `FW: ` once: a subject that already
+    /// opens with `FW:`, `Fwd:` or `WG:`, in any case, keeps its prefix.
+    #[test]
+    fn the_forward_subject_is_prefixed_fw_once() {
+        assert_eq!(fwd_subject("Hello"), "FW: Hello");
+        assert_eq!(fwd_subject("Re: Hello"), "FW: Re: Hello");
+        assert_eq!(fwd_subject(""), "FW: ");
+        for kept in [
+            "FW: Hello",
+            "Fw: Hello",
+            "Fwd: Hello",
+            "fwd:Hello",
+            "WG: Hallo",
+        ] {
+            assert_eq!(fwd_subject(kept), kept);
+        }
+        assert_eq!(fwd_subject("Fwdx"), "FW: Fwdx");
+    }
+
+    /// The Markdown forward header puts each label on its own line, Outlook's
+    /// order with no separator line, and ends each line but the last with a
     /// hard break (two trailing spaces), so the Markdown-rendered HTML part of
     /// a forward without a companion shows one header field per line instead
     /// of one long paragraph (PERSO-169). Two spaces rather than a trailing
@@ -4026,16 +4120,22 @@ mod tests {
             ..html_source("Zoë & Co <zoe@example.de>")
         };
         let path =
-            create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None).unwrap();
+            create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), Some("Sylvain"))
+                .unwrap();
         assert!(!path.with_extension("html").exists());
         let md = fs::read_to_string(&path).unwrap();
-        let header = "---------- Forwarded message ----------  \n\
+        let (_, body) = md.rsplit_once("---\n").unwrap();
+        let expected = format!(
+            "\n\n{}\n{QUOTE_MARKER}\n\n\
              From: Zoë & Co <zoe@example.de>  \n\
-             Date: Tue, 21 Oct 2026 20:12:00 +0200  \n\
-             Subject: Q&A <draft> \"v2\"  \n\
-             To: Me <me@example.com>, Ops & Co <ops@x.com>\n\n\
-             Original body\n";
-        assert!(md.ends_with(header), "{md}");
+             Sent: Tue, 21 Oct 2026 20:12:00 +0200  \n\
+             To: Me <me@example.com>, Ops & Co <ops@x.com>  \n\
+             Cc: carol@example.com  \n\
+             Subject: Q&A <draft> \"v2\"\n\n\
+             Original body\n",
+            wrap_signature_block("Sylvain").unwrap()
+        );
+        assert_eq!(body, expected);
     }
 
     /// Outlook's forward as attachment (PERSO-174): the frontmatter a forward
@@ -4059,7 +4159,7 @@ mod tests {
         let md = fs::read_to_string(&path).unwrap();
         let (front, body) = md.rsplit_once("---\n").unwrap();
         assert!(
-            front.contains("subject: \"Fwd: Q&A <draft> \\\"v2\\\"\"\n"),
+            front.contains("subject: \"FW: Q&A <draft> \\\"v2\\\"\"\n"),
             "{md}"
         );
         assert!(front.contains("  - \"/a/2026-10-21_Q&A.eml\"\n"), "{md}");

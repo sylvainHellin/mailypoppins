@@ -765,7 +765,7 @@ The family is the sixteen methods below, all served from protocol 1 and all dura
 | `draft.validate` | query | `{account, id?\|selector?}` | `DraftValidation` |
 
 The result types are `mp_protocol::draft`, beside `mp_protocol::events`: they are wire shapes, so they live in the crate a client links rather than in the daemon crate a client must never link.
-`DraftCreated` is `{account, id, selector, path, source, subject}`, whose `source` is `{id, selector}` for a reply or a forward and absent for a draft made from nothing, and whose `subject` is the one the file was written with, read back from it: the builder's `Re:` or `Fwd:`, a `headers` override, or `""` for a skeleton.
+`DraftCreated` is `{account, id, selector, path, source, subject}`, whose `source` is `{id, selector}` for a reply or a forward and absent for a draft made from nothing, and whose `subject` is the one the file was written with, read back from it: the builder's `Re:` or `FW:`, a `headers` override, or `""` for a skeleton.
 `DraftListing` is `{account, drafts, skipped, collisions}`, whose rows are `{id, selector, path, status, to, cc, bcc, subject, date, valid, ready, server?}` in the index's order (`mtime DESC, id ASC`); `to`, `cc`, `bcc`, `subject` and `date` stay nullable, which is where the row differs from the snapshot's, and `skipped` names a file that will not parse by path because such a file has no id to be named by (#0080).
 `cc` and `date` are the index's own columns and joined the row in P5-U4, for a client that lists drafts beside received mail: such a list prints the Cc line and sorts a draft by its `date:` field, falling back to the `YYYY-MM-DD-…` stem of `path` when the file has none.
 `mp list` reads neither.

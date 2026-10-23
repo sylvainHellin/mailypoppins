@@ -1956,6 +1956,39 @@ mod tests {
         }
     }
 
+    /// The HTML a forward of an HTML message sends opens its quote with
+    /// Outlook's bordered header block, which mp's own import takes for the
+    /// quote boundary: everything above it is the forward's own text.
+    #[test]
+    fn a_sent_forward_opens_its_quote_where_mps_import_finds_it() {
+        use crate::draft::{create_forward_draft_from, SourceMessage};
+        let tmp = tempfile::tempdir().unwrap();
+        let source = SourceMessage {
+            from: "Kim <kim@example.com>".into(),
+            to: "me@example.com".into(),
+            subject: "Angebot".into(),
+            date: Some("Tue, 21 Oct 2026 20:12:00 +0200".into()),
+            body: "Original text".into(),
+            html: Some("<p>Original text</p>".into()),
+            ..Default::default()
+        };
+        let path =
+            create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), Some("Sylvain"))
+                .unwrap();
+        let draft = crate::draft::parse_email_draft(&path).unwrap();
+        let body = draft.body_markdown.replacen("\n", "Please see below.\n", 1);
+        let companion = std::fs::read_to_string(path.with_extension("html")).unwrap();
+        let html = markdown_to_html(&body, &default_settings(), None, Some(&companion));
+        let at = crate::parse::draft_reply_boundary(&html).expect("a quote boundary");
+        assert!(
+            html[at..].starts_with("<div style=\"border:none;border-top:solid #B5C4DF 1.0pt;"),
+            "{html}"
+        );
+        assert!(html[..at].contains("Please see below."), "{html}");
+        assert!(html[..at].contains("Sylvain"), "{html}");
+        assert!(!html[..at].contains("Original text"), "{html}");
+    }
+
     /// Without a companion HTML original the send renders the Markdown quote
     /// header itself (PERSO-169). The HTML part of a forward shows each header
     /// field on its own line, and tag-shaped text in the subject, the
@@ -2016,7 +2049,7 @@ mod tests {
             assert!(plain[0].contains(from), "{kind}: {}", plain[0]);
             assert!(!plain[0].contains('\\'), "{kind}: {}", plain[0]);
             if kind == "forward" {
-                for prefix in ["From: ", "Date: ", "Subject: ", "To: "] {
+                for prefix in ["From: ", "Sent: ", "To: ", "Subject: "] {
                     assert!(
                         lines.iter().any(|l| l.starts_with(prefix)),
                         "{prefix} does not start a line: {shown}\n{}",
@@ -2033,7 +2066,7 @@ mod tests {
                 // encoding (the decoded part has CRLF line ends).
                 let plain_lf = plain[0].replace("\r\n", "\n");
                 assert!(
-                    plain_lf.contains("Subject: Q&A <draft>  \n"),
+                    plain_lf.contains("To: Desk <desk> <me@example.com>, carol@example.com  \n"),
                     "{plain_lf:?}"
                 );
             } else {

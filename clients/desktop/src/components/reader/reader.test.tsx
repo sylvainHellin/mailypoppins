@@ -276,7 +276,7 @@ describe("the reader's attachments", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     await user.click(within(toolbar).getByRole("button", { name: "Forward as attachment" }));
     const wizard = await screen.findByRole("dialog", { name: "Forward as attachment" });
-    expect(within(wizard).getByLabelText("Subject")).toHaveValue("Fwd: Quarterly ledger review");
+    expect(within(wizard).getByLabelText("Subject")).toHaveValue("FW: Quarterly ledger review");
   });
 
   it("to opens one attachment at once and picks among several; ts saves the checked parts", async () => {

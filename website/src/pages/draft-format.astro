@@ -57,7 +57,7 @@ Your Name
 
 const forwardExample = `---
 to: ""
-subject: "Fwd: Original subject"
+subject: "FW: Original subject"
 status: draft
 forwarded_from: "<message-id@example.com>"
 attachments:
@@ -71,11 +71,11 @@ Your Name
 
 <!-- mp:quote -->
 
----------- Forwarded message ----------
 From: Original Sender <sender@example.com>
-Date: 2026-01-15
-Subject: Original subject
+Sent: Thu, 15 Jan 2026 09:30:00 +0100
 To: you@example.com
+Cc: colleague@example.com
+Subject: Original subject
 
 Original message body here.`;
 
@@ -92,7 +92,7 @@ const attachmentStructure = `accounts/<name>/attachments/<message-id>/
 
 const attachmentFrontmatter = `---
 to: recipient@example.com
-subject: "Fwd: Document delivery"
+subject: "FW: Document delivery"
 status: draft
 attachments:
   - "/home/you/.local/share/mailypoppins/accounts/work/attachments/abc@example.com/document.pdf"
@@ -290,11 +290,18 @@ Email body here.`;
       <h2 id="forward-drafts">Forward Drafts</h2>
       <p>
         Forward drafts are created with <code>mp forward</code> (or <code>cf</code> in the TUI).
-        The <code>to:</code> field is left empty for you to fill in. The subject gets a
-        "Fwd:" prefix, and any attachments from the original email are listed in the
-        <code>attachments:</code> array with their absolute file paths. The source message
-        is recorded in <code>forwarded_from</code> and is marked as forwarded once the draft
-        goes out.
+        The <code>to:</code> field is left empty for you to fill in. The subject gets
+        Outlook's "FW:" prefix, unless it already starts with FW:, Fwd: or WG:, and any
+        attachments from the original email are listed in the <code>attachments:</code>
+        array with their absolute file paths. The source message is recorded in
+        <code>forwarded_from</code> and is marked as forwarded once the draft goes out.
+      </p>
+      <p>
+        The forward is laid out as Outlook lays it out. Below your note and signature, the
+        original's From, Sent, To, Cc and Subject stand one per line, with Cc left out when
+        the original had none, then the original body follows. When the original has an HTML
+        part, the sent HTML sets these labels in bold under a thin blue-grey line, as a
+        forward written in Outlook does.
       </p>
       <Code code={forwardExample} lang="markdown" theme={codeTheme} />
       <p>

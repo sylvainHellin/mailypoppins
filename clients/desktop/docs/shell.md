@@ -324,7 +324,7 @@ A row the store no longer holds is a warning notice, "Open failed: that message 
 `cn`, `cf` and `cF` on a stored message open `ComposeWizard.tsx`, a dialog titled "New draft", "Forward" or "Forward as attachment" with To, Cc, Bcc and Subject, and a new draft has the TUI's inline Body last.
 Both have a Signature select, filled from `signature_list`, with the account's default preselected and "none" last; a reply has no wizard and carries the account's default, as in the TUI.
 The select reads the account's listing in `state.signatures`, which a `signature.changed`, a `signature.removed` or a change in the Signatures dialog makes stale, so it follows while the wizard is open: until the user picks, it shows the default, and a pick stays while its name is listed and falls back to the default when it goes.
-The forward's Subject starts as the forward will write it (`Fwd: `, the rule of `mp_core::draft::fwd_subject`); the TUI asks for the forward's recipients first too, and a reply goes straight to the editor.
+The forward's Subject starts as the forward will write it (`FW: `, the rule of `mp_core::draft::fwd_subject`); the TUI asks for the forward's recipients first too, and a reply goes straight to the editor.
 Enter in a field moves to the next one and, after the last, to the submit button, except in Body, where it starts a new line; Cmd+Enter or Ctrl+Enter submits from anywhere in the dialog; Escape cancels and writes nothing.
 
 To, Cc and Bcc complete contacts as the TUI's wizard does (`RecipientsInput.tsx`, a `combobox` over a `listbox` named "Contacts"); Subject is a plain field.

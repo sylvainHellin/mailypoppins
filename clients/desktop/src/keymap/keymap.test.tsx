@@ -442,7 +442,7 @@ describe("compose keys (the TUI's)", () => {
     await user.keyboard("jj");
     await user.keyboard("cf");
     const dialog = await screen.findByRole("dialog", { name: "Forward" });
-    expect(within(dialog).getByLabelText("Subject")).toHaveValue("Fwd: Angebot Dachsanierung");
+    expect(within(dialog).getByLabelText("Subject")).toHaveValue("FW: Angebot Dachsanierung");
     expect(callsOf("draft_forward")).toEqual([]);
     await waitFor(() => expect(within(dialog).getByLabelText("To")).toHaveFocus());
     // Completion off: the test types a recipient and is not about it.
@@ -452,7 +452,7 @@ describe("compose keys (the TUI's)", () => {
     expect(callsOf("draft_forward")[0]).toMatchObject({
       account: "work",
       source: { kind: "row", row_id: 1002 },
-      headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: Angebot Dachsanierung" },
+      headers: { to: "kim@example.com", cc: "", bcc: "", subject: "FW: Angebot Dachsanierung" },
     });
     await waitFor(() => expect(mock.editorOpens).toHaveLength(1));
   });
@@ -463,7 +463,7 @@ describe("compose keys (the TUI's)", () => {
     await user.keyboard("jj");
     await user.keyboard("cF");
     const dialog = await screen.findByRole("dialog", { name: "Forward as attachment" });
-    expect(within(dialog).getByLabelText("Subject")).toHaveValue("Fwd: Angebot Dachsanierung");
+    expect(within(dialog).getByLabelText("Subject")).toHaveValue("FW: Angebot Dachsanierung");
     await waitFor(() => expect(within(dialog).getByLabelText("To")).toHaveFocus());
     mock.failing.set("contact_search", new Error("off"));
     await user.keyboard("kim@example.com{Control>}{Enter}{/Control}");
@@ -472,7 +472,7 @@ describe("compose keys (the TUI's)", () => {
       account: "work",
       source: { kind: "row", row_id: 1002 },
       as_attachment: true,
-      headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: Angebot Dachsanierung" },
+      headers: { to: "kim@example.com", cc: "", bcc: "", subject: "FW: Angebot Dachsanierung" },
     });
     await waitFor(() => expect(mock.editorOpens).toHaveLength(1));
   });
@@ -549,14 +549,14 @@ describe("compose keys (the TUI's)", () => {
     ] as const) {
       await user.keyboard(keys);
       const dialog = await screen.findByRole("dialog", { name });
-      expect(within(dialog).getByLabelText("Subject")).toHaveValue("Fwd: The old thread");
+      expect(within(dialog).getByLabelText("Subject")).toHaveValue("FW: The old thread");
       await waitFor(() => expect(within(dialog).getByLabelText("To")).toHaveFocus());
       await user.keyboard("kim@example.com{Control>}{Enter}{/Control}");
       await waitFor(() => expect(screen.queryByRole("dialog", { name })).toBeNull());
       expect(callsOf("draft_forward").slice(-1)[0]).toMatchObject({
         account: "work",
         source,
-        headers: { to: "kim@example.com", cc: "", bcc: "", subject: "Fwd: The old thread" },
+        headers: { to: "kim@example.com", cc: "", bcc: "", subject: "FW: The old thread" },
         ...(attached ? { as_attachment: true } : {}),
       });
     }
