@@ -24,6 +24,7 @@ pub mod folder;
 pub mod holds;
 pub mod push;
 pub mod reconcile;
+pub mod send_guard;
 
 use std::path::PathBuf;
 

@@ -393,6 +393,18 @@ A failed delete retries on the queue's backoff and parks `failed` past its budge
 The stale server copy then shows in Outlook and Apple Mail as a draft that was in fact sent; mp's reconcile sees a marker that names a retired id and enqueues `DeleteDraft` again, so it converges at the next sync that reaches the server.
 A `DeleteDraft` whose copy is already gone is a not-found, which the drain treats as success (`src/pending_ops.rs:20-28`).
 
+Since approval travels, mp on the Mac and mp on the home server can both hold the same approved draft, and a send on each would send it twice.
+A send of a draft with a `server_message_id` on an account that mirrors therefore claims the server copy before it submits (`draft_mirror::send_guard`, run by `send.draft` and `send.approved` alike, after any undo-send hold has run out):
+
+- Under the account runtime's turn, held until the submission ends, it searches the Drafts folder for the copy by `Message-ID`.
+- No copy: the draft was sent or discarded on another machine or in another client; the send is refused with an error that says so, and the file is left for the reconcile to retire.
+- A copy: it is removed with `UID STORE \Deleted` and `UID EXPUNGE`, and the send goes ahead only when this session saw the untagged `EXPUNGE` for every copy; a copy another session removed first refuses the send.
+- After the claim the draft's `draft_sync` row is forgotten, so a send that then fails leaves a draft the owed-push scan pushes again, and the reconcile does not retire an unsent file as one whose copy went.
+- A Drafts folder that cannot be reached, or a server without `UIDPLUS`, refuses the send with an error that says so: nothing then shows that the other machine has not sent the draft, so the send does not fall through.
+  The cost is that a mirrored draft cannot be sent while its IMAP server is unreachable even when SMTP is; `[accounts.drafts] mirror = false` turns the guard off with the mirror.
+- The outbox's `DeleteDraft` stays queued after the send and finds nothing, a not-found the drain counts as converged.
+- Not closed: two sends whose reads of the copy both come before either one's `UID EXPUNGE`, a window of one round trip, both see the expunge and both go ahead; plain IMAP offers no test-and-set without `CONDSTORE`, which neither server has.
+
 #### The per-account switch
 
 `[accounts.drafts] mirror = true | false` in `config.toml`, read by the daemon at reload.
@@ -465,7 +477,7 @@ No `state.invalidate` scope changes: drafts never travelled as invalidations, an
 - A push leaves the file alone once its `server_message_id` is written, so an editor holding the file open is not interrupted by the mirror.
 - Blob files are written before the transaction that references them: `PushDraft` carries no blob, and the attachments a pull writes are plain files written before the frontmatter names them.
 - The per-account engine lock (`src/engine_lock.rs`) covers the drain and the reconcile; the watcher stays lock-free.
-- Exactly-once submission (`submission_started_at`, `docs/architecture.md:293`) is untouched: the server copy's delete is queued after the SMTP verdict and never gates it.
+- Exactly-once submission (`submission_started_at`, `docs/architecture.md:293`) is untouched: the server copy's delete is queued after the SMTP verdict and never gates it; what gates a send of a mirrored draft is the claim of its copy before the outbox row exists ("Send").
 - No two files share an `id:` (`BACKLOG.md:38`): conflict copies and imports mint fresh ids, and the marker import writes only an id the directory does not hold.
 
 ### Decisions
@@ -536,6 +548,7 @@ Installing it turns the mirror on for `tum` and `proton` at once, so the first d
 - [ ] On `tum`, approve a draft on the Mac; within a minute it is `approved` on the home server, and an Outlook edit of it makes it `draft` on both.
 - [ ] On `proton`, approve a draft on the Mac; on the home server it stays `draft`.
 - [ ] `mp send` a draft; its copy leaves Outlook's Drafts and the file is in `drafts/.retired/`.
+- [ ] On `tum`, with an approved draft on both machines, run `mp send-approved` on the Mac and then on the home server; the home server refuses the draft as sent on another machine, and the recipient gets one message.
 - [ ] Send a draft from Outlook, and delete one in Apple Mail; after two ticks both files are in `drafts/.retired/` and neither comes back.
 - [ ] On `tum`, open an mp draft's copy in Apple Mail with View, Message, Raw Source, without editing it: it carries `X-Mailypoppins-Draft-Source` headers and its HTML ends with `<!-- mp:copy v2 ... -->`, and the base64 of the headers decodes to the draft with an empty `bcc:`.
 - [ ] On `proton`, a draft made on the Mac appears on the home server with its text and Bcc, through its HTML when Bridge dropped the headers, and a store rebuild there leaves it `synced` with no conflict copy.

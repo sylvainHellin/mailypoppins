@@ -503,6 +503,22 @@ impl AccountRuntime {
         true
     }
 
+    /// The turn, for a send of a mirrored draft (#0143): held from the claim
+    /// of the draft's server copy to the end of its submission, so no drain
+    /// pushes the draft back and no reconcile reads its missing copy in
+    /// between. It waits for a tick or a drain in flight, as a drain does.
+    /// `None` on a blocked or retired runtime, which runs neither.
+    pub async fn send_turn(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        if self.readiness != Readiness::Ready {
+            return None;
+        }
+        let turn = self.turn.lock().await;
+        if *self.retired.borrow() {
+            return None;
+        }
+        Some(turn)
+    }
+
     /// The account this runtime serves.
     pub fn account(&self) -> &str {
         &self.account

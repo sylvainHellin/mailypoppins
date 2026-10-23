@@ -1843,3 +1843,154 @@ fn an_approval_travels_only_when_the_local_attachment_bytes_match() {
     assert_eq!(status_of(&m2, "d-same"), EmailStatus::Approved);
     assert_eq!(status_of(&m2, "d-differs"), EmailStatus::Draft);
 }
+
+// ---------------------------------------------------------------------------
+// The send guard: one draft, two machines, one send
+// ---------------------------------------------------------------------------
+
+fn guard(
+    store: &Store,
+    account: &AccountConfig,
+    folder: &mut FakeFolder,
+    id: &str,
+) -> Result<(), String> {
+    let draft = find_local("tum", id).unwrap().draft;
+    block_on(send_guard::claim_for_send(store, account, folder, &draft))
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// The approved draft on both machines: the first send claims the server
+/// copy and goes ahead, the second finds it gone and is refused, so the draft
+/// is sent once.
+#[test]
+fn two_machines_sending_one_approved_draft_send_it_once() {
+    use crate::types::EmailStatus;
+    let mut folder = FakeFolder::default();
+    let m1 = Machine::new();
+    let m2 = Machine::new();
+    {
+        let _guard = m1.enter();
+        let path = Fixture::write_in_current("angebot", "d1", "", "Hallo Robin");
+        approve(&path);
+    }
+    m1.drain(&mut folder);
+    assert_eq!(m2.reconcile(&mut folder).imported, 1);
+    assert_eq!(status_of(&m2, "d1"), EmailStatus::Approved);
+
+    {
+        let _guard = m1.enter();
+        guard(&m1.store, &m1.account, &mut folder, "d1").expect("the first send goes ahead");
+        assert!(
+            draft_sync::get(&m1.store, "tum", "d1").unwrap().is_none(),
+            "row forgotten"
+        );
+    }
+    assert!(
+        folder.live().is_empty(),
+        "the copy is claimed: {:?}",
+        folder.log
+    );
+
+    let _guard = m2.enter();
+    let refused = guard(&m2.store, &m2.account, &mut folder, "d1").unwrap_err();
+    assert!(
+        refused.contains("sent or discarded on another machine"),
+        "{refused}"
+    );
+    assert!(
+        find_local("tum", "d1").is_some(),
+        "the file is the reconcile's to retire"
+    );
+    assert!(
+        draft_sync::get(&m2.store, "tum", "d1").unwrap().is_some(),
+        "the row stays, so the reconcile counts the missing copy"
+    );
+}
+
+/// A copy another session expunged while this one claimed it means the other
+/// machine is sending: refused here.
+#[test]
+fn a_copy_claimed_by_another_session_refuses_the_send() {
+    let fx = Fixture::new();
+    fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    folder.claimed_elsewhere = true;
+
+    let refused = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(refused.contains("another machine removed"), "{refused}");
+    assert!(fx.row("d1").is_some());
+}
+
+/// A server that cannot be reached, or offers no UIDPLUS, says nothing about
+/// the other machine: the send is refused rather than risked.
+#[test]
+fn an_unreachable_drafts_folder_refuses_the_send() {
+    let fx = Fixture::new();
+    fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+
+    folder.fail_select = true;
+    let refused = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(refused.contains("could not be reached"), "{refused}");
+    assert!(refused.contains("nothing was sent"), "{refused}");
+
+    folder.fail_select = false;
+    folder.uidplus = false;
+    let refused = guard(&fx.store, &fx.account, &mut folder, "d1").unwrap_err();
+    assert!(refused.contains("UIDPLUS"), "{refused}");
+    assert_eq!(folder.live().len(), 1, "the copy is untouched");
+    assert!(fx.row("d1").is_some());
+}
+
+/// A draft never pushed, and any draft of an account that does not mirror,
+/// passes without a word to the server.
+#[test]
+fn a_draft_with_no_server_copy_passes_the_guard_untouched() {
+    let mut fx = Fixture::new();
+    fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder {
+        fail_select: true,
+        ..FakeFolder::default()
+    };
+    guard(&fx.store, &fx.account, &mut folder, "d1").expect("never pushed");
+
+    fx.write(
+        "pushed",
+        "d2",
+        "server_message_id: \"<mp-draft.2@tum.de>\"\n",
+        "zwei",
+    );
+    fx.account.drafts.mirror = false;
+    guard(&fx.store, &fx.account, &mut folder, "d2").expect("mirror off");
+    assert!(folder.log.is_empty(), "{:?}", folder.log);
+}
+
+/// A send that fails after its claim leaves a draft with no copy and no row:
+/// the owed-push scan pushes it again, and the reconcile never retires it as
+/// a draft sent elsewhere.
+#[test]
+fn a_send_that_fails_after_its_claim_is_pushed_again_and_never_retired() {
+    let fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "eins");
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1), &mut folder, "d1")).unwrap();
+    guard(&fx.store, &fx.account, &mut folder, "d1").unwrap();
+    assert!(folder.live().is_empty());
+
+    // The SMTP submission failed: the file stays where it was.
+    for _ in 0..2 {
+        let report = reconciled(&fx, &mut folder);
+        assert_eq!(report.retired, 0, "{report:?}");
+    }
+    assert!(path.exists(), "never retired");
+    assert_eq!(
+        push::enqueue_owed(&fx.store, &fx.account).unwrap(),
+        1,
+        "a push is owed"
+    );
+    block_on(push::push(&fx.mirror(2), &mut folder, "d1")).unwrap();
+    assert_eq!(folder.live().len(), 1, "pushed again: {:?}", folder.log);
+    assert!(fx.row("d1").is_some());
+}

@@ -778,8 +778,24 @@ async fn run(
     runtimes: Arc<crate::daemon::server::RuntimeTable>,
 ) {
     let account = work.account().to_string();
-    perform(work, handle).await;
+    perform(work, handle, &runtimes).await;
     drain_after_send(&runtimes, &account);
+}
+
+/// The runtime whose turn a send of the draft at `path` holds, when the draft
+/// is one the mirror pushed ([`crate::draft_mirror::send_guard`]): its claim
+/// of the server copy and its submission then run with no drain or reconcile
+/// of this account between them. `None` for every other send, which holds
+/// nothing.
+fn guarded_runtime(
+    runtimes: &crate::daemon::server::RuntimeTable,
+    account: &AccountConfig,
+    path: &std::path::Path,
+) -> Option<Arc<crate::daemon::runtime::account::AccountRuntime>> {
+    let draft = crate::draft::parse_email_draft(path).ok()?;
+    crate::draft_mirror::send_guard::guards(account, &draft)
+        .then(|| runtimes.get(&account.name))
+        .flatten()
 }
 
 /// Ask `account`'s runtime for a drain once a send operation has ended.
@@ -798,7 +814,11 @@ fn drain_after_send(runtimes: &crate::daemon::server::RuntimeTable, account: &st
 }
 
 /// The operation itself, to its terminal state.
-async fn perform(work: Work, handle: OperationHandle) {
+async fn perform(
+    work: Work,
+    handle: OperationHandle,
+    runtimes: &crate::daemon::server::RuntimeTable,
+) {
     handle.set_running();
     match work {
         Work::Draft {
@@ -812,6 +832,11 @@ async fn perform(work: Work, handle: OperationHandle) {
             }
             let name = account.name.clone();
             let selector = crate::selector::Selector::for_draft(&name, &row.id).to_string();
+            let runtime = guarded_runtime(runtimes, &account, &row.path);
+            let _turn = match &runtime {
+                Some(runtime) => runtime.send_turn().await,
+                None => None,
+            };
             let sent = off_thread("the send", move || async move {
                 send_one(&account, &row.path, &email).await
             })
@@ -839,7 +864,7 @@ async fn perform(work: Work, handle: OperationHandle) {
             if let Err(e) = super::open_secrets(&account.name, secrets) {
                 return handle.fail(DomainError::from(e));
             }
-            let outcome = send_approved(account, email, &handle).await;
+            let outcome = send_approved(account, email, &handle, runtimes).await;
             handle.succeed(value_or_fail("send.approved", &outcome));
         }
         Work::Invite {
@@ -927,6 +952,10 @@ async fn send_one(
     let draft = crate::draft::parse_email_draft(path)?;
     crate::draft::validate_draft(&draft)?;
     let ctx = context_for(account, email)?;
+    // A draft the mirror pushed may be approved on the other machine too: its
+    // server copy is claimed first, and a send that cannot claim it, or finds
+    // it gone, sends nothing (#0143).
+    crate::draft_mirror::send_guard::guard_send(account, &draft).await?;
     let sent = crate::send::send_draft(&draft, &ctx).await?;
     let mut outcome = outcome_of(account, None, &sent.report, sent.settle_error);
     outcome.message_id = sent.message_id;
@@ -1012,6 +1041,7 @@ async fn send_approved(
     account: AccountConfig,
     email: EmailSettings,
     handle: &OperationHandle,
+    runtimes: &crate::daemon::server::RuntimeTable,
 ) -> ApprovedOutcome {
     let name = account.name.clone();
     let rows: Vec<DraftRow> = crate::store::drafts::index_dir(&crate::config::drafts_dir(&name))
@@ -1035,6 +1065,11 @@ async fn send_approved(
             total: Some(total),
             message: Some(selector.clone()),
         });
+        let runtime = guarded_runtime(runtimes, &account, &row.path);
+        let _turn = match &runtime {
+            Some(runtime) => runtime.send_turn().await,
+            None => None,
+        };
         let account = account.clone();
         let email = email.clone();
         let sent = off_thread("the batch send", move || async move {

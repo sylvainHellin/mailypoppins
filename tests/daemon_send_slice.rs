@@ -2946,3 +2946,67 @@ async fn a_send_result_renders_through_the_shared_wordings() {
         "the CLI's line comes out of the daemon's payload and nowhere else: {lines:?}"
     );
 }
+
+/// A draft the mirror pushed is claimed from the server Drafts folder before
+/// it is sent (#0143), so mp on two machines holding the same approved draft
+/// cannot both send it. A server that cannot be checked refuses the send:
+/// both `send.draft` and the `send.approved` batch go through the guard, and
+/// nothing reaches the transport.
+///
+/// Routed side only (fake transport). The fixture account has no IMAP
+/// server configured, which is a Drafts folder the guard cannot reach.
+#[tokio::test]
+async fn a_mirrored_draft_is_not_sent_when_its_server_copy_cannot_be_claimed() {
+    let slice = Slice::with_fake_transport();
+    let path = fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join(fixture::APPROVED_FILE);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let pushed = text.replacen(
+        "status: approved\n",
+        "status: approved\nserver_message_id: \"<mp-draft.guard@example.com>\"\n",
+        1,
+    );
+    assert_ne!(pushed, text, "the approved draft has a status line");
+    std::fs::write(&path, pushed).unwrap();
+    let mut conn = slice.connect().await;
+
+    let settled = run_operation(
+        &mut conn,
+        "send.draft",
+        json!({
+            "account": fixture::ACCOUNT,
+            "selector": fixture::selector(fixture::ACCOUNT, fixture::APPROVED),
+        }),
+    )
+    .await;
+    assert_eq!(settled["state"], "failed", "{settled}");
+    let said = settled.to_string();
+    assert!(
+        said.contains("could not be reached") && said.contains("nothing was sent"),
+        "the refusal says why: {said}"
+    );
+
+    let settled = run_operation(
+        &mut conn,
+        "send.approved",
+        json!({"account": fixture::ACCOUNT}),
+    )
+    .await;
+    assert_eq!(settled["state"], "succeeded", "{settled}");
+    let outcome: ApprovedOutcome = serde_json::from_value(settled["result"].clone())
+        .expect("send.approved answers with an ApprovedOutcome");
+    assert_eq!(outcome.sent, 0, "{outcome:?}");
+    assert!(
+        outcome
+            .results
+            .iter()
+            .any(|r| r.status_line.contains("nothing was sent")),
+        "{outcome:?}"
+    );
+
+    let submitted: Vec<_> = fixture::transport_events(&slice.log())
+        .into_iter()
+        .filter(|event| matches!(event, fixture::TransportEvent::Submit { .. }))
+        .collect();
+    assert!(submitted.is_empty(), "nothing went out: {submitted:?}");
+    assert!(path.exists(), "the draft stays");
+}

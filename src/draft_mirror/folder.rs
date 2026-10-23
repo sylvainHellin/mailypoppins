@@ -71,6 +71,17 @@ pub trait DraftsFolder {
     /// `UID EXPUNGE` of exactly those.
     fn delete(&mut self, uids: &[u32]) -> impl Future<Output = Result<()>>;
 
+    /// Remove the copies `uids` names as a claim, and answer which of them
+    /// this session removed: the UIDs whose untagged `EXPUNGE` it saw in
+    /// answer to its own `UID EXPUNGE`. A copy another session removed first
+    /// is not in the answer. Needs `UIDPLUS`, and refuses without it, since a
+    /// plain `EXPUNGE` would also take what another client flagged.
+    ///
+    /// What a send of a mirrored draft takes the draft's server copy with
+    /// before it submits ([`super::send_guard`]), so mp on two machines
+    /// sending one draft cannot both go ahead.
+    fn claim(&mut self, uids: &[u32]) -> impl Future<Output = Result<Vec<u32>>>;
+
     /// Every message of the folder, by its [`HEAD_FIELDS`].
     fn heads(&mut self) -> impl Future<Output = Result<Vec<ServerHead>>>;
 
@@ -235,6 +246,57 @@ impl DraftsFolder for ImapDraftsFolder {
         self.settle(result)
     }
 
+    async fn claim(&mut self, uids: &[u32]) -> Result<Vec<u32>> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.uidplus {
+            return Err(anyhow!(
+                "the server does not offer UIDPLUS, so a draft's server copy cannot be \
+                 removed by its UID alone"
+            ));
+        }
+        let set = uids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let result = async {
+            let session = self.pooled().await?.session();
+            session
+                .uid_store(&set, "+FLAGS.SILENT (\\Deleted)")
+                .await
+                .map_err(|e| anyhow!("Failed to flag {set} deleted: {e}"))?
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(|e| anyhow!("Failed to collect the store response: {e}"))?;
+            // Each copy's sequence number as it stands now, read after the
+            // STORE so an expunge reported while it ran is already counted.
+            let fetched: Vec<_> = session
+                .uid_fetch(&set, "(UID)")
+                .await
+                .map_err(|e| anyhow!("Failed to fetch {set}: {e}"))?
+                .try_collect()
+                .await
+                .map_err(|e| anyhow!("Failed to collect the fetch response: {e}"))?;
+            let mut pending: Vec<(u32, u32)> = fetched
+                .iter()
+                .filter_map(|msg| Some((msg.message, msg.uid?)))
+                .filter(|(_, uid)| uids.contains(uid))
+                .collect();
+            let expunged: Vec<u32> = session
+                .uid_expunge(&set)
+                .await
+                .map_err(|e| anyhow!("Failed to expunge {set}: {e}"))?
+                .try_collect()
+                .await
+                .map_err(|e| anyhow!("Failed to collect the expunge response: {e}"))?;
+            Ok(claimed_by_expunges(&mut pending, &expunged))
+        }
+        .await;
+        self.settle(result)
+    }
+
     async fn heads(&mut self) -> Result<Vec<ServerHead>> {
         let result = async {
             let session = self.pooled().await?.session();
@@ -298,9 +360,55 @@ impl DraftsFolder for ImapDraftsFolder {
     }
 }
 
+/// The UIDs among `pending` (sequence number, UID) that the untagged
+/// `EXPUNGE` responses `expunged` removed, in the order the server sent them.
+///
+/// Each `EXPUNGE n` renumbers every message above `n` down by one at once
+/// (RFC 3501, 7.4.1), so a copy is matched by its sequence number as the
+/// expunges before it left it, and an expunge of some other message below it
+/// (another client's, reported during this command) moves it down rather
+/// than being taken for it.
+fn claimed_by_expunges(pending: &mut Vec<(u32, u32)>, expunged: &[u32]) -> Vec<u32> {
+    let mut claimed = Vec::new();
+    for &seq in expunged {
+        if let Some(at) = pending.iter().position(|(s, _)| *s == seq) {
+            claimed.push(pending.remove(at).1);
+        }
+        for (s, _) in pending.iter_mut() {
+            if *s > seq {
+                *s -= 1;
+            }
+        }
+    }
+    claimed.sort_unstable();
+    claimed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An expunge reported for another message below a copy moves the copy
+    /// down one; the copy is claimed only by the expunge of its own number.
+    #[test]
+    fn a_claim_follows_the_renumbering_of_each_expunge() {
+        // Copies 120 at 5 and 130 at 9; another client's message at 3 goes
+        // first, then 5 (now 4), then 9 (now 8, then 7).
+        let mut pending = vec![(5, 120), (9, 130)];
+        assert_eq!(
+            claimed_by_expunges(&mut pending, &[3, 4, 7]),
+            vec![120, 130]
+        );
+        // Only another client's expunge, at the copy's old number after a
+        // shift: not this session's claim.
+        let mut pending = vec![(5, 120)];
+        assert_eq!(
+            claimed_by_expunges(&mut pending, &[2, 5]),
+            Vec::<u32>::new()
+        );
+        let mut pending = vec![(5, 120)];
+        assert_eq!(claimed_by_expunges(&mut pending, &[]), Vec::<u32>::new());
+    }
 
     /// The listing asks for the linking headers by name, so the draft source
     /// a copy carries never rides along.
@@ -351,6 +459,10 @@ pub mod fake {
         /// A file and the text appended to it at the next `fetch`: a save in
         /// the editor while the mirror waits on the network.
         pub touch_on_fetch: Option<(std::path::PathBuf, String)>,
+        /// Another session expunges the copies a `claim` names just before
+        /// this one's `UID EXPUNGE`: mp on the other machine sending the
+        /// same draft at the same moment.
+        pub claimed_elsewhere: bool,
     }
 
     impl Default for FakeFolder {
@@ -366,6 +478,7 @@ pub mod fake {
                 fail_select: false,
                 hidden: Vec::new(),
                 touch_on_fetch: None,
+                claimed_elsewhere: false,
             }
         }
     }
@@ -449,6 +562,24 @@ pub mod fake {
                     .retain(|c| !(c.deleted && uids.contains(&c.uid)));
             }
             Ok(())
+        }
+
+        async fn claim(&mut self, uids: &[u32]) -> Result<Vec<u32>> {
+            if !self.uidplus {
+                return Err(anyhow!("the fake server offers no UIDPLUS"));
+            }
+            self.log.push(format!("claim {uids:?}"));
+            let present: Vec<u32> = self
+                .live()
+                .iter()
+                .map(|c| c.uid)
+                .filter(|uid| uids.contains(uid))
+                .collect();
+            self.copies.retain(|c| !uids.contains(&c.uid));
+            if self.claimed_elsewhere {
+                return Ok(Vec::new());
+            }
+            Ok(present)
         }
 
         /// The [`HEAD_FIELDS`] of every listed copy, as a server answers
