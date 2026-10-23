@@ -639,19 +639,40 @@ pub fn fwd_subject(subject: &str) -> String {
     }
 }
 
+/// The original's date as Outlook writes it on a forward's `Sent:` line,
+/// `Wednesday, October 21, 2026 8:12 PM`, in `zone`; a date that is not
+/// RFC 2822 stays as written.
+fn outlook_sent_date<Tz: chrono::TimeZone>(raw: &str, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    match chrono::DateTime::parse_from_rfc2822(raw.trim()) {
+        Ok(at) => at
+            .with_timezone(zone)
+            .format("%A, %B %-d, %Y %-I:%M %p")
+            .to_string(),
+        Err(_) => raw.to_string(),
+    }
+}
+
 /// The header fields a forward quotes above the original, in Outlook's order
 /// and with its English labels: `From:`, `Sent:`, `To:`, `Cc:` when the
-/// original had one, `Subject:`. The values stay as written.
-fn forward_header_fields(source: &SourceMessage) -> Vec<(&'static str, &str)> {
+/// original had one, `Subject:`. The values stay as written, but for the
+/// date, which Outlook's long form in this machine's zone replaces.
+fn forward_header_fields(source: &SourceMessage) -> Vec<(&'static str, String)> {
+    let sent = source.date.as_deref().map_or_else(
+        || "(unknown date)".to_string(),
+        |date| outlook_sent_date(date, &chrono::Local),
+    );
     let mut fields = vec![
-        ("From:", source.from.as_str()),
-        ("Sent:", source.date.as_deref().unwrap_or("(unknown date)")),
-        ("To:", source.to.as_str()),
+        ("From:", source.from.clone()),
+        ("Sent:", sent),
+        ("To:", source.to.clone()),
     ];
     if let Some(cc) = source.cc.as_deref().filter(|cc| !cc.trim().is_empty()) {
-        fields.push(("Cc:", cc));
+        fields.push(("Cc:", cc.to_string()));
     }
-    fields.push(("Subject:", source.subject.as_str()));
+    fields.push(("Subject:", source.subject.clone()));
     fields
 }
 
@@ -3931,7 +3952,7 @@ mod tests {
             to: "Me <me@example.com>, Ops & Co <ops@x.com>".into(),
             cc: Some("carol@example.com".into()),
             subject: "Q&A <draft> \"v2\"".into(),
-            date: Some("Tue, 21 Oct 2026 20:12:00 +0200".into()),
+            date: Some("Wed, 21 Oct 2026 20:12:00 +0200".into()),
             body: "Original body".into(),
             html: Some("<p>Original <b>body</b></p>".into()),
             ..Default::default()
@@ -3940,6 +3961,45 @@ mod tests {
 
     fn companion_html(draft: &Path) -> String {
         fs::read_to_string(draft.with_extension("html")).unwrap()
+    }
+
+    /// The `Sent:` value of [`html_source`]'s date in this machine's zone.
+    fn local_sent() -> String {
+        outlook_sent_date("Wed, 21 Oct 2026 20:12:00 +0200", &chrono::Local)
+    }
+
+    /// A forward's `Sent:` value is Outlook's long English date in the given
+    /// zone, with a 12-hour clock; a date that does not parse stays as written.
+    /// The zone is passed in, so the test holds on any machine.
+    #[test]
+    fn the_forward_sent_date_is_outlooks_long_form() {
+        let date = "Wed, 21 Oct 2026 20:12:00 +0200";
+        let east = |hours| chrono::FixedOffset::east_opt(hours * 3600).unwrap();
+        assert_eq!(
+            outlook_sent_date(date, &east(2)),
+            "Wednesday, October 21, 2026 8:12 PM"
+        );
+        assert_eq!(
+            outlook_sent_date(date, &chrono::Utc),
+            "Wednesday, October 21, 2026 6:12 PM"
+        );
+        assert_eq!(
+            outlook_sent_date("Thu, 1 Jan 2026 00:05:00 +0100", &east(1)),
+            "Thursday, January 1, 2026 12:05 AM"
+        );
+        assert_eq!(
+            outlook_sent_date("Thu, 1 Jan 2026 00:05:00 +0100", &east(-5)),
+            "Wednesday, December 31, 2025 6:05 PM"
+        );
+        // A weekday that does not match the date fails RFC 2822 too.
+        for raw in [
+            "Tue, 21 Oct 2026 20:12:00 +0200",
+            "2026-10-21T20:12:00+02:00",
+            "yesterday",
+            "",
+        ] {
+            assert_eq!(outlook_sent_date(raw, &chrono::Utc), raw);
+        }
     }
 
     #[test]
@@ -3985,14 +4045,14 @@ mod tests {
                 .unwrap();
                 let html = companion_html(&path);
                 let expected = format!(
-                    "<p style=\"color:#666\">On Tue, 21 Oct 2026 20:12:00 +0200, {escaped} wrote:</p>"
+                    "<p style=\"color:#666\">On Wed, 21 Oct 2026 20:12:00 +0200, {escaped} wrote:</p>"
                 );
                 assert!(html.starts_with(&expected), "{from} (all {all}): {html}");
                 assert!(html.contains("<p>Original <b>body</b></p>"), "{html}");
                 let md = fs::read_to_string(&path).unwrap();
                 assert!(
                     md.contains(&format!(
-                        "On Tue, 21 Oct 2026 20:12:00 +0200, {from} wrote:\n"
+                        "On Wed, 21 Oct 2026 20:12:00 +0200, {from} wrote:\n"
                     )),
                     "{from}: {md}"
                 );
@@ -4011,7 +4071,7 @@ mod tests {
         let html = companion_html(&path);
         for line in [
             "<b>From:</b> Zoë &amp; Co &lt;zoe@example.de&gt;<br>",
-            "<b>Sent:</b> Tue, 21 Oct 2026 20:12:00 +0200<br>",
+            &format!("<b>Sent:</b> {}<br>", local_sent()),
             "<b>To:</b> Me &lt;me@example.com&gt;, Ops &amp; Co &lt;ops@x.com&gt;<br>",
             "<b>Cc:</b> carol@example.com<br>",
             "<b>Subject:</b> Q&amp;A &lt;draft&gt; &quot;v2&quot;</p>",
@@ -4046,16 +4106,19 @@ mod tests {
         let path =
             create_forward_draft_from(&source, "me@example.com", Some(tmp.path()), None).unwrap();
         let html = companion_html(&path);
-        let expected = "<div style=\"border:none;border-top:solid #B5C4DF 1.0pt;padding:3.0pt 0cm 0cm 0cm\">\n\
+        let expected = format!(
+            "<div style=\"border:none;border-top:solid #B5C4DF 1.0pt;padding:3.0pt 0cm 0cm 0cm\">\n\
             <p style=\"margin:0 0 12.0pt 0\"><b>From:</b> Zoë &lt;zoe@example.de&gt;<br>\n\
-            <b>Sent:</b> Tue, 21 Oct 2026 20:12:00 +0200<br>\n\
+            <b>Sent:</b> {}<br>\n\
             <b>To:</b> Me &lt;me@example.com&gt;, Ops &amp; Co &lt;ops@x.com&gt;<br>\n\
             <b>Cc:</b> carol@example.com<br>\n\
             <b>Subject:</b> Q&amp;A &lt;draft&gt; &quot;v2&quot;</p>\n\
             </div>\n\
             <div>\n\
             <p>Original <b>body</b></p>\n\
-            </div>";
+            </div>",
+            local_sent()
+        );
         assert_eq!(html, expected);
         assert!(!html.contains("Forwarded message"), "{html}");
         let sent = format!("<p>Hi Kim</p>\n<div style=\"padding-top:1em\">\n{html}\n</div>");
@@ -4129,12 +4192,13 @@ mod tests {
         let expected = format!(
             "\n\n{}\n{QUOTE_MARKER}\n\n\
              From: Zoë & Co <zoe@example.de>  \n\
-             Sent: Tue, 21 Oct 2026 20:12:00 +0200  \n\
+             Sent: {}  \n\
              To: Me <me@example.com>, Ops & Co <ops@x.com>  \n\
              Cc: carol@example.com  \n\
              Subject: Q&A <draft> \"v2\"\n\n\
              Original body\n",
-            wrap_signature_block("Sylvain").unwrap()
+            wrap_signature_block("Sylvain").unwrap(),
+            local_sent()
         );
         assert_eq!(body, expected);
     }

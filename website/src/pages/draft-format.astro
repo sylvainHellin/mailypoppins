@@ -72,7 +72,7 @@ Your Name
 <!-- mp:quote -->
 
 From: Original Sender <sender@example.com>
-Sent: Thu, 15 Jan 2026 09:30:00 +0100
+Sent: Thursday, January 15, 2026 9:30 AM
 To: you@example.com
 Cc: colleague@example.com
 Subject: Original subject
@@ -299,9 +299,10 @@ Email body here.`;
       <p>
         The forward is laid out as Outlook lays it out. Below your note and signature, the
         original's From, Sent, To, Cc and Subject stand one per line, with Cc left out when
-        the original had none, then the original body follows. When the original has an HTML
-        part, the sent HTML sets these labels in bold under a thin blue-grey line, as a
-        forward written in Outlook does.
+        the original had none, then the original body follows. The Sent date is written as
+        Outlook writes it, in your time zone. When the original has an HTML part,
+        the sent HTML sets these labels in bold under a thin blue-grey line, as a forward
+        written in Outlook does.
       </p>
       <Code code={forwardExample} lang="markdown" theme={codeTheme} />
       <p>
