@@ -352,7 +352,15 @@ pub struct AccountRuntime {
     /// where the production hooks pass on the account's drafts mirror state
     /// after a drain or a tick that may have moved it (#0143).
     draft_watch: DraftWatchCell,
+    /// The drafts mirror's reconcile on its own, without a sync (#0143), which
+    /// [`AccountRuntime::reconcile_drafts`] runs under the turn. `None` for a
+    /// runtime built with injected tick hooks and no drafts hook.
+    drafts: Option<DraftsHook>,
 }
+
+/// The drafts reconcile [`AccountRuntime::reconcile_drafts`] runs: the
+/// production one reads the server Drafts folder, a test's counts.
+pub type DraftsHook = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 
 /// The draft watcher a runtime and its production hooks share (#0143), set
 /// once by [`AccountRuntime::attach_draft_watch`].
@@ -395,9 +403,11 @@ impl AccountRuntime {
             report.clone(),
             Arc::clone(&draft_watch),
         );
+        let drafts = drafts_hook(Arc::new(cfg.clone()), Arc::clone(&draft_watch));
         let mut runtime = Self::start_at_with_hooks(dir, cfg, pool_size, hooks)?;
         runtime.report = report;
         runtime.draft_watch = draft_watch;
+        runtime.drafts = Some(drafts);
         Ok(runtime)
     }
 
@@ -459,7 +469,38 @@ impl AccountRuntime {
             drain_requests: watch::channel(0).0,
             report: TickReport::default(),
             draft_watch: DraftWatchCell::default(),
+            drafts: None,
         })
+    }
+
+    /// Install the drafts reconcile [`AccountRuntime::reconcile_drafts`]
+    /// runs, as [`AccountRuntime::start_at`] installs the production one.
+    pub fn with_drafts_hook(mut self, hook: DraftsHook) -> Self {
+        self.drafts = Some(hook);
+        self
+    }
+
+    /// Reconcile the account's drafts with its server Drafts folder now,
+    /// without a sync (#0143): what the drafts poll runs between ticks, so a
+    /// draft saved in Outlook or pushed by the other machine arrives within
+    /// a minute rather than at the next sync tick.
+    ///
+    /// Under the turn, as a drain is: it waits for a tick or a drain in
+    /// flight and never runs beside one. A blocked or retired runtime, or one
+    /// with no drafts hook, refuses; the answer is whether it ran.
+    pub async fn reconcile_drafts(&self) -> bool {
+        if self.readiness != Readiness::Ready {
+            return false;
+        }
+        let Some(hook) = self.drafts.clone() else {
+            return false;
+        };
+        let _turn = self.turn.lock().await;
+        if *self.retired.borrow() {
+            return false;
+        }
+        hook().await;
+        true
     }
 
     /// The account this runtime serves.
@@ -1047,6 +1088,31 @@ fn body_hook(cfg: Arc<AccountConfig>, report: TickReport, watch: DraftWatchCell)
             .and_then(|inner| inner)?;
             *lock(&report.sync) = Some(result);
             Ok(())
+        }
+        .boxed()
+    })
+}
+
+/// The drafts reconcile on its own (#0143): the body hook's reconcile without
+/// the sync before it, off the reactor for the same reason.
+fn drafts_hook(cfg: Arc<AccountConfig>, watch: DraftWatchCell) -> DraftsHook {
+    Arc::new(move || {
+        let cfg = Arc::clone(&cfg);
+        let watch = Arc::clone(&watch);
+        async move {
+            let ran = off_thread("the drafts reconcile", move || async move {
+                if let Err(e) = crate::draft_mirror::reconcile_account(&cfg).await {
+                    warn!(
+                        "[drafts] reconciling the drafts of {} failed: {e:#}",
+                        cfg.name
+                    );
+                }
+                publish_mirror_state(&cfg, &watch);
+            })
+            .await;
+            if let Err(e) = ran {
+                warn!("[drafts] {e:#}");
+            }
         }
         .boxed()
     })

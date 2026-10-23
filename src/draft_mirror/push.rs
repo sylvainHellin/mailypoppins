@@ -142,11 +142,15 @@ pub async fn push<F: DraftsFolder>(
             .collect(),
         _ => Vec::new(),
     };
+    let mut removed = Vec::new();
     if !replaced.is_empty() {
-        if let Err(e) = folder.delete(&replaced).await {
+        match folder.delete(&replaced).await {
+            Ok(()) => removed = replaced,
             // The new copy is in and recorded below; the old one is the
             // reconcile's to remove at the next sync.
-            warn!("[drafts] could not remove the old copy of {account}/{draft_id}: {e:#}");
+            Err(e) => {
+                warn!("[drafts] could not remove the old copy of {account}/{draft_id}: {e:#}")
+            }
         }
     }
 
@@ -163,7 +167,14 @@ pub async fn push<F: DraftsFolder>(
         },
     )?;
     crate::pending_ops::forget_failed_pushes(mirror.store, account, draft_id)?;
-    info!("[drafts] pushed {account}/{draft_id} to {mailbox} as UID {new_uid}");
+    if removed.is_empty() {
+        info!("[drafts] pushed {account}/{draft_id} to {mailbox} as UID {new_uid}");
+    } else {
+        info!(
+            "[drafts] pushed {account}/{draft_id} to {mailbox} as UID {new_uid}, replacing UID(s) \
+             {removed:?}"
+        );
+    }
     Ok(())
 }
 

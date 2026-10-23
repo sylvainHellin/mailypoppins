@@ -58,6 +58,7 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 
 pub mod account;
+pub mod drafts_poll;
 pub mod drainer;
 pub mod hook_runner;
 pub mod pool;

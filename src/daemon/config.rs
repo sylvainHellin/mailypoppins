@@ -689,6 +689,8 @@ pub async fn start_account(
                 // The periodic quick tick for what the watcher cannot hear
                 // (#0134), bound the same way again.
                 super::runtime::scheduler::spawn(&runtime, Arc::clone(canonical), &cfg_for_watch);
+                // The drafts mirror's reconcile between those ticks (#0143).
+                super::runtime::drafts_poll::spawn(&runtime, &cfg_for_watch);
                 // The mail hooks, run after every tick that ingested (#0135).
                 super::runtime::hook_runner::spawn(&runtime, &cfg_for_watch);
                 super::runtime::watcher::spawn(&runtime, Arc::clone(canonical), cfg_for_watch);

@@ -313,8 +313,8 @@ For each local draft with a `server_message_id`:
 For each server copy carrying a marker that names no local file and no file in `drafts/.retired/`: it is a draft the other machine's mp pushed, and it is written as a new local file under that `id:` with the copy's `server_message_id`, beside a `draft_sync` row for the copy.
 Without this rule the Mac and the home server would not converge in slice 1, since each would only ever see its own drafts.
 
-The latency is the scheduler's quick tick (`imap.sync_interval_secs`), because the IDLE watcher hears only INBOX (`src/daemon/runtime/watcher.rs:21-28`).
-That is the latency Outlook and Apple Mail show between each other on IMAP as well.
+The IDLE watcher hears only INBOX (`src/daemon/runtime/watcher.rs:21-28`), so a tick alone left the Drafts folder unread for up to `imap.sync_interval_secs`, fifteen minutes by default.
+As built, a drafts poll (`src/daemon/runtime/drafts_poll.rs`) runs the reconcile on its own once a minute between ticks, which is close to what Outlook and Apple Mail show between each other.
 
 #### Pull
 
@@ -387,6 +387,7 @@ The server copy's delete joins the outbox's transition out of `pending_send`, wi
 - The condition is the one `settle_sent_draft` retires the file under (`src/draft.rs:182-187`), so a partly delivered draft keeps both its local file and its server copy.
 
 The outbox's `done` keeps meaning "sent and filed", and the delete is a server mutation of the kind the queue already retries and converges.
+The send method asks the account's runtime for a drain once the send ends, so the delete goes out seconds after the send; until 2026-10-23 it waited for the next sync tick, and a TUM draft sent from mp stayed in Outlook's Drafts for eight minutes.
 A failed delete retries on the queue's backoff and parks `failed` past its budget with `Rollback::None`.
 The stale server copy then shows in Outlook and Apple Mail as a draft that was in fact sent; mp's reconcile sees a marker that names a retired id and enqueues `DeleteDraft` again, so it converges at the next sync that reaches the server.
 A `DeleteDraft` whose copy is already gone is a not-found, which the drain treats as success (`src/pending_ops.rs:20-28`).

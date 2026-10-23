@@ -331,6 +331,9 @@ A settled draft whose bytes are not the ones its server copy was written from ow
 A new mirror state describes again only the drafts whose row or failure moved, and every draft of the account the first time or when the switch flips; a conflict copy appearing or going describes the draft beside it again.
 The account runtime reconciles the drafts with the server Drafts folder after every sync body, whether the mail folders synced or not: a copy edited elsewhere is pulled into its file, a draft edited on both sides gets a `<name>.conflict.md` beside it, a draft whose copy was sent or deleted elsewhere moves to `drafts/.retired/`, and a draft mp pushed on another machine is written here under its own id.
 A failed reconcile is a warning in the log, never the tick's error, and the next tick tries again.
+Between ticks a drafts poll (`src/daemon/runtime/drafts_poll.rs`) runs the reconcile on its own, without a sync, once the account has gone `DRAFTS_POLL` (60 s, a constant) since its last tick or poll; it runs under the runtime's turn, and an account that does not mirror, has no IMAP server, has `sync_interval_secs = 0` or syncs at least once a minute gets none.
+A reconcile that changed something logs `[drafts] reconciled <account> against <folder>: ...` at info, and one that found everything in step logs only at debug.
+A send asks its account's runtime for a drain when it ends, so the delete of the sent draft's server copy and the `\Answered` flag it queued go out `DRAIN_DEBOUNCE` later rather than at the next tick.
 That is why a draft with no `id:` is announced under its file stem, where the explicit index refresh would mint one: minting inside a watcher means writing to a file an editor is holding open, which is the exact burst the debounce exists to survive.
 A file that will not parse is left byte-identical, mtime included, which is also what keeps it from republishing the same diagnostic on every poll.
 

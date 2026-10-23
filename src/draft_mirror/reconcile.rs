@@ -474,6 +474,12 @@ pub async fn reconcile<F: DraftsFolder>(
     }
     if report != ReconcileReport::default() {
         info!("[drafts] reconciled {account} against {mailbox}: {report:?}");
+    } else {
+        log::debug!(
+            "[drafts] {account} is in step with {mailbox}: {} copies, {} drafts",
+            copies.len(),
+            locals.len()
+        );
     }
     Ok(report)
 }
