@@ -197,8 +197,8 @@ default_from = "your.name@example.com"`} />
         <code>60</code>). The daemon already syncs when new mail reaches the inbox; this
         catches what that cannot see, such as changes in other folders, retries of queued
         changes, and an account with no window open. Any sync, whether you started it or
-        the daemon did, restarts the wait. It does not apply to Microsoft Graph accounts
-        yet.
+        the daemon did, restarts the wait. Microsoft Graph accounts follow the same
+        interval.
       </p>
       <ConfigExample code={`[imap]
 host = "imap.example.com"   # Falls back to smtp.host
