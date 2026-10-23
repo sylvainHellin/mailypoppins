@@ -38,12 +38,13 @@ All notable changes to this project are documented in this file.
 - `mp -A <account>` with no subcommand opens the TUI on that account; a name no account carries is refused before the TUI starts.
 - Drafts are mirrored to each IMAP account's server Drafts folder (#0143).
   A save is pushed within seconds.
-  An edit made in Outlook, Apple Mail, the Proton app or mp on another machine comes back at the next sync.
+  An edit made in Outlook, Apple Mail, the Proton app or mp on another machine comes back within a minute: the Drafts folder is read after every sync and once a minute between syncs.
   A draft changed on both sides keeps the server's version, and your text is saved beside it in `<name>.conflict.md`.
   `[accounts.drafts] mirror = false` turns the mirror off for an account.
 - TUI and desktop: the Drafts list shows each draft as synced, pending, conflict or failed (#0143).
 - Drafts started in Outlook, Apple Mail or the Proton app appear in mp's Drafts view as Markdown files (#0143).
-- Sent and discarded drafts move to `drafts/.retired/` for 30 days, and their server copies are removed (#0143).
+- A draft approved on one machine is approved on the other, when the copy it reads is mp's own, unedited and with every attachment; an edit in another client brings it back as `status: draft`, and on Proton, whose Bridge drops mp's headers, the approval does not travel (#0143).
+- Sent and discarded drafts move to `drafts/.retired/` for 30 days, and their server copies are removed seconds later (#0143).
   A draft whose server copy was sent or deleted in another client moves there once two syncs in a row miss the copy, and comes back if the copy does.
 - A draft's server copy carries nothing in its body beyond the message itself, so a copy sent unedited from another client reveals no Bcc and no frontmatter; mp's own bookkeeping rides in `X-Mailypoppins-Draft-Source` headers, without the Bcc (#0143).
 - `draft.set_headers` rewrites an existing draft's recipients and subject in the daemon (#0143).
