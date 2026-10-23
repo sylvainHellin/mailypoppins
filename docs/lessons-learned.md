@@ -3241,3 +3241,9 @@ A refusal that matters for reconstructing an incident later (the send guard's, i
 
 `GlobalConfig` deserializes in one piece, so deleting the `oauth2` variant from `AuthMethod` would make a config that still names it fail to parse, and the daemon then serves zero accounts (`ConfigState::Invalid`).
 The retired value is kept as `AuthMethod::RetiredOAuth2`, which every path that would run the account refuses with one sentence (`config::retired_oauth2_message`), and `start_account` records it as a failed start, so that account alone is `blocked` while the rest serve.
+
+## A git worktree has none of the checkout's local .gitignore files (2026-10-23)
+
+The repo's `.gitignore` files are local-only, so a worktree made with `git worktree add` starts with no ignore rules at all.
+A `pnpm build` of the website in such a worktree leaves `website/dist/` and `website/.astro/` untracked, and a broad `git add` commits them.
+An agent in a worktree adds paths by name, or copies the checkout's `.gitignore` files into the worktree first.
