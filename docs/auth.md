@@ -21,7 +21,8 @@ No write takes a block naming it: the daemon's `account_block` refuses one.
 
 - Passwords stored in the secrets backend under `smtp-password-<account>` and `imap-password-<account>`.
 - IMAP falls back to the SMTP password if `imap-password-<account>` is missing.
-- Default backend: machine-bound encrypted file at `~/.config/mailypoppins/secrets.enc`. Opt into the OS keyring with `secrets_backend = "keyring"` in `config.toml`. See [secrets.md](secrets.md).
+- Default backend: machine-bound encrypted file at `~/.config/mailypoppins/secrets.enc`.
+  Opt into the OS keyring with `secrets_backend = "keyring"` in `config.toml`; both backends use the same keys (see [secrets.md](secrets.md)).
 - Set or rotate via `mp config set-password {smtp|imap} --account <name>`.
 
 ## Graph (Microsoft Graph REST)
@@ -42,12 +43,16 @@ No write takes a block naming it: the daemon's `account_block` refuses one.
   ```
 
 - Token cache: `<mailypoppins_data_dir>/tokens/<account>.enc` (encrypted with the same `encrypt_blob` / `decrypt_blob` as `secrets.enc`), refreshed automatically; when the refresh token expires after roughly 90 days of inactivity, re-run `mp config oauth2-login --account <name>`.
-- Scopes: `GRAPH_SCOPES` constant in `oauth2.rs` (`Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `offline_access`).
+- Scopes: `GRAPH_SCOPES` constant in `crates/mp-core/src/oauth2.rs` (`Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `offline_access`).
 - `SmtpConfig::load()` and `ImapConfig::load()` return errors for Graph accounts. Use `GraphConfig::load()` instead.
-- All mail operations route through `src/graph.rs`: `list_folders`, `fetch_new_messages`, `sync_mailboxes_graph`, `send_mail`, `move_message_graph`, `delete_message_graph`, `mark_read_graph`, `search_messages_threaded`.
-- TUI actions branch on `app.is_graph()` in `tui/actions.rs::handle_action()` and dispatch to Graph helpers (`graph::archive_email_graph`, etc.) instead of IMAP/SMTP.
-- No IMAP IDLE -- the watcher is a 60-second timer that polls inbox message count and emits `WatchEvent::Changed` on delta.
-- `mp config oauth2-login --account <name>` tests Graph accounts via the `/me` endpoint. `mp config show` displays "graph (Microsoft Graph API)" and hides SMTP/IMAP details.
+- All mail operations route through `src/graph.rs`: `list_folders`, `fetch_new_messages`, `sync_mailboxes_graph`, `GraphClient::send_mime`, `move_message_graph`, `delete_message_graph`, `mark_read_graph`, `search_messages_threaded`.
+- The TUI and the CLI hold no transport: they call the daemon over its socket, and the daemon picks Graph or IMAP/SMTP from the account's `auth_method`.
+  Server mutations (move, archive, delete, flags) go through `ops::Backend::resolve` and `ops::run_op` in `src/ops.rs`; sync, send, fetch and search branch in the daemon methods under `src/daemon/methods/`.
+- No IMAP IDLE: the daemon's per-account watcher (`src/daemon/runtime/watcher.rs`) enumerates the Graph inbox every 60 seconds (`GRAPH_POLL`) and runs a quick tick when its message-id set changes.
+- The scheduler (`src/daemon/runtime/scheduler.rs`) also ticks a Graph account once it has gone `imap.sync_interval_secs` without a sync, and follows up within seconds while a capped folder still owes a backlog.
+- An incremental sync pass reads `/messages/delta` from the stored delta token (#0042) and falls back to a full folder enumeration when there is no usable token, on a full sync, or when the delta reports a removal.
+- `mp config oauth2-login --account <name>` runs the device-code flow through the daemon (`config.oauth2_login`) and stores the token cache.
+  `mp config show` displays "graph (Microsoft Graph API)" and hides SMTP/IMAP details.
 
 ## Setup wizard
 

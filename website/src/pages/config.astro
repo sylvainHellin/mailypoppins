@@ -52,7 +52,7 @@ host = "postout.lrz.de"
 port = 587
 username = "your-id"
 default_from = "your.name@example.com"
-# Password stored in OS keyring, not here
+# Password stored in the secrets store, not here
 
 [imap]
 host = "imap.example.com"   # Falls back to smtp.host if omitted
@@ -156,9 +156,8 @@ send_hold_secs = 20`} />
       <!-- [smtp] -->
       <h3 id="smtp-section">[smtp]</h3>
       <p>
-        SMTP settings for sending email. The password is stored in the OS keyring
-        (macOS Keychain, Windows Credential Manager, or Linux Secret Service) under the
-        key <code>smtp-password</code> (or <code>smtp-password-&lt;account&gt;</code> for named accounts).
+        SMTP settings for sending email. The password is kept in the secrets store under
+        the key <code>smtp-password-&lt;account&gt;</code> (see <a href="#secrets">Password Storage</a>).
         It is never written to the config file.
       </p>
       <ConfigExample code={`[smtp]
@@ -380,7 +379,7 @@ mirror = false`} />
         To manage multiple email accounts, use the <code>[[accounts]]</code> array syntax.
         Each account has its own <code>smtp</code>, <code>imap</code>, and <code>mailboxes</code>
         sections nested under it. The account <code>name</code> is used to identify it in
-        commands, keyring keys, and the data-dir layout (<code>accounts/&lt;name&gt;/</code>).
+        commands, password keys, and the data-dir layout (<code>accounts/&lt;name&gt;/</code>).
       </p>
       <p>
         In the TUI and the desktop app, <code>ga</code> opens a list of the accounts:
@@ -447,15 +446,14 @@ server = "sentitems"`} />
 
       <h3 id="auth-password">1. Password (default)</h3>
       <p>
-        Passwords are stored in the OS keyring (macOS Keychain, Windows Credential Manager,
-        Linux Secret Service). They are never written to the config file. Keyring keys
-        follow the pattern <code>smtp-password-&lt;name&gt;</code> and
-        <code>imap-password-&lt;name&gt;</code>. If the IMAP password is not set, it falls
-        back to the SMTP password.
+        Passwords are kept in the secrets store (see <a href="#secrets">Password Storage</a>)
+        and never written to the config file. Their keys follow the pattern
+        <code>smtp-password-&lt;name&gt;</code> and <code>imap-password-&lt;name&gt;</code>.
+        If the IMAP password is not set, it falls back to the SMTP password.
       </p>
       <p>Set or update passwords with:</p>
       <div class="code-inline">
-        <Code code="mp config set-password" lang="bash" theme={codeTheme} />
+        <Code code="mp config set-password smtp --account personal" lang="bash" theme={codeTheme} />
       </div>
       <p>
         An on-premises Exchange server, one your organisation runs itself, is a password
@@ -561,30 +559,50 @@ server = "sentitems"          # Not "Sent Items"`} />
       </ol>
     </section>
 
-    <!-- Keyring Management -->
+    <!-- Password Storage -->
     <section>
-      <h2>Keyring Management</h2>
+      <h2 id="secrets">Password Storage</h2>
       <p>
-        Passwords for the <code>password</code> auth method are stored in the OS-native
-        keyring. The CLI uses the <code>keyring</code> Rust crate, which maps to:
+        Passwords for the <code>password</code> auth method are stored, by default, in an
+        encrypted file at <code>~/.config/mailypoppins/secrets.enc</code>. Its key is derived
+        from the machine ID and your user ID, so the file opens only on the machine and for
+        the user that wrote it: a backup or a copy on another computer stays unreadable.
+        Graph token caches under <code>tokens/</code> in the data directory are encrypted the
+        same way. No password prompt or keychain dialog appears at runtime.
       </p>
-      <ul class="keyring-list">
-        <li>macOS: Keychain</li>
-        <li>Windows: Credential Manager</li>
-        <li>Linux: Secret Service (e.g., GNOME Keyring, KWallet)</li>
-      </ul>
-      <p>Keyring keys follow this naming pattern:</p>
+      <p>Keys follow this naming pattern:</p>
       <ul class="keyring-list">
         <li><code>smtp-password-&lt;account-name&gt;</code></li>
         <li><code>imap-password-&lt;account-name&gt;</code> (falls back to SMTP password if not set)</li>
       </ul>
       <p>To set or update a password:</p>
       <div class="code-inline">
-        <Code code="mp config set-password" lang="bash" theme={codeTheme} />
+        <Code code="mp config set-password smtp --account personal" lang="bash" theme={codeTheme} />
       </div>
       <p>
-        The command prompts you to select which password to update (SMTP or IMAP) and
-        which account. The password is entered interactively and never echoed to the terminal.
+        The argument is <code>smtp</code> or <code>imap</code>; without <code>--account</code>
+        the first account is used. The password is entered interactively and never echoed to
+        the terminal.
+      </p>
+      <p>
+        On a new machine, or after a restore from a backup, the file no longer decrypts.
+        <code>mp config reset-secrets</code> removes it and the Graph token caches, then asks
+        for each account's passwords again.
+      </p>
+      <h3 id="secrets-keyring">OS keyring (opt-in)</h3>
+      <p>
+        To keep passwords in the OS keyring instead (macOS Keychain, or Secret Service on
+        Linux, such as GNOME Keyring or KWallet), add this top-level key to
+        <code>config.toml</code>, before the first <code>[section]</code> header:
+      </p>
+      <ConfigExample code={`secrets_backend = "keyring"`} />
+      <p>
+        The keyring entries use the service name <code>mailypoppins</code> and the same keys
+        as above. Nothing is migrated: set each password again with
+        <code>mp config set-password</code> after the switch, and run
+        <code>mp daemon restart</code> so a running daemon picks up the new backend. On macOS
+        a build signed with a different identity, which every <code>cargo install</code>
+        produces, asks for keychain access again for every entry.
       </p>
     </section>
   </main>

@@ -24,11 +24,14 @@ import AccordionItem from '../components/AccordionItem.astro';
           </p>
         </AccordionItem>
 
-        <AccordionItem question="Password not found in keyring">
+        <AccordionItem question="Secret not found">
           <p>
-            Run <code>mp config set-password</code> to store your SMTP or IMAP password in the
-            OS keyring (macOS Keychain, Windows Credential Manager, or Linux Secret Service).
-            Passwords are never stored in the config file.
+            Run <code>mp config set-password smtp --account &lt;name&gt;</code> (or
+            <code>imap</code>) to store the password in the secrets store: by default an
+            encrypted file bound to this machine, or the OS keyring if you opted in with
+            <code>secrets_backend = "keyring"</code>. Passwords are never stored in the config
+            file. If the store cannot be decrypted at all, for example after a restore onto a new
+            machine, run <code>mp config reset-secrets</code> and enter the passwords again.
           </p>
         </AccordionItem>
 
