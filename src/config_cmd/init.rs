@@ -3,7 +3,8 @@
 //!
 //! The wizards ask the user to describe an account, dial its servers to test
 //! the answers, offer the server's mailboxes as the next prompt's choices, sign
-//! an OAuth2 account in, write `config.toml` and store the passwords. Since the
+//! a Microsoft 365 (Graph) account in, write `config.toml` and store the
+//! passwords. Since the
 //! daemon leftovers of 2026-10-22 each of those steps is one call on a
 //! [`WizardDaemon`]: `config.probe` for a connection test or a mailbox list,
 //! `config.oauth2_login` with the `candidate` block for a sign-in,
@@ -91,13 +92,38 @@ enum Mode {
     Add { existing: Vec<String> },
 }
 
-/// The four presets both wizards offer.
+/// The three presets both wizards offer. Microsoft 365 always goes through
+/// Graph; on-premises Exchange is a standard password account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Preset {
+pub(super) enum Preset {
     Standard,
     Proton,
-    Exchange,
     Graph,
+}
+
+/// The provider menu, in order: the digit typed, the line shown, the preset
+/// it picks. Anything else typed is [`Preset::Standard`], the default.
+pub(super) const PROVIDERS: [(&str, &str, Preset); 3] = [
+    (
+        "1",
+        "Standard IMAP/SMTP with a password (also on-premises Exchange)",
+        Preset::Standard,
+    ),
+    ("2", "Proton Mail (via Proton Bridge)", Preset::Proton),
+    (
+        "3",
+        "Microsoft 365 / Exchange Online (Graph API)",
+        Preset::Graph,
+    ),
+];
+
+/// The preset a provider answer picks.
+pub(super) fn preset_for(choice: &str) -> Preset {
+    PROVIDERS
+        .iter()
+        .find(|(digit, _, _)| *digit == choice.trim())
+        .map(|(_, _, preset)| *preset)
+        .unwrap_or(Preset::Standard)
 }
 
 /// The answers of an IMAP/SMTP account, the shape [`imap_candidate`] writes.
@@ -114,8 +140,6 @@ pub struct ImapAnswers {
     /// The IMAP username as typed; empty falls back to the SMTP username.
     pub imap_username: String,
     pub accept_invalid_certs: bool,
-    /// `Some((client_id, tenant_id))` for an OAuth2 (Exchange) account.
-    pub oauth2: Option<(String, String)>,
     pub mailboxes: Mailboxes,
 }
 
@@ -160,16 +184,12 @@ pub fn imap_candidate(a: &ImapAnswers) -> Value {
         smtp["accept_invalid_certs"] = json!(true);
         imap["accept_invalid_certs"] = json!(true);
     }
-    let mut candidate = json!({
+    let candidate = json!({
         "name": a.name,
         "default_from": a.default_from,
         "smtp": smtp,
         "imap": imap,
     });
-    if let Some((client_id, tenant_id)) = &a.oauth2 {
-        candidate["auth_method"] = json!("oauth2");
-        candidate["oauth2"] = json!({"client_id": client_id, "tenant_id": tenant_id});
-    }
     with_mailboxes(candidate, &a.mailboxes)
 }
 
@@ -308,16 +328,10 @@ pub async fn cmd_config_add_account(
 /// The provider prompt, then the flow for it.
 async fn run(daemon: &mut impl WizardDaemon, mode: Mode, path: &Path) -> Result<()> {
     println!("Select email provider:");
-    println!("  1. Standard IMAP/SMTP (manual config)");
-    println!("  2. Proton Mail (via Proton Bridge)");
-    println!("  3. Microsoft 365 / Exchange Online (OAuth2 IMAP/SMTP)");
-    println!("  4. Microsoft 365 / Exchange Online (Graph API)");
-    let preset = match prompt_input("Choice", "1")?.trim() {
-        "2" => Preset::Proton,
-        "3" => Preset::Exchange,
-        "4" => Preset::Graph,
-        _ => Preset::Standard,
-    };
+    for (digit, line, _) in PROVIDERS {
+        println!("  {digit}. {line}");
+    }
+    let preset = preset_for(&prompt_input("Choice", "1")?);
     println!();
     match preset {
         Preset::Proton => {
@@ -327,21 +341,13 @@ async fn run(daemon: &mut impl WizardDaemon, mode: Mode, path: &Path) -> Result<
             );
             println!();
         }
-        Preset::Exchange => {
-            println!(
-                "{} Microsoft 365 requires an Azure Entra ID app registration.",
-                "\u{2139}".blue()
-            );
-            println!("  See docs/exchange-setup.md for step-by-step instructions.");
-            println!();
-        }
         Preset::Graph => return graph_flow(daemon, &mode, path).await,
         Preset::Standard => {}
     }
     imap_flow(daemon, &mode, preset, path).await
 }
 
-/// The IMAP/SMTP flow: Standard, Proton Bridge and Exchange over OAuth2.
+/// The IMAP/SMTP flow with a password: Standard and Proton Bridge.
 async fn imap_flow(
     daemon: &mut impl WizardDaemon,
     mode: &Mode,
@@ -350,12 +356,10 @@ async fn imap_flow(
 ) -> Result<()> {
     let (smtp_host, smtp_port, imap_host, imap_port) = match preset {
         Preset::Proton => ("127.0.0.1", "1025", "127.0.0.1", "1143"),
-        Preset::Exchange => ("smtp.office365.com", "587", "outlook.office365.com", "993"),
         _ => ("smtp.example.com", "465", "", "993"),
     };
     let default_name = match (preset, mode) {
         (Preset::Proton, _) => "proton",
-        (Preset::Exchange, _) => "exchange",
         (_, Mode::Init { .. }) => "main",
         (_, Mode::Add { .. }) => "work",
     };
@@ -374,69 +378,49 @@ async fn imap_flow(
 
     // Each password the probes accepted, stored once the account exists.
     let mut passwords: Vec<(&str, String)> = Vec::new();
-    // What a mailbox probe authenticates with: the IMAP password for a
-    // password account, the cached token for an OAuth2 one.
-    let imap_password: Option<String>;
+    let smtp_password = tested_password(daemon, &a, "smtp", "SMTP password").await?;
+    passwords.push(("smtp", smtp_password.clone()));
+    println!();
 
-    if preset == Preset::Exchange {
-        println!();
-        println!("{}", "OAuth2 Configuration".bold());
-        a.oauth2 = Some((
-            prompt_input("Azure App client_id", "")?,
-            prompt_input("Azure tenant_id", "")?,
-        ));
-        println!();
-        println!("{}", "IMAP Configuration".bold());
-        a.imap_host = prompt_input("IMAP host", imap_host)?;
-        a.imap_port = prompt_input("IMAP port", imap_port)?.parse().unwrap_or(993);
-        a.imap_username = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
-        println!();
-        sign_in_and_test_smtp(daemon, &imap_candidate(&a)).await?;
-        imap_password = None;
-    } else {
-        let smtp_password = tested_password(daemon, &a, "smtp", "SMTP password").await?;
-        passwords.push(("smtp", smtp_password.clone()));
-        println!();
+    println!("{}", "IMAP Configuration".bold());
+    a.imap_host = prompt_input("IMAP host (leave empty to use SMTP host)", imap_host)?;
+    a.imap_port = prompt_input("IMAP port", imap_port)?.parse().unwrap_or(993);
+    a.imap_username = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
 
-        println!("{}", "IMAP Configuration".bold());
-        a.imap_host = prompt_input("IMAP host (leave empty to use SMTP host)", imap_host)?;
-        a.imap_port = prompt_input("IMAP port", imap_port)?.parse().unwrap_or(993);
-        a.imap_username = prompt_input("IMAP username (leave empty to use SMTP username)", "")?;
-
-        print!("Use same password as SMTP? [Y/n] ");
+    print!("Use same password as SMTP? [Y/n] ");
+    io::stdout().flush()?;
+    // What the mailbox probe authenticates with: the IMAP password.
+    let imap_password = if yes_no(true)? {
+        print!("  Testing IMAP connection... ");
         io::stdout().flush()?;
-        if yes_no(true)? {
-            print!("  Testing IMAP connection... ");
-            io::stdout().flush()?;
-            let probe = daemon
-                .probe(&imap_candidate(&a), "imap", Some(&smtp_password))
-                .await?;
-            if probe.ok {
-                println!("{}", "OK".green());
-            } else {
-                println!("{}", "FAILED".red());
-                eprintln!(
-                    "  Error: {}",
-                    probe.error.unwrap_or_else(|| "no reason given".into())
-                );
-                eprintln!(
-                    "  {} SMTP password did not work for IMAP. You may need to set it separately later.",
-                    "\u{26a0}".yellow()
-                );
-            }
-            imap_password = Some(smtp_password);
+        let probe = daemon
+            .probe(&imap_candidate(&a), "imap", Some(&smtp_password))
+            .await?;
+        if probe.ok {
+            println!("{}", "OK".green());
         } else {
-            let password = tested_password(daemon, &a, "imap", "IMAP password").await?;
-            passwords.push(("imap", password.clone()));
-            imap_password = Some(password);
+            println!("{}", "FAILED".red());
+            eprintln!(
+                "  Error: {}",
+                probe.error.unwrap_or_else(|| "no reason given".into())
+            );
+            eprintln!(
+                "  {} SMTP password did not work for IMAP. You may need to set it separately later.",
+                "\u{26a0}".yellow()
+            );
         }
-    }
+        smtp_password
+    } else {
+        let password = tested_password(daemon, &a, "imap", "IMAP password").await?;
+        passwords.push(("imap", password.clone()));
+        password
+    };
     println!();
 
     a.mailboxes = choose_mailboxes(
         daemon,
         &imap_candidate(&a),
-        imap_password.as_deref(),
+        Some(&imap_password),
         Labels::imap(mode),
     )
     .await?;
@@ -449,53 +433,13 @@ async fn imap_flow(
     print_account_data_paths(&a.name);
     println!();
     finished(mode, &a.name, &path);
-    if a.oauth2.is_some() {
-        println!(
-            "{} OAuth2 token cached at {}/<account>.enc",
-            "\u{2713}".green().bold(),
-            crate::config::tokens_dir().display()
-        );
-    } else if !passwords.is_empty() {
+    if !passwords.is_empty() {
         println!(
             "{} Passwords stored in the daemon's secrets backend",
             "\u{2713}".green().bold()
         );
     }
     Ok(())
-}
-
-/// What the user reads when an OAuth2 account's SMTP test fails; the desktop
-/// wizard says the same (`OAUTH2_SMTP_WARNING` in
-/// clients/desktop/src/app/wizard.ts).
-pub const OAUTH2_SMTP_WARNING: &str =
-    "The sign-in may lack SMTP access: a tenant that disables SMTP AUTH refuses it. \
-     Setup goes on, and sending fails until an administrator enables SMTP AUTH for the mailbox.";
-
-/// Sign an OAuth2 candidate in, then test its SMTP login with the staged
-/// token, as the desktop wizard does. A refused SMTP login is a warning and
-/// the wizard goes on: the mailbox list that follows tests IMAP, and only
-/// sending needs the SMTP scope a tenant may withhold.
-pub(super) async fn sign_in_and_test_smtp(
-    daemon: &mut impl WizardDaemon,
-    candidate: &Value,
-) -> Result<Probe> {
-    println!("{} Running OAuth2 device code flow...", "\u{2139}".blue());
-    daemon.sign_in(candidate).await?;
-    println!("{} OAuth2 token acquired and cached", "\u{2713}".green());
-    print!("  Testing SMTP connection... ");
-    io::stdout().flush()?;
-    let probe = daemon.probe(candidate, "smtp", None).await?;
-    if probe.ok {
-        println!("{}", "OK".green());
-    } else {
-        println!("{}", "FAILED".red());
-        eprintln!(
-            "  Error: {}",
-            probe.error.as_deref().unwrap_or("no reason given")
-        );
-        eprintln!("  {} {OAUTH2_SMTP_WARNING}", "\u{26a0}".yellow());
-    }
-    Ok(probe)
 }
 
 /// Store each password the probes accepted, now that the account exists.

@@ -146,18 +146,16 @@ pub fn credentials(
     let accounts = accounts
         .iter()
         .map(|account| {
-            let graph = account.auth_method == AuthMethod::Graph;
-            let (smtp_password, imap_password) = if graph {
-                (None, None)
-            } else {
-                (
+            // An account naming the retired `oauth2` mode holds no credential
+            // anything reads, so it reports none.
+            let (smtp_password, imap_password, token) = match account.auth_method {
+                AuthMethod::Password => (
                     Some(present(format!("smtp-password-{}", account.name))),
                     Some(present(format!("imap-password-{}", account.name))),
-                )
-            };
-            let token = match account.auth_method {
-                AuthMethod::Password => None,
-                AuthMethod::OAuth2 | AuthMethod::Graph => Some(token_state(&account.name)),
+                    None,
+                ),
+                AuthMethod::Graph => (None, None, Some(token_state(&account.name))),
+                AuthMethod::RetiredOAuth2 => (None, None, None),
             };
             AccountCredential {
                 account: account.name.clone(),
@@ -171,7 +169,7 @@ pub fn credentials(
     Ok(AccountCredentials { accounts })
 }
 
-/// What the account's OAuth2 token cache holds, without handing any of it out.
+/// What the Graph account's token cache holds, without handing any of it out.
 fn token_state(account: &str) -> TokenState {
     if !crate::oauth2::token_cache_path(account).exists() {
         return TokenState::NotCached;
@@ -187,8 +185,8 @@ fn token_state(account: &str) -> TokenState {
 fn auth_method_word(method: &AuthMethod) -> &'static str {
     match method {
         AuthMethod::Password => "password",
-        AuthMethod::OAuth2 => "oauth2",
         AuthMethod::Graph => "graph",
+        AuthMethod::RetiredOAuth2 => "oauth2",
     }
 }
 

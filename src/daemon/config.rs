@@ -352,11 +352,11 @@ pub fn effective_account(config: &GlobalConfig, account: &AccountConfig) -> Valu
         "default_from": account.default_from,
         "auth_method": match account.auth_method {
             AuthMethod::Password => "password",
-            AuthMethod::OAuth2 => "oauth2",
             AuthMethod::Graph => "graph",
+            AuthMethod::RetiredOAuth2 => "oauth2",
         },
         // A public identifier, never redacted: `mp config show` prints it in
-        // the clear and it is the one thing an OAuth2 setup is diagnosed from.
+        // the clear and it is the one thing a Graph setup is diagnosed from.
         "oauth2": account.oauth2.as_ref().map(|settings| json!({
             "client_id": settings.client_id,
             "tenant_id": settings.tenant_id,
@@ -615,6 +615,14 @@ pub async fn start_account(
     if !account_runtimes {
         return;
     }
+    // An account naming the retired `auth_method = "oauth2"` has no
+    // transport left to run on. It comes up blocked with the sentence that
+    // says how to switch it, and every other account starts as usual.
+    if cfg.auth_method == AuthMethod::RetiredOAuth2 {
+        let reason = crate::config::retired_oauth2_message(&cfg.name);
+        canonical.apply(blocked_by_failure(runtimes, &cfg.name, reason));
+        return;
+    }
     // An account with no store has never been synced, and a runtime would
     // *create* one: `ReadPool::open` opens SQLite read-write, which
     // materialises an empty database. That would turn "<account> has no local
@@ -792,7 +800,10 @@ pub fn spawn_first_sync_if_new(
     let Some(cfg) = store.accounts().iter().find(|a| a.name == account).cloned() else {
         return;
     };
-    if cfg.is_local_only() || crate::config::store_path(account).exists() {
+    if cfg.is_local_only()
+        || cfg.auth_method == AuthMethod::RetiredOAuth2
+        || crate::config::store_path(account).exists()
+    {
         return;
     }
     // Cleared by the first sync itself, whichever way it ends.

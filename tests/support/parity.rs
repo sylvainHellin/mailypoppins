@@ -628,6 +628,23 @@ pub fn graph_without_smtp_warning(mut out: Output) -> Output {
     out
 }
 
+/// The oracle's stdout with `mp config reset-secrets`' preamble line as
+/// today's binary prints it.
+///
+/// The pre-daemon binary told "OAuth2/Graph accounts" to sign in again; the
+/// `oauth2` mode it meant is retired (decision log, 2026-10-23), so today's
+/// line names Graph accounts alone, and this takes that deliberate change out
+/// of a parity row the way [`graph_without_smtp_warning`] does.
+pub fn without_retired_oauth2_mode(mut out: Output) -> Output {
+    const ORACLE: &str = "  - For OAuth2/Graph accounts, you will need to re-run";
+    const TODAY: &str = "  - For Graph accounts, you will need to re-run";
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if stdout.contains(ORACLE) {
+        out.stdout = stdout.replace(ORACLE, TODAY).into_bytes();
+    }
+    out
+}
+
 /// The oracle's stdout as today's binary prints it into a pipe.
 ///
 /// Since #0144 a command that hands back a selector or a path prints the

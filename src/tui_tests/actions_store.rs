@@ -717,7 +717,6 @@ mod store_backed_mutations {
                 password: String::new(),
                 default_from: "me@example.com".to_string(),
                 accept_invalid_certs: false,
-                auth_method: crate::config::AuthMethod::Password,
             }),
             account: crate::config::AccountConfig {
                 name: "alice".to_string(),

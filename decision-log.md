@@ -246,3 +246,13 @@ Ticket [#0143](docs/tickets/0143-server-drafts.md).
 Rejected: approval staying local (the build's provisional default, never logged as a decision); a status header of its own, which a copy mp never wrote could carry too; the status in the HTML mark for Proton, which nothing validates and which would approve a body converted from HTML.
 Source: Sylvain, chat of 2026-10-23.
 Status: accepted
+
+## 2026-10-23 - Microsoft 365 accounts always go through Microsoft Graph, and the OAuth2 sign-in over IMAP and SMTP is retired
+
+Why: one way to reach Microsoft 365 keeps the design simple, and no account uses the retired mode (TUM is password IMAP on the on-premises LRZ Exchange, EVOQS is Graph, Proton, OVH and Gmail are password accounts, checked in both machines' configs).
+The XOAUTH2 paths in IMAP and SMTP, the IMAP and SMTP scopes and the wizards' Microsoft 365 IMAP preset are removed; the Graph sign-in, its token cache and the Entra app stay.
+Password IMAP and SMTP stay for every server, on-premises Exchange included.
+A config that still says `auth_method = "oauth2"` loads, and only that account is blocked with a sentence naming both ways out: `auth_method = "graph"` for Microsoft 365, a password for on-premises Exchange.
+Rejected: keeping the mode behind a flag; failing the whole config on the retired value, which would stop every other account.
+Source: Sylvain, chat of 2026-10-23.
+Status: accepted

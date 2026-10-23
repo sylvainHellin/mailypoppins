@@ -468,15 +468,10 @@ pub fn send_approved_summary(outcome: &ApprovedOutcome) -> String {
 // The admin slice (P4-U14)
 // ---------------------------------------------------------------------------
 
-/// The line `mp config oauth2-login` prints before the flow starts.
-///
-/// `graph` picks the transport the token is for, which is the only thing the
-/// user can tell the two flows apart by.
-pub fn oauth2_start_line(account: &str, graph: bool) -> String {
-    format!(
-        "\u{2139} Starting OAuth2 device code flow for account '{account}' ({})",
-        if graph { "Graph API" } else { "IMAP/SMTP" }
-    )
+/// The line `mp config oauth2-login` prints before the flow starts, for the
+/// Graph account it signs in.
+pub fn oauth2_start_line(account: &str) -> String {
+    format!("\u{2139} Starting OAuth2 device code flow for account '{account}' (Graph API)")
 }
 
 /// The block a device-code login shows a human, blank lines included.

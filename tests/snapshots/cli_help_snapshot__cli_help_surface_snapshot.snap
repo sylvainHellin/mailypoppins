@@ -499,9 +499,9 @@ Commands:
   init           Interactive setup wizard
   show           Show current configuration
   set-password   Store a password in the active secrets backend (for the first account unless `-A` names one)
-  reset-secrets  Wipe the encrypted secrets file (and OAuth2 token caches) and re-prompt for credentials. Use this after a Time Machine restore to a new machine, or whenever the secrets file can no longer be decrypted
+  reset-secrets  Wipe the encrypted secrets file (and Graph token caches) and re-prompt for credentials. Use this after a Time Machine restore to a new machine, or whenever the secrets file can no longer be decrypted
   add-account    Add a new account to the existing config
-  oauth2-login   Run OAuth2 device code flow to acquire and cache a token (for the first OAuth2 account unless `-A` names one)
+  oauth2-login   Sign a Microsoft 365 (Graph) account in with the OAuth2 device code flow and cache its token (for the first Graph account unless `-A` names one)
   path           Print config file path
   help           Print this message or the help of the given subcommand(s)
 
@@ -538,7 +538,7 @@ Options:
   -h, --help               Print help
 
 $ mp config reset-secrets --help
-Wipe the encrypted secrets file (and OAuth2 token caches) and re-prompt for credentials. Use this after a Time Machine restore to a new machine, or whenever the secrets file can no longer be decrypted
+Wipe the encrypted secrets file (and Graph token caches) and re-prompt for credentials. Use this after a Time Machine restore to a new machine, or whenever the secrets file can no longer be decrypted
 
 Usage: mp config reset-secrets
 
@@ -554,7 +554,7 @@ Options:
   -h, --help  Print help
 
 $ mp config oauth2-login --help
-Run OAuth2 device code flow to acquire and cache a token (for the first OAuth2 account unless `-A` names one)
+Sign a Microsoft 365 (Graph) account in with the OAuth2 device code flow and cache its token (for the first Graph account unless `-A` names one)
 
 Usage: mp config oauth2-login [OPTIONS]
 

@@ -1,7 +1,7 @@
-// OAuth2 Device Code Flow for Microsoft Entra ID (Exchange Online)
+// OAuth2 Device Code Flow for Microsoft Entra ID (Microsoft 365)
 //
-// Implements the device authorization grant for acquiring access tokens
-// to use with IMAP (XOAUTH2) and SMTP (XOAUTH2) on Exchange Online.
+// Implements the device authorization grant for acquiring the access tokens
+// a Graph account (`auth_method = "graph"`) calls Microsoft Graph with.
 //
 // Token cache is stored encrypted at `<mailypoppins_data_dir>/tokens/<account>.enc`
 // using the same machine-bound key as the secrets store (see `secrets.rs`).
@@ -66,24 +66,11 @@ pub fn tenant_or_default(input: &str) -> String {
     }
 }
 
-/// Scopes required for IMAP + SMTP access via OAuth2.
-pub const IMAP_SMTP_SCOPES: &str = "https://outlook.office365.com/IMAP.AccessAsUser.All \
-                                    https://outlook.office365.com/SMTP.Send \
-                                    offline_access";
-
 /// Scopes required for Microsoft Graph API mail access.
 pub const GRAPH_SCOPES: &str = "https://graph.microsoft.com/Mail.Read \
                                 https://graph.microsoft.com/Mail.ReadWrite \
                                 https://graph.microsoft.com/Mail.Send \
                                 offline_access";
-
-/// Return the appropriate OAuth2 scopes for a given auth method.
-pub fn scopes_for_auth_method(method: &crate::config::AuthMethod) -> &'static str {
-    match method {
-        crate::config::AuthMethod::Graph => GRAPH_SCOPES,
-        crate::config::AuthMethod::OAuth2 | crate::config::AuthMethod::Password => IMAP_SMTP_SCOPES,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Token cache
@@ -548,18 +535,6 @@ pub fn load_or_refresh_token_blocking(
 }
 
 // ---------------------------------------------------------------------------
-// XOAUTH2 SASL string builder
-// ---------------------------------------------------------------------------
-
-/// Build the XOAUTH2 SASL string for IMAP/SMTP authentication.
-/// Format: `base64("user=<email>\x01auth=Bearer <token>\x01\x01")`
-pub fn build_xoauth2_string(username: &str, access_token: &str) -> String {
-    use base64::Engine;
-    let raw = format!("user={}\x01auth=Bearer {}\x01\x01", username, access_token);
-    base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -597,21 +572,6 @@ mod tests {
         assert_eq!(
             sweep_staged_tokens_in(&dir.path().join("missing"), now, day).unwrap(),
             0
-        );
-    }
-
-    #[test]
-    fn test_build_xoauth2_string() {
-        let result = build_xoauth2_string("user@example.com", "ya29.token");
-        // Decode and verify structure
-        use base64::Engine;
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(&result)
-            .unwrap();
-        let decoded_str = String::from_utf8(decoded).unwrap();
-        assert_eq!(
-            decoded_str,
-            "user=user@example.com\x01auth=Bearer ya29.token\x01\x01"
         );
     }
 

@@ -61,7 +61,7 @@ fn imap_password_line(credential: Option<&AccountCredential>) -> String {
     }
 }
 
-/// The `[oauth2]` token line.
+/// The `[oauth2]` token line of a Graph account.
 fn token_line(credential: Option<&AccountCredential>) -> String {
     match credential.and_then(|c| c.token) {
         Some(TokenState::Valid) => "valid".green().to_string(),
@@ -160,13 +160,11 @@ pub fn cmd_config_show(
         println!("  default_from = {}", account.default_from);
 
         match account.auth_method {
-            AuthMethod::OAuth2 | AuthMethod::Graph => {
-                let label = if account.auth_method == AuthMethod::Graph {
-                    "graph (Microsoft Graph API)"
-                } else {
-                    "oauth2"
-                };
-                println!("  auth_method  = {}", label.yellow());
+            AuthMethod::Graph => {
+                println!(
+                    "  auth_method  = {}",
+                    "graph (Microsoft Graph API)".yellow()
+                );
                 if let Some(ref oauth2) = account.oauth2 {
                     println!("\n  {}", "[oauth2]".bold());
                     println!("    client_id = {}", oauth2.client_id);
@@ -179,6 +177,14 @@ pub fn cmd_config_show(
             }
             AuthMethod::Password => {
                 println!("  auth_method  = password");
+            }
+            AuthMethod::RetiredOAuth2 => {
+                println!("  auth_method  = {}", "oauth2 (retired)".red());
+                println!(
+                    "  {} {}",
+                    "\u{26a0}".yellow(),
+                    crate::config::retired_oauth2_message(&account.name)
+                );
             }
         }
 

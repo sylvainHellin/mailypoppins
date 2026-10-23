@@ -931,26 +931,21 @@ pub fn resolve_date(
 /// never its value.
 ///
 /// The TUI loaded every account's IMAP and SMTP configuration itself before
-/// the daemon leftovers' follow-up, password and OAuth2 token included, only
-/// to ask whether the load succeeded. The secrets are the daemon's; this is
+/// the daemon leftovers' follow-up, passwords included, only to ask whether
+/// the load succeeded. The secrets are the daemon's; this is
 /// the answer to that one question.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Credentials {
-    /// The account can log in to IMAP: an IMAP password, the SMTP password
-    /// it falls back to, or an OAuth2 token that is cached.
+    /// The account can log in to IMAP: an IMAP password, or the SMTP
+    /// password it falls back to.
     pub imap: bool,
-    /// The account can submit over SMTP: an SMTP password or a cached OAuth2
-    /// token.
+    /// The account can submit over SMTP: an SMTP password.
     pub smtp: bool,
 }
 
 impl Credentials {
     /// What one `account.credentials` entry says the account can use.
-    ///
-    /// An expired token counts as present, because the daemon refreshes it on
-    /// its next use; a token that is not cached or does not read does not.
     pub fn from_wire(entry: &mp_protocol::account::AccountCredential) -> Self {
-        use mp_protocol::account::TokenState;
         match entry.auth_method.as_str() {
             "password" => {
                 let smtp = entry.smtp_password.unwrap_or(false);
@@ -959,18 +954,9 @@ impl Credentials {
                     smtp,
                 }
             }
-            "oauth2" => {
-                let usable = matches!(
-                    entry.token,
-                    Some(TokenState::Valid) | Some(TokenState::Expired)
-                );
-                Self {
-                    imap: usable,
-                    smtp: usable,
-                }
-            }
             // A Graph account has neither transport; `graph_configured` is
-            // its question.
+            // its question. An account naming the retired `oauth2` mode has
+            // none left at all.
             _ => Self::default(),
         }
     }

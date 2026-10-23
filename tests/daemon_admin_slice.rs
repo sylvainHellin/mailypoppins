@@ -186,7 +186,7 @@
 //! success path is pinned only as far as it can be honestly reached:
 //!
 //! - the three refusals, over the wire and through the CLI: an unknown
-//!   account, an account whose `auth_method` is `password`, and an OAuth2
+//!   account, an account whose `auth_method` is `password`, and a Graph
 //!   account with no usable `[accounts.oauth2]` section;
 //! - the rendering, as a pure function of a synthetic progress payload
 //!   through [`oauth2_start_line`], [`oauth2_device_code_lines`] and
@@ -195,7 +195,7 @@
 //!   have to reproduce.
 //!
 //! The connection tests `mp config oauth2-login` runs after acquiring a token
-//! (IMAP, SMTP, or Graph `/me`) are **not** pinned here: they need a server as
+//! (Graph `/me`) are **not** pinned here: they need a server as
 //! much as the flow needs an IdP, and they are the account slice's subject.
 //!
 //! # Parity, and what proves routing
@@ -314,8 +314,8 @@ use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
 use support::admin_fixture as fixture;
 use support::parity::{
     assert_byte_identical, daemon_is_listening, graph_without_smtp_warning, mp_command,
-    mp_no_daemon, oracle_command, pin_font_size, pin_theme, socket_path, DaemonFixture,
-    EXIT_UNAVAILABLE, REQUIRE_ENV,
+    mp_no_daemon, oracle_command, pin_font_size, pin_theme, socket_path,
+    without_retired_oauth2_mode, DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
 use support::send_fixture::{all_rows, await_commit_marker, commit_hold_dir};
 
@@ -505,12 +505,12 @@ impl Slice {
 
     /// The pre-daemon binary over the same root: the definition of parity.
     fn oracle(&self, args: &[&str]) -> Output {
-        graph_without_smtp_warning(
+        without_retired_oauth2_mode(graph_without_smtp_warning(
             oracle_command(self.root())
                 .args(args)
                 .output()
                 .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
-        )
+        ))
     }
 
     /// Assert the two binaries agree byte for byte, and hand the routed output
@@ -586,7 +586,11 @@ impl Slice {
 
     /// The same for the oracle.
     fn oracle_with_stdin(&self, args: &[&str], input: &str) -> Output {
-        run_with_stdin(&mut oracle_command(self.root()), args, input)
+        without_retired_oauth2_mode(run_with_stdin(
+            &mut oracle_command(self.root()),
+            args,
+            input,
+        ))
     }
 
     /// A connected, initialized client of this daemon.
@@ -1952,26 +1956,23 @@ async fn config_reset_secrets_removes_the_secret_file_and_the_token_caches() {
 }
 
 /// A `config.probe` candidate named like a configured account is refused while
-/// no sign-in of its own is staged, before anything is dialled: the candidate
-/// names its own servers, and the configured account's token must never reach
-/// them. Before the fix the probe loaded the configured account's cache and
-/// answered `{ok: false}` about the host it had tried to send it to.
+/// no sign-in of its own is staged, before anything is dialled: the configured
+/// account's token must never reach a mailbox the wizard has not committed
+/// to. Before the fix the probe loaded the configured account's cache and
+/// answered `{ok: false}` about the host it had tried to send it to. A
+/// candidate naming the retired `auth_method = "oauth2"` is refused before
+/// anything is dialled too, with the sentence that says how to switch.
 #[tokio::test]
 async fn config_probe_never_lends_a_configured_accounts_token_to_a_candidate() {
     let slice = Slice::start();
     let mut conn = slice.connect().await;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local listener");
-    listener.set_nonblocking(true).expect("non-blocking");
-    let port = listener.local_addr().expect("its address").port();
     let candidate = json!({
         "name": fixture::GRAPH_ACCOUNT,
         "default_from": "graph@example.com",
-        "auth_method": "oauth2",
+        "auth_method": "graph",
         "oauth2": {"client_id": "c", "tenant_id": "common"},
-        "smtp": {"host": "127.0.0.1", "port": port, "username": "graph@example.com"},
-        "imap": {"host": "127.0.0.1", "port": port},
     });
-    for check in ["smtp", "imap", "mailboxes"] {
+    for check in ["graph", "mailboxes"] {
         let refused = call_err(
             &mut conn,
             "config.probe",
@@ -1985,14 +1986,40 @@ async fn config_probe_never_lends_a_configured_accounts_token_to_a_candidate() {
             refused.message
         );
     }
-    assert!(
-        listener.accept().is_err(),
-        "nothing dialled the candidate's host"
-    );
     assert_eq!(
         std::fs::read(fixture::token_cache(slice.root(), fixture::GRAPH_ACCOUNT))
             .expect("the configured token is still there"),
         b"opaque-token"
+    );
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local listener");
+    listener.set_nonblocking(true).expect("non-blocking");
+    let port = listener.local_addr().expect("its address").port();
+    let retired = json!({
+        "name": "office",
+        "default_from": "office@example.com",
+        "auth_method": "oauth2",
+        "oauth2": {"client_id": "c", "tenant_id": "common"},
+        "smtp": {"host": "127.0.0.1", "port": port, "username": "office@example.com"},
+        "imap": {"host": "127.0.0.1", "port": port},
+    });
+    for check in ["smtp", "imap", "mailboxes"] {
+        let refused = call_err(
+            &mut conn,
+            "config.probe",
+            json!({"account": retired, "check": check, "password": "pw"}),
+        )
+        .await;
+        assert_eq!(refused.code, -32602, "{check}: {refused:?}");
+        assert!(
+            refused.message.contains("auth_method = \"graph\""),
+            "{check}: the refusal says how to switch: {}",
+            refused.message
+        );
+    }
+    assert!(
+        listener.accept().is_err(),
+        "nothing dialled the retired candidate's host"
     );
 }
 
@@ -2108,9 +2135,8 @@ async fn config_oauth2_login_refuses_an_account_it_cannot_authenticate() {
         password_account.message
     );
 
-    // An OAuth2-flavoured account with no usable client_id / tenant_id is the
-    // other half of the same refusal, and the fixture's SMTP account is
-    // exactly that shape.
+    // A password account carrying an `[accounts.oauth2]` section it does not
+    // use, the fixture's SMTP account, is refused the same way.
     let refused = call_err(
         &mut conn,
         "config.oauth2_login",
@@ -2161,11 +2187,7 @@ fn the_device_code_block_renders_from_a_progress_payload() {
 #[test]
 fn the_oauth2_login_lines_are_the_ones_the_cli_prints_today() {
     assert_eq!(
-        oauth2_start_line("tum", false),
-        "\u{2139} Starting OAuth2 device code flow for account 'tum' (IMAP/SMTP)"
-    );
-    assert_eq!(
-        oauth2_start_line("tum", true),
+        oauth2_start_line("tum"),
         "\u{2139} Starting OAuth2 device code flow for account 'tum' (Graph API)"
     );
     assert_eq!(
@@ -2678,8 +2700,20 @@ fn mp_config_oauth2_login_refusals_match_the_oracle() {
         "--account",
         fixture::UNKNOWN_ACCOUNT,
     ]);
-    slice.both(&["config", "oauth2-login", "--account", fixture::ACCOUNT]);
-    slice.both(&["config", "oauth2-login", "--account", fixture::SMTP_ACCOUNT]);
+    // The password-account refusal names `graph` alone since the retired
+    // `oauth2` mode went (decision log, 2026-10-23), so it no longer matches
+    // the oracle's sentence, which offered both; it is pinned on the routed
+    // side instead.
+    for account in [fixture::ACCOUNT, fixture::SMTP_ACCOUNT] {
+        let routed = slice.routed(&["config", "oauth2-login", "--account", account]);
+        assert!(!routed.status.success(), "{account} is refused");
+        let stderr = String::from_utf8_lossy(&routed.stderr);
+        assert!(
+            stderr.contains("uses auth_method = \"password\", not \"graph\""),
+            "{account}: {stderr}"
+        );
+        assert!(!stderr.contains("\"oauth2\" or"), "{account}: {stderr}");
+    }
 }
 
 // ---------------------------------------------------------------------------

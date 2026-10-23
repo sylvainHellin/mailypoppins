@@ -35,7 +35,7 @@ pub struct GlobalConfig {
     pub retention: RetentionConfig,
     #[serde(default)]
     pub accounts: Vec<AccountConfig>,
-    /// Where to store SMTP/IMAP passwords and OAuth2 token caches.
+    /// Where to store SMTP/IMAP passwords and Graph token caches.
     /// Default: "encrypted-file" (machine-bound). Opt-in: "keyring".
     #[serde(default)]
     pub secrets_backend: crate::secrets::SecretsBackendKind,
@@ -45,15 +45,37 @@ pub struct GlobalConfig {
 #[derive(Debug, Deserialize, Clone, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthMethod {
+    /// A password over IMAP and SMTP, for every server that takes one,
+    /// on-premises Exchange included.
     #[default]
     Password,
-    #[serde(rename = "oauth2")]
-    OAuth2,
+    /// Microsoft 365 through Microsoft Graph, signed in with the device code
+    /// flow and the app registration in `[accounts.oauth2]`.
     #[serde(rename = "graph")]
     Graph,
+    /// `auth_method = "oauth2"`, the retired mode that signed in to Microsoft
+    /// and then spoke IMAP and SMTP with XOAUTH2. Still read, so a config that
+    /// names it loads and only that account fails, with
+    /// [`retired_oauth2_message`] saying how to switch; nothing signs in this
+    /// way any more.
+    #[serde(rename = "oauth2")]
+    RetiredOAuth2,
 }
 
-/// OAuth2 settings stored in config (client_id + tenant_id for Azure Entra ID).
+/// Why an account whose `auth_method` is the retired `"oauth2"` does not
+/// load, and how to switch it.
+pub fn retired_oauth2_message(account: &str) -> String {
+    format!(
+        "account {account:?} uses auth_method = \"oauth2\" (Microsoft sign-in over IMAP and SMTP), \
+         which mailypoppins no longer supports. For Microsoft 365, set auth_method = \"graph\" \
+         and run `mp config oauth2-login --account {account}`; for on-premises Exchange, \
+         remove the auth_method line and store the password with \
+         `mp config set-password smtp --account {account}`."
+    )
+}
+
+/// The app registration in `[accounts.oauth2]` (client_id + tenant_id for
+/// Azure Entra ID), which a Graph account signs in with.
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct OAuth2Settings {
     #[serde(default)]
@@ -785,7 +807,6 @@ pub struct SmtpConfig {
     pub password: String,
     pub default_from: String,
     pub accept_invalid_certs: bool,
-    pub auth_method: AuthMethod,
 }
 
 #[derive(Clone)]
@@ -795,7 +816,6 @@ pub struct ImapConfig {
     pub username: String,
     pub password: String,
     pub accept_invalid_certs: bool,
-    pub auth_method: AuthMethod,
     /// Parallel mailbox fetches per sync, clamped to [1, 8]. See
     /// [`ImapSettings::fetch_concurrency`].
     pub fetch_concurrency: usize,
@@ -1169,7 +1189,8 @@ pub fn load_global_config_with_warnings() -> Result<(GlobalConfig, Vec<String>)>
 }
 
 /// Non-fatal findings about a config document, one line each: every key the
-/// typed load ignores, anywhere in the file.
+/// typed load ignores, anywhere in the file, and every account that names the
+/// retired `auth_method = "oauth2"`, which loads and never runs.
 ///
 /// serde drops an unknown key without a word, so a typo (`[emial]`,
 /// `sync_intervall_secs`) or a `[accounts.mailboxes.spesen]` table written
@@ -1195,10 +1216,18 @@ pub fn config_warnings(content: &str) -> Vec<String> {
     let Ok(config) = parsed else {
         return Vec::new();
     };
-    ignored
+    let mut warnings: Vec<String> = ignored
         .iter()
         .map(|steps| ignored_key_warning(&config, steps))
-        .collect()
+        .collect();
+    warnings.extend(
+        config
+            .accounts
+            .iter()
+            .filter(|account| account.auth_method == AuthMethod::RetiredOAuth2)
+            .map(|account| retired_oauth2_message(&account.name)),
+    );
+    warnings
 }
 
 /// One step of the path to an ignored key: a table key or an array position.
@@ -1353,33 +1382,21 @@ pub fn reject_legacy_keys(content: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Build SmtpConfig from AccountConfig + secrets-backend password (or OAuth2 token)
+/// Build SmtpConfig from AccountConfig + secrets-backend password
 impl SmtpConfig {
     pub fn load(account: &AccountConfig) -> Result<Self> {
-        if account.auth_method == AuthMethod::Graph {
-            return Err(anyhow::anyhow!(
-                "Graph accounts use Microsoft Graph API, not SMTP"
-            ));
+        match account.auth_method {
+            AuthMethod::Password => {}
+            AuthMethod::Graph => {
+                return Err(anyhow::anyhow!(
+                    "Graph accounts use Microsoft Graph API, not SMTP"
+                ))
+            }
+            AuthMethod::RetiredOAuth2 => {
+                return Err(anyhow::anyhow!(retired_oauth2_message(&account.name)))
+            }
         }
-        let password = match account.auth_method {
-            AuthMethod::OAuth2 => {
-                let oauth2_settings = account
-                    .oauth2
-                    .as_ref()
-                    .context("OAuth2 auth_method requires [accounts.oauth2] config")?;
-                crate::oauth2::load_or_refresh_token_blocking(
-                    &account.name,
-                    &oauth2_settings.client_id,
-                    &oauth2_settings.tenant_id,
-                    crate::oauth2::IMAP_SMTP_SCOPES,
-                )?
-            }
-            AuthMethod::Password => {
-                let key = format!("smtp-password-{}", account.name);
-                get_secret(&key)?
-            }
-            AuthMethod::Graph => unreachable!(),
-        };
+        let password = get_secret(&format!("smtp-password-{}", account.name))?;
         Ok(Self {
             host: account.smtp.host.clone(),
             port: account.smtp.port,
@@ -1387,18 +1404,23 @@ impl SmtpConfig {
             password,
             default_from: account.default_from.clone(),
             accept_invalid_certs: account.smtp.accept_invalid_certs,
-            auth_method: account.auth_method.clone(),
         })
     }
 }
 
-/// Build ImapConfig from AccountConfig + secrets-backend password (or OAuth2 token, with SMTP fallback)
+/// Build ImapConfig from AccountConfig + secrets-backend password (with SMTP fallback)
 impl ImapConfig {
     pub fn load(account: &AccountConfig) -> Result<Self> {
-        if account.auth_method == AuthMethod::Graph {
-            return Err(anyhow::anyhow!(
-                "Graph accounts use Microsoft Graph API, not IMAP"
-            ));
+        match account.auth_method {
+            AuthMethod::Password => {}
+            AuthMethod::Graph => {
+                return Err(anyhow::anyhow!(
+                    "Graph accounts use Microsoft Graph API, not IMAP"
+                ))
+            }
+            AuthMethod::RetiredOAuth2 => {
+                return Err(anyhow::anyhow!(retired_oauth2_message(&account.name)))
+            }
         }
 
         // Username falls back to SMTP username if empty
@@ -1408,27 +1430,10 @@ impl ImapConfig {
             account.imap.username.clone()
         };
 
-        let password = match account.auth_method {
-            AuthMethod::OAuth2 => {
-                let oauth2_settings = account
-                    .oauth2
-                    .as_ref()
-                    .context("OAuth2 auth_method requires [accounts.oauth2] config")?;
-                crate::oauth2::load_or_refresh_token_blocking(
-                    &account.name,
-                    &oauth2_settings.client_id,
-                    &oauth2_settings.tenant_id,
-                    crate::oauth2::IMAP_SMTP_SCOPES,
-                )?
-            }
-            AuthMethod::Password => {
-                // Password: try imap-password first, fall back to smtp-password
-                let imap_key = format!("imap-password-{}", account.name);
-                let smtp_key = format!("smtp-password-{}", account.name);
-                get_secret(&imap_key).or_else(|_| get_secret(&smtp_key))?
-            }
-            AuthMethod::Graph => unreachable!(),
-        };
+        // The IMAP password, falling back to the SMTP one.
+        let imap_key = format!("imap-password-{}", account.name);
+        let smtp_key = format!("smtp-password-{}", account.name);
+        let password = get_secret(&imap_key).or_else(|_| get_secret(&smtp_key))?;
 
         // Host falls back to SMTP host if empty
         let host = if account.imap.host.is_empty() {
@@ -1443,7 +1448,6 @@ impl ImapConfig {
             username,
             password,
             accept_invalid_certs: account.imap.accept_invalid_certs,
-            auth_method: account.auth_method.clone(),
             fetch_concurrency: account.imap.fetch_concurrency.clamp(1, 8),
             body_fetch_deadline_secs: account.imap.body_fetch_deadline_secs.min(600),
         })
@@ -2102,6 +2106,36 @@ host = "imap.example.com"
             ..Default::default()
         };
         assert!(!account.is_local_only());
+    }
+
+    /// A config naming the retired `auth_method = "oauth2"` still loads, the
+    /// other accounts with it; only that account fails, at the IMAP and SMTP
+    /// loads, with the sentence that says how to switch, which is also one of
+    /// the file's warnings.
+    #[test]
+    fn a_retired_oauth2_account_loads_and_fails_alone_with_how_to_switch() {
+        let toml =
+            "[[accounts]]\nname = \"home\"\n\n[accounts.smtp]\nhost = \"smtp.example.com\"\n\n\
+                    [[accounts]]\nname = \"office\"\nauth_method = \"oauth2\"\n\n\
+                    [accounts.oauth2]\nclient_id = \"c\"\ntenant_id = \"common\"\n\n\
+                    [accounts.smtp]\nhost = \"smtp.office365.com\"\n";
+        let config: GlobalConfig = toml::from_str(toml).expect("the file still loads");
+        assert_eq!(config.accounts[0].auth_method, AuthMethod::Password);
+        let office = &config.accounts[1];
+        assert_eq!(office.auth_method, AuthMethod::RetiredOAuth2);
+        for error in [
+            ImapConfig::load(office).err().expect("no IMAP"),
+            SmtpConfig::load(office).err().expect("no SMTP"),
+        ] {
+            let text = format!("{error:#}");
+            assert!(text.contains("\"office\""), "{text}");
+            assert!(text.contains("auth_method = \"graph\""), "{text}");
+            assert!(text.contains("on-premises Exchange"), "{text}");
+        }
+        assert_eq!(
+            config_warnings(toml),
+            vec![retired_oauth2_message("office")]
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// What the OAuth2 token cache of an `oauth2` or `graph` account holds.
+/// What the OAuth2 token cache of a `graph` account holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
@@ -31,17 +31,19 @@ pub enum TokenState {
 pub struct AccountCredential {
     /// The configured account name.
     pub account: String,
-    /// `password`, `oauth2` or `graph`, the account's `auth_method`.
+    /// `password` or `graph`, the account's `auth_method`; `oauth2` for an
+    /// account that still names the retired mode, which reports no secret.
     pub auth_method: String,
-    /// Whether `smtp-password-<account>` is stored; `null` for a Graph
-    /// account, which has no SMTP transport.
+    /// Whether `smtp-password-<account>` is stored; `null` for any account
+    /// but a password one.
     pub smtp_password: Option<bool>,
     /// Whether `imap-password-<account>` is stored, the IMAP key alone: an
     /// account without one falls back to the SMTP password, which a client
-    /// says itself from the two booleans. `null` for a Graph account.
+    /// says itself from the two booleans. `null` for any account but a
+    /// password one.
     pub imap_password: Option<bool>,
-    /// The token cache's verdict for an `oauth2` or `graph` account, `null`
-    /// for a password account.
+    /// The token cache's verdict for a `graph` account, `null` for any
+    /// other.
     pub token: Option<TokenState>,
 }
 

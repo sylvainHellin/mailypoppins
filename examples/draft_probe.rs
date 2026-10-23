@@ -5,8 +5,8 @@
 //! holds after each edit made by hand in those clients.
 //!
 //! It links the library, loads the account from `config.toml` and opens its
-//! session through [`open_imap_session`], the path the daemon takes, OAuth2
-//! included. It opens no store and takes no engine lock, so it runs beside a
+//! session through [`open_imap_session`], the path the daemon takes. It opens
+//! no store and takes no engine lock, so it runs beside a
 //! live daemon.
 //!
 //! ```text
@@ -161,7 +161,7 @@ fn main() -> Result<()> {
         Cmd::Dump { id, .. } => Some(read_state(&account.name, id)?),
         Cmd::Append { .. } | Cmd::List { .. } => None,
     };
-    // Loaded outside the runtime: an OAuth2 refresh blocks.
+    // Loaded outside the runtime: the secrets backend read blocks.
     let imap = ImapConfig::load(&account)?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()

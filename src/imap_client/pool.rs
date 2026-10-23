@@ -179,10 +179,9 @@ fn pool() -> &'static Pool {
 
 /// What makes two sessions interchangeable: the same server, the same user.
 ///
-/// The credential is deliberately not part of the key. An OAuth2 access token
-/// is refreshed behind the client's back, and an IMAP session stays
-/// authenticated across that refresh; keying on the token would throw away a
-/// perfectly good connection every hour.
+/// The credential is deliberately not part of the key. An IMAP session stays
+/// authenticated when the stored password changes behind it, and keying on
+/// the password would throw away a perfectly good connection for it.
 fn key_of(config: &ImapConfig) -> String {
     format!("{}:{}/{}", config.host, config.port, config.username)
 }
@@ -375,7 +374,6 @@ mod tests {
             port,
             username: "nobody@example.com".into(),
             password: "unused".into(),
-            auth_method: crate::config::AuthMethod::Password,
             accept_invalid_certs: false,
             fetch_concurrency: 4,
             body_fetch_deadline_secs: 30,
@@ -416,24 +414,23 @@ mod tests {
     }
 
     /// Two sessions are interchangeable when they are the same user on the same
-    /// server, and the credential is not part of that: an OAuth2 token refresh
+    /// server, and the credential is not part of that: a changed password
     /// must not orphan a live connection.
     #[test]
     fn the_pool_key_is_the_server_and_the_user_and_not_the_credential() {
-        let base = |user: &str, port: u16, token: &str| ImapConfig {
+        let base = |user: &str, port: u16, password: &str| ImapConfig {
             host: "imap.example.com".into(),
             port,
             username: user.into(),
-            password: token.into(),
-            auth_method: crate::config::AuthMethod::Password,
+            password: password.into(),
             accept_invalid_certs: false,
             fetch_concurrency: 4,
             body_fetch_deadline_secs: 30,
         };
         assert_eq!(
-            key_of(&base("a@x", 993, "first-token")),
-            key_of(&base("a@x", 993, "refreshed-token")),
-            "an OAuth2 refresh must not orphan a live session"
+            key_of(&base("a@x", 993, "first-password")),
+            key_of(&base("a@x", 993, "changed-password")),
+            "a changed password must not orphan a live session"
         );
         assert_ne!(
             key_of(&base("a@x", 993, "t")),

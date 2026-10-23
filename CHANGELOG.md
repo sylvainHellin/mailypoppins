@@ -124,6 +124,9 @@ All notable changes to this project are documented in this file.
 - The daemon tests that failed now and then under load pass reliably: they no longer mistake the daemon's own startup events for theirs, and they wait for the log, the connection count and the event stream to settle instead of reading them once.
 
 ### Removed
+- Microsoft OAuth2 over IMAP and SMTP (`auth_method = "oauth2"`, XOAUTH2): Microsoft 365 accounts sign in through Microsoft Graph (`auth_method = "graph"`), and on-premises Exchange is a password account like any other IMAP server.
+  `mp config init` and `add-account` no longer offer it.
+  A config that still names it loads: that account alone stays blocked, and the daemon, `mp sync` and `mp config show` say how to switch, while every other account keeps serving.
 - The obsolete `spikes/ipc-bench` benchmark.
 - `mp fetch`: use `mp search --mailbox <name>` with the same filters (`--from`, `--to`, `--cc`, `--subject`, `--body`, `--after`/`--before`, `-n`, `--full`); the daemon's `message.list_server` went with it.
 

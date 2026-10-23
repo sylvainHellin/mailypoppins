@@ -35,7 +35,6 @@ fn answers() -> ImapAnswers {
         imap_port: 993,
         imap_username: String::new(),
         accept_invalid_certs: false,
-        oauth2: None,
         mailboxes: mapped(),
     }
 }
@@ -113,19 +112,25 @@ fn a_proton_candidate_accepts_invalid_certs_on_both_servers() {
     assert_eq!(account.imap.port, 1143);
 }
 
-/// Exchange over OAuth2: `auth_method = "oauth2"` and the app registration.
+/// The provider menu offers Microsoft 365 through Graph only: no line
+/// offers Microsoft OAuth2 over IMAP and SMTP, every Microsoft line picks the
+/// Graph flow, on-premises Exchange is the standard password account, and
+/// the digit that used to pick the retired mode falls back to the default.
 #[test]
-fn an_exchange_candidate_carries_its_app_registration() {
-    let account = loaded(&imap_candidate(&ImapAnswers {
-        oauth2: Some(("client".into(), "tenant".into())),
-        ..answers()
-    }));
-    assert_eq!(account.auth_method, AuthMethod::OAuth2);
-    let oauth2 = account.oauth2.expect("oauth2");
-    assert_eq!(
-        (oauth2.client_id.as_str(), oauth2.tenant_id.as_str()),
-        ("client", "tenant")
-    );
+fn the_provider_menu_offers_microsoft_365_through_graph_only() {
+    use super::init::{preset_for, Preset, PROVIDERS};
+    for (digit, line, preset) in PROVIDERS {
+        assert!(!line.contains("OAuth2"), "{line}");
+        if line.contains("Microsoft") {
+            assert_eq!(preset, Preset::Graph, "{line}");
+        }
+        assert_eq!(preset_for(digit), preset);
+    }
+    assert_eq!(preset_for("3"), Preset::Graph);
+    assert_eq!(preset_for("4"), Preset::Standard);
+    let standard = PROVIDERS[0].1;
+    assert!(standard.contains("on-premises Exchange"), "{standard}");
+    assert!(imap_candidate(&answers()).get("auth_method").is_none());
 }
 
 /// A probe made before the mailboxes are chosen carries no mapping, and still
@@ -158,21 +163,26 @@ fn wizard_answers_needing_toml_escapes_round_trip() {
     let account = loaded(&imap_candidate(&ImapAnswers {
         default_from: from.into(),
         smtp_username: from.into(),
-        oauth2: Some(("client\"id".into(), "tenant\\id".into())),
         mailboxes: mailboxes.clone(),
         ..answers()
     }));
     assert_eq!(account.default_from, from);
     assert_eq!(account.smtp.username, from);
     assert_eq!(account.mailboxes.inbox.as_ref().unwrap().server, odd);
-    let oauth2 = account.oauth2.expect("oauth2");
+
+    let graph = loaded(&graph_candidate(
+        "g",
+        from,
+        "client\"id",
+        "tenant\\id",
+        &mailboxes,
+    ));
+    assert_eq!(graph.default_from, from);
+    let oauth2 = graph.oauth2.as_ref().expect("oauth2");
     assert_eq!(
         (oauth2.client_id.as_str(), oauth2.tenant_id.as_str()),
         ("client\"id", "tenant\\id")
     );
-
-    let graph = loaded(&graph_candidate("g", from, "client", "tenant", &mailboxes));
-    assert_eq!(graph.default_from, from);
     assert_eq!(graph.mailboxes.junk.as_ref().unwrap().server, "Say \"hi\"");
     assert_eq!(graph.mailboxes.overrides[0].pattern, odd);
 }
@@ -300,58 +310,6 @@ fn a_typed_mailbox_another_role_holds_is_asked_again() {
     let mut answers = vec!["Sent", "Bin"].into_iter();
     let junk = untaken("mailbox", &all, || Ok(answers.next().unwrap().into())).unwrap();
     assert_eq!(junk, "Bin", "the trash folder named Bin before");
-}
-
-/// A daemon double that records its calls and refuses every SMTP login.
-#[derive(Default)]
-struct SmtpRefused {
-    calls: Vec<String>,
-}
-
-impl super::WizardDaemon for SmtpRefused {
-    async fn probe(
-        &mut self,
-        _: &Value,
-        check: &str,
-        password: Option<&str>,
-    ) -> anyhow::Result<Probe> {
-        self.calls.push(format!("probe {check} {password:?}"));
-        Ok(Probe {
-            ok: check != "smtp",
-            error: (check == "smtp")
-                .then(|| "535 5.7.139 SmtpClientAuthentication is disabled for the Tenant.".into()),
-            mailboxes: Vec::new(),
-        })
-    }
-    async fn sign_in(&mut self, _: &Value) -> anyhow::Result<()> {
-        self.calls.push("sign_in".into());
-        Ok(())
-    }
-    async fn init(&mut self, _: &Value, _: bool) -> anyhow::Result<std::path::PathBuf> {
-        unreachable!("no write in this test")
-    }
-    async fn add_account(&mut self, _: &Value) -> anyhow::Result<()> {
-        unreachable!("no write in this test")
-    }
-    async fn set_password(&mut self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
-        unreachable!("no password in this test")
-    }
-}
-
-/// A Microsoft 365 account is signed in, then its SMTP login is tested with
-/// the staged token, as the desktop wizard does; a refusal is a warning, not
-/// the end of the wizard, since a tenant may withhold SMTP AUTH.
-#[tokio::test]
-async fn an_oauth2_account_tests_smtp_after_the_sign_in_and_goes_on_when_it_fails() {
-    let mut daemon = SmtpRefused::default();
-    let mut a = answers();
-    a.oauth2 = Some(("client".into(), "tenant".into()));
-    let probe = super::init::sign_in_and_test_smtp(&mut daemon, &imap_candidate(&a))
-        .await
-        .expect("a refused SMTP login does not end the wizard");
-    assert!(!probe.ok);
-    assert_eq!(daemon.calls, ["sign_in", "probe smtp None"]);
-    assert!(super::init::OAUTH2_SMTP_WARNING.contains("SMTP AUTH"));
 }
 
 /// A daemon double whose `config.set_password` refuses one kind.

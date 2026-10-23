@@ -995,7 +995,6 @@ pub(crate) fn smtp_config(account: &AccountConfig) -> anyhow::Result<SmtpConfig>
             password: String::new(),
             default_from: account.default_from.clone(),
             accept_invalid_certs: false,
-            auth_method: crate::config::AuthMethod::Password,
         }),
         Err(e) => Err(e),
     }

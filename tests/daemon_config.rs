@@ -1724,6 +1724,54 @@ async fn removing_an_account_stops_its_runtime_and_releases_its_engine_lock() {
     );
 }
 
+/// An account naming the retired `auth_method = "oauth2"` fails alone: the
+/// file loads, the other account comes up ready, the retired one is listed
+/// as blocked with the sentence that says how to switch, and a sync of it
+/// refuses with the same sentence instead of dialling anything.
+#[tokio::test]
+async fn a_retired_oauth2_account_is_blocked_and_the_others_keep_serving() {
+    let sandbox = Sandbox::with_accounts(&["alpha", "office"]);
+    sandbox.write_config(&format!(
+        "{}[[accounts]]\n\
+         name = \"office\"\n\
+         default_from = \"office@example.com\"\n\
+         auth_method = \"oauth2\"\n\
+         \n\
+         [accounts.oauth2]\n\
+         client_id = \"cid\"\n\
+         tenant_id = \"common\"\n\
+         \n\
+         [accounts.smtp]\n\
+         host = \"smtp.office365.com\"\n",
+        account_toml("alpha", DEFAULT_BODY_FETCH_DEADLINE_SECS)
+    ));
+    let _daemon = sandbox.start_daemon().await;
+    assert_eq!(sandbox.wait_settled_state("alpha"), "ready");
+    assert_eq!(sandbox.wait_settled_state("office"), "blocked");
+    assert!(
+        sandbox.engine_lock_is_free("office"),
+        "no runtime came up for the retired account"
+    );
+
+    let (mut conn, _hello) = connect_initialized(&sandbox).await;
+    let get = call_ok(&mut conn, "config.get", json!({})).await;
+    assert_eq!(get["state"], json!("ok"), "the file loads: {get}");
+    assert_eq!(account_of(&get, "office")["auth_method"], json!("oauth2"));
+
+    let sync = sandbox
+        .cmd()
+        .args(["sync", "--account", "office"])
+        .output()
+        .expect("run mp sync");
+    let stderr = String::from_utf8_lossy(&sync.stderr);
+    assert!(!sync.status.success(), "the sync of office fails: {stderr}");
+    assert!(
+        stderr.contains("no longer supports") && stderr.contains("auth_method = \"graph\""),
+        "the refusal says how to switch: {stderr}"
+    );
+    assert_eq!(sandbox.account_state("alpha").as_deref(), Some("ready"));
+}
+
 #[tokio::test]
 async fn an_invalid_edit_keeps_the_previous_snapshot_live_and_publishes_a_diagnostic() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
@@ -2303,6 +2351,15 @@ async fn account_credentials_reports_presence_and_never_a_value() {
          tenant_id = \"common\"\n\
          \n\
          [[accounts]]\n\
+         name = \"teams\"\n\
+         default_from = \"me@example.com\"\n\
+         auth_method = \"graph\"\n\
+         \n\
+         [accounts.oauth2]\n\
+         client_id = \"cid\"\n\
+         tenant_id = \"common\"\n\
+         \n\
+         [[accounts]]\n\
          name = \"office\"\n\
          default_from = \"me@example.com\"\n\
          auth_method = \"oauth2\"\n\
@@ -2315,7 +2372,7 @@ async fn account_credentials_reports_presence_and_never_a_value() {
     // `not_cached`.
     let tokens = sandbox.data_dir().join("tokens");
     fs::create_dir_all(&tokens).expect("tokens dir");
-    fs::write(tokens.join("office.enc"), b"not a token cache").expect("garbage cache");
+    fs::write(tokens.join("teams.enc"), b"not a token cache").expect("garbage cache");
     let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
 
@@ -2327,8 +2384,11 @@ async fn account_credentials_reports_presence_and_never_a_value() {
              "smtp_password": false, "imap_password": false, "token": null},
             {"account": "exchange", "auth_method": "graph",
              "smtp_password": null, "imap_password": null, "token": "not_cached"},
+            {"account": "teams", "auth_method": "graph",
+             "smtp_password": null, "imap_password": null, "token": "invalid"},
+            // The retired `oauth2` mode holds no credential anything reads.
             {"account": "office", "auth_method": "oauth2",
-             "smtp_password": false, "imap_password": false, "token": "invalid"},
+             "smtp_password": null, "imap_password": null, "token": null},
         ]}),
     );
 

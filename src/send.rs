@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{AuthMethod, EmailSettings, SmtpConfig};
+use crate::config::{EmailSettings, SmtpConfig};
 use crate::types::{EmailDraft, EmailStatus};
 
 pub mod graph_submit;
@@ -2381,8 +2381,8 @@ pub async fn test_smtp_connection(smtp_config: &SmtpConfig) -> Result<()> {
 }
 
 /// Build the SMTP transport (implicit TLS on :465, STARTTLS otherwise),
-/// honouring the account's OAuth2/password auth and `accept_invalid_certs`
-/// opt-in. The single transport builder behind [`submit`], so every SMTP
+/// logging in with the account's password and honouring its
+/// `accept_invalid_certs` opt-in. The single transport builder behind [`submit`], so every SMTP
 /// submission applies identical transport policy.
 fn build_smtp_transport(smtp_config: &SmtpConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
     if smtp_config.accept_invalid_certs {
@@ -2400,16 +2400,7 @@ fn build_smtp_transport(smtp_config: &SmtpConfig) -> Result<AsyncSmtpTransport<T
                     .build()?;
             transport = transport.tls(lettre::transport::smtp::client::Tls::Wrapper(tls_params));
         }
-        let transport = transport.port(smtp_config.port).credentials(creds);
-        if smtp_config.auth_method == AuthMethod::OAuth2 {
-            transport
-                .authentication(vec![
-                    lettre::transport::smtp::authentication::Mechanism::Xoauth2,
-                ])
-                .build()
-        } else {
-            transport.build()
-        }
+        transport.port(smtp_config.port).credentials(creds).build()
     } else {
         // STARTTLS
         let mut transport =
@@ -2421,16 +2412,7 @@ fn build_smtp_transport(smtp_config: &SmtpConfig) -> Result<AsyncSmtpTransport<T
                     .build()?;
             transport = transport.tls(lettre::transport::smtp::client::Tls::Required(tls_params));
         }
-        let transport = transport.port(smtp_config.port).credentials(creds);
-        if smtp_config.auth_method == AuthMethod::OAuth2 {
-            transport
-                .authentication(vec![
-                    lettre::transport::smtp::authentication::Mechanism::Xoauth2,
-                ])
-                .build()
-        } else {
-            transport.build()
-        }
+        transport.port(smtp_config.port).credentials(creds).build()
     };
     Ok(mailer)
 }
@@ -3960,7 +3942,6 @@ async fn resubmit_pending(
             password: String::new(),
             default_from: account.default_from.clone(),
             accept_invalid_certs: false,
-            auth_method: crate::config::AuthMethod::Password,
         },
         Err(e) => {
             log::warn!(
@@ -4858,7 +4839,6 @@ mod smtp_durability_tests {
             password: String::new(),
             default_from: "me@example.com".to_string(),
             accept_invalid_certs: false,
-            auth_method: AuthMethod::Password,
         }
     }
 

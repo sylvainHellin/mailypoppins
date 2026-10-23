@@ -305,7 +305,9 @@ fn pass_request(
 ///
 /// Unknown is `-32005`; configured with no server at all is `-32006` carrying
 /// `state: "local_only"`, which is the client's cue to print the skip line and
-/// keep the run's exit code at zero.
+/// keep the run's exit code at zero. An account naming the retired
+/// `auth_method = "oauth2"` is `-32006` with `state: "blocked"` and the
+/// sentence that says how to switch it, a failure of that account alone.
 pub(super) fn syncable_account<'a>(
     accounts: &'a [AccountConfig],
     name: &str,
@@ -316,6 +318,13 @@ pub(super) fn syncable_account<'a>(
             code: ErrorCode::AccountNotReady.code(),
             message: format!("{name} configures no server, so it has nothing to sync"),
             data: Some(json!({"account": name, "state": "local_only"})),
+        });
+    }
+    if account.auth_method == AuthMethod::RetiredOAuth2 {
+        return Err(RpcError {
+            code: ErrorCode::AccountNotReady.code(),
+            message: crate::config::retired_oauth2_message(name),
+            data: Some(json!({"account": name, "state": "blocked"})),
         });
     }
     Ok(account)

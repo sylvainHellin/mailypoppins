@@ -472,7 +472,7 @@ async fn init(family: &ConfigFamily, params: &Value) -> Result<Outcome, DomainEr
 }
 
 /// The account whose staged sign-in a write promotes: the block's own name,
-/// when the block authenticates with a token at all.
+/// when the block is a Graph account, the one kind that signs in with a token.
 ///
 /// The setup wizard signs a candidate in before it writes the account
 /// (`config.oauth2_login` with a `candidate`), and that sign-in is staged
@@ -481,11 +481,7 @@ async fn init(family: &ConfigFamily, params: &Value) -> Result<Outcome, DomainEr
 /// commits the account is the one moment the staged token becomes the
 /// account's.
 fn staged_sign_in(account: &Value, name: &str) -> Option<String> {
-    matches!(
-        account.get("auth_method").and_then(Value::as_str),
-        Some("oauth2" | "graph")
-    )
-    .then(|| name.to_string())
+    (account.get("auth_method").and_then(Value::as_str) == Some("graph")).then(|| name.to_string())
 }
 
 /// The account a candidate `[[accounts]]` block describes, read through the
@@ -507,8 +503,17 @@ pub fn candidate_account(candidate: &Value) -> Result<crate::config::AccountConf
 ///
 /// Every string goes through [`quote`], so a name with a quote or a backslash
 /// in it produces a document that parses rather than one that does not.
+///
+/// A block naming the retired `auth_method = "oauth2"` is refused with the
+/// sentence that says how to switch, so no wizard, probe or sign-in takes one
+/// and no write adds one to the file.
 fn account_block(account: &Value) -> Result<String, DomainError> {
     let name = string_param(account, "name")?;
+    if account.get("auth_method").and_then(Value::as_str) == Some("oauth2") {
+        return Err(DomainError::invalid_params(
+            crate::config::retired_oauth2_message(&name),
+        ));
+    }
     let mut out = format!("\n[[accounts]]\nname = {}\n", quote(&name));
     for (key, field) in [
         ("default_from", "default_from"),
@@ -940,13 +945,13 @@ struct OAuth2Work {
     staged: bool,
     client_id: String,
     tenant_id: String,
-    scopes: &'static str,
-    kind: &'static str,
 }
 
 /// Validate `config.oauth2_login`, in the three refusals `src/config_cmd/oauth2.rs`
-/// makes and in its own sentences: an unknown account, an account that does not
-/// authenticate this way, and an OAuth2 account with no usable client.
+/// made and in its own sentences: an unknown account, an account that is not
+/// a Graph account, and a Graph account with no usable client. An account
+/// naming the retired `auth_method = "oauth2"` is refused with the sentence
+/// that says how to switch it.
 ///
 /// The unknown-account message is the command's rather than
 /// [`super::account::configured_account`]'s, because it is the sentence the user
@@ -992,12 +997,19 @@ fn plan_oauth2(
             })?,
     };
 
-    let auth = &account.auth_method;
-    if *auth != crate::config::AuthMethod::OAuth2 && *auth != crate::config::AuthMethod::Graph {
-        return Err(DomainError::invalid_params(format!(
-            "Account '{name}' uses auth_method = \"password\", not \"oauth2\" or \"graph\". \
-             Set auth_method = \"oauth2\" or \"graph\" in config.toml to use OAuth2."
-        )));
+    match account.auth_method {
+        crate::config::AuthMethod::Graph => {}
+        crate::config::AuthMethod::Password => {
+            return Err(DomainError::invalid_params(format!(
+                "Account '{name}' uses auth_method = \"password\", not \"graph\". \
+                 Set auth_method = \"graph\" in config.toml to sign in to Microsoft 365."
+            )))
+        }
+        crate::config::AuthMethod::RetiredOAuth2 => {
+            return Err(DomainError::invalid_params(
+                crate::config::retired_oauth2_message(&name),
+            ))
+        }
     }
     let settings = account.oauth2.as_ref().ok_or_else(|| {
         DomainError::invalid_params(format!(
@@ -1021,11 +1033,6 @@ fn plan_oauth2(
         account: name,
         client_id: settings.client_id.clone(),
         tenant_id: settings.tenant_id.clone(),
-        scopes: crate::oauth2::scopes_for_auth_method(auth),
-        kind: match auth {
-            crate::config::AuthMethod::Graph => "graph",
-            _ => "oauth2",
-        },
     })
 }
 
@@ -1054,7 +1061,7 @@ async fn oauth2_login(work: OAuth2Work, handle: crate::daemon::operations::Opera
         &work.client_id,
         &work.tenant_id,
         &work.token,
-        work.scopes,
+        crate::oauth2::GRAPH_SCOPES,
         &report,
     )
     .await;
@@ -1063,7 +1070,7 @@ async fn oauth2_login(work: OAuth2Work, handle: crate::daemon::operations::Opera
             "stored": true,
             "staged": work.staged,
             "account": work.account,
-            "kind": work.kind,
+            "kind": "graph",
             "key": format!("oauth2-token-{}", work.account),
         })),
         // The value is never rendered: the failure is about the provider, and
@@ -1204,12 +1211,12 @@ mod tests {
         assert!(!login.staged);
     }
 
-    /// Only a block that authenticates with a token promotes a staged one.
+    /// Only a Graph block promotes a staged sign-in.
     #[test]
-    fn only_a_token_account_promotes_a_staged_sign_in() {
+    fn only_a_graph_account_promotes_a_staged_sign_in() {
         assert_eq!(
-            staged_sign_in(&json!({"auth_method": "oauth2"}), "work").as_deref(),
-            Some("work")
+            staged_sign_in(&json!({"auth_method": "oauth2"}), "work"),
+            None
         );
         assert_eq!(
             staged_sign_in(&json!({"auth_method": "graph"}), "work").as_deref(),
@@ -1220,6 +1227,43 @@ mod tests {
             staged_sign_in(&json!({"auth_method": "password"}), "work"),
             None
         );
+    }
+
+    /// A block naming the retired `auth_method = "oauth2"` is `-32602` with
+    /// the sentence that says how to switch, whichever method takes it: the
+    /// writes, a probe and a sign-in all read the block through here.
+    #[test]
+    fn a_block_naming_the_retired_oauth2_mode_is_refused_with_how_to_switch() {
+        let block = json!({
+            "name": "office", "default_from": "me@example.com", "auth_method": "oauth2",
+            "oauth2": {"client_id": "c", "tenant_id": "common"},
+            "smtp": {"host": "smtp.office365.com", "port": 587, "username": "me@example.com"},
+        });
+        let error = account_block(&block).expect_err("the retired mode");
+        assert_eq!(error.code(), -32602);
+        let text = format!("{error}");
+        assert!(text.contains("auth_method = \"graph\""), "{text}");
+        assert!(text.contains("on-premises Exchange"), "{text}");
+        assert!(candidate_account(&block).is_err());
+        let refused = plan_oauth2(&[], &json!({"account": "office", "candidate": block}))
+            .err()
+            .expect("no sign-in either");
+        assert!(format!("{refused}").contains("no longer supports"));
+    }
+
+    /// A configured account naming the retired mode is not signed in either:
+    /// the refusal says how to switch it.
+    #[test]
+    fn a_configured_retired_oauth2_account_is_not_signed_in() {
+        let config: GlobalConfig = toml::from_str(
+            "[[accounts]]\nname = \"office\"\nauth_method = \"oauth2\"\n\n\
+             [accounts.oauth2]\nclient_id = \"c\"\ntenant_id = \"common\"\n",
+        )
+        .expect("a config naming the retired mode still loads");
+        let refused = plan_oauth2(&config.accounts, &json!({"account": "office"}))
+            .err()
+            .expect("refused");
+        assert!(format!("{refused}").contains("no longer supports"));
     }
 
     /// A block with no name is `-32602` rather than a document that parses

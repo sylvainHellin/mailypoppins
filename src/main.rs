@@ -832,7 +832,7 @@ enum ConfigAction {
         /// Which password to set: "smtp" or "imap"
         which: String,
     },
-    /// Wipe the encrypted secrets file (and OAuth2 token caches) and re-prompt
+    /// Wipe the encrypted secrets file (and Graph token caches) and re-prompt
     /// for credentials. Use this after a Time Machine restore to a new
     /// machine, or whenever the secrets file can no longer be decrypted.
     ResetSecrets {
@@ -844,8 +844,9 @@ enum ConfigAction {
         #[command(flatten)]
         no_account: NoAccount,
     },
-    /// Run OAuth2 device code flow to acquire and cache a token (for the
-    /// first OAuth2 account unless `-A` names one)
+    /// Sign a Microsoft 365 (Graph) account in with the OAuth2 device code
+    /// flow and cache its token (for the first Graph account unless `-A`
+    /// names one)
     Oauth2Login,
     /// Print config file path
     Path {
@@ -3836,7 +3837,7 @@ async fn routed_reset_secrets() -> Result<()> {
     println!("  - Delete {}", secrets_file.display());
     println!("  - Delete {}/*.enc", token_dir.display());
     println!("  - Prompt you to re-enter SMTP/IMAP passwords for each account");
-    println!("  - For OAuth2/Graph accounts, you will need to re-run `mp config oauth2-login`");
+    println!("  - For Graph accounts, you will need to re-run `mp config oauth2-login`");
     println!();
     print!("Continue? [y/N] ");
     io::stdout().flush()?;
@@ -3897,13 +3898,19 @@ async fn routed_reset_secrets() -> Result<()> {
                     println!("    {} IMAP password stored", "\u{2713}".green());
                 }
             }
-            AuthMethod::OAuth2 | AuthMethod::Graph => {
+            AuthMethod::Graph => {
                 println!(
-                    "{} Account '{}' ({:?} auth) -- run `mp config oauth2-login --account {}` to re-acquire token",
+                    "{} Account '{}' (Graph auth) -- run `mp config oauth2-login --account {}` to re-acquire token",
                     "\u{2139}".blue(),
                     account.name.bold(),
-                    account.auth_method,
                     account.name
+                );
+            }
+            AuthMethod::RetiredOAuth2 => {
+                println!(
+                    "{} {}",
+                    "\u{26a0}".yellow(),
+                    mailypoppins::config::retired_oauth2_message(&account.name)
                 );
             }
         }
@@ -3934,33 +3941,22 @@ async fn store_password(
 /// `mp config oauth2-login`: the daemon runs the device flow and reports the
 /// verification URL and the user code; this process renders them (`INT-04`).
 async fn routed_oauth2_login(global: &GlobalConfig, account: Option<&str>) -> Result<()> {
-    // The default is the client's, exactly as it was: the first OAuth2 or Graph
-    // account, else the first account at all.
+    // The default is the client's: the first Graph account, else the first
+    // account at all, which the daemon then refuses with the reason.
     let name = match account {
         Some(name) => name.to_string(),
         None => global
             .accounts
             .iter()
-            .find(|a| a.auth_method == AuthMethod::OAuth2 || a.auth_method == AuthMethod::Graph)
+            .find(|a| a.auth_method == AuthMethod::Graph)
             .or_else(|| global.accounts.first())
             .ok_or_else(|| anyhow!("No accounts configured"))?
             .name
             .clone(),
     };
 
-    let graph = global
-        .accounts
-        .iter()
-        .find(|a| a.name == name)
-        .is_some_and(|a| a.auth_method == AuthMethod::Graph);
     let mut connection = operation_session().await;
-    sign_in(
-        &mut connection,
-        serde_json::json!({"account": name}),
-        &name,
-        graph,
-    )
-    .await
+    sign_in(&mut connection, serde_json::json!({"account": name}), &name).await
 }
 
 /// One `config.oauth2_login`, its start line, the device code as the daemon
@@ -3970,15 +3966,11 @@ async fn sign_in(
     connection: &mut mp_client::Connection,
     params: serde_json::Value,
     name: &str,
-    graph: bool,
 ) -> Result<()> {
     let started = daemon_try_call(connection, "config.oauth2_login", params)
         .await
         .map_err(|error| anyhow!("{}", error.message))?;
-    println!(
-        "{}",
-        paint(&mp_client::format::oauth2_start_line(name, graph))
-    );
+    println!("{}", paint(&mp_client::format::oauth2_start_line(name)));
 
     let id = wire_str(&started["operation_id"]).to_string();
     let settled = await_operation(connection, &id, |payload| {
@@ -4029,12 +4021,10 @@ impl mailypoppins::config_cmd::WizardDaemon for DaemonWizard {
 
     async fn sign_in(&mut self, candidate: &serde_json::Value) -> Result<()> {
         let name = wire_str(&candidate["name"]).to_string();
-        let graph = candidate["auth_method"] == "graph";
         sign_in(
             &mut self.connection,
             serde_json::json!({"account": name, "candidate": candidate}),
             &name,
-            graph,
         )
         .await
     }
@@ -4397,7 +4387,6 @@ async fn main() -> Result<()> {
                 password: String::new(),
                 default_from: "user@example.com".to_string(),
                 accept_invalid_certs: false,
-                auth_method: mailypoppins::config::AuthMethod::Password,
             }
         }))
     };
