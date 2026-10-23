@@ -139,6 +139,7 @@ pub fn register(
     canonical: Arc<CanonicalState>,
     operations: Arc<OperationRegistry>,
     holds: Arc<HoldScheduler>,
+    runtimes: Arc<crate::daemon::server::RuntimeTable>,
 ) {
     for spec in SEND_METHOD_SPECS {
         dispatcher.register(Arc::new(SendMethod {
@@ -147,6 +148,7 @@ pub fn register(
             canonical: Arc::clone(&canonical),
             operations: Arc::clone(&operations),
             holds: Arc::clone(&holds),
+            runtimes: Arc::clone(&runtimes),
         }));
     }
 }
@@ -163,6 +165,10 @@ pub struct SendMethod {
     pub operations: Arc<OperationRegistry>,
     /// Every hold this daemon is carrying.
     pub holds: Arc<HoldScheduler>,
+    /// The account runtimes, which a send asks for a drain once it ends, so
+    /// what it queued for the server goes out in seconds rather than at the
+    /// next sync (#0143).
+    pub runtimes: Arc<crate::daemon::server::RuntimeTable>,
 }
 
 impl Method for SendMethod {
@@ -214,8 +220,9 @@ impl Method for SendMethod {
                         self.spec.name,
                     );
                     let account = work.account().to_string();
+                    let runtimes = Arc::clone(&self.runtimes);
                     let Some(plan) = hold else {
-                        tokio::spawn(run(*work, handle));
+                        tokio::spawn(run(*work, handle, runtimes));
                         return Ok(Outcome::query(json!({"operation_id": id.as_str()})));
                     };
                     // Armed before the timer is spawned, so a `send.hold_status`
@@ -229,7 +236,7 @@ impl Method for SendMethod {
                         id.clone(),
                         plan.hold_secs,
                         token,
-                        run(*work, handle),
+                        run(*work, handle, runtimes),
                     ));
                     Ok(Outcome::query(
                         json!({"operation_id": id.as_str(), "held": true}),
@@ -763,8 +770,35 @@ impl Drop for RetryTicket {
     }
 }
 
-/// Run one operation to its terminal state.
-async fn run(work: Work, handle: OperationHandle) {
+/// Run one operation to its terminal state, then ask its account's runtime for
+/// a drain ([`drain_after_send`]).
+async fn run(
+    work: Work,
+    handle: OperationHandle,
+    runtimes: Arc<crate::daemon::server::RuntimeTable>,
+) {
+    let account = work.account().to_string();
+    perform(work, handle).await;
+    drain_after_send(&runtimes, &account);
+}
+
+/// Ask `account`'s runtime for a drain once a send operation has ended.
+///
+/// A send queues server work beside the message: the delete of the draft's
+/// copy in the server Drafts folder once every recipient has it (#0143), and
+/// the `\Answered` flag on the message it replies to. Neither is a mutation
+/// that asks for a drain itself, so without this both waited for the
+/// account's next sync tick, up to `imap.sync_interval_secs` later, and the
+/// sent draft sat in Outlook's Drafts meanwhile. Asked whatever the outcome:
+/// a drain with nothing queued costs one `COUNT`.
+fn drain_after_send(runtimes: &crate::daemon::server::RuntimeTable, account: &str) {
+    if let Some(runtime) = runtimes.get(account) {
+        runtime.request_drain();
+    }
+}
+
+/// The operation itself, to its terminal state.
+async fn perform(work: Work, handle: OperationHandle) {
     handle.set_running();
     match work {
         Work::Draft {
@@ -1283,6 +1317,49 @@ mod tests {
         assert!(outbox::load(&store, id).unwrap().is_some());
         drop(held);
         discard_in(&store, &blobs, "acct", true, id).unwrap();
+    }
+
+    /// A send that ended asks its account's runtime for a drain, so the
+    /// delete of the draft's server copy it queued (and the `\Answered` flag)
+    /// goes out in seconds rather than at the next sync tick (#0143, the TUM
+    /// draft that stayed in Outlook's Drafts for eight minutes after its
+    /// send). An account with no runtime is no error.
+    #[tokio::test]
+    async fn a_finished_send_asks_its_runtime_for_a_drain() {
+        use crate::daemon::runtime::account::{AccountRuntime, DrainHook, TickHooks};
+        use futures::future::FutureExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let quiet: DrainHook = Arc::new(|_ctx| async { String::new() }.boxed());
+        let runtime = AccountRuntime::start_at_with_hooks(
+            dir.path(),
+            AccountConfig {
+                name: "tum".to_string(),
+                ..Default::default()
+            },
+            1,
+            TickHooks {
+                outbox: Arc::clone(&quiet),
+                mutations: quiet,
+                body: Arc::new(|_ctx| async { Ok(()) }.boxed()),
+            },
+        )
+        .unwrap();
+        let runtime = Arc::new(runtime);
+        let table = crate::daemon::server::RuntimeTable::default();
+        table.insert(Arc::clone(&runtime));
+        let mut requests = runtime.drain_requests();
+        assert!(!requests.has_changed().unwrap(), "nothing asked yet");
+
+        drain_after_send(&table, "tum");
+        assert!(
+            requests.has_changed().unwrap(),
+            "the send asked for a drain"
+        );
+        requests.borrow_and_update();
+
+        drain_after_send(&table, "proton");
+        assert!(!requests.has_changed().unwrap(), "another account's send");
     }
 
     #[test]

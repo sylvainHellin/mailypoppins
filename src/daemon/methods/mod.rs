@@ -164,6 +164,7 @@ pub fn register(dispatcher: &mut Dispatcher, shared: Shared) {
         Arc::clone(&canonical),
         Arc::clone(&operations),
         Arc::clone(&holds),
+        Arc::clone(&runtimes),
     );
     self::contact::register(
         dispatcher,
