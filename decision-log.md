@@ -264,6 +264,7 @@ The subject takes `FW: `, and a subject that already opens with `FW:`, `Fwd:` or
 Above the original stand an empty line and the signature.
 The original opens with a block under a 1pt solid #B5C4DF top border with a little top padding, holding bold English labels one per line: `From:`, `Sent:`, `To:`, `Cc:` (left out when the original had none) and `Subject:`; a blank line and the original body follow.
 The date label is `Sent:`, which Outlook desktop and Outlook on the web write in English; Outlook mobile writes `Date:` in the same bordered block.
+The date reads as Outlook writes it, such as `Wednesday, October 21, 2026 8:12 PM`, in the local time zone of the machine that writes the draft.
 The plain-text part carries the same labels, one per line, without bold.
 The block is one `parse::draft_reply_boundary` already takes for the start of a quote, so a copy edited in Outlook imports with the original below the quote marker.
 Rejected: Gmail's `Fwd:` prefix and its `---------- Forwarded message ----------` header, mp's layout until now; Outlook mobile's `Date:` label.
