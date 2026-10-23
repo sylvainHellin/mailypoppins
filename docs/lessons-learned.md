@@ -3224,3 +3224,10 @@ Code that needs to know whether an attachment is present here, such as the draft
 async-imap 0.11 sends an untagged `EXPUNGE` that arrives during `UID FETCH` or `UID STORE` to `Session::unsolicited_responses`, not to the command's own stream.
 That channel is bounded at 100 and silently drops once full, so code that relies on sequence numbers empties it before the command and checks it afterwards.
 async-imap also treats an EOF as a clean end of stream, so a dropped connection can look like an empty result instead of an error.
+
+## A copy gone with its row still there is a draft that left (2026-10-23)
+
+A push that read "no copy under the draft's `Message-ID`" as "nothing to replace" APPENDed a fresh copy of a TUM draft the other machine had already sent: the TUI's send key approves before it sends, the approval owes a push, and the push drained right after the guard refused the send.
+Had it drained before the claim, the claim would have taken that copy and sent the draft twice.
+A row that names a copy under the current UIDVALIDITY, with no copy left at all, means the draft was sent or discarded elsewhere; `push::push` now does nothing for it and leaves the file to the reconcile's copy-gone retirement.
+Any code that writes a server copy must ask whether the copy it replaces is still there before treating its absence as a clean slate.

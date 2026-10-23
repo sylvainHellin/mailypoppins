@@ -398,6 +398,11 @@ A send of a draft with a `server_message_id` on an account that mirrors therefor
 
 - Under the account runtime's turn, held until the submission ends, it searches the Drafts folder for the copy by `Message-ID`.
 - No copy: the draft was sent or discarded on another machine or in another client; the send is refused with an error that says so, and the file is left for the reconcile to retire.
+- A push never stands in for a copy that left the folder with nothing in its place (`push::push`): a row naming a copy under the current UIDVALIDITY and no copy carrying the draft's `Message-ID` is a draft sent or discarded elsewhere, and the push does nothing.
+  The send key of the TUI and the desktop app approves before it sends, and the approval is a local edit that owes a push.
+  On 2026-10-23 the home server's refused send pushed back the TUM draft the Mac had sent minutes before, as UID 18608; had that push drained before the send took the runtime's turn, the claim would have taken the fresh copy and sent the draft a second time.
+  A local edit of such a draft is not pushed either: the reconcile retires the file, edit included, to `drafts/.retired/<name>.copy-gone.md` once two reconciles miss the copy, and a file moved back from there has no row and is pushed as a new copy, which is the deliberate way to keep it.
+  Pushing the edit as a new copy was rejected, since nothing tells an edit from the approval a send makes, and it would bring back every draft sent elsewhere.
 - A copy: it is removed with `UID STORE \Deleted` and `UID EXPUNGE`, and the send goes ahead only when this session saw the untagged `EXPUNGE` for every copy; a copy another session removed first refuses the send.
 - After the claim the draft's `draft_sync` row is forgotten, so a send that then fails leaves a draft the owed-push scan pushes again, and the reconcile does not retire an unsent file as one whose copy went.
 - A Drafts folder that cannot be reached, or a server without `UIDPLUS`, refuses the send with an error that says so: nothing then shows that the other machine has not sent the draft, so the send does not fall through.
@@ -550,6 +555,7 @@ Installing it turns the mirror on for `tum` and `proton` at once, so the first d
 - [ ] On `proton`, approve a draft on the Mac; on the home server it stays `draft`.
 - [ ] `mp send` a draft; its copy leaves Outlook's Drafts and the file is in `drafts/.retired/`.
 - [ ] On `tum`, with an approved draft on both machines, run `mp send-approved` on the Mac and then on the home server; the home server refuses the draft as sent on another machine, and the recipient gets one message.
+- [ ] On `tum`, send a draft from the Mac, then within a minute press `x` on it in the home server's TUI; the send is refused as sent on another machine, nothing reappears in Outlook's Drafts, and the file retires within two minutes.
 - [ ] Send a draft from Outlook, and delete one in Apple Mail; after two ticks both files are in `drafts/.retired/` and neither comes back.
 - [ ] On `tum`, open an mp draft's copy in Apple Mail with View, Message, Raw Source, without editing it: it carries `X-Mailypoppins-Draft-Source` headers and its HTML ends with `<!-- mp:copy v2 ... -->`, and the base64 of the headers decodes to the draft with an empty `bcc:`.
 - [ ] On `proton`, a draft made on the Mac appears on the home server with its text and Bcc, through its HTML when Bridge dropped the headers, and a store rebuild there leaves it `synced` with no conflict copy.

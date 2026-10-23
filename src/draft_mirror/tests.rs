@@ -2039,6 +2039,117 @@ fn a_send_that_fails_after_its_claim_is_pushed_again_and_never_retired() {
     assert!(fx.row("d1").is_some());
 }
 
+/// The TUM incident of 2026-10-23: the home server imported a draft at its
+/// first copy, the Mac replaced that copy twice, approved it and sent it.
+/// The home server's send key then approves its own file, which owes a push,
+/// and sends. Whichever runs first, the push or the claim, nothing is pushed
+/// again and nothing is sent: a push that finds no copy where its row named
+/// one was sent or discarded elsewhere, and the reconcile retires the file.
+fn sent_on_the_other_machine() -> (FakeFolder, Machine, Machine, PathBuf) {
+    let mut folder = FakeFolder::default();
+    let mac = Machine::new();
+    let home = Machine::new();
+    let path = {
+        let _guard = mac.enter();
+        Fixture::write_in_current("angebot", "d1", "", "Hallo Robin")
+    };
+    mac.drain(&mut folder);
+    assert_eq!(home.reconcile(&mut folder).imported, 1);
+    let home_path = {
+        let _guard = home.enter();
+        find_local("tum", "d1").unwrap().path
+    };
+    std::fs::write(
+        &path,
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("Hallo Robin", "Hallo Robin, anbei"),
+    )
+    .unwrap();
+    mac.drain(&mut folder);
+    approve(&path);
+    mac.drain(&mut folder);
+    {
+        let _guard = mac.enter();
+        guard(&mac.store, &mac.account, &mut folder, "d1").expect("the Mac sends it");
+    }
+    assert!(folder.live().is_empty(), "{:?}", folder.log);
+    (folder, mac, home, home_path)
+}
+
+#[test]
+fn a_draft_sent_elsewhere_is_never_pushed_again_when_approved_then_sent() {
+    let (mut folder, _mac, home, home_path) = sent_on_the_other_machine();
+
+    // The send key: approve, then send; the guard refuses.
+    approve(&home_path);
+    {
+        let _guard = home.enter();
+        let refused = guard(&home.store, &home.account, &mut folder, "d1").unwrap_err();
+        assert!(
+            refused.contains("sent or discarded on another machine"),
+            "{refused}"
+        );
+    }
+    // The drain the approval and the send asked for.
+    home.drain(&mut folder);
+    assert!(
+        folder.live().is_empty(),
+        "the refused draft is not pushed back: {:?}",
+        folder.log
+    );
+    for _ in 0..2 {
+        home.reconcile(&mut folder);
+        home.drain(&mut folder);
+    }
+    assert!(!home.has("d1"), "retired as copy-gone");
+    assert!(folder.live().is_empty(), "{:?}", folder.log);
+}
+
+#[test]
+fn a_push_before_the_claim_never_hands_the_claim_a_fresh_copy_of_a_sent_draft() {
+    let (mut folder, _mac, home, home_path) = sent_on_the_other_machine();
+
+    // The approval's push drains before the send takes the runtime's turn.
+    approve(&home_path);
+    home.drain(&mut folder);
+    assert!(
+        folder.live().is_empty(),
+        "no fresh copy for the claim to find: {:?}",
+        folder.log
+    );
+    let _guard = home.enter();
+    let refused = guard(&home.store, &home.account, &mut folder, "d1").unwrap_err();
+    assert!(
+        refused.contains("sent or discarded on another machine"),
+        "{refused}"
+    );
+}
+
+/// A draft retired because its copy went and then moved back into `drafts/`
+/// by hand has no row: that is the deliberate way to keep it, and it is
+/// pushed as a new copy.
+#[test]
+fn a_copy_gone_draft_moved_back_by_hand_is_pushed_as_new() {
+    let (mut folder, _mac, home, home_path) = sent_on_the_other_machine();
+    approve(&home_path);
+    for _ in 0..2 {
+        home.reconcile(&mut folder);
+    }
+    assert!(!home.has("d1"));
+    let _guard = home.enter();
+    let retired = crate::config::drafts_dir("tum")
+        .join(crate::draft::RETIRED_DIR)
+        .join(format!(
+            "{}.copy-gone.md",
+            home_path.file_stem().unwrap().to_string_lossy()
+        ));
+    std::fs::rename(&retired, &home_path).unwrap();
+    drop(_guard);
+    home.drain(&mut folder);
+    assert_eq!(folder.live().len(), 1, "pushed as new: {:?}", folder.log);
+}
+
 // ---------------------------------------------------------------------------
 // A forward started in Outlook mobile (TUM Drafts, 2026-10-23)
 // ---------------------------------------------------------------------------

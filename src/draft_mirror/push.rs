@@ -34,7 +34,9 @@ pub struct Mirror<'a> {
 /// A [`NotFoundOnServer`] out of a delete is the queue's converged replay. A
 /// push of a draft that is gone, does not parse, is not pushable, or already
 /// matches its row does nothing and succeeds: the file is the truth, and what
-/// it says now is what the next owed push carries.
+/// it says now is what the next owed push carries. So does a push of a draft
+/// whose row names a copy that left the folder with nothing in its place: it
+/// was sent or discarded elsewhere, and the reconcile retires it.
 pub async fn run<F: DraftsFolder>(
     mirror: &Mirror<'_>,
     folder: &mut F,
@@ -100,6 +102,21 @@ pub async fn push<F: DraftsFolder>(
     let row_current = row
         .as_ref()
         .is_some_and(|row| row.mailbox == mailbox && row.uidvalidity == info.uidvalidity);
+    if row_current && before.is_empty() {
+        // The copy the row names is gone and nothing replaced it: the draft
+        // was sent or discarded on another machine or in another client, or
+        // claimed by another machine's send. A push now would put a sent
+        // draft back in Drafts, where a send's claim would find it and send
+        // it again. The file is left as it is, local edit included, for the
+        // reconcile to retire as copy-gone (or to relink to an Apple Mail
+        // edit); moved back from `drafts/.retired/` it has no row and is
+        // pushed as a new copy.
+        info!(
+            "[drafts] {account}/{draft_id}: its copy {message_id} is gone from {mailbox}, sent \
+             or discarded elsewhere; not pushed again, the reconcile retires it"
+        );
+        return Ok(());
+    }
     let unseen = before
         .iter()
         .any(|uid| !(row_current && row.as_ref().is_some_and(|row| row.uid == *uid)));

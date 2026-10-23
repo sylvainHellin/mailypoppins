@@ -20,7 +20,10 @@
 //! - No copy and a row: the row says this machine last saw the copy and did
 //!   not remove it, so the draft was sent or discarded on another machine or
 //!   in another client. The send is refused and the file left alone; the
-//!   reconcile retires it once the copy has been missing twice.
+//!   reconcile retires it once the copy has been missing twice. No push puts
+//!   it back meanwhile, the approval a send key makes before the send
+//!   included ([`super::push::push`]), so the claim never finds a fresh copy
+//!   of a draft sent elsewhere.
 //! - No copy and no row: this machine's own claim took the copy, and the
 //!   send after it failed or its outcome was unknown, or the push never
 //!   landed, or a rebuilt store dropped the row. The send goes ahead, since
