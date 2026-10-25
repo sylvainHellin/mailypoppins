@@ -279,3 +279,12 @@ Its subject takes `FW: ` like every forward.
 Rejected: the quoted body of an inline forward, which PERSO-174 shipped and which repeated the attachment's content.
 Source: Sylvain, chat of 2026-10-23.
 Status: accepted
+
+## 2026-10-25 - The draft_sync row records each server copy's Message-ID and restores it into a file that lost it
+
+Why: a draft file rewritten without `server_message_id` was taken for sent elsewhere, retired, and its send skipped the claim that keeps the other machine from sending it too (PERSO-192).
+The row is the authority the file's edits cannot reach: the push, the reconcile and the daemon's send put the key back from it before reading the draft, and a row with a copy but no recorded Message-ID refuses the send until the next reconcile learns it.
+The column is added additively; a row an earlier build wrote learns the Message-ID from the file's key, or from the copy its UID names.
+Rejected: fetching the copy by the row's UID and reading its `Message-ID` header on every recovery, which costs an IMAP round trip each time and fails offline.
+Source: Sylvain, chat of 2026-10-25.
+Status: accepted
