@@ -267,6 +267,7 @@ fn the_owed_pushes_are_queued_once() {
             uidvalidity: 7,
             synced_at: 1,
             synced_hash: file_hash(&std::fs::read(&synced).unwrap()),
+            message_id: None,
         },
     )
     .unwrap();
@@ -2367,4 +2368,139 @@ fn every_send_guard_refusal_is_logged_as_a_warning() {
             "{id}: {warnings:#?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// A file rewritten without its server_message_id (PERSO-192)
+// ---------------------------------------------------------------------------
+
+/// A pushed draft whose file was rewritten whole from its scaffold, as an
+/// agent does with what `mp new` printed: the push wrote `server_message_id`
+/// into the file and the rewrite dropped it. Returns the draft's path and the
+/// Message-ID its copy carries.
+fn pushed_then_rewritten(fx: &Fixture, folder: &mut FakeFolder) -> (PathBuf, String) {
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    block_on(push::push(&fx.mirror(1000), folder, "d1")).unwrap();
+    let mid = mid_of(&path);
+    fx.write("angebot", "d1", "", "Hallo Robin, anbei das Angebot.");
+    assert!(crate::draft::parse_email_draft(&path)
+        .unwrap()
+        .frontmatter
+        .server_message_id
+        .is_none());
+    (path, mid)
+}
+
+/// The push puts the key back from the row and replaces the copy under the
+/// same Message-ID, rather than taking the copy for sent elsewhere.
+#[test]
+fn a_draft_rewritten_without_its_key_is_pushed_under_its_message_id() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    let (path, mid) = pushed_then_rewritten(&fx, &mut folder);
+    assert_eq!(
+        fx.row("d1").unwrap().message_id.as_deref(),
+        Some(mid.as_str())
+    );
+
+    block_on(push::push(&fx.mirror(2000), &mut folder, "d1")).unwrap();
+
+    assert_eq!(mid_of(&path), mid, "the key is back");
+    let live = folder.live();
+    assert_eq!(live.len(), 1, "{:?}", folder.log);
+    assert_eq!(
+        header_value(&live[0].raw, "Message-ID").as_deref(),
+        Some(mid.as_str())
+    );
+    assert!(String::from_utf8_lossy(&live[0].raw).contains("anbei das Angebot"));
+    let row = fx.row("d1").unwrap();
+    assert_eq!(row.uid, live[0].uid);
+    assert_eq!(row.synced_hash, file_hash(&std::fs::read(&path).unwrap()));
+}
+
+/// A reconcile before the push neither retires the draft nor imports its
+/// copy as a second one: the key comes back and the edit is owed a push.
+#[test]
+fn a_reconcile_relinks_a_draft_rewritten_without_its_key() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    let (path, mid) = pushed_then_rewritten(&fx, &mut folder);
+
+    for _ in 0..2 {
+        let report = reconciled(&fx, &mut folder);
+        assert_eq!((report.retired, report.imported), (0, 0), "{report:?}");
+    }
+    assert_eq!(mid_of(&path), mid);
+    assert_eq!(local_drafts("tum").len(), 1, "no second draft");
+    assert_eq!(push::enqueue_owed(&fx.store, &fx.account).unwrap(), 1);
+}
+
+/// The send guard still claims the copy of a draft whose file lost the key,
+/// so the other machine cannot send it too.
+#[test]
+fn the_send_guard_claims_the_copy_of_a_draft_rewritten_without_its_key() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    let (path, mid) = pushed_then_rewritten(&fx, &mut folder);
+
+    send_guard::restore_link(&fx.store, &fx.account, &path).unwrap();
+    assert_eq!(mid_of(&path), mid);
+    let draft = find_local("tum", "d1").unwrap().draft;
+    assert!(send_guard::guards(&fx.account, &draft));
+    guard(&fx.store, &fx.account, &mut folder, "d1").expect("the copy is claimed");
+    assert!(folder.live().is_empty(), "{:?}", folder.log);
+}
+
+/// A row an earlier build wrote has no Message-ID. With the file's key it is
+/// filled from the file; without it the push takes the one its copy carries,
+/// and the send refuses until a reconcile has learnt it.
+#[test]
+fn a_row_without_a_message_id_learns_it_from_the_file_or_the_copy() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    let (path, mid) = pushed_then_rewritten(&fx, &mut folder);
+    let mut legacy = fx.row("d1").unwrap();
+    legacy.message_id = None;
+    draft_sync::upsert(&fx.store, &legacy).unwrap();
+
+    let refused = send_guard::restore_link(&fx.store, &fx.account, &path).unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("nothing was sent"),
+        "{refused:#}"
+    );
+
+    block_on(push::push(&fx.mirror(2000), &mut folder, "d1")).unwrap();
+    assert_eq!(mid_of(&path), mid, "the copy's Message-ID, not a fresh one");
+    assert_eq!(folder.live().len(), 1, "{:?}", folder.log);
+    assert_eq!(
+        fx.row("d1").unwrap().message_id.as_deref(),
+        Some(mid.as_str())
+    );
+
+    // A reconcile fills a legacy row from the file's key.
+    let mut legacy = fx.row("d1").unwrap();
+    legacy.message_id = None;
+    draft_sync::upsert(&fx.store, &legacy).unwrap();
+    reconciled(&fx, &mut folder);
+    assert_eq!(
+        fx.row("d1").unwrap().message_id.as_deref(),
+        Some(mid.as_str())
+    );
+}
+
+/// A retired file that lost its key still has its copy deleted, by the
+/// Message-ID its row remembers.
+#[test]
+fn a_retired_draft_without_its_key_deletes_its_copy_by_the_rows_message_id() {
+    let fx = Fixture::new();
+    let mut folder = FakeFolder::default();
+    let (_, mid) = pushed_then_rewritten(&fx, &mut folder);
+
+    assert!(push::forget_retired(&fx.store, &fx.account, "d1", None).unwrap());
+    let queued = pending_ops::queued_ops(&fx.store, "tum").unwrap();
+    assert!(
+        matches!(&queued[0].op, ServerOp::DeleteDraft { message_id, .. } if *message_id == mid),
+        "{:?}",
+        queued[0].op
+    );
 }

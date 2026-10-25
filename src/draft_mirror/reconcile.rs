@@ -16,6 +16,9 @@
 //! that file when its headers travelled; a copy without it was edited in
 //! Outlook, Apple Mail or the Proton app and is converted from its HTML.
 //!
+//! A file rewritten without its `server_message_id` gets it back from its
+//! row first (PERSO-192), so it is still linked to its copy below.
+//!
 //! For each local draft with a `server_message_id`:
 //!
 //! - its row's copy is still there and the newest: nothing, or a push when the
@@ -243,11 +246,15 @@ pub async fn reconcile<F: DraftsFolder>(
     let mailbox = drafts_mailbox(mirror.store, mirror.account);
     let info = folder.select(&mailbox).await?;
     let copies: Vec<Copy> = folder.heads().await?.iter().map(Copy::of).collect();
-    let locals = local_drafts(&account);
-    let rows: HashMap<String, DraftSyncRow> = draft_sync::load(mirror.store, &account)?
+    let at = Place {
+        uidvalidity: info.uidvalidity,
+        mailbox: &mailbox,
+    };
+    let mut rows: HashMap<String, DraftSyncRow> = draft_sync::load(mirror.store, &account)?
         .into_iter()
         .map(|row| (row.draft_id.clone(), row))
         .collect();
+    let locals = linked_locals(mirror, &mut rows, &copies, &at)?;
     let gone = retired(&account);
     let present = present_ids(&account);
     let linked_mids: HashSet<String> = locals
@@ -260,10 +267,6 @@ pub async fn reconcile<F: DraftsFolder>(
     // The absences this reconcile saw; any other is forgotten at the end, so
     // only two sightings in a row act.
     let mut absent: HashSet<String> = HashSet::new();
-    let at = Place {
-        uidvalidity: info.uidvalidity,
-        mailbox: &mailbox,
-    };
 
     for local in &locals {
         let Some(mid) = local.draft.frontmatter.server_message_id.clone() else {
@@ -353,7 +356,7 @@ pub async fn reconcile<F: DraftsFolder>(
                 if let Some(hash) =
                     pull_into(mirror, local, &raw, moved && !same, None, &mut report)?
                 {
-                    record(mirror, &local.id, newest.uid, &at, hash)?;
+                    record(mirror, &local.id, newest.uid, &at, hash, Some(mid.clone()))?;
                     report.pulled += 1;
                 }
                 settle_older(folder, local, &older, &mut doomed, &mut report).await?;
@@ -379,11 +382,18 @@ pub async fn reconcile<F: DraftsFolder>(
                 // from it, or renders to it.
                 let raw = folder.fetch(newest.uid).await?.unwrap_or_default();
                 if is_the_file(mirror, local, &raw)? {
-                    record(mirror, &local.id, newest.uid, &at, local.hash.clone())?;
+                    record(
+                        mirror,
+                        &local.id,
+                        newest.uid,
+                        &at,
+                        local.hash.clone(),
+                        Some(mid.clone()),
+                    )?;
                     report.recovered += 1;
                 } else if let Some(hash) = pull_into(mirror, local, &raw, true, None, &mut report)?
                 {
-                    record(mirror, &local.id, newest.uid, &at, hash)?;
+                    record(mirror, &local.id, newest.uid, &at, hash, Some(mid.clone()))?;
                     report.pulled += 1;
                 }
                 settle_older(folder, local, &older, &mut doomed, &mut report).await?;
@@ -453,14 +463,14 @@ pub async fn reconcile<F: DraftsFolder>(
             claimed.insert(copy.uid);
             if let Some(hash) = revive(mirror, returning, &raw, &mut report)? {
                 let id = returning.id.clone().unwrap_or_default();
-                record(mirror, &id, copy.uid, &at, hash)?;
+                record(mirror, &id, copy.uid, &at, hash, linked_mid(copy))?;
                 report.pulled += 1;
             }
             continue;
         }
         if let Some((id, hash)) = imported(mirror, copy, &raw, &present)? {
             claimed.insert(copy.uid);
-            record(mirror, &id, copy.uid, &at, hash)?;
+            record(mirror, &id, copy.uid, &at, hash, linked_mid(copy))?;
             report.imported += 1;
         }
     }
@@ -488,6 +498,54 @@ pub async fn reconcile<F: DraftsFolder>(
 struct Place<'a> {
     uidvalidity: u32,
     mailbox: &'a str,
+}
+
+/// The bracketed `Message-ID` a copy carries, as `server_message_id` spells
+/// it.
+fn linked_mid(copy: &Copy) -> Option<String> {
+    copy.message_id.as_ref().map(|mid| format!("<{mid}>"))
+}
+
+/// The account's local drafts, each linked to its copy again when its file
+/// lost `server_message_id` (PERSO-192).
+///
+/// A row an earlier build wrote has no `Message-ID`: it takes the file's
+/// key, or the one of the copy the row names. Then every file without a key
+/// whose row has one gets it back, so the passes below see the draft linked
+/// to its copy rather than a draft never pushed beside a copy nobody links,
+/// which they would retire and import as a second draft.
+fn linked_locals(
+    mirror: &Mirror<'_>,
+    rows: &mut HashMap<String, DraftSyncRow>,
+    copies: &[Copy],
+    at: &Place<'_>,
+) -> Result<Vec<LocalDraft>> {
+    let account = &mirror.account.name;
+    let locals = local_drafts(account);
+    for row in rows.values_mut().filter(|row| row.message_id.is_none()) {
+        let from_file = locals
+            .iter()
+            .find(|local| local.id == row.draft_id)
+            .and_then(|local| local.draft.frontmatter.server_message_id.clone());
+        let current = row.mailbox == at.mailbox && row.uidvalidity == at.uidvalidity;
+        let from_copy = || {
+            copies
+                .iter()
+                .find(|copy| current && copy.uid == row.uid)
+                .and_then(linked_mid)
+        };
+        if let Some(mid) = from_file.or_else(from_copy) {
+            row.message_id = Some(mid);
+            draft_sync::upsert(mirror.store, row)?;
+        }
+    }
+    locals
+        .into_iter()
+        .map(|local| {
+            let row = rows.get(&local.id);
+            super::restore_server_message_id(account, local, row)
+        })
+        .collect()
 }
 
 /// The copies of a draft older than the one it is linked to.
@@ -562,7 +620,8 @@ async fn settle_changed<F: DraftsFolder>(
 ) -> Result<()> {
     let raw = folder.fetch(uid).await?.unwrap_or_default();
     if let Some(hash) = pull_into(mirror, local, &raw, moved, relink, report)? {
-        record(mirror, &local.id, uid, at, hash)?;
+        let mid = relink.or(local.draft.frontmatter.server_message_id.as_deref());
+        record(mirror, &local.id, uid, at, hash, mid.map(str::to_string))?;
         report.pulled += 1;
     }
     Ok(())
@@ -638,10 +697,18 @@ fn is_the_file(mirror: &Mirror<'_>, local: &LocalDraft, raw: &[u8]) -> Result<bo
     Ok(rendered.is_ok_and(|bytes| file_hash(&bytes) == local.hash))
 }
 
-/// Record the draft `id` against the copy `uid`, its file hashing to `hash`:
-/// the bytes the reconcile wrote or read, never a re-read that could take in
-/// a save made since, which would then never be pushed.
-fn record(mirror: &Mirror<'_>, id: &str, uid: u32, at: &Place<'_>, hash: String) -> Result<()> {
+/// Record the draft `id` against the copy `uid`, which carries `message_id`,
+/// its file hashing to `hash`: the bytes the reconcile wrote or read, never a
+/// re-read that could take in a save made since, which would then never be
+/// pushed.
+fn record(
+    mirror: &Mirror<'_>,
+    id: &str,
+    uid: u32,
+    at: &Place<'_>,
+    hash: String,
+    message_id: Option<String>,
+) -> Result<()> {
     draft_sync::upsert(
         mirror.store,
         &DraftSyncRow {
@@ -652,6 +719,7 @@ fn record(mirror: &Mirror<'_>, id: &str, uid: u32, at: &Place<'_>, hash: String)
             uidvalidity: at.uidvalidity,
             synced_at: mirror.now,
             synced_hash: hash,
+            message_id,
         },
     )
 }

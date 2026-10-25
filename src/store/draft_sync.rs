@@ -3,10 +3,15 @@
 //!
 //! One row per `(account, draft_id)`. The draft file is the truth and the
 //! server copy is its mirror; this table only says which copy the mirror is
-//! (`mailbox`, `uid`, `uidvalidity`) and what the file looked like when the
-//! two last agreed (`synced_hash`, `synced_at`). A file whose hash differs
-//! from its row changed locally since; a copy whose UID differs from its row
-//! changed on the server since.
+//! (`mailbox`, `uid`, `uidvalidity`, `message_id`) and what the file looked
+//! like when the two last agreed (`synced_hash`, `synced_at`). A file whose
+//! hash differs from its row changed locally since; a copy whose UID differs
+//! from its row changed on the server since.
+//!
+//! `message_id` repeats the draft's `server_message_id` so a file rewritten
+//! without that key gets it back from here (PERSO-192): without it, the
+//! mirror would mint a new one, read the row's copy as gone, and retire the
+//! draft as sent elsewhere.
 //!
 //! It is a cache table like `pending_ops`: a store rebuild drops it, and the
 //! reconcile re-derives each row from the server copy the draft's
@@ -38,9 +43,30 @@ pub fn create_sql() -> String {
             uidvalidity INTEGER NOT NULL,
             synced_at   INTEGER NOT NULL,
             synced_hash TEXT NOT NULL,
+            message_id  TEXT,
             PRIMARY KEY (account, draft_id)
         )"
     )
+}
+
+/// Add the `message_id` column to a table an earlier build created without
+/// it. A read when nothing is missing, as [`create_sql`]'s caller requires;
+/// the rows it leaves `NULL` are filled by the next reconcile.
+pub fn ensure_columns(conn: &rusqlite::Connection) -> Result<()> {
+    let has_message_id: bool = conn
+        .query_row(
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM pragma_table_info('{TABLE}') WHERE name = 'message_id')"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .context("reading the draft_sync columns")?;
+    if !has_message_id {
+        conn.execute_batch(&format!("ALTER TABLE {TABLE} ADD COLUMN message_id TEXT"))
+            .context("adding the draft_sync message_id column")?;
+    }
+    Ok(())
 }
 
 /// One draft's server copy and the convergence it was recorded at.
@@ -59,6 +85,9 @@ pub struct DraftSyncRow {
     pub synced_at: i64,
     /// [`crate::draft_mirror::file_hash`] of the file's bytes at that moment.
     pub synced_hash: String,
+    /// The copy's `Message-ID`, as the draft's `server_message_id` spells it;
+    /// `None` on a row an earlier build wrote, until the reconcile fills it.
+    pub message_id: Option<String>,
 }
 
 fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<DraftSyncRow> {
@@ -70,10 +99,12 @@ fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<DraftSyncRow> {
         uidvalidity: row.get::<_, i64>(4)? as u32,
         synced_at: row.get(5)?,
         synced_hash: row.get(6)?,
+        message_id: row.get(7)?,
     })
 }
 
-const COLUMNS: &str = "account, draft_id, mailbox, uid, uidvalidity, synced_at, synced_hash";
+const COLUMNS: &str =
+    "account, draft_id, mailbox, uid, uidvalidity, synced_at, synced_hash, message_id";
 
 /// Every row of `account`, by draft id.
 pub fn load(store: &Store, account: &str) -> Result<Vec<DraftSyncRow>> {
@@ -106,11 +137,11 @@ pub fn upsert(store: &Store, row: &DraftSyncRow) -> Result<()> {
         .conn()
         .execute(
             &format!(
-                "INSERT INTO {TABLE} ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO {TABLE} ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT (account, draft_id) DO UPDATE SET
                     mailbox = excluded.mailbox, uid = excluded.uid,
                     uidvalidity = excluded.uidvalidity, synced_at = excluded.synced_at,
-                    synced_hash = excluded.synced_hash"
+                    synced_hash = excluded.synced_hash, message_id = excluded.message_id"
             ),
             rusqlite::params![
                 row.account,
@@ -120,6 +151,7 @@ pub fn upsert(store: &Store, row: &DraftSyncRow) -> Result<()> {
                 i64::from(row.uidvalidity),
                 row.synced_at,
                 row.synced_hash,
+                row.message_id,
             ],
         )
         .context("writing a draft_sync row")?;
@@ -245,6 +277,7 @@ mod tests {
             uidvalidity: 7,
             synced_at: 1_700_000_000,
             synced_hash: format!("hash-{uid}"),
+            message_id: Some(format!("<mp-draft.{uid}@tum.de>")),
         }
     }
 
@@ -280,5 +313,34 @@ mod tests {
         big.uidvalidity = u32::MAX - 1;
         upsert(&store, &big).unwrap();
         assert_eq!(get(&store, "tum", "a").unwrap(), Some(big));
+    }
+
+    /// A table an earlier build created without `message_id` gains the
+    /// column at the next open, its rows reading `None` until a write fills
+    /// it (PERSO-192).
+    #[test]
+    fn a_table_without_the_message_id_gains_it_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .conn()
+                .execute_batch(&format!(
+                    "DROP TABLE {TABLE};
+                     CREATE TABLE {TABLE} (
+                        account TEXT NOT NULL, draft_id TEXT NOT NULL,
+                        mailbox TEXT NOT NULL, uid INTEGER NOT NULL,
+                        uidvalidity INTEGER NOT NULL, synced_at INTEGER NOT NULL,
+                        synced_hash TEXT NOT NULL, PRIMARY KEY (account, draft_id));
+                     INSERT INTO {TABLE} VALUES ('tum', 'a', 'Drafts', 10, 7, 1, 'h');"
+                ))
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let old = get(&store, "tum", "a").unwrap().expect("the old row");
+        assert_eq!(old.message_id, None);
+        upsert(&store, &row("a", 10)).unwrap();
+        assert_eq!(get(&store, "tum", "a").unwrap(), Some(row("a", 10)));
     }
 }

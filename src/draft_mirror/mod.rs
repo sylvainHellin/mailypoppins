@@ -10,7 +10,9 @@
 //! their own edits (the probe of 2026-10-20). The volatile state, the copy's
 //! UID and the hash of the file at the last convergence, lives in the store's
 //! [`draft_sync`](crate::store::draft_sync) table, which a store rebuild drops
-//! and the reconcile re-derives.
+//! and the reconcile re-derives. The row repeats the `Message-ID`, so a file
+//! rewritten without the key gets it back before the push, the reconcile or
+//! a send reads it ([`restore_server_message_id`]).
 //!
 //! A push is owed when a pushable draft's hash differs from its row's, or it
 //! has no row: [`push::enqueue_owed`] turns every owed push into a queued
@@ -28,7 +30,10 @@ pub mod send_guard;
 
 use std::path::PathBuf;
 
+use anyhow::anyhow;
+
 use crate::config::{AccountConfig, AuthMethod};
+use crate::store::draft_sync::DraftSyncRow;
 use crate::store::Store;
 use crate::types::{EmailDraft, EmailStatus};
 
@@ -185,6 +190,38 @@ pub fn prune_retired(account: &str, now: std::time::SystemTime) -> usize {
         log::info!("[drafts] pruned {pruned} retired draft file(s) of {account}");
     }
     pruned
+}
+
+/// `local` with the `server_message_id` its `row` remembers written back, when
+/// the file has none (PERSO-192); `local` itself otherwise.
+///
+/// A draft rewritten whole from a snapshot taken before its first push (an
+/// agent filling in the scaffold `mp new` printed, an editor's stale buffer)
+/// loses the key the push wrote. Read as a draft never pushed, it would get a
+/// fresh `Message-ID` that no copy carries, so the row's copy would read as
+/// sent elsewhere: the push and the send refused, the file retired, and the
+/// copy imported back as a draft of its own. The row's copy is still the
+/// draft's, so the key is put back instead, and the push replaces that copy
+/// as it would after any edit.
+pub fn restore_server_message_id(
+    account: &str,
+    local: LocalDraft,
+    row: Option<&DraftSyncRow>,
+) -> anyhow::Result<LocalDraft> {
+    if local.draft.frontmatter.server_message_id.is_some() {
+        return Ok(local);
+    }
+    let Some(message_id) = row.and_then(|row| row.message_id.as_deref()) else {
+        return Ok(local);
+    };
+    crate::draft::set_draft_server_message_id(&local.path, message_id)?;
+    log::warn!(
+        "[drafts] {account}/{}: its file had lost server_message_id; restored {message_id} \
+         from its row",
+        local.id
+    );
+    LocalDraft::read(local.path.clone())
+        .ok_or_else(|| anyhow!("{} did not read back after its restore", local.id))
 }
 
 /// The draft `id` of `account`, if a file holds it.

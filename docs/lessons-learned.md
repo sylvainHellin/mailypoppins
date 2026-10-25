@@ -3247,3 +3247,11 @@ The retired value is kept as `AuthMethod::RetiredOAuth2`, which every path that 
 The repo's `.gitignore` files are local-only, so a worktree made with `git worktree add` starts with no ignore rules at all.
 A `pnpm build` of the website in such a worktree leaves `website/dist/` and `website/.astro/` untracked, and a broad `git add` commits them.
 An agent in a worktree adds paths by name, or copies the checkout's `.gitignore` files into the worktree first.
+
+## A draft file is not the only record of its server copy's Message-ID (2026-10-25, PERSO-192)
+
+The mirror wrote `server_message_id` into the draft file at the first push and kept it nowhere else, so a file rewritten whole from the scaffold `mp new` printed lost the only link to its copy.
+The next push then minted a fresh Message-ID, found no copy under it while a `draft_sync` row existed, and took the draft for sent elsewhere: the push and the send refused, the reconcile retired the file and imported the old copy back as a ghost draft.
+Worse, `send_guard::guards` read only the file's key, so the send of such a draft skipped the claim and the double-send protection silently.
+The row now repeats the copy's Message-ID and puts it back into any file that lost it, before the push, the reconcile and the daemon's send read the draft; a row from an earlier build learns it from the file or from the copy its UID names.
+A field a file carries for the system's own bookkeeping needs a second home the user's edits cannot reach.

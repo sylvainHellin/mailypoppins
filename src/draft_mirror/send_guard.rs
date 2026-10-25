@@ -39,6 +39,12 @@
 //! other machine have sent it after all, its reconcile deletes the copy
 //! pushed again as a sent draft's and this one's then retires the file.
 //!
+//! A draft whose file lost its `server_message_id` while its row remembers it
+//! gets it back before the send reads it ([`restore_link`], PERSO-192), so
+//! the guard is not skipped as for a draft never pushed; a draft with a row
+//! whose `Message-ID` is not known yet is refused until the next reconcile
+//! learns it.
+//!
 //! The daemon runs the guard under the account runtime's turn, so no drain or
 //! reconcile of this machine runs between the claim and the submission.
 //!
@@ -52,6 +58,8 @@
 //! the draft leaves it here with no copy and no row, which this machine
 //! sends again, as its owed-push scan would push it again anyway.
 
+use std::path::Path;
+
 use anyhow::{anyhow, bail, Result};
 use log::{info, warn};
 
@@ -60,6 +68,51 @@ use super::{drafts_mailbox, mirror_enabled};
 use crate::config::AccountConfig;
 use crate::store::{draft_sync, Store};
 use crate::types::EmailDraft;
+
+/// Put back the `server_message_id` the file at `path` lost, from the draft's
+/// row in `store`, before a send reads the draft (PERSO-192).
+///
+/// A draft without the key and without a row was never pushed and is left
+/// alone. One with a row whose `Message-ID` an earlier build did not record
+/// is refused: its copy is on the server, and sending without claiming it
+/// would let the other machine send it too.
+pub fn restore_link(store: &Store, account: &AccountConfig, path: &Path) -> Result<()> {
+    if !mirror_enabled(account) {
+        return Ok(());
+    }
+    let Some(local) = super::LocalDraft::read(path.to_path_buf()) else {
+        return Ok(());
+    };
+    if local.draft.frontmatter.server_message_id.is_some() {
+        return Ok(());
+    }
+    let Some(row) = draft_sync::get(store, &account.name, &local.id)? else {
+        return Ok(());
+    };
+    if row.message_id.is_none() {
+        bail!(
+            "this draft has a copy in {}'s server Drafts folder but its file lost the \
+             server_message_id that names it, so the copy cannot be claimed before the send; \
+             nothing was sent, send it again after the next sync",
+            account.name
+        );
+    }
+    super::restore_server_message_id(&account.name, local, Some(&row))?;
+    Ok(())
+}
+
+/// [`restore_link`] against the account's own store, as the daemon's send
+/// runs it; a draft that has its key opens no store.
+pub fn restore_link_for_send(account: &AccountConfig, path: &Path) -> Result<()> {
+    if !mirror_enabled(account)
+        || crate::draft::parse_email_draft(path)
+            .map_or(true, |draft| draft.frontmatter.server_message_id.is_some())
+    {
+        return Ok(());
+    }
+    let store = Store::open(crate::config::store_path(&account.name))?;
+    restore_link(&store, account, path)
+}
 
 /// Whether a send of `draft` from `account` passes the guard at all: the
 /// account mirrors its drafts and the draft has been pushed, so a copy on the

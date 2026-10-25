@@ -787,11 +787,21 @@ async fn run(
 /// of the server copy and its submission then run with no drain or reconcile
 /// of this account between them. `None` for every other send, which holds
 /// nothing.
+///
+/// A file that lost its `server_message_id` gets it back from its row first
+/// (PERSO-192), so the draft is still seen as pushed; a restore that fails is
+/// reported by [`send_one`], which runs it again and refuses the send.
 fn guarded_runtime(
     runtimes: &crate::daemon::server::RuntimeTable,
     account: &AccountConfig,
     path: &std::path::Path,
 ) -> Option<Arc<crate::daemon::runtime::account::AccountRuntime>> {
+    if let Err(e) = crate::draft_mirror::send_guard::restore_link_for_send(account, path) {
+        log::debug!(
+            "[drafts] {}: restore before the send turn: {e:#}",
+            account.name
+        );
+    }
     let draft = crate::draft::parse_email_draft(path).ok()?;
     crate::draft_mirror::send_guard::guards(account, &draft)
         .then(|| runtimes.get(&account.name))
@@ -949,6 +959,7 @@ async fn send_one(
     path: &std::path::Path,
     email: &EmailSettings,
 ) -> anyhow::Result<(SendOutcome, Option<usize>)> {
+    crate::draft_mirror::send_guard::restore_link_for_send(account, path)?;
     let draft = crate::draft::parse_email_draft(path)?;
     crate::draft::validate_draft(&draft)?;
     let ctx = context_for(account, email)?;
