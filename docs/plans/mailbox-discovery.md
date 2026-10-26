@@ -1,6 +1,6 @@
 # Mailbox discovery (#0141)
 
-Implementation plan and map for [ticket #0141](../tickets/0141-mailbox-auto-discovery.md), which holds the design and Sylvain's policy decision of 2026-10-22.
+Implementation plan and map for ticket #0141, which holds the design and Sylvain's policy decision of 2026-10-22.
 The catalogue and the folder roles come first, because the server drafts of #0143 reuse the `drafts` role.
 
 ## Layers

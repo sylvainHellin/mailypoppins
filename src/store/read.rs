@@ -2,7 +2,7 @@
 //!
 //! Everything the TUI and `mp dump-mailbox` show comes from here, and nothing
 //! here touches the filesystem tree. There is deliberately no fallback to a
-//! directory walk: after [#0037](../../docs/tickets/0037-sqlite-store-engine-skeleton.md)
+//! directory walk: after #0037
 //! nothing writes `.md`, so a row that is missing is a bug in ingest, and a
 //! walk that quietly produced the message anyway would hide it.
 //!

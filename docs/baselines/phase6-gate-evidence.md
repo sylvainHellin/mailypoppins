@@ -2,7 +2,7 @@
 
 The four gate lines of Phase 6 of the daemon migration (`.agents/workflow/native-gui-daemon/plan.md`, section 4), each mapped to the test, the smoke run or the measurement that proves it, with the result recorded rather than asserted.
 
-Ticket [#0125](../tickets/0125-daemon-hardening.md).
+Ticket #0125.
 Evidence taken on 2026-09-21 at `1ee6bcb` on branch `daemon`, thirty-one commits past the Phase 5 exit, all of them Phase 6's own.
 Toolchain `rustc 1.96.0 (ac68faa20 2026-05-25)`, `cargo 1.96.0 (30a34c682 2026-05-25)`, host Ubuntu 26.04 LTS, Linux 7.0.0-22-generic, AMD Ryzen 7 PRO 8845HS, 16 threads, 28 GiB RAM.
 
@@ -191,7 +191,7 @@ W4 is 0.85x and 0.95x against a 1.5x ceiling, and no `frame_too_large` appeared 
 **W3 is still the one workload that pays more than it saves, and it improved.**
 `mp dump-mailbox --json -A alpha` is 116 ms routed against 91 in process, 1.27x, where Phase 4 measured 121 against 86, 1.41x.
 W3's acceptance rule is 1.2x, so the rule is still breached, by less; the output is byte-identical, which is the other half of that rule.
-It is a batch export rather than an interaction, and streaming or a handle-backed NDJSON answer is the fix, already in `BACKLOG.md` since Phase 4.
+It is a batch export rather than an interaction, and streaming or a handle-backed NDJSON answer is the fix, already in PERSO-223 since Phase 4.
 
 **W2 is the one regression of the two phases since, and it is the row shape rather than the transport.**
 `mp list-messages --mailbox Bulk -n 5000` is 94 ms warm here against Phase 4's 56 ms, while its oracle moved by 4 ms and every other row moved by less than that.
@@ -275,22 +275,22 @@ Nothing on this list blocks the exit; the first three are the ones a Phase 7 uni
 |---|---|
 | The operation registry never forgot a settled operation | **fixed** in P6-U9 (`operations::HISTORY = 256`), pinned by a unit test and written up in `docs/lessons-learned.md` |
 | `snapshot.holds` was hard-coded to `[]`, so a client joining mid-countdown could not render the hold | **fixed** in P6-U4 (`CanonicalState::attach_holds`) |
-| `mp daemon restart` takes no `--grace-secs`, so a restart cannot pass the grace `stop` accepts | `BACKLOG.md` |
-| `mp daemon restart` prints the stop's line and says nothing about the start it performed | `BACKLOG.md` |
-| `REPORT_DEADLINE` in `src/daemon/shutdown.rs` names a connection-close ceiling rather than a report deadline | `BACKLOG.md` |
-| `Snapshot::holds` and `operations` stay `Vec<Value>` while the event and `send.hold_status` are typed | `BACKLOG.md` |
-| `AccountView.health` is only ever `SyncHealth::default()`, so every snapshot reports `sync_health.state: "unknown"` | `BACKLOG.md` |
-| The log reader stamps every line with `Local::now()`'s offset, so a line written across a DST change is an hour out | `BACKLOG.md` |
-| `DAEMON_ENV_HOOKS` in `tests/support/parity.rs` clears twelve of the fifteen hooks | `BACKLOG.md` |
-| The activity overlay's `/filter` matches the level's `Debug` spelling as a substring of the same query that matches the message | `BACKLOG.md` |
-| No protocol fixture pins a `state.bootstrap` whose `snapshot.diagnostics` is non-empty | `BACKLOG.md` |
-| Every `mp daemon` subcommand inherits the global `-s/--signature`, `--no-signature` and `-A/--account` flags, which mean nothing to a lifecycle command | `BACKLOG.md` |
-| The live `systemctl --user enable --now` and the login start (install, `systemctl --user status`, log out and back in, `mp daemon status`, uninstall) | **owner action**, NOT TAKEN above, in `BACKLOG.md` |
-| The live launchd check (install, log out and back in, `status`, uninstall) and the two questions on it | **owner action**, NOT TAKEN above, in `BACKLOG.md`, `docs/daemon-operations.md` and `docs/release-process.md` |
+| `mp daemon restart` takes no `--grace-secs`, so a restart cannot pass the grace `stop` accepts | **closed** after the gate (git history) |
+| `mp daemon restart` prints the stop's line and says nothing about the start it performed | **closed** after the gate (git history) |
+| `REPORT_DEADLINE` in `src/daemon/shutdown.rs` names a connection-close ceiling rather than a report deadline | **closed** after the gate (git history) |
+| `Snapshot::holds` and `operations` stay `Vec<Value>` while the event and `send.hold_status` are typed | **closed** after the gate (git history) |
+| `AccountView.health` is only ever `SyncHealth::default()`, so every snapshot reports `sync_health.state: "unknown"` | **closed** after the gate (git history) |
+| The log reader stamps every line with `Local::now()`'s offset, so a line written across a DST change is an hour out | **closed** after the gate (git history) |
+| `DAEMON_ENV_HOOKS` in `tests/support/parity.rs` clears twelve of the fifteen hooks | PERSO-225 |
+| The activity overlay's `/filter` matches the level's `Debug` spelling as a substring of the same query that matches the message | PERSO-218 |
+| No protocol fixture pins a `state.bootstrap` whose `snapshot.diagnostics` is non-empty | **closed** after the gate (git history) |
+| Every `mp daemon` subcommand inherits the global `-s/--signature`, `--no-signature` and `-A/--account` flags, which mean nothing to a lifecycle command | **closed** after the gate (git history) (2026-10-22) |
+| The live `systemctl --user enable --now` and the login start (install, `systemctl --user status`, log out and back in, `mp daemon status`, uninstall) | **owner action**, NOT TAKEN above, in PERSO-225 |
+| The live launchd check (install, log out and back in, `status`, uninstall) and the two questions on it | **owner action**, NOT TAKEN above, in PERSO-225, `docs/daemon-operations.md` and `docs/release-process.md` |
 | A draft whose `from:` names an account other than the one whose drafts directory holds it is now refused by `send.draft` | **accepted**, recorded in the P6-U2 section of the ticket |
 | The two service hooks are deliberately not in `DaemonFixture`'s clearing list | **accepted**, recorded in the P6-U6 section of the ticket and in `docs/daemon-operations.md` |
-| The periodic tick with no client anywhere ("Phase 6's" in three documents) is not built | `BACKLOG.md`, retargeted off Phase 6 |
-| `spikes/ipc-bench`, kept past the Phase 1a gate so Phase 6 could re-run its workloads | **still there**. This unit re-ran the Phase 0/1a *workloads* through the product binaries rather than through the spike, so the spike bought nothing here; its deletion is a `git rm` nobody has asked for yet and it stays a `BACKLOG.md` line |
+| The periodic tick with no client anywhere ("Phase 6's" in three documents) is not built | retargeted off Phase 6, then **built** (#0134, 2026-09-28) |
+| `spikes/ipc-bench`, kept past the Phase 1a gate so Phase 6 could re-run its workloads | **still there**. This unit re-ran the Phase 0/1a *workloads* through the product binaries rather than through the spike, so the spike bought nothing here; its deletion is a `git rm` nobody had asked for yet (it was deleted on 2026-10-22) |
 
 ## What Phase 6 does not answer
 

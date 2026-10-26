@@ -1,4 +1,4 @@
-//! The Graph inline-image probe of PERSO-165 (`docs/tickets/0145-mark-inline-images-at-ingest.md`).
+//! The Graph inline-image probe of PERSO-165 (#0145).
 //!
 //! Answers, against a live Graph account, which shape of the attachment list
 //! returns `isInline` and `contentId` without `contentBytes`, and what it costs

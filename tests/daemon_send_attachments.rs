@@ -18,7 +18,7 @@
 //! which is the one location both processes agree on
 //! (`send::resolve_attachment_paths` takes the anchor explicitly). That is an
 //! accepted divergence from the pre-daemon binary, which anchored to the
-//! sender's cwd; it is recorded in `docs/tickets/0123-cli-cutover.md`,
+//! sender's cwd; it is recorded in ticket #0123 (git history),
 //! `docs/parity-matrix.md` and `docs/daemon-protocol.md`.
 //!
 //! Both rows below run the client from a third directory - neither the draft's

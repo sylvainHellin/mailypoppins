@@ -2,11 +2,11 @@
 
 > Status: design, nothing implemented (2026-07-11). Implementer-facing.
 > Scout: [.agents/research/2026-07-11-calendar-contacts-scout.md] (contacts/iMIP touchpoints).
-> Tickets: [#0020](../tickets/0020-accept-calendar-invitations.md),
-> [#0027](../tickets/0027-imip-receive-parse.md),
-> [#0028](../tickets/0028-imip-send-invite.md),
-> [#0029](../tickets/0029-imip-rsvp-reply.md),
-> [#0030](../tickets/0030-imip-reply-reconciliation.md).
+> Tickets: #0020,
+> #0027,
+> #0028,
+> #0029,
+> #0030.
 
 ## Decision summary (settled — do not reopen)
 
@@ -14,8 +14,8 @@
   account, Graph and non-Graph alike.** No Microsoft Graph calendar path in v1. The TUM
   M365 tenant requires IT-admin approval for Graph API access that is currently
   unobtainable, so Graph is a *future* sync backend with its own gating ticket
-  ([#0035](../tickets/0035-graph-admin-approval.md) approval →
-  [#0036](../tickets/0036-graph-sync-backend.md) backend). The requirement is **universal
+  (PERSO-163 approval →
+  PERSO-200 backend). The requirement is **universal
   recipient compatibility**: Gmail, Outlook, and Apple Mail must render `method=REQUEST`
   as an actionable invite.
 - **D2 — On-disk representation.** A received invite is stored as **both** (a) new
@@ -43,7 +43,7 @@
   (attendees from `--to`/`--cc`); plus `accept` / `tentative` / `decline` CLI commands. The
   TUI wraps the library functions — no subprocess spawning.
 - **D8 — Cancellations/updates.** `METHOD:CANCEL` and bumped-`SEQUENCE` updates are out of
-  scope for v1; noted as follow-up ([#0031](../tickets/0031-imip-cancel-update.md)).
+  scope for v1; noted as follow-up (#0031).
 
 ## Architecture
 
@@ -62,7 +62,7 @@ Add a dedicated calendar branch that runs during part traversal:
 1. **Detect** any `text/calendar` MIME part (inline or `.ics`-named attachment).
 2. **Persist** the raw bytes as a sidecar `.ics` in the email's attachment directory (D2).
    Reuse the existing attachment-path scheme so archive/move keeps it colocated (mind
-   [#0006](../tickets/0006-attachment-paths-after-archive.md) path handling).
+   #0006 path handling).
 3. **Parse** the `VCALENDAR`/`VEVENT` with the `icalendar` crate. Read `METHOD`, and from the
    first `VEVENT`: `UID`, `SUMMARY`, `DTSTART`/`DTEND` (or `DURATION`), `LOCATION`,
    `ORGANIZER`, `ATTENDEE` list with `PARTSTAT`, `SEQUENCE`, and `RRULE` (rendered to a
@@ -203,7 +203,7 @@ mp invite decline  <email-path>
   three-choice overlay (Accept / Tentative / Decline). Reuse the confirm/choice overlay
   primitive. No note text field in v1.
 - Register the key + overlay through the keymap-as-data table once the TUI-foundation package
-  ([#0032](../tickets/0032-tui-foundation-package.md)) lands; until then follow the existing
+  (#0032) lands; until then follow the existing
   `keys.rs` + `help_sections()` + website triple-update rule.
 
 ## Dependency choice
@@ -230,9 +230,9 @@ mp invite decline  <email-path>
 | Recurrence display (human `RRULE`) | ✅ | |
 | Accept/decline **whole series** | ✅ | |
 | Per-occurrence responses; create recurring invites | | ✅ ([#0031] scope-adjacent) |
-| `METHOD:CANCEL` / `SEQUENCE`-bump updates | | ✅ [#0031](../tickets/0031-imip-cancel-update.md) |
+| `METHOD:CANCEL` / `SEQUENCE`-bump updates | | ✅ #0031 |
 | RSVP note text | | ✅ |
-| Server-side Exchange calendar sync | | ✅ Graph backend [#0036](../tickets/0036-graph-sync-backend.md) (gated on [#0035](../tickets/0035-graph-admin-approval.md)) |
+| Server-side Exchange calendar sync | | ✅ Graph backend PERSO-200 (gated on PERSO-163) |
 
 ## Risks
 
@@ -241,7 +241,7 @@ mp invite decline  <email-path>
   fragile across some servers. Because v1 is iMIP-only and does **not** write the Exchange
   calendar, these belong to the **Graph-future** work: validated organizer identity and
   native accept/decline land with the Graph sync backend
-  ([#0036](../tickets/0036-graph-sync-backend.md)). v1 mitigates by hard-validating
+  (PERSO-200). v1 mitigates by hard-validating
   `ORGANIZER == account primary address` before send and by surfacing the "not synced" caveat.
 - **Silent-drop regression risk.** The parse change touches the hot part-traversal path; a bug
   could drop real attachments or bodies. Cover with fixtures for inline `REQUEST`, `.ics`
@@ -258,7 +258,7 @@ mp invite decline  <email-path>
    echo on REPLY — confirm whether a thin header-assembly wrapper is needed (dependency
    section). *Resolve in implementation; does not block the design.*
 2. Sidecar `.ics` filename/dir convention vs. the existing attachment scheme
-   ([#0006](../tickets/0006-attachment-paths-after-archive.md)) — pick one that survives
+   (#0006) — pick one that survives
    archive/move. *Implementer's call within the store convention; not a product decision.*
 3. Final RSVP keybinding letter (`V` proposed) — settle when the keymap table
-   ([#0032](../tickets/0032-tui-foundation-package.md)) lands to avoid collisions.
+   (#0032) lands to avoid collisions.

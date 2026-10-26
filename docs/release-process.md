@@ -107,7 +107,7 @@ Tauri's bundler reads the Apple signing and notarization variables itself.
 ### Signing and notarization (#0012)
 
 The app and the DMGs are unsigned until
-[#0012](tickets/0012-apple-developer-id-signing.md). The workflow step has a
+PERSO-84. The workflow step has a
 marked, commented-out `env:` block; signing is adding these repository
 secrets and uncommenting it:
 
@@ -227,7 +227,7 @@ tapped before Homebrew 6 runs
 The formula ([packaging/homebrew/mailypoppins.rb.tmpl](../packaging/homebrew/mailypoppins.rb.tmpl))
 downloads prebuilt release binaries instead of building from source, so
 the macOS artifact keeps its code signature once
-[#0012 apple-developer-id-signing](tickets/0012-apple-developer-id-signing.md)
+PERSO-84 (Apple Developer ID signing)
 ships. macOS uses the native darwin builds; Linux uses the static musl
 build.
 
@@ -391,4 +391,4 @@ allow it once under System Settings > Privacy & Security ("Open Anyway"
 after the first blocked launch; Control-click > Open no longer bypasses
 Gatekeeper since macOS 15), or clear the whole bundle with
 `xattr -dr com.apple.quarantine /Applications/mailypoppins.app`. Signing is
-tracked in [#0012](tickets/0012-apple-developer-id-signing.md).
+tracked in PERSO-84.

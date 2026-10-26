@@ -118,7 +118,7 @@
 //!   the source plan's prose says "deadline-stopped mailboxes". The payload
 //!   carries the count, which is the data that exists; widening it to names is a
 //!   behaviour change in the engine and belongs in its own ticket, which
-//!   P3b-U6 records in `BACKLOG.md`.
+//!   P3b-U6 records among the settled deferrals of `docs/plans/native-gui.md`.
 //! - **Severity travels on the wire and is not recomputed on deserialisation.**
 //!   A client applies what the daemon decided; a client that recomputed could
 //!   disagree with the daemon after a rule change and present a warning tick as

@@ -1,7 +1,7 @@
 # Design: an account picker on `ga`, and other accounts collapsed in the desktop sidebar
 
 > Status: implemented (2026-10-22).
-> The ticket is [#0147](../tickets/0147-account-picker.md).
+> The ticket is #0147.
 > Sylvain settled every decision below on 2026-10-22 (decision log, same date).
 > Citations name a symbol and its file.
 > Research: [account picker scouting](../../.agents/research/2026-10-22-account-picker-scouting.md), [prior art](../../.agents/research/2026-10-22-chord-timeout-and-account-picker-prior-art.md).

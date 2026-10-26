@@ -6,7 +6,7 @@ id: "mailypoppins-herdr-inspiration"
 # What mailypoppins can learn from herdr
 
 > Status: analysis only, nothing implemented yet (2026-07-11). Next step when picked up:
-> turn the phases at the bottom into `docs/tickets/` entries and index them in BACKLOG.md.
+> turn the phases at the bottom into issues in Plane (project PERSO, module Mailypoppins).
 
 Read-only analysis of `/home/sylvain/code/_ref/herdr` (ratatui 0.30, ~9.2k lines in `src/ui/`)
 vs `src/tui/` in mailypoppins (ratatui 0.29, ~9.9k lines). No code was changed.
@@ -192,9 +192,9 @@ it becomes a mouse drag target for free once item 5 lands.
 | E | 6 (toasts), 9 (unicode-width, TestBackend tests) | small each | Polish + safety net |
 
 Each phase ships independently; A alone is probably a weekend-sized change and closes
-most of the perceived gap. When picking this up, convert each phase into a ticket via the
-`ticket` fish function and index it in [BACKLOG.md](../BACKLOG.md).
+most of the perceived gap. When picking this up, convert each phase into an issue in Plane
+(project PERSO, module Mailypoppins).
 
 Note: phase C (keymap as data) subsumes/enables existing ticket
-[#0019 Configurable keybindings](tickets/0019-configurable-keybindings.md) — the `Action`
+#0019 Configurable keybindings — the `Action`
 enum + keymap table is exactly the groundwork that ticket needs.

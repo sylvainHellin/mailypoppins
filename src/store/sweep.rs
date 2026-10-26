@@ -4,7 +4,7 @@
 //! The local store is a cache in front of the server, so evicting a blob is not
 //! deletion in the durable sense: the `messages` row stays, the listing stays
 //! complete, and the bytes are re-materialised by a re-ingest of the same UID
-//! (see [`docs/tickets/0060-retention-enforcement.md`] and the interim note in
+//! (see ticket #0060 and the interim note in
 //! [`crate::config`] at the `RetentionPolicy` docs). Message rows are *never*
 //! touched here; only blob files and their `blobs` refcount rows go.
 //!

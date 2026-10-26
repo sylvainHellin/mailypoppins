@@ -74,4 +74,4 @@ The review of this batch named four places where the TUI still did the daemon's 
 
 ## Docs
 
-`docs/daemon-protocol.md` (families, kinds, events, changelog), `docs/parity-matrix.md` (ACC-03, ACC-05, ACC-09, ACC-10, LST-11, CON-*), `docs/architecture.md` where it names the residue, `BACKLOG.md` (the items leave it), `clients/desktop/docs/rust-layer.md` and `shell.md`, and the website pages under `website/src/pages/` that list the commands and flags.
+`docs/daemon-protocol.md` (families, kinds, events, changelog), `docs/parity-matrix.md` (ACC-03, ACC-05, ACC-09, ACC-10, LST-11, CON-*), `docs/architecture.md` where it names the residue, the backlog (the items leave it), `clients/desktop/docs/rust-layer.md` and `shell.md`, and the website pages under `website/src/pages/` that list the commands and flags.

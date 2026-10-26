@@ -994,7 +994,7 @@ pub struct MailboxCursor {
 /// would wipe the token, the next pass would find NULL, silently fall back to
 /// the full window with no error, and #0041's whole delta path would flap
 /// between working and not (#0054 review, deferred note 4). The same trap was
-/// latent for `deltalink` and [#0042](../../docs/tickets/0042-graph-delta-sync.md).
+/// latent for `deltalink` and #0042.
 ///
 /// `None` therefore means "this pass has nothing to say about the token", and
 /// the only way to *clear* one is [`clear_mailbox_modseq`], which the engine

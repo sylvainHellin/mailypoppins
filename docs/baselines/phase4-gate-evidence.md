@@ -2,7 +2,7 @@
 
 The six gate lines of Phase 4 of the daemon migration (`.agents/workflow/native-gui-daemon/plan.md`, section 4), each mapped to the test or command that proves it, with the result recorded rather than asserted.
 
-Ticket [#0123](../tickets/0123-cli-cutover.md).
+Ticket #0123.
 Evidence taken on 2026-09-11 at `db2d67d` on branch `daemon`, twenty-three commits past the Phase 3b exit, all of them Phase 4's own.
 Toolchain `rustc 1.96.0 (ac68faa20 2026-05-25)`, `cargo 1.96.0 (30a34c682 2026-05-25)`, host Ubuntu 26.04 LTS, Linux 7.0.0-22-generic, AMD Ryzen 7 PRO 8845HS, 28 GiB RAM.
 
@@ -74,7 +74,7 @@ So neither a field on `config.get` nor a tenth `config.*` method can carry the `
 **(d) The two `config.toml` wizards** - 6 rows in `src/config_cmd/{helpers,init}.rs` (`SmtpTransport::`, `imap_client::` twice, `GraphClient::`, `device_code_flow(`, `set_secret(`).
 `mp config init` and `mp config add-account` ask the daemon where the configuration is and what accounts it has - one `config.get`, through `routed_config_state` in `src/main.rs` - then prompt, test the connection the user just described, prompt again on the result, store the password and write the file.
 That is one interactive transaction whose intermediate results steer the next prompt; splitting it needs a wizard protocol, which no unit of Phase 4 contracted.
-`config.init` and `config.add_account` are served and are what such a protocol would build on, but **no wizard calls either**: only `tests/daemon_config.rs` exercises them (`BACKLOG.md`).
+`config.init` and `config.add_account` are served and are what such a protocol would build on, but **no wizard calls either**: only `tests/daemon_config.rs` exercises them (closed on 2026-10-22, when the setup wizards moved onto the daemon).
 The `set_secret(` row is the one place a client still writes a secret itself: the wizards call `secrets::set_secret` directly (`src/config_cmd/init.rs:227,286,633,673`) for the passwords they prompt for, rather than the `config.set_password` the daemon serves.
 It is the exception `docs/daemon-protocol.md`'s `config.*` section and `docs/daemon-operations.md`'s residue list both name.
 
@@ -135,7 +135,7 @@ The daemon holds both, so a warm client pays process start plus a round trip and
 `mp dump-mailbox --json -A alpha` (5 351 NDJSON records, several MiB) goes from 86 ms to 121 ms, and `list-messages -n 5000` from 51 ms to 56 ms; the 10 MiB `mp show` is a wash (76 -> 73 ms) because its cost was always the blob read, which the daemon does once either way.
 So the socket costs roughly 35 ms per multi-MiB answer on this host, against the 33 ms it saves per call.
 `docs/baselines/decisions/large-payload.md` and `list-transfer.md` are the decisions this measures; nothing here contradicts them, and `mp dump-mailbox` is the one command that pays more than it saves.
-It is a batch export, not an interaction, and it is in `BACKLOG.md` as the first candidate if streaming is ever built.
+It is a batch export, not an interaction, and it is in PERSO-223 as the first candidate if streaming is ever built.
 
 **Cold costs one daemon start, and that start is 67 ms.**
 Every cold figure is its warm figure plus 62-68 ms, flat across workloads of very different sizes, which is what a start looks like: fork, bind, load the configuration, open the store.
@@ -192,7 +192,7 @@ What the tree has is `a_second_client_reuses_the_daemon_the_first_one_started` (
 Every parity row also runs two binaries against one root in turn.
 
 **Two commands running at the same instant against one daemon has no row of its own.**
-It is recorded here rather than claimed: the property is served by the dispatcher's per-connection tasks and by the operation registry, both of which have their own tests, but no test drives two `mp` processes concurrently. It is in `BACKLOG.md`.
+It is recorded here rather than claimed: the property is served by the dispatcher's per-connection tasks and by the operation registry, both of which have their own tests, but no test drives two `mp` processes concurrently. It is in PERSO-223.
 
 ## Clippy
 
@@ -201,7 +201,7 @@ timeout 900 cargo clippy --workspace --offline --all-targets
 ```
 
 39 warnings, against 39 at `4d8349e` before this unit: no new warning, and none names a file P4-U15 touched.
-The seven in `tests/daemon_config.rs` and `tests/daemon_draft_watch.rs` that Phase 3b recorded are still there, still untouchable for the same reason (T-unit files), still in `BACKLOG.md`.
+The seven in `tests/daemon_config.rs` and `tests/daemon_draft_watch.rs` that Phase 3b recorded are still there, still untouchable for the same reason (T-unit files), still in PERSO-222.
 
 ## Housekeeping
 

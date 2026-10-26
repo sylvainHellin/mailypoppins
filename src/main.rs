@@ -2512,7 +2512,7 @@ fn ensure_selector_account_matches(selector: &str, bound: &AccountConfig) -> Res
 // The sync/watch slice, routed (P4-U10)
 // ---------------------------------------------------------------------------
 
-/// The only mailbox the daemon's watcher watches (BACKLOG.md).
+/// The only mailbox the daemon's watcher watches (PERSO-184).
 const WATCHED_MAILBOX: &str = mailypoppins::daemon::methods::sync::WATCHED_MAILBOX;
 
 /// What one operation settled as.

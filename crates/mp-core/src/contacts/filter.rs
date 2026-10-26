@@ -2,7 +2,7 @@
 //!
 //! Hardcoded compile-time patterns reject common non-human senders
 //! (no-reply, mailer-daemon, bulk/mailing-list domains). Not user-tunable
-//! in v1 — tunable blocklist is a Tier B follow-up in BACKLOG.md.
+//! in v1; a tunable blocklist is not built.
 
 use regex::Regex;
 use std::sync::LazyLock;

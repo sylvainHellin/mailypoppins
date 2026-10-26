@@ -67,7 +67,7 @@ One `j` in the TUI message list onto a row with a body and attachments, from a s
 This is the workload the daemon puts a round trip in the middle of, so it is the one that decides
 whether the transport is affordable.
 
-Conditions are the ones ticket [#0108](../../tickets/0108-coalesce-key-events.md) pins: release
+Conditions are the ones ticket #0108 pins: release
 build, named terminal emulator, recorded OS key-repeat delay and rate, named account and mailbox,
 the same twenty rows walked each time, warm page cache after one discarded pass.
 

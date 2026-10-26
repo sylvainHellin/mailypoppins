@@ -326,7 +326,7 @@ A signature travels as the lifecycle event `signature.changed`.
 
 The watcher never opens a draft for writing: not to mint an `id:`, not to normalise, not to restore a file it saw disappear.
 
-On an account that mirrors its drafts to the server ([#0143](tickets/0143-server-drafts.md)), the watcher also gives each draft its `server` member, from the mirror state the account's runtime hands it after every drain and at start (`MirrorState`: the `draft_sync` rows and the drafts whose push was parked `failed`), so it still opens no store.
+On an account that mirrors its drafts to the server (PERSO-139), the watcher also gives each draft its `server` member, from the mirror state the account's runtime hands it after every drain and at start (`MirrorState`: the `draft_sync` rows and the drafts whose push was parked `failed`), so it still opens no store.
 A settled draft whose bytes are not the ones its server copy was written from owes a push, and the watcher asks the account's runtime for a drain (`AccountRuntime::request_drain`); the drain queues the push (`ServerOp::PushDraft`) and runs it like a queued archive, `DRAIN_DEBOUNCE` after the save.
 A new mirror state describes again only the drafts whose row or failure moved, and every draft of the account the first time or when the switch flips; a conflict copy appearing or going describes the draft beside it again.
 The account runtime reconciles the drafts with the server Drafts folder after every sync body, whether the mail folders synced or not: a copy edited elsewhere is pulled into its file, a draft edited on both sides gets a `<name>.conflict.md` beside it, a draft whose copy was sent or deleted elsewhere moves to `drafts/.retired/`, and a draft mp pushed on another machine is written here under its own id.
@@ -729,7 +729,7 @@ Every Phase 4 slice that moves a command onto the daemon is gated on byte parity
 
 `DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears the twelve environment hooks its own `HOOKS` list carries so an exported variable cannot change an outcome, and returns once `<tmp>/runtime/daemon.sock` accepts a connection.
 Three of the fifteen are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, and `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which `tests/daemon_send_slice.rs` sets the same way.
-The asymmetry is deliberate per hook rather than by design, and it is in `BACKLOG.md` as a thing to decide once rather than three times.
+The asymmetry is deliberate per hook rather than by design, and it is in PERSO-225 as a thing to decide once rather than three times.
 `fixture.mp(args)` runs the client against the same root; `oracle(args, tmp)` runs the pre-daemon binary against **the same** root, so a config path in the output is the same string on both sides and the comparison stays literal instead of normalised.
 `stop` kills the daemon and waits for it to be gone, and `Drop` does the same, so a panicking test leaks nothing.
 

@@ -1,5 +1,5 @@
 //! The store half of iMIP invite reconciliation (#0030, moved onto rows and
-//! blobs by [#0038](../docs/tickets/0038-read-path-to-db.md) scope item 6).
+//! blobs by #0038 scope item 6).
 //!
 //! Three readers: [`load_invites`] parses every `invite.ics` blob of one
 //! account, [`event_for_message`] folds one row's card, and
@@ -582,14 +582,12 @@ pub(crate) mod tests {
         assert_eq!(invites[0].uid(), Some("u1@x"));
     }
 
-    /// TKT-0047, closed by construction in [#0040]: a sender-controlled `.md`
+    /// TKT-0047, closed by construction in #0040: a sender-controlled `.md`
     /// attachment carrying a forged `method: REPLY` used to be walked by
     /// `build_index` and written into a real invite's `PARTSTAT` on disk.
     /// There is no walk and no frontmatter writer left: the fold reads
     /// `invite.ics` blobs of message rows, and an attachment blob is not a
     /// row. This pins that, so the surface cannot come back unnoticed.
-    ///
-    /// [#0040]: ../docs/tickets/0040-drop-file-layer-cutover.md
     #[test]
     fn a_forged_md_attachment_cannot_move_a_partstat() {
         let fx = fixture();

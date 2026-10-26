@@ -3,10 +3,10 @@
 > Status: design, nothing implemented (2026-07-11). Implementer-facing.
 > Inspiration: [docs/herdr-tui-inspiration.md] (phases A–E).
 > Scout: [.agents/research/2026-07-11-tui-restructure-scout.md].
-> Tickets: [#0032](../tickets/0032-tui-foundation-package.md) (foundation),
-> [#0033](../tickets/0033-view-switcher-contacts-view.md) (switcher + contacts),
-> [#0034](../tickets/0034-local-calendar-view.md) (calendar view).
-> Subsumes: [#0019](../tickets/0019-configurable-keybindings.md).
+> Tickets: #0032 (foundation),
+> #0033 (switcher + contacts),
+> #0034 (calendar view).
+> Subsumes: #0019.
 
 ## Why this doc
 
@@ -118,8 +118,8 @@ Depends on Stage 2 (the `View` abstraction) and on the iMIP receive/parse work
   the mail preview (title, time, location, organizer, RSVP, attendee statuses).
 - **Explicitly blind** to Outlook-created events (events that never came through email). That
   gap is closed only by the Graph sync backend
-  ([#0036](../tickets/0036-graph-sync-backend.md)), gated on admin approval
-  ([#0035](../tickets/0035-graph-admin-approval.md)) — **approved option c**.
+  (PERSO-200), gated on admin approval
+  (PERSO-163) — **approved option c**.
 
 ## Sequencing at a glance
 
@@ -130,7 +130,7 @@ Depends on Stage 2 (the `View` abstraction) and on the iMIP receive/parse work
 | 3 Calendar view | [#0034] | #0033, #0027 | local-first agenda/list from iMIP files | (Graph backend later) |
 
 Priorities: **invites next**, **restructure after**, **calendar view later** — reflected in the
-ticket `priority` fields and BACKLOG.md ordering.
+ticket `priority` fields and the backlog ordering.
 
 ## Risks
 

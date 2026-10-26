@@ -24,7 +24,7 @@ a socket can change: one envelope plus its body for `<alpha-inbox-42@fixture.inv
 `mailypoppins::store::read` on both sides of the comparison.
 The harness is the P1a-U1 spike, `spikes/ipc-bench`, whose README documents the stage split (deleted on 2026-10-22, last in the tree at `014b9ba2`).
 
-Conditions, pinned as ticket [#0108](../../tickets/0108-coalesce-key-events.md) requires:
+Conditions, pinned as ticket #0108 requires:
 
 - release build (`cargo run --release`), never a debug build, which is roughly five times slower on this path;
 - the fixture of `docs/baselines/pre-daemon/workloads.md`, built by `mkfixture --rows 5000`, under `/tmp` and therefore on tmpfs;

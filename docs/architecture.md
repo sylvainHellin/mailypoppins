@@ -10,7 +10,7 @@ Received mail lives in a per-account SQLite file plus a content-addressed blob s
 Nothing in the store may be the only copy of anything the user typed.
 - Drafts are the only local truth.
 They are Markdown files with YAML frontmatter under `<account_dir>/drafts/`, written by `mp new` and by `$EDITOR`, and the `drafts` table is a derived index over them.
-Each draft is mirrored to the account's server Drafts folder ([#0143](tickets/0143-server-drafts.md), `src/draft_mirror/`): the copy there is a rendering of the file, and a change made on the server reaches mp only by rewriting the file.
+Each draft is mirrored to the account's server Drafts folder (PERSO-139, `src/draft_mirror/`): the copy there is a rendering of the file, and a change made on the server reaches mp only by rewriting the file.
 - Received mail is read-only locally.
 The client never edits a message body; it changes flags and mailbox membership, and the server is told immediately.
 - No migration paths until v1.0.
@@ -18,7 +18,7 @@ When changing data formats, secret storage or wire protocols, drop the old code 
 Do not write v1 to v2 migrators.
 - Every mailbox operation goes through the daemon.
 The CLI, the TUI and the desktop app make the same daemon calls and offer the same capabilities; no client reaches the store, a server or a secret on its own.
-The `CLI_ENGINE_RESIDUE` rows of `tests/architecture_boundaries.rs` are the open exceptions, each a follow-up in `BACKLOG.md`.
+The `CLI_ENGINE_RESIDUE` rows of `tests/architecture_boundaries.rs` are the open exceptions, each a follow-up in PERSO-223.
 - The TUI implements no email logic.
 No SMTP, IMAP, MIME or Graph REST code belongs in `tui/app/` or `tui/ui/`; the TUI layering section below states what those two layers do and do not touch today.
 - Windows is targeted via WSL only.
@@ -317,7 +317,7 @@ The synchronous settle deliberately does *not* converge a not-found, because a C
 
 ### Drafts on the server
 
-Every draft of an IMAP account is mirrored to the account's server Drafts folder ([#0143](tickets/0143-server-drafts.md)); the file stays the truth.
+Every draft of an IMAP account is mirrored to the account's server Drafts folder (PERSO-139); the file stays the truth.
 A save the draft watcher settles owes a push when its bytes differ from the `draft_sync` row's hash, and the watcher, which opens no store, asks the account's runtime for a drain; the drain queues `ServerOp::PushDraft` (`draft_mirror::push::enqueue_owed`) and runs it like a queued archive: APPEND the rendering, read the new UID back by `Message-ID`, delete the copy the row named, write the row.
 The file is written once in a draft's life, at the first push, to record `server_message_id`; every later push leaves its bytes alone, unless a rewrite dropped the key, which the row then puts back.
 A copy can be sent unedited from another client, so its body carries nothing private: the HTML part ends with a mark holding two hashes (`<!-- mp:copy v2 file=… src=… -->`), and the draft file, its `bcc:` emptied, rides in `X-Mailypoppins-Draft-Source` headers (`draft_mirror::carrier`).
@@ -625,7 +625,7 @@ Two families, two snapshot directories, one set of fixtures.
 
 The plan's shape was `clients/tui` depending on the client crates and on nothing else, and it took eleven units because the obstacle was never the engine residue the allow-list recorded.
 It was the shared modules the allow-list deliberately does not scan: the TUI reached twenty root-crate modules, fourteen of which (`config`, `parse`, `types`, `selector`, `search`, `contacts`, `draft`, `signatures`, `notify`, `timing`, `invite`, `calendar`, `sync_health`, `reconcile`) are not engine modules at all, and their own closure was about 15 000 lines across sixteen modules.
-`docs/tickets/0126-tui-crate-move.md` carries the unit table and what each one measured; the order it went in:
+ticket #0126 carries the unit table and what each one measured; the order it went in:
 
 | unit | what it did |
 |---|---|

@@ -5,7 +5,7 @@ Two of the Phase 6 exit gate lines (`.agents/workflow/native-gui-daemon/plan.md`
 > The daemon can run unattended across client churn.
 > Memory remains bounded under slow clients and repeated syncs.
 
-`tests/daemon_soak.rs` (unit P6-U9, ticket [#0125](../tickets/0125-daemon-hardening.md)) is what proves them, and this file is the run that landed it: the method, the host, the measured numbers, the ceilings they justify, and the one leak the measuring found.
+`tests/daemon_soak.rs` (unit P6-U9, ticket #0125) is what proves them, and this file is the run that landed it: the method, the host, the measured numbers, the ceilings they justify, and the one leak the measuring found.
 
 Taken on 2026-09-21 on branch `daemon`, at the commit that adds the file.
 Toolchain `rustc 1.96.0 (ac68faa20 2026-05-25)`, host Ubuntu 26.04 LTS, Linux 7.0.0-22-generic, AMD Ryzen 7 PRO 8845HS, 16 threads, 28 GiB RAM, `/var/tmp` on the root ext4 filesystem.

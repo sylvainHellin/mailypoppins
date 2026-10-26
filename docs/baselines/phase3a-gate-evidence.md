@@ -2,7 +2,7 @@
 
 The four gate lines of Phase 3a of the daemon migration (`.agents/workflow/native-gui-daemon/plan.md`, section 4), each mapped to the test or command that proves it, with the result recorded rather than asserted.
 
-Ticket [#0121](../tickets/0121-daemon-dispatcher-and-state-model.md).
+Ticket #0121.
 Evidence taken on 2026-09-09 at `a493229` on branch `daemon`, eight commits past the Phase 2 exit `b80f3bd`, all eight of them Phase 3a's own.
 Re-taken after the review fixes commit that follows `fda9718`, which is where the counts below come from.
 Toolchain `rustc 1.96.0 (ac68faa20 2026-05-25)`, host Ubuntu 26.04 LTS, Linux 7.0.0.

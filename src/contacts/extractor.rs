@@ -3,7 +3,7 @@
 //! The full rebuild reads `messages` through `store::read`, the same listing
 //! shape the TUI and `mp dump-mailbox` use: every row already carries `from`,
 //! `to`, `cc`, `mailbox` and the `Date:` header, which is exactly what the
-//! ranker needs. Before [#0053](../../docs/tickets/0053-contacts-rebuild-data-loss.md)
+//! ranker needs. Before #0053
 //! this walked a `.md` tree that the store cutover deleted, so a rebuild found
 //! nothing and the caller cached the nothing over months of accumulated
 //! frecency.

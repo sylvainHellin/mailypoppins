@@ -47,14 +47,14 @@ Status: accepted
 
 ## 2026-10-22 - The desktop prefix chord waits 5 s by default for its second key, configurable in Settings
 
-Why: the 1.2 s wait was too short, so a late second key fired its flat action (`a` after `c` archived instead of replying to all); 5 s leaves room for a slow second key while an accidental prefix still lapses on its own. Ticket [#0148](docs/tickets/0148-chord-timeout.md), plan `docs/plans/chord-timeout.md`.
+Why: the 1.2 s wait was too short, so a late second key fired its flat action (`a` after `c` archived instead of replying to all); 5 s leaves room for a slow second key while an accidental prefix still lapses on its own. Ticket #0148, plan `docs/plans/chord-timeout.md`.
 Rejected: no timeout by default (an accidental prefix keeps the which-key overlay up until Escape; it stays a choice in Settings); 3 s (less room for the second key).
 Source: chat with Sylvain, 2026-10-22.
 Status: superseded by the 2026-10-22 entry "The desktop prefix chord never times out"
 
 ## 2026-10-22 - The TUI sidebar keeps showing only the active account; collapsing the other accounts is desktop only
 
-Why: the TUI sidebar never lists the other accounts, so the request is already met there, and the `ga` picker covers switching. Ticket [#0147](docs/tickets/0147-account-picker.md), plan `docs/plans/account-picker.md` (Decision 6).
+Why: the TUI sidebar never lists the other accounts, so the request is already met there, and the `ga` picker covers switching. Ticket #0147, plan `docs/plans/account-picker.md` (Decision 6).
 Rejected: collapsed header rows for the other accounts in the TUI sidebar (extra work for the same result).
 Source: chat with Sylvain, 2026-10-22.
 Status: accepted
@@ -89,28 +89,28 @@ Status: accepted
 
 ## 2026-10-22 - The account picker follows its plan's five recommendations
 
-Why: a plain list with the digits 1 to 9 and no filter field keeps `j` and `k` as navigation; each row shows new mail as the inbox unread count in the desktop and as a dot in the TUI, which keeps no per-account unread count; a desktop account expanded or collapsed by hand stays so until the app quits, and every start shows only the selected account expanded; in the desktop sidebar `j` and `k` skip collapsed accounts and `ga` is the keyboard path to another account, and picking the current account there expands it again after a hand collapse, since its header takes no key; a row of an account that is not serving says so in both pickers (the runtime state in the desktop, `not ready` in the TUI, which has one flag for opening and blocked); the unreachable `Ctrl+1..9` account jump leaves the TUI code. Ticket [#0147](docs/tickets/0147-account-picker.md), plan `docs/plans/account-picker.md`.
+Why: a plain list with the digits 1 to 9 and no filter field keeps `j` and `k` as navigation; each row shows new mail as the inbox unread count in the desktop and as a dot in the TUI, which keeps no per-account unread count; a desktop account expanded or collapsed by hand stays so until the app quits, and every start shows only the selected account expanded; in the desktop sidebar `j` and `k` skip collapsed accounts and `ga` is the keyboard path to another account, and picking the current account there expands it again after a hand collapse, since its header takes no key; a row of an account that is not serving says so in both pickers (the runtime state in the desktop, `not ready` in the TUI, which has one flag for opening and blocked); the unreachable `Ctrl+1..9` account jump leaves the TUI code. Ticket #0147, plan `docs/plans/account-picker.md`.
 Rejected: a type-to-filter field (it would swallow `j` and `k`); a TUI unread count per account (new state for a cosmetic gain); remembering the expand state across restarts; a cursor stop on every account header with Enter to toggle it (a second keyboard model for the picker's job).
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 1, answered 2026-10-22.
 Status: accepted, amended by the 2026-10-22 entry "Both account pickers say opening, blocked or sync failed"
 
 ## 2026-10-22 - The desktop prefix chord never times out, as in the TUI
 
-Why: a pending prefix waits for its second key with no timer and no setting, so `c`, a pause of any length, then `a` replies to all in both clients; Escape cancels the prefix and does nothing else, a click drops it so an abandoned chord never resolves with a much later key, and the which-key popup appears at once. Ticket [#0148](docs/tickets/0148-chord-timeout.md), plan `docs/plans/chord-timeout.md`.
+Why: a pending prefix waits for its second key with no timer and no setting, so `c`, a pause of any length, then `a` replies to all in both clients; Escape cancels the prefix and does nothing else, a click drops it so an abandoned chord never resolves with a much later key, and the which-key popup appears at once. Ticket #0148, plan `docs/plans/chord-timeout.md`.
 Rejected: a 5 s default with four presets in Settings (the earlier entry of the same day; two behaviours between the clients and a setting changed once); a show delay before the popup.
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 1, answered 2026-10-22.
 Status: accepted
 
 ## 2026-10-22 - Server drafts link by Message-ID, then by a single matching draft, and the mirror is on for Proton too
 
-Why: the probe of 2026-10-20 showed that no foreign edit keeps the UID, that Outlook and the Proton Mail app keep the Message-ID while Apple Mail mints a new one, and that `X-Mailypoppins-Draft-Id` never survives; Message-ID first, then a single draft with the same recipients, subject and reply target, is the only rule the probe supports that also catches an Apple Mail edit, and a wrong guess costs a duplicate, never a lost draft. A draft that links to nothing comes back as a second copy and the old file moves to `drafts/.retired/`, which the reconcile prunes after 30 days. Bridge keeps the Message-ID and the attachment, so the link holds on Proton and its switch defaults to on like TUM's; a reply draft sent from the Proton Mail app loses its threading because Bridge drops `In-Reply-To`, while mp's own sends keep it from the local file. An agent may delete the probe's leftover drafts from the TUM and Proton Drafts and Deleted Items folders once it has listed them in the ticket. Ticket [#0143](docs/tickets/0143-server-drafts.md).
+Why: the probe of 2026-10-20 showed that no foreign edit keeps the UID, that Outlook and the Proton Mail app keep the Message-ID while Apple Mail mints a new one, and that `X-Mailypoppins-Draft-Id` never survives; Message-ID first, then a single draft with the same recipients, subject and reply target, is the only rule the probe supports that also catches an Apple Mail edit, and a wrong guess costs a duplicate, never a lost draft. A draft that links to nothing comes back as a second copy and the old file moves to `drafts/.retired/`, which the reconcile prunes after 30 days. Bridge keeps the Message-ID and the attachment, so the link holds on Proton and its switch defaults to on like TUM's; a reply draft sent from the Proton Mail app loses its threading because Bridge drops `In-Reply-To`, while mp's own sends keep it from the local file. An agent may delete the probe's leftover drafts from the TUM and Proton Drafts and Deleted Items folders once it has listed them in the ticket. Ticket PERSO-139.
 Rejected: Message-ID only (every Apple Mail edit would produce a second copy); the mirror off by default for Proton; keeping retired files for 7 days or for ever.
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 2, answered 2026-10-22; probe dumps in `.sync/draft-probe/`.
 Status: accepted
 
 ## 2026-10-22 - A newly discovered user folder syncs every tick like Inbox, and discovery lands before the server drafts
 
-Why: a counts-only default would bring back the Spesen problem, local search missing every message of a folder never opened; the cost is five more folder visits per tick on TUM and some disk. Junk, Trash and Proton's label folders get counts only, since the labels repeat messages that live in real folders; Exchange's calendar and contact folders and Proton's All Mail and Starred are ignored. The catalogue and the folder roles come first, and the server drafts reuse the `drafts` role. Ticket [#0141](docs/tickets/0141-mailbox-auto-discovery.md).
+Why: a counts-only default would bring back the Spesen problem, local search missing every message of a folder never opened; the cost is five more folder visits per tick on TUM and some disk. Junk, Trash and Proton's label folders get counts only, since the labels repeat messages that live in real folders; Exchange's calendar and contact folders and Proton's All Mail and Starred are ignored. The catalogue and the folder roles come first, and the server drafts reuse the `drafts` role. Ticket #0141.
 Rejected: counts only for user folders until pinned in the config (the ticket's first proposal); the server drafts first with the Drafts folder found by name.
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 3, answered 2026-10-22.
 Status: accepted
@@ -124,7 +124,7 @@ Status: accepted
 
 ## 2026-10-22 - v0.12.0 is tagged now, and auto-update stage 2 is the quiet daemon restart plus two stage-1 fixes
 
-Why: the first in-app update needs a second release with the updater in it, and over 230 commits of features since v0.11.0 make a minor version. Stage 2 restarts the old daemon quietly after an update, stops the release job from marking a prerelease tag as the latest release, and has a manual check after Later say that a restart is pending. Ticket [#0139](docs/tickets/0139-desktop-auto-update.md), Plane PERSO-102 and PERSO-107.
+Why: the first in-app update needs a second release with the updater in it, and over 230 commits of features since v0.11.0 make a minor version. Stage 2 restarts the old daemon quietly after an update, stops the release job from marking a prerelease tag as the latest release, and has a manual check after Later say that a restart is pending. Issue PERSO-209 (#0139), with PERSO-102 and PERSO-107.
 Rejected: v0.11.1 (the number follows the content); tagging after the account picker and the prefix wait land; the Settings toggle that installs updates silently at quit (it replaces the app unseen, so it waits until a few manual updates have gone through cleanly).
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, section 5, answered 2026-10-22.
 Status: accepted
@@ -153,7 +153,7 @@ Status: accepted
 ## 2026-10-22 - The codebase is kept clean as it is worked on, and every mailbox operation goes through the daemon with one set of calls for all clients
 
 Why: something sub-optimal noticed in passing is fixed in the same pass instead of parked as a leftover, which is what grew the daemon follow-up lists; the CLI, the TUI and the desktop make the same daemon calls and offer the same capabilities, so a fix or a feature lands once. Both are stated in `AGENTS.md`, and the second also in `docs/architecture.md`, "Project invariants".
-Rejected: parking follow-ups in BACKLOG.md until one causes a visible bug.
+Rejected: parking follow-ups in the backlog until one causes a visible bug.
 Source: decisions page `.sync/2026-10-22-mailypoppins-open-decisions.html`, comments, 2026-10-22.
 Status: accepted
 
@@ -242,7 +242,7 @@ The status rides inside the draft file the copy carries, so it is taken only fro
 A pull or an import takes it only when the carried source reproduces the pushed file, and every attachment is here or carried by the copy; an attachment file that is here must hold the bytes of the copy's part of the same name.
 An edit in Outlook, Apple Mail or the Proton app demotes the draft to `status: draft` on both machines.
 On Proton it does not travel, because Bridge drops the headers that carry the file and the copy's HTML holds no validated status.
-Ticket [#0143](docs/tickets/0143-server-drafts.md).
+Ticket PERSO-139.
 Rejected: approval staying local (the build's provisional default, never logged as a decision); a status header of its own, which a copy mp never wrote could carry too; the status in the HTML mark for Proton, which nothing validates and which would approve a body converted from HTML.
 Source: Sylvain, chat of 2026-10-23.
 Status: accepted
@@ -287,4 +287,12 @@ The row is the authority the file's edits cannot reach: the push, the reconcile 
 The column is added additively; a row an earlier build wrote learns the Message-ID from the file's key, or from the copy its UID names.
 Rejected: fetching the copy by the row's UID and reading its `Message-ID` header on every recovery, which costs an IMAP round trip each time and fails offline.
 Source: Sylvain, chat of 2026-10-25.
+Status: accepted
+
+## 2026-10-26 - Open work lives in Plane, project PERSO, module Mailypoppins; BACKLOG.md and docs/tickets/ are retired
+
+Why: Plane is the single issue tracker for every code repo Sylvain maintains, so the repo stops keeping a second, plain-text one; each open ticket became a PERSO issue whose title keeps its number (PERSO-139 is "Two-way server drafts (#0143)"), the daemon follow-up lists of the backlog became one issue per phase, and the settled daemon-migration deferrals moved to the "Settled deferrals" section of `docs/plans/native-gui.md`.
+Docs and comments cite an issue by its identifier (`PERSO-139`); a four-digit number (`#0143`) names a retired ticket, which git keeps (last in the tree at `ed93905f`).
+Rejected: keeping BACKLOG.md as an index beside Plane (two trackers drift); moving the done tickets into Plane too (git history holds them).
+Source: Sylvain, decision of 2026-10-26; migration tracked in PERSO-194.
 Status: accepted

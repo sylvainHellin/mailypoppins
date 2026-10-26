@@ -24,7 +24,7 @@ The wire contract is [daemon-protocol.md](../daemon-protocol.md), the crate shap
 Ship a macOS GUI using Tauri 2, React, shadcn/ui, the approved Basenord palette in dark and light, and a real embedded Neovim process for draft composition (M5, shipped 2026-10-01).
 The GUI provides every user-facing capability present in the TUI, as the parity matrix classifies it.
 Capabilities classified as CLI automation, diagnostics and maintenance, daemon administration, or migration-only carry no GUI-parity obligation.
-A capability classified as GUI parity may be deferred only when a settled decision names it and `BACKLOG.md` records the deferral.
+A capability classified as GUI parity may be deferred only when a settled decision names it and the "Settled deferrals" section below records the deferral.
 
 ## Settled decisions
 
@@ -337,7 +337,7 @@ What is open:
 - Send confirmation, approve-and-send, partial-recipient outcomes and outbox state, through `send.*`.
 
 M3 landed on the `gui-m3` branch on 2026-09-30, in the commits `b765c620` to `efe865b5`, each tagged `(#0131)`.
-What shipped per unit, the keys, the fixture simulations, the decisions and what stays open are in the ticket's section ["M3 landed"](../tickets/0131-gui-full-parity.md#m3-landed), and the parity rows it closes in [parity-matrix.md](../parity-matrix.md).
+What shipped per unit, the keys, the fixture simulations, the decisions and what stays open are in the ticket's section "M3 landed" (PERSO-207), and the parity rows it closes in [parity-matrix.md](../parity-matrix.md).
 The attachment save and attach take a typed path, and since 2026-10-01 a Browse button fills it from the native picker of `tauri-plugin-dialog`.
 
 ### M4: calendar, contacts, signatures and config (#0131)
@@ -350,7 +350,7 @@ The attachment save and attach take a typed path, and since 2026-10-01 a Browse 
 - Activity, logs and help.
 
 M4 landed on the `gui-m4` branch on 2026-09-30, in the commits `f888afce` to `41e3b73f`, each tagged `(#0131)`.
-What shipped per unit, the keys, the fixture simulations, the decisions and what stays open are in the ticket's section ["M4 landed"](../tickets/0131-gui-full-parity.md#m4-landed), and the parity rows it closes in [parity-matrix.md](../parity-matrix.md).
+What shipped per unit, the keys, the fixture simulations, the decisions and what stays open are in the ticket's section "M4 landed" (PERSO-207), and the parity rows it closes in [parity-matrix.md](../parity-matrix.md).
 No plugin was installed: the copies go through `navigator.clipboard.writeText` from the key or click handler instead of the clipboard-manager plugin; the dialog plugin came after M5, for M3's path fields.
 The signatures and the vCard were client-side over `mp-core` at M4; since the daemon leftovers (2026-10-22) they are the daemon's `signature.*` family and `contact.vcard_draft`.
 
@@ -380,7 +380,7 @@ The feedback round that followed is #0137.
 GUI work runs beside TUI and daemon work on `main` under one rule.
 The GUI never edits `clients/tui`.
 It only adds to `mp-protocol` and `mp-client`, additively and with a protocol changelog entry where a wire shape is new.
-A conflict in `BACKLOG.md` or `CHANGELOG.md` is resolved by rebasing.
+A conflict in `CHANGELOG.md` is resolved by rebasing.
 Rust-only GUI work, such as the connector, the pending-operations tracker and the `mp-client` and `mp-protocol` additions, can run on the Linux server in a separate session.
 
 ## Tests
@@ -437,6 +437,17 @@ The socket singleton, the handshake, the explicit restart and the packaging test
 - Outbox retry and discard as GUI actions rather than CLI-only operator commands.
 - Bundled Neovim distribution.
 - Native Windows support.
+
+## Settled deferrals
+
+Settled deferrals for the daemon migration, the list the Phase 0 gate points at ([gate.md](../baselines/pre-daemon/gate.md)):
+
+- `mp fetch` (`LST-11`) kept its command surface through the migration and was retired on 2026-10-22 as a duplicate of `mp search --mailbox` (`ANO-3`), with `message.list_server`.
+- `schemars` is not adopted. Phase 2 pins the protocol with checked-in JSON fixtures, and #0129 (M1) generates the TypeScript protocol types with ts-rs, which reads the serde attributes directly, so no consumer needs JSON Schema.
+- `notify` is not adopted. The daemon's draft, signature and config watcher uses the 1-second fingerprint poll the TUI already runs, moved into the daemon, and a filesystem-notification crate is revisited only if that poll proves inadequate under test.
+- `uuid` stays transitive. Ids are minted from `rand` plus a hex format, so no RFC-4122 shape and no new direct dependency.
+- `SyncResult.bodies_truncated` stays a count, and so does the `bodies_truncated` field of the daemon's `sync.completed` payload, which P3b-U6 shipped carrying the data that exists. Widening either to the list of deadline-stopped mailbox names is a behaviour change to the engine and to the wording contracts of #0113 and #0115, it moves a wire field from `u64` to an array and therefore needs a protocol-changelog entry, and it gets its own ticket rather than riding along with the daemon's sync event.
+- Auto-mark-read, which #0110 retired, is not restored by the GUI: walking the list marks nothing read, and an explicit open marks once (`MSG-08`). The inline images and the rich HTML render #0109 and #0111 retired from the TUI come back in the GUI reader, which loads `message.html` in a sandboxed frame with its `cid:` images inlined as `data:` URIs (`RD-05`).
 
 ## Open questions
 

@@ -98,11 +98,11 @@
 //! connection is not built. The daemon's continuous watcher is INBOX-only, as
 //! `imap_watch` is today, and a second connection class with its own teardown
 //! semantics is not what a CLI flag with no known user should buy. P4-U10
-//! records it in `BACKLOG.md`.
+//! recorded it in the backlog; it is tracked as PERSO-184.
 //!
 //! Both sides of the socket carry the narrowing. The client rewrites the
 //! mailbox to `INBOX` before it calls and prints [`NARROWING_WARNING`], one
-//! line on stderr naming the mailbox it dropped and the `BACKLOG.md` entry;
+//! line on stderr naming the mailbox it dropped and the backlog entry;
 //! the daemon accepts `mailbox` absent or `"INBOX"` and refuses anything else
 //! with `-32602`, so a client that skipped the narrowing is told rather than
 //! quietly watched the wrong mailbox.

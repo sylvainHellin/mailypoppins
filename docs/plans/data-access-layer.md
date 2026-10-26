@@ -22,7 +22,7 @@ This is Option B from the decision doc, with three owner amendments recorded bel
 Confirmed 2026-07-14 by the owner:
 
 1. Server is ground truth for received mail; the client mirrors it locally and reconciles.
-2. Drafts are local Markdown files and stay the local truth (amended 2026-10-13, [#0143](../tickets/0143-server-drafts.md)).
+2. Drafts are local Markdown files and stay the local truth (amended 2026-10-13, PERSO-139).
    mp mirrors them two-way to the server Drafts folder, where Outlook and Apple Mail already converge.
    Drafts started in another client are imported into the drafts directory and treated like mp's own from then on.
 3. Received mail is read-only.
@@ -47,9 +47,9 @@ Recorded after owner review of the foundation plan v2 ([2026-07-31_dal-foundatio
 These are settled and do not reopen.
 
 A. Complete nuke, greenfield on a long-lived branch with delete-as-you-go.
-   [#0037](../tickets/0037-sqlite-store-engine-skeleton.md) and [#0038](../tickets/0038-read-path-to-db.md) may delete `src/sync.rs`, `src/imap_client/sync.rs` and the scanners as they go; no dead code is carried forward.
+   #0037 and #0038 may delete `src/sync.rs`, `src/imap_client/sync.rs` and the scanners as they go; no dead code is carried forward.
    The safety net is the `mp-legacy` binary plus the `pre-dal-nuke` tag, never a dual-write layer.
-B. Sent durability ships with the greenfield ingest slice ([#0037](../tickets/0037-sqlite-store-engine-skeleton.md)) as a durable outbox, per the research recommendation.
+B. Sent durability ships with the greenfield ingest slice (#0037) as a durable outbox, per the research recommendation.
    The `outbox` table holds the raw RFC822 blob with states `pending_send`, `sent_pending_append`, `done` and `failed`, and the blob and row are committed before SMTP.
    SMTP is attempted exactly once per row: an ambiguous SMTP failure goes to `failed` for manual inspection and never to an automatic re-send.
    Retry drives the APPEND only, guarded by a `UID SEARCH HEADER MESSAGE-ID` check in the Sent mailbox when the previous attempt was ambiguous, with `APPENDUID` as the definitive acknowledgement.
@@ -60,7 +60,7 @@ C. Draft identity is an `id:` frontmatter field written by `mp new`, so a rename
 D. Golden frames stay lean: the mail view (sidebar, list, preview) and the calendar at 120x40, plus the help overlay.
    The style-run legend is captured only where style carries meaning (unread bold, cursor row, selection), and there is no multi-size sweep, because a cosmetic snapshot catches no regression worth the churn.
 E. `mp dump-mailbox --json` may land on `main` before the freeze, since it is the only way the envelope-dump oracle exists at all.
-F. TKT-0047 is parked with an explicit accepted-risk note and marked resolved-by [#0040](../tickets/0040-drop-file-layer-cutover.md); no code is spent on the module the nuke deletes.
+F. TKT-0047 is parked with an explicit accepted-risk note and marked resolved-by #0040; no code is spent on the module the nuke deletes.
 G. `messages` carries a synthetic integer row id with `UNIQUE (account, mailbox, uid)` as the real identity and a non-unique index on `message_id`; ingest dedup is the UPSERT on that unique constraint, and a missing Message-ID is synthesised as `sha256-<hex16>@local.invalid`.
 H. One CLI contract, `mp://<account>/<mailbox>/<key>`, committed on landing: no path inputs anywhere in the CLI, `mp path` and `mp edit` are the only filesystem edge, no command ever dual-accepts a path and a selector, and TKT-0045 is resolved by the drafts index rather than fixed in the current build.
 
@@ -206,7 +206,7 @@ That covers the store safely, but two processes each running their own sync engi
 The rule: at most one engine per account across all processes.
 
 The mechanism is a non-blocking exclusive advisory lock (`flock`-style) on `<account_dir>/store.lock`, taken by whichever process runs the engine and released when that process exits or dies, which is what makes the takeover below automatic.
-The lock lands with the engine rather than with the store skeleton, because it is only meaningful once a second writer can exist, so [#0037](../tickets/0037-sqlite-store-engine-skeleton.md) defers both.
+The lock lands with the engine rather than with the store skeleton, because it is only meaningful once a second writer can exist, so #0037 defers both.
 SQLite's own locking is not the mechanism: its locks are scoped to a transaction, so they can serialise writes but cannot express "one engine per account for the lifetime of the process".
 The protocol around the lock:
 
@@ -224,7 +224,7 @@ A later refinement (out of scope for the first cut) is a proper background daemo
 The RFC822 parser and MIME extraction (`src/parse.rs`), `markdown_to_html` and per-recipient SMTP send (`src/send.rs`), OAuth2 / XOAUTH2 and the encrypted secrets store, the Graph REST client (`src/graph.rs`), config loading, contacts mining (`src/contacts/`), IMAP session open and capability handling, `TimingSpan`, and the entire TEA / `Action` / `BgResult` scaffolding.
 What disappears (~25%) is the files-as-truth machinery: the two full-file scanners (`parse.rs:756`, `:989`), `deduplicate_mailbox`, `count_all_emails`, the `MessageIdIndex` HashMap, and the reconciliation heuristics.
 
-Two tree-walking modules the original split missed, both of which land in [#0038](../tickets/0038-read-path-to-db.md) rather than in the cutover:
+Two tree-walking modules the original split missed, both of which land in #0038 rather than in the cutover:
 
 - `src/tui/app/calendar_view.rs` (975 lines, `load_events_for_account:97`) reads iMIP events straight out of the mailbox directories, so the agenda is broken from the moment ingest stops writing `.md`.
 - `src/reconcile.rs` (491 lines, `build_index`) walks the account root to reconcile attendee replies, which is also where TKT-0047 lives.
@@ -238,14 +238,14 @@ The lever is the no-migrations-before-v1.0 rule: the cutover in Stage 4 is not a
 
 | Stage | Ticket | Ships | De-risks | Effort |
 |---|---|---|---|---|
-| 0 Pre-nuke oracle capture | [#0049](../tickets/0049-pre-nuke-oracle-capture.md) | Golden frames, gap-list fixtures, `mp dump-mailbox --json` envelope dumps, then the `pre-dal-nuke` tag and the `mp-legacy` binary. | The absence of an oracle. Nothing greenfield opens until this closes. | M |
-| 1 Greenfield store, ingest and outbox | [#0037](../tickets/0037-sqlite-store-engine-skeleton.md) | `src/store/` (schema v1, WAL, blob store, retention config) plus store-only ingest and the durable outbox. No `.md` is written on the ingest path; drafts stay file-truth. | Schema, WAL single-writer discipline, blob store, and sent durability, which the nuke would otherwise regress. | L |
-| 2 Read path on the store | [#0038](../tickets/0038-read-path-to-db.md) | `load_emails`, list render, counts, search, the calendar agenda and reconcile all read the store; cold start stops walking files. | List-render perf, envelope correctness and look-and-feel parity against the golden frames. | L-XL |
-| 2b Selector contract and drafts index | [#0050](../tickets/0050-selector-contract-drafts-index.md) | `mp://<account>/<mailbox>/<key>` everywhere, the `drafts` table and the CLI rewrite, in one commit. | The CLI contract, committed once rather than migrated. Subsumes TKT-0045. | M-L |
-| 2c TUI mutation half | [#0052](../tickets/0052-tui-mutation-half.md) | The TUI's reply, forward, send, approve, mark-draft, `$EDITOR`, attachment, browser and calendar-source flows on the store and the selector, so nothing declines. | The half of the product the owner actually uses. STOP-GATE, after this ticket and not after Stage 2 or 2b. | M-L |
-| 3 Remaining mutations to `pending_ops` | [#0039](../tickets/0039-pending-ops-queue.md) | Archive/delete/move/mark-read become durable queue rows; engine drains with retry/backoff. Send is already durable via the outbox. | The op-queue, the genuinely new core infra and its new bug class. | L |
-| 4 Legacy decommission **(done)** | [#0040](../tickets/0040-drop-file-layer-cutover.md) | Retire the legacy `.md` tree and `mp-legacy`, one-time draft import assigning `id:` frontmatter, TKT-0047 closed. | The end of the transition period, not a code deletion (the greenfield build never had the file layer). | S-M |
-| 5 Persistent conn + protocol + FTS | [#0041](../tickets/0041-persistent-conn-condstore.md), [#0042](../tickets/0042-graph-delta-sync.md), [#0043](../tickets/0043-fts5-search.md) | Persistent authenticated connection, CONDSTORE/QRESYNC flag-delta, Graph `/messages/delta`, FTS5 search. | Sync smoothness and full-text search. | M-L |
+| 0 Pre-nuke oracle capture | #0049 | Golden frames, gap-list fixtures, `mp dump-mailbox --json` envelope dumps, then the `pre-dal-nuke` tag and the `mp-legacy` binary. | The absence of an oracle. Nothing greenfield opens until this closes. | M |
+| 1 Greenfield store, ingest and outbox | #0037 | `src/store/` (schema v1, WAL, blob store, retention config) plus store-only ingest and the durable outbox. No `.md` is written on the ingest path; drafts stay file-truth. | Schema, WAL single-writer discipline, blob store, and sent durability, which the nuke would otherwise regress. | L |
+| 2 Read path on the store | #0038 | `load_emails`, list render, counts, search, the calendar agenda and reconcile all read the store; cold start stops walking files. | List-render perf, envelope correctness and look-and-feel parity against the golden frames. | L-XL |
+| 2b Selector contract and drafts index | #0050 | `mp://<account>/<mailbox>/<key>` everywhere, the `drafts` table and the CLI rewrite, in one commit. | The CLI contract, committed once rather than migrated. Subsumes TKT-0045. | M-L |
+| 2c TUI mutation half | #0052 | The TUI's reply, forward, send, approve, mark-draft, `$EDITOR`, attachment, browser and calendar-source flows on the store and the selector, so nothing declines. | The half of the product the owner actually uses. STOP-GATE, after this ticket and not after Stage 2 or 2b. | M-L |
+| 3 Remaining mutations to `pending_ops` | #0039 | Archive/delete/move/mark-read become durable queue rows; engine drains with retry/backoff. Send is already durable via the outbox. | The op-queue, the genuinely new core infra and its new bug class. | L |
+| 4 Legacy decommission **(done)** | #0040 | Retire the legacy `.md` tree and `mp-legacy`, one-time draft import assigning `id:` frontmatter, TKT-0047 closed. | The end of the transition period, not a code deletion (the greenfield build never had the file layer). | S-M |
+| 5 Persistent conn + protocol + FTS | #0041, #0042, #0043 | Persistent authenticated connection, CONDSTORE/QRESYNC flag-delta, Graph `/messages/delta`, FTS5 search. | Sync smoothness and full-text search. | M-L |
 
 The stop-gate is still real, and it is what the greenfield ordering buys, but it sits after the Stage 2, 2b and 2c triple rather than after Stage 2 alone.
 Stage 2 moves the read path onto the store; Stage 2b puts the path-taking CLI commands and the drafts index back on a tree that no longer holds a `.md` mailstore; Stage 2c does the same for the TUI, whose mutations decline until it lands.
@@ -258,7 +258,7 @@ Pausing there is viable; the only thing already promoted out of Stage 3 is send,
 The redesign is a greenfield rebuild on a long-lived branch, with delete-as-you-go: Stages 1 and 2 remove `src/sync.rs`, `src/imap_client/sync.rs` and the scanners as they replace them, and no dead code is carried forward for a fallback that will never be used.
 The safety net is not a code path, it is the preserved binary and the tagged tree.
 
-Both were captured in Stage 0 ([#0049](../tickets/0049-pre-nuke-oracle-capture.md)), together with the envelope oracles, before a line of greenfield code existed:
+Both were captured in Stage 0 (#0049), together with the envelope oracles, before a line of greenfield code existed:
 
 1. `~/.local/bin/mp-legacy`, copied from the cargo-installed `mp` built at the frozen commit; it keeps reading the existing `.md` tree and works forever against its own data, and the redesign becomes the new `mp`.
 2. The tag `pre-dal-nuke`, on the last files-as-truth commit, so the frozen reference is addressable rather than remembered.
@@ -276,7 +276,7 @@ The alternative of keeping two crates compiling side by side was rejected: it is
 - Storage backend: SQLite, not JSON, not NoSQL. Straight to SQLite because the envelope store (Stage 2) and FTS5 (Stage 5) need it and a JSON mirror becomes a full-rewrite-per-save liability.
 - Bodies: content-addressed blob files, not inline in SQLite.
 - Received mail: read-only. Drafts only in `$EDITOR`.
-- Drafts: local files are the truth, mirrored two-way to the server Drafts folder (amended 2026-10-13, [#0143](../tickets/0143-server-drafts.md)).
+- Drafts: local files are the truth, mirrored two-way to the server Drafts folder (amended 2026-10-13, PERSO-139).
 - Obsidian / `grep`: dropped; FTS5 replaces search. Note the in-app search today is server-side IMAP SEARCH (`f` in the TUI, `mp search` in the CLI), not a local `grep`; FTS5 is a new local capability that also makes search work offline and without a round trip. There is no existing local full-text index to reuse.
 - Persistent connection: approved; the "one session per operation" invariant in `docs/architecture.md:23` gets rewritten in Stage 5.
 

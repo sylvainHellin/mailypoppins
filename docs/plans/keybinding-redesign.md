@@ -2,8 +2,8 @@
 
 > Status: approved with amendments (2026-08-14). Implementation may begin.
 > Baseline: [.agents/research/2026-08-14-ux-workflow-audit.md] (full current matrix + friction).
-> Related tickets: [#0019](../tickets/0019-configurable-keybindings.md) (configurable bindings, dropped/subsumed),
-> [#0078](../tickets/0078-hint-bar-short-labels.md) (hint-bar short labels, done).
+> Related tickets: #0019 (configurable bindings, dropped/subsumed),
+> #0078 (hint-bar short labels, done).
 > Builds on: [tui-restructure-views.md](tui-restructure-views.md) Stage 1 (keymap-as-data, leader support).
 
 ## Review (2026-08-14)

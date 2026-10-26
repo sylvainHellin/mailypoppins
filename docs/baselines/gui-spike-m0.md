@@ -1,6 +1,6 @@
 # M0 GUI spike results (#0128)
 
-The measurements and findings of the M0 spike of the [native GUI plan](../plans/native-gui.md), ticket [#0128](../tickets/0128-gui-risk-spikes.md).
+The measurements and findings of the M0 spike of the [native GUI plan](../plans/native-gui.md), ticket #0128.
 Every later GUI milestone compares against these numbers rather than against remembered ones.
 
 Taken on 2026-09-30 on branch `origin/gui-spike`, commits `a4a5be7` to `5768543` on top of the scaffold `0332a44`.

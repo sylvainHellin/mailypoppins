@@ -226,7 +226,7 @@ Bytes 0x80..0x9F reach the user as different characters depending on where they 
 Inside an `=?ISO-8859-1?Q?...?=` encoded-word, and inside a body declared `charset=iso-8859-1`, they decode as windows-1252, so 0x93/0x94 become the curly quotes the sender meant; that mapping is what the WHATWG encoding standard and every browser do with the `ISO-8859-1` label.
 Raw in a header with no encoded-word at all, they decode as strict ISO-8859-1 instead, so the same bytes land as the invisible C1 control characters U+0093/U+0094 and get written straight into the frontmatter.
 Charset decoding is otherwise solid on the receive path: ISO-8859-1, windows-1252 and Shift_JIS bodies, quoted-printable included, all come out right, and a latin-1 HTML body is transcoded to UTF-8 with its stale `<meta charset>` replaced.
-The oracles are in [tests/mime_oracle_integration.rs](../tests/mime_oracle_integration.rs), tagged `parity` or `known-bug` per [#0049](tickets/0049-pre-nuke-oracle-capture.md).
+The oracles are in [tests/mime_oracle_integration.rs](../tests/mime_oracle_integration.rs), tagged `parity` or `known-bug` per #0049.
 
 ## clap's `--help` is not always the long help (2026-08-05)
 
@@ -638,7 +638,7 @@ The fix is to make the two distinguishable rather than to soften the mark: no cu
 Before persisting a value a later run will be held to, ask what it means when it was computed from no information; if that reads the same as a genuine obligation, it is the absence that has to be representable ([src/imap_client/fetch.rs](../src/imap_client/fetch.rs), `arrival_mark`).
 ## A lifecycle with no terminal state leaves its dead ends on disk
 
-A draft can be created, edited, approved and sent, and nothing deletes one ([#0073](tickets/0073-delete-draft.md)).
+A draft can be created, edited, approved and sent, and nothing deletes one (#0073).
 `mp delete` takes a received selector, `mp://<account>/<mailbox>/<message-id>`, and a draft has neither a mailbox nor a message, so the grammar cannot express the request at all; the TUI meanwhile binds `d` once for every view, and `Action::Delete` hands `selected_email_ref()` to a store mutation that finds nothing to prepare, which reaches the user as `Delete failed: nothing to delete` ([src/tui/actions.rs](../src/tui/actions.rs), `Action::Delete` and `delete_msgs`).
 The gap stayed invisible while send removed the file on its own, and appeared only on a machine upgraded from a version that did not, where nine `status: sent` drafts had no supported way out.
 The index side needs nothing built: `mp list` re-scans the drafts directory and drops the rows whose file is gone, so removing the file is the entire missing operation.
@@ -665,10 +665,10 @@ Read keyword matching case-insensitively and accept `\Forwarded` as well: the ke
 
 ## A capability deleted by a rewrite leaves no failing test behind it
 
-Every received message was a `.md` file until the store cutover ([#0037](tickets/0037-sqlite-store-engine-skeleton.md)), and `$EDITOR` on a list row opened that file.
+Every received message was a `.md` file until the store cutover (#0037), and `$EDITOR` on a list row opened that file.
 The cutover deleted the files, the `EditCurrent` arm was rewritten to decline on a received row, and a comment was added saying the decline was permanent "because nothing is coming that would make it work" ([src/tui/actions.rs](../src/tui/actions.rs), `Action::EditCurrent`).
 Nothing was broken by that in the sense a test can see: the store was truth, the preview pane still rendered the message, and the decline was honest about the file.
-What was lost was the affordance, and it stayed lost for months because a rewrite that removes a mechanism removes the thing that would have complained about it ([#0075](tickets/0075-open-received-mail-in-editor.md)).
+What was lost was the affordance, and it stayed lost for months because a rewrite that removes a mechanism removes the thing that would have complained about it (#0075).
 The rendition was ten lines away the whole time: the same flow already materialised the browser `.html` and the invite `.ics` out of the store on demand, so the message itself was the one artifact with no rendition.
 When a rewrite makes a mechanism impossible, write down what the mechanism was for, not that it is gone; the second is a fact about the code and the first is the thing that still has to be answered.
 
@@ -687,7 +687,7 @@ Dropping the value beats escaping it when the value only exists to be looked up 
 
 ## Parallel network fetch is safe only if it never touches the store
 
-Sync got a per-mailbox parallel fetch ([#0005](tickets/0005-parallel-imap-fetch-per-mailbox.md)), and the temptation is to parallelise the whole loop, fetch and ingest together.
+Sync got a per-mailbox parallel fetch (#0005), and the temptation is to parallelise the whole loop, fetch and ingest together.
 That loop carries the #0072 prune gate, the arrival marks and the deferred second prune pass, all of which depend on ingest happening serially in target order: inbox before archive before sent, so a message archived elsewhere has its destination row before its source row is pruned.
 The change that keeps every one of those invariants is to split the loop into three phases and make only the middle one concurrent: read each mailbox's skip list from the store serially, fetch every mailbox in parallel with no store access at all, then ingest serially in target order exactly as before.
 The concurrency runs on `futures::stream::buffered`, not `buffer_unordered`, because `buffered` yields its results in input order however the fetches finish, so the serial ingest still sees its mailboxes in target order and the SQLite single-writer discipline is never in question.
@@ -695,7 +695,7 @@ The load-bearing property is that swap, and it is one identifier, so it is pinne
 
 ## A read-side jump across mailboxes needs a one-shot target the async load consumes
 
-The conversation overlay ([#0008](tickets/0008-threading-conversation-view.md)) opens a message that may live in another mailbox, but a mailbox switch does not load synchronously: `switch_mailbox` on a cache miss shows an empty list and queues a background walk that lands later as `BgResult::MailboxLoaded`.
+The conversation overlay (#0008) opens a message that may live in another mailbox, but a mailbox switch does not load synchronously: `switch_mailbox` on a cache miss shows an empty list and queues a background walk that lands later as `BgResult::MailboxLoaded`.
 So "select this row" cannot be a single post-switch line; the target is parked on `App::pending_select` and consumed in two places, the cache-hit tail of `switch_mailbox` and the `MailboxLoaded` handler after its own cursor restore.
 `consume_pending_select` clears the target only when it finds the row, so the parked value survives the async gap yet never lingers to hijack a later unrelated switch, because the row it names is always in its own mailbox's listing.
 
@@ -707,14 +707,14 @@ Any column added to `row_columns` has to be chased into every query that concate
 
 ## A wrong-store lookup can print a right-looking error, so parse the selector's account before opening any store
 
-`mp delete mp://tum/drafts/<id>` under a non-tum default failed with `no match for <id> in the drafts index of tum/drafts`, while `mp delete -A tum <same>` succeeded ([#0073](tickets/0073-delete-draft.md) follow-up).
+`mp delete mp://tum/drafts/<id>` under a non-tum default failed with `no match for <id> in the drafts index of tum/drafts`, while `mp delete -A tum <same>` succeeded (#0073 follow-up).
 The selector parser already lets an `mp://<account>/…` segment override `-A`/the default, but every command in `main.rs` opened its store from the pre-chosen `account_config` *before* parsing, so a cross-account selector was resolved against the wrong account's index; the miss then formatted the scope from the query's own account (`tum/drafts`), naming the account the caller asked for while having searched a different one.
 The error looked correct because it echoed the selector, which is exactly what made the bug hard to see: the fix is to resolve the account from the selector first (`account_for_selector`) and only then open the store and, for received mail, load the server credentials.
 Where a command binds its transport before the selector is parsed (`mp send`, `mp invite`), a cross-account selector cannot be honoured cheaply, so it fails loudly with "selector names account X but this command is bound to Y" rather than acting on the wrong account.
 
 ## A skipped draft is invisible, so the scan has to hand the skip back as data, not a log line
 
-The drafts index catches an unparseable `.md` file and keeps refreshing the rest (one bad file must not hide the other twenty), but the original catch was `Err(e) => log::warn!(...)`, which dropped the file with no row and no signpost: the draft vanished from the TUI Drafts list and `mp list` while sitting on disk ([#0080](tickets/0080-surface-parse-skipped-drafts.md), the "my draft disappeared" report).
+The drafts index catches an unparseable `.md` file and keeps refreshing the rest (one bad file must not hide the other twenty), but the original catch was `Err(e) => log::warn!(...)`, which dropped the file with no row and no signpost: the draft vanished from the TUI Drafts list and `mp list` while sitting on disk (#0080, the "my draft disappeared" report).
 The fix is the same shape the id-collision case already used: `refresh_reporting` returns the skipped files (path plus a one-line parse error) beside the collisions, so a caller can put the broken file back in front of the user instead of the log swallowing it.
 `mp list` prints them after its listing and the TUI shows each as an error row.
 The row is carried on a typed `EmailEntry::skip` field rather than the `(msg: None, draft_id: None)` pair, because that pair already means "server-search hit" everywhere in the action layer; overloading it would have let a skip row reach the wrong handler, so the third kind of row is its own field.
@@ -1728,7 +1728,7 @@ A contract test that means "these keys and no others" is worth writing; what it 
 That is exactly right for a daemon with no account runtime, which is every Phase 4 daemon, and exactly wrong for one that has started a runtime: the runtime holds `store.lock` for its whole lifetime, `flock` is per open file description rather than per process (`src/engine_lock.rs`), so the pass opens a second description of a file its own process already locked, contends with itself, and reports `blocked` for work nobody else is doing.
 
 So a pass routes through `tick_and_commit`, the runtime's own tick, when a live runtime exists, and through the guarded call only when none does.
-The tick carries neither a mailbox subset nor `--dry-run`, so a request that names either still takes the guarded path. Until P5-U8 that was answered `blocked` by this daemon's own runtime; the process-local engine gate below means it takes a turn and runs instead, and a tick that can carry a subset is in `BACKLOG.md`.
+The tick carries neither a mailbox subset nor `--dry-run`, so a request that names either still takes the guarded path. Until P5-U8 that was answered `blocked` by this daemon's own runtime; the process-local engine gate below means it takes a turn and runs instead, and a tick that can carry a subset is in PERSO-223.
 The general shape: any daemon-side call to a `*_guarded` entry point has to ask first whether this process is already the engine.
 
 ## A client that renders an operation has to bootstrap before it starts one
@@ -1905,7 +1905,7 @@ The fix is two entry points, not one. `EngineLock::hold_for_runtime` announces i
 
 `ReadPool::open` opens SQLite read-write, so starting an account runtime for an account nobody has ever synced *materialises* its database. Every read and mutation method then answers an empty list where it used to refuse with `-32006` and the sentence `<account> has no local store yet, so no received mail can be addressed; run `mp sync` first`. Five parity suites are built on a fixture account that is configured and deliberately storeless, and all of them went red the moment account runtimes were turned on by default (P5-U8).
 
-An account with no store therefore gets no runtime and is reported `blocked` with the sentence that says what to do. The cost is that it stays that way until the next daemon start, which is in `BACKLOG.md`. The general rule: "open it and see" is not a probe when opening creates.
+An account with no store therefore gets no runtime and is reported `blocked` with the sentence that says what to do. The cost was that it stayed that way until the next daemon start, closed on 2026-10-21 when a new account began to sync on its own and turn ready without a restart. The general rule: "open it and see" is not a probe when opening creates.
 
 ## A `tokio::select!` arm that builds its timer inside the loop never fires under a poller
 

@@ -3285,8 +3285,8 @@ fn attachment_anchor(draft: &EmailDraft) -> &Path {
 /// client sends a selector - so the client cannot rewrite the entry either
 /// without editing the draft file. The draft's directory is the one location
 /// both processes agree on. This is an accepted divergence from the pre-daemon
-/// binary, which anchored to the sender's cwd; see
-/// `docs/tickets/0123-cli-cutover.md`.
+/// binary, which anchored to the sender's cwd; see ticket #0123 (the CLI
+/// cutover) in git history.
 ///
 /// The other visible change is in a failure: a missing `report.pdf` is now
 /// reported by its full path.

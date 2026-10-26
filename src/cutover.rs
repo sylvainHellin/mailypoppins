@@ -1,11 +1,11 @@
 //! `mp cutover`: end the transition period off the file-era `.md` mailstore
-//! ([#0040](../docs/tickets/0040-drop-file-layer-cutover.md), Stage 4 of the
+//! (#0040, Stage 4 of the
 //! data-access-layer plan).
 //!
 //! # What is actually left to do
 //!
 //! There is no file layer in the code to delete: the greenfield build never
-//! had one, and [#0037] / [#0038] removed the legacy modules as they replaced
+//! had one, and #0037 / #0038 removed the legacy modules as they replaced
 //! them. Two things survive the rewrite, and they are both *on disk*:
 //!
 //! 1. **Drafts.** They are the only local-only data in the product, so they
@@ -39,9 +39,6 @@
 //! command that removes them, and the human runs that command. That keeps the
 //! irreversible step attached to a human decision and keeps this module's
 //! blast radius to "wrote an `id:` field into a draft".
-//!
-//! [#0037]: ../docs/tickets/0037-sqlite-store-engine-skeleton.md
-//! [#0038]: ../docs/tickets/0038-read-path-to-db.md
 
 use std::path::{Path, PathBuf};
 

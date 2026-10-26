@@ -433,7 +433,7 @@ fn the_save_destination_is_anchored_to_the_clients_working_directory() {
 /// The anchor is explicit rather than read from `current_dir()`, because every
 /// send runs inside the daemon now and the daemon's cwd is nobody's choice.
 /// This is the accepted divergence from the pre-daemon binary, which anchored
-/// to the sender's cwd; see `docs/tickets/0123-cli-cutover.md`.
+/// to the sender's cwd; see ticket #0123 (the CLI cutover) in git history.
 #[test]
 fn resolve_attachment_paths_yields_absolute_paths_for_relative_entries() {
     let dir = root();

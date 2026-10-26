@@ -39,6 +39,6 @@ The desktop crate (`clients/desktop/src-tauri`) builds only on the Mac; pure Rus
 
 ## Further reading
 
-See [docs/](docs/) for architecture, project invariants, lessons-learned, auth, secrets, exchange setup, design plans, and ticket workflow. Open work is indexed in [BACKLOG.md](BACKLOG.md); shipped features in [CHANGELOG.md](CHANGELOG.md).
+See [docs/](docs/) for architecture, project invariants, lessons-learned, auth, secrets, exchange setup and design plans. Open work lives in Plane, project PERSO, module Mailypoppins (`plane issue list PERSO --module Mailypoppins`), with the label `bug` or `feature`; commits and docs cite an issue by its identifier (`PERSO-139`), and the four-digit numbers (`#0143`) are the retired repo tickets, kept in git history and in the titles of the issues they became. Shipped features are in [CHANGELOG.md](CHANGELOG.md).
 
 When you discover a non-obvious behaviour or hard-won fix, append it to [docs/lessons-learned.md](docs/lessons-learned.md) in the same turn; a subagent instead reports its suggested lessons-learned and CHANGELOG lines, and the session that merges its branch writes them after the review. For commands and key bindings, the source of truth is `mp --help` and the in-TUI help overlay (`?`); the website pages under `website/src/pages/` are hand-derived from those and must be updated alongside CLI changes.

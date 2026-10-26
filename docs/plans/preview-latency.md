@@ -1,7 +1,7 @@
 # Design: preview latency on list navigation
 
-> Status: implemented (2026-09-08) as [#0108](../tickets/0108-coalesce-key-events.md), [#0109](../tickets/0109-retire-inline-image-rendering.md), [#0110](../tickets/0110-retire-auto-mark-read.md) and [#0111](../tickets/0111-retire-rich-html-preview.md); the measurement in #0108 was waived and the cache-and-prefetch contingency closed as unnecessary (2026-09-08). Line numbers below predate the removals. Implementer-facing.
-> Owner decisions taken in session 2026-09-09. Four of them are deliberate reversals of shipped tickets: [#0087](../tickets/0087-auto-mark-read-on-open.md), [#0010](../tickets/0010-inline-image-rendering.md), [#0091](../tickets/0091-html-to-text-rendering.md), and the render-time half of [#0093](../tickets/0093-memoise-preview-body-wrap.md).
+> Status: implemented (2026-09-08) as #0108, #0109, #0110 and #0111; the measurement in #0108 was waived and the cache-and-prefetch contingency closed as unnecessary (2026-09-08). Line numbers below predate the removals. Implementer-facing.
+> Owner decisions taken in session 2026-09-09. Four of them are deliberate reversals of shipped tickets: #0087, #0010, #0091, and the render-time half of #0093.
 > Reviewed once (2026-09-09) against an earlier draft that led with a cache; the cache is demoted here to a contingency behind a measurement.
 > Next free ticket ID at time of writing: #0108.
 
@@ -63,8 +63,8 @@ Sequencing them first is therefore both cheaper and more informative.
 
 Four tickets, ordered. Each lands and is verified before the next starts.
 
-Each ticket adds its own line to `BACKLOG.md` when it is cut and removes it when it ships.
-None of the four removes a BACKLOG line for the ticket it reverses: #0010, #0087 and #0091 all shipped and were removed from the index already (`BACKLOG.md:11`, `docs/tickets/README.md:37`).
+Each ticket adds its own line to the backlog when it is cut and removes it when it ships.
+None of the four removes a backlog line for the ticket it reverses: #0010, #0087 and #0091 all shipped and were removed from the index already.
 
 ### Ticket A: baseline measurement and key-event coalescing
 
@@ -115,7 +115,7 @@ Tests and fixtures that go with it: `golden_mail_view_inline_image_placeholders`
 `parse::embed_inline_images` (`src/parse.rs:1037`) and `parse::inline_images` (`src/parse.rs:1078`) **stay**: the `b` / `tb` browser path and the `.html` companion depend on them.
 The names are one word apart from `load_inline_images`, which is the one being deleted.
 
-Bookkeeping: `CHANGELOG.md:198`, `docs/architecture.md:250` (a module-table row for the deleted `src/tui/images.rs`) and `:205` (attributing `parse.rs::inline_images` to #0010), `docs/lessons-learned.md:867`, and a reversal note on `docs/tickets/0010-inline-image-rendering.md`.
+Bookkeeping: `CHANGELOG.md:198`, `docs/architecture.md:250` (a module-table row for the deleted `src/tui/images.rs`) and `:205` (attributing `parse.rs::inline_images` to #0010), `docs/lessons-learned.md:867`, and a reversal note on ticket #0010.
 `docs/lessons-learned.md:55` is *not* affected: it covers `is_attachment_part` and the paperclip icon, which this ticket does not touch.
 
 No keymap, `mp --help`, help-overlay, dump-keys or website change: no image binding exists in `src/tui/app/keymap.rs` and `website/src/pages/` has no inline-image page.
@@ -137,7 +137,7 @@ Tests: seven assertions across four tests at `src/tui/app/keys.rs:3374-3417`, al
 
 Bookkeeping: `CHANGELOG.md:81` carries the shipped #0087 claim this ticket falsifies.
 `docs/lessons-learned.md:977-984` documents the #0087 mechanism by name, and `:131` cites auto-mark-on-preview in the #0004 snapshot-clobber analysis; both go stale.
-A reversal note goes on `docs/tickets/0087-auto-mark-read-on-open.md`.
+A reversal note goes on ticket #0087.
 
 ### Ticket D: retire the rich HTML render (#0091)
 
@@ -147,7 +147,7 @@ The preview then always takes the `wrap_and_style_body` branch, which is the exi
 `store::read::load_html` (`src/store/read.rs:602`) **stays**: `b` / `tb` reads it on demand.
 Deleting the preview caller is what removes the raw-RFC822 fallback parse from the per-keypress path.
 
-Bookkeeping: `CHANGELOG.md:23`, a reversal note on `docs/tickets/0091-html-to-text-rendering.md`, and the tests calling `render_html_body` or `style_for_annotations` across `src/tui/ui/preview.rs:1317-1403`.
+Bookkeeping: `CHANGELOG.md:23`, a reversal note on ticket #0091, and the tests calling `render_html_body` or `style_for_annotations` across `src/tui/ui/preview.rs:1317-1403`.
 
 The `css` feature of `html2text` (`Cargo.toml:47`) stays: `html_to_plain` uses `use_doc_css()` and ingest still runs it.
 
@@ -196,7 +196,7 @@ Caching rendered `Line`s is safe with respect to the theme: `theme::init` is a `
 
 Drafts do not enter this cache; they keep a generation-keyed slot invalidated by the existing fingerprint poll (`DRAFTS_POLL_INTERVAL`, `src/tui/mod.rs:39`), since a draft file is mutable by `$EDITOR` and by agents.
 `PreviewInvite` keeps its own small slot.
-An asynchronously arriving body (`prime_preview_body`, and the on-open re-fetch of an evicted blob in [#0085](../tickets/0085-on-open-body-refetch.md)) must invalidate and refill its entry.
+An asynchronously arriving body (`prime_preview_body`, and the on-open re-fetch of an evicted blob in PERSO-205) must invalidate and refill its entry.
 
 Prefetch, if it follows: one worker per account holding a single `Store`, in four stages, being the selected message, the rest of the current mailbox outward from the cursor, the sibling mailboxes of the account, then the other accounts.
 Stage 4 chains onto the existing per-account startup threads in `src/tui/mod.rs` rather than adding a second set beside them.
@@ -224,7 +224,7 @@ TMPDIR=/var/tmp cargo test --offline --lib queries_tests -- --ignored
 It prints no number: what it pins is the verdict, and it prices the dispatcher in one process rather than the socket, the framing or the session thread's hop, so it is a lower bound on W1 and not W1.
 
 **W1 itself is still NOT TAKEN**, unchanged since Phase 0 and still owner action.
-It needs a release build in a named terminal with a real account, the recorded key-repeat delay and rate, and the twenty named rows of [#0108](../tickets/0108-coalesce-key-events.md) walked twice; the metric is the p50 and p95 of `[TIMING] tui_preview_query` and the p95 of the `tui_draw` pair behind each of them, and the acceptance rule is [workloads.md](../baselines/pre-daemon/workloads.md)'s: the daemon-era p95 may exceed the pre-daemon p95 by at most 5 ms.
+It needs a release build in a named terminal with a real account, the recorded key-repeat delay and rate, and the twenty named rows of #0108 walked twice; the metric is the p50 and p95 of `[TIMING] tui_preview_query` and the p95 of the `tui_draw` pair behind each of them, and the acceptance rule is [workloads.md](../baselines/pre-daemon/workloads.md)'s: the daemon-era p95 may exceed the pre-daemon p95 by at most 5 ms.
 Nothing has been substituted for it.
 
 What Phase 6 did measure beside it, in [phase6-gate-evidence.md](../baselines/phase6-gate-evidence.md): cold first paint re-taken at 7 ms warm and 35 ms with no daemon running, unchanged from P5-U11, and the ten CLI workloads, where every small routed query is three to four times faster than the pre-daemon binary's.

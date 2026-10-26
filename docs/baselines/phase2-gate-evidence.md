@@ -2,7 +2,7 @@
 
 The eight gate lines of Phase 2 of the daemon migration (`.agents/workflow/native-gui-daemon/plan.md`, section 4), each mapped to the test or command that proves it, with the result recorded rather than asserted.
 
-Ticket [#0120](../tickets/0120-daemon-transport-and-read-only-methods.md).
+Ticket #0120.
 Evidence taken on 2026-09-09 at `ef6878e` on branch `daemon`, twelve commits past the Phase 1a exit `a8ec8ef`, all twelve of them Phase 2's own.
 Toolchain `rustc 1.96.0 (ac68faa20 2026-05-25)`, host Ubuntu 26.04 LTS, Linux 7.0.0.
 

@@ -2,7 +2,7 @@
 
 The four gate lines of Phase 0 of the daemon migration (`.agents/workflow/native-gui-daemon/plan.md`, section 4), each mapped to the artifact that answers it and the command that proves it, with the result recorded rather than asserted.
 
-Ticket [#0118](../../tickets/0118-pre-daemon-baselines-and-inventories.md).
+Ticket #0118.
 Evidence taken on 2026-09-09 at `7297b81` on branch `daemon`, six commits past the `pre-daemon` freeze `f8af44b`, all six of them Phase 0's own.
 Toolchain `rustc 1.96.0 (ac68faa20 2026-05-25)`, host Ubuntu 26.04 LTS.
 
@@ -27,9 +27,9 @@ The matrix's own cross-read of `cli-help.txt` and `tui-keys.json` found no unnam
 
 Passes.
 
-## Every GUI-parity feature has a target interaction, or a settled deferral recorded in BACKLOG.md
+## Every GUI-parity feature has a target interaction, or a recorded settled deferral
 
-Artifacts: `docs/parity-matrix.md` and the daemon-migration blockquote in `BACKLOG.md`.
+Artifacts: `docs/parity-matrix.md` and the "Settled deferrals" section of `docs/plans/native-gui.md`.
 
 ```sh
 grep -c '^- Classification: GUI parity' docs/parity-matrix.md   # 97
@@ -41,7 +41,7 @@ Partially satisfied, and it cannot be more than that in Phase 0.
 The plan puts the GUI design in Phase 9 and instructs P0-U3 in the same document to leave the GUI column at `TBD (Phase 9)`.
 So no GUI-parity entry carries a target interaction, and the gate line's first half is unsatisfiable by the phase that is supposed to satisfy it.
 The one exception is `RD-05`, inline image rendering, whose GUI location reads `none` because #0109 retired the capability and the identifier stays reserved rather than carrying an obligation.
-The second half is met for what is actually settled today: the deferral list is in `BACKLOG.md` under the daemon-migration blockquote in `## Now`, and it holds the decisions taken rather than a placeholder per row.
+The second half is met for what is actually settled today: the deferral list is the "Settled deferrals" section of `docs/plans/native-gui.md`, and it holds the decisions taken rather than a placeholder per row.
 
 Of the 97 GUI-parity entries, one is retired (`RD-05`), one is deferred with the deferral recorded (`OBS-07`), and 95 carry neither a target interaction nor a deferral because the interaction does not exist to record yet.
 

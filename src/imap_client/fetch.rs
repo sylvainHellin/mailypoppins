@@ -504,13 +504,12 @@ pub(crate) fn flag_pass(
 /// The consequence is deliberate and worth stating: on a large mailbox the
 /// delta only starts working after a full sync, and quick syncs consume the
 /// resume point without advancing it. Correctness over speed, which is the
-/// ticket's own ranking. Advancing it on a capped pass is [#0081].
+/// ticket's own ranking. Advancing it on a capped pass is PERSO-202.
 ///
 /// `enumeration_complete` is the second half: if `UID SEARCH ALL` came back
 /// short, "the window is the whole mailbox" is a statement about a listing that
 /// is already known to be untrustworthy.
 ///
-/// [#0081]: ../../docs/tickets/0081-qresync-uidplus.md
 /// `bodies_complete` is the third (#0113): a pass that stopped at its body
 /// deadline looked at every flag in the window and at only part of the mail, so
 /// the next `CHANGEDSINCE` would skip the flag changes made in between on the

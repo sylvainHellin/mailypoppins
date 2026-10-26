@@ -4,7 +4,7 @@
 //! This file is a **contract test**: it is written before the two subcommands
 //! exist, against the surface fixed in
 //! `.agents/workflow/native-gui-daemon/plan.md` section 3.8 (P6-U5/P6-U6) and
-//! pinned in full in `docs/tickets/0125-daemon-hardening.md`. It compiles
+//! pinned in full in ticket #0125 (in git history). It compiles
 //! against the tree as committed - it spawns the `mp` binary and imports two
 //! names that already exist - and every row that is contract rather than
 //! regression fails at runtime, today with clap's `unrecognized subcommand`.

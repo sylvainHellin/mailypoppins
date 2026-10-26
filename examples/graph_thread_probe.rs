@@ -1,4 +1,4 @@
-//! The Graph threading probe of PERSO-147 (`docs/tickets/0142-conversation-list.md`, step 7).
+//! The Graph threading probe of PERSO-147 (#0142, step 7).
 //!
 //! Answers, against a live Graph account, which Graph calls return
 //! `internetMessageHeaders` and `conversationId`, and what the headers cost in

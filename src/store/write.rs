@@ -11,7 +11,7 @@
 //! coordinates the row had before it (a [`MutatedRow`]), which is what the
 //! caller hands to the server op it fires next and what it puts back when that
 //! op fails. The durable queue that would survive a crash between the two is
-//! [#0039](../../docs/tickets/0039-pending-ops-queue.md); until it lands this
+//! #0039; until it lands this
 //! is exactly the durability the pre-store build had, where the local half was
 //! a file move and the rollback was moving the file back.
 //!
@@ -34,7 +34,7 @@
 //! mailbox's skip list, the next sync refetches it and ingest re-inserts the
 //! row. A tombstone would be local state that the server cannot contradict,
 //! i.e. a second source of truth, and the durable form of that intent is the
-//! `pending_ops` row of [#0039](../../docs/tickets/0039-pending-ops-queue.md).
+//! `pending_ops` row of #0039.
 
 use anyhow::{Context, Result};
 use log::warn;

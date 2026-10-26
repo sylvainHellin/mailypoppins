@@ -35,12 +35,11 @@
 #   false}` keeps its own process stopped until the next login. So when the agent is
 #   loaded this script runs `mp daemon stop` then `launchctl kickstart`
 #   whatever the plist runs, the sequence the live launchd check took
-#   (docs/tickets/0129, "after `mp daemon stop` plus `launchctl kickstart` the
+#   (#0129, now PERSO-206, "after `mp daemon stop` plus `launchctl kickstart` the
 #   daemon runs as launchd's child"); otherwise `mp daemon restart`, which
 #   bootstraps a matching agent itself. Not `kickstart -k`: a daemon a client
 #   started on demand may hold the socket while the agent's own process is
-#   down, and a second launchd spawn then crash-loops (BACKLOG, "A client's
-#   on-demand `mp daemon start` races the installed service").
+#   down, and a second launchd spawn then crash-loops (PERSO-219).
 #
 # - The app is quit before the swap and relaunched after the daemon restart.
 #   Quit first, so no process runs out of the bundle being replaced, and so it

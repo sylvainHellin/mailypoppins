@@ -2,7 +2,7 @@
 
 The five gate lines of Phase 5 of the daemon migration (`.agents/workflow/native-gui-daemon/plan.md`, section 4), each mapped to the test or the measurement that proves it, with the result recorded rather than asserted.
 
-Ticket [#0124](../tickets/0124-tui-cutover.md).
+Ticket #0124.
 Evidence taken on 2026-09-21 at `cf25695` on branch `daemon`, thirty-eight commits past the Phase 4 exit, all of them Phase 5's own.
 Toolchain `rustc 1.96.0 (ac68faa20 2026-05-25)`, `cargo 1.96.0 (30a34c682 2026-05-25)`, host Ubuntu 26.04 LTS, Linux 7.0.0-22-generic, AMD Ryzen 7 PRO 8845HS, 28 GiB RAM.
 
@@ -103,7 +103,7 @@ All three answered, and `mp list-messages` reported the row the TUI had archived
 The daemon log shows both connections completing `initialize` inside one instance lifetime.
 
 Two things are worth knowing about that evidence.
-No automated test drives a TUI process and an `mp` process at the same instant against one daemon, which is the same gap Phase 4 recorded for two concurrent CLI commands and which is in `BACKLOG.md`.
+No automated test drives a TUI process and an `mp` process at the same instant against one daemon, which is the same gap Phase 4 recorded for two concurrent CLI commands and which is in PERSO-224.
 And the TUI announces itself as `ClientKind::Cli`, because it reaches the daemon through `client_session`, the same door every routed command uses; `ClientKind::Tui` exists and is used by the undo-send-hold suite and by the in-process fixtures only, so the daemon cannot today tell a TUI from a one-shot command.
 That matters to P6-U3, whose gate line is about what happens when the last client exits mid-hold.
 
@@ -214,7 +214,7 @@ It landed the first third of that, three additive daemon queries (`calendar.even
 - Two rows (`actions.rs store`, `actions.rs send`) are `RD-06`'s Markdown rendition, `RD-07`'s selector, `LST-09`'s `message.fetch`, and the undo-send hold's fire path, which the plan holds in the TUI until P6-U1/U2.
 - Three rows (`helpers.rs store`, `helpers.rs imap_client`, `mod.rs store`) are `LST-08`'s server leg through `message.list_server`.
 
-The sequencing is P5-U10a (the shared crate), P5-U10b (the last surfaces) and P5-U10c (the move itself), each leaving `cargo test --workspace` green, and it is written out in full in the P5-U10 section of [the ticket](../tickets/0124-tui-cutover.md).
+The sequencing is P5-U10a (the shared crate), P5-U10b (the last surfaces) and P5-U10c (the move itself), each leaving `cargo test --workspace` green, and it is written out in full in the P5-U10 section of the ticket (#0124).
 The orchestrator's decision is to run the three after Phase 6 rather than before it, because P6-U1/U2 remove one of the eleven rows on their own and P6's hardening work does not depend on the crate boundary.
 
 ## Clippy
@@ -241,5 +241,5 @@ Every suite that starts a daemon points `MAILYPOPPINS_DATA_DIR` at a `TempDir` a
 - **The undo-send hold is still client-side**, in `src/tui/actions.rs` and the pre-draw loop, as the plan intends until P6-U1/U2. Oracle (e) asserts the daemon's half of the criterion today and will assert the daemon's own cancellation after them without moving a line.
 - **Three of the twenty manual keys are `NOT TAKEN`** and need a host with a display, a browser and a real account.
 - **No automated test drives a TUI and a CLI against one daemon at the same instant**, and the TUI announces itself as a CLI client.
-- **An account with no local store gets no runtime and comes up `blocked`** (P5-U8), which contradicts P3b-U8's rule that a configured account gets a live runtime and which three `tests/daemon_config.rs` rows now pin the other way. It is the one decision of this phase that wants ratifying, and it is recorded in the ticket and in `BACKLOG.md`.
+- **An account with no local store gets no runtime and comes up `blocked`** (P5-U8), which contradicts P3b-U8's rule that a configured account gets a live runtime and which three `tests/daemon_config.rs` rows now pin the other way. It is the one decision of this phase that wants ratifying, and it is recorded in the ticket (#0124); it has since closed, a new account syncing on its own and turning ready without a restart (2026-10-21).
 - **The macOS half of Phase 2's crash and stale-socket recovery** is unchanged and still escalated.

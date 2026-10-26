@@ -9,18 +9,15 @@
 //!
 //! What the seam is *for*, beyond the tests:
 //!
-//! - [`#0041`] wants one IMAP session held across mailboxes and a CONDSTORE
+//! - #0041 wants one IMAP session held across mailboxes and a CONDSTORE
 //!   `HIGHESTMODSEQ` remembered between passes. Both are backend state, and
 //!   the trait takes `&mut self` so a backend may keep them.
-//! - [`#0042`] wants Graph's `deltaLink` remembered between passes, which is
+//! - #0042 wants Graph's `deltaLink` remembered between passes, which is
 //!   the same shape of state behind the same `&mut self`.
 //!
 //! Neither is implemented here. The parity half of #0059, one orchestration
 //! serving both transports, is parked with the Graph backend: `graph.rs` still
 //! runs its own loop, and the engine below is driven by the IMAP backend only.
-//!
-//! [`#0041`]: https://github.com/sylvainhellin/mailypoppins/blob/main/docs/tickets/0041-persistent-conn-condstore.md
-//! [`#0042`]: https://github.com/sylvainhellin/mailypoppins/blob/main/docs/tickets/0042-graph-delta-sync.md
 
 pub mod engine;
 pub mod tick;

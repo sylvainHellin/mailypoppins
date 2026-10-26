@@ -1,7 +1,7 @@
 # Design: key prefixes in the desktop app wait for the second key, as in the TUI
 
 > Status: implemented (2026-10-22).
-> The ticket is [#0148](../tickets/0148-chord-timeout.md).
+> The ticket is #0148.
 > Sylvain decided on 2026-10-22 that the desktop behaves as the TUI: no timeout, no setting (decision log, same date).
 > Citations name a symbol and its file; line numbers move with the code.
 > Research: [chord timeout scouting](../../.agents/research/2026-10-22-chord-timeout-scouting.md), [prior art](../../.agents/research/2026-10-22-chord-timeout-and-account-picker-prior-art.md).

@@ -60,7 +60,7 @@
 //! live, and is then answered `blocked` by this daemon's own lock. Since P5-U8
 //! every account has a runtime, so `mp sync --mailbox` and `mp sync --dry-run`
 //! reach that corner on a daemon that is the account's engine; it is recorded
-//! in `docs/lessons-learned.md` and in `BACKLOG.md`.
+//! in `docs/lessons-learned.md` and in PERSO-223.
 //!
 //! ## A cancelled pass stops at the next boundary (PERSO-127)
 //!
@@ -121,7 +121,7 @@ pub const SYNC_METHOD_SPECS: [MethodSpec; 3] = [
     MethodSpec::new("sync.watch", MethodKind::Operation, 1).client_scoped(),
 ];
 
-/// The only mailbox this build's watcher watches (BACKLOG.md).
+/// The only mailbox this build's watcher watches (PERSO-184).
 pub const WATCHED_MAILBOX: &str = "INBOX";
 
 /// How long one IDLE round of a watch lasts before it is renewed.

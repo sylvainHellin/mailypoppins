@@ -25,7 +25,7 @@ Enter at the tenant prompt writes `common`, which takes work or school and perso
 The device-code, token and refresh endpoints all take the tenant as it is written, so `common` and an explicit tenant both keep working after the first sign-in.
 An existing account with its own client ID and tenant ID is read unchanged.
 
-Until the publisher is verified ([#0035](tickets/0035-graph-admin-approval.md)), only an organisation's admin can consent, by ticking "Consent on behalf of your organization" at the first device-code sign-in.
+Until the publisher is verified (PERSO-163), only an organisation's admin can consent, by ticking "Consent on behalf of your organization" at the first device-code sign-in.
 
 The account block the wizard writes:
 

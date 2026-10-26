@@ -2,7 +2,7 @@
 
 The three gate lines of Phase 3b of the daemon migration (`.agents/workflow/native-gui-daemon/plan.md`, section 4), each mapped to the test or command that proves it, with the result recorded rather than asserted.
 
-Ticket [#0122](../tickets/0122-daemon-ownership-moves.md).
+Ticket #0122.
 Evidence taken on 2026-09-10 at `38f823c` on branch `daemon`, twelve commits past the Phase 3a exit, all twelve of them Phase 3b's own, plus the two-line clippy fix in `tests/daemon_account_runtime.rs` that this sweep commit carries.
 Toolchain `rustc 1.96.0 (ac68faa20 2026-05-25)`, host Ubuntu 26.04 LTS, Linux 7.0.0.
 
@@ -136,7 +136,7 @@ Seven warnings sit in the phase's own test files, against the "zero" the phase a
 - `tests/daemon_config.rs` has 2 (`cmp_owned`, twice).
 
 Those seven are left alone rather than fixed: they are T-unit files, the sweep's approval covered `daemon_account_runtime` only, and the convention is that an implementer edits a pinned test file only with a written approval naming it.
-They are a `BACKLOG.md` follow-up.
+They are a follow-up in PERSO-222.
 
 `tests/engine_lock_ingest.rs`, `tests/daemon_sync_outcome.rs` and `tests/daemon_handles.rs` report none.
 
@@ -149,7 +149,7 @@ Every test that starts one points `MAILYPOPPINS_DATA_DIR` at a `TempDir` and sto
 
 `src/store/sweep.rs` is not rustfmt-clean, with two `rustfmt --edition 2021 --check` hunks left.
 Both predate #0122 and neither is in code P3b-U12 wrote: the file had eleven before that unit and has two after it.
-The tree as a whole has never been rustfmt-clean, so this is a note rather than a regression, and it is in `BACKLOG.md`.
+The tree as a whole has never been rustfmt-clean, so this is a note rather than a regression, and it is in PERSO-222.
 
 ## One flake, measured, and then closed
 
@@ -172,4 +172,4 @@ The macOS half of Phase 2's crash and stale-socket recovery line is unchanged an
 
 Two seams are built and proved but have no production caller yet.
 `RuntimeTable::tick_account` is driven only by its own tests, because the periodic scheduler is Phase 5/6, and `store::sweep::sweep_pinned` is called only by `sweep` with an empty pin set, because nothing in the daemon sweeps yet.
-Both are in `BACKLOG.md`.
+Both are in PERSO-222.

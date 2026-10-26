@@ -1,4 +1,4 @@
-//! The server-drafts probe of PERSO-139 slice 0 (`docs/tickets/0143-server-drafts.md`).
+//! The server-drafts probe of PERSO-139 (#0143) slice 0.
 //!
 //! Answers what Outlook and Apple Mail do to a draft another client wrote, by
 //! APPENDing one to an account's Drafts folder and dumping what the folder

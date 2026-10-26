@@ -1,7 +1,7 @@
 //! The daemon gaps the desktop's M3 and M4 worked around client-side (#0131).
 //!
-//! Each section is one gap from the `BACKLOG.md` "Next" bullet, in the
-//! bullet's order, and pins the daemon half of it over a live daemon and the
+//! Each section is one gap from #0131's list of M3 daemon gaps (PERSO-207),
+//! in the list's order, and pins the daemon half of it over a live daemon and the
 //! draft fixture: what a client may now rely on instead of reading or writing
 //! a file behind the daemon's back.
 

@@ -215,7 +215,7 @@ A draft row carries `{id, path, to, subject, status, valid, ready}`, the same fi
 `id` is the `id:` frontmatter field, or the file stem when the file has none; `path` is absolute, because a GUI opens a draft by path; `to` is `null` for a draft with no recipient yet.
 `valid` is "the file parsed" and `ready` is "it would send", which are two axes: a draft with no subject parses perfectly and is not sendable.
 A draft that does not parse stays a row with `valid: false`, `status: "invalid"`, `to: null`, `subject: ""` and `ready: false` (#0080): `"invalid"` is not a draft status a file can spell, and that is the point, since nothing read a status out of a file that would not parse.
-A row may also carry `server`, `{state, synced_at}`, where the draft stands against its copy in the account's server Drafts folder ([#0143](tickets/0143-server-drafts.md)): `state` is `local` (never pushed, or the account's mirror is off), `pending` (the file changed since its copy was written), `synced`, `conflict` (the draft and the server both changed and a conflict copy holds the local text, or this row is that copy) or `failed` (the push was refused past its retry budget), and `synced_at` is the RFC 3339 time the two last agreed, `null` when they never did.
+A row may also carry `server`, `{state, synced_at}`, where the draft stands against its copy in the account's server Drafts folder (PERSO-139): `state` is `local` (never pushed, or the account's mirror is off), `pending` (the file changed since its copy was written), `synced`, `conflict` (the draft and the server both changed and a conflict copy holds the local text, or this row is that copy) or `failed` (the push was refused past its retry budget), and `synced_at` is the RFC 3339 time the two last agreed, `null` when they never did.
 The member is absent until the account's runtime has read its mirror state, and absent from every row of a daemon that predates it, so a client reads its absence as "nothing known" rather than as `local`.
 The watcher derives it from the file and the mirror state the runtime hands it after every drain, so a push that lands reaches clients as a `draft.changed` with `synced`, and a save as one with `pending` until the push that follows it lands.
 A push parked `failed` stays `failed` until a later push of the same draft succeeds; the drain that parked it also publishes `mutations.rolled_back`, as for any refused op.
@@ -816,7 +816,7 @@ Its `headers` is `{to?, cc?, bcc?, subject?}`: a field it names is rewritten, an
 The body and every other frontmatter key stay byte for byte.
 `splice_signature: true` also replaces the body's signature block with the one `signature` and `no_signature` select, resolved as `draft.create` resolves them (none named is the account default), and records the name in `signature:`; without it the body is not touched.
 It answers the draft's `DraftLocation`, refuses a `sent` draft with `-32602` (`Cannot edit the headers of an already sent email`), a file that will not parse with `-32010`, and a field that is not a string with `-32602`.
-The write reaches clients as the watcher's `draft.changed`, like any other write to the file, and on an account that mirrors its drafts it is a change the next push carries to the server ([#0143](tickets/0143-server-drafts.md)).
+The write reaches clients as the watcher's `draft.changed`, like any other write to the file, and on an account that mirrors its drafts it is a change the next push carries to the server (PERSO-139).
 It is declared in `DRAFT_HEADERS_METHOD_SPECS`, an array of its own for the reason `DRAFT_FROM_MESSAGE_METHOD_SPECS` is one.
 
 **A draft's attachment list is the daemon's to rewrite.**
@@ -841,7 +841,7 @@ The scan takes no engine lock and opens no store, exactly as the watcher's looku
 The two mutators fall back to that inventory when the scan finds nothing, because a file that will not parse has no `id:` and is announced under its stem, which is the id `draft.approve` refuses `draft_invalid` for.
 
 **`draft.discard` removes one draft, or sweeps the sent ones.**
-The file and its HTML companion move into `drafts/.retired/`, where the drafts mirror reads them as a tombstone and prunes them after 30 days, and the index row goes with the next scan (#0073, [#0143](tickets/0143-server-drafts.md)).
+The file and its HTML companion move into `drafts/.retired/`, where the drafts mirror reads them as a tombstone and prunes them after 30 days, and the index row goes with the next scan (#0073, PERSO-139).
 On an account that mirrors its drafts, a draft that was pushed also has the delete of its server copies queued (`delete_draft`) and its account's runtime asked for a drain, so the copy leaves Outlook's Drafts within seconds; the answer does not wait for it, and a delete the server refuses is retried by the queue.
 `force` is required for an `approved` draft and for nothing else, because an approved draft is a queued send and deleting it drops that send; a `sent` draft needs none, since retiring one is the whole point of the sweep.
 The refusal is `delete_indexed_draft`'s own sentence, verbatim, and so is the refusal of a draft an outbox row still holds mid-send.

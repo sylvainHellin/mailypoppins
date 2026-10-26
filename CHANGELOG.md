@@ -2157,7 +2157,7 @@ All notable changes to this project are documented in this file.
   back to the default and logs a warning to the activity log instead of
   failing. `email config show` prints the active theme; `config init`
   templates include the key. Website config page documents the option.
-  Closes [#0023](docs/tickets/0023-enable-theme-config.md).
+  Closes #0023.
 
 - **Terminal-adaptive `terminal` theme.** A new built-in theme (aliases
   `transparent` / `ansi`) that follows the terminal's own palette: the
@@ -2182,7 +2182,7 @@ All notable changes to this project are documented in this file.
   file is picked by filename (`latest_log_file` in `src/config.rs`;
   daily-dated names make lexicographic order equal date order). Help
   overlay and website `commands.astro` updated alongside.
-  Closes [#0025](docs/tickets/0025-access-detailed-logs.md).
+  Closes #0025.
 
 - **Open config.toml from the TUI.** New global hotkey `Ctrl+e` suspends
   the TUI and opens the global config file (`~/.config/email/config.toml`)
@@ -2204,7 +2204,7 @@ All notable changes to this project are documented in this file.
   `archived` so we never silently rewrite a synced server email.
   CLI parity via `email mark-draft <file>`. Help overlay and website
   pages (`commands.astro`, `faq.astro`) updated alongside.
-  Closes [#0021](docs/tickets/0021-mark-as-draft.md).
+  Closes #0021.
 
 - **Auto-fetch on TUI startup.** Each account now runs an automatic
   per-account quick sync at launch, so mail that arrived between TUI
@@ -2217,7 +2217,7 @@ All notable changes to this project are documented in this file.
   one. Local-only accounts (no IMAP, no Graph) are skipped. Combined
   with #0002, the cold-start fetch is now the warm-state ~1-2 s path
   instead of the previous 14 s reconcile, so the user sees fresh mail
-  almost immediately. Closes [#0001](docs/tickets/0001-auto-fetch-on-tui-startup.md).
+  almost immediately. Closes #0001.
 
 ### Performance
 - **Search narrows incrementally per keystroke.** Appending a
@@ -2315,7 +2315,7 @@ All notable changes to this project are documented in this file.
   `bg_count > 0` gate and fire automatically when the last account
   finishes. Local benchmark: per-account `AccountState::new` dropped
   from 1183 ms / 234 ms (TUM / Proton) to 13 ms / 4 ms.
-  Closes [#0003](docs/tickets/0003-cold-start-async-indexing.md).
+  Closes #0003.
 - **First quick sync after launch is now <2 s instead of ~14 s.** Persist
   per-role IMAP `MailboxState` (`uid_validity`, `uid_next`, `exists`) to
   `<account_dir>/mailbox-states.json` after every successful Fetch /
@@ -2324,12 +2324,12 @@ All notable changes to this project are documented in this file.
   branch instead of falling through to a full Message-ID scan of INBOX +
   Archive. `uid_validity` mismatch on the next SELECT still falls back
   to a full reconcile, so other-client moves / mailbox renumbering
-  remain safe. Closes [#0002](docs/tickets/0002-persist-mailbox-states.md).
+  remain safe. Closes #0002.
 
 ### Fixed
 - **Read/unread status now survives fetches and syncs reliably in both
   directions.** Three bugs conspired to make `\Seen`/`isRead` sync flaky
-  (ticket [#0004](docs/tickets/0004-fix-read-unread-sync.md)):
+  (ticket #0004):
   1. *Fetches clobbered in-flight local marks.* Sync captured the server
      read flags first and applied them to local frontmatter seconds
      later, so marking an email read while a sync was running (previewing
@@ -2377,7 +2377,7 @@ All notable changes to this project are documented in this file.
   the per-mailbox copy. New helpers in `src/parse.rs`:
   `sanitize_message_id_for_path`, `stable_attachments_dir`,
   `link_or_copy`, `account_dir_for_email`. Closes
-  [#0006](docs/tickets/0006-attachment-paths-after-archive.md).
+  #0006.
 
 ### Changed
 - **All app data moved to a single OS-conventional data directory.**
@@ -2433,7 +2433,7 @@ All notable changes to this project are documented in this file.
   before formatting; display strings stay in sender-local time so dates
   still match other clients. Regression test
   `test_resolve_date_sort_normalises_timezone` covers both branches.
-  Closes [#0024](docs/tickets/0024-sorting-email-inbox.md).
+  Closes #0024.
 - `email config init` and `email config add-account` no longer panic with
   "Cannot start a runtime from within a runtime" when the wizard reaches
   the IMAP test, OAuth2 device-code flow, or Graph folder discovery.
