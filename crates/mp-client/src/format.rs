@@ -233,7 +233,7 @@ fn cli_lines(outcome: &SyncCompleted, dry_run: bool) -> Vec<String> {
     for name in &outcome.non_converging {
         lines.push(format!(
             "⚠ {at}'{name}' downloaded the same messages again: the fetch is not converging, \
-             see the log and docs/tickets/0115-warn-on-a-non-converging-fetch.md"
+             see the log"
         ));
     }
     // No CLI original either: today's `mp sync` prints a `completed`/`failed`

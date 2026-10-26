@@ -1038,10 +1038,10 @@ fn the_cli_lines_are_todays_lines_in_todays_order() {
                 .to_string(),
             "ℹ 8 mailbox(es) stopped at the fetch deadline (resuming next sync)".to_string(),
             "⚠ 'INBOX' downloaded the same messages again: the fetch is not converging, \
-             see the log and docs/tickets/0115-warn-on-a-non-converging-fetch.md"
+             see the log"
                 .to_string(),
             "⚠ 'Sent' downloaded the same messages again: the fetch is not converging, \
-             see the log and docs/tickets/0115-warn-on-a-non-converging-fetch.md"
+             see the log"
                 .to_string(),
             "⚠ 2 mutation(s) failed and were rolled back (see the log)".to_string(),
         ]
@@ -1805,7 +1805,7 @@ async fn the_notification_payload_is_typed_data_and_not_a_rendered_line() {
         vec![
             "✓ Synced: 3 new, 2 already present".to_string(),
             "⚠ 'INBOX' downloaded the same messages again: the fetch is not converging, \
-             see the log and docs/tickets/0115-warn-on-a-non-converging-fetch.md"
+             see the log"
                 .to_string(),
             "⚠ 1 mutation(s) failed and were rolled back (see the log)".to_string(),
         ]

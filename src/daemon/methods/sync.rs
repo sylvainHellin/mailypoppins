@@ -889,7 +889,7 @@ impl Method for SyncWatch {
                 Some(mailbox) => {
                     return Err(DomainError::invalid_params(format!(
                         "this daemon watches {WATCHED_MAILBOX} only; \
-                         watching {mailbox} is not built (BACKLOG.md)"
+                         watching {mailbox} is not supported yet"
                     ))
                     .with_data(json!({"account": name, "mailbox": mailbox})))
                 }

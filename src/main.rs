@@ -2755,7 +2755,7 @@ async fn sync_one_routed(
 ///
 /// The narrowing to INBOX is announced before the call rather than discovered
 /// afterwards, so a user who typed `--mailbox Archive` and got INBOX is told the
-/// mailbox that was dropped, the reason and where the decision is recorded. The
+/// mailbox that was dropped and the reason. The
 /// daemon refuses anything but INBOX as well, so a client that skipped the
 /// narrowing is told rather than quietly watched the wrong mailbox.
 async fn routed_watch(account: &AccountConfig, mailbox: &str, timeout: Option<u64>) -> Result<()> {
@@ -2767,8 +2767,7 @@ async fn routed_watch(account: &AccountConfig, mailbox: &str, timeout: Option<u6
     } else {
         eprintln!(
             "{} watching {WATCHED_MAILBOX} instead of '{mailbox}': the daemon's watcher is \
-             {WATCHED_MAILBOX}-only (BACKLOG.md, `mp watch --mailbox` is narrowed to \
-             {WATCHED_MAILBOX})",
+             {WATCHED_MAILBOX}-only, watching another mailbox is not supported yet",
             "⚠".yellow()
         );
         WATCHED_MAILBOX.to_string()

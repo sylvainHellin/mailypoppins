@@ -297,13 +297,12 @@ const _: () = assert!(MAILBOX_METHOD_SPECS.len() == MAILBOX_METHODS.len());
 ///
 /// One line, on stderr, before the call, so it is visible even on a run that
 /// then refuses for another reason - which is every run over this fixture. It
-/// names the mailbox it dropped, the reason, and where the decision is
-/// recorded, because a user who typed `--mailbox Archive` and got INBOX is
-/// owed all three.
+/// names the mailbox it dropped and the reason, because a user who typed
+/// `--mailbox Archive` and got INBOX is owed both.
 fn narrowing_warning(mailbox: &str) -> String {
     format!(
-        "⚠ watching {inbox} instead of '{mailbox}': the daemon's watcher is {inbox}-only \
-         (BACKLOG.md, `mp watch --mailbox` is narrowed to {inbox})",
+        "⚠ watching {inbox} instead of '{mailbox}': the daemon's watcher is {inbox}-only, \
+         watching another mailbox is not supported yet",
         inbox = fixture::INBOX,
     )
 }
@@ -1256,7 +1255,7 @@ fn the_client_wordings_are_the_lines_mp_sync_prints() {
                 .to_string(),
             "ℹ 2 mailbox(es) stopped at the fetch deadline (resuming next sync)".to_string(),
             "⚠ 'INBOX' downloaded the same messages again: the fetch is not converging, see \
-             the log and docs/tickets/0115-warn-on-a-non-converging-fetch.md"
+             the log"
                 .to_string(),
             "⚠ 1 mutation(s) failed and were rolled back (see the log)".to_string(),
         ],

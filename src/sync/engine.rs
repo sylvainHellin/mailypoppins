@@ -126,8 +126,7 @@ fn note_download_fingerprint(
         let max = uids.iter().max().copied().unwrap_or(0);
         warn!(
             "[sync] '{}' on account '{account}' downloaded the same {count} message(s) \
-             (uids {min}..{max}) on {streak} consecutive passes; the fetch is not converging, \
-             see docs/tickets/0115-warn-on-a-non-converging-fetch.md",
+             (uids {min}..{max}) on {streak} consecutive passes; the fetch is not converging",
             target.server_name
         );
     }
