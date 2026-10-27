@@ -296,6 +296,14 @@ async fn a_reply_quotes_the_message_the_client_holds() {
         Some(created.id.as_str()),
         "the id is in the file before the selector is handed out"
     );
+    assert!(
+        draft
+            .frontmatter
+            .server_message_id
+            .as_deref()
+            .is_some_and(|mid| mid.starts_with("<mp-draft.")),
+        "the server copy's Message-ID is in the file before an editor opens it (PERSO-231)"
+    );
     assert_eq!(
         draft.frontmatter.to.as_deref(),
         Some("ivana@example.com"),

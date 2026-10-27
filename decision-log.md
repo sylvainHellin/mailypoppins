@@ -301,7 +301,7 @@ Status: accepted
 
 Why: every client opens a new draft in an editor at once, and the first push seconds later wrote the key under the editor's open buffer, so saving dropped the key and not saving dropped the edits (PERSO-231).
 The daemon writes the key in the one helper every creation method ends in, before the path goes out, on an account that mirrors; from then on no push writes a draft mp created, and a file written outside mp still gets its key at its first push.
-A new draft therefore reads `pending` rather than `local` until its first push, and a send before that push claims on the server, which finds nothing and goes ahead.
+A new draft therefore reads `pending` rather than `local` until its first push, and a send before that push claims on the server, which finds nothing and goes ahead; with the Drafts folder unreachable that send is refused, as for any mirrored draft, since a draft with no row cannot be told apart from one whose row a store rebuild dropped while its copy sits on the server.
 Rejected: keeping the key in the `draft_sync` row only, which a store rebuild drops; holding the write while an editor has the file open, which depends on the editor and misses the desktop app.
 Source: Sylvain, chat of 2026-10-27.
 Status: accepted

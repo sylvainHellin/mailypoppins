@@ -3256,7 +3256,7 @@ Worse, `send_guard::guards` read only the file's key, so the send of such a draf
 The row now repeats the copy's Message-ID and puts it back into any file that lost it, before the push, the reconcile and the daemon's send read the draft; a row from an earlier build learns it from the file or from the copy its UID names.
 A field a file carries for the system's own bookkeeping needs a second home the user's edits cannot reach.
 
-## The daemon never writes a file an editor may hold open (2026-10-27, PERSO-231)
+## Bookkeeping a file carries is written before the file is handed to an editor (2026-10-27, PERSO-231)
 
 Every client opens a new draft in an editor the moment `draft.create` returns, and the first push, seconds later, wrote `server_message_id` into that file under the open buffer.
 Saving the buffer dropped the key, which the PERSO-192 row restore then wrote back under the buffer a second time; not saving dropped the edits.

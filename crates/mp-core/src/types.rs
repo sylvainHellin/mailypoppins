@@ -395,10 +395,10 @@ pub struct EmailFrontmatter {
     pub event: Option<EventFrontmatter>,
     /// The `Message-ID` every server copy of this draft carries (#0143).
     ///
-    /// Minted once by the daemon when the draft is first pushed to the
-    /// account's server Drafts folder, and kept for the draft's life: it is
-    /// what links the file to its copy across a replace by mp and across an
-    /// edit in Outlook or the Proton app, which keep it. It differs from the
+    /// Minted once by the daemon when it creates the draft (PERSO-231), or at
+    /// the first push of a file written outside mp, and kept for the draft's
+    /// life: it is what links the file to its copy across a replace by mp and
+    /// across an edit in Outlook or the Proton app, which keep it. It differs from the
     /// `message_id:` a send records, so a sent message and its draft are
     /// never confused by a `Message-ID` search. Absent on a draft that was
     /// never mirrored.

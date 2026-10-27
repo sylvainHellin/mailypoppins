@@ -213,12 +213,12 @@ pub fn prune_retired(account: &str, now: std::time::SystemTime) -> usize {
 /// `local` with the `server_message_id` its `row` remembers written back, when
 /// the file has none (PERSO-192); `local` itself otherwise.
 ///
-/// A draft rewritten whole from a snapshot taken before its first push (an
-/// agent filling in the scaffold `mp new` printed, an editor's stale buffer)
-/// loses the key the push wrote. Read as a draft never pushed, it would get a
-/// fresh `Message-ID` that no copy carries, so the row's copy would read as
-/// sent elsewhere: the push and the send refused, the file retired, and the
-/// copy imported back as a draft of its own. The row's copy is still the
+/// A draft rewritten whole without the key (an agent writing a fresh file over
+/// the scaffold, a draft from before PERSO-231 or a hand-written file saved
+/// from a buffer older than its first push) loses it. Read as a draft never
+/// pushed, it would get a fresh `Message-ID` that no copy carries, so the
+/// row's copy would read as sent elsewhere: the push and the send refused,
+/// the file retired, and the copy imported back as a draft of its own. The row's copy is still the
 /// draft's, so the key is put back instead, and the push replaces that copy
 /// as it would after any edit.
 pub fn restore_server_message_id(
