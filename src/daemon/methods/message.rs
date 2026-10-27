@@ -1704,7 +1704,10 @@ async fn mutate(
     // A move into the mailbox the message already sits in would owe the
     // server a MOVE onto itself, which mints a new UID on some servers for
     // nothing (PERSO-235). Refused before the backend, like every other
-    // parameter the caller got wrong; the pickers never offer it.
+    // parameter the caller got wrong. The TUI picker and the desktop picker
+    // outside a search leave the source mailbox out; the desktop picker over
+    // search results, whose hits can come from several mailboxes, can offer a
+    // hit's own mailbox and gets this refusal as a per-row failure.
     if kind == Kind::Move && destination.as_deref() == Some(row.mailbox.as_str()) {
         return Err(invalid_params(format!(
             "{selector} is already in {}",
