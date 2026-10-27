@@ -139,9 +139,9 @@ fn a_server_copy_keeps_the_bcc_the_id_and_the_reply_headers() {
     .is_ok());
 }
 
-/// The first push mints the draft's `server_message_id` into its file, puts
-/// one copy in the folder and records it; a second push of the same bytes
-/// does nothing.
+/// The first push of a file written outside mp mints the draft's
+/// `server_message_id` into it, puts one copy in the folder and records it; a
+/// second push of the same bytes does nothing.
 #[test]
 fn the_first_push_records_the_message_id_and_the_copy() {
     let fx = Fixture::new();
@@ -180,6 +180,50 @@ fn the_first_push_records_the_message_id_and_the_copy() {
 
     block_on(push::push(&fx.mirror(2000), &mut folder, "d1")).unwrap();
     assert_eq!(folder.log, vec!["append".to_string()], "nothing changed");
+}
+
+/// A draft the daemon created has its `server_message_id` before any push, so
+/// the first push copies it under that Message-ID and never writes the file an
+/// editor already holds (PERSO-231). An account that does not mirror gets no
+/// key.
+#[test]
+fn a_created_draft_carries_its_message_id_and_the_first_push_leaves_it_alone() {
+    let mut fx = Fixture::new();
+    let path = fx.write("angebot", "d1", "", "Hallo");
+    link_new_draft(&fx.account, &path).unwrap();
+    let linked = std::fs::read_to_string(&path).unwrap();
+    let mid = crate::draft::parse_email_draft(&path)
+        .unwrap()
+        .frontmatter
+        .server_message_id
+        .expect("the key is minted at creation");
+    assert!(
+        mid.starts_with("<mp-draft.") && mid.ends_with("@tum.de>"),
+        "{mid}"
+    );
+
+    let mut folder = FakeFolder::default();
+    block_on(push::push(&fx.mirror(1000), &mut folder, "d1")).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        linked,
+        "the push leaves the file alone"
+    );
+    assert_eq!(folder.live().len(), 1);
+    assert_eq!(
+        header_value(&folder.live()[0].raw, "Message-ID").as_deref(),
+        Some(mid.as_str())
+    );
+    assert_eq!(
+        fx.row("d1").unwrap().message_id.as_deref(),
+        Some(mid.as_str())
+    );
+
+    fx.account.drafts.mirror = false;
+    let local = fx.write("lokal", "d2", "", "Hallo");
+    let before = std::fs::read_to_string(&local).unwrap();
+    link_new_draft(&fx.account, &local).unwrap();
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), before);
 }
 
 /// An edit replaces the copy: one copy afterwards, under the same

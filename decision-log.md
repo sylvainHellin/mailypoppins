@@ -296,3 +296,12 @@ Docs and comments cite an issue by its identifier (`PERSO-139`); a four-digit nu
 Rejected: keeping BACKLOG.md as an index beside Plane (two trackers drift); moving the done tickets into Plane too (git history holds them).
 Source: Sylvain, decision of 2026-10-26; migration tracked in PERSO-194.
 Status: accepted
+
+## 2026-10-27 - A draft the daemon creates gets its server_message_id at creation, not at its first push
+
+Why: every client opens a new draft in an editor at once, and the first push seconds later wrote the key under the editor's open buffer, so saving dropped the key and not saving dropped the edits (PERSO-231).
+The daemon writes the key in the one helper every creation method ends in, before the path goes out, on an account that mirrors; from then on no push writes a draft mp created, and a file written outside mp still gets its key at its first push.
+A new draft therefore reads `pending` rather than `local` until its first push, and a send before that push claims on the server, which finds nothing and goes ahead.
+Rejected: keeping the key in the `draft_sync` row only, which a store rebuild drops; holding the write while an editor has the file open, which depends on the editor and misses the desktop app.
+Source: Sylvain, chat of 2026-10-27.
+Status: accepted

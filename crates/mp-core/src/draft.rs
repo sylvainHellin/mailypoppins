@@ -377,7 +377,8 @@ pub fn set_draft_signature_name(path: &Path, name: &str) -> Result<()> {
 /// `server_message_id:` frontmatter (#0143), in place, leaving every other
 /// byte of the file as it was.
 ///
-/// The mirror's one write to a draft it pushes, made once, at the first push:
+/// Made once, when the daemon creates the draft, before its path reaches an
+/// editor (PERSO-231), or at the first push of a file written outside mp:
 /// every later push replaces the copy and leaves the file alone, so an editor
 /// holding it open is not interrupted.
 pub fn set_draft_server_message_id(path: &Path, message_id: &str) -> Result<()> {

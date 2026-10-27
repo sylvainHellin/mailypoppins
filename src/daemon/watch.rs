@@ -201,10 +201,12 @@ pub struct MirrorState {
 impl MirrorState {
     /// The `server` member of a draft whose file hashes to `hash`.
     ///
-    /// `local` on an account that does not mirror and for a draft that was
-    /// never pushed; `conflict` for a conflict copy and for a draft one names;
-    /// `failed` for a draft whose push was parked; `synced` when the bytes are
-    /// the ones the copy was written from, `pending` otherwise.
+    /// `local` on an account that does not mirror and for a file written
+    /// outside mp that was never pushed, which has no `server_message_id` yet;
+    /// `conflict` for a conflict copy and for a draft one names; `failed` for a
+    /// draft whose push was parked; `synced` when the bytes are the ones the
+    /// copy was written from, `pending` otherwise, a draft the daemon created
+    /// and has not pushed yet included (PERSO-231).
     pub fn server_of(
         &self,
         id: &str,

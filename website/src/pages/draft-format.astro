@@ -19,7 +19,7 @@ const frontmatterFields = [
   { command: 'attachments', description: 'List of file paths to attach; a folder path attaches every file inside it. Optional.' },
   { command: 'in_reply_to', description: 'Message-ID of the message this draft answers. Written by mp reply; on send, the source is marked answered.' },
   { command: 'forwarded_from', description: 'Message-ID of the message this draft forwards. Written by mp forward; on send, the source is marked forwarded.' },
-  { command: 'server_message_id', description: 'Message-ID of the draft\'s copies in the server Drafts folder. Written once by the daemon at the first push; leave it alone.' },
+  { command: 'server_message_id', description: 'Message-ID of the draft\'s copies in the server Drafts folder. Written by the daemon when it creates the draft, or at the first push of a file written by hand; leave it alone.' },
   { command: 'conflict_of', description: 'Id of the draft this file is a conflict copy of. Written by the daemon; such a file is never pushed, and removing the line keeps it as a draft of its own.' },
 ];
 
@@ -182,10 +182,10 @@ Email body here.`;
       <p>
         The daemon keeps a copy of every draft in the account's Drafts folder on the server,
         which is where Outlook, Apple Mail, the Proton app and mp on another machine see it.
-        A save in your editor replaces that copy a couple of seconds later; the draft file
-        itself is written once, at the first push, to record the copy's
-        <code>server_message_id</code>, and never again by a push, so an editor holding it
-        open is not interrupted.
+        A save in your editor replaces that copy a couple of seconds later.
+        The copy's <code>server_message_id</code> is in the draft from the moment mp creates it,
+        so no push writes the file and an editor holding it open is not interrupted; only a
+        file you write by hand gets the key at its first push.
       </p>
       <p>
         The copy's body is the message as it would be sent, so a copy sent unedited from another

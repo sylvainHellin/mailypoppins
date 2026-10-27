@@ -115,8 +115,9 @@ pub fn restore_link_for_send(account: &AccountConfig, path: &Path) -> Result<()>
 }
 
 /// Whether a send of `draft` from `account` passes the guard at all: the
-/// account mirrors its drafts and the draft has been pushed, so a copy on the
-/// server names it.
+/// account mirrors its drafts and the draft has a `server_message_id`, which
+/// a draft the daemon created carries before its first push (PERSO-231); with
+/// no copy and no row, the claim then lets such a draft go.
 pub fn guards(account: &AccountConfig, draft: &EmailDraft) -> bool {
     mirror_enabled(account) && draft.frontmatter.server_message_id.is_some()
 }

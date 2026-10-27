@@ -782,6 +782,11 @@ async fn draft_create_writes_a_skeleton_and_names_it() {
          resolves the moment it is printed: {document}"
     );
     assert!(
+        document.contains("server_message_id: \"<mp-draft."),
+        "the server copy's Message-ID is in the file before an editor opens it, so the \
+         first push never writes under the editor's buffer (PERSO-231): {document}"
+    );
+    assert!(
         document.contains("status: draft"),
         "a new draft starts as a draft: {document}"
     );

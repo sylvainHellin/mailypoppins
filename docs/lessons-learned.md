@@ -3255,3 +3255,10 @@ The next push then minted a fresh Message-ID, found no copy under it while a `dr
 Worse, `send_guard::guards` read only the file's key, so the send of such a draft skipped the claim and the double-send protection silently.
 The row now repeats the copy's Message-ID and puts it back into any file that lost it, before the push, the reconcile and the daemon's send read the draft; a row from an earlier build learns it from the file or from the copy its UID names.
 A field a file carries for the system's own bookkeeping needs a second home the user's edits cannot reach.
+
+## The daemon never writes a file an editor may hold open (2026-10-27, PERSO-231)
+
+Every client opens a new draft in an editor the moment `draft.create` returns, and the first push, seconds later, wrote `server_message_id` into that file under the open buffer.
+Saving the buffer dropped the key, which the PERSO-192 row restore then wrote back under the buffer a second time; not saving dropped the edits.
+The key is now minted in `created()` before the path goes out, so the first push of a draft mp created reads the file and writes nothing.
+Bookkeeping a file must carry belongs in it before anyone else can open it; a write after hand-off races whatever editor holds the file, and the editor wins.

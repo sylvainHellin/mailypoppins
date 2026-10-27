@@ -311,10 +311,11 @@ pub struct DraftServer {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DraftSyncState {
-    /// Not mirrored: the draft was never pushed, or the account's mirror is
-    /// off.
+    /// Not mirrored: the account's mirror is off, or a file written outside
+    /// mp was never pushed and has no `server_message_id` yet.
     Local,
-    /// The file changed since its copy was written, and a push is owed.
+    /// A push is owed: the file changed since its copy was written, or the
+    /// daemon created the draft and has not pushed it yet.
     Pending,
     /// The file and its server copy agree.
     Synced,

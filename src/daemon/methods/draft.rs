@@ -653,7 +653,7 @@ pub(super) fn create(
         })?;
     }
 
-    created(&account.name, &id, &path, None)
+    created(account, &id, &path, None)
 }
 
 /// The `result` of `draft.create_from_message`: a reply, a reply-all or a
@@ -748,7 +748,7 @@ fn create_from_message(
     crate::draft::set_draft_id(&path, &id)
         .map_err(|e| internal(format!("minting the id of {}: {e:#}", path.display())))?;
 
-    created(&account.name, &id, &path, None)
+    created(account, &id, &path, None)
 }
 
 /// The `result` of `draft.reply` and `draft.forward`: a draft built from a
@@ -807,7 +807,7 @@ fn from_source(
     .map_err(|e| internal(format!("writing the draft of {name}: {e:#}")))?;
 
     created(
-        &name,
+        account,
         &written.key,
         &path,
         Some(DraftSource {
@@ -873,7 +873,7 @@ async fn forward_hit_inline(
         signature_of(&account, params, email).as_deref(),
     )
     .map_err(|e| internal(format!("writing the draft of {name}: {e:#}")))?;
-    created(&name, &written.key, &draft, None)
+    created(&account, &written.key, &draft, None)
 }
 
 /// `draft.forward` with `as_attachment: true` (PERSO-174): the forward draft
@@ -972,7 +972,7 @@ async fn forward_hit_as_attachment(
         signature_of(account, params, email).as_deref(),
     )
     .map_err(|e| internal(format!("writing the draft of {name}: {e:#}")))?;
-    created(name, &written.key, &draft, None)
+    created(account, &written.key, &draft, None)
 }
 
 /// The `headers` override of `draft.reply`, `draft.forward` (P5-U6) and
@@ -1109,20 +1109,31 @@ fn set_headers(
     )
 }
 
-/// The answer of the four methods that write a new draft, with the subject
-/// read back from the file so it is the one written, override included.
+/// The answer of the methods that write a new draft, with the subject read
+/// back from the file so it is the one written, override included.
+///
+/// The draft gets its `server_message_id` here, before its path goes out: a
+/// client opens it in an editor at once, and a key the first push wrote would
+/// land under that editor's buffer (PERSO-231).
 fn created(
-    account: &str,
+    account: &AccountConfig,
     id: &str,
     path: &Path,
     source: Option<DraftSource>,
 ) -> Result<Value, RpcError> {
+    crate::draft_mirror::link_new_draft(account, path).map_err(|e| {
+        internal(format!(
+            "recording the server copy of {}: {e:#}",
+            path.display()
+        ))
+    })?;
+    let name = account.name.as_str();
     to_value(
         "a created draft",
         &DraftCreated {
-            account: account.to_string(),
+            account: name.to_string(),
             id: id.to_string(),
-            selector: Selector::for_draft(account, id).to_string(),
+            selector: Selector::for_draft(name, id).to_string(),
             path: path.display().to_string(),
             source,
             subject: crate::draft::parse_email_draft(path)

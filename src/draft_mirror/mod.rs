@@ -5,11 +5,13 @@
 //! The draft file stays the truth. A push renders the file into a message and
 //! replaces the server copy with it ([`push`]); a pull rewrites the file from a
 //! copy that changed on the server. Which copy belongs to which file is the
-//! draft's `server_message_id` frontmatter key, minted at the first push and
-//! carried by every copy mp writes; Outlook and the Proton app keep it across
-//! their own edits (the probe of 2026-10-20). The volatile state, the copy's
-//! UID and the hash of the file at the last convergence, lives in the store's
-//! [`draft_sync`](crate::store::draft_sync) table, which a store rebuild drops
+//! draft's `server_message_id` frontmatter key, minted when the daemon creates
+//! the draft ([`link_new_draft`], PERSO-231), or at the first push for a file
+//! written outside mp, and carried by every copy mp writes; Outlook and the
+//! Proton app keep it across their own edits (the probe of 2026-10-20). The
+//! volatile state, the copy's UID and the hash of the file at the last
+//! convergence, lives in the store's [`draft_sync`](crate::store::draft_sync)
+//! table, which a store rebuild drops
 //! and the reconcile re-derives. The row repeats the `Message-ID`, so a file
 //! rewritten without the key gets it back before the push, the reconcile or
 //! a send reads it ([`restore_server_message_id`]).
@@ -28,7 +30,7 @@ pub mod push;
 pub mod reconcile;
 pub mod send_guard;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 
@@ -101,6 +103,22 @@ pub fn mint_server_message_id(account: &AccountConfig) -> String {
     let random: [u8; 12] = rand::random();
     let hex: String = random.iter().map(|b| format!("{b:02x}")).collect();
     format!("<mp-draft.{hex}@{domain}>")
+}
+
+/// Give the draft the daemon just wrote at `path` the `server_message_id` its
+/// server copies will carry, when `account` mirrors its drafts (PERSO-231).
+///
+/// It runs before the path is handed to a client, which opens it in an editor
+/// at once. Minted at the first push instead, the key was written under the
+/// editor's open buffer seconds later: saving the buffer dropped the key (and
+/// had the row restore it under the buffer again), not saving dropped the
+/// edits. With the key in the file from creation on, no push writes a draft
+/// mp created.
+pub fn link_new_draft(account: &AccountConfig, path: &Path) -> anyhow::Result<()> {
+    if !mirror_enabled(account) {
+        return Ok(());
+    }
+    crate::draft::set_draft_server_message_id(path, &mint_server_message_id(account))
 }
 
 /// One draft file the mirror may act on, read once.

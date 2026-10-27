@@ -5,11 +5,11 @@
 //! the Drafts folder, reads the new copy's UID back, removes the copy the
 //! draft's `draft_sync` row named, and records the new one. APPEND comes before
 //! the delete, so a crash between them leaves two copies rather than none.
-//! The file is written once in a draft's life, at its first push, to record
-//! the `server_message_id` every copy carries; no later push touches it, so an
-//! editor holding the file open sees no change. The one exception is a file
-//! rewritten without that key, which gets it back from the draft's row
-//! (PERSO-192).
+//! A draft the daemon created carries the `server_message_id` every copy
+//! carries from its first byte ([`super::link_new_draft`], PERSO-231), so no
+//! push touches its file and an editor holding it open sees no change. A file
+//! written outside mp gets the key at its first push, and a file rewritten
+//! without it gets it back from the draft's row (PERSO-192).
 
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info, warn};
@@ -90,7 +90,8 @@ pub async fn push<F: DraftsFolder>(
     let message_id = match local.draft.frontmatter.server_message_id.clone() {
         Some(message_id) => message_id,
         None => {
-            // A draft never pushed gets a fresh `Message-ID`. One whose row
+            // A file written outside mp and never pushed gets a fresh
+            // `Message-ID`; one the daemon created has it already. One whose row
             // an earlier build wrote without it, and whose file lost the key,
             // takes the one its row's copy carries: a fresh one would read
             // that copy as sent elsewhere (PERSO-192).
