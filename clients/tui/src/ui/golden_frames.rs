@@ -468,6 +468,7 @@ pub fn contacts_fixture() -> App {
         contacts,
         built_at: "2026-07-28T09:00:00+00:00".into(),
         extractor_version: mp_core::contacts::EXTRACTOR_VERSION,
+        rows_through: 0,
     });
     app.contacts_view.loaded = true;
     app.recompute_contact_matches();

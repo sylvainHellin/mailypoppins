@@ -14,13 +14,18 @@
 //! [`observe_message`], the rule the send and sync hooks apply too
 //! (PERSO-234), so what a rebuild indexes the hooks index.
 
+use std::path::Path;
+
 use crate::config::AccountConfig;
 use crate::contacts::types::ContactIndex;
 use crate::store::read::{self, MessageRow};
-use crate::store::{open_store, Store};
+use crate::store::{open_store_in, Store};
 use crate::types::MailboxRole;
 use anyhow::Result;
 use mp_core::contacts::extractor::{empty_index, observe_message, MessageAddresses};
+use mp_core::contacts::{
+    load_cache, save_cache, save_rebuilt_cache, with_cache_lock, CacheSave, EXTRACTOR_VERSION,
+};
 
 /// Build a full `ContactIndex` from the account's message store.
 ///
@@ -41,7 +46,17 @@ pub fn build_index_for_account_until(
     account: &AccountConfig,
     stop: impl Fn() -> bool,
 ) -> Result<Option<ContactIndex>> {
-    match open_store(&account.name) {
+    build_index_in(&crate::config::account_dir(&account.name), account, stop)
+}
+
+/// [`build_index_for_account_until`] over the store in the account directory
+/// `root`, which a caller running this on a blocking thread resolves first.
+pub fn build_index_in(
+    root: &Path,
+    account: &AccountConfig,
+    stop: impl Fn() -> bool,
+) -> Result<Option<ContactIndex>> {
+    match open_store_in(root) {
         Some(store) => build_index_from_store_until(&store, account, stop),
         None => Ok(Some(empty_index(account))),
     }
@@ -60,6 +75,10 @@ fn build_index_from_store(store: &Store, account: &AccountConfig) -> Result<Cont
 }
 
 /// The walk itself, stoppable between two batches of [`STOP_EVERY_ROWS`].
+///
+/// The index it answers is stamped with the highest row it walked
+/// ([`ContactIndex::rows_through`]): the listing is one statement, so one
+/// snapshot, and every row inserted after it has a higher id.
 fn build_index_from_store_until(
     store: &Store,
     account: &AccountConfig,
@@ -75,16 +94,22 @@ fn build_index_from_store_until(
         if n % STOP_EVERY_ROWS == 0 && stop() {
             return Ok(None);
         }
-        observe_message(
-            &mut index.contacts,
-            &self_addr,
-            &MailboxRole::from(row.mailbox.as_str()),
-            &row_addresses(&row),
-            row.date_display.as_deref(),
-        );
+        fold_row(&mut index, &self_addr, &row);
     }
 
     Ok(Some(index))
+}
+
+/// Fold one row into `index` and raise its watermark to the row.
+fn fold_row(index: &mut ContactIndex, self_addr: &str, row: &MessageRow) {
+    observe_message(
+        &mut index.contacts,
+        self_addr,
+        &MailboxRole::from(row.mailbox.as_str()),
+        &row_addresses(row),
+        row.date_display.as_deref(),
+    );
+    index.rows_through = index.rows_through.max(row.id);
 }
 
 /// The address headers of one row.
@@ -97,6 +122,61 @@ fn row_addresses(row: &MessageRow) -> MessageAddresses<'_> {
     }
 }
 
+/// What committing a rebuild did, and the index the caller serves after it.
+#[derive(Debug)]
+pub struct Committed {
+    /// The verdict of the cache guard (#0067).
+    pub saved: CacheSave,
+    /// The rebuilt index when it was written; the cache the guard kept when it
+    /// refused, or the rebuilt index when there was nothing to keep.
+    pub index: ContactIndex,
+}
+
+/// Offer a rebuilt `index` to the cache under the account directory `root`,
+/// holding the cache's lock from the catch-up to the save (PERSO-234).
+///
+/// The walk ran without the lock, and a sync may have inserted rows and
+/// merged them into the old cache meanwhile; that cache is about to be
+/// replaced, so those rows would be lost. Under the lock, then, the rows above
+/// the walk's watermark are folded in first, and the watermark is raised to
+/// the last of them: a sync merge waiting on the lock for one of those rows
+/// finds it at or below the watermark and skips it, and one for a row
+/// inserted after the catch-up finds it above and merges it.
+///
+/// `stamp_kept` is for the reads that rebuild a stale cache: when the guard
+/// refuses the rebuild, the kept cache is stamped current, so the next read
+/// does not walk the store again to reach the same verdict.
+pub fn commit_rebuild_at(
+    root: &Path,
+    account: &AccountConfig,
+    mut index: ContactIndex,
+    stamp_kept: bool,
+) -> Result<Committed> {
+    with_cache_lock(root, || {
+        if let Some(store) = open_store_in(root) {
+            let self_addr = account.own_address();
+            for row in read::list_account_after(&store, &account.name, index.rows_through)? {
+                fold_row(&mut index, &self_addr, &row);
+            }
+        }
+        let saved = save_rebuilt_cache(root, &index)?;
+        if saved == CacheSave::Written {
+            return Ok(Committed { saved, index });
+        }
+        let index = match load_cache(root)? {
+            Some(mut kept) => {
+                if stamp_kept && !kept.is_current() {
+                    kept.extractor_version = EXTRACTOR_VERSION;
+                    save_cache(root, &kept)?;
+                }
+                kept
+            }
+            None => index,
+        };
+        Ok(Committed { saved, index })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +184,7 @@ mod tests {
     use crate::parse::FetchedEmail;
     use crate::store::BlobStore;
     use mp_core::contacts::extractor::UNDATED_OBSERVED_AT;
+    use mp_core::contacts::save_cache;
     use tempfile::TempDir;
 
     /// A store plus its blob store, both under one temp directory. No mailbox
@@ -356,6 +437,98 @@ mod tests {
         assert_eq!(
             MailboxRole::from("some-folder"),
             MailboxRole::Other("some-folder".to_string())
+        );
+    }
+
+    /// Ingest one message the way a sync does, and answer the observation the
+    /// engine records for the row it inserted.
+    fn sync_in(fx: &Fixture, uid: i64, from: &str) -> crate::sync::FreshObservation {
+        let message = email(
+            from,
+            "me@example.com",
+            None,
+            "Wed, 07 Jan 2026 12:00:00 +0000",
+        );
+        let outcome = ingest_message(
+            &fx.store,
+            &fx.blobs,
+            &IngestInput {
+                account: "alice",
+                mailbox: "inbox",
+                uid,
+                email: &message,
+                raw: None,
+            },
+        )
+        .unwrap();
+        assert!(outcome.inserted);
+        crate::sync::FreshObservation::of(outcome.row_id, &MailboxRole::Inbox, &message)
+    }
+
+    fn received(root: &Path, address: &str) -> u32 {
+        let cached = load_cache(root).unwrap().expect("cached");
+        cached.contacts.get(address).map_or(0, |c| c.received)
+    }
+
+    /// PERSO-234 review: a sync that inserts a row after a rebuild's walk and
+    /// merges it into the old cache before the rebuild commits must not lose
+    /// it when the rebuild replaces that cache: the commit folds in what the
+    /// walk did not see.
+    #[test]
+    fn a_rebuild_keeps_a_row_a_sync_inserted_during_its_walk() {
+        let fx = fixture();
+        let root = fx._dir.path();
+        ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("Alice <alice@example.com>", "me@example.com", None, ""),
+        );
+        let first = build_index_from_store(&fx.store, &account()).unwrap();
+        save_cache(root, &first).unwrap();
+
+        let walked = build_index_from_store(&fx.store, &account()).unwrap();
+        let carol = sync_in(&fx, 2, "Carol <carol@example.com>");
+        crate::contacts::hooks::bump_after_sync_at(root, &account(), &[carol]);
+        let committed = commit_rebuild_at(root, &account(), walked, false).unwrap();
+
+        assert_eq!(committed.saved, CacheSave::Written);
+        assert_eq!(received(root, "carol@example.com"), 1, "kept, once");
+        assert_eq!(received(root, "alice@example.com"), 1);
+    }
+
+    /// And a sync whose merge waited for the commit, for a row the walk had
+    /// already counted, does not count it twice.
+    #[test]
+    fn a_merge_after_a_rebuild_skips_a_row_the_rebuild_counted() {
+        let fx = fixture();
+        let root = fx._dir.path();
+        ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("Alice <alice@example.com>", "me@example.com", None, ""),
+        );
+        save_cache(
+            root,
+            &build_index_from_store(&fx.store, &account()).unwrap(),
+        )
+        .unwrap();
+
+        let carol = sync_in(&fx, 2, "Carol <carol@example.com>");
+        let walked = build_index_from_store(&fx.store, &account()).unwrap();
+        commit_rebuild_at(root, &account(), walked, false).unwrap();
+        let late = crate::contacts::hooks::bump_after_sync_at(root, &account(), &[carol]);
+
+        assert_eq!(late, None, "nothing left to merge");
+        assert_eq!(received(root, "carol@example.com"), 1, "counted once");
+
+        let dave = sync_in(&fx, 3, "Dave <dave@example.com>");
+        assert!(crate::contacts::hooks::bump_after_sync_at(root, &account(), &[dave]).is_some());
+        assert_eq!(
+            received(root, "dave@example.com"),
+            1,
+            "a later row still merges"
         );
     }
 }

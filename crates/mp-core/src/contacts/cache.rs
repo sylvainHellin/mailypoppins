@@ -2,12 +2,21 @@
 //!
 //! Each account's index lives at `<account_dir>/contacts-cache.json` (where
 //! `account_dir` resolves under `mailypoppins_data_dir()`).
+//!
+//! Every read-modify-write of the file runs under [`with_cache_lock`], and
+//! every write replaces it atomically ([`save_cache`]), PERSO-234: a sync's
+//! merge, a send's merge and a rebuild's commit once each loaded the file,
+//! changed it and wrote it back with a plain write on a multi-threaded
+//! runtime, so two of them overlapping lost one, and a reader could see half
+//! a file.
 
 use crate::contacts::types::ContactIndex;
 use anyhow::{Context, Result};
 use log::warn;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// What `save_rebuilt_cache` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +114,34 @@ fn cached_count(account_root: &Path) -> usize {
     }
 }
 
+/// Run `f` holding the lock of the cache under `account_root`, the one lock
+/// every load-merge-save and every rebuild commit of that file takes.
+///
+/// Per process: every writer of the cache is the daemon (the CLI, the TUI and
+/// the desktop app read and rebuild the index through it), and a lock file
+/// would only add a second way to be wrong. Not reentrant, so `f` must not
+/// take it again. A writer that panicked while holding it left a file that
+/// was replaced atomically or not at all, so the lock is taken over rather
+/// than poisoned.
+pub fn with_cache_lock<T>(account_root: &Path, f: impl FnOnce() -> T) -> T {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Arc::clone(locks.entry(cache_path(account_root)).or_default())
+    };
+    let _held = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    f()
+}
+
+/// Write `index` as the account's cache, replacing the file atomically: the
+/// bytes go to a temporary file beside it, which is then renamed over it, so
+/// a reader sees the old index or the new one and never a torn file.
+///
+/// A caller that read the cache and writes back what it changed holds
+/// [`with_cache_lock`] across both.
 pub fn save_cache(account_root: &Path, index: &ContactIndex) -> Result<()> {
     let path = cache_path(account_root);
     if let Some(parent) = path.parent() {
@@ -112,8 +149,13 @@ pub fn save_cache(account_root: &Path, index: &ContactIndex) -> Result<()> {
             .with_context(|| format!("creating cache directory at {}", parent.display()))?;
     }
     let data = serde_json::to_string_pretty(index)?;
-    fs::write(&path, data)
-        .with_context(|| format!("writing contacts cache at {}", path.display()))?;
+    let staged = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    fs::write(&staged, data)
+        .with_context(|| format!("writing contacts cache at {}", staged.display()))?;
+    fs::rename(&staged, &path).map_err(|e| {
+        let _ = fs::remove_file(&staged);
+        anyhow::Error::new(e).context(format!("replacing contacts cache at {}", path.display()))
+    })?;
     Ok(())
 }
 
@@ -145,6 +187,7 @@ mod tests {
             contacts,
             built_at: "2026-01-01T00:00:00+00:00".into(),
             extractor_version: crate::contacts::EXTRACTOR_VERSION,
+            rows_through: 0,
         }
     }
 
@@ -231,6 +274,42 @@ mod tests {
             CacheSave::Written
         );
         assert!(load_cache(dir.path()).unwrap().unwrap().contacts.is_empty());
+    }
+
+    /// PERSO-234 review: a save replaces the file through a staged copy that
+    /// is renamed over it, so a reader racing the write reads a whole index,
+    /// and nothing staged is left behind.
+    #[test]
+    fn a_save_replaces_the_file_whole_and_leaves_nothing_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        save_cache(dir.path(), &index(&["alice@example.com"])).unwrap();
+        let readers = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut reads = 0;
+                for _ in 0..200 {
+                    // A torn file would be a parse error here.
+                    load_cache(dir.path())
+                        .unwrap()
+                        .expect("always a whole cache");
+                    reads += 1;
+                }
+                reads
+            });
+            for n in 0..200 {
+                let many: Vec<String> = (0..n % 50 + 1)
+                    .map(|i| format!("c{i}@example.com"))
+                    .collect();
+                let many: Vec<&str> = many.iter().map(String::as_str).collect();
+                save_cache(dir.path(), &index(&many)).unwrap();
+            }
+            reader.join().unwrap()
+        });
+        assert_eq!(readers, 200);
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["contacts-cache.json"]);
     }
 
     /// A non-empty rebuild replaces whatever was there.

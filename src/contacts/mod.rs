@@ -14,11 +14,15 @@
 
 pub use mp_core::contacts::{
     cache, cache_path, contact_to_vcard, filter, load_cache, matcher, observe_message, rank,
-    save_cache, save_rebuilt_cache, search, types, vcard, vcard_file_stem, CacheSave, Contact,
-    ContactIndex, ContactSource, ContactTier, MatchResult, MessageAddresses, EXTRACTOR_VERSION,
+    save_cache, save_rebuilt_cache, search, types, vcard, vcard_file_stem, with_cache_lock,
+    CacheSave, Contact, ContactIndex, ContactSource, ContactTier, MatchResult, MessageAddresses,
+    EXTRACTOR_VERSION,
 };
 
 mod extractor;
 pub mod hooks;
 
-pub use extractor::{build_index_for_account, build_index_for_account_until};
+pub use extractor::{
+    build_index_for_account, build_index_for_account_until, build_index_in, commit_rebuild_at,
+    Committed,
+};

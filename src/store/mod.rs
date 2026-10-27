@@ -244,14 +244,23 @@ impl Store {
 /// `rusqlite::Connection` is not `Sync` and the TUI clones account state
 /// across threads. This follows `crate::outbox::counts_for_account`.
 pub fn open_store(account: &str) -> Option<Store> {
-    let path = crate::config::store_path(account);
+    open_store_in(&crate::config::account_dir(account))
+}
+
+/// [`open_store`] for an account directory the caller already resolved, which
+/// is what a blocking task spawned off the caller's thread needs.
+pub fn open_store_in(account_dir: &std::path::Path) -> Option<Store> {
+    let path = crate::config::store_path_in(account_dir);
     if !path.exists() {
         return None;
     }
     match Store::open(&path) {
         Ok(store) => Some(store),
         Err(e) => {
-            warn!("[store] could not open the store for {account}: {e:#}");
+            warn!(
+                "[store] could not open the store at {}: {e:#}",
+                path.display()
+            );
             None
         }
     }

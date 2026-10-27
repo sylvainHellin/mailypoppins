@@ -15,7 +15,9 @@ pub mod rank;
 pub mod types;
 pub mod vcard;
 
-pub use cache::{cache_path, load_cache, save_cache, save_rebuilt_cache, CacheSave};
+pub use cache::{
+    cache_path, load_cache, save_cache, save_rebuilt_cache, with_cache_lock, CacheSave,
+};
 pub use extractor::{observe_message, MessageAddresses, EXTRACTOR_VERSION};
 pub use matcher::{search, MatchResult};
 pub use types::{Contact, ContactIndex, ContactSource, ContactTier};

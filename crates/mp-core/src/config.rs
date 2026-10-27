@@ -1675,7 +1675,13 @@ pub fn contacts_cache_path(account_name: &str) -> PathBuf {
 /// `<account_dir>/store.sqlite3`, the per-account SQLite store (see
 /// `src/store/`).
 pub fn store_path(account_name: &str) -> PathBuf {
-    account_dir(account_name).join("store.sqlite3")
+    store_path_in(&account_dir(account_name))
+}
+
+/// The message store inside an account directory already resolved, for a
+/// caller that resolved it on another thread than the one it runs on.
+pub fn store_path_in(account_dir: &Path) -> PathBuf {
+    account_dir.join("store.sqlite3")
 }
 
 /// `<account_dir>/blobs/`, the content-addressed blob store root.

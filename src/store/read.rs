@@ -656,6 +656,25 @@ pub fn list_account(store: &Store, account: &str) -> Result<Vec<MessageRow>> {
     Ok(out)
 }
 
+/// The account's rows above `after_id`, lowest id first: what was inserted
+/// after a walk whose highest row was `after_id`, which a contacts rebuild
+/// folds in before it commits (PERSO-234).
+pub fn list_account_after(store: &Store, account: &str, after_id: i64) -> Result<Vec<MessageRow>> {
+    let columns = row_columns();
+    let sql = format!(
+        "SELECT {columns} FROM messages
+         WHERE account = ?1 AND id > ?2
+         ORDER BY id ASC"
+    );
+    let mut stmt = store.conn().prepare(&sql)?;
+    let rows = stmt.query_map((account, after_id), row_from_sql)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.context("reading a message row")?);
+    }
+    Ok(out)
+}
+
 /// Message count per mailbox for one account, as one grouped query.
 ///
 /// Replaces the second directory walk the pre-store build ran at startup

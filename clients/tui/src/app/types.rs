@@ -1629,7 +1629,8 @@ pub struct ComposeWizard {
     pub suggestion_idx: usize,
     /// The contact index for the active account, loaded once when the
     /// wizard opens. `None` means "no cache yet — run rebuild first".
-    pub contacts: Option<mp_core::contacts::ContactIndex>,
+    /// Boxed so the index does not size every [`Overlay`] variant.
+    pub contacts: Option<Box<mp_core::contacts::ContactIndex>>,
 }
 
 impl ComposeWizard {

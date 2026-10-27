@@ -5462,6 +5462,7 @@ mod tests {
             contacts,
             built_at: "2026-04-08T00:00:00Z".into(),
             extractor_version: mp_core::contacts::EXTRACTOR_VERSION,
+            rows_through: 0,
         });
         app.contacts_view.loaded = true;
         app.view = View::Contacts;
@@ -5504,6 +5505,7 @@ mod tests {
                 contacts: on_disk,
                 built_at: String::new(),
                 extractor_version: mp_core::contacts::EXTRACTOR_VERSION,
+                rows_through: 0,
             },
         )
         .unwrap();

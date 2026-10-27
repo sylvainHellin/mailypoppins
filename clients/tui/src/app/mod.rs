@@ -631,9 +631,9 @@ impl App {
     /// The index a compose wizard completes recipients from: the one the
     /// Contacts view holds once the daemon has answered, else `None` with a
     /// request queued, which fills the wizard when it lands.
-    pub fn compose_contacts(&mut self) -> Option<mp_core::contacts::ContactIndex> {
+    pub fn compose_contacts(&mut self) -> Option<Box<mp_core::contacts::ContactIndex>> {
         if self.contacts_view.loaded {
-            return self.contacts_view.index.clone();
+            return self.contacts_view.index.clone().map(Box::new);
         }
         if !self.contacts_view.loading {
             self.request_contacts();
@@ -674,7 +674,7 @@ impl App {
             }
         }
         self.recompute_contact_matches();
-        let index = self.contacts_view.index.clone();
+        let index = self.contacts_view.index.clone().map(Box::new);
         if let Some(wizard) = self.compose_wizard_mut() {
             wizard.contacts = index;
         }

@@ -7,15 +7,24 @@
 //! Both are no-ops when the account has no `contacts-cache.json` yet, or has
 //! one another extractor version built ([`ContactIndex::is_current`]): the first
 //! `contact.search` or `contact.stats` rebuilds such a cache from the store,
-//! which already holds the rows the hook would have merged, so merging into it
-//! would only be thrown away.
+//! which already holds the rows the hook would have merged.
+//!
+//! Every merge is one load-merge-save under the cache's lock, the lock a
+//! rebuild's commit takes too ([`crate::contacts::commit_rebuild_at`]): that
+//! commit folds in every row inserted after its walk before it saves, and
+//! stamps the index with the highest row it folded
+//! ([`ContactIndex::rows_through`]), so a sync merge that waited for it skips
+//! the rows it already counted. A rebuild racing a sync neither loses a row
+//! nor counts one twice.
 //! All errors are logged at warning level but never propagated, so a broken
 //! contacts index never fails a send or sync.
 
 use std::path::Path;
 
 use crate::config::{account_dir, AccountConfig};
-use crate::contacts::{load_cache, observe_message, save_cache, ContactIndex, MessageAddresses};
+use crate::contacts::{
+    load_cache, observe_message, save_cache, with_cache_lock, ContactIndex, MessageAddresses,
+};
 use crate::sync::FreshObservation;
 use crate::types::{EmailDraft, MailboxRole};
 use chrono::Utc;
@@ -98,7 +107,13 @@ pub fn bump_after_sync_at(
         return None;
     }
     merge(root, account, "sync", |index, self_addr| {
-        for obs in observations {
+        // A row at or below the watermark is one the rebuild that wrote this
+        // cache walked: it raced this sync and has counted it already.
+        let fresh: Vec<&FreshObservation> = observations
+            .iter()
+            .filter(|obs| obs.row_id > index.rows_through)
+            .collect();
+        for obs in &fresh {
             observe_message(
                 &mut index.contacts,
                 self_addr,
@@ -112,61 +127,66 @@ pub fn bump_after_sync_at(
                 Some(obs.date.as_str()),
             );
         }
-        observations.len()
+        fresh.len()
     })
 }
 
-/// Load the cache under `root`, let `fold` merge into it, and write it back.
+/// Load the cache under `root`, let `fold` merge into it, and write it back,
+/// all under the cache's lock ([`with_cache_lock`]), so no other merge and no
+/// rebuild commit lands between the load and the save (PERSO-234).
 /// `fold` answers how many messages it merged. `None` for a missing, stale or
-/// unreadable cache, and for a write that failed.
+/// unreadable cache, for a fold that merged nothing, and for a write that
+/// failed.
 fn merge(
     root: &Path,
     account: &AccountConfig,
     what: &str,
     fold: impl FnOnce(&mut ContactIndex, &str) -> usize,
 ) -> Option<usize> {
-    let mut index = match load_cache(root) {
-        Ok(Some(index)) if index.is_current() => index,
-        Ok(Some(index)) => {
-            debug!(
-                "contacts hook: the cache for '{}' is from extractor version {}, skipping the {what} bump until a read rebuilds it",
-                account.name, index.extractor_version
-            );
+    with_cache_lock(root, || {
+        let mut index = match load_cache(root) {
+            Ok(Some(index)) if index.is_current() => index,
+            Ok(Some(index)) => {
+                debug!(
+                    "contacts hook: the cache for '{}' is from extractor version {}, skipping the {what} bump until a read rebuilds it",
+                    account.name, index.extractor_version
+                );
+                return None;
+            }
+            Ok(None) => {
+                debug!(
+                    "contacts hook: no cache for account '{}', skipping the {what} bump",
+                    account.name
+                );
+                return None;
+            }
+            Err(e) => {
+                warn!(
+                    "contacts hook: failed to load cache for '{}': {}",
+                    account.name, e
+                );
+                return None;
+            }
+        };
+        let merged = fold(&mut index, &account.own_address());
+        if merged == 0 {
             return None;
         }
-        Ok(None) => {
-            debug!(
-                "contacts hook: no cache for account '{}', skipping the {what} bump",
-                account.name
-            );
-            return None;
-        }
-        Err(e) => {
+        if let Err(e) = save_cache(root, &index) {
             warn!(
-                "contacts hook: failed to load cache for '{}': {}",
+                "contacts hook: failed to save cache for '{}': {}",
                 account.name, e
             );
             return None;
         }
-    };
-    let merged = fold(&mut index, &account.own_address());
-    if let Err(e) = save_cache(root, &index) {
-        warn!(
-            "contacts hook: failed to save cache for '{}': {}",
-            account.name, e
+        debug!(
+            "contacts hook: merged {merged} messages into '{}' index after a {what}",
+            account.name
         );
-        return None;
-    }
-    debug!(
-        "contacts hook: merged {merged} messages into '{}' index after a {what}",
-        account.name
-    );
-    Some(index.contacts.len())
+        Some(index.contacts.len())
+    })
 }
 
-/// Fixtures the contacts tests share with the runtime's: a fetched email and
-/// its ingest through the real ingest API, so a fixture row is exactly the
-/// row a sync writes.
 #[cfg(test)]
 pub(crate) mod fixture {
     use crate::config::AccountConfig;
@@ -500,5 +520,38 @@ mod tests {
         let kept = load_cache(&f.account_root).unwrap().unwrap();
         assert!(!kept.contacts.contains_key("alice@example.com"));
         assert_eq!(kept.extractor_version, 0, "left for the read to rebuild");
+    }
+
+    /// PERSO-234 review: merges that overlap lose nothing. Each one loads the
+    /// cache, folds one message in and writes it back; without one lock across
+    /// the three, two of them read the same file and the second write drops
+    /// the first's message.
+    #[test]
+    fn overlapping_merges_lose_no_message() {
+        let f = fixture("testaccount");
+        let account = mk_account();
+        seed_cache_from_store(&account, &f.account_root, "Zoe <zoe@example.com>");
+        const PER_THREAD: i64 = 40;
+        std::thread::scope(|scope| {
+            for thread in 0..4i64 {
+                let (root, account) = (&f.account_root, &account);
+                scope.spawn(move || {
+                    for n in 0..PER_THREAD {
+                        let observation = FreshObservation {
+                            row_id: 100 + thread * PER_THREAD + n,
+                            role: "inbox".into(),
+                            from: "Carol <carol@example.com>".into(),
+                            to: "me@example.com".into(),
+                            cc: None,
+                            bcc: None,
+                            date: "Mon, 01 Jan 2026 12:00:00 +0000".into(),
+                        };
+                        bump_after_sync_at(root, account, &[observation]);
+                    }
+                });
+            }
+        });
+        let loaded = load_cache(&f.account_root).unwrap().unwrap();
+        assert_eq!(loaded.contacts["carol@example.com"].received, 4 * 40);
     }
 }

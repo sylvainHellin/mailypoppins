@@ -49,12 +49,13 @@
 //! ## A cancelled rebuild writes nothing
 //!
 //! The rebuild observes its cancel token twice: inside the walk, every 256 rows
-//! (`STOP_EVERY_ROWS`) through [`build_index_for_account_until`], and once
+//! (`STOP_EVERY_ROWS`) through [`build_index_in`], and once
 //! more at the commit point, the
 //! cache write, through [`commit_point`]. A rebuild cancelled anywhere before
 //! that write drops the index it built and leaves the cache on disk exactly as
 //! it was; the registry has already settled it `cancelled`.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -67,9 +68,9 @@ use mp_protocol::RpcError;
 
 use crate::config::{AccountConfig, EmailSettings};
 use crate::contacts::{
-    build_index_for_account, build_index_for_account_until, cache_path, contact_to_vcard,
-    load_cache, save_cache, save_rebuilt_cache, search, vcard_file_stem, CacheSave, Contact,
-    ContactIndex, ContactSource, MatchResult, EXTRACTOR_VERSION,
+    build_index_for_account, build_index_in, cache_path, commit_rebuild_at, contact_to_vcard,
+    load_cache, search, vcard_file_stem, CacheSave, Contact, ContactIndex, ContactSource,
+    MatchResult, EXTRACTOR_VERSION,
 };
 
 use super::super::config::ConfigStore;
@@ -335,49 +336,40 @@ fn load_index(account: &AccountConfig) -> Result<Loaded, RpcError> {
 /// serves: the built index when it was written, the kept one when the guard
 /// refused it.
 ///
-/// A kept index another extractor version built is stamped current as it is kept:
-/// the guard judged the store's rebuild a failed read, and the next read would
-/// only walk the store again to reach the same verdict, on every keystroke of
-/// a recipient field. `mp contacts rebuild` still offers a rebuild to the
-/// guard whenever it is run, and the hooks keep the kept index up meanwhile.
+/// A kept index another extractor version built is stamped current as it is
+/// kept ([`commit_rebuild_at`]'s `stamp_kept`): the guard judged the store's
+/// rebuild a failed read, and the next read would only walk the store again
+/// to reach the same verdict, on every keystroke of a recipient field.
+/// `mp contacts rebuild` still offers a rebuild to the guard whenever it is
+/// run, and the hooks keep the kept index up meanwhile.
 fn settle_built(
-    root: &std::path::Path,
+    root: &Path,
     account: &AccountConfig,
     index: ContactIndex,
 ) -> anyhow::Result<Loaded> {
-    let found = index.contacts.len();
-    let (saved, kept) = match save_rebuilt_cache(root, &index)? {
+    let committed = commit_rebuild_at(root, account, index, true)?;
+    let (saved, contacts, kept) = match committed.saved {
         CacheSave::Written => {
             return Ok(Loaded {
-                written: Some(found),
-                index,
+                written: Some(committed.index.contacts.len()),
+                index: committed.index,
                 refused: None,
             })
         }
-        CacheSave::RefusedEmpty { kept } => ("refused_empty", kept),
-        CacheSave::RefusedShrunk { kept, .. } => ("refused_shrunk", kept),
+        CacheSave::RefusedEmpty { kept } => ("refused_empty", 0, kept),
+        CacheSave::RefusedShrunk { kept, rebuilt } => ("refused_shrunk", rebuilt, kept),
     };
     log::warn!(
         "[daemon] contacts rebuild for {} refused ({saved}); serving the cache at {}",
         account.name,
         cache_path(root).display()
     );
-    let served = match load_cache(root)? {
-        Some(mut kept) => {
-            if !kept.is_current() {
-                kept.extractor_version = EXTRACTOR_VERSION;
-                save_cache(root, &kept)?;
-            }
-            kept
-        }
-        None => index,
-    };
     Ok(Loaded {
-        index: served,
+        index: committed.index,
         written: None,
         refused: Some(RefusedRebuild {
             saved: saved.to_string(),
-            contacts: found as u64,
+            contacts: contacts as u64,
             kept: kept as u64,
         }),
     })
@@ -497,8 +489,10 @@ async fn rebuild(account: AccountConfig, handle: OperationHandle) {
         message: Some(account.name.clone()),
     });
     let token = handle.token.clone();
+    let root = crate::config::account_dir(&account.name);
+    let walk_root = root.clone();
     let walked = tokio::task::spawn_blocking(move || {
-        build_index_for_account_until(&account, || token.is_cancelled())
+        build_index_in(&walk_root, &account, || token.is_cancelled())
             .map(|index| index.map(|index| (account, index)))
     })
     .await;
@@ -511,7 +505,7 @@ async fn rebuild(account: AccountConfig, handle: OperationHandle) {
     if !commit_point("contact.rebuild", &handle.token).await {
         return;
     }
-    let saved = tokio::task::spawn_blocking(move || save_blocking(&account, &index)).await;
+    let saved = tokio::task::spawn_blocking(move || save_blocking(&root, &account, index)).await;
     match saved {
         Ok(Ok(result)) => {
             if result["saved"] == "written" {
@@ -529,20 +523,27 @@ async fn rebuild(account: AccountConfig, handle: OperationHandle) {
 }
 
 /// The blocking commit: offer the ranked index to the cache.
-fn save_blocking(account: &AccountConfig, index: &ContactIndex) -> anyhow::Result<Value> {
-    let root = crate::config::account_dir(&account.name);
-    let contacts = index.contacts.len();
-    let (saved, kept) = match save_rebuilt_cache(&root, index)? {
-        CacheSave::Written => ("written", 0),
-        CacheSave::RefusedEmpty { kept } => ("refused_empty", kept),
-        CacheSave::RefusedShrunk { kept, .. } => ("refused_shrunk", kept),
+///
+/// Through [`commit_rebuild_at`], which folds in the rows a sync inserted
+/// while the walk ran and holds the cache's lock to the save (PERSO-234).
+fn save_blocking(
+    root: &Path,
+    account: &AccountConfig,
+    index: ContactIndex,
+) -> anyhow::Result<Value> {
+    let rebuilt = index.contacts.len();
+    let committed = commit_rebuild_at(root, account, index, false)?;
+    let (saved, contacts, kept) = match committed.saved {
+        CacheSave::Written => ("written", committed.index.contacts.len(), 0),
+        CacheSave::RefusedEmpty { kept } => ("refused_empty", rebuilt, kept),
+        CacheSave::RefusedShrunk { kept, rebuilt } => ("refused_shrunk", rebuilt, kept),
     };
     Ok(json!({
         "account": account.name,
         "contacts": contacts,
         "kept": kept,
         "saved": saved,
-        "cache_path": cache_path(&root).display().to_string(),
+        "cache_path": cache_path(root).display().to_string(),
     }))
 }
 
@@ -568,6 +569,7 @@ mod tests {
                 contacts: Default::default(),
                 built_at: String::new(),
                 extractor_version: crate::contacts::EXTRACTOR_VERSION,
+                rows_through: 0,
             };
             for i in 0..n {
                 let address = format!("c{i}@example.com");

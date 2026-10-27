@@ -105,6 +105,7 @@ pub fn empty_index(account: &AccountConfig) -> ContactIndex {
         contacts: HashMap::new(),
         built_at: Utc::now().to_rfc3339(),
         extractor_version: EXTRACTOR_VERSION,
+        rows_through: 0,
     }
 }
 
