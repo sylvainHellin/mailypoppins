@@ -1,95 +1,113 @@
 //! Best-effort hooks that keep the contacts index fresh after send/sync.
 //!
-//! Both hooks are no-ops when the account has no `.contacts-cache.json` yet —
-//! the user must run `mp contacts rebuild` once to create the baseline.
+//! Both fold a message in through [`observe_message`], the rule the full
+//! rebuild applies to every row (PERSO-234), so an index kept up by the hooks
+//! holds what a rebuild of the same mail would.
+//!
+//! Both are no-ops when the account has no `contacts-cache.json` yet: the
+//! first `contact.search` or `contact.stats` builds it from the store, which
+//! already holds the rows the hook would have merged.
 //! All errors are logged at warning level but never propagated, so a broken
 //! contacts index never fails a send or sync.
 
+use std::path::Path;
+
 use crate::config::{account_dir, AccountConfig};
-use crate::contacts::{load_cache, observe, save_cache, ObservedIn};
+use crate::contacts::{load_cache, observe_message, save_cache, ContactIndex, MessageAddresses};
 use crate::sync::FreshObservation;
-use crate::types::EmailDraft;
-use chrono::{DateTime, Utc};
+use crate::types::{EmailDraft, MailboxRole};
+use chrono::Utc;
 use log::{debug, warn};
 
 /// Merge the recipients of a just-sent draft into the account's contact index.
 /// Answers how many contacts the index holds once it was written, `None` when
 /// nothing was written, so the daemon can announce the change.
+///
+/// The draft is the Sent copy the rebuild will later read back: its `From:`,
+/// `To:`, `Cc:` and `Bcc:` under the `sent` role, observed now.
 pub fn bump_after_send(account: &AccountConfig, draft: &EmailDraft) -> Option<usize> {
-    let root = account_dir(&account.name);
-    let mut index = match load_cache(&root) {
-        Ok(Some(idx)) => idx,
-        Ok(None) => {
-            debug!(
-                "contacts hook: no cache for account '{}', skipping send bump",
-                account.name
-            );
-            return None;
-        }
-        Err(e) => {
-            warn!(
-                "contacts hook: failed to load cache for '{}': {}",
-                account.name, e
-            );
-            return None;
-        }
+    let front = &draft.frontmatter;
+    let addresses = MessageAddresses {
+        from: front.from.as_deref(),
+        to: front.to.as_deref(),
+        cc: front.cc.as_deref(),
+        bcc: front.bcc.as_deref(),
     };
-
+    let blank = |h: Option<&str>| h.is_none_or(|h| h.trim().is_empty());
+    if blank(addresses.to) && blank(addresses.cc) && blank(addresses.bcc) {
+        return None;
+    }
     let now = Utc::now().to_rfc3339();
-    let mut obs: Vec<(ObservedIn, &str)> = Vec::new();
-    if let Some(ref to) = draft.frontmatter.to {
-        if !to.trim().is_empty() {
-            obs.push((ObservedIn::SentTo, to.as_str()));
-        }
-    }
-    if let Some(ref cc) = draft.frontmatter.cc {
-        if !cc.trim().is_empty() {
-            obs.push((ObservedIn::SentCc, cc.as_str()));
-        }
-    }
-    if let Some(ref bcc) = draft.frontmatter.bcc {
-        if !bcc.trim().is_empty() {
-            obs.push((ObservedIn::SentCc, bcc.as_str()));
-        }
-    }
-    if obs.is_empty() {
-        return None;
-    }
-
-    if let Err(e) = observe(&mut index, &account.default_from, &obs, &now) {
-        warn!(
-            "contacts hook: observe failed for '{}': {}",
-            account.name, e
-        );
-        return None;
-    }
-    if let Err(e) = save_cache(&root, &index) {
-        warn!(
-            "contacts hook: failed to save cache for '{}': {}",
-            account.name, e
-        );
-        return None;
-    }
-    Some(index.contacts.len())
+    merge(
+        &account_dir(&account.name),
+        account,
+        "send",
+        |index, self_addr| {
+            observe_message(
+                &mut index.contacts,
+                self_addr,
+                &MailboxRole::Sent,
+                &addresses,
+                Some(&now),
+            );
+            1
+        },
+    )
 }
 
-/// Merge freshly-fetched email headers into the account's contact index.
-/// Called after a successful `sync_mailboxes`.
+/// Merge the messages a sync just inserted into the account's contact index.
 /// Answers how many contacts the index holds once it was written, `None` when
 /// nothing was written, so the daemon can announce the change.
 pub fn bump_after_sync(
     account: &AccountConfig,
     observations: &[FreshObservation],
 ) -> Option<usize> {
+    bump_after_sync_at(&account_dir(&account.name), account, observations)
+}
+
+/// [`bump_after_sync`] against the account directory `root`, which a caller
+/// that runs it off its own thread resolves first.
+pub fn bump_after_sync_at(
+    root: &Path,
+    account: &AccountConfig,
+    observations: &[FreshObservation],
+) -> Option<usize> {
     if observations.is_empty() {
         return None;
     }
-    let root = account_dir(&account.name);
-    let mut index = match load_cache(&root) {
-        Ok(Some(idx)) => idx,
+    merge(root, account, "sync", |index, self_addr| {
+        for obs in observations {
+            observe_message(
+                &mut index.contacts,
+                self_addr,
+                &obs.role,
+                &MessageAddresses {
+                    from: Some(obs.from.as_str()),
+                    to: Some(obs.to.as_str()),
+                    cc: obs.cc.as_deref(),
+                    bcc: obs.bcc.as_deref(),
+                },
+                Some(obs.date.as_str()),
+            );
+        }
+        observations.len()
+    })
+}
+
+/// Load the cache under `root`, let `fold` merge into it, and write it back.
+/// `fold` answers how many messages it merged. `None` for a missing or
+/// unreadable cache, and for a write that failed.
+fn merge(
+    root: &Path,
+    account: &AccountConfig,
+    what: &str,
+    fold: impl FnOnce(&mut ContactIndex, &str) -> usize,
+) -> Option<usize> {
+    let mut index = match load_cache(root) {
+        Ok(Some(index)) => index,
         Ok(None) => {
             debug!(
-                "contacts hook: no cache for account '{}', skipping sync bump",
+                "contacts hook: no cache for account '{}', skipping the {what} bump",
                 account.name
             );
             return None;
@@ -102,54 +120,8 @@ pub fn bump_after_sync(
             return None;
         }
     };
-
-    let mut merged = 0usize;
-    for obs in observations {
-        let observed_at = rfc2822_to_rfc3339(&obs.date).unwrap_or_else(|| Utc::now().to_rfc3339());
-        let mut batch: Vec<(ObservedIn, &str)> = Vec::new();
-
-        // Which ObservedIn kind to use depends on the mailbox role.
-        // For "sent", the envelope `to:` is a true sent-to; cc is sent-cc.
-        // For inbox/archive/extra, every address (from/to/cc) counts as received.
-        if obs.role.is_sent() {
-            if !obs.to.trim().is_empty() {
-                batch.push((ObservedIn::SentTo, obs.to.as_str()));
-            }
-            if let Some(ref cc) = obs.cc {
-                if !cc.trim().is_empty() {
-                    batch.push((ObservedIn::SentCc, cc.as_str()));
-                }
-            }
-        } else {
-            // inbox / archive / extra → all fields fold into "received".
-            if !obs.from.trim().is_empty() {
-                batch.push((ObservedIn::Inbox, obs.from.as_str()));
-            }
-            if !obs.to.trim().is_empty() {
-                batch.push((ObservedIn::Inbox, obs.to.as_str()));
-            }
-            if let Some(ref cc) = obs.cc {
-                if !cc.trim().is_empty() {
-                    batch.push((ObservedIn::Inbox, cc.as_str()));
-                }
-            }
-        }
-        if batch.is_empty() {
-            continue;
-        }
-        if let Err(e) = observe(&mut index, &account.default_from, &batch, &observed_at) {
-            warn!(
-                "contacts hook: observe failed for '{}': {}",
-                account.name, e
-            );
-            continue;
-        }
-        merged += 1;
-    }
-    if merged == 0 {
-        return None;
-    }
-    if let Err(e) = save_cache(&root, &index) {
+    let merged = fold(&mut index, &account.own_address());
+    if let Err(e) = save_cache(root, &index) {
         warn!(
             "contacts hook: failed to save cache for '{}': {}",
             account.name, e
@@ -157,30 +129,116 @@ pub fn bump_after_sync(
         return None;
     }
     debug!(
-        "contacts hook: merged {} observations into '{}' index",
-        merged, account.name
+        "contacts hook: merged {merged} messages into '{}' index after a {what}",
+        account.name
     );
     Some(index.contacts.len())
 }
 
-fn rfc2822_to_rfc3339(s: &str) -> Option<String> {
-    if s.trim().is_empty() {
-        return None;
+/// Fixtures the contacts tests share with the runtime's: a fetched email and
+/// its ingest through the real ingest API, so a fixture row is exactly the
+/// row a sync writes.
+#[cfg(test)]
+pub(crate) mod fixture {
+    use crate::config::AccountConfig;
+    use crate::ingest::{ingest_message, IngestInput, IngestOutcome};
+    use crate::parse::FetchedEmail;
+    use crate::store::{BlobStore, Store};
+
+    /// An email with these headers and a fixed body.
+    pub fn email(
+        from: &str,
+        to: &str,
+        cc: Option<&str>,
+        subject: &str,
+        date: &str,
+        message_id: &str,
+    ) -> FetchedEmail {
+        FetchedEmail {
+            from: from.into(),
+            to: to.into(),
+            cc: cc.map(Into::into),
+            reply_to: None,
+            bcc: None,
+            subject: subject.into(),
+            date: date.into(),
+            body_text: "body".into(),
+            html_body: None,
+            has_attachments: false,
+            server_has_attachments: None,
+            message_id: Some(message_id.into()),
+            attachments: Vec::new(),
+            flags: Default::default(),
+            calendar_ics: None,
+            event: None,
+        }
     }
-    DateTime::parse_from_rfc2822(s)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
+
+    /// Ingest `email` into `account`'s store, under the data directory this
+    /// thread resolves.
+    pub fn ingest(
+        account: &AccountConfig,
+        mailbox: &str,
+        uid: i64,
+        email: &FetchedEmail,
+    ) -> IngestOutcome {
+        let store = Store::open(crate::config::store_path(&account.name)).unwrap();
+        let blobs = BlobStore::new(crate::config::blobs_dir(&account.name));
+        ingest_message(
+            &store,
+            &blobs,
+            &IngestInput {
+                account: &account.name,
+                mailbox,
+                uid,
+                email,
+                raw: None,
+            },
+        )
+        .unwrap()
+    }
+
+    /// The PERSO-234 correspondent, in the two messages that were all the
+    /// store held of him: his Outlook meeting accept, filed in the archive,
+    /// and the user's own forward to him, with the user on cc.
+    pub fn meeting_reply_and_own_forward(
+        account: &AccountConfig,
+    ) -> [(&'static str, FetchedEmail); 2] {
+        [
+            (
+                "archive",
+                email(
+                    "\"Hochmuth, Markus\" <Markus.Hochmuth@obermeyer-group.com>",
+                    "Sylvain Hellin <me@example.com>",
+                    None,
+                    "Angenommen: LOC Day",
+                    "Wed, 14 Oct 2026 07:59:05 +0000",
+                    "<accept-loc-day@obermeyer-group.com>",
+                ),
+            ),
+            (
+                "sent",
+                email(
+                    &account.default_from,
+                    "Markus.Hochmuth@obermeyer-group.com",
+                    Some(&account.default_from),
+                    "FW: LOC Round Table",
+                    "Tue, 20 Oct 2026 07:43:50 +0000",
+                    "<fw-round-table@example.com>",
+                ),
+            ),
+        ]
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::fixture::{email, ingest, meeting_reply_and_own_forward};
     use super::*;
-    use crate::config::{account_dir, MailboxMapping, MailboxesConfig};
-    use crate::contacts::{build_index_for_account, cache_path};
-    use crate::ingest::{ingest_message, IngestInput};
-    use crate::parse::FetchedEmail;
-    use crate::store::{BlobStore, Store};
+    use crate::config::{MailboxMapping, MailboxesConfig};
+    use crate::contacts::{build_index_for_account, cache_path, search, Contact};
     use crate::types::{EmailFrontmatter, EmailStatus};
+    use std::collections::{BTreeMap, HashMap};
     use std::path::PathBuf;
 
     /// Test fixture: point the data dir at a tempdir for this thread only
@@ -220,41 +278,16 @@ mod tests {
     /// Seed the fixture account's store with one received message, then build
     /// and persist the index from it, exactly as `mp contacts rebuild` does.
     /// The hooks merge into a real rebuilt cache, not into an empty one.
-    fn seed_cache_from_store(account: &AccountConfig, root: &std::path::Path, from: &str) {
-        let store = Store::open(crate::config::store_path(&account.name)).unwrap();
-        let blobs = BlobStore::new(crate::config::blobs_dir(&account.name));
-        let email = FetchedEmail {
-            from: from.into(),
-            to: account.default_from.clone(),
-            cc: None,
-            reply_to: None,
-            bcc: None,
-            subject: "Seed".into(),
-            date: "Fri, 02 Jan 2026 09:00:00 +0000".into(),
-            body_text: "body".into(),
-            html_body: None,
-            has_attachments: false,
-            server_has_attachments: None,
-            message_id: Some("<seed@example.com>".into()),
-            attachments: Vec::new(),
-            flags: Default::default(),
-            calendar_ics: None,
-            event: None,
-        };
-        ingest_message(
-            &store,
-            &blobs,
-            &IngestInput {
-                account: &account.name,
-                mailbox: "inbox",
-                uid: 1,
-                email: &email,
-                raw: None,
-            },
-        )
-        .unwrap();
-        drop(store);
-
+    fn seed_cache_from_store(account: &AccountConfig, root: &Path, from: &str) {
+        let seed = email(
+            from,
+            &account.default_from,
+            None,
+            "Seed",
+            "Fri, 02 Jan 2026 09:00:00 +0000",
+            "<seed@example.com>",
+        );
+        ingest(account, "inbox", 1, &seed);
         let index = build_index_for_account(account).unwrap();
         save_cache(root, &index).unwrap();
     }
@@ -292,6 +325,23 @@ mod tests {
         }
     }
 
+    /// Every contact by address, with what a rebuild and a hook must agree on.
+    fn by_address(contacts: &HashMap<String, Contact>) -> BTreeMap<String, String> {
+        contacts
+            .iter()
+            .map(|(address, c)| {
+                let fact = format!(
+                    "{:?} {:?} {} {}",
+                    c.tier_tuple(),
+                    c.display_name,
+                    c.first_seen,
+                    c.last_seen
+                );
+                (address.clone(), fact)
+            })
+            .collect()
+    }
+
     #[test]
     fn bump_after_send_is_noop_without_cache() {
         let f = fixture("testaccount");
@@ -314,8 +364,9 @@ mod tests {
         let seeded = load_cache(&f.account_root).unwrap().unwrap();
         assert_eq!(seeded.contacts.get("zoe@example.com").unwrap().received, 1);
 
-        let draft = mk_draft("Alice <alice@example.com>", Some("bob@example.com"));
-        bump_after_send(&account, &draft);
+        let mut draft = mk_draft("Alice <alice@example.com>", Some("bob@example.com"));
+        draft.frontmatter.bcc = Some("carol@example.com".into());
+        assert_eq!(bump_after_send(&account, &draft), Some(4));
 
         let loaded = load_cache(&f.account_root).unwrap().unwrap();
         let alice = loaded.contacts.get("alice@example.com").expect("alice");
@@ -323,6 +374,7 @@ mod tests {
         assert_eq!(alice.display_name, "Alice");
         let bob = loaded.contacts.get("bob@example.com").expect("bob");
         assert_eq!(bob.sent_cc, 1);
+        assert_eq!(loaded.contacts["carol@example.com"].sent_cc, 1, "bcc");
     }
 
     #[test]
@@ -337,6 +389,7 @@ mod tests {
                 from: "Carol <carol@example.com>".into(),
                 to: "me@example.com".into(),
                 cc: None,
+                bcc: None,
                 date: "Mon, 01 Jan 2026 12:00:00 +0000".into(),
             },
             FreshObservation {
@@ -344,6 +397,7 @@ mod tests {
                 from: "me@example.com".into(),
                 to: "Dave <dave@example.com>".into(),
                 cc: Some("Erin <erin@example.com>".into()),
+                bcc: None,
                 date: "Tue, 02 Jan 2026 12:00:00 +0000".into(),
             },
         ];
@@ -358,5 +412,39 @@ mod tests {
         assert_eq!(loaded.contacts.get("erin@example.com").unwrap().sent_cc, 1);
         // Self-address must be filtered.
         assert!(!loaded.contacts.contains_key("me@example.com"));
+    }
+
+    /// PERSO-234: the sync hook folds a message in exactly as the rebuild
+    /// folds its row, so an index kept up incrementally is the index a rebuild
+    /// of the same store produces. The account's `default_from` carries a
+    /// display name, which the hook once compared verbatim and so indexed the
+    /// user as their own contact.
+    #[test]
+    fn the_sync_hook_indexes_what_a_rebuild_indexes() {
+        let f = fixture("testaccount");
+        let mut account = mk_account();
+        account.default_from = "Sylvain Hellin <me@example.com>".into();
+        seed_cache_from_store(&account, &f.account_root, "Zoe <zoe@example.com>");
+
+        let mut observations = Vec::new();
+        for (uid, (mailbox, message)) in (10..).zip(meeting_reply_and_own_forward(&account)) {
+            assert!(ingest(&account, mailbox, uid, &message).inserted);
+            observations.push(FreshObservation::of(&MailboxRole::from(mailbox), &message));
+        }
+        bump_after_sync(&account, &observations).expect("the hook wrote the cache");
+
+        let incremental = load_cache(&f.account_root).unwrap().unwrap();
+        let hits = search(&incremental, "hochmuth", 20);
+        assert_eq!(hits.len(), 1, "searchable without a rebuild");
+        let markus = hits[0].contact;
+        assert_eq!(markus.address, "markus.hochmuth@obermeyer-group.com");
+        assert_eq!(markus.tier_tuple(), (1, 0, 1));
+        assert!(!incremental.contacts.contains_key("me@example.com"));
+
+        let rebuilt = build_index_for_account(&account).unwrap();
+        assert_eq!(
+            by_address(&incremental.contacts),
+            by_address(&rebuilt.contacts)
+        );
     }
 }

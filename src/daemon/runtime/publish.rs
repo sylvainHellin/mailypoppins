@@ -192,6 +192,7 @@ mod tests {
             status: String::new(),
             error: error.map(str::to_string),
             sync: None,
+            contacts: None,
         }
     }
 

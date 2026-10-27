@@ -1,31 +1,73 @@
 //! The engine-free half of the contact extractor (#0126, P5-U10b).
 //!
 //! Everything here observes addresses that a caller already has in hand: the
-//! `ObservedIn` hook kinds, the header parse, the self-address filter and the
-//! per-observation merge. The full rebuild, which reads `messages` through
-//! `store::read`, stays in the root crate beside the store and calls back into
-//! these; the items it needs are `pub` and `#[doc(hidden)]` for that reason
-//! and no other.
+//! header parse, the self-address filter and the per-observation merge. The
+//! full rebuild, which reads `messages` through `store::read`, stays in the
+//! root crate beside the store, and so do the send and sync hooks.
+//!
+//! All three fold a message in through one function, [`observe_message`]
+//! (PERSO-234): the hooks once had a rule of their own, which counted what
+//! the rebuild did not and filtered the user's own address where the rebuild
+//! did not, so an index kept up incrementally drifted from the one a rebuild
+//! produced. One rule cannot drift.
 
 use crate::config::AccountConfig;
 use crate::contacts::filter::is_usable_address;
 use crate::contacts::rank::{update_from_observation, Observation, ObservationField};
 use crate::contacts::types::{Contact, ContactIndex};
 use crate::types::MailboxRole;
-use anyhow::Result;
 use chrono::Utc;
 use mailparse::addrparse;
 use std::collections::HashMap;
 
-/// Public observation kind used by incremental-update hooks (send/sync).
-#[derive(Debug, Clone, Copy)]
-pub enum ObservedIn {
-    /// Recipient was in the `to:` field of a sent message.
-    SentTo,
-    /// Recipient was in the `cc:` or `bcc:` field of a sent message.
-    SentCc,
-    /// Address was observed in an inbox/archive message.
-    Inbox,
+/// The address headers of one message, as a store row or a fetched email
+/// carries them, verbatim.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MessageAddresses<'a> {
+    pub from: Option<&'a str>,
+    pub to: Option<&'a str>,
+    pub cc: Option<&'a str>,
+    pub bcc: Option<&'a str>,
+}
+
+impl<'a> MessageAddresses<'a> {
+    /// The headers in the order the ranker sees them; `Bcc:` counts as `Cc:`,
+    /// so a blind copy on sent mail is a `sent_cc` and anywhere else a
+    /// `received`, which is what [`Contact::sent_cc`] says it counts.
+    fn fields(&self) -> [(ObservationField, Option<&'a str>); 4] {
+        [
+            (ObservationField::From, self.from),
+            (ObservationField::To, self.to),
+            (ObservationField::Cc, self.cc),
+            (ObservationField::Cc, self.bcc),
+        ]
+    }
+}
+
+/// Fold one message into `contacts`: the one observation rule the full
+/// rebuild, the sync hook and the send hook all apply (PERSO-234).
+///
+/// `role` is the mailbox the message sits in, and only `sent` changes the
+/// ranking. `self_addr` is [`AccountConfig::own_address`], already
+/// lowercased, and is never a contact. `date` is the `Date:` header verbatim;
+/// an absent or unparseable one is observed at [`UNDATED_OBSERVED_AT`].
+pub fn observe_message(
+    contacts: &mut HashMap<String, Contact>,
+    self_addr: &str,
+    role: &MailboxRole,
+    addresses: &MessageAddresses<'_>,
+    date: Option<&str>,
+) {
+    let observed_at = date
+        .and_then(parse_date_to_rfc3339)
+        .unwrap_or_else(|| UNDATED_OBSERVED_AT.to_string());
+    for (field, raw) in addresses.fields() {
+        let Some(raw) = raw else { continue };
+        if raw.trim().is_empty() {
+            continue;
+        }
+        process_header(contacts, raw, field, role, &observed_at, self_addr);
+    }
 }
 
 /// The `observed_at` a row with an absent or unparseable `Date:` header gets.
@@ -40,6 +82,7 @@ pub enum ObservedIn {
 #[doc(hidden)]
 pub const UNDATED_OBSERVED_AT: &str = "1970-01-01T00:00:00+00:00";
 
+/// The index a rebuild starts from: no contacts, built now.
 #[doc(hidden)]
 pub fn empty_index(account: &AccountConfig) -> ContactIndex {
     ContactIndex {
@@ -49,8 +92,7 @@ pub fn empty_index(account: &AccountConfig) -> ContactIndex {
     }
 }
 
-#[doc(hidden)]
-pub fn process_header(
+fn process_header(
     contacts: &mut HashMap<String, Contact>,
     raw: &str,
     field: ObservationField,
@@ -100,67 +142,27 @@ fn flatten_addr(info: &mailparse::MailAddr) -> Vec<(String, String)> {
 ///
 /// Normalised to UTC because `first_seen` and `last_seen` are compared as
 /// strings, which orders instants only when they share an offset.
-#[doc(hidden)]
-pub fn parse_date_to_rfc3339(s: &str) -> Option<String> {
+fn parse_date_to_rfc3339(s: &str) -> Option<String> {
     let parsed = chrono::DateTime::parse_from_rfc3339(s)
         .or_else(|_| chrono::DateTime::parse_from_rfc2822(s))
         .ok()?;
     Some(parsed.with_timezone(&Utc).to_rfc3339())
 }
 
-/// Incremental update: merge a batch of address observations into an existing
-/// index. Hook point for send-post-success and sync-post-new-message updates.
-///
-/// Caller is responsible for persisting the index via `cache::save_cache`
-/// after calling this.
-pub fn observe(
-    index: &mut ContactIndex,
-    self_addr: &str,
-    observations: &[(ObservedIn, &str)],
-    observed_at: &str,
-) -> Result<()> {
-    let self_lc = self_addr.to_ascii_lowercase();
-    for (kind, raw_header) in observations {
-        if raw_header.trim().is_empty() {
-            continue;
-        }
-        let Ok(parsed) = addrparse(raw_header) else {
-            continue;
-        };
-        let (role, field): (MailboxRole, ObservationField) = match kind {
-            ObservedIn::SentTo => (MailboxRole::Sent, ObservationField::To),
-            ObservedIn::SentCc => (MailboxRole::Sent, ObservationField::Cc),
-            ObservedIn::Inbox => (MailboxRole::Inbox, ObservationField::From),
-        };
-        for info in parsed.iter() {
-            for (addr, name) in flatten_addr(info) {
-                let addr_lc = addr.to_ascii_lowercase();
-                if addr_lc == self_lc || !is_usable_address(&addr_lc) {
-                    continue;
-                }
-                let obs = Observation {
-                    address: addr_lc,
-                    display_name: name,
-                    mailbox_role: role.clone(),
-                    field,
-                    observed_at: observed_at.to_string(),
-                };
-                update_from_observation(&mut index.contacts, obs);
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn empty_index() -> ContactIndex {
-        ContactIndex {
-            account: "test".into(),
-            contacts: HashMap::new(),
-            built_at: Utc::now().to_rfc3339(),
+    const ME: &str = "me@example.com";
+
+    fn sent() -> MailboxRole {
+        MailboxRole::Sent
+    }
+
+    fn to(header: &str) -> MessageAddresses<'_> {
+        MessageAddresses {
+            to: Some(header),
+            ..Default::default()
         }
     }
 
@@ -169,134 +171,122 @@ mod tests {
     /// sighting and its display name wins.
     #[test]
     fn sightings_order_by_instant_across_offsets() {
-        let mut index = empty_index();
-        let pacific = parse_date_to_rfc3339("2026-01-01T20:00:00-08:00").unwrap();
-        let utc = parse_date_to_rfc3339("2026-01-02T01:00:00+00:00").unwrap();
-        for (name, at) in [("Pacific Alice", &pacific), ("Utc Alice", &utc)] {
-            observe(
-                &mut index,
-                "me@example.com",
-                &[(ObservedIn::Inbox, &format!("{name} <alice@example.com>"))],
-                at,
-            )
-            .unwrap();
+        let mut contacts = HashMap::new();
+        let pacific = "2026-01-01T20:00:00-08:00";
+        let utc = "2026-01-02T01:00:00+00:00";
+        for (name, at) in [("Pacific Alice", pacific), ("Utc Alice", utc)] {
+            let from = format!("{name} <alice@example.com>");
+            let addresses = MessageAddresses {
+                from: Some(&from),
+                ..Default::default()
+            };
+            observe_message(&mut contacts, ME, &MailboxRole::Inbox, &addresses, Some(at));
         }
-        let alice = &index.contacts["alice@example.com"];
-        assert_eq!(alice.last_seen, pacific);
-        assert_eq!(alice.first_seen, utc);
+        let alice = &contacts["alice@example.com"];
+        assert_eq!(alice.last_seen, parse_date_to_rfc3339(pacific).unwrap());
+        assert_eq!(alice.first_seen, parse_date_to_rfc3339(utc).unwrap());
         assert_eq!(alice.display_name, "Pacific Alice");
     }
 
+    /// A sent message's `To:` is a `sent_to`, its `Cc:` and `Bcc:` are each a
+    /// `sent_cc`; the same headers on received mail are all `received`.
     #[test]
-    fn observe_bumps_sent_to_counter() {
-        let mut index = empty_index();
-        observe(
-            &mut index,
-            "me@example.com",
-            &[(ObservedIn::SentTo, "Alice <alice@example.com>")],
-            "2026-04-08T00:00:00Z",
-        )
-        .unwrap();
+    fn the_role_and_the_field_pick_the_counter() {
+        let addresses = MessageAddresses {
+            from: Some(ME),
+            to: Some("Alice <alice@example.com>"),
+            cc: Some("bob@example.com"),
+            bcc: Some("carol@example.com"),
+        };
+        let mut contacts = HashMap::new();
+        observe_message(&mut contacts, ME, &sent(), &addresses, None);
+        let tuple = |c: &HashMap<String, Contact>, a: &str| c[a].tier_tuple();
+        assert_eq!(tuple(&contacts, "alice@example.com"), (1, 0, 0));
+        assert_eq!(contacts["alice@example.com"].display_name, "Alice");
+        assert_eq!(tuple(&contacts, "bob@example.com"), (0, 1, 0));
+        assert_eq!(tuple(&contacts, "carol@example.com"), (0, 1, 0));
 
-        let c: &Contact = index
-            .contacts
-            .get("alice@example.com")
-            .expect("alice added");
-        assert_eq!(c.sent_to, 1);
-        assert_eq!(c.sent_cc, 0);
-        assert_eq!(c.received, 0);
-        assert_eq!(c.display_name, "Alice");
-    }
-
-    #[test]
-    fn observe_skips_self_address() {
-        let mut index = empty_index();
-        observe(
-            &mut index,
-            "me@example.com",
-            &[(ObservedIn::SentTo, "me@example.com, bob@example.com")],
-            "2026-04-08T00:00:00Z",
-        )
-        .unwrap();
-
-        assert!(!index.contacts.contains_key("me@example.com"));
-        assert!(index.contacts.contains_key("bob@example.com"));
-    }
-
-    #[test]
-    fn observe_skips_noreply() {
-        let mut index = empty_index();
-        observe(
-            &mut index,
-            "me@example.com",
-            &[(ObservedIn::Inbox, "no-reply@example.com")],
-            "2026-04-08T00:00:00Z",
-        )
-        .unwrap();
-
-        assert!(index.contacts.is_empty());
-    }
-
-    #[test]
-    fn observe_accumulates_counts_across_calls() {
-        let mut index = empty_index();
-        for _ in 0..3 {
-            observe(
-                &mut index,
-                "me@example.com",
-                &[(ObservedIn::SentTo, "alice@example.com")],
-                "2026-04-08T00:00:00Z",
-            )
-            .unwrap();
+        let mut received = HashMap::new();
+        observe_message(&mut received, ME, &MailboxRole::Archive, &addresses, None);
+        for address in ["alice@example.com", "bob@example.com", "carol@example.com"] {
+            assert_eq!(tuple(&received, address), (0, 0, 1), "{address}");
         }
-        assert_eq!(index.contacts.get("alice@example.com").unwrap().sent_to, 3);
+    }
+
+    /// The user's own address is never a contact, in any field.
+    #[test]
+    fn the_self_address_is_skipped() {
+        let mut contacts = HashMap::new();
+        observe_message(
+            &mut contacts,
+            ME,
+            &sent(),
+            &MessageAddresses {
+                from: Some("Me <ME@example.com>"),
+                to: Some("me@example.com, bob@example.com"),
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(!contacts.contains_key(ME));
+        assert!(contacts.contains_key("bob@example.com"));
     }
 
     #[test]
-    fn observe_updates_last_seen_with_newer_timestamp() {
-        let mut index = empty_index();
-        observe(
-            &mut index,
-            "me@example.com",
-            &[(ObservedIn::SentTo, "Old Name <alice@example.com>")],
-            "2025-01-01T00:00:00Z",
-        )
-        .unwrap();
-        observe(
-            &mut index,
-            "me@example.com",
-            &[(ObservedIn::SentTo, "New Name <alice@example.com>")],
-            "2026-04-08T00:00:00Z",
-        )
-        .unwrap();
+    fn noreply_is_skipped() {
+        let mut contacts = HashMap::new();
+        let addresses = MessageAddresses {
+            from: Some("no-reply@example.com"),
+            ..Default::default()
+        };
+        observe_message(&mut contacts, ME, &MailboxRole::Inbox, &addresses, None);
+        assert!(contacts.is_empty());
+    }
 
-        let c = index.contacts.get("alice@example.com").unwrap();
+    #[test]
+    fn counts_accumulate_across_messages() {
+        let mut contacts = HashMap::new();
+        for _ in 0..3 {
+            observe_message(&mut contacts, ME, &sent(), &to("alice@example.com"), None);
+        }
+        assert_eq!(contacts["alice@example.com"].sent_to, 3);
+    }
+
+    #[test]
+    fn a_newer_sighting_renames_the_contact() {
+        let mut contacts = HashMap::new();
+        for (name, at) in [
+            ("Old Name", "2025-01-01T00:00:00Z"),
+            ("New Name", "2026-04-08T00:00:00Z"),
+        ] {
+            let header = format!("{name} <alice@example.com>");
+            observe_message(&mut contacts, ME, &sent(), &to(&header), Some(at));
+        }
+        let c = &contacts["alice@example.com"];
         assert_eq!(c.display_name, "New Name");
         assert_eq!(c.sent_to, 2);
     }
 
     #[test]
-    fn observe_handles_multi_recipient_header() {
-        let mut index = empty_index();
-        observe(
-            &mut index,
-            "me@example.com",
-            &[(
-                ObservedIn::SentTo,
-                "\"A User\" <a@x.com>, B User <b@x.com>, c@x.com",
-            )],
-            "2026-04-08T00:00:00Z",
-        )
-        .unwrap();
+    fn a_multi_recipient_header_yields_every_recipient() {
+        let mut contacts = HashMap::new();
+        let header = "\"A User\" <a@x.com>, B User <b@x.com>, c@x.com";
+        observe_message(&mut contacts, ME, &sent(), &to(header), None);
+        assert_eq!(contacts.len(), 3);
+        assert_eq!(contacts["a@x.com"].display_name, "A User");
+        assert_eq!(contacts["b@x.com"].display_name, "B User");
+    }
 
-        assert_eq!(index.contacts.len(), 3);
-        assert_eq!(
-            index.contacts.get("a@x.com").unwrap().display_name,
-            "A User"
-        );
-        assert_eq!(
-            index.contacts.get("b@x.com").unwrap().display_name,
-            "B User"
-        );
+    /// #0067: an absent or unparseable date is the constant, never "now", so
+    /// undated mail sinks in its tier and two folds of it agree.
+    #[test]
+    fn an_undated_message_is_observed_at_the_epoch() {
+        for date in [None, Some(""), Some("not a date")] {
+            let mut contacts = HashMap::new();
+            observe_message(&mut contacts, ME, &sent(), &to("frank@example.com"), date);
+            let frank = &contacts["frank@example.com"];
+            assert_eq!(frank.last_seen, UNDATED_OBSERVED_AT, "{date:?}");
+            assert_eq!(frank.first_seen, UNDATED_OBSERVED_AT, "{date:?}");
+        }
     }
 }

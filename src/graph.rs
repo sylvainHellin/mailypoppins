@@ -2381,6 +2381,9 @@ fn ingest_window(
                 crate::ingest::clear_ingest_failure(store, account_name, target.role.as_str(), uid);
                 if outcome.inserted {
                     result.saved += 1;
+                    result
+                        .fresh_observations
+                        .push(FreshObservation::of(&target.role, email));
                     if target.role.is_inbox()
                         && crate::ingest::arrived_after(newest_held, &email.date)
                     {
@@ -2392,13 +2395,6 @@ fn ingest_window(
                 if outcome.uid_rebound {
                     result.uid_rebound += 1;
                 }
-                result.fresh_observations.push(FreshObservation {
-                    role: target.role.clone(),
-                    from: email.from.clone(),
-                    to: email.to.clone(),
-                    cc: email.cc.clone(),
-                    date: email.date.clone(),
-                });
             }
             Err(e) => {
                 warn!(

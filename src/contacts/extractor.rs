@@ -8,10 +8,11 @@
 //! nothing and the caller cached the nothing over months of accumulated
 //! frecency.
 //!
-//! The observation half - the `ObservedIn` hook kinds, the header parse, the
-//! per-observation merge - reads nothing and lives in
-//! `mp_core::contacts::extractor` since #0126 (P5-U10b). This module is the
-//! store reader and calls back into it.
+//! The observation half - the header parse, the per-observation merge - reads
+//! nothing and lives in `mp_core::contacts::extractor` since #0126 (P5-U10b).
+//! This module is the store reader, and it folds each row in through
+//! [`observe_message`], the rule the send and sync hooks apply too
+//! (PERSO-234), so what a rebuild indexes the hooks index.
 
 use crate::config::AccountConfig;
 use crate::contacts::types::ContactIndex;
@@ -19,10 +20,7 @@ use crate::store::read::{self, MessageRow};
 use crate::store::{open_store, Store};
 use crate::types::MailboxRole;
 use anyhow::Result;
-use mp_core::contacts::extractor::{
-    empty_index, parse_date_to_rfc3339, process_header, UNDATED_OBSERVED_AT,
-};
-use mp_core::contacts::rank::ObservationField;
+use mp_core::contacts::extractor::{empty_index, observe_message, MessageAddresses};
 
 /// Build a full `ContactIndex` from the account's message store.
 ///
@@ -77,38 +75,26 @@ fn build_index_from_store_until(
         if n % STOP_EVERY_ROWS == 0 && stop() {
             return Ok(None);
         }
-        let role = MailboxRole::from(row.mailbox.as_str());
-        let observed_at = row
-            .date_display
-            .as_deref()
-            .and_then(parse_date_to_rfc3339)
-            .unwrap_or_else(|| UNDATED_OBSERVED_AT.to_string());
-        for (field, raw) in header_fields(&row) {
-            let Some(raw) = raw else { continue };
-            if raw.trim().is_empty() {
-                continue;
-            }
-            process_header(
-                &mut index.contacts,
-                raw,
-                field,
-                &role,
-                &observed_at,
-                &self_addr,
-            );
-        }
+        observe_message(
+            &mut index.contacts,
+            &self_addr,
+            &MailboxRole::from(row.mailbox.as_str()),
+            &row_addresses(&row),
+            row.date_display.as_deref(),
+        );
     }
 
     Ok(Some(index))
 }
 
-/// The from/to/cc headers of one row, in the order the ranker sees them.
-fn header_fields(row: &MessageRow) -> [(ObservationField, Option<&str>); 3] {
-    [
-        (ObservationField::From, row.from.as_deref()),
-        (ObservationField::To, row.to.as_deref()),
-        (ObservationField::Cc, row.cc.as_deref()),
-    ]
+/// The address headers of one row.
+fn row_addresses(row: &MessageRow) -> MessageAddresses<'_> {
+    MessageAddresses {
+        from: row.from.as_deref(),
+        to: row.to.as_deref(),
+        cc: row.cc.as_deref(),
+        bcc: row.bcc.as_deref(),
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +103,7 @@ mod tests {
     use crate::ingest::{ingest_message, IngestInput};
     use crate::parse::FetchedEmail;
     use crate::store::BlobStore;
+    use mp_core::contacts::extractor::UNDATED_OBSERVED_AT;
     use tempfile::TempDir;
 
     /// A store plus its blob store, both under one temp directory. No mailbox

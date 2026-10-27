@@ -84,7 +84,7 @@ use crate::config::AccountConfig;
 use crate::daemon::sync_outcome::from_sync_result;
 use crate::engine_lock::EngineLock;
 use crate::sync::tick::run_tick_with_drains;
-use crate::sync::{Stop, SyncResult};
+use crate::sync::{FreshObservation, Stop, SyncResult};
 
 use super::pool::{PooledRead, ReadPool};
 
@@ -192,6 +192,11 @@ pub struct TickOutcome {
     /// its own outcome once and two commits for one tick would be two facts
     /// where there was one.
     pub sync: Option<SyncCompleted>,
+    /// How many contacts the account's index holds once the tick folded in
+    /// the correspondents its pass inserted (PERSO-234), `None` when it wrote
+    /// no index; the committer announces it as `contact.changed`. `None` on a
+    /// joiner too, for the reason `sync` is.
+    pub contacts: Option<usize>,
 }
 
 /// What one [`AccountRuntime::drain`] did.
@@ -704,6 +709,7 @@ impl AccountRuntime {
                 status: String::new(),
                 error: None,
                 sync: None,
+                contacts: None,
             };
         }
 
@@ -724,6 +730,7 @@ impl AccountRuntime {
                     status: String::new(),
                     error: None,
                     sync: None,
+                    contacts: None,
                 };
             }
             match running.as_ref() {
@@ -747,6 +754,7 @@ impl AccountRuntime {
                         // The runner commits the tick's outcome; a joiner
                         // reports the same tick and must not commit it twice.
                         outcome.sync = None;
+                        outcome.contacts = None;
                         return outcome;
                     }
                     if receiver.changed().await.is_err() {
@@ -765,6 +773,7 @@ impl AccountRuntime {
                                 "the tick this call joined ended without an outcome".to_string(),
                             ),
                             sync: None,
+                            contacts: None,
                         };
                     }
                 }
@@ -787,6 +796,7 @@ impl AccountRuntime {
                     status: String::new(),
                     error: None,
                     sync: None,
+                    contacts: None,
                 }
             } else {
                 let outcome = self.run_tick(kind, stop).await;
@@ -886,7 +896,10 @@ impl AccountRuntime {
 
         let entered = lock(&phases).clone();
         let error = result.err().map(|e| format!("{e:#}"));
-        let (sync_result, failed_mutations) = self.report.take();
+        let (mut sync_result, failed_mutations) = self.report.take();
+        let contacts = self
+            .index_contacts(std::mem::take(&mut sync_result.fresh_observations))
+            .await;
         // A failed body owes nothing: whatever failed (the network, the
         // ceiling, a refused token) is what an immediate retry would hit again,
         // so the regular interval paces it.
@@ -908,7 +921,33 @@ impl AccountRuntime {
                 error.clone(),
             )),
             error,
+            contacts,
         }
+    }
+
+    /// Fold the correspondents a tick's pass inserted into the account's
+    /// contact index, through the hook the guarded pass and the first sync
+    /// use, and answer how many contacts the index then holds.
+    ///
+    /// The tick is how a running daemon syncs, and until PERSO-234 it was the
+    /// one pass that dropped its observations, so a correspondent first seen
+    /// in a scheduled or a watcher tick stayed unsearchable until a rebuild.
+    /// The cache read and write are blocking, so they run off the reactor; the
+    /// account directory is resolved here first, on the caller's thread.
+    async fn index_contacts(&self, observations: Vec<FreshObservation>) -> Option<usize> {
+        if observations.is_empty() {
+            return None;
+        }
+        let root = crate::config::account_dir(&self.account);
+        let cfg = Arc::clone(&self.config);
+        tokio::task::spawn_blocking(move || {
+            crate::contacts::hooks::bump_after_sync_at(&root, &cfg, &observations)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            warn!("[daemon] the contacts bump of {} {e}", self.account);
+            None
+        })
     }
 }
 
@@ -1746,5 +1785,99 @@ mod tests {
         assert!(EngineLock::try_acquire_at(&path, "alpha")
             .expect("readable")
             .is_some());
+    }
+
+    /// PERSO-234: the correspondents a tick's pass inserted are in the contact
+    /// index once the tick returns, without a rebuild, and the index is the one
+    /// a rebuild of the store would produce.
+    ///
+    /// The tick is how a running daemon syncs (the scheduler, the watcher, a
+    /// `mp sync` routed to the runtime), and it used to drop the pass's
+    /// observations: only the guarded pass and the first sync merged them, so
+    /// a meeting accept from someone the user had never written to stayed
+    /// unsearchable until `mp contacts rebuild`. The body ingests through the
+    /// real ingest API and records what the engine records, an observation
+    /// for every row it inserted; the second tick ingests the same two
+    /// messages again, inserts nothing, and must not count them twice.
+    #[tokio::test]
+    async fn a_tick_indexes_the_correspondents_its_pass_inserted() {
+        use crate::contacts::hooks::fixture::{email, ingest, meeting_reply_and_own_forward};
+        use crate::contacts::{build_index_for_account, load_cache, save_cache, search};
+        use crate::sync::FreshObservation;
+        use crate::types::MailboxRole;
+
+        let _data = crate::config::test_env::TestDataDir::new();
+        let mut cfg = config("alpha", 0);
+        cfg.default_from = "Sylvain Hellin <me@example.com>".into();
+        let dir = crate::config::account_dir(&cfg.name);
+        crate::config::create_private_dir_all(&dir).expect("the account directory");
+        let zoe = email(
+            "Zoe <zoe@example.com>",
+            &cfg.default_from,
+            None,
+            "Seed",
+            "Fri, 02 Jan 2026 09:00:00 +0000",
+            "<seed@example.com>",
+        );
+        ingest(&cfg, "inbox", 1, &zoe);
+        save_cache(&dir, &build_index_for_account(&cfg).expect("rebuilt")).expect("cached");
+
+        let report = TickReport::default();
+        let mut hooks = quiet_hooks();
+        hooks.body = {
+            let report = report.clone();
+            let cfg = cfg.clone();
+            Arc::new(move |_ctx: TickContext| {
+                let mut result = SyncResult::default();
+                for (uid, (mailbox, message)) in (10..).zip(meeting_reply_and_own_forward(&cfg)) {
+                    if ingest(&cfg, mailbox, uid, &message).inserted {
+                        result
+                            .fresh_observations
+                            .push(FreshObservation::of(&MailboxRole::from(mailbox), &message));
+                    }
+                }
+                *lock(&report.sync) = Some(result);
+                async { Ok(()) }.boxed()
+            })
+        };
+        let runtime = AccountRuntime::start_at_with_hooks(&dir, cfg.clone(), 1, hooks)
+            .expect("a free lock")
+            .with_report(report);
+
+        let facts = |index: &crate::contacts::ContactIndex| {
+            let mut facts: Vec<_> = index
+                .contacts
+                .values()
+                .map(|c| {
+                    let seen = (c.first_seen.clone(), c.last_seen.clone());
+                    (
+                        c.address.clone(),
+                        c.tier_tuple(),
+                        c.display_name.clone(),
+                        seen,
+                    )
+                })
+                .collect();
+            facts.sort();
+            facts
+        };
+        for tick in 1..=2 {
+            let outcome = runtime.tick(TickKind::Quick).await;
+            let cached = load_cache(&dir).expect("readable").expect("cached");
+            assert_eq!(
+                outcome.contacts,
+                (tick == 1).then_some(cached.contacts.len()),
+                "tick {tick}: only a tick that wrote the index announces it"
+            );
+            let hits = search(&cached, "hochmuth", 20);
+            assert_eq!(hits.len(), 1, "tick {tick}: searchable without a rebuild");
+            assert_eq!(
+                hits[0].contact.address,
+                "markus.hochmuth@obermeyer-group.com"
+            );
+            assert_eq!(hits[0].contact.tier_tuple(), (1, 0, 1), "tick {tick}");
+            let rebuilt = build_index_for_account(&cfg).expect("rebuilt");
+            assert_eq!(facts(&cached), facts(&rebuilt), "tick {tick}");
+        }
     }
 }

@@ -484,6 +484,9 @@ pub async fn run_sync(
                     );
                     if outcome.inserted {
                         result.saved += 1;
+                        result
+                            .fresh_observations
+                            .push(FreshObservation::of(&target.role, &email));
                     }
                     if outcome.uid_rebound {
                         result.uid_rebound += 1;
@@ -493,13 +496,6 @@ pub async fn run_sync(
                             .new_inbox_mail
                             .push(crate::notify::NewMailMeta::new(&email.from, &email.subject));
                     }
-                    result.fresh_observations.push(FreshObservation {
-                        role: target.role.clone(),
-                        from: email.from.clone(),
-                        to: email.to.clone(),
-                        cc: email.cc.clone(),
-                        date: email.date.clone(),
-                    });
                 }
                 Err(e) => {
                     warn!(
@@ -1276,7 +1272,7 @@ mod tests {
         assert_eq!(
             result.fresh_observations.len(),
             3,
-            "every ingest feeds the contacts hook"
+            "every inserted row feeds the contacts hook"
         );
         assert_eq!(fx.rows("inbox"), vec![101, 102]);
         assert_eq!(fx.rows("archive"), vec![55]);
@@ -1887,6 +1883,12 @@ mod tests {
         assert_eq!(
             result.saved, 0,
             "and neither copy is invented as a third row"
+        );
+        assert!(
+            result.fresh_observations.is_empty(),
+            "a row that followed its message is no new sighting: the contacts \
+             index counted it when it was inserted, as a rebuild counts it once \
+             (PERSO-234)"
         );
         assert_eq!(fx.rows("archive"), vec![7, 8]);
         assert_eq!(

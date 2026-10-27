@@ -537,7 +537,10 @@ pub async fn tick_and_commit_until(
     let runtime = runtimes.get(account)?;
     let outcome = runtime.tick_until(kind, Some(stop)).await;
     if !cancel.is_cancelled() {
-        commit_outcome(canonical, &outcome);
+        commit_outcome(canonical, account, &outcome);
+    } else {
+        // The index was written whether or not the sync is reported.
+        publish_contacts(canonical, account, &outcome);
     }
     Some(outcome)
 }
@@ -552,14 +555,24 @@ pub async fn commit_tick(
     kind: TickKind,
 ) -> TickOutcome {
     let outcome = runtime.tick(kind).await;
-    commit_outcome(canonical, &outcome);
+    commit_outcome(canonical, runtime.account(), &outcome);
     outcome
 }
 
-/// Publish a tick's `sync.completed`, when it carries one.
-fn commit_outcome(canonical: &CanonicalState, outcome: &TickOutcome) {
+/// Publish a tick's `sync.completed`, when it carries one, and the
+/// `contact.changed` of the index it wrote.
+fn commit_outcome(canonical: &CanonicalState, account: &str, outcome: &TickOutcome) {
     if let Some(sync) = outcome.sync.clone() {
         canonical.apply(Change::SyncCompleted(sync));
+    }
+    publish_contacts(canonical, account, outcome);
+}
+
+/// The `contact.changed` of a tick that folded its pass into the account's
+/// contact index (PERSO-234), as the guarded pass announces its own.
+fn publish_contacts(canonical: &CanonicalState, account: &str, outcome: &TickOutcome) {
+    if let Some(contacts) = outcome.contacts {
+        canonical.publish(super::methods::contact::contact_changed(account, contacts));
     }
 }
 

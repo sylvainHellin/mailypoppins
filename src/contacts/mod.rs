@@ -5,16 +5,17 @@
 //! tiebreaker, and caches results to JSON.
 //!
 //! Only the two halves that touch the engine are here: `extractor`'s store
-//! rebuild and [`hooks`], which observes what a sync or a send just saw.
+//! rebuild and [`hooks`], which observes what a sync or a send just saw, both
+//! through the one rule [`observe_message`] (PERSO-234).
 //! Everything else - the cache, the filter, the ranker, the matcher, the vCard
 //! writer and the observation merge - is [`mp_core::contacts`], re-exported
 //! whole below (#0126, P5-U10b), so `crate::contacts::load_cache` and every
 //! other old path resolves unchanged.
 
 pub use mp_core::contacts::{
-    cache, cache_path, contact_to_vcard, filter, load_cache, matcher, observe, rank, save_cache,
-    save_rebuilt_cache, search, types, vcard, vcard_file_stem, CacheSave, Contact, ContactIndex,
-    ContactSource, ContactTier, MatchResult, ObservedIn,
+    cache, cache_path, contact_to_vcard, filter, load_cache, matcher, observe_message, rank,
+    save_cache, save_rebuilt_cache, search, types, vcard, vcard_file_stem, CacheSave, Contact,
+    ContactIndex, ContactSource, ContactTier, MatchResult, MessageAddresses,
 };
 
 mod extractor;

@@ -121,8 +121,12 @@ impl SyncTarget {
     }
 }
 
-/// One fresh address observation captured from a newly-ingested message.
-/// Consumed by the contacts-index hook after a successful sync.
+/// The address headers of a message a sync inserted as a new row, for the
+/// contacts hook ([`crate::contacts::hooks::bump_after_sync`]) to fold in.
+///
+/// Only an inserted row is one: a row ingest updated or rebound to a new UID
+/// is a message the index has already counted, once, exactly as a rebuild
+/// counts each row once (PERSO-234).
 #[derive(Debug, Clone)]
 pub struct FreshObservation {
     /// The mailbox the message was ingested into.
@@ -130,8 +134,24 @@ pub struct FreshObservation {
     pub from: String,
     pub to: String,
     pub cc: Option<String>,
+    pub bcc: Option<String>,
     /// RFC-2822 date header from the email, or empty if unavailable.
     pub date: String,
+}
+
+impl FreshObservation {
+    /// The observation of `email`, just inserted under `role`: the headers a
+    /// rebuild reads back from the row ingest wrote.
+    pub fn of(role: &MailboxRole, email: &crate::parse::FetchedEmail) -> FreshObservation {
+        FreshObservation {
+            role: role.clone(),
+            from: email.from.clone(),
+            to: email.to.clone(),
+            cc: email.cc.clone(),
+            bcc: email.bcc.clone(),
+            date: email.date.clone(),
+        }
+    }
 }
 
 /// Results from a sync run.
