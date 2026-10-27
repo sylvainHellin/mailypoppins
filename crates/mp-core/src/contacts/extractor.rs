@@ -9,7 +9,8 @@
 //! (PERSO-234): the hooks once had a rule of their own, which counted what
 //! the rebuild did not and filtered the user's own address where the rebuild
 //! did not, so an index kept up incrementally drifted from the one a rebuild
-//! produced. One rule cannot drift.
+//! produced. One rule cannot drift, and [`EXTRACTOR_VERSION`] names it, so a
+//! cache an older rule built is rebuilt rather than kept.
 
 use crate::config::AccountConfig;
 use crate::contacts::filter::is_usable_address;
@@ -19,6 +20,19 @@ use crate::types::MailboxRole;
 use chrono::Utc;
 use mailparse::addrparse;
 use std::collections::HashMap;
+
+/// The version of the observation rule, stamped on every index a rebuild
+/// writes ([`ContactIndex::extractor_version`]).
+///
+/// Bump it whenever [`observe_message`] or the rebuild's walk changes what an
+/// index holds for the same mail: a cache whose stamp differs, a missing
+/// stamp included, was built by another rule, and the first read of it
+/// rebuilds it before it answers (PERSO-234). Without it a reinstall that
+/// taught the extractor something kept the old, thinner cache for ever,
+/// because a cache was only ever built when the file was missing.
+///
+/// 1: PERSO-234, one rule for the rebuild and both hooks, `Bcc:` observed.
+pub const EXTRACTOR_VERSION: u32 = 1;
 
 /// The address headers of one message, as a store row or a fetched email
 /// carries them, verbatim.
@@ -82,13 +96,15 @@ pub fn observe_message(
 #[doc(hidden)]
 pub const UNDATED_OBSERVED_AT: &str = "1970-01-01T00:00:00+00:00";
 
-/// The index a rebuild starts from: no contacts, built now.
+/// The index a rebuild starts from: no contacts, built now, stamped with the
+/// rule that is about to fill it.
 #[doc(hidden)]
 pub fn empty_index(account: &AccountConfig) -> ContactIndex {
     ContactIndex {
         account: account.name.clone(),
         contacts: HashMap::new(),
         built_at: Utc::now().to_rfc3339(),
+        extractor_version: EXTRACTOR_VERSION,
     }
 }
 
@@ -288,5 +304,17 @@ mod tests {
             assert_eq!(frank.last_seen, UNDATED_OBSERVED_AT, "{date:?}");
             assert_eq!(frank.first_seen, UNDATED_OBSERVED_AT, "{date:?}");
         }
+    }
+
+    /// A rebuild's empty index carries the current rule's stamp.
+    #[test]
+    fn an_empty_index_is_stamped_with_the_current_rule() {
+        let account = AccountConfig {
+            name: "alice".into(),
+            ..Default::default()
+        };
+        let index = empty_index(&account);
+        assert_eq!(index.extractor_version, EXTRACTOR_VERSION);
+        assert!(index.is_current());
     }
 }

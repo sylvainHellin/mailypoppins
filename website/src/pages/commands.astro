@@ -96,7 +96,7 @@ const daemonCommands = [
 
 const contactsCommands = [
   { command: 'mp contacts search [<query>] [--parsable|--json] [-n N]', description: 'Fuzzy-search the contact index by name and email; --parsable emits tab-delimited email/name lines for mutt, aerc or vim, --json one JSON object with the counts (default limit: 20)' },
-  { command: 'mp contacts rebuild', description: 'Rebuild the contact index from the local message store (every account unless -A names one)' },
+  { command: 'mp contacts rebuild', description: 'Rebuild the contact index from the local message store now (every account unless -A names one)' },
   { command: 'mp contacts stats', description: 'Show contact index statistics' },
 ];
 
@@ -345,6 +345,15 @@ eval "$(mp completions bash)"`} lang="sh" theme={codeTheme} />
     <section>
       <h2 id="contacts-commands">Contacts Commands</h2>
       <CommandTable commands={contactsCommands} />
+      <p>
+        The contact index is a cache per account, <code>contacts-cache.json</code> in the
+        account's data directory, ranked from the From, To, Cc and Bcc headers of the stored mail.
+        Every sync and every send folds the mail it saw into it.
+        The first search of an account, from the CLI, the TUI or the desktop app, builds it before
+        answering, and rebuilds it first when another version of mailypoppins built it, so a
+        reinstall never keeps an index the current rules would not produce.
+        <code>mp contacts rebuild</code> rebuilds it on demand.
+      </p>
     </section>
 
     <section>

@@ -513,6 +513,7 @@ pub fn decode_contacts(account: &str, answer: &Value) -> ContactsAnswer {
         account: account.to_string(),
         contacts,
         built_at: String::new(),
+        extractor_version: mp_core::contacts::EXTRACTOR_VERSION,
     });
     ContactsAnswer { index, refused }
 }

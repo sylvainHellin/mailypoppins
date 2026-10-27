@@ -478,6 +478,14 @@ enum Commands {
         action: ConfigAction,
     },
     /// Contact index operations
+    #[command(after_help = "\
+The index is a cache per account, `contacts-cache.json` in the account's data
+directory, ranked from the From, To, Cc and Bcc headers of the stored mail.
+Every sync and every send folds the mail it saw into it. The first search or
+stats of an account builds it before answering, and rebuilds it first when
+another mp version's extractor built it, so a reinstall never keeps an index
+the current rules would not produce; the CLI, the TUI and the desktop app
+read it the same way. `mp contacts rebuild` rebuilds it on demand.")]
     Contacts {
         #[command(subcommand)]
         action: ContactsAction,
@@ -770,7 +778,7 @@ enum ContactsAction {
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
     },
-    /// Rebuild the contact index from the local message store (every
+    /// Rebuild the contact index from the local message store now (every
     /// configured account unless `-A` names one)
     Rebuild,
     /// Show index statistics

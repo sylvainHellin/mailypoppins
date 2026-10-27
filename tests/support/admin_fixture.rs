@@ -29,7 +29,7 @@
 //! # Why the contact index is prebuilt, and built by the oracle
 //!
 //! `mp contacts search` and `mp contacts stats` build the index on demand when
-//! no cache is there ([`contacts_cmd::load_or_build`]), so the *first* of the
+//! no current cache is there (the daemon's `load_index`), so the *first* of the
 //! two binaries in a parity row would write the cache and the second would
 //! read it. That alone is survivable, but `mp contacts stats` prints
 //! `Built at: <timestamp>`, which is the moment the index was built: two runs
@@ -524,7 +524,27 @@ fn prebuild_contacts(root: &Path) {
             "the prebuild wrote no cache at {}",
             contacts_cache(root, account).display()
         );
+        stamp_current(&contacts_cache(root, account));
     }
+}
+
+/// Stamp an oracle-built cache with this build's extractor version.
+///
+/// The oracle predates the stamp (PERSO-234), and a cache without one is
+/// rebuilt by the daemon's first read, which would move `built_at` between
+/// the two binaries of a parity row: the very difference the prebuild exists
+/// to keep out. The fixture's rows carry nothing the two rules index
+/// differently, so the stamp claims nothing the oracle's index does not hold.
+fn stamp_current(path: &Path) {
+    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let mut value: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    value["extractor_version"] = mailypoppins::contacts::EXTRACTOR_VERSION.into();
+    fs::write(
+        path,
+        serde_json::to_string_pretty(&value).expect("serialise"),
+    )
+    .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
 // ---------------------------------------------------------------------------

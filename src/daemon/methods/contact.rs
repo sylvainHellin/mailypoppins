@@ -11,10 +11,15 @@
 //!
 //! Every write of an account's index is announced as `contact.changed`
 //! `{account, contacts}` (the daemon leftovers, 2026-10-22): a rebuild the
-//! cache guard let through, the build a search ran because there was no
-//! index, and the bump a sync or a send gives the addresses it saw
+//! cache guard let through, the build a read ran because there was no
+//! current index, and the bump a sync or a send gives the addresses it saw
 //! ([`contact_changed`]). A search whose own build the guard refused answers
 //! the kept index and says so in `rebuild`, `null` otherwise.
+//!
+//! The two reads build the index before they answer when the account has no
+//! cache, and when its cache was built by another extractor version than this
+//! binary's (PERSO-234, [`EXTRACTOR_VERSION`]): the first contacts read after
+//! an install that changed the rule indexes the store, from every client.
 //!
 //! `contact.vcard_draft` is the TUI's and the desktop's `v`: a draft addressed
 //! to the contact, subject `Contact: <name>`, no signature, with the contact's
@@ -63,8 +68,8 @@ use mp_protocol::RpcError;
 use crate::config::{AccountConfig, EmailSettings};
 use crate::contacts::{
     build_index_for_account, build_index_for_account_until, cache_path, contact_to_vcard,
-    load_cache, save_rebuilt_cache, search, vcard_file_stem, CacheSave, Contact, ContactIndex,
-    ContactSource, MatchResult,
+    load_cache, save_cache, save_rebuilt_cache, search, vcard_file_stem, CacheSave, Contact,
+    ContactIndex, ContactSource, MatchResult, EXTRACTOR_VERSION,
 };
 
 use super::super::config::ConfigStore;
@@ -289,22 +294,38 @@ struct Loaded {
     refused: Option<RefusedRebuild>,
 }
 
-/// The cached index, built on demand when there is none.
+/// The cached index, built before the read answers when there is none or
+/// when another extractor version built it.
 ///
-/// [`crate::contacts_cmd`]'s `load_or_build`, moved: the guard that refuses to
-/// replace a populated cache with a thin rebuild (#0067) keeps what is on
-/// disk, so a refusal shows the disk rather than the rebuild that was just
-/// refused, and says so in [`Loaded::refused`], which `contact.search`
-/// answers as `rebuild` so a client can tell the user.
+/// Every client reads the index through here (`mp contacts search` and
+/// `stats`, the TUI's contacts view and recipient completion, the desktop's),
+/// so the first read after an install that changed the observation rule
+/// rebuilds the cache before it answers (PERSO-234): a cache whose
+/// [`ContactIndex::extractor_version`] is not [`EXTRACTOR_VERSION`], a cache
+/// written before the stamp existed included, was built by another rule, and
+/// until the stamp existed it was kept for ever.
+///
+/// The guard that refuses to replace a populated cache with a thin rebuild
+/// (#0067) keeps what is on disk, so a refusal shows the disk rather than the
+/// rebuild that was just refused, and says so in [`Loaded::refused`], which
+/// `contact.search` answers as `rebuild` so a client can tell the user.
 fn load_index(account: &AccountConfig) -> Result<Loaded, RpcError> {
     let root = crate::config::account_dir(&account.name);
     let opening = |e: anyhow::Error| internal(format!("{e:#}"));
-    if let Some(index) = load_cache(&root).map_err(opening)? {
-        return Ok(Loaded {
-            index,
-            written: None,
-            refused: None,
-        });
+    match load_cache(&root).map_err(opening)? {
+        Some(index) if index.is_current() => {
+            return Ok(Loaded {
+                index,
+                written: None,
+                refused: None,
+            })
+        }
+        Some(stale) => log::info!(
+            "[daemon] the contacts cache of {} is from extractor version {} (current {EXTRACTOR_VERSION}); rebuilding it",
+            account.name,
+            stale.extractor_version
+        ),
+        None => {}
     }
     let index = build_index_for_account(account).map_err(opening)?;
     settle_built(&root, account, index).map_err(opening)
@@ -313,6 +334,12 @@ fn load_index(account: &AccountConfig) -> Result<Loaded, RpcError> {
 /// Offer an index a read built to the cache, and answer what the read then
 /// serves: the built index when it was written, the kept one when the guard
 /// refused it.
+///
+/// A kept index another extractor version built is stamped current as it is kept:
+/// the guard judged the store's rebuild a failed read, and the next read would
+/// only walk the store again to reach the same verdict, on every keystroke of
+/// a recipient field. `mp contacts rebuild` still offers a rebuild to the
+/// guard whenever it is run, and the hooks keep the kept index up meanwhile.
 fn settle_built(
     root: &std::path::Path,
     account: &AccountConfig,
@@ -335,8 +362,18 @@ fn settle_built(
         account.name,
         cache_path(root).display()
     );
+    let served = match load_cache(root)? {
+        Some(mut kept) => {
+            if !kept.is_current() {
+                kept.extractor_version = EXTRACTOR_VERSION;
+                save_cache(root, &kept)?;
+            }
+            kept
+        }
+        None => index,
+    };
     Ok(Loaded {
-        index: load_cache(root)?.unwrap_or(index),
+        index: served,
         written: None,
         refused: Some(RefusedRebuild {
             saved: saved.to_string(),
@@ -530,6 +567,7 @@ mod tests {
                 account: "work".to_string(),
                 contacts: Default::default(),
                 built_at: String::new(),
+                extractor_version: crate::contacts::EXTRACTOR_VERSION,
             };
             for i in 0..n {
                 let address = format!("c{i}@example.com");
@@ -566,6 +604,103 @@ mod tests {
         let written = settle_built(fresh.path(), &account, index(3)).expect("settled");
         assert_eq!(written.written, Some(3));
         assert_eq!(written.refused, None);
+    }
+
+    /// An account whose store holds Zoe, and the PERSO-234 correspondent in
+    /// the two messages that were all the store held of him.
+    fn account_with_mail() -> AccountConfig {
+        use crate::contacts::hooks::fixture::{email, ingest, meeting_reply_and_own_forward};
+        let account = AccountConfig {
+            name: "work".to_string(),
+            default_from: "Sylvain Hellin <me@example.com>".to_string(),
+            ..Default::default()
+        };
+        crate::config::create_private_dir_all(crate::config::account_dir(&account.name))
+            .expect("the account directory");
+        let zoe = email(
+            "Zoe <zoe@example.com>",
+            &account.default_from,
+            None,
+            "Seed",
+            "Fri, 02 Jan 2026 09:00:00 +0000",
+            "<seed@example.com>",
+        );
+        ingest(&account, "inbox", 1, &zoe);
+        for (uid, (mailbox, message)) in (10..).zip(meeting_reply_and_own_forward(&account)) {
+            ingest(&account, mailbox, uid, &message);
+        }
+        account
+    }
+
+    /// A cache of `addresses`, stamped `version`, under the account directory.
+    fn cache_of(account: &AccountConfig, addresses: &[String], version: u32) {
+        let mut index = ContactIndex {
+            account: account.name.clone(),
+            extractor_version: version,
+            ..Default::default()
+        };
+        for address in addresses {
+            index.contacts.insert(
+                address.clone(),
+                Contact {
+                    address: address.clone(),
+                    display_name: String::new(),
+                    sent_to: 0,
+                    sent_cc: 0,
+                    received: 1,
+                    first_seen: String::new(),
+                    last_seen: String::new(),
+                    source: ContactSource::default(),
+                },
+            );
+        }
+        let root = crate::config::account_dir(&account.name);
+        crate::contacts::save_cache(&root, &index).expect("cached");
+    }
+
+    /// PERSO-234: a cache an older extractor built, here one written before
+    /// the stamp existed and missing the correspondent, is rebuilt by the
+    /// first read before it answers, and the rebuilt cache is served as it is
+    /// by the next read.
+    #[test]
+    fn a_read_rebuilds_a_cache_another_extractor_built_before_it_answers() {
+        let _data = crate::config::test_env::TestDataDir::new();
+        let account = account_with_mail();
+        cache_of(&account, &["zoe@example.com".to_string()], 0);
+
+        let first = load_index(&account).expect("loaded");
+        assert_eq!(first.written, Some(2), "rebuilt and written");
+        assert_eq!(first.refused, None);
+        let hits = search(&first.index, "hochmuth", 20);
+        assert_eq!(hits.len(), 1, "the first read already finds him");
+        let root = crate::config::account_dir(&account.name);
+        let on_disk = load_cache(&root).expect("readable").expect("cached");
+        assert!(on_disk.is_current(), "stamped with this extractor");
+
+        let second = load_index(&account).expect("loaded");
+        assert_eq!(second.written, None, "a current cache is served as it is");
+        assert_eq!(second.index.contacts.len(), 2);
+    }
+
+    /// An upgrade rebuild the guard refuses serves the kept cache and stamps
+    /// it, so the next read does not walk the store again to reach the same
+    /// verdict.
+    #[test]
+    fn a_refused_upgrade_is_not_retried_on_every_read() {
+        let _data = crate::config::test_env::TestDataDir::new();
+        let account = account_with_mail();
+        let many: Vec<String> = (0..20).map(|i| format!("c{i}@example.com")).collect();
+        cache_of(&account, &many, 0);
+
+        let first = load_index(&account).expect("loaded");
+        assert_eq!(first.index.contacts.len(), 20, "the kept cache answers");
+        assert_eq!(
+            first.refused.map(|r| r.saved),
+            Some("refused_shrunk".to_string())
+        );
+        let second = load_index(&account).expect("loaded");
+        assert_eq!((second.written, second.refused), (None, None));
+        assert_eq!(second.index.contacts.len(), 20);
     }
 
     /// The array is the family, in method-name order, and every one of it is

@@ -60,4 +60,17 @@ pub struct ContactIndex {
     pub contacts: HashMap<String, Contact>,
     /// RFC-3339 timestamp of the most recent full rebuild.
     pub built_at: String,
+    /// The [`EXTRACTOR_VERSION`](crate::contacts::extractor::EXTRACTOR_VERSION)
+    /// of the rule that built this index (PERSO-234). A cache written before
+    /// the stamp existed reads as 0, which no rule ever had, so it is stale.
+    #[serde(default)]
+    pub extractor_version: u32,
+}
+
+impl ContactIndex {
+    /// Whether the current observation rule built this index, which is what
+    /// lets a read serve it instead of rebuilding it first.
+    pub fn is_current(&self) -> bool {
+        self.extractor_version == crate::contacts::extractor::EXTRACTOR_VERSION
+    }
 }

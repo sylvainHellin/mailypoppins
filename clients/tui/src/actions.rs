@@ -2823,6 +2823,7 @@ mod tests {
             account: "work".to_string(),
             contacts: Default::default(),
             built_at: String::new(),
+            extractor_version: mp_core::contacts::EXTRACTOR_VERSION,
         };
         let root = mp_core::config::account_dir("work");
         std::fs::create_dir_all(&root).unwrap();

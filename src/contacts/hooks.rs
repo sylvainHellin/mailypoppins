@@ -4,9 +4,11 @@
 //! rebuild applies to every row (PERSO-234), so an index kept up by the hooks
 //! holds what a rebuild of the same mail would.
 //!
-//! Both are no-ops when the account has no `contacts-cache.json` yet: the
-//! first `contact.search` or `contact.stats` builds it from the store, which
-//! already holds the rows the hook would have merged.
+//! Both are no-ops when the account has no `contacts-cache.json` yet, or has
+//! one another extractor version built ([`ContactIndex::is_current`]): the first
+//! `contact.search` or `contact.stats` rebuilds such a cache from the store,
+//! which already holds the rows the hook would have merged, so merging into it
+//! would only be thrown away.
 //! All errors are logged at warning level but never propagated, so a broken
 //! contacts index never fails a send or sync.
 
@@ -95,7 +97,7 @@ pub fn bump_after_sync_at(
 }
 
 /// Load the cache under `root`, let `fold` merge into it, and write it back.
-/// `fold` answers how many messages it merged. `None` for a missing or
+/// `fold` answers how many messages it merged. `None` for a missing, stale or
 /// unreadable cache, and for a write that failed.
 fn merge(
     root: &Path,
@@ -104,7 +106,14 @@ fn merge(
     fold: impl FnOnce(&mut ContactIndex, &str) -> usize,
 ) -> Option<usize> {
     let mut index = match load_cache(root) {
-        Ok(Some(index)) => index,
+        Ok(Some(index)) if index.is_current() => index,
+        Ok(Some(index)) => {
+            debug!(
+                "contacts hook: the cache for '{}' is from extractor version {}, skipping the {what} bump until a read rebuilds it",
+                account.name, index.extractor_version
+            );
+            return None;
+        }
         Ok(None) => {
             debug!(
                 "contacts hook: no cache for account '{}', skipping the {what} bump",
@@ -446,5 +455,23 @@ mod tests {
             by_address(&incremental.contacts),
             by_address(&rebuilt.contacts)
         );
+    }
+
+    /// A cache another extractor version built takes no bump: the first read
+    /// rebuilds it from the store, which already holds the message.
+    #[test]
+    fn a_stale_cache_takes_no_bump() {
+        let f = fixture("testaccount");
+        let account = mk_account();
+        seed_cache_from_store(&account, &f.account_root, "Zoe <zoe@example.com>");
+        let mut stale = load_cache(&f.account_root).unwrap().unwrap();
+        stale.extractor_version = 0;
+        save_cache(&f.account_root, &stale).unwrap();
+
+        let draft = mk_draft("Alice <alice@example.com>", None);
+        assert_eq!(bump_after_send(&account, &draft), None);
+        let kept = load_cache(&f.account_root).unwrap().unwrap();
+        assert!(!kept.contacts.contains_key("alice@example.com"));
+        assert_eq!(kept.extractor_version, 0, "left for the read to rebuild");
     }
 }

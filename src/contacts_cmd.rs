@@ -4,16 +4,14 @@
 //! Since the admin slice the index itself is the daemon's: `contact.search`,
 //! `contact.stats` and `contact.rebuild` answer with [`ContactRow`]s and the
 //! verdict a rebuild reached, and every literal below is printed once, here,
-//! whichever process did the reading.
+//! whichever process did the reading. Loading the cache, and building it
+//! first when it is missing or another extractor version built it, is the
+//! daemon's `load_index` (`src/daemon/methods/contact.rs`).
 
-use crate::config::{account_dir, AccountConfig, GlobalConfig};
-use crate::contacts::{
-    build_index_for_account, cache_path, load_cache, save_rebuilt_cache, search, CacheSave,
-    Contact, ContactIndex,
-};
-use anyhow::{anyhow, Result};
+use crate::contacts::{CacheSave, Contact};
+use anyhow::Result;
 use colored::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// One ranked contact, as the listing renders it.
 ///
@@ -40,26 +38,6 @@ impl From<&Contact> for ContactRow {
             received: contact.received,
         }
     }
-}
-
-pub fn handle_search(
-    config: &GlobalConfig,
-    query: Option<String>,
-    parsable: bool,
-    limit: usize,
-    account_name: Option<String>,
-) -> Result<()> {
-    let account = pick_account(config, account_name.as_deref())?;
-    let root = account_root(account)?;
-    let index = load_or_build(account, &root)?;
-
-    let q = query.unwrap_or_default();
-    let results: Vec<ContactRow> = search(&index, &q, limit)
-        .iter()
-        .map(|m| ContactRow::from(m.contact))
-        .collect();
-    print_search(&results, &q, parsable);
-    Ok(())
 }
 
 /// Every line `mp contacts search` prints, in order.
@@ -176,47 +154,6 @@ pub fn print_stats(
             r.sent_cc,
             r.received,
         );
-    }
-}
-
-// --- helpers ---
-
-fn pick_account<'a>(config: &'a GlobalConfig, name: Option<&str>) -> Result<&'a AccountConfig> {
-    match name {
-        Some(n) => config
-            .accounts
-            .iter()
-            .find(|a| a.name.eq_ignore_ascii_case(n))
-            .ok_or_else(|| anyhow!("no account named '{}'", n)),
-        None => config
-            .accounts
-            .first()
-            .ok_or_else(|| anyhow!("no accounts configured")),
-    }
-}
-
-fn account_root(account: &AccountConfig) -> Result<PathBuf> {
-    Ok(account_dir(&account.name))
-}
-
-fn load_or_build(account: &AccountConfig, root: &Path) -> Result<ContactIndex> {
-    if let Some(idx) = load_cache(root)? {
-        return Ok(idx);
-    }
-    // No cache yet — build on demand.
-    let idx = build_index_for_account(account)?;
-    match save_rebuilt_cache(root, &idx)? {
-        CacheSave::Written => Ok(idx),
-        // The guard kept something on disk, so the caller must be shown what
-        // the disk holds and not the rebuild that was just refused (#0067).
-        refused => {
-            eprintln!(
-                "{} Contacts rebuild refused ({refused:?}); showing the cache at {}",
-                "⚠".yellow(),
-                cache_path(root).display()
-            );
-            Ok(load_cache(root)?.unwrap_or(idx))
-        }
     }
 }
 

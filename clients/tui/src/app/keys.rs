@@ -5461,6 +5461,7 @@ mod tests {
             account: "test".into(),
             contacts,
             built_at: "2026-04-08T00:00:00Z".into(),
+            extractor_version: mp_core::contacts::EXTRACTOR_VERSION,
         });
         app.contacts_view.loaded = true;
         app.view = View::Contacts;
@@ -5502,6 +5503,7 @@ mod tests {
                 account: app.account_config.name.clone(),
                 contacts: on_disk,
                 built_at: String::new(),
+                extractor_version: mp_core::contacts::EXTRACTOR_VERSION,
             },
         )
         .unwrap();

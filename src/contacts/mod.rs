@@ -15,7 +15,7 @@
 pub use mp_core::contacts::{
     cache, cache_path, contact_to_vcard, filter, load_cache, matcher, observe_message, rank,
     save_cache, save_rebuilt_cache, search, types, vcard, vcard_file_stem, CacheSave, Contact,
-    ContactIndex, ContactSource, ContactTier, MatchResult, MessageAddresses,
+    ContactIndex, ContactSource, ContactTier, MatchResult, MessageAddresses, EXTRACTOR_VERSION,
 };
 
 mod extractor;
