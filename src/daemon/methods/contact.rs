@@ -55,8 +55,9 @@
 //! that write drops the index it built and leaves the cache on disk exactly as
 //! it was; the registry has already settled it `cancelled`.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
@@ -68,9 +69,9 @@ use mp_protocol::RpcError;
 
 use crate::config::{AccountConfig, EmailSettings};
 use crate::contacts::{
-    build_index_for_account, build_index_in, cache_path, commit_rebuild_at, contact_to_vcard,
-    load_cache, search, vcard_file_stem, CacheSave, Contact, ContactIndex, ContactSource,
-    MatchResult, EXTRACTOR_VERSION,
+    build_index_in, cache_path, commit_rebuild_at, contact_to_vcard, load_cache, search,
+    vcard_file_stem, CacheSave, Contact, ContactIndex, ContactSource, MatchResult,
+    EXTRACTOR_VERSION,
 };
 
 use super::super::config::ConfigStore;
@@ -148,6 +149,16 @@ pub fn contact_changed(account: &str, contacts: usize) -> Event {
     }
 }
 
+impl ContactMethod {
+    /// Publish `contact.changed` for an index a read built and wrote.
+    fn announce(&self, account: &AccountConfig, written: Option<usize>) {
+        if let Some(contacts) = written {
+            self.canonical
+                .publish(contact_changed(&account.name, contacts));
+        }
+    }
+}
+
 impl Method for ContactMethod {
     fn spec(&self) -> MethodSpec {
         self.spec
@@ -166,11 +177,8 @@ impl Method for ContactMethod {
                     only_params("contact.search", &params, &["account", "limit", "query"])?;
                     let name = string_param(&params, "account")?;
                     let account = super::account::ready_account(&snapshot.accounts, &name)?.clone();
-                    let (answer, written) = search_result(&account, &params)?;
-                    if let Some(contacts) = written {
-                        self.canonical
-                            .publish(contact_changed(&account.name, contacts));
-                    }
+                    let (answer, written) = search_result(&account, &params).await?;
+                    self.announce(&account, written);
                     Ok(Outcome::query(answer))
                 }
                 "contact.vcard_draft" => {
@@ -195,7 +203,7 @@ impl Method for ContactMethod {
                     only_params("contact.stats", &params, &["account"])?;
                     let name = string_param(&params, "account")?;
                     let account = super::account::ready_account(&snapshot.accounts, &name)?.clone();
-                    Ok(Outcome::query(stats_result(&account)?))
+                    Ok(Outcome::query(stats_result(&account).await?))
                 }
                 _ => {
                     only_params("contact.rebuild", &params, &["account"])?;
@@ -226,7 +234,7 @@ impl Method for ContactMethod {
 /// A query nothing matches is an empty array rather than a refusal: "no
 /// matches" is an answer. `rebuild` is the [`RefusedRebuild`] of a build the
 /// cache guard refused, `null` otherwise.
-fn search_result(
+async fn search_result(
     account: &AccountConfig,
     params: &Value,
 ) -> Result<(Value, Option<usize>), RpcError> {
@@ -240,7 +248,7 @@ fn search_result(
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(20);
-    let loaded = load_index(account)?;
+    let loaded = load_index(account).await?;
     let answer = json!({
         "account": account.name,
         "query": query,
@@ -252,9 +260,9 @@ fn search_result(
 
 /// `contact.stats`: the totals, the cache the answer was read from, when it
 /// was built, and the top rows.
-fn stats_result(account: &AccountConfig) -> Result<Value, RpcError> {
+async fn stats_result(account: &AccountConfig) -> Result<Value, RpcError> {
     let root = crate::config::account_dir(&account.name);
-    let index = load_index(account)?.index;
+    let index = load_index(account).await?.index;
     Ok(json!({
         "account": account.name,
         "total": index.contacts.len(),
@@ -310,26 +318,84 @@ struct Loaded {
 /// (#0067) keeps what is on disk, so a refusal shows the disk rather than the
 /// rebuild that was just refused, and says so in [`Loaded::refused`], which
 /// `contact.search` answers as `rebuild` so a client can tell the user.
-fn load_index(account: &AccountConfig) -> Result<Loaded, RpcError> {
-    let root = crate::config::account_dir(&account.name);
-    let opening = |e: anyhow::Error| internal(format!("{e:#}"));
-    match load_cache(&root).map_err(opening)? {
-        Some(index) if index.is_current() => {
-            return Ok(Loaded {
-                index,
-                written: None,
-                refused: None,
-            })
-        }
-        Some(stale) => log::info!(
-            "[daemon] the contacts cache of {} is from extractor version {} (current {EXTRACTOR_VERSION}); rebuilding it",
-            account.name,
-            stale.extractor_version
-        ),
-        None => {}
+async fn load_index(account: &AccountConfig) -> Result<Loaded, RpcError> {
+    load_index_in(crate::config::account_dir(&account.name), account.clone()).await
+}
+
+/// [`load_index`] over the account directory `root`, resolved by the caller.
+///
+/// The cache read and the build are blocking, and a build walks the whole
+/// store, so both run on a blocking thread rather than inside the reader's
+/// future. Builds are single-flight per account: after an upgrade every
+/// account's cache is stale at once, and the TUI's completion reads, one per
+/// keystroke, would each start a walk of their own. A read that finds a build
+/// in flight waits for it and is then served the cache it wrote.
+async fn load_index_in(root: PathBuf, account: AccountConfig) -> Result<Loaded, RpcError> {
+    let failed = |e: anyhow::Error| internal(format!("{e:#}"));
+    let blocking = |e: tokio::task::JoinError| internal(format!("the contacts read {e}"));
+    let read_root = root.clone();
+    let cached = tokio::task::spawn_blocking(move || current_cache(&read_root))
+        .await
+        .map_err(blocking)?
+        .map_err(failed)?;
+    if let Some(index) = cached {
+        return Ok(Loaded::served(index));
     }
-    let index = build_index_for_account(account).map_err(opening)?;
-    settle_built(&root, account, index).map_err(opening)
+    let gate = build_gate(&root);
+    let _turn = gate.lock().await;
+    tokio::task::spawn_blocking(move || {
+        // The build this read waited for has written a current cache.
+        if let Some(index) = current_cache(&root)? {
+            return Ok(Loaded::served(index));
+        }
+        let index = build_index_in(&root, &account, || false)?
+            .expect("a walk nothing stops always finishes");
+        settle_built(&root, &account, index)
+    })
+    .await
+    .map_err(blocking)?
+    .map_err(failed)
+}
+
+/// The cache under `root` when the current extractor built it, `None` when
+/// there is none or another version built it, which is logged.
+fn current_cache(root: &Path) -> anyhow::Result<Option<ContactIndex>> {
+    match load_cache(root)? {
+        Some(index) if index.is_current() => Ok(Some(index)),
+        Some(stale) => {
+            log::info!(
+                "[daemon] the contacts cache at {} is from extractor version {} (current {EXTRACTOR_VERSION}); rebuilding it",
+                cache_path(root).display(),
+                stale.extractor_version
+            );
+            Ok(None)
+        }
+        None => Ok(None),
+    }
+}
+
+/// The gate a read takes before it builds the index under `root`: one per
+/// account directory, so two accounts build side by side and two reads of
+/// one account build once.
+fn build_gate(root: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    static GATES: OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let mut gates = GATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(gates.entry(root.to_path_buf()).or_default())
+}
+
+impl Loaded {
+    /// A cache served as it is, nothing built.
+    fn served(index: ContactIndex) -> Loaded {
+        Loaded {
+            index,
+            written: None,
+            refused: None,
+        }
+    }
 }
 
 /// Offer an index a read built to the cache, and answer what the read then
@@ -664,13 +730,13 @@ mod tests {
     /// the stamp existed and missing the correspondent, is rebuilt by the
     /// first read before it answers, and the rebuilt cache is served as it is
     /// by the next read.
-    #[test]
-    fn a_read_rebuilds_a_cache_another_extractor_built_before_it_answers() {
+    #[tokio::test]
+    async fn a_read_rebuilds_a_cache_another_extractor_built_before_it_answers() {
         let _data = crate::config::test_env::TestDataDir::new();
         let account = account_with_mail();
         cache_of(&account, &["zoe@example.com".to_string()], 0);
 
-        let first = load_index(&account).expect("loaded");
+        let first = load_index(&account).await.expect("loaded");
         assert_eq!(first.written, Some(2), "rebuilt and written");
         assert_eq!(first.refused, None);
         let hits = search(&first.index, "hochmuth", 20);
@@ -679,7 +745,7 @@ mod tests {
         let on_disk = load_cache(&root).expect("readable").expect("cached");
         assert!(on_disk.is_current(), "stamped with this extractor");
 
-        let second = load_index(&account).expect("loaded");
+        let second = load_index(&account).await.expect("loaded");
         assert_eq!(second.written, None, "a current cache is served as it is");
         assert_eq!(second.index.contacts.len(), 2);
     }
@@ -687,22 +753,59 @@ mod tests {
     /// An upgrade rebuild the guard refuses serves the kept cache and stamps
     /// it, so the next read does not walk the store again to reach the same
     /// verdict.
-    #[test]
-    fn a_refused_upgrade_is_not_retried_on_every_read() {
+    #[tokio::test]
+    async fn a_refused_upgrade_is_not_retried_on_every_read() {
         let _data = crate::config::test_env::TestDataDir::new();
         let account = account_with_mail();
         let many: Vec<String> = (0..20).map(|i| format!("c{i}@example.com")).collect();
         cache_of(&account, &many, 0);
 
-        let first = load_index(&account).expect("loaded");
+        let first = load_index(&account).await.expect("loaded");
         assert_eq!(first.index.contacts.len(), 20, "the kept cache answers");
         assert_eq!(
             first.refused.map(|r| r.saved),
             Some("refused_shrunk".to_string())
         );
-        let second = load_index(&account).expect("loaded");
+        let second = load_index(&account).await.expect("loaded");
         assert_eq!((second.written, second.refused), (None, None));
         assert_eq!(second.index.contacts.len(), 20);
+    }
+
+    /// PERSO-234 review: after an upgrade every cache is stale at once, and
+    /// the TUI reads the index on every keystroke of a recipient field. Reads
+    /// that arrive while a build runs wait for it rather than each walking the
+    /// store, so a burst of them writes the cache once, and every one of them
+    /// is served the rebuilt index.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_reads_of_a_stale_cache_build_it_once() {
+        let _data = crate::config::test_env::TestDataDir::new();
+        let account = account_with_mail();
+        // Enough rows that a walk outlasts the scheduling of the others.
+        for uid in 100..400 {
+            let message = crate::contacts::hooks::fixture::email(
+                &format!("Sender {uid} <s{uid}@example.com>"),
+                &account.default_from,
+                None,
+                "Bulk",
+                "Mon, 05 Jan 2026 12:00:00 +0000",
+                &format!("<bulk-{uid}@example.com>"),
+            );
+            crate::contacts::hooks::fixture::ingest(&account, "inbox", uid, &message);
+        }
+        cache_of(&account, &["zoe@example.com".to_string()], 0);
+        let root = crate::config::account_dir(&account.name);
+
+        let reads: Vec<_> = (0..8)
+            .map(|_| tokio::spawn(load_index_in(root.clone(), account.clone())))
+            .collect();
+        let mut written = 0;
+        for read in reads {
+            let loaded = read.await.expect("the read ran").expect("loaded");
+            assert_eq!(loaded.refused, None);
+            assert_eq!(search(&loaded.index, "hochmuth", 20).len(), 1);
+            written += usize::from(loaded.written.is_some());
+        }
+        assert_eq!(written, 1, "one build, whatever the number of reads");
     }
 
     /// The array is the family, in method-name order, and every one of it is
