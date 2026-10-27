@@ -312,7 +312,7 @@ The drain and a tick hold the same runtime turn, so a drain requested during a t
 A drainer drains once when it starts, which catches rows queued while no runtime was there to ask, and a mutation drain refused the engine gate by a pass outside the turn (the post-send outbox drain, a guarded `mp sync --mailbox`) reports `Resume::Busy` and is retried with a doubling backoff, six times at most.
 A drain that rolled ops back publishes `mutations.rolled_back` rather than a `sync.completed`, and every drain that ran publishes the mailbox counts that moved.
 Replay is exactly-once for the local half because the drain runs only the server op and never re-applies the local change, and it converges a crash-replayed not-found rather than failing it.
-The CLI (`mp archive`, `mp delete`) enqueues through the same `apply_*` and then runs the op synchronously with `pending_ops::run_and_settle`, keeping its blocking UX: a success retires the row, a refusal rolls the local half back and returns the error verbatim, so a not-found stays byte-identical to the pre-queue message.
+The CLI (`mp archive`, `mp move`, `mp delete`) enqueues through the same `apply_*` and then runs the op synchronously with `pending_ops::run_and_settle`, keeping its blocking UX: a success retires the row, a refusal rolls the local half back and returns the error verbatim, so a not-found stays byte-identical to the pre-queue message.
 The synchronous settle deliberately does *not* converge a not-found, because a CLI invocation runs the op once in the process that enqueued it and so is never a crash replay.
 
 ### Drafts on the server

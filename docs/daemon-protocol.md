@@ -533,6 +533,7 @@ Only the movers have anything to roll back when the server refuses.
 All five are commands, because each moves the daemon's revision and invalidates `message:<account>/<mailbox>/<uid>`, and all five are `durable`: a caller that asked to settle may not have the drain torn down because its socket went away.
 
 `destination` is the mailbox a move lands in, resolved by role, slug or sidebar label exactly as `message.list`'s `mailbox` is, and Drafts is not one of them.
+A destination that resolves to the mailbox the message already sits in is `-32602` (`<selector> is already in <mailbox>`), refused before the backend is resolved: the server would be owed a move onto itself (PERSO-235).
 It is not spelled `mailbox` because that key already narrows a selector address on the same method, and one key may not mean two things.
 `flagged` and `read` are the *new* state and are required booleans: the daemon does not toggle, because a toggle over a row a client has not re-read is a race with the last sync.
 
@@ -552,7 +553,7 @@ That refusal is `-32603` with `{account}`: the account is configured and its sto
 Protocol 1 has no credentials code, and adding one would take a changelog entry without moving a user-visible byte.
 The daemon opens the secrets backend at startup once a configuration loaded; a daemon that started with none opens it on first use, as `config.set_password` does.
 
-`moved_to.selector` names the Message-ID as the store holds it, which is the "now" line `mp archive` prints.
+`moved_to.selector` names the Message-ID as the store holds it, which is the "now" line `mp archive` and `mp move` print.
 
 ### Materialised handles
 

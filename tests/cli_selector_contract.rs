@@ -188,6 +188,7 @@ fn a_path_is_refused_where_a_selector_is_expected() {
         vec!["path", path.as_str()],
         vec!["edit", path.as_str()],
         vec!["archive", path.as_str()],
+        vec!["move", path.as_str(), "inbox"],
         vec!["delete", path.as_str()],
         vec!["open", path.as_str()],
         vec!["save", path.as_str()],

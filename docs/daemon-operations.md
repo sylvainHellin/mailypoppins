@@ -102,6 +102,7 @@ The table is what routes and through what:
 | `mp forward [--mailbox]` | `draft.forward` | P4-U6 |
 | `mp <selector>` (the dry run) | `draft.preview` | P4-U6 |
 | `mp archive <selector> [--mailbox]` | `message.archive` | P4-U8 |
+| `mp move <selector> <mailbox> [--mailbox]` | `message.move` with `destination` | PERSO-235 |
 | `mp delete <selector> [--mailbox] [--force]` | `message.delete`, or `draft.discard` for a drafts selector | P4-U8 |
 | `mp delete --sent` | `draft.discard` with `sent: true` | P4-U8 |
 | `mp open <selector> [--mailbox]` | `message.get`, then `message.materialise_attachment` per part, opened in the client | P4-U8 |

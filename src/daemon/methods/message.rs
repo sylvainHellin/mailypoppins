@@ -1701,6 +1701,16 @@ async fn mutate(
         .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
     let row = address(params, &store, &name)?;
     let selector = Selector::for_message(&name, &row).to_string();
+    // A move into the mailbox the message already sits in would owe the
+    // server a MOVE onto itself, which mints a new UID on some servers for
+    // nothing (PERSO-235). Refused before the backend, like every other
+    // parameter the caller got wrong; the pickers never offer it.
+    if kind == Kind::Move && destination.as_deref() == Some(row.mailbox.as_str()) {
+        return Err(invalid_params(format!(
+            "{selector} is already in {}",
+            row.mailbox
+        )));
+    }
     let id = format!("{}/{}", row.mailbox, row.uid);
     let resource = format!("message:{name}/{}/{}", row.mailbox, row.uid);
     // The server folder behind each store key from the account's catalogue

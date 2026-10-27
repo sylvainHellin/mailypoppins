@@ -24,6 +24,7 @@ Commands:
   sync            Sync mailboxes from the server into the local store
   watch           Watch a mailbox for changes using IMAP IDLE
   archive         Archive a received email (server + local)
+  move            Move a received email to another mailbox (server + local)
   delete          Delete a received email (server + local) or a local draft
   open            Open a received email's attachment in the default application
   save            Save a received email's attachment(s) to a directory
@@ -310,6 +311,20 @@ Usage: mp archive [OPTIONS] <SELECTOR>
 
 Arguments:
   <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>
+
+Options:
+      --mailbox <MAILBOX>  Mailbox to resolve the selector in
+  -A, --account <ACCOUNT>  Account to use
+  -h, --help               Print help
+
+$ mp move --help
+Move a received email to another mailbox (server + local)
+
+Usage: mp move [OPTIONS] <SELECTOR> <MAILBOX>
+
+Arguments:
+  <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>
+  <MAILBOX>   Destination mailbox: role, slug or label (inbox, Junk, archive, ...)
 
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in

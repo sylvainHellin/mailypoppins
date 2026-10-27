@@ -311,6 +311,18 @@ enum Commands {
         #[arg(long)]
         mailbox: Option<String>,
     },
+    /// Move a received email to another mailbox (server + local)
+    Move {
+        /// Received selector: mp://<account>/<mailbox>/<message-id>
+        #[arg(value_name = "SELECTOR")]
+        selector: String,
+        /// Destination mailbox: role, slug or label (inbox, Junk, archive, ...)
+        #[arg(value_name = "MAILBOX")]
+        destination: String,
+        /// Mailbox to resolve the selector in
+        #[arg(long)]
+        mailbox: Option<String>,
+    },
     /// Delete a received email (server + local) or a local draft
     //
     // Kept to one doc line on purpose: a second paragraph flips clap into its
@@ -1754,8 +1766,8 @@ async fn message_get_or_fetch(
 /// than the one its selector names.
 ///
 /// A read, a reply, a forward and an RSVP may: the copy is the same message
-/// by `Message-ID`, so what they read or quote is the same. An archive and a
-/// delete may not, because the Inbox and Sent copies of a message sent to
+/// by `Message-ID`, so what they read or quote is the same. An archive, a move
+/// and a delete may not, because the Inbox and Sent copies of a message sent to
 /// oneself are two messages on the server, and moving or deleting the other
 /// one is not what the selector asked for.
 #[derive(Clone, Copy)]
@@ -2291,22 +2303,29 @@ fn wire_str(value: &serde_json::Value) -> &str {
     value.as_str().unwrap_or_default()
 }
 
-/// `mp archive` and `mp delete` of received mail.
+/// `mp archive`, `mp move` and `mp delete` of received mail.
 ///
 /// One call: the daemon resolves the selector, refuses in the command's own
 /// words when it cannot, loads the account's credentials *before* it touches
 /// the store, and then commits the row change and drains the op it owes the
 /// server in one go (#0039). The synchronous UX is preserved because the
 /// answer is the settled outcome rather than an acknowledgement.
+///
+/// `extra` carries the parameters one method needs beyond the address, which
+/// is `destination` for `message.move`.
 async fn routed_received_mutation(
     account: &str,
     method: &str,
     selector: &str,
     mailbox: Option<&str>,
+    extra: &[(&str, &str)],
 ) -> Result<serde_json::Value> {
     let mut params = serde_json::json!({"account": account, "selector": selector});
     if let Some(mailbox) = mailbox {
         params["mailbox"] = serde_json::json!(mailbox);
+    }
+    for (key, value) in extra {
+        params[*key] = serde_json::json!(value);
     }
     let mut connection = daemon_connection().await;
     daemon_try_call_within(&mut connection, method, params, DAEMON_MUTATION_TIMEOUT)
@@ -4730,6 +4749,7 @@ async fn main() -> Result<()> {
                         "message.archive",
                         selector,
                         mailbox,
+                        &[],
                     )
                     .await
                 },
@@ -4738,6 +4758,47 @@ async fn main() -> Result<()> {
             hand_back(
                 &format!(
                     "{} archived {}\n  {} {}",
+                    "\u{2713}".green(),
+                    wire_str(&moved["selector"]),
+                    "now".dimmed(),
+                    wire_str(&moved["moved_to"]["selector"])
+                ),
+                wire_str(&moved["moved_to"]["selector"]),
+            );
+        }
+
+        Some(Commands::Move {
+            selector,
+            destination,
+            mailbox,
+        }) => {
+            // `mp archive` with a destination of the user's choosing
+            // (PERSO-235): the same daemon call the TUI's `M` makes, resolved
+            // against the selector's own account, and settled before it
+            // answers. The destination is resolved by the daemon, as a role,
+            // slug or label, so an unknown name is refused there with the
+            // account's mailboxes listed.
+            let account_config = account_for_selector(&selector, &account_config, &global_config)?;
+            let moved = fetch_on_miss(
+                &account_config,
+                &selector,
+                mailbox.as_deref(),
+                StandIn::Refused { verb: "move" },
+                async |selector: &str, mailbox: Option<&str>| {
+                    routed_received_mutation(
+                        &account_config.name,
+                        "message.move",
+                        selector,
+                        mailbox,
+                        &[("destination", destination.as_str())],
+                    )
+                    .await
+                },
+            )
+            .await?;
+            hand_back(
+                &format!(
+                    "{} moved {}\n  {} {}",
                     "\u{2713}".green(),
                     wire_str(&moved["selector"]),
                     "now".dimmed(),
@@ -4789,6 +4850,7 @@ async fn main() -> Result<()> {
                                 "message.delete",
                                 selector,
                                 mailbox,
+                                &[],
                             )
                             .await
                         },

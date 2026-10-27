@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- `mp move <selector> <mailbox>` moves a received email to another mailbox, server and store, the way `M` does in the TUI (for example out of Junk into the Inbox); the mailbox is a role, slug or label as `--mailbox` takes it, an unknown one is refused with the account's mailboxes listed, the mailbox the message already sits in is refused, and the new selector is printed under `✓ moved`, bare when piped (PERSO-235).
 - Config: any key config.toml does not know, anywhere in the file (a typo like `sync_intervall_secs`, a stray `[accounts.mailboxes.spesen]` table that belongs in `[[accounts.mailboxes.extra]]`), now warns, naming the key and its account: on stderr, in the TUI activity log, in the daemon log and as a `config_loaded` health warning, instead of being dropped silently; the config still loads (PERSO-118).
 - Desktop: the daemon's health checks that are not ok now show as calm, dismissible lines under the connection banner and in the activity log, from startup and live as they change; each line clears when its check recovers, a dismissed line comes back when its check changes status (a warning that becomes a failure with the same sentence shows again), and the config.toml line offers Open config.toml.
 - Desktop: `pnpm preview:browser` in clients/desktop runs the frontend in a browser on the tests' fixture backend, and `pnpm build` fails when an app module loads any part of that backend.

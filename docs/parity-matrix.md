@@ -564,11 +564,12 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### MSG-05 Move a message to another mailbox through a fuzzy picker
 
 - Classification: GUI parity
-- Source anchor: TUI `M`, `Action::MoveToMailbox` (`clients/tui/src/app/types.rs:1571`)
-- Daemon surface: `message.move` `{account, row_id, destination, settle}`, plus the mailbox list from `state.bootstrap`
+- Source anchor: `mp move <selector> <mailbox> [--mailbox]` (`src/main.rs`, PERSO-235), TUI `M`, `Action::MoveToMailbox` (`clients/tui/src/app/types.rs:1571`)
+- Daemon surface: `message.move` `{account, row_id, destination, settle}` (the CLI addresses by selector and settles), plus the mailbox list from `state.bootstrap`
 - GUI location: clients/desktop: `M`, the reader toolbar's Move and the palette open a picker of the account's mailboxes less Drafts and the rows' own mailbox, filtered as the name is typed; from Drafts it says "Quick-move is not available in this mailbox", the TUI's words (M2, #0131)
-- Validation: `src/tui_tests/actions.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`M opens the mailbox picker, typing filters it and Enter moves`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`filters as the name is typed, and Escape cancels`, `says why a Drafts row cannot move`), `clients/desktop/src-tauri/src/commands.rs` (`a_move_lands_in_the_destination_by_slug_or_label`)
+- Validation: `tests/cli_move.rs`, `src/tui_tests/actions.rs`, TUI golden frames; `clients/desktop/src/keymap/keymap.test.tsx` (`M opens the mailbox picker, typing filters it and Enter moves`), `clients/desktop/src/components/mutations/mutation-ui.test.tsx` (`filters as the name is typed, and Escape cancels`, `says why a Drafts row cannot move`), `clients/desktop/src-tauri/src/commands.rs` (`a_move_lands_in_the_destination_by_slug_or_label`)
 - Status: routed (P5-U6); GUI shipped (M2, #0131)
+- Note: a destination that is the message's own mailbox is refused by the daemon; the pickers never offer it, and `mp move` reports it.
 - Note: `destination` is a role, slug or sidebar label, resolved by the daemon; the client no longer checks the sidebar's `server_name`, because `find_server_name_for_role` is the same mapping read on the side that owns it.
   In the desktop a moved row leaves its list at once but shows in a destination list only after the drain's `state.invalidate` re-reads it.
 

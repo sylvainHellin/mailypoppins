@@ -41,6 +41,7 @@ const imapCommands = [
   { command: 'mp watch [options]', description: 'Watch mailbox for changes (IMAP IDLE)' },
   { command: 'mp list-mailboxes [--json]', description: 'List every folder on the server with its sync policy (sync, status-only, ignore) and its role, or why it is ignored (--json prints them as JSON on stdout)' },
   { command: 'mp archive <selector> [--mailbox <name>]', description: 'Archive a received email (server + local)' },
+  { command: 'mp move <selector> <mailbox> [--mailbox <name>]', description: 'Move a received email to another mailbox (server + local), named by role, slug or label (inbox, Junk, archive); an unknown name lists the account\'s mailboxes, and the mailbox the message is already in is refused' },
   { command: 'mp delete <selector> [--mailbox <name>]', description: 'Delete a received email (server + local), or a local draft with a drafts selector' },
   { command: 'mp search <query> [--json]', description: 'Search emails on the server with one grammar (fields, has:attachment, dates, OR groups); --local searches the store offline; --json prints the hits as JSON on stdout' },
   { command: 'mp open <selector> [--mailbox <name>]', description: 'Open the attachments in the default app; a message whose only parts are inline images opens those' },
@@ -226,16 +227,18 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
         A received selector that names its mailbox works even when no sync stored the message,
         as for a server hit of <code>mp search</code>: <code>show</code>, <code>save</code>,
         <code>open</code>, <code>export</code>, <code>reply</code>, <code>forward</code>,
-        <code>archive</code>, <code>delete</code> and <code>invite</code> fetch it from the server
-        first and say so on stderr. When the store holds the message in another mailbox, the reads,
-        replies and forwards use that copy; <code>archive</code> and <code>delete</code> refuse and
+        <code>archive</code>, <code>move</code>, <code>delete</code> and <code>invite</code> fetch it
+        from the server first and say so on stderr. When the store holds the message in another
+        mailbox, the reads, replies and forwards use that copy; <code>archive</code>,
+        <code>move</code> and <code>delete</code> refuse and
         name its selector, since the Inbox and Sent copies of a message are two messages on the server.
       </p>
       <p>
         On a terminal, <code>mp new</code>, <code>mp edit</code>, <code>mp reply</code>,
         <code>mp forward</code>, <code>mp mark-approved</code> and <code>mp mark-draft</code> print
-        <code>&#10003; &lt;selector&gt;</code>, <code>mp archive</code> prints the selector it moved
-        the message to under <code>&#10003; archived</code>, and <code>mp save</code> prints
+        <code>&#10003; &lt;selector&gt;</code>, <code>mp archive</code> and <code>mp move</code> print
+        the selector they moved the message to under <code>&#10003; archived</code> or
+        <code>&#10003; moved</code>, and <code>mp save</code> prints
         <code>&#10003; &lt;path&gt;</code> per file. When stdout is a pipe or a file, each prints
         only the bare selector or path, one per line, so
         <code>sel=$(mp new note) &amp;&amp; mp path "$sel"</code> works as written.
