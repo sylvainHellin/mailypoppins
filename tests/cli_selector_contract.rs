@@ -656,20 +656,27 @@ fn reply_forward_and_invite_fetch_a_missing_selector_too() {
     assert!(stderr.contains("the store holds it in inbox"), "{stderr}");
 }
 
-/// `mp archive` and `mp delete` fetch a missing selector too, but do not act
-/// on a copy the store holds in another mailbox: the Inbox and Sent copies of
-/// a message sent to oneself are two messages on the server, so the refusal
-/// names the stored copy's selector and leaves it where it is (PERSO-155).
+/// `mp archive`, `mp delete` and `mp move` fetch a missing selector too, but
+/// do not act on a copy the store holds in another mailbox: the Inbox and Sent
+/// copies of a message sent to oneself are two messages on the server, so the
+/// refusal names the stored copy's selector and leaves it where it is
+/// (PERSO-155, PERSO-235).
 #[test]
-fn archive_and_delete_fetch_a_missing_selector_but_leave_another_mailboxs_copy() {
+fn archive_delete_and_move_fetch_a_missing_selector_but_leave_another_mailboxs_copy() {
     let fx = Fixture::new();
     let key = "sent-to-self@example.com";
     fx.ingest("inbox", 1, key, "Sent to myself");
     let sent = format!("mp://{ACCOUNT}/sent/{}", selector::encode(key));
     let inbox = format!("mp://{ACCOUNT}/inbox/{}", selector::encode(key));
 
-    for command in ["archive", "delete"] {
-        let stderr = fx.err(&[command, &sent]);
+    let sent_cases: [&[&str]; 3] = [
+        &["archive", &sent],
+        &["delete", &sent],
+        &["move", &sent, "archive"],
+    ];
+    for args in sent_cases {
+        let command = args[0];
+        let stderr = fx.err(args);
         assert!(
             stderr.contains(&format!("the store holds that message in inbox as {inbox}")),
             "mp {command}: {stderr}"
@@ -687,8 +694,16 @@ fn archive_and_delete_fetch_a_missing_selector_but_leave_another_mailboxs_copy()
 
     // A message the server cannot hand over either fails with both halves.
     let unknown = format!("mp://{ACCOUNT}/sent/unknown@example.com");
-    for command in ["archive", "delete", "reply", "forward"] {
-        let stderr = fx.err(&[command, &unknown]);
+    let unknown_cases: [&[&str]; 5] = [
+        &["archive", &unknown],
+        &["delete", &unknown],
+        &["move", &unknown, "archive"],
+        &["reply", &unknown],
+        &["forward", &unknown],
+    ];
+    for args in unknown_cases {
+        let command = args[0];
+        let stderr = fx.err(args);
         assert!(
             stderr.contains("and fetching it from the server failed"),
             "mp {command}: {stderr}"

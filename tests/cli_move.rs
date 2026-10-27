@@ -21,7 +21,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use mp_client::{ClientInfo, ClientKind, Connection, Identity};
+use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
 
 use mailypoppins::store::read;
 
@@ -147,6 +147,49 @@ fn a_move_into_the_messages_own_mailbox_is_refused() {
         assert_refused(&out, &format!("{selector} is already in inbox"));
     }
     assert_eq!(slice.rows(), before);
+}
+
+/// The same refusal reaches a caller who addresses the row by `row_id`, as the
+/// TUI and the desktop app do: the desktop picker over search results can
+/// offer a hit's own mailbox, and that row fails alone with `-32602`.
+#[tokio::test]
+async fn message_move_by_row_id_into_its_own_mailbox_is_refused() {
+    let slice = Slice::start();
+    let before = slice.rows();
+    let store = fixture::store(slice.tmp.path(), fixture::ACCOUNT);
+    let stored = format!("<{KICKOFF}>");
+    let row = read::list_mailbox(&store, fixture::ACCOUNT, "inbox")
+        .expect("list inbox")
+        .into_iter()
+        .find(|row| row.message_id == stored)
+        .expect("the kickoff row in inbox");
+    drop(store);
+
+    let mut conn = slice.connect().await;
+    let error = tokio::time::timeout(
+        DEADLINE,
+        conn.call(
+            "message.move",
+            json!({
+                "account": fixture::ACCOUNT,
+                "row_id": row.id,
+                "destination": "inbox",
+                "settle": false,
+            }),
+        ),
+    )
+    .await
+    .expect("message.move within the deadline")
+    .expect_err("a move into the row's own mailbox is refused");
+    let ClientError::Rpc(error) = error else {
+        panic!("expected a typed RPC error, got {error:?}");
+    };
+    assert_eq!(error.code, -32602, "{error:?}");
+    assert_eq!(
+        error.message,
+        format!("{} is already in inbox", kickoff_in_inbox()),
+    );
+    assert_eq!(slice.rows(), before, "a refused move moves nothing");
 }
 
 /// Past every address check, an account with no credentials refuses with the
