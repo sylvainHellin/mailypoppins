@@ -850,6 +850,19 @@ impl State {
                 &format!("{account} holds no message with row id {row_id}"),
             ));
         };
+        // The daemon refuses a move into the mailbox the row is already in
+        // (PERSO-235), which the picker over search results can offer.
+        if method == "message.move" && destination.as_deref() == Some(mailbox.as_str()) {
+            let selector = self.messages[&account][&mailbox][index]["selector"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            return Err(refused(
+                method,
+                -32602,
+                &format!("{selector} is already in {mailbox}"),
+            ));
+        }
         let boxes = self
             .messages
             .get_mut(&account)
@@ -6463,6 +6476,14 @@ mod tests {
             ),
             Some(-32602)
         );
+        let e = f
+            .call(
+                "message.move",
+                json!({"account": "work", "row_id": 1001, "destination": "inbox"}),
+            )
+            .expect_err("a move into the row's own mailbox");
+        assert_eq!(crate::error::rpc_code(&format!("{e:#}")), Some(-32602));
+        assert!(format!("{e:#}").contains(" is already in inbox"), "{e:#}");
         assert_eq!(
             code(
                 "message.set_flag",

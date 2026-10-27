@@ -1148,6 +1148,11 @@ function mutate(cmd: string, account: string, args: Record<string, unknown>): Mu
         out.failed.push({ row_id: rowId, error: refusedRow(method, `'${wanted}' is not a mailbox of ${account}`) });
         continue;
       }
+      // The daemon refuses a move into the row's own mailbox (PERSO-235), which the picker over search results can offer.
+      if (dest === mailbox) {
+        out.failed.push({ row_id: rowId, error: refusedRow(method, `${row.selector} is already in ${mailbox}`) });
+        continue;
+      }
     }
     const rows = boxes[mailbox];
     if (dest !== null || cmd === "message_delete") rows.splice(rows.indexOf(row), 1);

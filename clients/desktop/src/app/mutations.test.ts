@@ -69,6 +69,14 @@ describe("the mutation dispatch", () => {
     expect(rowIds(get())).toContain(1002);
   });
 
+  it("puts back a row moved into its own mailbox, which the daemon refuses", async () => {
+    const { get, m } = await store();
+    expect(await m.move([row(1002)], "inbox")).toEqual({ done: 0, failed: 1 });
+    expect(rowIds(get())).toContain(1002);
+    expect(mock.rows.work.inbox.map((r) => r.id)).toContain(1002);
+    expect(get().activity.find((n) => n.kind === "failed")?.rows[0].reason).toMatch(/mp:\/\/work\/inbox\/\S+ is already in inbox/);
+  });
+
   it("flags and marks read in place, and the answer confirms the state", async () => {
     const { get, m } = await store();
     await m.setFlag([row(1001)], true);
