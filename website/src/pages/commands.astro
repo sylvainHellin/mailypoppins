@@ -349,8 +349,8 @@ eval "$(mp completions bash)"`} lang="sh" theme={codeTheme} />
         The contact index is a cache per account, <code>contacts-cache.json</code> in the
         account's data directory, ranked from the From, To, Cc and Bcc headers of the stored mail.
         Every sync and every send folds the mail it saw into it.
-        The first search of an account, from the CLI, the TUI or the desktop app, builds it before
-        answering, and rebuilds it first when another version of mailypoppins built it, so a
+        The first search or stats of an account, from the CLI, the TUI or the desktop app, builds it
+        before answering, and rebuilds it first when another version of mailypoppins built it, so a
         reinstall never keeps an index the current rules would not produce.
         <code>mp contacts rebuild</code> rebuilds it on demand.
       </p>

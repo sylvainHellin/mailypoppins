@@ -203,7 +203,9 @@ impl Method for ContactMethod {
                     only_params("contact.stats", &params, &["account"])?;
                     let name = string_param(&params, "account")?;
                     let account = super::account::ready_account(&snapshot.accounts, &name)?.clone();
-                    Ok(Outcome::query(stats_result(&account).await?))
+                    let (answer, written) = stats_result(&account).await?;
+                    self.announce(&account, written);
+                    Ok(Outcome::query(answer))
                 }
                 _ => {
                     only_params("contact.rebuild", &params, &["account"])?;
@@ -259,11 +261,13 @@ async fn search_result(
 }
 
 /// `contact.stats`: the totals, the cache the answer was read from, when it
-/// was built, and the top rows.
-async fn stats_result(account: &AccountConfig) -> Result<Value, RpcError> {
+/// was built, and the top rows; and, as for a search, how many contacts an
+/// index this read built and wrote holds, which the caller announces.
+async fn stats_result(account: &AccountConfig) -> Result<(Value, Option<usize>), RpcError> {
     let root = crate::config::account_dir(&account.name);
-    let index = load_index(account).await?.index;
-    Ok(json!({
+    let loaded = load_index(account).await?;
+    let index = loaded.index;
+    let answer = json!({
         "account": account.name,
         "total": index.contacts.len(),
         "sent_to": index.contacts.values().map(|c| u64::from(c.sent_to)).sum::<u64>(),
@@ -272,7 +276,8 @@ async fn stats_result(account: &AccountConfig) -> Result<Value, RpcError> {
         "built_at": index.built_at,
         "cache_path": cache_path(&root).display().to_string(),
         "top": rows(&search(&index, "", TOP_ROWS)),
-    }))
+    });
+    Ok((answer, loaded.written))
 }
 
 /// Every matched contact as the row the wire carries.

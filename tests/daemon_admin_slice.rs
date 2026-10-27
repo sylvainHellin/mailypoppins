@@ -1302,6 +1302,47 @@ async fn a_written_rebuild_publishes_contact_changed() {
     );
 }
 
+/// A read that had to build the index first announces the write as
+/// `contact.changed` too, whichever of the two reads it was: `contact.stats`
+/// once dropped what its build wrote (PERSO-234 review).
+#[tokio::test]
+async fn a_read_that_built_the_index_publishes_contact_changed() {
+    for method in ["contact.search", "contact.stats"] {
+        let slice = Slice::start();
+        let cache = fixture::contacts_cache(slice.root(), fixture::ACCOUNT);
+        std::fs::remove_file(&cache).expect("the fixture prebuilt a contacts cache");
+        let mut watcher = slice.connect().await;
+        call(&mut watcher, "state.bootstrap", json!({})).await;
+        let mut conn = slice.connect().await;
+        call(&mut conn, "state.bootstrap", json!({})).await;
+
+        call(&mut conn, method, json!({"account": fixture::ACCOUNT})).await;
+        assert!(cache.is_file(), "{method} built the index");
+
+        let start = Instant::now();
+        let mut changed = None;
+        while start.elapsed() < SETTLE_DEADLINE {
+            let Some(notification) = within("state.event", watcher.next_notification()).await
+            else {
+                break;
+            };
+            if notification.params["kind"] == "contact.changed" {
+                changed = Some(notification.params["payload"].clone());
+                break;
+            }
+        }
+        let changed = changed.unwrap_or_else(|| panic!("{method}: the build was announced"));
+        let typed: mp_protocol::events::ContactChanged =
+            serde_json::from_value(changed.clone()).expect("a ContactChanged");
+        assert_eq!(typed.account, fixture::ACCOUNT, "{method}");
+        assert_eq!(
+            typed.contacts as usize,
+            fixture::cached_contacts(slice.root(), fixture::ACCOUNT),
+            "{method}: {changed}"
+        );
+    }
+}
+
 /// `contact.vcard_draft` writes a draft addressed to the contact, subject
 /// `Contact: <name>`, with no signature, and the contact's vCard under
 /// `_vcards/`, attached: the TUI's and the desktop's `v`, done once.
