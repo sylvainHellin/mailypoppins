@@ -67,6 +67,26 @@ pub fn bump_after_sync(
     bump_after_sync_at(&account_dir(&account.name), account, observations)
 }
 
+/// [`bump_after_sync`] off the async runtime: the cache is a blocking read and
+/// write, and its lock may be held by a rebuild's commit. The account
+/// directory is resolved first, on the caller's thread.
+pub async fn bump_after_sync_off_reactor(
+    account: &AccountConfig,
+    observations: Vec<FreshObservation>,
+) -> Option<usize> {
+    if observations.is_empty() {
+        return None;
+    }
+    let root = account_dir(&account.name);
+    let cfg = account.clone();
+    tokio::task::spawn_blocking(move || bump_after_sync_at(&root, &cfg, &observations))
+        .await
+        .unwrap_or_else(|e| {
+            warn!("contacts hook: the sync bump of '{}' {e}", account.name);
+            None
+        })
+}
+
 /// [`bump_after_sync`] against the account directory `root`, which a caller
 /// that runs it off its own thread resolves first.
 pub fn bump_after_sync_at(
@@ -394,6 +414,7 @@ mod tests {
 
         let observations = vec![
             FreshObservation {
+                row_id: 2,
                 role: "inbox".into(),
                 from: "Carol <carol@example.com>".into(),
                 to: "me@example.com".into(),
@@ -402,6 +423,7 @@ mod tests {
                 date: "Mon, 01 Jan 2026 12:00:00 +0000".into(),
             },
             FreshObservation {
+                row_id: 3,
                 role: "sent".into(),
                 from: "me@example.com".into(),
                 to: "Dave <dave@example.com>".into(),
@@ -437,8 +459,13 @@ mod tests {
 
         let mut observations = Vec::new();
         for (uid, (mailbox, message)) in (10..).zip(meeting_reply_and_own_forward(&account)) {
-            assert!(ingest(&account, mailbox, uid, &message).inserted);
-            observations.push(FreshObservation::of(&MailboxRole::from(mailbox), &message));
+            let outcome = ingest(&account, mailbox, uid, &message);
+            assert!(outcome.inserted);
+            observations.push(FreshObservation::of(
+                outcome.row_id,
+                &MailboxRole::from(mailbox),
+                &message,
+            ));
         }
         bump_after_sync(&account, &observations).expect("the hook wrote the cache");
 

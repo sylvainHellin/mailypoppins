@@ -129,6 +129,10 @@ impl SyncTarget {
 /// counts each row once (PERSO-234).
 #[derive(Debug, Clone)]
 pub struct FreshObservation {
+    /// `messages.id` of the inserted row, which is what lets a merge skip a
+    /// row the cache's rebuild already walked
+    /// ([`ContactIndex::rows_through`](crate::contacts::ContactIndex::rows_through)).
+    pub row_id: i64,
     /// The mailbox the message was ingested into.
     pub role: MailboxRole,
     pub from: String,
@@ -140,10 +144,15 @@ pub struct FreshObservation {
 }
 
 impl FreshObservation {
-    /// The observation of `email`, just inserted under `role`: the headers a
-    /// rebuild reads back from the row ingest wrote.
-    pub fn of(role: &MailboxRole, email: &crate::parse::FetchedEmail) -> FreshObservation {
+    /// The observation of `email`, just inserted under `role` as row
+    /// `row_id`: the headers a rebuild reads back from the row ingest wrote.
+    pub fn of(
+        row_id: i64,
+        role: &MailboxRole,
+        email: &crate::parse::FetchedEmail,
+    ) -> FreshObservation {
         FreshObservation {
+            row_id,
             role: role.clone(),
             from: email.from.clone(),
             to: email.to.clone(),
@@ -151,6 +160,46 @@ impl FreshObservation {
             bcc: email.bcc.clone(),
             date: email.date.clone(),
         }
+    }
+}
+
+/// Where a pass records a [`FreshObservation`] the moment it inserts the row,
+/// shared with the caller that handed it over (PERSO-234).
+///
+/// A [`SyncResult`] reaches its caller only when the pass returns `Ok`, and a
+/// pass can fail after it has committed rows: a quick Graph tick cut off at
+/// its ceiling, a cursor write that fails after an earlier mailbox was
+/// ingested. Those rows are never inserted again, the next pass resumes past
+/// them, so an observation carried only in the result was lost with it and
+/// the correspondent stayed unsearchable until a rebuild. The sink is the
+/// caller's own, so whatever the pass pushed is still there whatever it
+/// returned. A clone shares the same list.
+#[derive(Debug, Clone, Default)]
+pub struct ObservationSink(std::sync::Arc<std::sync::Mutex<Vec<FreshObservation>>>);
+
+impl ObservationSink {
+    fn list(&self) -> std::sync::MutexGuard<'_, Vec<FreshObservation>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Record the observation of a row just inserted.
+    pub fn push(&self, observation: FreshObservation) {
+        self.list().push(observation);
+    }
+
+    /// Everything recorded so far, leaving the sink empty.
+    pub fn take(&self) -> Vec<FreshObservation> {
+        std::mem::take(&mut *self.list())
+    }
+
+    pub fn len(&self) -> usize {
+        self.list().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list().is_empty()
     }
 }
 
@@ -195,9 +244,11 @@ pub struct SyncResult {
     /// and skips the backlog under it by design. The account runtime runs its
     /// next tick at once while this is not empty.
     pub backlogged: Vec<String>,
-    /// Address observations from newly-ingested messages, ready to be merged
-    /// into the contacts index by the caller. Empty on `dry_run`.
-    pub fresh_observations: Vec<FreshObservation>,
+    /// Address observations from newly-inserted rows, ready to be merged into
+    /// the contacts index by the caller. Empty on `dry_run`. The pass's
+    /// [`ObservationSink`]: the one its caller handed it, so a caller holding
+    /// a clone reads them whether or not the pass returned this result.
+    pub fresh_observations: ObservationSink,
     /// Sender + subject of every genuinely new inbox message (#0009).
     pub new_inbox_mail: Vec<crate::notify::NewMailMeta>,
 }

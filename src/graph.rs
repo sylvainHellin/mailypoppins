@@ -18,7 +18,9 @@ use crate::config::GraphConfig;
 use crate::ingest::pass_may_prune;
 use crate::parse::{sanitize_attachment_filename, AttachmentData, FetchedEmail};
 use crate::server_search::{Fetched, MailboxStubs, SearchStub};
-use crate::sync::{stops_at, FreshObservation, Stop, StopPoint, SyncResult, SyncTarget};
+use crate::sync::{
+    stops_at, FreshObservation, ObservationSink, Stop, StopPoint, SyncResult, SyncTarget,
+};
 use crate::timing::TimingSpan;
 use crate::types::MailboxRole;
 
@@ -2381,9 +2383,11 @@ fn ingest_window(
                 crate::ingest::clear_ingest_failure(store, account_name, target.role.as_str(), uid);
                 if outcome.inserted {
                     result.saved += 1;
-                    result
-                        .fresh_observations
-                        .push(FreshObservation::of(&target.role, email));
+                    result.fresh_observations.push(FreshObservation::of(
+                        outcome.row_id,
+                        &target.role,
+                        email,
+                    ));
                     if target.role.is_inbox()
                         && crate::ingest::arrived_after(newest_held, &email.date)
                     {
@@ -2963,6 +2967,11 @@ fn absorb_threading_page(
 /// target fetches and ingests in one step, so its mailbox boundary is the one
 /// point at which nothing is half done. A stopped pass returns what the
 /// targets before the stop wrote, and runs no prune.
+///
+/// Every row the pass inserts is recorded in `observations` as it is
+/// inserted (PERSO-234): a quick tick cut off at its ceiling drops this
+/// future, and the rows it committed before that must still reach the
+/// contacts index.
 pub async fn sync_mailboxes_graph(
     config: &GraphConfig,
     account_name: &str,
@@ -2970,6 +2979,7 @@ pub async fn sync_mailboxes_graph(
     limit: usize,
     dry_run: bool,
     stop: Option<&Stop>,
+    observations: &ObservationSink,
 ) -> Result<SyncResult> {
     info!(
         "sync_mailboxes_graph: account={account_name}, {} targets, limit={limit}, dry_run={dry_run}",
@@ -2985,7 +2995,10 @@ pub async fn sync_mailboxes_graph(
     let client = GraphClient::new_async(config).await?;
     let store = crate::store::Store::open_for_pass(account_name, dry_run)?;
     let blobs = crate::store::BlobStore::for_account(account_name);
-    let mut result = SyncResult::default();
+    let mut result = SyncResult {
+        fresh_observations: observations.clone(),
+        ..SyncResult::default()
+    };
     span.mark("client_open");
 
     // Every prune this run will apply, collected here and applied after the
@@ -5841,6 +5854,59 @@ mod tests {
         );
         assert_eq!(result.saved, 1);
         assert!(announced(&result).is_empty());
+    }
+
+    /// PERSO-234: only a row the window inserted feeds the contacts hook, under
+    /// the row id ingest gave it. The same window again updates rows the index
+    /// already counted, and a rebuild counts each row once.
+    #[test]
+    fn only_an_inserted_row_is_observed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        let window = vec![
+            received("<m2@x>", "2026-08-06T11:00:00Z"),
+            received("<m1@x>", "2026-08-06T10:00:00Z"),
+        ];
+        let observed = |result: &SyncResult| -> Vec<(i64, String)> {
+            let mut out: Vec<(i64, String)> = result
+                .fresh_observations
+                .take()
+                .into_iter()
+                .map(|o| (o.row_id, o.role.as_str().to_string()))
+                .collect();
+            out.sort();
+            out
+        };
+        let row_ids = || -> Vec<i64> {
+            let conn = store.conn();
+            let mut stmt = conn.prepare("SELECT id FROM messages ORDER BY id").unwrap();
+            let ids = stmt
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            ids
+        };
+
+        let mut result = SyncResult::default();
+        ingest_window(&store, &blobs, "acct", &inbox, &window, None, &mut result);
+        assert_eq!(result.saved, 2);
+        let inserted: Vec<(i64, String)> = row_ids()
+            .into_iter()
+            .map(|id| (id, "inbox".to_string()))
+            .collect();
+        assert_eq!(observed(&result), inserted, "one per inserted row, by id");
+
+        let mut again = SyncResult::default();
+        ingest_window(&store, &blobs, "acct", &inbox, &window, None, &mut again);
+        assert_eq!(again.saved, 0);
+        assert!(
+            observed(&again).is_empty(),
+            "a row already held is no sighting"
+        );
+        assert_eq!(row_ids().len(), 2);
     }
 
     /// The floor is the account's, not the inbox's: an inbox kept at zero

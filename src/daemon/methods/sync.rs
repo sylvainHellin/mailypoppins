@@ -101,7 +101,7 @@ use crate::daemon::runtime::account::{off_thread, Phase, TickKind, QUICK_TICK_LI
 use crate::daemon::state::{commit_hold_marker, commit_point_blocking, CanonicalState};
 use crate::daemon::sync_outcome::from_sync_result;
 use crate::sync::tick::run_tick_with_drains;
-use crate::sync::{Stop, StopPoint, SyncResult, SyncTarget};
+use crate::sync::{ObservationSink, Stop, StopPoint, SyncResult, SyncTarget};
 
 use super::super::config::ConfigStore;
 use super::super::dispatch::{
@@ -413,24 +413,23 @@ pub async fn first_sync(
         secrets: snapshot.config.secrets_backend,
     };
     log::info!("[daemon] {account} has no local store yet; running its first sync");
+    let observations = ObservationSink::default();
     let result = async {
         let targets =
             resolve_targets(&request.account, None).map_err(|e| anyhow::anyhow!(e.message))?;
         super::open_secrets(&account, request.secrets).map_err(|e| anyhow::anyhow!(e.message))?;
-        body(&request, &targets, Stop::new(|_| false)).await
+        body(&request, &targets, Stop::new(|_| false), &observations).await
     }
     .await;
+    // Whatever the pass returned: a first sync that fails half way has
+    // committed the rows it got to (PERSO-234).
+    index_contacts(&request, &canonical, &observations).await;
     // The pass has released the engine lock, so from here a swap may start
     // the runtime itself; whichever of the two gets there first wins, and
     // `take_failure` keeps it to one.
     drop(mark);
     match result {
         Ok(Some(pass)) => {
-            if let Some(contacts) =
-                crate::contacts::hooks::bump_after_sync(&request.account, &pass.fresh_observations)
-            {
-                canonical.publish(super::contact::contact_changed(&account, contacts));
-            }
             let outcome = from_sync_result(&account, &pass, 0, None);
             canonical.apply(super::super::state::Change::SyncCompleted(outcome));
             log::info!("[daemon] {account} finished its first sync");
@@ -553,6 +552,7 @@ async fn run_pass_to_end(
     }
 
     let failed_mutations = Arc::new(AtomicU64::new(0));
+    let observations = ObservationSink::default();
     let head = || drain(&request, &handle, &failed_mutations, false);
     let tail = || drain(&request, &handle, &failed_mutations, true);
     let (_status, result) = run_tick_with_drains(
@@ -564,11 +564,14 @@ async fn run_pass_to_end(
                 total: None,
                 message: None,
             });
-            body(&request, &targets, stop).await
+            body(&request, &targets, stop, &observations).await
         },
         tail,
     )
     .await;
+    // Before any exit: a pass cancelled or failing half way has committed the
+    // rows it got to, and the next pass resumes past them (PERSO-234).
+    index_contacts(&request, &canonical, &observations).await;
     if handle.token.is_cancelled() {
         return publish_cancelled(&request, &canonical).await;
     }
@@ -588,15 +591,6 @@ async fn run_pass_to_end(
                 None,
             );
             if !request.dry_run {
-                if let Some(contacts) = crate::contacts::hooks::bump_after_sync(
-                    &request.account,
-                    &pass.fresh_observations,
-                ) {
-                    canonical.publish(super::contact::contact_changed(
-                        &request.account.name,
-                        contacts,
-                    ));
-                }
                 // A dry run publishes nothing: an outcome counting what *would*
                 // have been ingested would read, to every other client, as mail
                 // that arrived.
@@ -608,6 +602,25 @@ async fn run_pass_to_end(
                 "new_inbox_mail": arrivals,
             }));
         }
+    }
+}
+
+/// Fold the rows a pass inserted into the account's contact index and
+/// announce the write, whatever the pass returned (PERSO-234). A dry run
+/// inserted nothing.
+async fn index_contacts(
+    request: &PassRequest,
+    canonical: &CanonicalState,
+    observations: &ObservationSink,
+) {
+    if request.dry_run {
+        return;
+    }
+    let account = &request.account;
+    if let Some(contacts) =
+        crate::contacts::hooks::bump_after_sync_off_reactor(account, observations.take()).await
+    {
+        canonical.publish(super::contact::contact_changed(&account.name, contacts));
     }
 }
 
@@ -749,8 +762,10 @@ async fn body(
     request: &PassRequest,
     targets: &[SyncTarget],
     stop: Stop,
+    observations: &ObservationSink,
 ) -> anyhow::Result<Option<SyncResult>> {
     let account = Arc::new(request.account.clone());
+    let observations = observations.clone();
     let targets = targets.to_vec();
     let (limit, dry_run) = (pass_limit(request.kind, request.limit), request.dry_run);
     // A pass over the whole account lists the server first, as a runtime's
@@ -800,6 +815,7 @@ async fn body(
                 limit,
                 dry_run,
                 Some(&stop),
+                &observations,
             )
             .await
             .map(Some);
@@ -813,6 +829,7 @@ async fn body(
             dry_run,
             None,
             Some(stop),
+            &observations,
         )
         .await
     })

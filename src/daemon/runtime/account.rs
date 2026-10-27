@@ -84,7 +84,7 @@ use crate::config::AccountConfig;
 use crate::daemon::sync_outcome::from_sync_result;
 use crate::engine_lock::EngineLock;
 use crate::sync::tick::run_tick_with_drains;
-use crate::sync::{FreshObservation, Stop, SyncResult};
+use crate::sync::{FreshObservation, ObservationSink, Stop, SyncResult};
 
 use super::pool::{PooledRead, ReadPool};
 
@@ -277,6 +277,13 @@ pub(super) struct TickReport {
     /// Set by a mutation drain that was refused the engine turn with ops owed
     /// ([`crate::pending_ops::Resume::Busy`]); read by [`AccountRuntime::drain`].
     busy: Arc<AtomicBool>,
+    /// The body's pass records each row it inserts here as it inserts it
+    /// (PERSO-234), and [`AccountRuntime::run_tick`] folds them into the
+    /// contacts index whatever the body returned: a pass cut off at its
+    /// ceiling or failing after an earlier mailbox has committed rows that
+    /// the next pass resumes past, and `sync` above is only set on success.
+    /// [`TickReport::reset`] leaves it alone, so nothing pushed is dropped.
+    observations: ObservationSink,
 }
 
 impl TickReport {
@@ -896,10 +903,10 @@ impl AccountRuntime {
 
         let entered = lock(&phases).clone();
         let error = result.err().map(|e| format!("{e:#}"));
-        let (mut sync_result, failed_mutations) = self.report.take();
-        let contacts = self
-            .index_contacts(std::mem::take(&mut sync_result.fresh_observations))
-            .await;
+        let (sync_result, failed_mutations) = self.report.take();
+        // From the report's sink, not the result's: a failed body hands no
+        // result over, and the rows it committed are in the sink all the same.
+        let contacts = self.index_contacts(self.report.observations.take()).await;
         // A failed body owes nothing: whatever failed (the network, the
         // ceiling, a refused token) is what an immediate retry would hit again,
         // so the regular interval paces it.
@@ -932,22 +939,8 @@ impl AccountRuntime {
     /// The tick is how a running daemon syncs, and until PERSO-234 it was the
     /// one pass that dropped its observations, so a correspondent first seen
     /// in a scheduled or a watcher tick stayed unsearchable until a rebuild.
-    /// The cache read and write are blocking, so they run off the reactor; the
-    /// account directory is resolved here first, on the caller's thread.
     async fn index_contacts(&self, observations: Vec<FreshObservation>) -> Option<usize> {
-        if observations.is_empty() {
-            return None;
-        }
-        let root = crate::config::account_dir(&self.account);
-        let cfg = Arc::clone(&self.config);
-        tokio::task::spawn_blocking(move || {
-            crate::contacts::hooks::bump_after_sync_at(&root, &cfg, &observations)
-        })
-        .await
-        .unwrap_or_else(|e| {
-            warn!("[daemon] the contacts bump of {} {e}", self.account);
-            None
-        })
+        crate::contacts::hooks::bump_after_sync_off_reactor(&self.config, observations).await
     }
 }
 
@@ -1122,8 +1115,9 @@ fn body_hook(cfg: Arc<AccountConfig>, report: TickReport, watch: DraftWatchCell)
         let listed = Arc::clone(&listed);
         let watch = Arc::clone(&watch);
         async move {
+            let observations = report.observations.clone();
             let result = off_thread("the sync body", move || async move {
-                let synced = sync_once(&cfg, &ctx, &listed).await;
+                let synced = sync_once(&cfg, &ctx, &listed, &observations).await;
                 // The drafts mirror's reconcile (#0143), after the sync and
                 // whatever it did: the Drafts folder is read on its own, so a
                 // failed sync of the mail folders does not hold it back, and
@@ -1257,13 +1251,14 @@ async fn sync_once(
     cfg: &AccountConfig,
     ctx: &TickContext,
     listed: &AtomicBool,
+    observations: &ObservationSink,
 ) -> Result<SyncResult> {
     refresh_catalogue(cfg, ctx.kind, listed).await;
     let targets = crate::catalogue::Catalogue::load(cfg).targets();
     let result = if cfg.auth_method == crate::config::AuthMethod::Graph {
-        sync_once_graph(cfg, ctx, &targets).await
+        sync_once_graph(cfg, ctx, &targets, observations).await
     } else {
-        sync_once_imap(cfg, ctx, &targets).await
+        sync_once_imap(cfg, ctx, &targets, observations).await
     };
     refresh_status_counts(cfg).await;
     result
@@ -1274,6 +1269,7 @@ async fn sync_once_imap(
     cfg: &AccountConfig,
     ctx: &TickContext,
     targets: &[crate::sync::SyncTarget],
+    observations: &ObservationSink,
 ) -> Result<SyncResult> {
     use crate::config::ImapConfig;
     use crate::store::{BlobStore, Store};
@@ -1303,6 +1299,7 @@ async fn sync_once_imap(
             limit: tick_limit(ctx.kind),
             dry_run: false,
             stop: ctx.stop.as_ref(),
+            observations,
         },
         &mut span,
     )
@@ -1343,6 +1340,7 @@ async fn sync_once_graph(
     cfg: &AccountConfig,
     ctx: &TickContext,
     targets: &[crate::sync::SyncTarget],
+    observations: &ObservationSink,
 ) -> Result<SyncResult> {
     let graph = crate::config::GraphConfig::load(cfg)?;
     within_ceiling(
@@ -1354,6 +1352,7 @@ async fn sync_once_graph(
             tick_limit(ctx.kind),
             false,
             ctx.stop.as_ref(),
+            observations,
         ),
     )
     .await
@@ -1451,9 +1450,15 @@ mod tests {
     #[tokio::test]
     async fn a_graph_tick_body_runs_the_graph_backend() {
         for kind in [TickKind::Quick, TickKind::Full] {
-            let err = sync_once(&graph_config(), &tick_context(kind), &AtomicBool::new(true))
-                .await
-                .expect_err("no oauth2 settings, so the Graph config cannot load");
+            let sink = ObservationSink::default();
+            let err = sync_once(
+                &graph_config(),
+                &tick_context(kind),
+                &AtomicBool::new(true),
+                &sink,
+            )
+            .await
+            .expect_err("no oauth2 settings, so the Graph config cannot load");
             let text = format!("{err:#}");
             assert!(
                 text.contains("Graph auth_method requires [accounts.oauth2]"),
@@ -1797,10 +1802,10 @@ mod tests {
     /// a meeting accept from someone the user had never written to stayed
     /// unsearchable until `mp contacts rebuild`. The body ingests through the
     /// real ingest API and records what the engine records, an observation
-    /// for every row it inserted; the second tick ingests the same two
-    /// messages again, inserts nothing, and must not count them twice.
-    #[tokio::test]
-    async fn a_tick_indexes_the_correspondents_its_pass_inserted() {
+    /// in the report's sink for every row it inserted; the second tick
+    /// ingests the same two messages again, inserts nothing, and must not
+    /// count them twice.
+    async fn a_tick_indexes_what_it_inserted(body_fails: bool) {
         use crate::contacts::hooks::fixture::{email, ingest, meeting_reply_and_own_forward};
         use crate::contacts::{build_index_for_account, load_cache, save_cache, search};
         use crate::sync::FreshObservation;
@@ -1828,13 +1833,24 @@ mod tests {
             let report = report.clone();
             let cfg = cfg.clone();
             Arc::new(move |_ctx: TickContext| {
-                let mut result = SyncResult::default();
+                let result = SyncResult {
+                    fresh_observations: report.observations.clone(),
+                    ..SyncResult::default()
+                };
                 for (uid, (mailbox, message)) in (10..).zip(meeting_reply_and_own_forward(&cfg)) {
-                    if ingest(&cfg, mailbox, uid, &message).inserted {
-                        result
-                            .fresh_observations
-                            .push(FreshObservation::of(&MailboxRole::from(mailbox), &message));
+                    let outcome = ingest(&cfg, mailbox, uid, &message);
+                    if outcome.inserted {
+                        result.fresh_observations.push(FreshObservation::of(
+                            outcome.row_id,
+                            &MailboxRole::from(mailbox),
+                            &message,
+                        ));
                     }
+                }
+                // A failed pass never hands its result over: the rows it
+                // committed reach the runtime through the sink alone.
+                if body_fails {
+                    return async { Err(anyhow::anyhow!("cut off at its ceiling")) }.boxed();
                 }
                 *lock(&report.sync) = Some(result);
                 async { Ok(()) }.boxed()
@@ -1863,6 +1879,7 @@ mod tests {
         };
         for tick in 1..=2 {
             let outcome = runtime.tick(TickKind::Quick).await;
+            assert_eq!(outcome.error.is_some(), body_fails, "tick {tick}");
             let cached = load_cache(&dir).expect("readable").expect("cached");
             assert_eq!(
                 outcome.contacts,
@@ -1879,5 +1896,20 @@ mod tests {
             let rebuilt = build_index_for_account(&cfg).expect("rebuilt");
             assert_eq!(facts(&cached), facts(&rebuilt), "tick {tick}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_tick_indexes_the_correspondents_its_pass_inserted() {
+        a_tick_indexes_what_it_inserted(false).await;
+    }
+
+    /// A pass that fails after committing rows (a quick Graph pass cut off at
+    /// its ceiling, a cursor write that fails after an earlier mailbox) hands
+    /// no result over, and the next pass resumes past those rows, so they are
+    /// never inserted again: their correspondents must reach the index from
+    /// the failed tick or never.
+    #[tokio::test]
+    async fn a_tick_whose_body_fails_still_indexes_what_it_inserted() {
+        a_tick_indexes_what_it_inserted(true).await;
     }
 }

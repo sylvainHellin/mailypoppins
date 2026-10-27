@@ -28,7 +28,7 @@ use crate::config::ImapConfig;
 use crate::ingest::KnownUids;
 use crate::store::{BlobStore, Store};
 use crate::sync::engine::{run_sync_guarded, SyncRun};
-use crate::sync::{MailboxFetch, Stop, SyncBackend, SyncResult, SyncTarget};
+use crate::sync::{MailboxFetch, ObservationSink, Stop, SyncBackend, SyncResult, SyncTarget};
 use crate::timing::TimingSpan;
 
 /// The IMAP transport behind [`crate::sync::SyncBackend`] (#0059).
@@ -155,6 +155,13 @@ impl SyncBackend for ImapBackend<'_> {
 /// `stop` is asked at every body chunk and every mailbox boundary
 /// (PERSO-127); a stopped pass returns `Ok(Some(..))` with what it ingested
 /// before the stop, and the caller that owns the `Stop` knows it stopped.
+///
+/// Every row the pass inserts is recorded in `observations` as it is
+/// inserted, so the caller indexes its correspondents whatever the pass
+/// returns (PERSO-234).
+// Every argument is a separate fact of the pass, and the one caller names them
+// all; a struct would only be `SyncRun` built a second time.
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_mailboxes(
     imap_config: &ImapConfig,
     account_name: &str,
@@ -163,6 +170,7 @@ pub async fn sync_mailboxes(
     dry_run: bool,
     body_budget: Option<Duration>,
     stop: Option<Stop>,
+    observations: &ObservationSink,
 ) -> Result<Option<SyncResult>> {
     info!(
         "sync_mailboxes: account={account_name}, {} targets, limit={limit}, dry_run={dry_run}",
@@ -191,6 +199,7 @@ pub async fn sync_mailboxes(
             limit,
             dry_run,
             stop: stop.as_ref(),
+            observations,
         },
         &mut span,
     )

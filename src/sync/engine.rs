@@ -22,7 +22,8 @@ use anyhow::Result;
 use log::{info, warn};
 
 use super::{
-    stops_at, FreshObservation, MailboxFetch, Stop, StopPoint, SyncBackend, SyncResult, SyncTarget,
+    stops_at, FreshObservation, MailboxFetch, ObservationSink, Stop, StopPoint, SyncBackend,
+    SyncResult, SyncTarget,
 };
 use crate::ingest::{self, IngestInput, MailboxCursor, RebindPolicy};
 use crate::parse::parse_rfc822_to_fetched_email;
@@ -152,6 +153,10 @@ pub struct SyncRun<'a> {
     /// has done so far: the targets already ingested stay written, the rest
     /// and the prune pass are not touched.
     pub stop: Option<&'a Stop>,
+    /// Where each inserted row's [`FreshObservation`] is recorded as it is
+    /// inserted, the caller's own so it outlives a pass that fails
+    /// (PERSO-234); the result's `fresh_observations` is this same sink.
+    pub observations: &'a ObservationSink,
 }
 
 /// The IMAP half of [`ingest::note_ingest_failure`]: the same give-up bound,
@@ -281,9 +286,13 @@ pub async fn run_sync(
         limit,
         dry_run,
         stop,
+        observations,
     } = *run;
 
-    let mut result = SyncResult::default();
+    let mut result = SyncResult {
+        fresh_observations: observations.clone(),
+        ..SyncResult::default()
+    };
     if stops_at(stop, StopPoint::Fetch) {
         info!("[sync] {account}: stopped before the fetch");
         return Ok(result);
@@ -484,9 +493,11 @@ pub async fn run_sync(
                     );
                     if outcome.inserted {
                         result.saved += 1;
-                        result
-                            .fresh_observations
-                            .push(FreshObservation::of(&target.role, &email));
+                        result.fresh_observations.push(FreshObservation::of(
+                            outcome.row_id,
+                            &target.role,
+                            &email,
+                        ));
                     }
                     if outcome.uid_rebound {
                         result.uid_rebound += 1;
@@ -883,6 +894,7 @@ mod tests {
                 limit,
                 dry_run,
                 stop,
+                observations: &ObservationSink::default(),
             };
             let mut span = TimingSpan::new("test");
             futures::executor::block_on(run_sync(backend, &run, &mut span)).unwrap()

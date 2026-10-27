@@ -72,7 +72,7 @@ use mailypoppins::ingest::KnownUids;
 use mailypoppins::store::{BlobStore, Store};
 use mailypoppins::sync::engine::{run_sync_guarded_at, SyncRun};
 use mailypoppins::sync::{
-    FetchedRaw, MailboxFetch, MailboxState, SyncBackend, SyncResult, SyncTarget,
+    FetchedRaw, MailboxFetch, MailboxState, ObservationSink, SyncBackend, SyncResult, SyncTarget,
 };
 use mailypoppins::timing::TimingSpan;
 use mailypoppins::types::{MailboxRole, MessageFlags};
@@ -274,6 +274,7 @@ impl Fixture {
             limit: usize::MAX,
             dry_run: false,
             stop: None,
+            observations: &ObservationSink::default(),
         };
         let mut span = TimingSpan::new("engine_lock_ingest");
         run_sync_guarded_at(&self.lock_path(), backend, &run, &mut span).await
@@ -575,6 +576,7 @@ async fn run_sync_itself_stays_lock_free() {
         limit: usize::MAX,
         dry_run: false,
         stop: None,
+        observations: &ObservationSink::default(),
     };
     let mut span = TimingSpan::new("engine_lock_ingest");
     let result = mailypoppins::sync::engine::run_sync(&mut backend, &run, &mut span)
