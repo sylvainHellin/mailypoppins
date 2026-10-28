@@ -10,6 +10,7 @@ pub use mp_core::{
 pub mod agenda;
 pub mod calendar_backend;
 pub mod calendar_cmd;
+pub mod calendar_sync;
 pub mod catalogue;
 pub mod config_cmd;
 pub mod contacts;
