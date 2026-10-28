@@ -762,6 +762,7 @@ Taking the engine turn in the settle would close the race but refuse that very t
 Claiming the row after the commit (`queued` to `running`) leaves a window between the two statements in which a drain can claim it first, and then the settle has to wait on the drain's verdict.
 The fix commits a settled op as `settling` in the same transaction as its local write (`Runner::Caller`), so no drain ever sees it owed, and the drain hands a `settling` row back as `queued` only when no `SettleScope` over that store is open in the process, which is the only process that settles.
 A regression for a race like this needs both runners in one test: `tokio::join!` the settle with a drain on a second store connection, and hold the settle's fake server call until the drain has finished, so the interleaving is the reported one rather than whichever the scheduler picks.
+Taking an op out of the drain's queue also takes it out of the drain's ordering: a later `queued` op on the same message (a star, a second move) must wait for the older `settling` one, keyed by `target_message_id`, or it runs against a folder the message has not reached yet and a flag op's not-found is retired as done.
 
 ## Not every queued op has a rollback, and the post-send flag is the one that must not
 
