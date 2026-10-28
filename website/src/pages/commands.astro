@@ -457,6 +457,17 @@ mp calendar view week --on +7 -A evoqs
 mp calendar hide AAMkADcal2 -A evoqs
 mp event respond AAMkADev2 accept --comment "See you there" -A evoqs`}
       />
+      <p>
+        In the TUI, the Calendar view (<code>Space a</code>) shows the same
+        events of every account. <code>a</code>, <code>d</code> and
+        <code>w</code> switch between the agenda, a day on an hour grid and the
+        week in seven columns, which falls back to the day grid on a narrow
+        terminal. <code>h</code> and <code>l</code> (or <code>[</code> and
+        <code>]</code>) move by a day or a week, <code>t</code> goes back to
+        today and <code>gt</code> jumps to a date. <code>Enter</code> opens the
+        event card, <code>V</code> answers an invitation, and <code>c</code>
+        lists the calendars, where <code>Space</code> shows or hides one.
+      </p>
     </section>
 
     <section>
@@ -480,7 +491,9 @@ mp event respond AAMkADev2 accept --comment "See you there" -A evoqs`}
       <p>
         In the TUI, invites show a calendar badge in the list and an event
         summary card at the top of the preview pane; press <code>tv</code> to open
-        an Accept / Tentative / Decline overlay, which sends the iMIP reply.
+        the respond overlay: Accept / Tentative / Decline, an optional comment,
+        and, when the account's server calendar holds the event, whether to send
+        the response. It answers the way <code>mp invite</code> does.
         <strong>An iMIP reply is emailed to the organizer only: it does not
         reach a server calendar.</strong> A Graph account answers only through
         its server calendar, so it needs <code>calendar_backend = "graph"</code>.
