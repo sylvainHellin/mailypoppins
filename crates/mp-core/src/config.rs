@@ -898,6 +898,9 @@ pub struct GraphConfig {
     pub tenant_id: String,
     pub username: String,
     pub account_name: String,
+    /// The scopes the account's token is refreshed with
+    /// ([`crate::oauth2::scopes_for`]).
+    pub scopes: String,
 }
 
 impl GraphConfig {
@@ -920,6 +923,7 @@ impl GraphConfig {
             tenant_id: oauth2_settings.tenant_id.clone(),
             username,
             account_name: account.name.clone(),
+            scopes: crate::oauth2::scopes_for(account),
         })
     }
 }

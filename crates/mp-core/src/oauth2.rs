@@ -13,6 +13,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::config::{AccountConfig, CalendarBackendKind};
+
 // ---------------------------------------------------------------------------
 // Microsoft Entra ID endpoints
 // ---------------------------------------------------------------------------
@@ -69,8 +71,8 @@ pub fn tenant_or_default(input: &str) -> String {
 /// The scope a Graph account's calendar needs (PERSO-200).
 pub const CALENDAR_SCOPE: &str = "https://graph.microsoft.com/Calendars.ReadWrite";
 
-/// Scopes a Graph account signs in and refreshes with: mail, and the calendar
-/// since PERSO-200.
+/// Every scope a Graph account can sign in with: mail, and the calendar since
+/// PERSO-200. What one account asks for is [`scopes_for`].
 pub const GRAPH_SCOPES: &str = "https://graph.microsoft.com/Mail.Read \
                                 https://graph.microsoft.com/Mail.ReadWrite \
                                 https://graph.microsoft.com/Mail.Send \
@@ -90,6 +92,18 @@ pub fn scope_name(scope: &str) -> &str {
 /// the line `mp config show` prints.
 pub fn calendar_relogin_prompt(account: &str) -> String {
     format!("calendar needs a re-login (mp config oauth2-login -A {account})")
+}
+
+/// The scopes `account` signs in and refreshes with: [`GRAPH_SCOPES`] when its
+/// calendar is Graph's, and without [`CALENDAR_SCOPE`] when it opted out
+/// (`calendar_backend = "none"`, or another backend), so a sign-in never asks
+/// for a permission the account does not use.
+pub fn scopes_for(account: &AccountConfig) -> String {
+    if account.calendar_backend() == CalendarBackendKind::Graph {
+        GRAPH_SCOPES.to_string()
+    } else {
+        without_scope(GRAPH_SCOPES, CALENDAR_SCOPE)
+    }
 }
 
 /// `scopes` (space separated) without `scope`, compared by [`scope_name`].
@@ -304,6 +318,38 @@ struct TokenResponse {
 struct TokenErrorResponse {
     error: String,
     error_description: Option<String>,
+    /// Entra's numeric `AADSTS` codes (`65001` for missing consent).
+    #[serde(default)]
+    error_codes: Vec<u64>,
+}
+
+impl TokenErrorResponse {
+    /// Whether this refusal is about the scopes asked for rather than the
+    /// grant as a whole: `invalid_scope`, or an `invalid_grant` carrying
+    /// AADSTS65001 (no consent) or a code of the AADSTS70000 family (a scope
+    /// unauthorized or expired), read from `error_codes` or, failing that,
+    /// from the `AADSTS<code>` the description opens with.
+    fn is_scope_refusal(&self) -> bool {
+        match self.error.as_str() {
+            "invalid_scope" => true,
+            "invalid_grant" => self
+                .aadsts_codes()
+                .any(|code| code == 65001 || (70000..70100).contains(&code)),
+            _ => false,
+        }
+    }
+
+    fn aadsts_codes(&self) -> impl Iterator<Item = u64> + '_ {
+        let described = self
+            .error_description
+            .as_deref()
+            .and_then(|text| text.trim_start().strip_prefix("AADSTS"))
+            .and_then(|rest| {
+                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse().ok()
+            });
+        self.error_codes.iter().copied().chain(described)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,28 +504,49 @@ pub async fn device_code_flow_reporting(
 // Token refresh
 // ---------------------------------------------------------------------------
 
-/// One refresh request: the token response, or the body of a refusal.
+/// A refresh the token endpoint answered with a non-2xx status.
+#[derive(Debug, Clone)]
+struct Refusal {
+    status: u16,
+    body: String,
+}
+
+impl Refusal {
+    /// Whether Entra refused the scopes asked for (see
+    /// [`TokenErrorResponse::is_scope_refusal`]), as opposed to a throttle, an
+    /// outage or a dead refresh token, none of which a narrower request fixes.
+    fn is_scope_refusal(&self) -> bool {
+        serde_json::from_str::<TokenErrorResponse>(&self.body)
+            .is_ok_and(|err| err.is_scope_refusal())
+    }
+}
+
+/// One refresh request: the token response, or the refusal.
 async fn request_refresh(
     client: &reqwest::Client,
     client_id: &str,
     tenant_id: &str,
     refresh_token_value: &str,
-    scopes: &str,
-) -> Result<std::result::Result<TokenResponse, String>> {
+    scopes: String,
+) -> Result<std::result::Result<TokenResponse, Refusal>> {
     let resp = client
         .post(token_url(tenant_id))
         .form(&[
             ("grant_type", "refresh_token"),
             ("client_id", client_id),
             ("refresh_token", refresh_token_value),
-            ("scope", scopes),
+            ("scope", scopes.as_str()),
         ])
         .send()
         .await
         .context("Failed to refresh OAuth2 token")?;
 
-    if !resp.status().is_success() {
-        return Ok(Err(resp.text().await.unwrap_or_default()));
+    let status = resp.status();
+    if !status.is_success() {
+        return Ok(Err(Refusal {
+            status: status.as_u16(),
+            body: resp.text().await.unwrap_or_default(),
+        }));
     }
     let token: TokenResponse = resp
         .json()
@@ -506,29 +573,10 @@ async fn refresh_token(
     let client = reqwest::Client::new();
     let refresh_token_value = previous.refresh_token.as_str();
 
-    let mut answer =
-        request_refresh(&client, client_id, tenant_id, refresh_token_value, scopes).await?;
-    let mail_only = without_scope(scopes, CALENDAR_SCOPE);
-    if answer.is_err() && mail_only != scopes {
-        warn!(
-            "OAuth2 refresh with the calendar scope refused for '{}', retrying without it",
-            account_name
-        );
-        answer = request_refresh(
-            &client,
-            client_id,
-            tenant_id,
-            refresh_token_value,
-            &mail_only,
-        )
-        .await?;
-    }
-    let token = answer.map_err(|body| {
-        anyhow!(
-            "Token refresh failed (the refresh token may have expired -- run `mp config oauth2-login`): {}",
-            body
-        )
-    })?;
+    let token = refresh_answer(account_name, scopes, |scopes| {
+        request_refresh(&client, client_id, tenant_id, refresh_token_value, scopes)
+    })
+    .await?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -552,6 +600,46 @@ async fn refresh_token(
     save_token_cache(account_name, &cache)?;
     info!("OAuth2 token refreshed for account '{}'", account_name);
     Ok(cache)
+}
+
+/// The token a refresh with `scopes` ends in, `request` making each attempt.
+///
+/// Only a refusal of the scopes themselves ([`Refusal::is_scope_refusal`]) is
+/// retried without the calendar scope. Anything else (a 429, a 5xx, a dead
+/// refresh token) is the ordinary refresh error: retrying it mail-only would
+/// record a grant without the calendar for a token that has it, and prompt a
+/// re-login nothing needs.
+async fn refresh_answer<F, Fut>(
+    account_name: &str,
+    scopes: &str,
+    mut request: F,
+) -> Result<TokenResponse>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<std::result::Result<TokenResponse, Refusal>>>,
+{
+    let mut answer = request(scopes.to_string()).await?;
+    if let Err(refusal) = &answer {
+        warn!(
+            "OAuth2 refresh refused for '{}' (HTTP {}): {}",
+            account_name, refusal.status, refusal.body
+        );
+        let mail_only = without_scope(scopes, CALENDAR_SCOPE);
+        if refusal.is_scope_refusal() && mail_only != scopes {
+            warn!(
+                "OAuth2 refresh with the calendar scope refused for '{}', retrying without it",
+                account_name
+            );
+            answer = request(mail_only).await?;
+        }
+    }
+    answer.map_err(|refusal| {
+        anyhow!(
+            "Token refresh failed with HTTP {} (the refresh token may have expired -- run `mp config oauth2-login`): {}",
+            refusal.status,
+            refusal.body
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -770,6 +858,100 @@ mod tests {
         );
         assert_eq!(without_scope(&mail_only, CALENDAR_SCOPE), mail_only);
         assert_eq!(scope_name(CALENDAR_SCOPE), "Calendars.ReadWrite");
+    }
+
+    /// A Graph account whose calendar is Graph's asks for the calendar; one
+    /// that opted out (`calendar_backend = "none"`) signs in and refreshes
+    /// with the mail scopes only.
+    #[test]
+    fn an_account_without_the_graph_calendar_asks_for_mail_scopes_only() {
+        let config: crate::config::GlobalConfig = toml::from_str(
+            "[[accounts]]\nname = \"evoqs\"\nauth_method = \"graph\"\n\n\
+             [[accounts]]\nname = \"hines\"\nauth_method = \"graph\"\ncalendar_backend = \"none\"\n",
+        )
+        .unwrap();
+        let with_calendar = scopes_for(&config.accounts[0]);
+        assert_eq!(with_calendar, GRAPH_SCOPES);
+        let opted_out = scopes_for(&config.accounts[1]);
+        assert!(!opted_out
+            .split_whitespace()
+            .any(|s| scope_name(s) == "Calendars.ReadWrite"));
+        assert_eq!(opted_out, without_scope(GRAPH_SCOPES, CALENDAR_SCOPE));
+        assert!(opted_out.split_whitespace().any(|s| s == "offline_access"));
+    }
+
+    fn token(scope: &str) -> TokenResponse {
+        TokenResponse {
+            access_token: "at".into(),
+            refresh_token: None,
+            expires_in: 3600,
+            scope: Some(scope.into()),
+        }
+    }
+
+    /// Drive [`refresh_answer`] against canned answers, one per attempt, and
+    /// return its outcome with the scopes each attempt asked for.
+    fn run_refresh(
+        answers: Vec<std::result::Result<TokenResponse, Refusal>>,
+    ) -> (Result<TokenResponse>, Vec<String>) {
+        let answers = std::cell::RefCell::new(answers.into_iter());
+        let asked = std::cell::RefCell::new(Vec::new());
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(refresh_answer("evoqs", GRAPH_SCOPES, |scopes| {
+                asked.borrow_mut().push(scopes);
+                let answer = answers.borrow_mut().next().expect("an attempt too many");
+                async move { Ok(answer) }
+            }));
+        (outcome, asked.into_inner())
+    }
+
+    /// A consent refusal of the calendar scope is retried mail-only, and the
+    /// grant without the calendar is what the refresh ends in.
+    #[test]
+    fn a_refused_calendar_consent_retries_with_the_mail_scopes() {
+        let mail_only = without_scope(GRAPH_SCOPES, CALENDAR_SCOPE);
+        for body in [
+            r#"{"error":"invalid_grant","error_description":"AADSTS65001: The user or administrator has not consented.","error_codes":[65001]}"#,
+            r#"{"error":"invalid_grant","error_description":"AADSTS70000: The request was denied because one or more scopes requested are unauthorized or expired."}"#,
+            r#"{"error":"invalid_scope","error_description":"AADSTS70011: The provided value for the input parameter 'scope' is not valid."}"#,
+        ] {
+            let (outcome, asked) = run_refresh(vec![
+                Err(Refusal {
+                    status: 400,
+                    body: body.into(),
+                }),
+                Ok(token(&mail_only)),
+            ]);
+            let token = outcome.expect(body);
+            assert_eq!(token.scope.as_deref(), Some(mail_only.as_str()));
+            assert_eq!(asked, vec![GRAPH_SCOPES.to_string(), mail_only.clone()]);
+        }
+    }
+
+    /// A throttle, an outage or a dead refresh token is the ordinary refresh
+    /// error after one attempt: no mail-only retry, so no reduced grant is
+    /// recorded.
+    #[test]
+    fn a_transient_or_unrelated_refusal_is_not_retried_without_the_calendar() {
+        for (status, body) in [
+            (429, r#"{"error":"temporarily_unavailable"}"#),
+            (503, "Service Unavailable"),
+            (
+                400,
+                r#"{"error":"invalid_grant","error_description":"AADSTS700082: The refresh token has expired due to inactivity.","error_codes":[700082]}"#,
+            ),
+        ] {
+            let (outcome, asked) = run_refresh(vec![Err(Refusal {
+                status,
+                body: body.into(),
+            })]);
+            let error = format!("{:#}", outcome.err().expect(body));
+            assert!(error.contains(&format!("HTTP {status}")), "{error}");
+            assert!(error.contains(body), "{error}");
+            assert_eq!(asked, vec![GRAPH_SCOPES.to_string()]);
+        }
     }
 
     #[test]

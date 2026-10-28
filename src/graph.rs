@@ -297,7 +297,7 @@ impl GraphClient {
             &config.account_name,
             &config.client_id,
             &config.tenant_id,
-            crate::oauth2::GRAPH_SCOPES,
+            &config.scopes,
         )?;
         Ok(Self {
             client: http_client()?,
@@ -313,7 +313,7 @@ impl GraphClient {
             &config.account_name,
             &config.client_id,
             &config.tenant_id,
-            crate::oauth2::GRAPH_SCOPES,
+            &config.scopes,
         )
         .await?;
         Ok(Self {
@@ -348,7 +348,7 @@ impl GraphClient {
             &config.account_name,
             &config.client_id,
             &config.tenant_id,
-            crate::oauth2::GRAPH_SCOPES,
+            &config.scopes,
         )
         .await?;
         Ok(())

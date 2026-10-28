@@ -264,6 +264,7 @@ fn graph_config(account: &AccountConfig) -> GraphConfig {
         tenant_id: oauth2.tenant_id,
         username: account.default_from.clone(),
         account_name: token_name(account),
+        scopes: crate::oauth2::scopes_for(account),
     }
 }
 
