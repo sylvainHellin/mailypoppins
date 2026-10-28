@@ -2486,7 +2486,17 @@ fn mp_config_show_matches_the_oracle() {
         stdout.contains("[folders]"),
         "every account lists its discovered folders: {stdout}"
     );
-    routed.stdout = without_folders_blocks(&stdout).into_bytes();
+    // The `calendar_backend` line (PERSO-200) is newer than the oracle.
+    assert!(
+        stdout.contains("  calendar_backend = "),
+        "every account names its calendar backend: {stdout}"
+    );
+    let stdout: String = without_folders_blocks(&stdout)
+        .lines()
+        .filter(|line| !line.starts_with("  calendar_backend = "))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    routed.stdout = stdout.into_bytes();
     assert_byte_identical(&routed, &slice.oracle(&args));
 }
 

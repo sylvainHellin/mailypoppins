@@ -27,7 +27,8 @@ test-support = ["dep:tempfile"]
 anyhow = "1.0"
 base64 = "0.22"
 chacha20poly1305 = "0.10"
-chrono = "0.4"
+# `serde` for the instants and dates of the neutral calendar model (PERSO-200).
+chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 colored = "2.1"
 dirs = "5"

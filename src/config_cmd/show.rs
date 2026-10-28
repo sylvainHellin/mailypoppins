@@ -10,7 +10,7 @@ use mp_protocol::signature::SignatureFile;
 
 use crate::config::{
     all_configured_mailboxes, blobs_dir, config_path, drafts_dir, mailypoppins_data_dir,
-    retention_for, store_path, AuthMethod, GlobalConfig,
+    retention_for, store_path, AccountConfig, AuthMethod, GlobalConfig,
 };
 use crate::store::sweep::human_bytes;
 use mp_protocol::state::MailboxRow;
@@ -76,6 +76,21 @@ fn token_line(credential: Option<&AccountCredential>) -> String {
 }
 
 /// Print the config file path.
+/// The `calendar_backend` line (PERSO-200): the resolved backend, marked when
+/// it is the default the auth method implies and when this release cannot
+/// serve it yet.
+fn calendar_backend_line(account: &AccountConfig) -> String {
+    let kind = account.calendar_backend();
+    let mut line = format!("calendar_backend = {}", kind.as_str());
+    if account.calendar_backend.is_none() {
+        line.push_str(&" (default)".dimmed().to_string());
+    }
+    if !kind.is_supported() {
+        line.push_str(&" (not supported yet)".yellow().to_string());
+    }
+    line
+}
+
 pub fn cmd_config_path() {
     println!("{}", config_path().display());
 }
@@ -187,6 +202,8 @@ pub fn cmd_config_show(
                 );
             }
         }
+
+        println!("  {}", calendar_backend_line(account));
 
         if account.auth_method == AuthMethod::Graph {
             // Graph accounts don't use SMTP/IMAP -- show a note instead
@@ -361,8 +378,37 @@ pub fn cmd_config_show(
 
 #[cfg(test)]
 mod tests {
-    use super::folder_lines;
+    use super::{calendar_backend_line, folder_lines};
+    use crate::config::{AccountConfig, AuthMethod, CalendarBackendKind};
     use mp_protocol::state::{FolderPolicy, MailboxRow};
+
+    /// PERSO-200: the line names the resolved backend, says when it is the
+    /// auth method's default, and flags a backend this release cannot serve.
+    #[test]
+    fn the_calendar_backend_line_marks_the_default_and_the_unsupported() {
+        colored::control::set_override(false);
+        let graph = AccountConfig {
+            auth_method: AuthMethod::Graph,
+            ..Default::default()
+        };
+        let tum = AccountConfig {
+            calendar_backend: Some(CalendarBackendKind::Ews),
+            ..Default::default()
+        };
+        let none = AccountConfig {
+            calendar_backend: Some(CalendarBackendKind::None),
+            ..Default::default()
+        };
+        assert_eq!(
+            calendar_backend_line(&graph),
+            "calendar_backend = graph (default)"
+        );
+        assert_eq!(
+            calendar_backend_line(&tum),
+            "calendar_backend = ews (not supported yet)"
+        );
+        assert_eq!(calendar_backend_line(&none), "calendar_backend = none");
+    }
 
     /// #0141 follow-up: `[folders]` lists every folder the server listed,
     /// configured or not, ignored ones included, with its policy and role.

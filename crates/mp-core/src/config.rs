@@ -127,6 +127,51 @@ pub struct AccountConfig {
     /// The drafts mirror (`[accounts.drafts]`, #0143). See [`DraftsConfig`].
     #[serde(default)]
     pub drafts: DraftsConfig,
+    /// `calendar_backend = "graph" | "ews" | "caldav" | "none"` (PERSO-200),
+    /// set independently of the mail transport. Absent means the default
+    /// [`AccountConfig::calendar_backend`] resolves; read it through that
+    /// accessor, never this field.
+    #[serde(default)]
+    pub calendar_backend: Option<CalendarBackendKind>,
+}
+
+/// Which server calendar an account reaches (PERSO-200,
+/// `docs/plans/calendar.md`, "Account setting").
+///
+/// The calendar backend is chosen per account and independently of the mail
+/// transport: TUM keeps IMAP and SMTP for mail and reaches its calendar through
+/// EWS. An account with no calendar backend keeps the iMIP path of
+/// `docs/plans/calendar-invites.md`.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CalendarBackendKind {
+    /// Microsoft Graph, the default of an `auth_method = "graph"` account.
+    Graph,
+    /// Exchange Web Services on an on-premises Exchange (phase 3).
+    Ews,
+    /// Generic CalDAV with RFC 6638 scheduling (phase 4).
+    Caldav,
+    /// No server calendar: invitations go through iMIP mails.
+    None,
+}
+
+impl CalendarBackendKind {
+    /// The value as the config file spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CalendarBackendKind::Graph => "graph",
+            CalendarBackendKind::Ews => "ews",
+            CalendarBackendKind::Caldav => "caldav",
+            CalendarBackendKind::None => "none",
+        }
+    }
+
+    /// Whether this release can serve the backend. `ews` and `caldav` load
+    /// so a config written ahead of their phase is not an error, and the
+    /// daemon refuses them with a message naming the account instead.
+    pub fn is_supported(self) -> bool {
+        matches!(self, CalendarBackendKind::Graph | CalendarBackendKind::None)
+    }
 }
 
 /// `[accounts.drafts]` (#0143): whether this account's drafts are mirrored to
@@ -337,6 +382,16 @@ impl AccountConfig {
     pub fn sends_as(&self, from: &str) -> bool {
         let own = self.own_address();
         !own.is_empty() && crate::parse::extract_email_address(from).to_ascii_lowercase() == own
+    }
+
+    /// The account's calendar backend: the configured `calendar_backend`, else
+    /// Graph for an `auth_method = "graph"` account and none for every other
+    /// (PERSO-200).
+    pub fn calendar_backend(&self) -> CalendarBackendKind {
+        self.calendar_backend.unwrap_or(match self.auth_method {
+            AuthMethod::Graph => CalendarBackendKind::Graph,
+            AuthMethod::Password | AuthMethod::RetiredOAuth2 => CalendarBackendKind::None,
+        })
     }
 }
 
@@ -2002,6 +2057,69 @@ mirror = false
         assert!(!config.accounts[1].drafts.mirror);
         assert!(AccountConfig::default().drafts.mirror);
         assert!(config_warnings(toml_str).is_empty());
+    }
+
+    /// `calendar_backend` (PERSO-200) defaults from `auth_method`, an explicit
+    /// value wins in either direction, `ews` and `caldav` load but are not
+    /// supported yet, and the key draws no unknown-key warning.
+    #[test]
+    fn the_calendar_backend_defaults_from_the_auth_method_and_an_explicit_value_wins() {
+        let toml_str = r#"
+[[accounts]]
+name = "evoqs"
+auth_method = "graph"
+
+[[accounts]]
+name = "proton"
+
+[[accounts]]
+name = "tum"
+calendar_backend = "ews"
+
+[[accounts]]
+name = "personal"
+calendar_backend = "caldav"
+
+[[accounts]]
+name = "hines"
+auth_method = "graph"
+calendar_backend = "none"
+
+[[accounts]]
+name = "graph-explicit"
+calendar_backend = "graph"
+"#;
+        let config: GlobalConfig = toml::from_str(toml_str).unwrap();
+        let kinds: Vec<CalendarBackendKind> = config
+            .accounts
+            .iter()
+            .map(AccountConfig::calendar_backend)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                CalendarBackendKind::Graph,
+                CalendarBackendKind::None,
+                CalendarBackendKind::Ews,
+                CalendarBackendKind::Caldav,
+                CalendarBackendKind::None,
+                CalendarBackendKind::Graph,
+            ]
+        );
+        assert_eq!(config.accounts[1].calendar_backend, None);
+        let supported: Vec<bool> = kinds.iter().map(|k| k.is_supported()).collect();
+        assert_eq!(supported, [true, true, false, false, true, true]);
+        let spelled: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+        assert_eq!(spelled, ["graph", "none", "ews", "caldav", "none", "graph"]);
+        assert_eq!(
+            AccountConfig::default().calendar_backend(),
+            CalendarBackendKind::None
+        );
+        assert!(config_warnings(toml_str).is_empty());
+        assert!(toml::from_str::<GlobalConfig>(
+            "[[accounts]]\nname = \"x\"\ncalendar_backend = \"google\"\n"
+        )
+        .is_err());
     }
 
     #[test]
