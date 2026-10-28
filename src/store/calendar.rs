@@ -10,7 +10,8 @@
 //! - [`PREFS_TABLE`]: the local visibility of each calendar. Its own table
 //!   rather than a column of the calendar list, so dropping the cache is a
 //!   plain `DELETE` of every cache table and the preference needs no carrying
-//!   across it; a calendar with no row is visible.
+//!   across it; a calendar with no row is visible. A schema-version rebuild of
+//!   the whole store does carry it (`super::rebuild`).
 //! - [`EVENTS_TABLE`]: the expanded occurrences of the window, one row per
 //!   server id, with the serialised [`Event`] in `event_json` and the columns
 //!   a range query filters on beside it.

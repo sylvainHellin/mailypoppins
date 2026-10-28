@@ -117,6 +117,7 @@ impl Store {
                     );
                     let mut salvaged = rebuild::salvage_outbox(&path);
                     salvaged.cleanups = rebuild::salvage_cleanups(&path);
+                    salvaged.calendar_prefs = rebuild::salvage_calendar_prefs(&path);
                     // The file about to be created is a different file, so the
                     // "already checked this incarnation" note must go with the
                     // one being deleted.
@@ -139,11 +140,13 @@ impl Store {
             let report = rebuild::finish(&conn, &path, salvaged);
             let notice = rebuild::write_notice(&path, &reason, &report);
             warn!(
-                "[store] rebuilt {}: {} outbox row(s) and {} Graph cleanup(s) carried, {} \
-                 discarded, {} orphaned blob file(s) swept ({} bytes){}",
+                "[store] rebuilt {}: {} outbox row(s), {} Graph cleanup(s) and {} calendar \
+                 visibility choice(s) carried, {} discarded, {} orphaned blob file(s) swept \
+                 ({} bytes){}",
                 path.display(),
                 report.carried.len(),
                 report.carried_cleanups,
+                report.carried_calendar_prefs,
                 report.lost.len(),
                 report.swept_files,
                 report.swept_bytes,
