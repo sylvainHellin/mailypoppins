@@ -44,11 +44,14 @@
 //!   ([`run_and_settle`], PERSO-241), running none of them itself, so each
 //!   still runs once. A delete orders nothing after it, since an op that
 //!   follows it on its row is on a new mail that reused the row id
-//!   ([`orders_later_ops`]). An op refused for good rolls back the later ops on its
-//!   message with it, newest first, since they were committed against the
-//!   state its rollback undoes, `queued` and `settling` alike, in the one
-//!   transaction that settles it ([`refuse`], PERSO-249), so a command
-//!   committing meanwhile lands before the refusal or after its rollbacks.
+//!   ([`orders_later_ops`]). A move refused for good rolls back the later
+//!   ops on its message with it, newest first, since they were committed
+//!   against the folder its rollback takes the message out of, `queued` and
+//!   `settling` alike, in the one transaction that settles it ([`refuse`],
+//!   PERSO-249), so a command committing meanwhile lands before the refusal
+//!   or after its rollbacks. Any other op refused for good changes no folder
+//!   and releases the later ops to run, and a refused flag toggle puts back
+//!   only its own bit ([`roll_flag_back`]).
 //!
 //! ## States
 //!
@@ -108,6 +111,7 @@ use crate::ops::{run_op, Backend, ServerOp};
 use crate::outbox::{backoff_secs, unix_now};
 use crate::store::write::MutatedRow;
 use crate::store::{BlobStore, Store};
+use crate::types::MessageFlags;
 
 /// How many times the drain attempts a queued op before it gives up, rolls the
 /// local state back and parks the row as `failed`.
@@ -253,8 +257,10 @@ pub fn recover_orphaned_settles(store: &Store, account: &str) -> Result<usize> {
 pub enum Rollback {
     /// Put a moved row back in its old mailbox and uid.
     Move(MutatedRow),
-    /// Restore a row's full flag string (read and starred toggles both ride the
-    /// same column, so the whole string is what round-trips cleanly).
+    /// Undo a read or star toggle: `flags` is the row's whole flag string
+    /// before it, of which the rollback restores only the bit its op changed
+    /// ([`roll_flag_back`], PERSO-243), so a bit written since, such as the
+    /// `\Answered` of a reply sent meanwhile, is kept.
     Flags { id: i64, flags: String },
     /// Nothing to undo. Two cases:
     ///
@@ -445,8 +451,8 @@ pub fn apply_set_flagged(
 
 /// The shared read-modify-write behind the two flag toggles: read the row's
 /// flags, apply `f`, write the canonical string back and enqueue the op, all in
-/// one transaction. The rollback carries the *old* string so a refused op
-/// restores exactly what was there, including any orthogonal bit `f` left alone.
+/// one transaction. The rollback carries the *old* string, from which a
+/// refused op restores the one bit `f` changed ([`roll_flag_back`]).
 fn apply_flag_change(
     store: &Store,
     account: &str,
@@ -1154,13 +1160,16 @@ enum Refusal {
     Discard,
 }
 
-/// Undo op `id`, refused for good, settle its row as `how` says, and first
-/// roll back and park `failed` the later ops still owed on its message,
-/// newest first, returning their ids (PERSO-243).
+/// Undo op `id`, refused for good, settle its row as `how` says, and, when it
+/// is a move, first roll back and park `failed` the later ops still owed on
+/// its message, newest first, returning their ids (PERSO-243).
 ///
-/// The later ops were committed against the local state the refused op left:
-/// a star or a second move names the folder the refused move put the message
-/// in, and its rollback restores the state just before it. Once the refused
+/// The later ops were committed against the local state the refused move
+/// left: a star or a second move names the folder it put the message in,
+/// and its rollback restores the state just before it. A refused flag
+/// toggle, a delete or a post-send flag changes no folder, so the later ops
+/// stand as committed and run in order once it is parked; a flag toggle's
+/// rollback restores only its own bit ([`roll_flag_back`]). Once the refused
 /// op is undone that state never existed on the server, so none of them can
 /// run as committed (a star would search a folder the message never reached
 /// and be retired as a converged not-found), and only undoing them newest
@@ -1203,9 +1212,12 @@ fn refuse(store: &Store, blobs: &BlobStore, id: i64, err: &str, how: Refusal) ->
         }
         return Ok(Vec::new());
     }
-    let later = match how {
-        Refusal::Park => later_on_message(&tx, &row)?,
-        Refusal::Discard => Vec::new(),
+    // Only a move puts the later ops on a state its rollback undoes: they
+    // name the folder it put the message in. After a refused flag toggle
+    // they stand as committed and run once it is parked (PERSO-243).
+    let later = match (how, &row.op) {
+        (Refusal::Park, ServerOp::Move { .. }) => later_on_message(&tx, &row)?,
+        _ => Vec::new(),
     };
     #[cfg(test)]
     tests::AFTER_LISTING.with(|hook| {
@@ -1724,17 +1736,112 @@ fn bump_attempt(store: &Store, id: i64, err: &str) -> Result<()> {
 fn apply_rollback(conn: &Connection, blobs: &BlobStore, row: &PendingOp) -> Result<()> {
     match &row.rollback {
         Rollback::Move(previous) => roll_move_back(conn, blobs, previous)?,
-        Rollback::Flags { id, flags } => {
-            conn.execute(
-                "UPDATE messages SET flags = ?2 WHERE id = ?1",
-                rusqlite::params![id, flags],
-            )
-            .context("rolling a flag change back")?;
-        }
+        Rollback::Flags { id, flags } => roll_flag_back(conn, row, *id, flags)?,
         // A delete cannot be restored: the row is gone and the message is still
         // on the server, so convergence is the next sync refetching the UID.
         Rollback::None => {}
     }
+    Ok(())
+}
+
+/// The one flag a read or star toggle changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlagBit {
+    Seen,
+    Flagged,
+}
+
+impl FlagBit {
+    /// The flag `op` changes, `None` for an op that toggles none.
+    fn of(op: &ServerOp) -> Option<FlagBit> {
+        match op {
+            ServerOp::SetRead { .. } => Some(FlagBit::Seen),
+            ServerOp::SetFlagged { .. } => Some(FlagBit::Flagged),
+            _ => None,
+        }
+    }
+
+    fn get(self, flags: MessageFlags) -> bool {
+        match self {
+            FlagBit::Seen => flags.seen,
+            FlagBit::Flagged => flags.flagged,
+        }
+    }
+
+    fn set(self, flags: MessageFlags, value: bool) -> MessageFlags {
+        match self {
+            FlagBit::Seen => flags.with_seen(value),
+            FlagBit::Flagged => flags.with_flagged(value),
+        }
+    }
+}
+
+/// Undo a read or star toggle: put back the one bit its op changed, as it
+/// stood in `old`, the row's flag string before the op (PERSO-243).
+///
+/// The rest of the string is left as it is now: a refused star no longer
+/// rolls back with the other ops on its message, so a reply sent meanwhile
+/// may have written `\Answered` since, which the whole of `old` would wipe.
+///
+/// A later op still owed on the same flag of the message has since written
+/// the local bit, and it is what the server gets once it runs, so the bit
+/// is left to it; that op's own rollback is pointed at the value from
+/// before the refused one instead, the value the server keeps if it is
+/// refused in turn, since it was taken over a write the server never got.
+fn roll_flag_back(conn: &Connection, row: &PendingOp, id: i64, old: &str) -> Result<()> {
+    let Some(bit) = FlagBit::of(&row.op) else {
+        conn.execute(
+            "UPDATE messages SET flags = ?2 WHERE id = ?1",
+            rusqlite::params![id, old],
+        )
+        .context("rolling a flag change back")?;
+        return Ok(());
+    };
+    let before = bit.get(MessageFlags::parse(old));
+    let next = later_on_message(conn, row)?
+        .into_iter()
+        .find(|later| FlagBit::of(&later.op) == Some(bit));
+    if let Some(next) = next {
+        if let Rollback::Flags { id, flags } = &next.rollback {
+            let flags = bit.set(MessageFlags::parse(flags), before).to_flag_string();
+            return rewrite_rollback(conn, &next, &Rollback::Flags { id: *id, flags });
+        }
+    }
+    let current: Option<Option<String>> = conn
+        .query_row("SELECT flags FROM messages WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()
+        .context("reading a message's flags to roll a change back")?;
+    let Some(current) = current else {
+        return Ok(());
+    };
+    let restored = bit
+        .set(
+            MessageFlags::parse(current.as_deref().unwrap_or_default()),
+            before,
+        )
+        .to_flag_string();
+    conn.execute(
+        "UPDATE messages SET flags = ?2 WHERE id = ?1",
+        rusqlite::params![id, restored],
+    )
+    .context("rolling a flag change back")?;
+    Ok(())
+}
+
+/// Replace the rollback of the owed op `row` with `rollback`.
+fn rewrite_rollback(conn: &Connection, row: &PendingOp, rollback: &Rollback) -> Result<()> {
+    let payload = serde_json::to_string(&Payload {
+        op: row.op.clone(),
+        rollback: rollback.clone(),
+    })
+    .context("encoding the pending op payload")?;
+    conn.execute(
+        "UPDATE pending_ops SET payload = ?1 WHERE id = ?2",
+        rusqlite::params![payload, row.id],
+    )
+    .context("pointing a later op's rollback past a refused one")?;
     Ok(())
 }
 
@@ -3130,13 +3237,12 @@ mod tests {
         );
     }
 
-    /// An op refused for good rolls back the later ops on its message with
+    /// A move refused for good rolls back the later ops on its message with
     /// it, unrun: the star, the read toggle and the second move were
     /// committed against the folder the refused move put the message in.
     /// Undone newest first, the message lands back in the inbox, unstarred
     /// and unread, where the server still has it; undone oldest first, the
-    /// read toggle's rollback would restore the star, and the second move's
-    /// would leave the message in the archive.
+    /// second move's rollback would leave the message in the archive.
     #[tokio::test]
     async fn a_refused_op_rolls_back_the_later_ops_on_its_message() {
         let fx = fixture();
@@ -3218,6 +3324,155 @@ mod tests {
                 op.last_error
             );
         }
+    }
+
+    /// Drain `MAX_ATTEMPTS` passes, each refusing the first op it runs, and
+    /// return every op run and the last pass's result.
+    async fn refuse_the_first_op_for_good(
+        fx: &crate::reconcile::tests::Fixture,
+    ) -> (Vec<ServerOp>, DrainResult) {
+        let base = unix_now();
+        let mut seen = Vec::new();
+        let mut last = DrainResult::default();
+        for tick in 0..MAX_ATTEMPTS {
+            let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("NO refused"))]);
+            last = drain(
+                &fx.store,
+                &fx.blobs,
+                "alice",
+                &mut exec,
+                base + (tick + 1) * 10_000_000,
+            )
+            .await
+            .unwrap();
+            seen.extend(exec.seen);
+        }
+        (seen, last)
+    }
+
+    /// PERSO-243: a star refused for good changed no folder, so the archive
+    /// queued after it was committed against a state the server has, and
+    /// runs once the star is parked rather than being rolled back with it.
+    #[tokio::test]
+    async fn a_refused_star_releases_a_later_move_to_run() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let star = apply_set_flagged(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            star_op("INBOX"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+
+        let (seen, last) = refuse_the_first_op_for_good(&fx).await;
+
+        let stars = vec![star_op("INBOX"); MAX_ATTEMPTS as usize];
+        assert_eq!(seen[..stars.len()], stars[..]);
+        assert_eq!(seen[stars.len()..], [move_op("<inbox-1@example.com>")]);
+        assert_eq!((last.failed, last.completed), (1, 1));
+        let row = read::find_by_id(&fx.store, id).unwrap().unwrap();
+        assert_eq!(row.mailbox, "archive", "the move was rolled back");
+        assert!(!row.is_flagged());
+        assert_eq!(
+            failed_ops(&fx.store, "alice")
+                .unwrap()
+                .iter()
+                .map(|op| op.id)
+                .collect::<Vec<_>>(),
+            [star]
+        );
+        assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+    }
+
+    /// PERSO-243: a reply sent while a star waits out its backoff writes
+    /// `\Answered` after the star's rollback snapshot. The star refused for
+    /// good puts back its own bit and keeps the reply's, which restoring the
+    /// whole snapshot wiped, and the reply's server half still runs.
+    #[tokio::test]
+    async fn a_refused_star_keeps_an_answered_bit_written_after_it() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        apply_set_flagged(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            star_op("INBOX"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        let replied = apply_post_send_flag(
+            &fx.store,
+            "alice",
+            "<inbox-1@example.com>",
+            true,
+            false,
+            &["INBOX".to_string()],
+        )
+        .unwrap();
+        assert_eq!(replied.rows, 1);
+
+        let (seen, last) = refuse_the_first_op_for_good(&fx).await;
+
+        assert_eq!(seen.last().map(ServerOp::kind), Some("set_answered"));
+        assert_eq!((last.failed, last.completed), (1, 1));
+        let row = read::find_by_id(&fx.store, id).unwrap().unwrap();
+        assert!(!row.is_flagged(), "the star was not rolled back");
+        assert!(
+            row.is_answered(),
+            "the star's rollback wiped the reply's bit"
+        );
+    }
+
+    /// A star, an unstar and a star again on one message, the first two
+    /// refused for good while a later one on the same flag is owed: the local
+    /// bit is the last op's until it is refused too, and then the one from
+    /// before them all, which is what the server kept. Restoring each op's
+    /// own snapshot showed unstarred while the last star was still owed,
+    /// and a refused unstar would have restored the star it was taken over.
+    #[test]
+    fn a_refused_toggle_leaves_its_flag_to_a_later_owed_toggle() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let toggles = [true, false, true].map(|flagged| {
+            let op = ServerOp::SetFlagged {
+                message_id: "<inbox-1@example.com>".to_string(),
+                mailbox: "INBOX".to_string(),
+                flagged,
+                copy: None,
+            };
+            apply_set_flagged(&fx.store, "alice", id, flagged, op, Runner::Drain)
+                .unwrap()
+                .unwrap()
+        });
+        let flagged = || {
+            read::find_by_id(&fx.store, id)
+                .unwrap()
+                .unwrap()
+                .is_flagged()
+        };
+
+        refuse(&fx.store, &fx.blobs, toggles[0], "NO", Refusal::Park).unwrap();
+        assert!(flagged(), "the last star is still owed");
+        refuse(&fx.store, &fx.blobs, toggles[1], "NO", Refusal::Park).unwrap();
+        assert!(flagged(), "the last star is still owed");
+        refuse(&fx.store, &fx.blobs, toggles[2], "NO", Refusal::Park).unwrap();
+        assert!(!flagged(), "the server never got a star");
     }
 
     /// An executor that appends every op it runs, and when it finished, to a
