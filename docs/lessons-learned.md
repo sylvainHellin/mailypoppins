@@ -768,6 +768,7 @@ The caller waits for it rather than running it, because the drain claims nothing
 In a test of such a wait, bound the stand-in drainer's wait for the nudge (`tokio::time::timeout`), so that with the fix reverted the test fails on the server order instead of hanging.
 The wait's clock has to stop while no drain can run: a sync tick holds the account's turn for its whole body (160 s on a full sync) and drains only at its head and its tail, so a settle that counted its 60 s from the nudge refused an op the tick's tail drain was about to run.
 The settle probes the turn (`AccountRuntime::turn_held`, a `try_lock`) and spends patience only while it is free, under an overall ceiling, since a held turn can last as long as the tick does.
+A waiting caller also blocks the recovery of what it waits for: its own `SettleScope` keeps every drain from handing an orphaned `settling` row back, so an op a dead caller left on the same message is never run while the caller waits; the settle hands orphans back itself before it opens its scope.
 
 ## A listing is older than the store's own moves, and the op that would say so may already be gone
 

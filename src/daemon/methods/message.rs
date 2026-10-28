@@ -1777,6 +1777,16 @@ async fn mutate_with<E: OpExecutor>(
     // out of the drain a sync tick runs while the op is on the server: the
     // tick the move's own first change wakes would otherwise run it again
     // (PERSO-236). Opened before the commit and held past the settle.
+    //
+    // An op a caller that is gone left `settling` (a daemon killed mid-settle)
+    // goes back to the drain first: once this scope is open no drain may
+    // recover it, and a settle behind it on the same message would wait out
+    // its whole patience for an op nobody runs (PERSO-241).
+    if backend.is_some() {
+        if let Err(e) = pending_ops::recover_orphaned_settles(&store, &name) {
+            log::warn!("[pending_ops] could not hand back the orphaned settles of {name}: {e:#}");
+        }
+    }
     let settler = backend.map(|backend| (backend, pending_ops::SettleScope::open(&store)));
     let runner = settler
         .as_ref()
@@ -3720,6 +3730,69 @@ mod tests {
                 .unwrap();
             assert_eq!(row.mailbox, "archive");
             assert!(row.is_flagged());
+        }
+
+        /// A star a caller left `settling` when it died (a daemon killed
+        /// mid-settle) goes back to the drain before the next settle on the
+        /// message opens its scope. Once that scope is open no drain recovers
+        /// it, and the archive waited out its whole patience for an op nobody
+        /// ran, then refused (PERSO-241).
+        #[tokio::test]
+        async fn a_settle_hands_back_an_op_a_dead_caller_left_settling_first() {
+            let daemon = seeded();
+            {
+                let dead = pending_ops::SettleScope::open(&daemon.fx.store);
+                let star = ServerOp::SetFlagged {
+                    message_id: "<inbox-1@example.com>".to_string(),
+                    mailbox: "INBOX".to_string(),
+                    flagged: true,
+                    copy: None,
+                };
+                pending_ops::apply_set_flagged(
+                    &daemon.fx.store,
+                    "alice",
+                    daemon.id,
+                    true,
+                    star,
+                    pending_ops::Runner::Caller(&dead),
+                )
+                .unwrap()
+                .unwrap();
+            }
+            assert_eq!(
+                daemon.ops(),
+                [("set_flagged".to_string(), "settling".to_string())]
+            );
+            let mut requests = daemon.runtime.drain_requests();
+            requests.borrow_and_update();
+            let log = Arc::default();
+            let server = FakeServer::new("caller", &log, &daemon.fx.store);
+
+            let archive = daemon.call_within(
+                Duration::from_secs(2),
+                Kind::Archive,
+                by_row(daemon.id),
+                |_| Ok(server),
+            );
+            let drain_store = Store::open(daemon.fx.store.path()).unwrap();
+            let mut drainer = FakeServer::new("drain", &log, &daemon.fx.store);
+            let drained = async {
+                let _ = tokio::time::timeout(Duration::from_secs(2), requests.changed()).await;
+                pending_ops::drain(
+                    &drain_store,
+                    &daemon.fx.blobs,
+                    "alice",
+                    &mut drainer,
+                    crate::outbox::unix_now(),
+                )
+                .await
+            };
+            let (archived, drained) = tokio::join!(archive, drained);
+
+            archived.unwrap();
+            assert_eq!(drained.unwrap().completed, 1);
+            assert_eq!(*log.lock().unwrap(), ["drain set_flagged", "caller move"]);
+            assert!(daemon.ops().is_empty());
         }
 
         /// A sync tick holds the account's turn for its whole body, and a star
