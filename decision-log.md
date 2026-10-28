@@ -305,3 +305,52 @@ A new draft therefore reads `pending` rather than `local` until its first push, 
 Rejected: keeping the key in the `draft_sync` row only, which a store rebuild drops; holding the write while an editor has the file open, which depends on the editor and misses the desktop app.
 Source: Sylvain, chat of 2026-10-27.
 Status: accepted
+
+## 2026-10-28 - The server-side calendar is built against Graph first, then EWS for TUM, then CalDAV
+
+Why: Graph is the cheapest API to build the shared engine, event store and views against, on the EVOQS account whose tenant Sylvain administers; TUM carries most meetings and room bookings and follows next; the personal calendar waits on its move to a CalDAV provider.
+The plan is `docs/plans/calendar.md`, with one Plane issue per phase (PERSO-200, PERSO-255, PERSO-256, PERSO-257).
+Rejected: Graph, then CalDAV, then EWS (TUM waits longest); EWS first (TUM sooner, but the engine is built against the hardest API).
+Source: report comment export of 2026-10-28 on `.sync/calendar-scoping`.
+Status: accepted
+
+## 2026-10-28 - On-prem Exchange accounts reach their calendar through EWS, and an account's calendar backend is set independently of its mail transport
+
+Why: TUM runs on-prem Exchange at LRZ (`xmail.mwn.de`), which Graph cannot reach and which exposes no CalDAV, and cal-cli proves that password EWS works there.
+TUM mail stays on IMAP and SMTP, which LRZ supports and which works; only its calendar, and later its contacts, go through EWS with the same account and credentials.
+A Graph account uses Graph for mail and calendar, and if LRZ moves TUM to Exchange Online the account switches to Graph for everything.
+The entry of 2026-10-21 rejected EWS only as the transport of the EVOQS Microsoft 365 account and stands.
+Rejected: staying Graph-only and leaving TUM to iMIP invitation mails (TUM events without an invitation mail stay invisible); moving TUM mail to EWS along with the calendar (replaces a working transport for nothing).
+Source: report comment export of 2026-10-28 on `.sync/calendar-scoping`.
+Status: accepted
+
+## 2026-10-28 - mp builds generic CalDAV only and no Google Calendar backend; the personal calendar moves to a CalDAV provider with server-side scheduling
+
+Why: staying on Google needs a Google OAuth client, app verification for the calendar scope, and Google-specific work as a fourth backend, while a provider with RFC 6638 scheduling is served by the generic CalDAV backend.
+Choosing the provider and migrating the events and the address book is Sylvain's task (PERSO-254), and the CalDAV phase waits on it.
+Rejected: staying on Google with the Google Calendar API or Google CalDAV.
+Source: report comment export of 2026-10-28 on `.sync/calendar-scoping`.
+Status: accepted
+
+## 2026-10-28 - mp absorbs cal-cli's calendar capabilities, and cal-cli retires once mp covers TUM and the personal calendar
+
+Why: free/busy, rooms booked by inviting the room mailbox, and creating and answering events then live in one tool with one credential store, and agents use mp; cal-cli's TUM part retires with the EWS phase and the rest with the CalDAV phase.
+Rejected: keeping cal-cli as a separate agent tool beside mp (two code bases and two credential stores).
+Source: report comment export of 2026-10-28 on `.sync/calendar-scoping`.
+Status: accepted
+
+## 2026-10-28 - The first calendar release covers views, responses with comment and proposed time, events with attendees including single occurrences, free/busy and reminders
+
+Why: this is how Outlook is used day to day.
+In: agenda, day and week views; calendars shown or hidden per account; accept, tentative and decline with an optional comment and a "do not send a response" option; propose a new time; create, update and cancel single and simple recurring events with attendees; edit a single occurrence of a series; attendee status; a Teams link toggle on Microsoft 365; free/busy when picking a time; reminders as desktop notifications.
+Out: shared calendars beyond TUM rooms, a room finder, a month view.
+Rejected: the proposed cut without proposing a new time and without editing a single occurrence (Sylvain added both).
+Source: report comment export of 2026-10-28 on `.sync/calendar-scoping`.
+Status: accepted
+
+## 2026-10-28 - The TUI gets agenda, day and week views, with a full week grid as in the desktop app
+
+Why: closer parity with the desktop app; calcure (<https://github.com/anufrievroman/calcure>), a Python terminal calendar, is the layout reference.
+Rejected: agenda and day view only in the TUI, with the week grid in the desktop app only (cheaper, but the TUI loses the week overview).
+Source: report comment export of 2026-10-28 on `.sync/calendar-scoping`.
+Status: accepted

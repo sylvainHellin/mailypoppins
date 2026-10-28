@@ -1,5 +1,7 @@
 # Design: Calendar invitations (iMIP over SMTP/IMAP)
 
+> The server-side calendar (Graph, EWS, CalDAV) is designed in [calendar.md](calendar.md); this iMIP path stays for accounts without a calendar backend.
+
 > Status: design, nothing implemented (2026-07-11). Implementer-facing.
 > Scout: [.agents/research/2026-07-11-calendar-contacts-scout.md] (contacts/iMIP touchpoints).
 > Tickets: #0020,
