@@ -13,9 +13,10 @@
 ## Decision summary (settled — do not reopen)
 
 - **D1 — Transport.** v1 uses **iMIP MIME (RFC 6047 / RFC 5546) over SMTP/IMAP for every
-  account, Graph and non-Graph alike.** No Microsoft Graph calendar path in v1. The TUM
-  M365 tenant requires IT-admin approval for Graph API access that is currently
-  unobtainable, so Graph is a *future* sync backend with its own gating ticket
+  account, Graph and non-Graph alike.** No Microsoft Graph calendar path in v1. TUM runs
+  on-prem Exchange at LRZ, which Graph cannot reach (its calendar goes through EWS,
+  calendar.md D3), and Graph is a *future* sync backend for Microsoft 365 accounts
+  with its own gating ticket
   (PERSO-163 approval →
   PERSO-200 backend). The requirement is **universal
   recipient compatibility**: Gmail, Outlook, and Apple Mail must render `method=REQUEST`

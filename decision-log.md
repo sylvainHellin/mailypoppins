@@ -348,9 +348,10 @@ Rejected: the proposed cut without proposing a new time and without editing a si
 Source: report comment export of 2026-10-28 on `.sync/calendar-scoping`.
 Status: accepted
 
-## 2026-10-28 - The TUI gets agenda, day and week views, with a full week grid as in the desktop app
+## 2026-10-28 - The TUI and the desktop app both get agenda, day and week views, with a full week grid
 
-Why: closer parity with the desktop app; calcure (<https://github.com/anufrievroman/calcure>), a Python terminal calendar, is the layout reference.
+Why: parity between the two clients; the desktop Calendar view has no week grid yet, so the grid is new work in both.
+calcure (<https://github.com/anufrievroman/calcure>), a Python terminal calendar, is the layout reference for the TUI.
 Rejected: agenda and day view only in the TUI, with the week grid in the desktop app only (cheaper, but the TUI loses the week overview).
 Source: report comment export of 2026-10-28 on `.sync/calendar-scoping`.
 Status: accepted

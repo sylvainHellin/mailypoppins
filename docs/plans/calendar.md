@@ -12,7 +12,8 @@ Each account reaches its server calendar through one backend: Microsoft Graph, E
 
 ## Decision summary
 
-These are settled; the decision log carries the why and the rejected options.
+Sylvain settled D1 to D5, D9 and D10, and the decision log carries their why and their rejected options.
+The other entries are design choices of this plan and stay open to revision during implementation.
 
 - D1, backend order.
   Graph comes first, then EWS for TUM, then CalDAV.
@@ -41,10 +42,14 @@ These are settled; the decision log carries the why and the rejected options.
 - D9, the first-release cut.
   In: agenda, day and week views; calendars shown or hidden per account; respond (accept, tentative, decline) with an optional comment and a "do not send a response" option; propose a new time; create, update and cancel single and simple recurring events with attendees; edit a single occurrence of a series; attendee status; a Teams link toggle on Microsoft 365; free/busy when picking a time; reminders as desktop notifications.
   Out: shared calendars beyond TUM rooms, a room finder, a month view.
-- D10, the TUI gets a full week grid.
-  The TUI shows agenda, day and week views like the desktop app, with calcure (<https://github.com/anufrievroman/calcure>, a Python terminal calendar) as the layout reference.
-- D11, sync by polling.
-  Webhooks and push subscriptions need a public endpoint, which a local daemon does not have.
+  The first release is phases 1 and 2 on Graph accounts.
+  EWS reaches the same cut in phase 3 and CalDAV in phase 4; on CalDAV, proposing a new time (an iTIP `COUNTER`) ships only if the chosen server supports it.
+- D10, the TUI and the desktop app both get a week grid.
+  Both show agenda, day and week views; the desktop Calendar view has no week grid yet.
+  calcure (<https://github.com/anufrievroman/calcure>, a Python terminal calendar) is the layout reference for the TUI.
+- D11, sync by polling on every backend to start with.
+  Graph webhooks need a public HTTPS endpoint for Microsoft to call, which a local daemon does not have.
+  EWS streaming and pull notifications run over outbound connections and would work for TUM, but polling keeps one sync path across the three backends while the engine is built; EWS notifications are listed under "Later".
 - D12, Hines stays out.
   Its tenant blocks third-party apps that need admin consent until its IT approves, and publisher verification (PERSO-163) does not lift a tenant block.
 
@@ -87,14 +92,15 @@ All-day events keep a date range with an exclusive end, as in iCalendar; the Gra
 
 ### Event store
 
-A per-account table set in the existing sqlite store, holding calendars (name, colour, visibility, permissions) and the expanded occurrences of the rolling window, plus each backend's sync token.
+Each account gets a set of tables in the existing sqlite store, holding calendars (name, colour, visibility, permissions) and the expanded occurrences of the rolling window, plus each backend's sync token.
 Visibility per calendar is a local preference and survives a cache rebuild.
 `calendar.rebuild` drops the cache of an account and resyncs it from the server; on an iMIP account it keeps its current meaning, refolding the invitation mails.
 
 ### Sync
 
 - Polling on the daemon's tick, plus an immediate refresh after every write.
-- Graph: `calendarView/delta` per calendar over the window, with a full resync on HTTP 410.
+- Graph: `calendarView/delta` over the window, with a full resync on HTTP 410.
+  A delta token is bound to the start and end of the window its first request named, so as the rolling window moves the daemon re-baselines on a schedule, daily to start with, with a fresh full delta over the new window.
 - EWS: `SyncFolderItems` on each calendar folder, then `FindItem` with a `CalendarView` over the window to get the expanded occurrences.
 - CalDAV: `sync-collection` (RFC 6578) where the server supports it, else a ctag check and an etag comparison.
 - Graph and EWS expand recurring events on the server; CalDAV needs client-side `RRULE` expansion.
@@ -123,7 +129,8 @@ EWS reuses the IMAP password; nothing new is stored for TUM.
 ### Graph
 
 - A hand-rolled client on reqwest and serde, about a dozen endpoints; the auth already exists.
-- Read: `GET /me/calendars`, `GET /me/calendars/{id}/calendarView/delta`.
+- Read: `GET /me/calendars`, then `GET /me/calendars/{id}/calendarView/delta` per calendar if v1.0 offers it, else `GET /me/calendarView/delta`; phase 1 checks which.
+- Delta tokens: each token is bound to the window of its first request, so the scheduled re-baseline of the rolling window (see "Sync") starts a new delta round.
 - Ids: every request sends `Prefer: IdType="ImmutableId"`, so an occurrence or an event moved between folders keeps its id.
 - Respond: `POST /me/events/{id}/accept|tentativelyAccept|decline` with `comment` and `sendResponse`; `tentativelyAccept` and `decline` take `proposedNewTime` for proposing a new time.
 - Write: `POST /me/calendars/{id}/events` (the server sends the invitations), `PATCH /me/events/{id}`, `POST /me/events/{id}/cancel` with a comment for the organizer, `DELETE` for an event without attendees.
@@ -138,6 +145,7 @@ EWS reuses the IMAP password; nothing new is stored for TUM.
 - The spike decides between hand-rolled SOAP on quick-xml and Thunderbird's `ews` crate (0.1.x, MPL-2.0, calendar coverage unverified), and probes the auth `xmail.mwn.de` accepts (Basic or NTLM).
 - Read: `FindFolder` for the calendars, `SyncFolderItems`, `FindItem` with `CalendarView`, `GetItem` for attendees and body.
 - Respond: `AcceptItem`, `TentativelyAcceptItem`, `DeclineItem` with a body and `MessageDisposition` (`SendAndSaveCopy` or `SaveOnly` for "do not send a response"); proposing a new time uses `ProposedStart` and `ProposedEnd` where LRZ's schema version has them, which the spike checks.
+  The spike also checks whether `SaveOnly` leaves a response item in Drafts, which mp would then have to delete.
 - Write: `CreateItem` with `SendMeetingInvitations`, `UpdateItem` with `SendMeetingInvitationsOrCancellations`, `CancelCalendarItem`.
 - Single occurrence: `OccurrenceItemId` (series master plus instance index) or the occurrence's own `ItemId` from the calendar view.
 - Free/busy: `GetUserAvailability`.
@@ -183,11 +191,12 @@ Every write is an `operation.*` with the existing journal, so an interrupted cre
 
 ### Phase 1, Graph read, views and server-side responses (PERSO-200)
 
+- Check first whether Graph v1.0 offers the per-calendar `/me/calendars/{id}/calendarView/delta` or only `/me/calendarView/delta`; the sync of calendars beyond the default one follows from the answer.
 - Event store as a disposable cache of the rolling window, rebuilt from the server.
 - `CalendarBackend` trait over the neutral event model, and the per-account `calendar_backend` setting.
 - `calendar.list` and `calendar.view` over Graph.
 - `Calendars.ReadWrite` in `GRAPH_SCOPES`, with a re-login prompt when a stored token lacks it.
-- Agenda, day and week views in the CLI, the TUI and the desktop app, with calendars shown or hidden per account.
+- Agenda, day and week views in the CLI, the TUI and the desktop app, with calendars shown or hidden per account; the week grid is new in both the TUI and the desktop app.
 - The invite card on a Graph mail wired to its server event (`eventMessage` to `event`), with accept, tentative and decline, an optional comment and the send-response option.
 - Done when the EVOQS account shows the events created in Outlook in all three clients, and an answer from mp shows in Outlook.
 
@@ -201,15 +210,17 @@ Every write is an `operation.*` with the existing journal, so an interrupted cre
 
 ### Phase 3, EWS for on-prem Exchange, TUM (PERSO-256, after phase 1)
 
-- Spike first: probe EWS auth on `xmail.mwn.de` (Basic or NTLM), and check the calendar coverage of the `ews` crate against hand-rolled SOAP on quick-xml; the spike's outcome picks the client.
+- Spike first: probe EWS auth on `xmail.mwn.de` (Basic or NTLM), check the calendar coverage of the `ews` crate against hand-rolled SOAP on quick-xml, and check whether `AcceptItem` with `SaveOnly` leaves a response item in Drafts; the spike's outcome picks the client.
 - Read, respond with comment, send-response option and proposed time, create, update and cancel, single occurrences.
 - Free/busy through `GetUserAvailability`, rooms by inviting the room mailbox, TUM delegate calendars for room booking.
+- TUM reaches the first-release cut of D9; the Teams link toggle applies to Microsoft 365 only.
 - cal-cli's TUM part retires once mp covers it.
 
 ### Phase 4, CalDAV (PERSO-257, after phase 1 and after PERSO-254)
 
 - Read with `sync-collection` and client-side recurrence expansion.
 - Write with RFC 6638 server scheduling, and iMIP when the server does not advertise it.
+- The personal calendar reaches the first-release cut of D9, with proposing a new time (iTIP `COUNTER`) only if the provider supports it.
 - Tested against the provider Sylvain chooses.
 - cal-cli retires fully.
 
@@ -219,6 +230,7 @@ Every write is an `operation.*` with the existing journal, so an interrupted cre
 - A room finder (`GetRoomLists` and `GetRooms`, Graph `findRooms`).
 - A month view.
 - ICS subscription feeds.
+- EWS streaming notifications for TUM in place of polling (D11).
 - Server contacts as an additional contact source: Graph `Contacts.Read` and `/me/contacts` (the contacts part of PERSO-200 before its reshape), EWS contacts for TUM, CardDAV for the personal account.
 - Hines, once its IT grants admin consent.
 
@@ -247,6 +259,6 @@ Graph needs nothing new beyond reqwest and serde.
 ## Out of scope
 
 - A Google Calendar API backend and Google-specific CalDAV (D4).
-- Webhooks and push subscriptions (D11).
+- Graph webhooks, which need a public endpoint (D11).
 - Calendars on Proton, which has no calendar API.
 - Everything under "Later" until it is scheduled.
