@@ -770,6 +770,16 @@ The wait's clock has to stop while no drain can run: a sync tick holds the accou
 The settle probes the turn (`AccountRuntime::turn_held`, a `try_lock`) and spends patience only while it is free, under an overall ceiling, since a held turn can last as long as the tick does.
 A waiting caller also blocks the recovery of what it waits for: its own `SettleScope` keeps every drain from handing an orphaned `settling` row back, so an op a dead caller left on the same message is never run while the caller waits; the settle hands orphans back itself before it opens its scope.
 
+## Holding an op behind a refused one decides what its rollback does to it
+
+The drain kept the ops on one message in order only behind an older `settling` op, so a move the server refused once waited out its 30 s backoff while a star queued after it ran first, against the folder the move had not reached (PERSO-243).
+Holding the star back is the easy half; the hard half is the star's fate when the move is refused for good.
+Running it then is wrong: it names the folder the refused move put the message in, so it searches the wrong folder and a not-found is retired as done, and the move's rollback has already overwritten the star's local half.
+Every rollback restores a whole snapshot (a flag string, a mailbox and UID) taken when its own op was committed, so rollbacks only compose in reverse: the later ops on the message are undone newest first, then the refused op, and parked `failed` unrun.
+Undoing oldest first restores the later snapshots last, which brings back a star the server never saw or a folder the message never reached.
+A held op spends no attempt and starts no backoff, or a slow server would spend its budget while it never ran; its rollback-on-refusal is not counted as an attempt either.
+A regression for the order needs two later ops whose snapshots differ (a star then a read toggle, or two moves), since a single later op restores the same state either way.
+
 ## A listing is older than the store's own moves, and the op that would say so may already be gone
 
 The sync reads its skip lists, lists the server, then ingests; a local move or delete can commit anywhere in between, and its server half lands later still (PERSO-240).

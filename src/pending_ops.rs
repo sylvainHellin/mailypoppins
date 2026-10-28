@@ -38,10 +38,13 @@
 //!   copies of the message);
 //! - the ops on one message reach the server in the order they were
 //!   committed, whoever runs them: the drain holds a `queued` op back behind
-//!   an older `settling` one ([`drain`]), and a caller waits for the older
-//!   ops still owed on its message before its own server call
+//!   an older one still owed on its message, `settling` or `queued` in
+//!   backoff ([`drain`], PERSO-243), and a caller waits for the older ops
+//!   still owed on its message before its own server call
 //!   ([`run_and_settle`], PERSO-241), running none of them itself, so each
-//!   still runs once.
+//!   still runs once. An op refused for good rolls back the later ops on its
+//!   message with it, newest first, since they were committed against the
+//!   state its rollback undoes.
 //!
 //! ## States
 //!
@@ -82,7 +85,7 @@
 //! cannot tell from a twin, as an ordinary error, which the drain retries and
 //! then rolls back (`crate::imap_client::ops::copy_to_move`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
@@ -916,8 +919,9 @@ pub struct DrainResult {
     pub completed: usize,
     /// Rows parked as `failed` this pass, with their local state rolled back.
     pub failed: usize,
-    /// Rows still `queued` after this pass (backoff not elapsed, or one more
-    /// retryable failure short of the budget).
+    /// Rows still `queued` after this pass (backoff not elapsed, one more
+    /// retryable failure short of the budget, or held behind an older op
+    /// still owed on the same message).
     pub still_open: usize,
 }
 
@@ -940,11 +944,23 @@ pub struct DrainResult {
 ///
 /// A `settling` row is a caller's to run ([`run_and_settle`]) and is never
 /// run here; one its caller left behind is first handed back as `queued`
-/// ([`recover_orphaned_settles`]). A `queued` row on a message that has an
-/// older `settling` row waits for it ([`settling_targets`]), counted as still
-/// open with no attempt spent: the ops on one message run in the order they
-/// were committed, which the drain kept when every op was `queued`. The
-/// settle that retires the older row asks for the drain that runs it.
+/// ([`recover_orphaned_settles`]).
+///
+/// The ops on one message reach the server in the order they were committed
+/// (PERSO-236, PERSO-243): a `queued` row waits while an older op on its
+/// message is still owed, an older `settling` row ([`settling_targets`]) or an
+/// older `queued` row this pass leaves owed (its backoff has not elapsed, it
+/// was refused short of the budget, or it waits itself). A waiting row is
+/// counted as still open, is not run and spends no attempt, so its own
+/// backoff and budget start only once it is first in line. The settle that
+/// retires an older `settling` row asks for the drain that runs the rest; an
+/// older `queued` row that runs in this pass releases the rows behind it in
+/// the same pass.
+///
+/// A row refused for good takes the later `queued` rows on its message with
+/// it ([`fail_newer_on_message`]): each was committed against the local state
+/// the refused op left, which its rollback undoes, so they are rolled back
+/// first, newest first, and parked `failed` unrun, with no attempt spent.
 ///
 /// `pub(crate)`, not `pub`: the only lock-guarded entry point is
 /// [`drain_account`], and draining outside that lock is the race the engine
@@ -963,17 +979,26 @@ pub(crate) async fn drain<E: OpExecutor>(
     // them, while one committed between the two reads would be missed the
     // other way round.
     let queued = queued_ops(store, account)?;
-    let settling = settling_targets(store, account)?;
+    // The oldest op still owed on each message: the settling ones now, and
+    // every queued one this pass leaves owed as the pass reaches it. Rows run
+    // oldest first, so a queued row only ever waits for a smaller id.
+    let mut owed = settling_targets(store, account)?;
+    // Rows a refused older op on their message parked unrun this pass.
+    let mut parked = HashSet::new();
     for row in queued {
+        if parked.contains(&row.id) {
+            continue;
+        }
         let waits = row
             .target_message_id
-            .and_then(|target| settling.get(&target))
+            .and_then(|target| owed.get(&target))
             .is_some_and(|&oldest| oldest < row.id);
         if waits {
             result.still_open += 1;
             continue;
         }
         if row.updated + backoff_secs(row.attempts) > now {
+            still_owed(&mut owed, &row);
             result.still_open += 1;
             continue;
         }
@@ -1007,7 +1032,17 @@ pub(crate) async fn drain<E: OpExecutor>(
             Err(e) => {
                 let err = format!("{e:#}");
                 if row.attempts + 1 >= MAX_ATTEMPTS {
-                    if let Err(e) = fail_and_roll_back(store, blobs, &row, &err) {
+                    match fail_newer_on_message(store, blobs, &row, &err) {
+                        Ok(newer) => {
+                            result.failed += newer.len();
+                            parked.extend(newer);
+                        }
+                        Err(e) => warn!(
+                            "[pending_ops] could not roll back the ops queued after op {}: {e:#}",
+                            row.id
+                        ),
+                    }
+                    if let Err(e) = fail_and_roll_back(store, blobs, &row, &err, true) {
                         warn!("[pending_ops] could not settle failed op {}: {e:#}", row.id);
                     }
                     // A drafts-mirror push retried after its cool-down that
@@ -1031,6 +1066,7 @@ pub(crate) async fn drain<E: OpExecutor>(
                             row.id
                         );
                     }
+                    still_owed(&mut owed, &row);
                     result.still_open += 1;
                 }
             }
@@ -1059,6 +1095,67 @@ fn settling_targets(store: &Store, account: &str) -> Result<HashMap<i64, i64>> {
     })?;
     rows.collect::<rusqlite::Result<HashMap<i64, i64>>>()
         .context("listing the messages a caller is settling an op on")
+}
+
+/// Record that `row` stays owed after this drain pass, so the later rows on
+/// its message wait for it (PERSO-243).
+fn still_owed(owed: &mut HashMap<i64, i64>, row: &PendingOp) {
+    if let Some(target) = row.target_message_id {
+        owed.entry(target)
+            .and_modify(|oldest| *oldest = (*oldest).min(row.id))
+            .or_insert(row.id);
+    }
+}
+
+/// Roll back and park `failed` every `queued` op committed after `refused` on
+/// its message, newest first, before `refused` itself is rolled back, and
+/// return their ids (PERSO-243).
+///
+/// Each of them was committed against the local state the older ops left: a
+/// star or a second move names the folder the refused move put the message
+/// in, and its rollback restores the state just before it. Once the refused
+/// op is undone that state never existed on the server, so none of them can
+/// run as committed (a star would search a folder the message never reached
+/// and be retired as a converged not-found), and only undoing them newest
+/// first lands the message where it was before the refused op, which is
+/// where the server still has it. They never ran, since the drain held them
+/// behind the refused op, so no attempt is counted.
+fn fail_newer_on_message(
+    store: &Store,
+    blobs: &BlobStore,
+    refused: &PendingOp,
+    err: &str,
+) -> Result<Vec<i64>> {
+    let Some(target) = refused.target_message_id else {
+        return Ok(Vec::new());
+    };
+    let mut stmt = store.conn().prepare(
+        "SELECT id, account, kind, target_message_id, payload, state, attempts,
+                last_error, created, updated
+         FROM pending_ops
+         WHERE account = ?1 AND target_message_id = ?2 AND id > ?3 AND state = ?4
+         ORDER BY id DESC",
+    )?;
+    let newer = stmt
+        .query_map(
+            rusqlite::params![refused.account, target, refused.id, STATE_QUEUED],
+            row_from_sql,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("listing the ops queued after a refused one on its message")?;
+    let why = format!(
+        "not run: an earlier change to this message (op {}, {}) was refused by the server \
+         and rolled back ({err})",
+        refused.id, refused.kind
+    );
+    let mut parked = Vec::with_capacity(newer.len());
+    for row in newer {
+        if let Err(e) = fail_and_roll_back(store, blobs, &row, &why, false) {
+            warn!("[pending_ops] could not settle op {}: {e:#}", row.id);
+        }
+        parked.push(row.id);
+    }
+    Ok(parked)
 }
 
 /// Take the engine lock and drain, or do nothing when another process holds it.
@@ -1441,11 +1538,18 @@ fn bump_attempt(store: &Store, id: i64, err: &str) -> Result<()> {
     Ok(())
 }
 
-/// Park a row as `failed` and roll its local state back to the server's.
+/// Park a row as `failed` and roll its local state back to the server's,
+/// counting the attempt that was refused when `attempted`.
 ///
 /// The op is parked even when the rollback errors: a rollback that fails the
 /// same way every tick would otherwise keep the op `queued` for good.
-fn fail_and_roll_back(store: &Store, blobs: &BlobStore, row: &PendingOp, err: &str) -> Result<()> {
+fn fail_and_roll_back(
+    store: &Store,
+    blobs: &BlobStore,
+    row: &PendingOp,
+    err: &str,
+    attempted: bool,
+) -> Result<()> {
     let err = match apply_rollback(store, blobs, &row.rollback) {
         Ok(()) => err.to_string(),
         Err(e) => {
@@ -1459,9 +1563,9 @@ fn fail_and_roll_back(store: &Store, blobs: &BlobStore, row: &PendingOp, err: &s
     store
         .conn()
         .execute(
-            "UPDATE pending_ops SET state = ?2, attempts = attempts + 1, last_error = ?3,
+            "UPDATE pending_ops SET state = ?2, attempts = attempts + ?5, last_error = ?3,
              updated = ?4 WHERE id = ?1",
-            rusqlite::params![row.id, STATE_FAILED, err, unix_now()],
+            rusqlite::params![row.id, STATE_FAILED, err, unix_now(), i64::from(attempted)],
         )
         .context("parking a pending op as failed")?;
     warn!(
@@ -2630,6 +2734,240 @@ mod tests {
         );
     }
 
+    /// A move to the archive and a star queued after it on the same message,
+    /// both for the drain: what PERSO-243's tests start from. Returns the
+    /// message's row id and the two op ids, oldest first.
+    fn refused_move_then_star(fx: &crate::reconcile::tests::Fixture) -> (i64, [i64; 2]) {
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let (_prev, archive) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        let star = apply_set_flagged(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            star_op("Archive"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        (id, [archive, star])
+    }
+
+    fn queued_row(store: &Store, op_id: i64) -> PendingOp {
+        let row = row_by_id(store, op_id).unwrap().unwrap();
+        assert_eq!(row.state, STATE_QUEUED, "op {op_id}");
+        row
+    }
+
+    /// PERSO-243: a move the server refused once waits out its backoff, and
+    /// the star queued after it on the same message waits with it rather
+    /// than running first against the folder the move has not reached. Once
+    /// the backoff has elapsed both run, in the order committed.
+    #[tokio::test]
+    async fn a_queued_op_waits_for_an_older_op_in_backoff_on_its_message() {
+        let fx = fixture();
+        let (_id, [_archive, star]) = refused_move_then_star(&fx);
+        let base = unix_now();
+
+        let mut refusing = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("connection reset"))]);
+        let result = drain(&fx.store, &fx.blobs, "alice", &mut refusing, base + 5)
+            .await
+            .unwrap();
+        assert_eq!(refusing.seen, [move_op("<inbox-1@example.com>")]);
+        assert_eq!(
+            result,
+            DrainResult {
+                still_open: 2,
+                ..DrainResult::default()
+            }
+        );
+
+        // The move's backoff has not elapsed: neither op runs.
+        let mut early = FakeExecutor::always_ok();
+        drain(&fx.store, &fx.blobs, "alice", &mut early, base + 5)
+            .await
+            .unwrap();
+        assert!(early.seen.is_empty(), "ran {:?}", early.seen);
+        assert_eq!(queued_row(&fx.store, star).attempts, 0);
+
+        let mut later = FakeExecutor::always_ok();
+        let result = drain(&fx.store, &fx.blobs, "alice", &mut later, base + 10_000_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            later.seen,
+            [move_op("<inbox-1@example.com>"), star_op("Archive")],
+            "in the order committed"
+        );
+        assert_eq!(result.completed, 2);
+        assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+    }
+
+    /// An op in backoff holds back only the later ops on its own message:
+    /// a move of another message queued after them still runs.
+    #[tokio::test]
+    async fn an_op_in_backoff_holds_back_no_op_on_another_message() {
+        let fx = fixture();
+        let (_id, [_archive, star]) = refused_move_then_star(&fx);
+        let other = fx.ingest_plain("inbox", 2, "Other");
+        apply_move(
+            &fx.store,
+            "alice",
+            other,
+            "archive",
+            move_op("<inbox-2@example.com>"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("connection reset"))]);
+        let result = drain(&fx.store, &fx.blobs, "alice", &mut exec, unix_now() + 10)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            exec.seen,
+            [
+                move_op("<inbox-1@example.com>"),
+                move_op("<inbox-2@example.com>")
+            ]
+        );
+        assert_eq!((result.completed, result.still_open), (1, 2));
+        assert_eq!(queued_row(&fx.store, star).attempts, 0);
+    }
+
+    /// A held op spends no attempt and backs off on nothing of its own: across
+    /// every refusal of the move ahead of it, the star stays as committed.
+    #[tokio::test]
+    async fn an_op_held_behind_an_older_one_spends_no_attempt() {
+        let fx = fixture();
+        let (_id, [archive, star]) = refused_move_then_star(&fx);
+        let committed = queued_row(&fx.store, star);
+
+        let base = unix_now();
+        for tick in 0..MAX_ATTEMPTS - 1 {
+            let mut exec = FakeExecutor::scripted(vec![
+                Err(anyhow::anyhow!("connection reset")),
+                Err(anyhow::anyhow!("connection reset")),
+            ]);
+            drain(
+                &fx.store,
+                &fx.blobs,
+                "alice",
+                &mut exec,
+                base + (tick + 1) * 10_000_000,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(queued_row(&fx.store, archive).attempts, MAX_ATTEMPTS - 1);
+        let held = queued_row(&fx.store, star);
+        assert_eq!(
+            (held.attempts, held.last_error, held.updated),
+            (0, None, committed.updated),
+            "waiting is not a failed attempt"
+        );
+    }
+
+    /// An op refused for good rolls back the later ops on its message with
+    /// it, unrun: the star, the read toggle and the second move were
+    /// committed against the folder the refused move put the message in.
+    /// Undone newest first, the message lands back in the inbox, unstarred
+    /// and unread, where the server still has it; undone oldest first, the
+    /// read toggle's rollback would restore the star, and the second move's
+    /// would leave the message in the archive.
+    #[tokio::test]
+    async fn a_refused_op_rolls_back_the_later_ops_on_its_message() {
+        let fx = fixture();
+        let (id, [archive, star]) = refused_move_then_star(&fx);
+        let read_op = ServerOp::SetRead {
+            message_id: "<inbox-1@example.com>".to_string(),
+            mailbox: "Archive".to_string(),
+            read: true,
+            copy: None,
+        };
+        let mark_read = apply_set_read(&fx.store, "alice", id, true, read_op, Runner::Drain)
+            .unwrap()
+            .unwrap();
+        let (_prev, onwards) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "receipts",
+            ServerOp::Move {
+                message_id: "<inbox-1@example.com>".to_string(),
+                source_mailbox: "Archive".to_string(),
+                dest_mailbox: "Receipts".to_string(),
+                copy: None,
+            },
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        let row = read::find_by_id(&fx.store, id).unwrap().unwrap();
+        assert!(row.is_flagged() && row.is_read());
+
+        let base = unix_now();
+        let mut seen = Vec::new();
+        let mut last = DrainResult::default();
+        for tick in 0..MAX_ATTEMPTS {
+            let mut exec = FakeExecutor::scripted(
+                (0..4)
+                    .map(|_| Err(anyhow::anyhow!("NO server refused")))
+                    .collect(),
+            );
+            last = drain(
+                &fx.store,
+                &fx.blobs,
+                "alice",
+                &mut exec,
+                base + (tick + 1) * 10_000_000,
+            )
+            .await
+            .unwrap();
+            seen.extend(exec.seen);
+        }
+
+        assert!(
+            seen.iter()
+                .all(|op| *op == move_op("<inbox-1@example.com>")),
+            "only the refused move ran: {seen:?}"
+        );
+        assert_eq!(last.failed, 4);
+        let row = read::find_by_id(&fx.store, id).unwrap().unwrap();
+        assert_eq!(row.mailbox, "inbox");
+        assert!(!row.is_flagged(), "the star was not rolled back");
+        assert!(!row.is_read(), "the read toggle was not rolled back");
+        assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+        let failed = failed_ops(&fx.store, "alice").unwrap();
+        assert_eq!(
+            failed.iter().map(|op| op.id).collect::<Vec<_>>(),
+            [archive, star, mark_read, onwards]
+        );
+        for op in &failed[1..] {
+            assert_eq!(op.attempts, 0, "op {} never ran", op.id);
+            assert!(
+                op.last_error
+                    .as_deref()
+                    .unwrap()
+                    .contains(&format!("op {archive}, move")),
+                "{:?}",
+                op.last_error
+            );
+        }
+    }
+
     /// An executor that appends every op it runs, and when it finished, to a
     /// log it shares with the other runners of a test, so the test can read
     /// the order the server saw the ops of one message in.
@@ -3002,7 +3340,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let row = row_by_id(&fx.store, parked).unwrap().unwrap();
-        fail_and_roll_back(&fx.store, &fx.blobs, &row, "refused").unwrap();
+        fail_and_roll_back(&fx.store, &fx.blobs, &row, "refused", true).unwrap();
         apply_move(
             &fx.store,
             "alice",
