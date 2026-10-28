@@ -731,14 +731,14 @@ The durable queues stamp every row `updated = unix_now()` and gate a retry on `u
 A fresh row has `attempts = 0`, so the backoff is `0` and the row is eligible the instant `now >= updated`, which in production it always is because the drain passes `unix_now()`.
 A test that enqueues a row and then drains with a tidy synthetic clock (`now = 10_000`) trips over the fact that `updated` is a real ~1.7e9 timestamp: `updated + 0 > 10_000` is true, so the row is treated as still backing off and the drain silently processes nothing, `completed == 0` with no error.
 The gate is correct; the test's clock was below the row's real one.
-Drive these drains from `unix_now()`-relative offsets (`unix_now() + 10` for immediate eligibility, `base + N * 10_000_000` to step past successive backoff windows), because the state transitions that stamp `updated` (`bump_attempt`, `fail_and_roll_back`) also use the real clock, not the `now` the drain was handed.
+Drive these drains from `unix_now()`-relative offsets (`unix_now() + 10` for immediate eligibility, `base + N * 10_000_000` to step past successive backoff windows), because the state transitions that stamp `updated` (`bump_attempt`, `park`) also use the real clock, not the `now` the drain was handed.
 When a scheduler mixes an injected clock (the drain's `now`) with a wall-clock one (the row's `updated`), a test has to speak the wall-clock one or its rows look permanently not-yet-due.
 
 ## A succeeded server op that crashes before its queue row retires must converge on replay, or it surfaces as a false failure
 
 The durable mutation queue (`src/pending_ops.rs`) commits the local write and the op it owes in one transaction, then a background drain runs the server op and retires the row.
 The dangerous window is server-op-succeeded-then-crash-before-retire: on restart the row is still `queued`, the drain replays the op, and the message is already gone from the source folder.
-Some backends reported that not-found as a plain `Err` (`imap_client::move_email_on_server` / `delete_email_on_server`, `graph::mark_read_graph`) while others returned `Ok` (the IMAP flag ops, `graph::move`/`delete`), so a replayed IMAP move retried to `MAX_ATTEMPTS`, parked a *succeeded* op as `failed`, and `fail_and_roll_back` moved the local row home: local diverged from the server until the next full sync, and a completed move was shown as failed.
+Some backends reported that not-found as a plain `Err` (`imap_client::move_email_on_server` / `delete_email_on_server`, `graph::mark_read_graph`) while others returned `Ok` (the IMAP flag ops, `graph::move`/`delete`), so a replayed IMAP move retried to `MAX_ATTEMPTS`, parked a *succeeded* op as `failed`, and the drain's rollback moved the local row home: local diverged from the server until the next full sync, and a completed move was shown as failed.
 The "idempotent by Message-ID, a no-op on both backends" claim in the module doc was simply false for those three paths.
 The fix is a typed not-found signal, not string matching: the backends return `ops::NotFoundOnServer` and the drain treats it as a converged replay (retire the row, no rollback), while every other error stays a genuine failure that rolls back once the budget is spent.
 Keep the typed error's `Display` byte-identical to the old `anyhow!` text so direct CLI/TUI callers still show the user the same "not found" message; the split is drain-converges vs caller-errors, decided by `NotFoundOnServer::is_in`, not by changing what the backend prints.
@@ -779,6 +779,14 @@ Every rollback restores a whole snapshot (a flag string, a mailbox and UID) take
 Undoing oldest first restores the later snapshots last, which brings back a star the server never saw or a folder the message never reached.
 A held op spends no attempt and starts no backoff, or a slow server would spend its budget while it never ran; its rollback-on-refusal is not counted as an attempt either.
 A regression for the order needs two later ops whose snapshots differ (a star then a read toggle, or two moves), since a single later op restores the same state either way.
+## A rollback that lists what to undo has to undo it in the same transaction
+
+The cascade of PERSO-243 listed the ops queued after a refused move, then rolled each back and the move last, each in a transaction of its own (PERSO-249).
+A daemon command runs on its own task with its own store connection, so it could commit an op between the listing and the rollbacks, against the archive the move had put the message in: unlisted, it was never rolled back, and once the move's rollback put the message home it ran against the archive, was retired as a converged not-found, and the user's star or move was dropped without a word.
+The fix is one `BEGIN IMMEDIATE` around the listing, every rollback and the refused row's own settle (`refuse`), with each rollback under a savepoint so a failing one leaves nothing half done; a command then commits before the refusal, where the listing sees it, or after its rollbacks.
+The listing has to take the `settling` ops too, and the waiting caller has to read its own row after the older ops at every poll: an older op stops being owed in the very transaction that parks the newer one, so a caller that checked only the older ops ran its op against the state the refusal had just undone.
+A test drives the window with a test-only hook between the listing and the rollbacks that commits from another thread; split the transaction there and it fails.
+The transaction orders the commits, not the reads the command built its op from: `mutations::addressing_of` and the daemon's `address` read the row before `apply_*` opens its own transaction, so a command that read the moved state during the refusal still commits an op addressed to it afterwards.
 
 ## A listing is older than the store's own moves, and the op that would say so may already be gone
 

@@ -44,7 +44,9 @@
 //!   ([`run_and_settle`], PERSO-241), running none of them itself, so each
 //!   still runs once. An op refused for good rolls back the later ops on its
 //!   message with it, newest first, since they were committed against the
-//!   state its rollback undoes.
+//!   state its rollback undoes, `queued` and `settling` alike, in the one
+//!   transaction that settles it ([`refuse`], PERSO-249), so a command
+//!   committing meanwhile lands before the refusal or after its rollbacks.
 //!
 //! ## States
 //!
@@ -57,7 +59,10 @@
 //!   ([`run_and_settle`], [`Runner::Caller`]). The drain does not run it; it
 //!   becomes `queued` only once its caller is gone
 //!   ([`recover_orphaned_settles`]). The settle retires it or rolls it back
-//!   and discards it, so it never reaches `failed`.
+//!   and discards it. It reaches `failed` only when an older op on its
+//!   message is refused for good and rolls it back with it; its caller then
+//!   runs nothing and discards it, and one whose caller is gone stays
+//!   `failed`, like a `queued` op rolled back the same way.
 //! - a successful op **deletes** the row: a done mutation has nothing an
 //!   operator can act on, unlike a `done` send that may carry a partial-delivery
 //!   note, so there is nothing to retain.
@@ -85,7 +90,7 @@
 //! cannot tell from a twin, as an ordinary error, which the drain retries and
 //! then rolls back (`crate::imap_client::ops::copy_to_move`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
@@ -960,10 +965,13 @@ pub struct DrainResult {
 /// older `queued` row that runs in this pass releases the rows behind it in
 /// the same pass.
 ///
-/// A row refused for good takes the later `queued` rows on its message with
-/// it ([`fail_newer_on_message`]): each was committed against the local state
-/// the refused op left, which its rollback undoes, so they are rolled back
-/// first, newest first, and parked `failed` unrun, with no attempt spent.
+/// A row refused for good takes the later rows still owed on its message
+/// with it, `queued` or `settling` ([`refuse`]): each was committed against
+/// the local state the refused op left, which its rollback undoes, so they
+/// are rolled back first, newest first, and parked `failed` unrun, with no
+/// attempt spent, in the one transaction that settles the refused row
+/// (PERSO-249). Every row is read again before it runs, since the list the
+/// pass works through may predate a refusal that parked it.
 ///
 /// `pub(crate)`, not `pub`: the only lock-guarded entry point is
 /// [`drain_account`], and draining outside that lock is the race the engine
@@ -986,12 +994,19 @@ pub(crate) async fn drain<E: OpExecutor>(
     // every queued one this pass leaves owed as the pass reaches it. Rows run
     // oldest first, so a queued row only ever waits for a smaller id.
     let mut owed = settling_targets(store, account)?;
-    // Rows a refused older op on their message parked unrun this pass.
-    let mut parked = HashSet::new();
-    for row in queued {
-        if parked.contains(&row.id) {
-            continue;
-        }
+    for listed in queued {
+        // Read again, since the list is a snapshot: a refusal on its message
+        // since then, this pass's or a caller's settle, may have parked the
+        // row or rewritten its rollback.
+        let row = match row_by_id(store, listed.id) {
+            Ok(Some(row)) if row.state == STATE_QUEUED => row,
+            Ok(_) => continue,
+            Err(e) => {
+                warn!("[pending_ops] could not read op {} again: {e:#}", listed.id);
+                result.still_open += 1;
+                continue;
+            }
+        };
         let waits = row
             .target_message_id
             .and_then(|target| owed.get(&target))
@@ -1035,18 +1050,11 @@ pub(crate) async fn drain<E: OpExecutor>(
             Err(e) => {
                 let err = format!("{e:#}");
                 if row.attempts + 1 >= MAX_ATTEMPTS {
-                    match fail_newer_on_message(store, blobs, &row, &err) {
-                        Ok(newer) => {
-                            result.failed += newer.len();
-                            parked.extend(newer);
+                    match refuse(store, blobs, row.id, &err, Refusal::Park) {
+                        Ok(later) => result.failed += later.len(),
+                        Err(e) => {
+                            warn!("[pending_ops] could not settle failed op {}: {e:#}", row.id)
                         }
-                        Err(e) => warn!(
-                            "[pending_ops] could not roll back the ops queued after op {}: {e:#}",
-                            row.id
-                        ),
-                    }
-                    if let Err(e) = fail_and_roll_back(store, blobs, &row, &err, true) {
-                        warn!("[pending_ops] could not settle failed op {}: {e:#}", row.id);
                     }
                     // A drafts-mirror push retried after its cool-down that
                     // fails again for the same bytes replaces its old failed
@@ -1110,55 +1118,164 @@ fn still_owed(owed: &mut HashMap<i64, i64>, row: &PendingOp) {
     }
 }
 
-/// Roll back and park `failed` every `queued` op committed after `refused` on
-/// its message, newest first, before `refused` itself is rolled back, and
-/// return their ids (PERSO-243).
+/// What becomes of the row of an op refused for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// The drain's: the row is parked `failed`, the refused attempt counted,
+    /// and parked even when its rollback fails, since a rollback that fails
+    /// the same way every tick would otherwise keep the op `queued` for good.
+    Park,
+    /// A caller's settle: the row is discarded and the caller reports the
+    /// error, so a rollback that fails is the caller's error and leaves the
+    /// row as it was.
+    Discard,
+}
+
+/// Undo op `id`, refused for good, settle its row as `how` says, and first
+/// roll back and park `failed` the later ops still owed on its message,
+/// newest first, returning their ids (PERSO-243).
 ///
-/// Each of them was committed against the local state the older ops left: a
-/// star or a second move names the folder the refused move put the message
+/// The later ops were committed against the local state the refused op left:
+/// a star or a second move names the folder the refused move put the message
 /// in, and its rollback restores the state just before it. Once the refused
 /// op is undone that state never existed on the server, so none of them can
 /// run as committed (a star would search a folder the message never reached
 /// and be retired as a converged not-found), and only undoing them newest
 /// first lands the message where it was before the refused op, which is
-/// where the server still has it. They never ran, since the drain held them
-/// behind the refused op, so no attempt is counted.
-fn fail_newer_on_message(
-    store: &Store,
-    blobs: &BlobStore,
-    refused: &PendingOp,
-    err: &str,
-) -> Result<Vec<i64>> {
-    let Some(target) = refused.target_message_id else {
+/// where the server still has it. None of them has run: the drain holds a
+/// `queued` one behind the refused op and a caller waits with a `settling`
+/// one, so no attempt is counted, and a waiting caller finds its row parked
+/// and runs nothing ([`wait_for_older`]).
+///
+/// The listing, every rollback and the refused op's own settle are one
+/// immediate transaction (PERSO-249). A daemon command on another
+/// connection commits its op in an immediate transaction of its own, which
+/// reads the row there, so it lands either before this one, where the
+/// listing finds it, or after, against the state the rollbacks restored.
+/// Separate transactions left it a window between the listing and the
+/// rollbacks to commit an op against the moved state that nothing rolled
+/// back, which then ran against a folder the server never got and was
+/// retired as a converged not-found.
+///
+/// The row is read again here rather than trusted from the caller, whose
+/// copy may predate a refusal that already settled it: a row that is no
+/// longer owed is left alone, except that a caller's row an older refusal
+/// parked is discarded, as its caller reports it.
+fn refuse(store: &Store, blobs: &BlobStore, id: i64, err: &str, how: Refusal) -> Result<Vec<i64>> {
+    let mut tx = store
+        .immediate_transaction()
+        .context("opening the refusal transaction")?;
+    let Some(row) = row_in(&tx, id)? else {
         return Ok(Vec::new());
     };
-    let mut stmt = store.conn().prepare(
+    let owed = match how {
+        Refusal::Park => row.state == STATE_QUEUED,
+        Refusal::Discard => row.state == STATE_QUEUED || row.state == STATE_SETTLING,
+    };
+    if !owed {
+        if how == Refusal::Discard && row.state == STATE_FAILED {
+            tx.execute("DELETE FROM pending_ops WHERE id = ?1", [id])
+                .context("discarding an op an earlier refusal rolled back")?;
+            tx.commit().context("committing the discard")?;
+        }
+        return Ok(Vec::new());
+    }
+    let later = match how {
+        Refusal::Park => later_on_message(&tx, &row)?,
+        Refusal::Discard => Vec::new(),
+    };
+    #[cfg(test)]
+    tests::AFTER_LISTING.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+    let why = format!(
+        "not run: an earlier change to this message (op {}, {}) failed and was rolled back \
+         ({err})",
+        row.id, row.kind
+    );
+    let mut parked = Vec::with_capacity(later.len());
+    for op in later.iter().rev() {
+        let note = noted(&why, undo(&mut tx, blobs, op), op);
+        park(&tx, op, &note, false)?;
+        parked.push(op.id);
+    }
+    match how {
+        Refusal::Park => {
+            let note = noted(err, undo(&mut tx, blobs, &row), &row);
+            park(&tx, &row, &note, true)?;
+        }
+        Refusal::Discard => {
+            undo(&mut tx, blobs, &row)?;
+            tx.execute("DELETE FROM pending_ops WHERE id = ?1", [id])
+                .context("discarding a refused op")?;
+        }
+    }
+    tx.commit().context("committing the refusal")?;
+    Ok(parked)
+}
+
+/// The ops still owed on `row`'s message that were committed after it,
+/// oldest first: `queued` ones the drain holds behind it and `settling` ones
+/// whose callers wait for it.
+fn later_on_message(conn: &Connection, row: &PendingOp) -> Result<Vec<PendingOp>> {
+    let Some(target) = row.target_message_id else {
+        return Ok(Vec::new());
+    };
+    let mut stmt = conn.prepare(
         "SELECT id, account, kind, target_message_id, payload, state, attempts,
                 last_error, created, updated
          FROM pending_ops
-         WHERE account = ?1 AND target_message_id = ?2 AND id > ?3 AND state = ?4
-         ORDER BY id DESC",
+         WHERE account = ?1 AND target_message_id = ?2 AND id > ?3 AND state IN (?4, ?5)
+         ORDER BY id",
     )?;
-    let newer = stmt
+    let later = stmt
         .query_map(
-            rusqlite::params![refused.account, target, refused.id, STATE_QUEUED],
+            rusqlite::params![row.account, target, row.id, STATE_QUEUED, STATE_SETTLING],
             row_from_sql,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .context("listing the ops queued after a refused one on its message")?;
-    let why = format!(
-        "not run: an earlier change to this message (op {}, {}) was refused by the server \
-         and rolled back ({err})",
-        refused.id, refused.kind
-    );
-    let mut parked = Vec::with_capacity(newer.len());
-    for row in newer {
-        if let Err(e) = fail_and_roll_back(store, blobs, &row, &why, false) {
-            warn!("[pending_ops] could not settle op {}: {e:#}", row.id);
+        .context("listing the ops owed after a refused one on its message")?;
+    Ok(later)
+}
+
+/// Undo `row`'s local half under a savepoint of `tx`, so a rollback that
+/// fails part way leaves nothing of itself behind.
+fn undo(tx: &mut rusqlite::Transaction<'_>, blobs: &BlobStore, row: &PendingOp) -> Result<()> {
+    let savepoint = tx.savepoint().context("opening a rollback savepoint")?;
+    apply_rollback(&savepoint, blobs, row)?;
+    savepoint.commit().context("releasing a rollback savepoint")
+}
+
+/// `err`, with the rollback's own failure appended when it had one.
+fn noted(err: &str, undone: Result<()>, row: &PendingOp) -> String {
+    match undone {
+        Ok(()) => err.to_string(),
+        Err(e) => {
+            warn!(
+                "[pending_ops] op {} ({}) could not be rolled back: {e:#}",
+                row.id, row.kind
+            );
+            format!("{err} (rollback failed: {e:#})")
         }
-        parked.push(row.id);
     }
-    Ok(parked)
+}
+
+/// Park `row` as `failed` with `err`, counting the attempt that was refused
+/// when `attempted`.
+fn park(conn: &Connection, row: &PendingOp, err: &str, attempted: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE pending_ops SET state = ?2, attempts = attempts + ?5, last_error = ?3,
+         updated = ?4 WHERE id = ?1",
+        rusqlite::params![row.id, STATE_FAILED, err, unix_now(), i64::from(attempted)],
+    )
+    .context("parking a pending op as failed")?;
+    warn!(
+        "[pending_ops] op {} ({}) failed and was rolled back: {err}",
+        row.id, row.kind
+    );
+    Ok(())
 }
 
 /// Take the engine lock and drain, or do nothing when another process holds it.
@@ -1387,8 +1504,10 @@ pub async fn run_and_settle<E: OpExecutor>(
     scope.covers(store)?;
     let row = row_by_id(store, op_id)?
         .ok_or_else(|| anyhow::anyhow!("pending op {op_id} vanished before it could run"))?;
+    // A `failed` row was rolled back with an older op refused for good on
+    // its message, which [`wait_for_older`] reports (PERSO-249).
     anyhow::ensure!(
-        row.state == STATE_SETTLING,
+        row.state == STATE_SETTLING || row.state == STATE_FAILED,
         "pending op {op_id} is {}, not settling: it is the drain's to run",
         row.state
     );
@@ -1413,6 +1532,12 @@ pub async fn run_and_settle<E: OpExecutor>(
 /// The patience is spent only while the account's turn is free
 /// ([`OlderOps::paused_while`]): each poll interval counts when the turn was
 /// free at its end, so a tick holding the turn for minutes costs none of it.
+///
+/// An older op refused for good rolls `row` back with it and parks it
+/// `failed`, in the transaction that takes the older op off the queue
+/// ([`refuse`], PERSO-249), so `row` is read again after the older ops at
+/// every poll: an older op is no longer owed only once that transaction has
+/// committed, and a row it parked is not run against the state it undid.
 async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) -> Result<()> {
     let Some(target) = row.target_message_id else {
         return Ok(());
@@ -1423,6 +1548,16 @@ async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) ->
     let mut nudged = false;
     loop {
         let ahead = older_owed(store, &row.account, target, row.id)?;
+        match row_by_id(store, row.id)? {
+            Some(own) if own.state == STATE_SETTLING => {}
+            Some(own) => anyhow::bail!(
+                "{}; nothing was changed",
+                own.last_error
+                    .as_deref()
+                    .unwrap_or("an earlier change to this message failed and this one was undone")
+            ),
+            None => anyhow::bail!("pending op {} vanished before it could run", row.id),
+        }
         let Some(first) = ahead.first() else {
             return Ok(());
         };
@@ -1496,26 +1631,28 @@ fn settle(store: &Store, blobs: &BlobStore, row: &PendingOp, outcome: Result<()>
             Ok(())
         }
         Err(e) => {
-            apply_rollback(store, blobs, &row.rollback)?;
-            retire(store, row.id)?;
+            refuse(store, blobs, row.id, &format!("{e:#}"), Refusal::Discard)?;
             Err(e)
         }
     }
 }
 
-/// One decoded row by its `pending_ops.id`, for the synchronous settle path.
+/// One decoded row by its `pending_ops.id`.
 fn row_by_id(store: &Store, id: i64) -> Result<Option<PendingOp>> {
-    store
-        .conn()
-        .query_row(
-            "SELECT id, account, kind, target_message_id, payload, state, attempts,
+    row_in(store.conn(), id)
+}
+
+/// [`row_by_id`], on a connection inside a transaction.
+fn row_in(conn: &Connection, id: i64) -> Result<Option<PendingOp>> {
+    conn.query_row(
+        "SELECT id, account, kind, target_message_id, payload, state, attempts,
                     last_error, created, updated
              FROM pending_ops WHERE id = ?1",
-            [id],
-            row_from_sql,
-        )
-        .optional()
-        .context("reading a pending op by id")
+        [id],
+        row_from_sql,
+    )
+    .optional()
+    .context("reading a pending op by id")
 }
 
 /// Retire a row whose op succeeded. A done mutation has nothing to say, so the
@@ -1541,55 +1678,16 @@ fn bump_attempt(store: &Store, id: i64, err: &str) -> Result<()> {
     Ok(())
 }
 
-/// Park a row as `failed` and roll its local state back to the server's,
-/// counting the attempt that was refused when `attempted`.
-///
-/// The op is parked even when the rollback errors: a rollback that fails the
-/// same way every tick would otherwise keep the op `queued` for good.
-fn fail_and_roll_back(
-    store: &Store,
-    blobs: &BlobStore,
-    row: &PendingOp,
-    err: &str,
-    attempted: bool,
-) -> Result<()> {
-    let err = match apply_rollback(store, blobs, &row.rollback) {
-        Ok(()) => err.to_string(),
-        Err(e) => {
-            warn!(
-                "[pending_ops] op {} ({}) could not be rolled back: {e:#}",
-                row.id, row.kind
-            );
-            format!("{err} (rollback failed: {e:#})")
-        }
-    };
-    store
-        .conn()
-        .execute(
-            "UPDATE pending_ops SET state = ?2, attempts = attempts + ?5, last_error = ?3,
-             updated = ?4 WHERE id = ?1",
-            rusqlite::params![row.id, STATE_FAILED, err, unix_now(), i64::from(attempted)],
-        )
-        .context("parking a pending op as failed")?;
-    warn!(
-        "[pending_ops] op {} ({}) failed and was rolled back: {err}",
-        row.id, row.kind
-    );
-    Ok(())
-}
-
-/// Undo a mutation's local half.
-fn apply_rollback(store: &Store, blobs: &BlobStore, rollback: &Rollback) -> Result<()> {
-    match rollback {
-        Rollback::Move(previous) => roll_move_back(store, blobs, previous)?,
+/// Undo a mutation's local half, inside the caller's transaction.
+fn apply_rollback(conn: &Connection, blobs: &BlobStore, row: &PendingOp) -> Result<()> {
+    match &row.rollback {
+        Rollback::Move(previous) => roll_move_back(conn, blobs, previous)?,
         Rollback::Flags { id, flags } => {
-            store
-                .conn()
-                .execute(
-                    "UPDATE messages SET flags = ?2 WHERE id = ?1",
-                    rusqlite::params![id, flags],
-                )
-                .context("rolling a flag change back")?;
+            conn.execute(
+                "UPDATE messages SET flags = ?2 WHERE id = ?1",
+                rusqlite::params![id, flags],
+            )
+            .context("rolling a flag change back")?;
         }
         // A delete cannot be restored: the row is gone and the message is still
         // on the server, so convergence is the next sync refetching the UID.
@@ -1606,10 +1704,10 @@ fn apply_rollback(store: &Store, blobs: &BlobStore, rollback: &Rollback) -> Resu
 /// into a row of its own. Moving the placeholder back would then collide on
 /// `UNIQUE (account, mailbox, uid)`; the refetched row already stands for the
 /// message, so the placeholder is the duplicate and goes.
-fn roll_move_back(store: &Store, blobs: &BlobStore, previous: &MutatedRow) -> Result<()> {
-    let tx = store
-        .immediate_transaction()
-        .context("opening the move rollback transaction")?;
+///
+/// Runs inside the caller's transaction ([`refuse`]), under a savepoint of
+/// its own.
+fn roll_move_back(tx: &Connection, blobs: &BlobStore, previous: &MutatedRow) -> Result<()> {
     let holder: Option<i64> = tx
         .query_row(
             "SELECT other.id FROM messages AS other
@@ -1630,13 +1728,13 @@ fn roll_move_back(store: &Store, blobs: &BlobStore, previous: &MutatedRow) -> Re
             .context("rolling a moved row back")?;
         }
         Some(holder) => {
-            let hashes = blob_refs_in(&tx, previous.id)?;
+            let hashes = blob_refs_in(tx, previous.id)?;
             tx.execute("DELETE FROM messages_fts WHERE rowid = ?1", [previous.id])
                 .context("removing the placeholder's FTS entry")?;
             tx.execute("DELETE FROM messages WHERE id = ?1", [previous.id])
                 .context("deleting the moved placeholder row")?;
             for hash in &hashes {
-                blobs.release(&tx, hash)?;
+                blobs.release(tx, hash)?;
             }
             info!(
                 "[pending_ops] row {} was refetched as row {holder} while its move was queued; \
@@ -1645,7 +1743,6 @@ fn roll_move_back(store: &Store, blobs: &BlobStore, previous: &MutatedRow) -> Re
             );
         }
     }
-    tx.commit().context("committing the move rollback")?;
     Ok(())
 }
 
@@ -1691,6 +1788,14 @@ mod tests {
     use crate::reconcile::tests::{fixture, invite_ics};
     use crate::store::read;
     use std::collections::VecDeque;
+
+    thread_local! {
+        /// Run by [`refuse`] on this thread once it has listed the later ops
+        /// on the refused op's message and before it rolls any back, so a
+        /// test can try to commit an op into that window (PERSO-249).
+        pub(super) static AFTER_LISTING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     /// A fake executor with a scripted verdict per call, recording every op it
     /// was asked to run so a test can assert exactly-once and idempotent replay.
@@ -3027,6 +3132,153 @@ mod tests {
         }
     }
 
+    /// The server folder of a store mailbox key, as a daemon command
+    /// addresses its op.
+    fn server_folder(mailbox: &str) -> &'static str {
+        match mailbox {
+            "inbox" => "INBOX",
+            "archive" => "Archive",
+            other => panic!("no server folder for {other}"),
+        }
+    }
+
+    /// PERSO-249: a daemon command on another connection marks the message
+    /// read while the drain is rolling back a refused move. It tries to
+    /// commit after the refusal listed the later ops and before it rolled
+    /// any back; that window let it commit against the archive the move had
+    /// put the message in, unlisted and so never rolled back, and the read
+    /// toggle then searched the archive and was retired as a converged
+    /// not-found. Now it lands once the refusal has committed, addressed to
+    /// the inbox the message is back in, or it is rolled back with the rest.
+    #[test]
+    fn an_op_committed_while_a_refusal_rolls_back_is_never_left_behind() {
+        let fx = fixture();
+        let (id, [archive, _star]) = refused_move_then_star(&fx);
+        let path = fx.store.path().to_path_buf();
+        let (sent, landed) = std::sync::mpsc::channel();
+        let command = std::sync::Arc::new(Mutex::new(None));
+        let spawned = std::sync::Arc::clone(&command);
+        AFTER_LISTING.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let thread = std::thread::spawn(move || {
+                    let store = Store::open(&path).unwrap();
+                    // The command reads the row under the write lock, as
+                    // `apply_*` does, and addresses its op from what it read.
+                    let tx = store.immediate_transaction().unwrap();
+                    let mailbox: String = tx
+                        .query_row("SELECT mailbox FROM messages WHERE id = ?1", [id], |row| {
+                            row.get(0)
+                        })
+                        .unwrap();
+                    drop(tx);
+                    let op = ServerOp::SetRead {
+                        message_id: "<inbox-1@example.com>".to_string(),
+                        mailbox: server_folder(&mailbox).to_string(),
+                        read: true,
+                        copy: None,
+                        graph_copy: None,
+                    };
+                    let op_id = apply_set_read(&store, "alice", id, true, op, Runner::Drain)
+                        .unwrap()
+                        .unwrap();
+                    let _ = sent.send(());
+                    op_id
+                });
+                // Long enough for the command to commit when nothing holds
+                // the write lock; a command still blocked lands afterwards.
+                let _ = landed.recv_timeout(Duration::from_millis(500));
+                *spawned.lock().unwrap() = Some(thread);
+            }));
+        });
+
+        refuse(&fx.store, &fx.blobs, archive, "NO refused", Refusal::Park).unwrap();
+        let thread = command.lock().unwrap().take().expect("the hook ran");
+        let mark_read = thread.join().unwrap();
+
+        let message = read::find_by_id(&fx.store, id).unwrap().unwrap();
+        assert_eq!(message.mailbox, "inbox");
+        let op = row_by_id(&fx.store, mark_read).unwrap().unwrap();
+        match op.state.as_str() {
+            STATE_FAILED => assert!(!message.is_read(), "rolled back with the move"),
+            STATE_QUEUED => {
+                let ServerOp::SetRead { mailbox, .. } = &op.op else {
+                    panic!("{:?}", op.op)
+                };
+                assert_eq!(
+                    mailbox, "INBOX",
+                    "left queued against the folder the move never reached"
+                );
+                assert!(message.is_read());
+            }
+            other => panic!("op {mark_read} is {other}"),
+        }
+    }
+
+    /// PERSO-249, the caller's side: `mp` marks the message read with a
+    /// settle while the archive queued before it is on its last attempt.
+    /// The archive is refused for good before the settle first looks at the
+    /// queue, so it finds no older op owed; it ran the read toggle against
+    /// the archive the move had put the message in, while the refusal had
+    /// rolled the message back to the inbox. Now the refusal rolls the
+    /// caller's op back with it and parks it, and the settle runs nothing.
+    #[tokio::test]
+    async fn a_settled_op_rolled_back_with_an_older_refused_move_does_not_run() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let (_prev, archive) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        let scope = SettleScope::open(&fx.store);
+        let mark_read = apply_set_read(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            ServerOp::SetRead {
+                message_id: "<inbox-1@example.com>".to_string(),
+                mailbox: "Archive".to_string(),
+                read: true,
+                copy: None,
+                graph_copy: None,
+            },
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+        refuse(&fx.store, &fx.blobs, archive, "NO refused", Refusal::Park).unwrap();
+
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let err = run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &scope,
+            mark_read,
+            &mut CountingExecutor::new(&runs),
+            OlderOps::wait(&nobody),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let err = format!("{err:#}");
+        assert!(err.contains(&format!("op {archive}, move")), "{err}");
+        let message = read::find_by_id(&fx.store, id).unwrap().unwrap();
+        assert_eq!(message.mailbox, "inbox");
+        assert!(!message.is_read());
+        assert!(
+            row_by_id(&fx.store, mark_read).unwrap().is_none(),
+            "the caller reported its op and discarded it"
+        );
+        assert_eq!(failed_ops(&fx.store, "alice").unwrap().len(), 1);
+    }
+
     /// PERSO-241: a star the TUI queued, then `mp archive` on the same
     /// message inside the drainer's debounce. The archive waits for the
     /// drain it asks for and reaches the server after the star, so the star
@@ -3351,8 +3603,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let row = row_by_id(&fx.store, parked).unwrap().unwrap();
-        fail_and_roll_back(&fx.store, &fx.blobs, &row, "refused", true).unwrap();
+        refuse(&fx.store, &fx.blobs, parked, "refused", Refusal::Park).unwrap();
         apply_move(
             &fx.store,
             "alice",
