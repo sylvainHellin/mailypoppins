@@ -1031,7 +1031,8 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Status: not started
 - Note: the outbox acquisition is #0116, where a refused drain reports nothing done and opens no session and the holder re-sweeps against a re-read clock.
   Phase 3b (#0122) extended it to the ingest half: `sync::engine::run_sync_guarded` is what `mp sync` and the TUI tick call, a non-holder returns `Ok(None)` before the transport is touched, and both callers report the refusal as information and succeed.
-  `run_and_settle` (`src/pending_ops.rs:614`), `run_sync` itself and the Graph loop still take no lock, so `ANO-13` is closed for the IMAP ingest only.
+  `run_sync` itself and the Graph loop still take no lock, so `ANO-13` is closed for the IMAP ingest only.
+  `run_and_settle` takes no lock either, by design: its op is committed `settling`, out of every drain's reach, instead of holding the engine turn across a server call (PERSO-236).
 
 ### SYN-10 Microsoft Graph backend for sync and send
 

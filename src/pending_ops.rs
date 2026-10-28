@@ -28,7 +28,14 @@
 //!   succeeded op as `failed` and rolling the local state back under it;
 //! - two drains racing on these rows is the destructive case the engine
 //!   advisory lock ([`crate::engine_lock`], #0061) exists to exclude, so a live
-//!   drain runs under that lock ([`drain_account`]).
+//!   drain runs under that lock ([`drain_account`]);
+//! - a caller that runs its own op ([`run_and_settle`]) does not take that
+//!   lock, because holding the engine turn across a server call would refuse
+//!   the sync tick its own change wakes. Its op is committed `settling`
+//!   instead of `queued`, in the transaction that commits the local write, so
+//!   no drain ever sees it as owed (PERSO-236: a tick that started while a
+//!   settled move was on the server ran the same move again and left two
+//!   copies of the message).
 //!
 //! ## States
 //!
@@ -37,6 +44,11 @@
 //!
 //! - `queued`: the local write is committed and the server op is owed. The
 //!   drain attempts it under backoff.
+//! - `settling`: the same, for an op the committing caller runs itself
+//!   ([`run_and_settle`], [`Runner::Caller`]). The drain does not run it; it
+//!   becomes `queued` only once its caller is gone
+//!   ([`recover_orphaned_settles`]). The settle retires it or rolls it back
+//!   and discards it, so it never reaches `failed`.
 //! - a successful op **deletes** the row: a done mutation has nothing an
 //!   operator can act on, unlike a `done` send that may carry a partial-delivery
 //!   note, so there is nothing to retain.
@@ -58,7 +70,10 @@
 //! on, because it is the proven seam and needs no widening of the `imap_client`
 //! op signatures.
 
+use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, Result};
 use log::{info, warn};
@@ -87,6 +102,124 @@ pub const MAX_ATTEMPTS: i64 = 5;
 pub const STATE_QUEUED: &str = "queued";
 /// `failed`, kept for visibility after the retry budget is spent.
 pub const STATE_FAILED: &str = "failed";
+/// `settling`: owed to the server, and run by the caller that committed it
+/// ([`run_and_settle`]) rather than by the drain (PERSO-236). The drain never
+/// runs a `settling` row; [`recover_orphaned_settles`] hands one back to it
+/// as `queued` once no caller in this process can still be running it.
+pub const STATE_SETTLING: &str = "settling";
+
+/// Who runs the server half of an op being committed (PERSO-236).
+#[derive(Debug, Clone, Copy)]
+pub enum Runner<'a> {
+    /// The background drain, under the engine turn: the row is `queued`.
+    Drain,
+    /// The caller, at once, through [`run_and_settle`] under this scope: the
+    /// row is `settling`, which the drain leaves alone, so the op cannot run
+    /// twice when a sync tick drains the account while the caller's server
+    /// call is still in flight.
+    Caller(&'a SettleScope),
+}
+
+/// The stores that have a [`SettleScope`] open in this process, with how many.
+///
+/// Keyed by the store's path rather than by account name, for the reason
+/// [`crate::engine_lock`] keys its gates by path: two data roots, or two
+/// tests, may each have an account of the same name.
+static LIVE_SETTLES: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(Default::default);
+
+fn live_settles() -> MutexGuard<'static, HashMap<PathBuf, usize>> {
+    LIVE_SETTLES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A caller's hold on the ops it runs itself in one store, from before it
+/// commits them `settling` until it has settled them (PERSO-236).
+///
+/// While one is open, [`recover_orphaned_settles`] leaves every `settling` row
+/// of the store alone, because any of them may be on the server right now.
+/// Once none is, a `settling` row can only be one whose caller died or failed
+/// to retire it, and it is handed to the drain, which converges a replay of
+/// an op that already landed (see the module docs). Only the daemon commits
+/// `settling` rows, and only the daemon drains, so a scope in this process is
+/// the whole answer to "is a caller still running this op".
+#[derive(Debug)]
+pub struct SettleScope {
+    store: PathBuf,
+}
+
+impl SettleScope {
+    /// Open a scope over `store`, before the ops it covers are committed.
+    pub fn open(store: &Store) -> SettleScope {
+        let path = store.path().to_path_buf();
+        *live_settles().entry(path.clone()).or_insert(0) += 1;
+        SettleScope { store: path }
+    }
+
+    /// Refuse a store this scope was not opened over.
+    fn covers(&self, store: &Store) -> Result<()> {
+        anyhow::ensure!(
+            self.store == store.path(),
+            "a settle scope opened over {} cannot settle an op in {}",
+            self.store.display(),
+            store.path().display()
+        );
+        Ok(())
+    }
+}
+
+impl Drop for SettleScope {
+    fn drop(&mut self) {
+        let mut live = live_settles();
+        if let Some(count) = live.get_mut(&self.store) {
+            *count -= 1;
+            if *count == 0 {
+                live.remove(&self.store);
+            }
+        }
+    }
+}
+
+/// The state a row committed for `runner` starts in, refusing a scope opened
+/// over another store.
+fn state_for(store: &Store, runner: Runner<'_>) -> Result<&'static str> {
+    match runner {
+        Runner::Drain => Ok(STATE_QUEUED),
+        Runner::Caller(scope) => {
+            scope.covers(store)?;
+            Ok(STATE_SETTLING)
+        }
+    }
+}
+
+/// Hand every `settling` row of `account` back to the drain as `queued`, unless
+/// a [`SettleScope`] over `store` is open in this process (PERSO-236).
+///
+/// What is left `settling` with no scope open is an op whose caller died
+/// between its commit and its settle, or could not retire it: the drain
+/// replays it, and a replay of an op that already landed converges. The
+/// registry stays locked across the update, so a scope cannot open, commit a
+/// row and start its server call between the check and the write.
+pub fn recover_orphaned_settles(store: &Store, account: &str) -> Result<usize> {
+    let live = live_settles();
+    if live.contains_key(store.path()) {
+        return Ok(0);
+    }
+    let recovered = store
+        .conn()
+        .execute(
+            "UPDATE pending_ops SET state = ?2, updated = ?3
+             WHERE account = ?1 AND state = ?4",
+            rusqlite::params![account, STATE_QUEUED, unix_now(), STATE_SETTLING],
+        )
+        .context("handing orphaned settles back to the drain")?;
+    drop(live);
+    if recovered > 0 {
+        warn!(
+            "[pending_ops] {recovered} op(s) of {account} were left settling by a caller \
+             that is gone; the drain runs them"
+        );
+    }
+    Ok(recovered)
+}
 
 /// How to undo a mutation's local half when its server op is refused for good.
 ///
@@ -154,6 +287,18 @@ pub fn enqueue(
     op: &ServerOp,
     rollback: &Rollback,
 ) -> Result<i64> {
+    insert(conn, account, target_message_id, op, rollback, STATE_QUEUED)
+}
+
+/// [`enqueue`], in the state its runner starts it in.
+fn insert(
+    conn: &Connection,
+    account: &str,
+    target_message_id: Option<i64>,
+    op: &ServerOp,
+    rollback: &Rollback,
+    state: &str,
+) -> Result<i64> {
     let payload = serde_json::to_string(&Payload {
         op: op.clone(),
         rollback: rollback.clone(),
@@ -165,14 +310,7 @@ pub fn enqueue(
             account, kind, target_message_id, payload, state, attempts,
             last_error, created, updated
          ) VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, ?6, ?6)",
-        rusqlite::params![
-            account,
-            op.kind(),
-            target_message_id,
-            payload,
-            STATE_QUEUED,
-            now
-        ],
+        rusqlite::params![account, op.kind(), target_message_id, payload, state, now],
     )
     .context("inserting the pending op row")?;
     Ok(conn.last_insert_rowid())
@@ -189,7 +327,9 @@ pub fn apply_move(
     id: i64,
     dest_mailbox: &str,
     op: ServerOp,
+    runner: Runner<'_>,
 ) -> Result<Option<(MutatedRow, i64)>> {
+    let state = state_for(store, runner)?;
     let tx = store
         .immediate_transaction()
         .context("opening the move-and-enqueue transaction")?;
@@ -201,12 +341,13 @@ pub fn apply_move(
         rusqlite::params![id, dest_mailbox, -id],
     )
     .context("moving the message row")?;
-    let op_id = enqueue(
+    let op_id = insert(
         &tx,
         account,
         Some(id),
         &op,
         &Rollback::Move(previous.clone()),
+        state,
     )?;
     tx.commit().context("committing the move and its op")?;
     info!(
@@ -223,7 +364,9 @@ pub fn apply_delete(
     account: &str,
     id: i64,
     op: ServerOp,
+    runner: Runner<'_>,
 ) -> Result<Option<(MutatedRow, i64)>> {
+    let state = state_for(store, runner)?;
     let tx = store
         .immediate_transaction()
         .context("opening the delete-and-enqueue transaction")?;
@@ -238,7 +381,7 @@ pub fn apply_delete(
     for hash in &hashes {
         blobs.release(&tx, hash)?;
     }
-    let op_id = enqueue(&tx, account, Some(id), &op, &Rollback::None)?;
+    let op_id = insert(&tx, account, Some(id), &op, &Rollback::None, state)?;
     tx.commit().context("committing the delete and its op")?;
     info!("[pending_ops] queued a delete for row {id} as op {op_id}");
     Ok(Some((previous, op_id)))
@@ -251,8 +394,11 @@ pub fn apply_set_read(
     id: i64,
     read: bool,
     op: ServerOp,
+    runner: Runner<'_>,
 ) -> Result<Option<i64>> {
-    apply_flag_change(store, account, id, op, |flags| flags.with_seen(read))
+    apply_flag_change(store, account, id, op, runner, |flags| {
+        flags.with_seen(read)
+    })
 }
 
 /// Set (or clear) `\Flagged` on a row and enqueue the server op, atomically.
@@ -262,8 +408,11 @@ pub fn apply_set_flagged(
     id: i64,
     flagged: bool,
     op: ServerOp,
+    runner: Runner<'_>,
 ) -> Result<Option<i64>> {
-    apply_flag_change(store, account, id, op, |flags| flags.with_flagged(flagged))
+    apply_flag_change(store, account, id, op, runner, |flags| {
+        flags.with_flagged(flagged)
+    })
 }
 
 /// The shared read-modify-write behind the two flag toggles: read the row's
@@ -275,8 +424,10 @@ fn apply_flag_change(
     account: &str,
     id: i64,
     op: ServerOp,
+    runner: Runner<'_>,
     f: impl FnOnce(crate::types::MessageFlags) -> crate::types::MessageFlags,
 ) -> Result<Option<i64>> {
+    let state = state_for(store, runner)?;
     let tx = store
         .immediate_transaction()
         .context("opening the flag-and-enqueue transaction")?;
@@ -296,12 +447,13 @@ fn apply_flag_change(
         rusqlite::params![id, new],
     )
     .context("setting a message's flags")?;
-    let op_id = enqueue(
+    let op_id = insert(
         &tx,
         account,
         Some(id),
         &op,
         &Rollback::Flags { id, flags: old },
+        state,
     )?;
     tx.commit()
         .context("committing the flag change and its op")?;
@@ -762,6 +914,10 @@ pub struct DrainResult {
 /// error is a genuine failure and is retried, then rolled back once the budget
 /// is spent.
 ///
+/// A `settling` row is a caller's to run ([`run_and_settle`]) and is never
+/// run here; one its caller left behind is first handed back as `queued`
+/// ([`recover_orphaned_settles`]).
+///
 /// `pub(crate)`, not `pub`: the only lock-guarded entry point is
 /// [`drain_account`], and draining outside that lock is the race the engine
 /// advisory lock (#0061) exists to exclude.
@@ -773,6 +929,7 @@ pub(crate) async fn drain<E: OpExecutor>(
     now: i64,
 ) -> Result<DrainResult> {
     let mut result = DrainResult::default();
+    recover_orphaned_settles(store, account)?;
     for row in queued_ops(store, account)? {
         if row.updated + backoff_secs(row.attempts) > now {
             result.still_open += 1;
@@ -939,6 +1096,8 @@ pub async fn resume_account_or_busy(account: &AccountConfig) -> Result<Resume> {
             account.name
         );
     }
+    // Before the count, so an op a caller left `settling` is owed here too.
+    recover_orphaned_settles(&store, &account.name)?;
     let (queued, _failed) = counts(&store, &account.name)?;
     if queued == 0 {
         return Ok(Resume::NothingQueued);
@@ -952,6 +1111,12 @@ pub async fn resume_account_or_busy(account: &AccountConfig) -> Result<Resume> {
 /// wants the op's own outcome rather than the background drain's convergence
 /// (the CLI).
 ///
+/// The op must have been committed for this caller ([`Runner::Caller`] with
+/// `scope`), which leaves it `settling` and out of every drain's reach, so a
+/// sync tick draining the account meanwhile cannot run it a second time
+/// (PERSO-236). An op committed for the drain is refused untouched: it is the
+/// drain's to run, and running it here would race it.
+///
 /// On success the row is retired; on any failure the local half is rolled back,
 /// the row is discarded, and the error is returned verbatim, so a
 /// [`crate::ops::NotFoundOnServer`] reaches the user byte-identical to the
@@ -959,15 +1124,22 @@ pub async fn resume_account_or_busy(account: &AccountConfig) -> Result<Resume> {
 /// synchronous caller runs the op once, in the same process that enqueued it, so
 /// it is never a crash replay, and a message the server does not hold is a
 /// genuine error to report rather than a converged replay to swallow.
-pub async fn run_and_settle(
+pub async fn run_and_settle<E: OpExecutor>(
     store: &Store,
     blobs: &BlobStore,
+    scope: &SettleScope,
     op_id: i64,
-    backend: &Backend,
+    exec: &mut E,
 ) -> Result<()> {
+    scope.covers(store)?;
     let row = row_by_id(store, op_id)?
         .ok_or_else(|| anyhow::anyhow!("pending op {op_id} vanished before it could run"))?;
-    let outcome = run_op(backend, &row.op).await;
+    anyhow::ensure!(
+        row.state == STATE_SETTLING,
+        "pending op {op_id} is {}, not settling: it is the drain's to run",
+        row.state
+    );
+    let outcome = exec.execute(&row.op).await;
     settle(store, blobs, &row, outcome)
 }
 
@@ -1234,6 +1406,7 @@ mod tests {
             id,
             "archive",
             move_op("<inbox-1@example.com>"),
+            Runner::Drain,
         )
         .unwrap()
         .unwrap();
@@ -1262,6 +1435,7 @@ mod tests {
             id,
             "archive",
             move_op("<inbox-1@example.com>"),
+            Runner::Drain,
         )
         .unwrap();
 
@@ -1296,6 +1470,7 @@ mod tests {
             id,
             "archive",
             move_op("<inbox-1@example.com>"),
+            Runner::Drain,
         )
         .unwrap();
 
@@ -1344,6 +1519,7 @@ mod tests {
             id,
             "archive",
             move_op("<inbox-1@example.com>"),
+            Runner::Drain,
         )
         .unwrap();
         let mut exec = FakeExecutor::scripted(vec![not_found("<inbox-1@example.com>")]);
@@ -1366,6 +1542,7 @@ mod tests {
             id2,
             "archive",
             move_op("<inbox-2@example.com>"),
+            Runner::Drain,
         )
         .unwrap();
         let base = unix_now();
@@ -1402,6 +1579,7 @@ mod tests {
             id,
             "archive",
             move_op("<inbox-1@example.com>"),
+            Runner::Drain,
         )
         .unwrap();
 
@@ -1449,6 +1627,7 @@ mod tests {
             id,
             "archive",
             move_op("<inbox-1@example.com>"),
+            Runner::Drain,
         )
         .unwrap();
         assert_eq!(
@@ -1507,6 +1686,7 @@ mod tests {
             id,
             "archive",
             move_op("<inbox-1@example.com>"),
+            Runner::Drain,
         )
         .unwrap();
         // The sync re-downloads the UID the moved row no longer claims.
@@ -1565,6 +1745,7 @@ mod tests {
             stuck,
             "archive",
             move_op("<inbox-1@example.com>"),
+            Runner::Drain,
         )
         .unwrap();
         // Any rollback of `stuck` errors.
@@ -1596,6 +1777,7 @@ mod tests {
             next,
             "archive",
             move_op("<inbox-2@example.com>"),
+            Runner::Drain,
         )
         .unwrap();
         let mut exec = FakeExecutor::scripted(vec![Err(anyhow::anyhow!("NO refused")), Ok(())]);
@@ -1628,7 +1810,7 @@ mod tests {
             mailbox: "INBOX".to_string(),
             read: true,
         };
-        apply_set_read(&fx.store, "alice", id, true, op).unwrap();
+        apply_set_read(&fx.store, "alice", id, true, op, Runner::Drain).unwrap();
         assert!(read::find_by_id(&fx.store, id).unwrap().unwrap().is_read());
 
         let base = unix_now();
@@ -1662,7 +1844,7 @@ mod tests {
             message_id: "<inbox-1@example.com>".to_string(),
             source_mailbox: "INBOX".to_string(),
         };
-        apply_delete(&fx.store, &fx.blobs, "alice", id, op).unwrap();
+        apply_delete(&fx.store, &fx.blobs, "alice", id, op, Runner::Drain).unwrap();
         assert!(read::find_by_id(&fx.store, id).unwrap().is_none());
         assert_eq!(queued_ops(&fx.store, "alice").unwrap().len(), 1);
 
@@ -1700,6 +1882,7 @@ mod tests {
             id,
             "archive",
             move_op("<inbox-1@example.com>"),
+            Runner::Drain,
         )
         .unwrap()
         .unwrap();
@@ -1726,6 +1909,7 @@ mod tests {
             id,
             "archive",
             move_op("<inbox-1@example.com>"),
+            Runner::Drain,
         )
         .unwrap()
         .unwrap();
@@ -1759,7 +1943,7 @@ mod tests {
             message_id: "<inbox-1@example.com>".to_string(),
             source_mailbox: "INBOX".to_string(),
         };
-        let (_prev, op_id) = apply_delete(&fx.store, &fx.blobs, "alice", id, op)
+        let (_prev, op_id) = apply_delete(&fx.store, &fx.blobs, "alice", id, op, Runner::Drain)
             .unwrap()
             .unwrap();
 
@@ -1781,6 +1965,271 @@ mod tests {
             "a delete has nothing to restore"
         );
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+    }
+
+    /// An executor that counts every server op it runs into a counter it
+    /// shares with another executor, so a test can count the server-side
+    /// executions of one op across two runners.
+    struct CountingExecutor {
+        runs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// Sent once the op is on the server, for a test that starts the
+        /// other runner at that moment.
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+        /// Awaited before the op returns, for a test that holds the op on
+        /// the server until the other runner is done.
+        hold: Option<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    impl CountingExecutor {
+        fn new(runs: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+            CountingExecutor {
+                runs: std::sync::Arc::clone(runs),
+                started: None,
+                hold: None,
+            }
+        }
+    }
+
+    impl OpExecutor for CountingExecutor {
+        async fn execute(&mut self, _op: &ServerOp) -> Result<()> {
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(started) = self.started.take() {
+                let _ = started.send(());
+            }
+            if let Some(hold) = self.hold.take() {
+                let _ = hold.await;
+            }
+            Ok(())
+        }
+    }
+
+    /// PERSO-236: a settled move and a sync tick's drain that starts while the
+    /// move is on the server run the op once between them. The tick here is
+    /// the IDLE watcher's, woken by the move's own first leg: it drains the
+    /// account on a store connection of its own while the settle's server call
+    /// is still in flight, and before the fix it found the same op queued and
+    /// copied the message a second time.
+    #[tokio::test]
+    async fn a_settled_op_runs_once_when_a_drain_overlaps_it() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let scope = SettleScope::open(&fx.store);
+        let (_prev, op_id) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (started, on_server) = tokio::sync::oneshot::channel();
+        let (drained, release) = tokio::sync::oneshot::channel();
+        let mut settling = CountingExecutor {
+            started: Some(started),
+            hold: Some(release),
+            ..CountingExecutor::new(&runs)
+        };
+        let tick_store = Store::open(fx.store.path()).unwrap();
+        let mut ticking = CountingExecutor::new(&runs);
+
+        let settle = run_and_settle(&fx.store, &fx.blobs, &scope, op_id, &mut settling);
+        let tick = async {
+            on_server.await.unwrap();
+            let result = drain(
+                &tick_store,
+                &fx.blobs,
+                "alice",
+                &mut ticking,
+                unix_now() + 10,
+            )
+            .await;
+            drained.send(()).unwrap();
+            result
+        };
+        let (settled, ticked) = tokio::join!(settle, tick);
+
+        settled.unwrap();
+        ticked.unwrap();
+        assert_eq!(
+            runs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the op ran on the server once, not once per runner"
+        );
+        assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "archive"
+        );
+    }
+
+    /// Every kind a caller settles (move, delete, read, star) is committed out
+    /// of the drain's reach while its caller's scope is open (PERSO-236).
+    #[tokio::test]
+    async fn a_drain_runs_no_kind_of_op_a_caller_is_settling() {
+        let fx = fixture();
+        let moved = fx.ingest_plain("inbox", 1, "Moved");
+        let deleted = fx.ingest_plain("inbox", 2, "Deleted");
+        let read_one = fx.ingest_plain("inbox", 3, "Read");
+        let starred = fx.ingest_plain("inbox", 4, "Starred");
+        let scope = SettleScope::open(&fx.store);
+        let caller = Runner::Caller(&scope);
+        let flag_op = |id: &str| ServerOp::SetFlagged {
+            message_id: id.to_string(),
+            mailbox: "INBOX".to_string(),
+            flagged: true,
+        };
+        apply_move(
+            &fx.store,
+            "alice",
+            moved,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            caller,
+        )
+        .unwrap()
+        .unwrap();
+        let delete = ServerOp::Delete {
+            message_id: "<inbox-2@example.com>".to_string(),
+            source_mailbox: "INBOX".to_string(),
+        };
+        apply_delete(&fx.store, &fx.blobs, "alice", deleted, delete, caller)
+            .unwrap()
+            .unwrap();
+        let read_op = ServerOp::SetRead {
+            message_id: "<inbox-3@example.com>".to_string(),
+            mailbox: "INBOX".to_string(),
+            read: true,
+        };
+        apply_set_read(&fx.store, "alice", read_one, true, read_op, caller)
+            .unwrap()
+            .unwrap();
+        apply_set_flagged(
+            &fx.store,
+            "alice",
+            starred,
+            true,
+            flag_op("<inbox-4@example.com>"),
+            caller,
+        )
+        .unwrap()
+        .unwrap();
+
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut ticking = CountingExecutor::new(&runs);
+        let result = drain(&fx.store, &fx.blobs, "alice", &mut ticking, unix_now() + 10)
+            .await
+            .unwrap();
+
+        assert_eq!(result, DrainResult::default());
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+        assert_eq!(
+            rows_in_state(&fx.store, "alice", STATE_SETTLING)
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+
+    /// An op its caller left `settling`, because the process died between the
+    /// commit and the settle, is the drain's once no scope over the store is
+    /// open, and it runs once (PERSO-236).
+    #[tokio::test]
+    async fn an_op_left_settling_by_a_dead_caller_is_drained_once() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let scope = SettleScope::open(&fx.store);
+        apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+        // A second scope over the same store keeps the row out of reach on
+        // its own: the first caller's is not the only one that counts.
+        let other = SettleScope::open(&fx.store);
+        drop(scope);
+        assert_eq!(recover_orphaned_settles(&fx.store, "alice").unwrap(), 0);
+        drop(other);
+
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut ticking = CountingExecutor::new(&runs);
+        let result = drain(&fx.store, &fx.blobs, "alice", &mut ticking, unix_now() + 10)
+            .await
+            .unwrap();
+
+        assert_eq!(result.completed, 1);
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(rows_in_state(&fx.store, "alice", STATE_SETTLING)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "archive"
+        );
+    }
+
+    /// An op committed for the drain is not a caller's to run: settling it
+    /// would race the drain, so it is refused before the server is asked.
+    #[tokio::test]
+    async fn a_caller_cannot_settle_an_op_queued_for_the_drain() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let (_prev, op_id) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+
+        let scope = SettleScope::open(&fx.store);
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut exec = CountingExecutor::new(&runs);
+        let err = run_and_settle(&fx.store, &fx.blobs, &scope, op_id, &mut exec)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("not settling"), "{err:#}");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(queued_ops(&fx.store, "alice").unwrap().len(), 1);
+    }
+
+    /// A scope opened over one store cannot commit or settle an op in another.
+    #[test]
+    fn a_scope_over_another_store_is_refused() {
+        let fx = fixture();
+        let elsewhere = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let scope = SettleScope::open(&elsewhere.store);
+
+        let err = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("cannot settle"), "{err:#}");
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "inbox",
+            "a refused commit leaves the row where it was"
+        );
     }
 
     /// The post-send flag write (#0076) commits the local bit and one
@@ -1990,11 +2439,16 @@ mod tests {
     #[test]
     fn applying_to_a_missing_row_queues_nothing() {
         let fx = fixture();
-        assert!(
-            apply_move(&fx.store, "alice", 404, "archive", move_op("<x@x>"))
-                .unwrap()
-                .is_none()
-        );
+        assert!(apply_move(
+            &fx.store,
+            "alice",
+            404,
+            "archive",
+            move_op("<x@x>"),
+            Runner::Drain
+        )
+        .unwrap()
+        .is_none());
         assert!(apply_delete(
             &fx.store,
             &fx.blobs,
@@ -2003,7 +2457,8 @@ mod tests {
             ServerOp::Delete {
                 message_id: "<x@x>".to_string(),
                 source_mailbox: "INBOX".to_string(),
-            }
+            },
+            Runner::Drain
         )
         .unwrap()
         .is_none());

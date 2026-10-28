@@ -754,6 +754,15 @@ The resolution is that the CLI does not use the converging drain at all.
 So the queue is one seam with two settle policies (`drain` converges, `run_and_settle` reports), and the discriminator is which entry point the caller picked, not what the backend returned.
 Keep `run_and_settle` testable offline by splitting the settle decision (`settle(store, blobs, row, outcome)`) from the one `await` that produces the outcome; the decision is what a not-found regression needs to exercise, and it needs no live backend.
 
+## A settled op must be out of the drain's reach from the commit that creates it
+
+`run_and_settle` used to run a `queued` row without the engine turn, so a sync tick that started while the op was on the server drained the same row and ran it again (PERSO-236).
+The tick that does it is the one the op itself wakes: a move changes INBOX, IDLE wakes the watcher about 40 ms later, and on a fast server both sessions `UID SEARCH` the source before either expunges, so both `UID COPY` succeed and the destination holds two copies.
+Taking the engine turn in the settle would close the race but refuse that very tick its sync body, so the move's own change would wait for the next periodic tick.
+Claiming the row after the commit (`queued` to `running`) leaves a window between the two statements in which a drain can claim it first, and then the settle has to wait on the drain's verdict.
+The fix commits a settled op as `settling` in the same transaction as its local write (`Runner::Caller`), so no drain ever sees it owed, and the drain hands a `settling` row back as `queued` only when no `SettleScope` over that store is open in the process, which is the only process that settles.
+A regression for a race like this needs both runners in one test: `tokio::join!` the settle with a drain on a second store connection, and hold the settle's fake server call until the drain has finished, so the interleaving is the reported one rather than whichever the scheduler picks.
+
 ## Not every queued op has a rollback, and the post-send flag is the one that must not
 
 The durable queue's failure policy is "roll the local half back to the server's truth and park the row as `failed`", which is right for a move or a read toggle: the user asserted a wish, the server refused it, so the wish is withdrawn.

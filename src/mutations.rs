@@ -25,15 +25,16 @@
 //! on the wire (`row_id`, P5-U4) and this module is below both clients.
 
 use crate::ops::ServerOp;
-use crate::pending_ops;
+use crate::pending_ops::{self, Runner};
 use crate::store::write;
 use crate::store::{BlobStore, Store};
 
 /// One queued mutation: the row it changed and the server op it owes.
 ///
-/// The op id is what a caller that wants the pre-daemon blocking UX hands to
-/// [`crate::pending_ops::run_and_settle`]; a caller that queues ignores it and
-/// lets the next drain retire it.
+/// The op id is what a caller that wants the pre-daemon blocking UX, and so
+/// queued for [`Runner::Caller`], hands to
+/// [`crate::pending_ops::run_and_settle`]; a caller that queues for
+/// [`Runner::Drain`] ignores it and lets the next drain retire it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Queued {
     /// The `messages.id` the mutation changed.
@@ -77,6 +78,7 @@ pub fn queue_move(
     dest_mailbox: &str,
     source_server: &str,
     dest_server: &str,
+    runner: Runner<'_>,
 ) -> Vec<Queued> {
     let mut moved = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
@@ -88,7 +90,7 @@ pub fn queue_move(
             source_mailbox: source_server.to_string(),
             dest_mailbox: dest_server.to_string(),
         };
-        match pending_ops::apply_move(store, account, row_id, dest_mailbox, op) {
+        match pending_ops::apply_move(store, account, row_id, dest_mailbox, op, runner) {
             Ok(Some((_previous, op_id))) => moved.push(Queued { row_id, op_id }),
             Ok(None) => log::warn!("[store] message {row_id} has no row to move"),
             Err(e) => log::warn!("[store] queuing a move for message {row_id} failed: {e:#}"),
@@ -104,6 +106,7 @@ pub fn queue_delete(
     account: &str,
     rows: &[i64],
     source_server: &str,
+    runner: Runner<'_>,
 ) -> Vec<Queued> {
     let mut deleted = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
@@ -114,7 +117,7 @@ pub fn queue_delete(
             message_id,
             source_mailbox: source_server.to_string(),
         };
-        match pending_ops::apply_delete(store, blobs, account, row_id, op) {
+        match pending_ops::apply_delete(store, blobs, account, row_id, op, runner) {
             Ok(Some((_previous, op_id))) => deleted.push(Queued { row_id, op_id }),
             Ok(None) => log::warn!("[store] message {row_id} has no row to delete"),
             Err(e) => log::warn!("[store] queuing a delete for message {row_id} failed: {e:#}"),
@@ -131,6 +134,7 @@ pub fn queue_read_flag(
     rows: &[i64],
     read: bool,
     server_mailbox: &str,
+    runner: Runner<'_>,
 ) -> Vec<Queued> {
     let mut out = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
@@ -142,7 +146,7 @@ pub fn queue_read_flag(
             mailbox: server_mailbox.to_string(),
             read,
         };
-        match pending_ops::apply_set_read(store, account, row_id, read, op) {
+        match pending_ops::apply_set_read(store, account, row_id, read, op, runner) {
             Ok(Some(op_id)) => out.push(Queued { row_id, op_id }),
             Ok(None) => log::warn!("[store] message {row_id} has no row to flag"),
             Err(e) => log::warn!("[store] queuing a read flag for message {row_id} failed: {e:#}"),
@@ -159,6 +163,7 @@ pub fn queue_flag(
     rows: &[i64],
     flagged: bool,
     server_mailbox: &str,
+    runner: Runner<'_>,
 ) -> Vec<Queued> {
     let mut out = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
@@ -170,7 +175,7 @@ pub fn queue_flag(
             mailbox: server_mailbox.to_string(),
             flagged,
         };
-        match pending_ops::apply_set_flagged(store, account, row_id, flagged, op) {
+        match pending_ops::apply_set_flagged(store, account, row_id, flagged, op, runner) {
             Ok(Some(op_id)) => out.push(Queued { row_id, op_id }),
             Ok(None) => log::warn!("[store] message {row_id} has no row to flag"),
             Err(e) => log::warn!("[store] queuing a flag for message {row_id} failed: {e:#}"),
@@ -222,6 +227,7 @@ mod tests {
             "archive",
             "INBOX",
             "Archive",
+            Runner::Drain,
         );
 
         assert_eq!(mailbox_of(&fx, id).as_deref(), Some("archive"));
@@ -244,7 +250,14 @@ mod tests {
         let fx = fixture();
         let id = fx.ingest_plain("archive", 4, "Junk");
 
-        let deleted = queue_delete(&fx.store, &fx.blobs, "alice", &refs(&[id]), "Archive");
+        let deleted = queue_delete(
+            &fx.store,
+            &fx.blobs,
+            "alice",
+            &refs(&[id]),
+            "Archive",
+            Runner::Drain,
+        );
 
         assert_eq!(rows(&deleted), vec![id]);
         assert!(mailbox_of(&fx, id).is_none(), "the row survived the delete");
@@ -264,7 +277,14 @@ mod tests {
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 2, "Unread");
 
-        queue_read_flag(&fx.store, "alice", &refs(&[id]), true, "INBOX");
+        queue_read_flag(
+            &fx.store,
+            "alice",
+            &refs(&[id]),
+            true,
+            "INBOX",
+            Runner::Drain,
+        );
 
         assert!(read::find_by_id(&fx.store, id).unwrap().unwrap().is_read());
         assert_eq!(
@@ -285,7 +305,14 @@ mod tests {
         let fx = fixture();
         let id = fx.ingest_plain("inbox", 7, "Important");
 
-        queue_flag(&fx.store, "alice", &refs(&[id]), true, "INBOX");
+        queue_flag(
+            &fx.store,
+            "alice",
+            &refs(&[id]),
+            true,
+            "INBOX",
+            Runner::Drain,
+        );
 
         let row = read::find_by_id(&fx.store, id).unwrap().unwrap();
         assert!(row.is_flagged());
@@ -316,6 +343,7 @@ mod tests {
             "archive",
             "INBOX",
             "Archive",
+            Runner::Drain,
         );
 
         assert_eq!(moved.len(), 3);
@@ -354,6 +382,7 @@ mod tests {
             "archive",
             "INBOX",
             "Archive",
+            Runner::Drain,
         );
         let rebuilt = agenda::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
 
@@ -371,7 +400,14 @@ mod tests {
         let stale = agenda::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
         assert_eq!(stale.len(), 1);
 
-        queue_delete(&fx.store, &fx.blobs, "alice", &refs(&[id]), "INBOX");
+        queue_delete(
+            &fx.store,
+            &fx.blobs,
+            "alice",
+            &refs(&[id]),
+            "INBOX",
+            Runner::Drain,
+        );
         let rebuilt = agenda::load_events_for_account(&fx.store, &fx.blobs, "alice", "");
 
         assert!(rebuilt.is_empty(), "a deleted invite stayed on the agenda");
@@ -390,12 +426,37 @@ mod tests {
             &refs(&[404]),
             "archive",
             "INBOX",
-            "Archive"
+            "Archive",
+            Runner::Drain
         )
         .is_empty());
-        assert!(queue_delete(&fx.store, &fx.blobs, "alice", &refs(&[404]), "INBOX").is_empty());
-        assert!(queue_read_flag(&fx.store, "alice", &refs(&[404]), true, "INBOX").is_empty());
-        assert!(queue_flag(&fx.store, "alice", &refs(&[404]), true, "INBOX").is_empty());
+        assert!(queue_delete(
+            &fx.store,
+            &fx.blobs,
+            "alice",
+            &refs(&[404]),
+            "INBOX",
+            Runner::Drain
+        )
+        .is_empty());
+        assert!(queue_read_flag(
+            &fx.store,
+            "alice",
+            &refs(&[404]),
+            true,
+            "INBOX",
+            Runner::Drain
+        )
+        .is_empty());
+        assert!(queue_flag(
+            &fx.store,
+            "alice",
+            &refs(&[404]),
+            true,
+            "INBOX",
+            Runner::Drain
+        )
+        .is_empty());
         assert!(pending_ops::queued_ops(&fx.store, "alice")
             .unwrap()
             .is_empty());

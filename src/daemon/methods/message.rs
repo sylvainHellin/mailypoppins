@@ -1736,6 +1736,16 @@ async fn mutate(
     let blobs = BlobStore::for_account(&name);
     let gone = || invalid_params(format!("{selector} is no longer in the store"));
     let rows = [row.id];
+    // A settled op is committed `settling` under this scope, which keeps it
+    // out of the drain a sync tick runs while the op is on the server: the
+    // tick the move's own first change wakes would otherwise run it again
+    // (PERSO-236). Opened before the commit and held past the settle.
+    let settler = backend.map(|backend| (backend, pending_ops::SettleScope::open(&store)));
+    let runner = settler
+        .as_ref()
+        .map_or(pending_ops::Runner::Drain, |(_, scope)| {
+            pending_ops::Runner::Caller(scope)
+        });
 
     // Through the durable queue in every case, which is the one place a row
     // change and the [`crate::ops::ServerOp`] it owes are committed together
@@ -1754,6 +1764,7 @@ async fn mutate(
                 &destination,
                 &source_server,
                 &dest_server,
+                runner,
             );
             let result = json!({
                 "account": name,
@@ -1770,8 +1781,14 @@ async fn mutate(
             (queued, result)
         }
         Kind::Delete => {
-            let queued =
-                crate::mutations::queue_delete(&store, &blobs, &name, &rows, &source_server);
+            let queued = crate::mutations::queue_delete(
+                &store,
+                &blobs,
+                &name,
+                &rows,
+                &source_server,
+                runner,
+            );
             let result = json!({
                 "account": name,
                 "id": id,
@@ -1782,8 +1799,14 @@ async fn mutate(
         }
         Kind::SetRead => {
             let read = read.expect("message.set_read reads its new state");
-            let queued =
-                crate::mutations::queue_read_flag(&store, &name, &rows, read, &source_server);
+            let queued = crate::mutations::queue_read_flag(
+                &store,
+                &name,
+                &rows,
+                read,
+                &source_server,
+                runner,
+            );
             let result = json!({
                 "account": name,
                 "id": id,
@@ -1796,7 +1819,7 @@ async fn mutate(
         Kind::SetFlag => {
             let flagged = flagged.expect("message.set_flag reads its new state");
             let queued =
-                crate::mutations::queue_flag(&store, &name, &rows, flagged, &source_server);
+                crate::mutations::queue_flag(&store, &name, &rows, flagged, &source_server, runner);
             let result = json!({
                 "account": name,
                 "id": id,
@@ -1811,8 +1834,8 @@ async fn mutate(
     let Some(queued) = queued.first() else {
         return Err(gone());
     };
-    if let Some(backend) = backend {
-        settle(&store, &blobs, queued.op_id, &backend).await?;
+    if let Some((mut backend, scope)) = settler {
+        settle(&store, &blobs, &scope, queued.op_id, &mut backend).await?;
     }
     Ok((result, resource))
 }
@@ -1842,10 +1865,11 @@ fn bool_param(params: &Value, name: &str) -> Result<bool, RpcError> {
 async fn settle(
     store: &Store,
     blobs: &BlobStore,
+    scope: &pending_ops::SettleScope,
     op_id: i64,
-    backend: &Backend,
+    backend: &mut Backend,
 ) -> Result<(), RpcError> {
-    pending_ops::run_and_settle(store, blobs, op_id, backend)
+    pending_ops::run_and_settle(store, blobs, scope, op_id, backend)
         .await
         .map_err(|e| internal(format!("{e:#}")))
 }
