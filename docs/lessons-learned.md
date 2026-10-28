@@ -779,6 +779,13 @@ What answers it is a watch the pass opens before its first store read: the moves
 The refusal is keyed on the folder the op takes the message out of and on the copy it names by UID, or on its Message-ID when the row was still on its move sentinel and the op names none, so a genuine second copy is ingested at once in the first case and at worst deferred to the next pass in the second, never hidden.
 The watcher had the mirror-image blind spot: IDLE hears only what happens while it runs, so a change landing during the tick it woke was never heard; each round now compares its SELECT with the state the last round left.
 
+## Naming a copy by UID turns a stale UID into a silent converge
+
+An op that names the row's copy by UID (PERSO-238) cannot be fooled by a twin, but a UID can go stale without a UIDVALIDITY change: another client moves the message out and back, and the folder's one copy has a new UID.
+The UID search then misses, the miss reads as not found, and the drain retires a not-found as a converged replay, so the local move stood, the server copy stayed and the next sync brought it back, where the old `Message-ID` search had simply found the copy.
+Falling back to that search is only safe with what the store knows: the op carries the UIDs bound to the row's twins in the folder, and takes the folder's copy only when it is the only one and no twin stands for it.
+A miss is a converged replay only when a completed run explains it; for a move that is the message already in the destination with nothing of the row's left in the source, and any other miss must surface as an ordinary error, which the drain retries and rolls back, rather than as a not-found.
+
 ## Not every queued op has a rollback, and the post-send flag is the one that must not
 
 The durable queue's failure policy is "roll the local half back to the server's truth and park the row as `failed`", which is right for a move or a read toggle: the user asserted a wish, the server refused it, so the wish is withdrawn.

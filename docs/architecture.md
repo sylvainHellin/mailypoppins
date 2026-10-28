@@ -671,6 +671,8 @@ The namespace (received mail or drafts) is fixed by the command, never sniffed f
 Resolution is one indexed lookup; an ambiguous key lists every candidate and asks for `--mailbox` rather than picking one.
 Two copies of one Message-ID in one mailbox are listed as `mp://<account>/<mailbox>/<key>/<uid>`, the trailing UID naming the copy, since `--mailbox` cannot tell them apart (PERSO-239); the printed canonical form never carries it, because a UID changes when the message moves.
 The server op a move, delete or flag toggle queues carries the store row's UID (`ops::ServerCopy`, PERSO-238), so it acts on the row's own copy when a folder holds two under one Message-ID, rather than on whichever one a `Message-ID` search lists first.
+It also carries the UIDs the store binds to the row's twins in that folder (`ServerCopy::siblings`), read when the op is queued: when the row's UID holds nothing any more (another client moved the message out and back), the op takes the folder's one copy for its own only if no twin row stands for it (`imap_client::ops::resolve_copy`).
+A move or delete that takes no copy converges as not found only when a completed run explains the miss: no copy left in the source, or only twins' copies, with the message already in a move's destination; any other miss is an ordinary error, which the drain retries and then rolls back.
 
 ## Performance-critical invariants
 

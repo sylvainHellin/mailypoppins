@@ -75,6 +75,12 @@
 //! hold two copies under one `Message-ID`, and the op acts on its own. A payload
 //! queued before that field existed decodes without it and falls back to the
 //! `Message-ID` search, so no queued row needs migrating.
+//!
+//! A move or delete whose copy is gone converges as a
+//! [`crate::ops::NotFoundOnServer`] only when a completed run of the op
+//! explains the miss; the IMAP arm reports any other miss, such as a copy it
+//! cannot tell from a twin, as an ordinary error, which the drain retries and
+//! then rolls back (`crate::imap_client::ops::copy_to_move`).
 
 use std::collections::HashMap;
 use std::future::Future;

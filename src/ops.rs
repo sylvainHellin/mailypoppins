@@ -87,23 +87,53 @@ impl NotFoundOnServer {
 /// `APPENDUID`), and from a payload queued before the field existed: the IMAP
 /// arm then searches by `Message-ID` alone
 /// (`crate::imap_client::ops::resolve_copy` has the whole rule).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `siblings` are the UIDs the store bound to its *other* rows in the same
+/// folder under the same `Message-ID` when the op was queued. A UID that went
+/// stale (another client moved the message out and back) leaves the op's own
+/// UID naming nothing, and the IMAP arm may then take the folder's one copy of
+/// the message for it, but never a copy one of these rows stands for. Empty,
+/// and absent from the payload, when the row has no twin, and in a payload
+/// queued before the field existed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerCopy {
     pub uid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uidvalidity: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub siblings: Vec<u32>,
 }
 
 impl ServerCopy {
     /// The copy a store row names: its `uid`, when that is a UID a server
     /// issued, and the UIDVALIDITY its mailbox was last synced under.
     pub fn of_row(uid: i64, uidvalidity: Option<i64>) -> Option<ServerCopy> {
-        let uid = u32::try_from(uid).ok().filter(|uid| *uid > 0)?;
+        let uid = server_uid(uid)?;
         Some(ServerCopy {
             uid,
             uidvalidity: uidvalidity.and_then(|v| u32::try_from(v).ok()),
+            siblings: Vec::new(),
         })
     }
+
+    /// The same copy, with the store's other rows of the message in its
+    /// folder bound to `uids`; a uid no server issued is left out.
+    pub fn with_siblings(self, uids: impl IntoIterator<Item = i64>) -> ServerCopy {
+        let mut siblings: Vec<u32> = uids
+            .into_iter()
+            .filter_map(server_uid)
+            .filter(|uid| *uid != self.uid)
+            .collect();
+        siblings.sort_unstable();
+        siblings.dedup();
+        ServerCopy { siblings, ..self }
+    }
+}
+
+/// A store `uid` as the UID a server issued, `None` for a sentinel or a
+/// synthetic uid.
+fn server_uid(uid: i64) -> Option<u32> {
+    u32::try_from(uid).ok().filter(|uid| *uid > 0)
 }
 
 /// What the background thread (or the queue drain) will ask the server to do.
@@ -291,7 +321,7 @@ async fn run_imap(config: &ImapConfig, op: &ServerOp) -> Result<()> {
                 config,
                 message_id,
                 source_mailbox,
-                *copy,
+                copy.as_ref(),
                 dest_mailbox,
             )
             .await
@@ -301,8 +331,13 @@ async fn run_imap(config: &ImapConfig, op: &ServerOp) -> Result<()> {
             source_mailbox,
             copy,
         } => {
-            crate::imap_client::delete_email_on_server(config, message_id, source_mailbox, *copy)
-                .await
+            crate::imap_client::delete_email_on_server(
+                config,
+                message_id,
+                source_mailbox,
+                copy.as_ref(),
+            )
+            .await
         }
         ServerOp::SetRead {
             message_id,
@@ -311,9 +346,16 @@ async fn run_imap(config: &ImapConfig, op: &ServerOp) -> Result<()> {
             copy,
         } => {
             if *read {
-                crate::imap_client::mark_read_on_server(config, message_id, mailbox, *copy).await
+                crate::imap_client::mark_read_on_server(config, message_id, mailbox, copy.as_ref())
+                    .await
             } else {
-                crate::imap_client::mark_unread_on_server(config, message_id, mailbox, *copy).await
+                crate::imap_client::mark_unread_on_server(
+                    config,
+                    message_id,
+                    mailbox,
+                    copy.as_ref(),
+                )
+                .await
             }
         }
         ServerOp::SetFlagged {
@@ -324,11 +366,23 @@ async fn run_imap(config: &ImapConfig, op: &ServerOp) -> Result<()> {
         } => {
             let flag = crate::types::FLAG_FLAGGED;
             if *flagged {
-                crate::imap_client::add_flag_on_server(config, message_id, mailbox, *copy, flag)
-                    .await
+                crate::imap_client::add_flag_on_server(
+                    config,
+                    message_id,
+                    mailbox,
+                    copy.as_ref(),
+                    flag,
+                )
+                .await
             } else {
-                crate::imap_client::remove_flag_on_server(config, message_id, mailbox, *copy, flag)
-                    .await
+                crate::imap_client::remove_flag_on_server(
+                    config,
+                    message_id,
+                    mailbox,
+                    copy.as_ref(),
+                    flag,
+                )
+                .await
             }
         }
         ServerOp::SetAnswered {
@@ -475,6 +529,7 @@ mod tests {
                 copy: Some(ServerCopy {
                     uid: 286,
                     uidvalidity: Some(7),
+                    siblings: Vec::new(),
                 }),
             },
             ServerOp::SetFlagged {
@@ -484,6 +539,7 @@ mod tests {
                 copy: Some(ServerCopy {
                     uid: 12,
                     uidvalidity: None,
+                    siblings: Vec::new(),
                 }),
             },
             ServerOp::SetAnswered {
@@ -548,6 +604,7 @@ mod tests {
             copy: Some(ServerCopy {
                 uid: 285,
                 uidvalidity: Some(1700000000),
+                siblings: Vec::new(),
             }),
         };
         let json = serde_json::to_string(&with_copy).unwrap();
@@ -567,11 +624,20 @@ mod tests {
             Some(ServerCopy {
                 uid: 285,
                 uidvalidity: Some(7),
+                siblings: Vec::new(),
             })
         );
         assert_eq!(
             ServerCopy::of_row(285, None).map(|c| c.uidvalidity),
             Some(None)
+        );
+        assert_eq!(
+            ServerCopy::of_row(285, Some(7))
+                .unwrap()
+                .with_siblings([289, -12, 285, 288, 289, crate::ingest::graph_uid("<a@x>")])
+                .siblings,
+            [288, 289],
+            "a twin's sentinel, synthetic uid or the copy's own UID is no sibling"
         );
         assert_eq!(ServerCopy::of_row(-5, Some(7)), None, "a local move");
         assert_eq!(ServerCopy::of_row(0, Some(7)), None);

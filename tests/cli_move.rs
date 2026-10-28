@@ -324,7 +324,7 @@ async fn two_copies_in_one_mailbox_are_listed_by_uid_and_each_resolves() {
         matches!(
             &owed[..],
             [op] if matches!(
-                op.op,
+                &op.op,
                 mailypoppins::ops::ServerOp::Move { copy: Some(copy), .. } if copy.uid == 9
             )
         ),

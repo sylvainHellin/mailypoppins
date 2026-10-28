@@ -50,8 +50,11 @@ pub struct Queued {
 /// their commit, but they take the [`ServerOp`] ready-made; this is the one
 /// lightweight read that supplies its addressing. The copy is the row's UID
 /// with its mailbox's UIDVALIDITY, so the server op acts on this row's copy
-/// when the folder holds two under one Message-ID. `None` (with a log line)
-/// when the row is already gone, which is a skip rather than an error.
+/// when the folder holds two under one Message-ID, and carries the UIDs of the
+/// row's twins in that folder ([`ServerCopy::siblings`]), so a stale UID is
+/// never resolved to a copy another row stands for. `None` (with a log line)
+/// when the row is already gone, or its twins cannot be read, which is a skip
+/// rather than an error.
 fn addressing_of(
     store: &Store,
     account: &str,
@@ -80,8 +83,29 @@ fn addressing_of(
             None
         })
         .and_then(|cursor| cursor.uidvalidity);
-    let copy = ServerCopy::of_row(row.uid, uidvalidity);
+    let siblings = match sibling_uids(store, account, &row) {
+        Ok(siblings) => siblings,
+        Err(e) => {
+            log::warn!("[store] reading the twins of message {row_id} to {what} failed: {e:#}");
+            return None;
+        }
+    };
+    let copy = ServerCopy::of_row(row.uid, uidvalidity).map(|copy| copy.with_siblings(siblings));
     Some((row.message_id, copy))
+}
+
+/// The uids of the store's other rows of `row`'s message in its mailbox
+/// (PERSO-238).
+fn sibling_uids(store: &Store, account: &str, row: &write::MutatedRow) -> anyhow::Result<Vec<i64>> {
+    let mut stmt = store.conn().prepare(
+        "SELECT uid FROM messages
+         WHERE account = ?1 AND mailbox = ?2 AND message_id = ?3 AND id <> ?4",
+    )?;
+    let uids = stmt.query_map(
+        rusqlite::params![account, row.mailbox, row.message_id, row.id],
+        |r| r.get(0),
+    )?;
+    Ok(uids.collect::<rusqlite::Result<Vec<i64>>>()?)
 }
 
 /// Move rows into `dest_mailbox` (the store's mailbox key) and queue the server
@@ -540,10 +564,13 @@ mod tests {
             .into_iter()
             .map(|row| row.op)
             .collect();
-        let named = |uid| {
+        // Each op also names the twin's UID, which a stale UID of its own
+        // must never be resolved to.
+        let named = |uid, twin| {
             Some(ServerCopy {
                 uid,
                 uidvalidity: Some(7),
+                siblings: vec![twin],
             })
         };
         assert_eq!(
@@ -553,13 +580,13 @@ mod tests {
                     message_id: "<dup@example.com>".to_string(),
                     mailbox: "Archive".to_string(),
                     flagged: true,
-                    copy: named(288),
+                    copy: named(288, 285),
                 },
                 ServerOp::Move {
                     message_id: "<dup@example.com>".to_string(),
                     source_mailbox: "Archive".to_string(),
                     dest_mailbox: "INBOX".to_string(),
-                    copy: named(285),
+                    copy: named(285, 288),
                 },
             ]
         );

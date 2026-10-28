@@ -68,7 +68,7 @@ impl Leaving {
     fn covers(&self, source: &str, message_id: &str, uid: u32, uidvalidity: Option<u32>) -> bool {
         self.message_id == message_id
             && same_folder(&self.source, source)
-            && self.copy.is_none_or(|copy| {
+            && self.copy.as_ref().is_none_or(|copy| {
                 copy.uid == uid
                     || matches!((copy.uidvalidity, uidvalidity), (Some(a), Some(b)) if a != b)
             })
@@ -118,7 +118,7 @@ fn departure_of(op: &ServerOp) -> Option<Leaving> {
         } => Some(Leaving {
             source: source_mailbox.clone(),
             message_id: message_id.clone(),
-            copy: *copy,
+            copy: copy.clone(),
         }),
         _ => None,
     }
@@ -397,6 +397,7 @@ mod tests {
                 copy: Some(ServerCopy {
                     uid: 10,
                     uidvalidity: Some(7),
+                    siblings: Vec::new(),
                 }),
             },
         );
