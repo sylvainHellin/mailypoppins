@@ -26,8 +26,6 @@ const draftCommands = [
   { command: 'mp delete --sent', description: "Clear every sent draft of the account" },
   { command: 'mp send <selector> [-y]', description: 'Send a single approved email' },
   { command: 'mp send --invite ...', description: 'Send a calendar invitation (iMIP REQUEST)' },
-  { command: 'mp invite accept|tentative|decline <selector>', description: 'RSVP to a received invitation (iMIP REPLY)' },
-  { command: 'mp calendar rebuild [-A NAME]', description: 'Report the attendee RSVPs resolved against your sent invites (every account unless -A names one)' },
   { command: 'mp send-approved [--all-accounts] [-y]', description: 'Send every approved draft of the account' },
   { command: 'mp outbox list [--json]', description: 'Show queued, retrying, failed and partly delivered submissions (--json prints them as JSON on stdout)' },
   { command: 'mp outbox retry <id>', description: 'Send a failed submission again' },
@@ -118,12 +116,22 @@ const syncOptions = [
 ];
 
 const globalOptions = [
-  { command: '-A, --account <name>', description: 'Account to use, before or after the command (default: first in config; mp calendar rebuild, mp cutover and mp contacts rebuild cover every account unless it names one; mp -A <name> with no command opens the TUI on that account). Refused by the commands that act on no account: mp daemon, mp completions, mp dump-keys, mp account list, and mp config init, show, add-account, reset-secrets and path' },
+  { command: '-A, --account <name>', description: 'Account to use, before or after the command (default: first in config; mp calendar rebuild, mp calendar list, mp calendar view, mp cutover and mp contacts rebuild cover every account unless it names one, and mp calendar view takes it more than once; mp -A <name> with no command opens the TUI on that account). Refused by the commands that act on no account: mp daemon, mp completions, mp dump-keys, mp account list, and mp config init, show, add-account, reset-secrets and path' },
 ];
 
 const signatureOptions = [
   { command: '-s, --signature <name>', description: 'Use a specific signature (mp new, mp reply, mp forward, and mp send --invite)' },
   { command: '--no-signature', description: 'Skip signature entirely (the same four)' },
+];
+
+const calendarCommands = [
+  { command: 'mp calendar list [-A NAME] [--json]', description: 'List the calendars with their account, name, id, backend, visibility and colour, the default one marked (every account unless -A names one)' },
+  { command: 'mp calendar view [agenda|day|week] [--on DATE | --from DATE --to DATE]', description: 'Show the events: the agenda from --on (default today) through 14 days later or from --from through --to, one day, or the ISO week holding --on. DATE is YYYY-MM-DD, today, tomorrow, yesterday or +N / -N days. -A NAME and --calendar ID (both repeatable) narrow the view, --hidden adds the hidden calendars, --zone reads the times in another IANA zone than the local one, and --json prints the calendar.view answer' },
+  { command: 'mp calendar show|hide <calendar-id> [-A NAME]', description: 'Show a hidden calendar in the views again, or hide one; a local preference that survives mp calendar rebuild' },
+  { command: 'mp event show <event-id> [-A NAME] [--json]', description: 'Print one event: when, where, organizer, attendees with their answers, your own answer, recurrence, link and description' },
+  { command: 'mp event respond <event-id> accept|tentative|decline [-A NAME]', description: 'Answer an invitation through the server for a server event, or by iMIP reply for an invitation mail (imip:<row_id>); --comment TEXT adds a note, --no-send-response records the answer without telling the organizer (server events only), --json prints the result' },
+  { command: 'mp invite accept|tentative|decline <selector> [--comment TEXT] [--no-send-response]', description: 'Answer a received invitation mail: through the server when the account has a server calendar holding its event, else by iMIP REPLY' },
+  { command: 'mp calendar rebuild [-A NAME]', description: 'Report the attendee RSVPs resolved against your sent invites, and resync the server calendar of an account that has one (every account unless -A names one)' },
 ];
 
 const inviteOptions = [
@@ -430,25 +438,52 @@ mp send --invite --to me@example.com --subject "Kita closed" --start 2026-12-24 
     </section>
 
     <section>
+      <h2 id="calendar-commands">Calendar Commands (<code>mp calendar</code>, <code>mp event</code>)</h2>
+      <p>
+        The calendar views merge two sources: the server calendar of an account
+        whose <code>calendar_backend</code> is <code>graph</code>, which the
+        daemon keeps a month back and a year ahead, and the invitation mails of
+        every account, listed as its <code>imip</code> calendar. An invitation
+        the server calendar also holds shows once, as the server's event.
+        Each event line in a view carries your answer: <code>✓</code> accepted,
+        <code>~</code> tentative, <code>✗</code> declined, <code>?</code> not
+        answered, <code>★</code> organizer. The event ids that
+        <code>mp event</code> takes are in <code>mp calendar view --json</code>.
+      </p>
+      <CommandTable commands={calendarCommands} />
+      <CodeBlock
+        code={`mp calendar view
+mp calendar view week --on +7 -A evoqs
+mp calendar hide AAMkADcal2 -A evoqs
+mp event respond AAMkADev2 accept --comment "See you there" -A evoqs`}
+      />
+    </section>
+
+    <section>
       <h2 id="rsvp">RSVP to Invitations (<code>mp invite</code>)</h2>
       <p>
-        <code>mp invite accept|tentative|decline &lt;selector&gt;</code> replies
-        to a received calendar invitation. It reads the invite email's sidecar
+        <code>mp invite accept|tentative|decline &lt;selector&gt;</code> answers
+        a received calendar invitation mail. On an account whose server calendar
+        holds the invitation's event, the answer goes through the server, as
+        Outlook would send it, and <code>--no-send-response</code> records it
+        without telling the organizer. Otherwise it reads the invite email's sidecar
         <code>invite.ics</code> (the source of truth for <code>UID</code>/<code>SEQUENCE</code>),
         builds a <code>METHOD:REPLY</code> with your account as the single
         <code>ATTENDEE</code> carrying the chosen <code>PARTSTAT</code>
         (<code>ACCEPTED</code>/<code>TENTATIVE</code>/<code>DECLINED</code>), and
         emails it to the <code>ORGANIZER</code> with an Outlook-convention
         subject (<code>Accepted: &lt;summary&gt;</code>, etc.). On a successful
-        send the local <code>event.rsvp</code> is updated. v1 answers the whole
-        series only (no per-occurrence responses) and adds no note text.
+        send the local <code>event.rsvp</code> is updated. <code>--comment</code>
+        adds a note to either answer. v1 answers the whole series only (no
+        per-occurrence responses).
       </p>
       <p>
         In the TUI, invites show a calendar badge in the list and an event
         summary card at the top of the preview pane; press <code>tv</code> to open
-        an Accept / Tentative / Decline overlay. <strong>The RSVP is emailed to
-        the organizer only — it is not synced to your Exchange server calendar
-        (no Graph in v1).</strong> Graph accounts are not yet supported for RSVP.
+        an Accept / Tentative / Decline overlay, which sends the iMIP reply.
+        <strong>An iMIP reply is emailed to the organizer only: it does not
+        reach a server calendar.</strong> A Graph account answers only through
+        its server calendar, so it needs <code>calendar_backend = "graph"</code>.
       </p>
     </section>
 
@@ -472,8 +507,10 @@ mp send --invite --to me@example.com --subject "Kita closed" --start 2026-12-24 
         the same account see identical state with no direct machine-to-machine
         sync. Replies for a <code>SEQUENCE</code> older than the invitation's are
         ignored, and the most recent reply per attendee wins.
-        <strong>Nothing is written back to the server — without Graph, your
-        server-side Exchange calendar is never touched.</strong>
+        <strong>Nothing is written back to the server.</strong> On an account
+        with a server calendar it also drops the daemon's copy of that calendar
+        and reads it afresh, keeping which calendars are hidden, and reports the
+        calendars and events it read.
       </p>
     </section>
 
