@@ -35,7 +35,13 @@
 //!   instead of `queued`, in the transaction that commits the local write, so
 //!   no drain ever sees it as owed (PERSO-236: a tick that started while a
 //!   settled move was on the server ran the same move again and left two
-//!   copies of the message).
+//!   copies of the message);
+//! - the ops on one message reach the server in the order they were
+//!   committed, whoever runs them: the drain holds a `queued` op back behind
+//!   an older `settling` one ([`drain`]), and a caller waits for the older
+//!   ops still owed on its message before its own server call
+//!   ([`run_and_settle`], PERSO-241), running none of them itself, so each
+//!   still runs once.
 //!
 //! ## States
 //!
@@ -74,6 +80,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use log::{info, warn};
@@ -1154,6 +1161,42 @@ fn owed_ops(store: &Store, account: &AccountConfig) -> Result<usize> {
     Ok(queued)
 }
 
+/// How long a caller settling an op waits for the older ops on its message to
+/// reach the server before it gives up on its own (PERSO-241).
+///
+/// Long enough for the debounced drain ([`crate::daemon::runtime::drainer`],
+/// 1.5 s of quiet) and a few of its refused-turn retries, or a sync tick that
+/// drains the account at its head; short against the five minutes the CLI
+/// gives a routed mutation, so the refusal reaches the user as an answer and
+/// not as a client timeout.
+pub const SETTLE_PATIENCE: Duration = Duration::from_secs(60);
+
+/// How often a waiting caller looks at the queue again.
+const SETTLE_POLL: Duration = Duration::from_millis(100);
+
+/// How a caller settling an op waits for the older ops on its message
+/// (PERSO-241): how long, and how it asks for the drain that runs them.
+pub struct OlderOps<'a> {
+    patience: Duration,
+    nudge: &'a dyn Fn(),
+}
+
+impl<'a> OlderOps<'a> {
+    /// Wait up to [`SETTLE_PATIENCE`], calling `nudge` once to ask the
+    /// account's drainer to run them.
+    pub fn wait(nudge: &'a dyn Fn()) -> OlderOps<'a> {
+        OlderOps {
+            patience: SETTLE_PATIENCE,
+            nudge,
+        }
+    }
+
+    /// The same, with a patience of the caller's choosing.
+    pub fn wait_for(patience: Duration, nudge: &'a dyn Fn()) -> OlderOps<'a> {
+        OlderOps { patience, nudge }
+    }
+}
+
 /// Run one just-enqueued op synchronously and settle its row, for a caller that
 /// wants the op's own outcome rather than the background drain's convergence
 /// (the CLI).
@@ -1163,6 +1206,17 @@ fn owed_ops(store: &Store, account: &AccountConfig) -> Result<usize> {
 /// sync tick draining the account meanwhile cannot run it a second time
 /// (PERSO-236). An op committed for the drain is refused untouched: it is the
 /// drain's to run, and running it here would race it.
+///
+/// Before its server call it waits for the ops committed earlier on the same
+/// message that are still owed ([`older_owed`]), so the server sees the ops on
+/// one message in the order they were committed, as the drain already keeps
+/// for a `queued` op behind an older `settling` one (PERSO-241). It runs none
+/// of them itself: a `queued` op is the drain's, and an older `settling` op
+/// another caller's, so each still runs exactly once. It asks for the drain
+/// through `older.nudge` and polls. An older op the server has already
+/// refused once, or one still owed after `older.patience`, makes the caller
+/// give up instead: its own op is rolled back and discarded unrun, like a
+/// server refusal, and the error says why.
 ///
 /// On success the row is retired; on any failure the local half is rolled back,
 /// the row is discarded, and the error is returned verbatim, so a
@@ -1177,6 +1231,7 @@ pub async fn run_and_settle<E: OpExecutor>(
     scope: &SettleScope,
     op_id: i64,
     exec: &mut E,
+    older: OlderOps<'_>,
 ) -> Result<()> {
     scope.covers(store)?;
     let row = row_by_id(store, op_id)?
@@ -1186,8 +1241,82 @@ pub async fn run_and_settle<E: OpExecutor>(
         "pending op {op_id} is {}, not settling: it is the drain's to run",
         row.state
     );
+    if let Err(refusal) = wait_for_older(store, &row, &older).await {
+        return settle(store, blobs, &row, Err(refusal));
+    }
     let outcome = exec.execute(&row.op).await;
     settle(store, blobs, &row, outcome)
+}
+
+/// Wait until no op committed before `row` on its message is still owed, or
+/// say why the caller should not wait any longer (PERSO-241).
+///
+/// An older op the server refused once is not waited for: its retry waits out
+/// a backoff of thirty seconds or more, and if it is refused for good its
+/// rollback restores the message to where it was before it, under the op this
+/// caller would have run. Catching it at its first refusal also means an older
+/// op is never seen parked `failed` here, since parking takes
+/// [`MAX_ATTEMPTS`] refusals; an op parked `failed` before `row` was committed
+/// is not owed and holds nothing back, because its rollback already ran.
+async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) -> Result<()> {
+    let Some(target) = row.target_message_id else {
+        return Ok(());
+    };
+    let deadline = tokio::time::Instant::now() + older.patience;
+    let mut nudged = false;
+    loop {
+        let ahead = older_owed(store, &row.account, target, row.id)?;
+        let Some(first) = ahead.first() else {
+            return Ok(());
+        };
+        if let Some(refused) = ahead.iter().find(|op| op.attempts > 0) {
+            anyhow::bail!(
+                "an earlier change to this message (op {}, {}) was refused by the server and \
+                 is waiting to retry ({}); nothing was changed, try again once it has run",
+                refused.id,
+                refused.kind,
+                refused.last_error.as_deref().unwrap_or("no error recorded")
+            );
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "an earlier change to this message (op {}, {}) has not reached the server yet; \
+                 nothing was changed, try again in a moment",
+                first.id,
+                first.kind
+            );
+        }
+        if !nudged {
+            info!(
+                "[pending_ops] op {} waits for {} older op(s) on its message",
+                row.id,
+                ahead.len()
+            );
+            (older.nudge)();
+            nudged = true;
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        tokio::time::sleep(SETTLE_POLL.min(left)).await;
+    }
+}
+
+/// The ops of `account` committed before op `before` on message `target` that
+/// are still owed to the server, oldest first: `queued` ones the drain runs and
+/// `settling` ones another caller is running (PERSO-241).
+fn older_owed(store: &Store, account: &str, target: i64, before: i64) -> Result<Vec<PendingOp>> {
+    let mut stmt = store.conn().prepare(
+        "SELECT id, account, kind, target_message_id, payload, state, attempts,
+                last_error, created, updated
+         FROM pending_ops
+         WHERE account = ?1 AND target_message_id = ?2 AND id < ?3 AND state IN (?4, ?5)
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![account, target, before, STATE_QUEUED, STATE_SETTLING],
+        row_from_sql,
+    )?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("listing the older ops owed on a message")
 }
 
 /// Retire a settled op on success, or roll its local half back and discard it
@@ -1419,6 +1548,10 @@ mod tests {
             self.verdicts.pop_front().unwrap_or(Ok(()))
         }
     }
+
+    /// A nudge nobody answers: the settle under test has no older op to wait
+    /// for, or the test drains by hand.
+    fn nobody() {}
 
     fn move_op(message_id: &str) -> ServerOp {
         ServerOp::Move {
@@ -2083,7 +2216,14 @@ mod tests {
         let tick_store = Store::open(fx.store.path()).unwrap();
         let mut ticking = CountingExecutor::new(&runs);
 
-        let settle = run_and_settle(&fx.store, &fx.blobs, &scope, op_id, &mut settling);
+        let settle = run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &scope,
+            op_id,
+            &mut settling,
+            OlderOps::wait(&nobody),
+        );
         let tick = async {
             on_server.await.unwrap();
             let result = drain(
@@ -2244,9 +2384,16 @@ mod tests {
         let scope = SettleScope::open(&fx.store);
         let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut exec = CountingExecutor::new(&runs);
-        let err = run_and_settle(&fx.store, &fx.blobs, &scope, op_id, &mut exec)
-            .await
-            .unwrap_err();
+        let err = run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &scope,
+            op_id,
+            &mut exec,
+            OlderOps::wait(&nobody),
+        )
+        .await
+        .unwrap_err();
 
         assert!(format!("{err:#}").contains("not settling"), "{err:#}");
         assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -2351,6 +2498,7 @@ mod tests {
             &scope,
             archive,
             &mut CountingExecutor::new(&runs),
+            OlderOps::wait(&nobody),
         )
         .await
         .unwrap();
@@ -2406,6 +2554,363 @@ mod tests {
             1,
             "the caller's op is still the caller's"
         );
+    }
+
+    /// An executor that appends every op it runs, and when it finished, to a
+    /// log it shares with the other runners of a test, so the test can read
+    /// the order the server saw the ops of one message in.
+    struct LoggingExecutor {
+        log: std::sync::Arc<Mutex<Vec<String>>>,
+        name: &'static str,
+        /// Awaited before the op returns, to hold it on the server.
+        hold: Option<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    impl LoggingExecutor {
+        fn new(log: &std::sync::Arc<Mutex<Vec<String>>>, name: &'static str) -> Self {
+            LoggingExecutor {
+                log: std::sync::Arc::clone(log),
+                name,
+                hold: None,
+            }
+        }
+    }
+
+    impl OpExecutor for LoggingExecutor {
+        async fn execute(&mut self, op: &ServerOp) -> Result<()> {
+            let kind = op.kind();
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("{} {kind}", self.name));
+            if let Some(hold) = self.hold.take() {
+                let _ = hold.await;
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} {kind} done", self.name));
+            }
+            Ok(())
+        }
+    }
+
+    fn star_op(mailbox: &str) -> ServerOp {
+        ServerOp::SetFlagged {
+            message_id: "<inbox-1@example.com>".to_string(),
+            mailbox: mailbox.to_string(),
+            flagged: true,
+        }
+    }
+
+    /// PERSO-241: a star the TUI queued, then `mp archive` on the same
+    /// message inside the drainer's debounce. The archive waits for the
+    /// drain it asks for and reaches the server after the star, so the star
+    /// does not search a folder the message has already left. Each op runs
+    /// once, the star by the drain and the archive by its caller.
+    #[tokio::test]
+    async fn a_settled_op_waits_for_an_older_queued_op_on_its_message() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        apply_set_flagged(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            star_op("INBOX"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        let scope = SettleScope::open(&fx.store);
+        let (_prev, archive) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let asked = tokio::sync::Notify::new();
+        let nudge = || asked.notify_one();
+        let mut caller = LoggingExecutor::new(&log, "caller");
+        let settle = run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &scope,
+            archive,
+            &mut caller,
+            OlderOps::wait(&nudge),
+        );
+        // The account's drainer, on a store connection of its own. Bounded,
+        // so a settle that never asks still lets the drain run and the test
+        // fail on the order rather than hang.
+        let drain_store = Store::open(fx.store.path()).unwrap();
+        let mut drainer = LoggingExecutor::new(&log, "drain");
+        let drained = async {
+            let _ = tokio::time::timeout(Duration::from_secs(2), asked.notified()).await;
+            drain(&drain_store, &fx.blobs, "alice", &mut drainer, unix_now()).await
+        };
+        let (settled, drained) = tokio::join!(settle, drained);
+
+        settled.unwrap();
+        assert_eq!(drained.unwrap().completed, 1);
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["drain set_flagged", "caller move"],
+            "the server saw the star first, each op once"
+        );
+        assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+        let row = read::find_by_id(&fx.store, id).unwrap().unwrap();
+        assert_eq!(row.mailbox, "archive");
+        assert!(row.is_flagged());
+    }
+
+    /// Two callers on one message, as two agents' `mp` commands: the newer
+    /// settle waits for the older one to come back from the server before it
+    /// runs its own op (PERSO-241).
+    #[tokio::test]
+    async fn a_settled_op_waits_for_an_older_caller_on_its_message() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let first = SettleScope::open(&fx.store);
+        let (_prev, archive) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&first),
+        )
+        .unwrap()
+        .unwrap();
+        let second = SettleScope::open(&fx.store);
+        let star = apply_set_flagged(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            star_op("Archive"),
+            Runner::Caller(&second),
+        )
+        .unwrap()
+        .unwrap();
+
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (release, hold) = tokio::sync::oneshot::channel();
+        let mut archiving = LoggingExecutor {
+            hold: Some(hold),
+            ..LoggingExecutor::new(&log, "archive")
+        };
+        let mut starring = LoggingExecutor::new(&log, "star");
+        let archived = run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &first,
+            archive,
+            &mut archiving,
+            OlderOps::wait(&nobody),
+        );
+        let starred = run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &second,
+            star,
+            &mut starring,
+            OlderOps::wait(&nobody),
+        );
+        let server = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            release.send(()).unwrap();
+        };
+        let (archived, starred, ()) = tokio::join!(archived, starred, server);
+
+        archived.unwrap();
+        starred.unwrap();
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["archive move", "archive move done", "star set_flagged"]
+        );
+        assert!(rows_in_state(&fx.store, "alice", STATE_SETTLING)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// An older op the server already refused once is waiting out a backoff
+    /// of thirty seconds or more, and may yet be rolled back under the newer
+    /// op: the settle gives up at once, rolls its own op back unrun and says
+    /// why, and the older op stays the drain's (PERSO-241).
+    #[tokio::test]
+    async fn a_settled_op_gives_up_on_an_older_op_the_server_refused() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let star = apply_set_flagged(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            star_op("INBOX"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        bump_attempt(&fx.store, star, "connection reset").unwrap();
+        let scope = SettleScope::open(&fx.store);
+        let (_prev, archive) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let err = run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &scope,
+            archive,
+            &mut CountingExecutor::new(&runs),
+            OlderOps::wait(&nobody),
+        )
+        .await
+        .unwrap_err();
+
+        let err = format!("{err:#}");
+        assert!(err.contains(&format!("op {star}, set_flagged")), "{err}");
+        assert!(err.contains("connection reset"), "{err}");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "inbox",
+            "the archive was rolled back"
+        );
+        let queued = queued_ops(&fx.store, "alice").unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id, star);
+        assert!(rows_in_state(&fx.store, "alice", STATE_SETTLING)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// An older op no drain runs within the caller's patience makes the
+    /// settle give up, after asking for the drain once (PERSO-241).
+    #[tokio::test]
+    async fn a_settled_op_gives_up_on_an_older_op_still_owed_after_its_patience() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let star = apply_set_flagged(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            star_op("INBOX"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        let scope = SettleScope::open(&fx.store);
+        let (_prev, archive) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+
+        let asked = std::cell::Cell::new(0);
+        let nudge = || asked.set(asked.get() + 1);
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let err = run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &scope,
+            archive,
+            &mut CountingExecutor::new(&runs),
+            OlderOps::wait_for(Duration::from_millis(250), &nudge),
+        )
+        .await
+        .unwrap_err();
+
+        let err = format!("{err:#}");
+        assert!(err.contains(&format!("op {star}, set_flagged")), "{err}");
+        assert!(err.contains("has not reached the server"), "{err}");
+        assert_eq!(asked.get(), 1, "the drain was asked for once");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
+            "inbox"
+        );
+        assert_eq!(queued_ops(&fx.store, "alice").unwrap().len(), 1);
+    }
+
+    /// A settle waits only for ops still owed on its own message: an older op
+    /// parked `failed` was rolled back before this one was committed, and an
+    /// op on another message is no concern of its ordering (PERSO-241).
+    #[tokio::test]
+    async fn a_settled_op_waits_for_no_failed_op_and_no_other_message() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let other = fx.ingest_plain("inbox", 2, "Other");
+        let parked = apply_set_flagged(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            star_op("INBOX"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        let row = row_by_id(&fx.store, parked).unwrap().unwrap();
+        fail_and_roll_back(&fx.store, &fx.blobs, &row, "refused").unwrap();
+        apply_move(
+            &fx.store,
+            "alice",
+            other,
+            "archive",
+            move_op("<inbox-2@example.com>"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        let scope = SettleScope::open(&fx.store);
+        let (_prev, archive) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+
+        let asked = std::cell::Cell::new(0);
+        let nudge = || asked.set(asked.get() + 1);
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &scope,
+            archive,
+            &mut CountingExecutor::new(&runs),
+            OlderOps::wait_for(Duration::ZERO, &nudge),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(asked.get(), 0, "nothing to wait for, nothing asked");
     }
 
     /// The resume's gate owes an op a dead caller left `settling`: counted

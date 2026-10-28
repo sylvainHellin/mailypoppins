@@ -763,6 +763,9 @@ Claiming the row after the commit (`queued` to `running`) leaves a window betwee
 The fix commits a settled op as `settling` in the same transaction as its local write (`Runner::Caller`), so no drain ever sees it owed, and the drain hands a `settling` row back as `queued` only when no `SettleScope` over that store is open in the process, which is the only process that settles.
 A regression for a race like this needs both runners in one test: `tokio::join!` the settle with a drain on a second store connection, and hold the settle's fake server call until the drain has finished, so the interleaving is the reported one rather than whichever the scheduler picks.
 Taking an op out of the drain's queue also takes it out of the drain's ordering: a later `queued` op on the same message (a star, a second move) must wait for the older `settling` one, keyed by `target_message_id`, or it runs against a folder the message has not reached yet and a flag op's not-found is retired as done.
+The ordering has to hold in both directions: an older `queued` op on the message must reach the server before the newer settled one (PERSO-241).
+The caller waits for it rather than running it, because the drain claims nothing per row, and a caller that took a `queued` row over could run it while a drain that had already listed it runs it too.
+In a test of such a wait, bound the stand-in drainer's wait for the nudge (`tokio::time::timeout`), so that with the fix reverted the test fails on the server order instead of hanging.
 
 ## Not every queued op has a rollback, and the post-send flag is the one that must not
 

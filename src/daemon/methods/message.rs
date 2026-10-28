@@ -1864,7 +1864,15 @@ async fn mutate_with<E: OpExecutor>(
         return Err(gone());
     };
     if let Some((mut backend, scope)) = settler {
-        let settled = settle(&store, &blobs, &scope, queued.op_id, &mut backend).await;
+        let ask_for_drain = || {
+            if let Some(runtime) = runtimes.get(&name) {
+                runtime.request_drain();
+            }
+        };
+        // The ops committed earlier on this message reach the server first
+        // (PERSO-241): the settle waits for the drain it asks for here.
+        let older = pending_ops::OlderOps::wait(&ask_for_drain);
+        let settled = settle(&store, &blobs, &scope, queued.op_id, &mut backend, older).await;
         drop(scope);
         // A drain that ran while this op was on the server held back the ops
         // queued after it on the same message (PERSO-236). They are owed now,
@@ -1872,9 +1880,7 @@ async fn mutate_with<E: OpExecutor>(
         // rather than left to the next tick.
         let waiting = pending_ops::counts(&store, &name).map_or(true, |(queued, _)| queued > 0);
         if waiting {
-            if let Some(runtime) = runtimes.get(&name) {
-                runtime.request_drain();
-            }
+            ask_for_drain();
         }
         settled?;
     }
@@ -1909,8 +1915,9 @@ async fn settle<E: OpExecutor>(
     scope: &pending_ops::SettleScope,
     op_id: i64,
     backend: &mut E,
+    older: pending_ops::OlderOps<'_>,
 ) -> Result<(), RpcError> {
-    pending_ops::run_and_settle(store, blobs, scope, op_id, backend)
+    pending_ops::run_and_settle(store, blobs, scope, op_id, backend, older)
         .await
         .map_err(|e| internal(format!("{e:#}")))
 }
@@ -3386,6 +3393,7 @@ mod tests {
     mod settle {
         use super::*;
         use std::sync::Mutex;
+        use std::time::Duration;
 
         use futures::FutureExt as _;
 
@@ -3628,6 +3636,52 @@ mod tests {
             .unwrap();
             assert_eq!(drained.completed, 1);
             assert_eq!(*log.lock().unwrap(), ["caller move", "drain set_flagged"]);
+        }
+
+        /// PERSO-241 through the daemon: the TUI stars a message
+        /// (`settle: false`) and an agent's `mp archive` follows inside the
+        /// drainer's debounce. The archive asks for the drain, waits for it,
+        /// and reaches the server after the star, each op once.
+        #[tokio::test]
+        async fn a_settled_mutation_reaches_the_server_after_an_older_queued_op() {
+            let daemon = seeded();
+            let mut star = by_row(daemon.id);
+            star["flagged"] = json!(true);
+            star["settle"] = json!(false);
+            daemon.call(Kind::SetFlag, star, no_server).await.unwrap();
+            let mut requests = daemon.runtime.drain_requests();
+            requests.borrow_and_update();
+            let log = Arc::default();
+            let server = FakeServer::new("caller", &log, &daemon.fx.store);
+
+            let archive = daemon.call(Kind::Archive, by_row(daemon.id), |_| Ok(server));
+            // The account's drainer, on a store connection of its own. Bounded,
+            // so an archive that never asks still lets it run and the test
+            // fail on the order rather than hang.
+            let drain_store = Store::open(daemon.fx.store.path()).unwrap();
+            let mut drainer = FakeServer::new("drain", &log, &daemon.fx.store);
+            let drained = async {
+                let _ = tokio::time::timeout(Duration::from_secs(2), requests.changed()).await;
+                pending_ops::drain(
+                    &drain_store,
+                    &daemon.fx.blobs,
+                    "alice",
+                    &mut drainer,
+                    crate::outbox::unix_now(),
+                )
+                .await
+            };
+            let (archived, drained) = tokio::join!(archive, drained);
+
+            archived.unwrap();
+            assert_eq!(drained.unwrap().completed, 1);
+            assert_eq!(*log.lock().unwrap(), ["drain set_flagged", "caller move"]);
+            assert!(daemon.ops().is_empty());
+            let row = read::find_by_id(&daemon.fx.store, daemon.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.mailbox, "archive");
+            assert!(row.is_flagged());
         }
     }
 }
