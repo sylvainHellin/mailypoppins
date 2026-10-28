@@ -28,7 +28,7 @@ pub use store_sync::{
 // The sync types moved to `crate::sync` with the engine (#0059); re-exported
 // here so the call sites that name them through this module keep compiling.
 pub use crate::sync::{FetchedRaw, FreshObservation, MailboxState, SyncResult, SyncTarget};
-pub use watch::watch_mailbox;
+pub use watch::{watch_mailbox, watch_mailbox_since};
 
 use std::fmt;
 use std::io;

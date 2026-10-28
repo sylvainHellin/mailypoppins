@@ -17,6 +17,13 @@
 //! differ from the canonical state's, so a client's sidebar converges without
 //! asking.
 //!
+//! No IDLE runs while that tick does, so each IMAP round starts by comparing
+//! the mailbox against the state the previous round left
+//! ([`crate::imap_client::watch_mailbox_since`]) and reports a change at once
+//! when it moved in between: the second leg of two back-to-back moves, or mail
+//! that arrived mid-tick, is ticked for straight away rather than at the next
+//! scheduled tick (PERSO-240).
+//!
 //! # Why a watcher is not a scheduler
 //!
 //! This is the watch the TUI had and nothing more: it reacts to a server
@@ -104,7 +111,7 @@ pub fn spawn(
             known: None,
         }
     } else {
-        Source::Imap
+        Source::Imap { since: None }
     };
     Some(tokio::spawn(watch(
         Arc::downgrade(runtime),
@@ -118,7 +125,15 @@ pub fn spawn(
 /// What one round watches.
 enum Source {
     /// One IMAP IDLE round on [`WATCHED_MAILBOX`].
-    Imap,
+    Imap {
+        /// The mailbox's state as the last round left it, which the next
+        /// round compares its own SELECT against: a change that landed while
+        /// the tick ran, or between two rounds, is a change, though no IDLE
+        /// was running to hear it (PERSO-240). `None` before the first round.
+        /// A failed round leaves it alone, so a change during the backoff is
+        /// heard too.
+        since: Option<crate::sync::MailboxState>,
+    },
     /// One Graph enumeration of the inbox.
     Graph {
         /// Built on the first round, and again after a failed one: the token
@@ -137,7 +152,7 @@ enum Source {
 impl Source {
     fn label(&self) -> &'static str {
         match self {
-            Source::Imap => "IMAP IDLE",
+            Source::Imap { .. } => "IMAP IDLE",
             Source::Graph { .. } => "Graph",
             #[cfg(test)]
             Source::Never => "nothing",
@@ -147,7 +162,7 @@ impl Source {
     /// `true` when the mailbox moved during the round.
     async fn round(&mut self, cfg: &AccountConfig) -> anyhow::Result<bool> {
         match self {
-            Source::Imap => idle_imap(cfg).await,
+            Source::Imap { since } => idle_imap(cfg, since).await,
             Source::Graph { client, known } => poll_graph(cfg, client, known).await,
             #[cfg(test)]
             Source::Never => std::future::pending().await,
@@ -234,17 +249,29 @@ fn backoff(failures: u32) -> Duration {
     doubled.min(MAX_BACKOFF)
 }
 
-/// One IDLE round: `true` when the mailbox moved, `false` when the round
-/// expired.
-async fn idle_imap(cfg: &AccountConfig) -> anyhow::Result<bool> {
+/// One IDLE round: `true` when the mailbox moved, during the round or since
+/// the state `since` holds, `false` when the round expired. `since` takes the
+/// state the round leaves for the next one.
+async fn idle_imap(
+    cfg: &AccountConfig,
+    since: &mut Option<crate::sync::MailboxState>,
+) -> anyhow::Result<bool> {
     let cfg = Arc::new(cfg.clone());
-    off_thread("the IDLE watch", move || async move {
+    let baseline = since.clone();
+    let (code, state) = off_thread("the IDLE watch", move || async move {
         let imap = ImapConfig::load(&cfg)?;
-        crate::imap_client::watch_mailbox(&imap, WATCHED_MAILBOX, Some(IDLE_ROUND_SECS)).await
+        crate::imap_client::watch_mailbox_since(
+            &imap,
+            WATCHED_MAILBOX,
+            Some(IDLE_ROUND_SECS),
+            baseline.as_ref(),
+        )
+        .await
     })
     .await
-    .and_then(|inner| inner)
-    .map(|code| code != IDLE_TIMED_OUT)
+    .and_then(|inner| inner)?;
+    *since = Some(state);
+    Ok(code != IDLE_TIMED_OUT)
 }
 
 /// One Graph enumeration: `true` when the inbox's id set differs from the
