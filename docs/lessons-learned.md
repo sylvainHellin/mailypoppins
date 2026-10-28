@@ -779,6 +779,8 @@ Every rollback restores a whole snapshot (a flag string, a mailbox and UID) take
 Undoing oldest first restores the later snapshots last, which brings back a star the server never saw or a folder the message never reached.
 A held op spends no attempt and starts no backoff, or a slow server would spend its budget while it never ran; its rollback-on-refusal is not counted as an attempt either.
 A regression for the order needs two later ops whose snapshots differ (a star then a read toggle, or two moves), since a single later op restores the same state either way.
+The key that groups the ops of one message, `target_message_id`, stops naming that message at a delete: `messages.id` has no `AUTOINCREMENT`, so deleting the newest row hands its id to the next mail, and the new mail's star waited behind the old mail's delete in backoff and would have been rolled back with it (the same reuse that bit the contacts index in PERSO-234).
+Nothing can follow a delete on its own message, so a delete orders nothing after it, and the ops after a refused move stop at the first delete among them; this needs no schema change.
 ## A rollback that lists what to undo has to undo it in the same transaction
 
 The cascade of PERSO-243 listed the ops queued after a refused move, then rolled each back and the move last, each in a transaction of its own (PERSO-249).

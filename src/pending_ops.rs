@@ -42,7 +42,9 @@
 //!   backoff ([`drain`], PERSO-243), and a caller waits for the older ops
 //!   still owed on its message before its own server call
 //!   ([`run_and_settle`], PERSO-241), running none of them itself, so each
-//!   still runs once. An op refused for good rolls back the later ops on its
+//!   still runs once. A delete orders nothing after it, since an op that
+//!   follows it on its row is on a new mail that reused the row id
+//!   ([`orders_later_ops`]). An op refused for good rolls back the later ops on its
 //!   message with it, newest first, since they were committed against the
 //!   state its rollback undoes, `queued` and `settling` alike, in the one
 //!   transaction that settles it ([`refuse`], PERSO-249), so a command
@@ -1094,23 +1096,44 @@ pub(crate) async fn drain<E: OpExecutor>(
 /// uid, so a move, a star and a second move of one message all carry the
 /// same target, while the `Message-ID` in the [`ServerOp`] is shared by every
 /// copy of a message in other folders. A drafts-mirror op has no target and
-/// is never deferred.
+/// is never deferred, and a delete defers nothing ([`orders_later_ops`]).
 fn settling_targets(store: &Store, account: &str) -> Result<HashMap<i64, i64>> {
     let mut stmt = store.conn().prepare(
         "SELECT target_message_id, MIN(id) FROM pending_ops
-         WHERE account = ?1 AND state = ?2 AND target_message_id IS NOT NULL
+         WHERE account = ?1 AND state = ?2 AND target_message_id IS NOT NULL AND kind <> ?3
          GROUP BY target_message_id",
     )?;
-    let rows = stmt.query_map(rusqlite::params![account, STATE_SETTLING], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-    })?;
+    let rows = stmt.query_map(
+        rusqlite::params![account, STATE_SETTLING, KIND_DELETE],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
     rows.collect::<rusqlite::Result<HashMap<i64, i64>>>()
         .context("listing the messages a caller is settling an op on")
+}
+
+/// The `kind` of a [`ServerOp::Delete`] row.
+const KIND_DELETE: &str = "delete";
+
+/// Whether the ops committed after `op` on its target row are ops on the same
+/// message, which wait for it and are rolled back with it (PERSO-243).
+///
+/// Not after a delete: it removes the row, so nothing can follow it on its
+/// own message, and `messages.id` is an `INTEGER PRIMARY KEY` without
+/// `AUTOINCREMENT`, which SQLite hands to the next insert when the deleted
+/// row had the largest id. An op committed later with the same target is on
+/// a new mail that reused the id, and owes nothing to the delete: holding it
+/// behind one in backoff, or rolling it back with one refused for good,
+/// would stall or undo a change to another message.
+fn orders_later_ops(op: &ServerOp) -> bool {
+    !matches!(op, ServerOp::Delete { .. })
 }
 
 /// Record that `row` stays owed after this drain pass, so the later rows on
 /// its message wait for it (PERSO-243).
 fn still_owed(owed: &mut HashMap<i64, i64>, row: &PendingOp) {
+    if !orders_later_ops(&row.op) {
+        return;
+    }
     if let Some(target) = row.target_message_id {
         owed.entry(target)
             .and_modify(|oldest| *oldest = (*oldest).min(row.id))
@@ -1219,8 +1242,12 @@ fn refuse(store: &Store, blobs: &BlobStore, id: i64, err: &str, how: Refusal) ->
 /// The ops still owed on `row`'s message that were committed after it,
 /// oldest first: `queued` ones the drain holds behind it and `settling` ones
 /// whose callers wait for it.
+///
+/// They end at the first delete among them, which is the message's last op:
+/// what follows it on the row is on a new mail that reused the row id
+/// ([`orders_later_ops`]).
 fn later_on_message(conn: &Connection, row: &PendingOp) -> Result<Vec<PendingOp>> {
-    let Some(target) = row.target_message_id else {
+    let Some(target) = row.target_message_id.filter(|_| orders_later_ops(&row.op)) else {
         return Ok(Vec::new());
     };
     let mut stmt = conn.prepare(
@@ -1230,13 +1257,18 @@ fn later_on_message(conn: &Connection, row: &PendingOp) -> Result<Vec<PendingOp>
          WHERE account = ?1 AND target_message_id = ?2 AND id > ?3 AND state IN (?4, ?5)
          ORDER BY id",
     )?;
-    let later = stmt
+    let mut later = stmt
         .query_map(
             rusqlite::params![row.account, target, row.id, STATE_QUEUED, STATE_SETTLING],
             row_from_sql,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("listing the ops owed after a refused one on its message")?;
+    let end = later
+        .iter()
+        .position(|op| !orders_later_ops(&op.op))
+        .map_or(later.len(), |delete| delete + 1);
+    later.truncate(end);
     Ok(later)
 }
 
@@ -1602,17 +1634,27 @@ async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) ->
 
 /// The ops of `account` committed before op `before` on message `target` that
 /// are still owed to the server, oldest first: `queued` ones the drain runs and
-/// `settling` ones another caller is running (PERSO-241).
+/// `settling` ones another caller is running (PERSO-241). A delete is left
+/// out: an op after it on its row is on another message
+/// ([`orders_later_ops`]).
 fn older_owed(store: &Store, account: &str, target: i64, before: i64) -> Result<Vec<PendingOp>> {
     let mut stmt = store.conn().prepare(
         "SELECT id, account, kind, target_message_id, payload, state, attempts,
                 last_error, created, updated
          FROM pending_ops
          WHERE account = ?1 AND target_message_id = ?2 AND id < ?3 AND state IN (?4, ?5)
+           AND kind <> ?6
          ORDER BY id",
     )?;
     let rows = stmt.query_map(
-        rusqlite::params![account, target, before, STATE_QUEUED, STATE_SETTLING],
+        rusqlite::params![
+            account,
+            target,
+            before,
+            STATE_QUEUED,
+            STATE_SETTLING,
+            KIND_DELETE
+        ],
         row_from_sql,
     )?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -2331,6 +2373,99 @@ mod tests {
         );
         assert_eq!(failed_ops(&fx.store, "alice").unwrap().len(), 1);
         assert_eq!(counts(&fx.store, "alice").unwrap(), (0, 1));
+    }
+
+    /// PERSO-243: SQLite hands a deleted row's id to the next mail when it
+    /// was the largest, so a delete in backoff and the ops on a new mail can
+    /// share a target. The delete held the new mail's star back, a settle on
+    /// it gave up on the delete's refusal, and the delete refused for good
+    /// rolled the new mail's move back with it. Nothing follows a delete on
+    /// its own message, so it orders nothing after it.
+    #[tokio::test]
+    async fn a_delete_orders_no_op_on_a_new_mail_that_reused_its_row_id() {
+        let fx = fixture();
+        let old = fx.ingest_plain("inbox", 1, "Old");
+        let delete_op = ServerOp::Delete {
+            message_id: "<inbox-1@example.com>".to_string(),
+            source_mailbox: "INBOX".to_string(),
+            copy: None,
+            graph_copy: None,
+        };
+        let (_prev, delete) =
+            apply_delete(&fx.store, &fx.blobs, "alice", old, delete_op, Runner::Drain)
+                .unwrap()
+                .unwrap();
+        bump_attempt(&fx.store, delete, "connection reset").unwrap();
+        let new = fx.ingest_plain("inbox", 2, "New");
+        assert_eq!(new, old, "the new mail reused the deleted row's id");
+
+        let star = ServerOp::SetFlagged {
+            message_id: "<inbox-2@example.com>".to_string(),
+            mailbox: "INBOX".to_string(),
+            flagged: true,
+            copy: None,
+        };
+        apply_set_flagged(&fx.store, "alice", new, true, star.clone(), Runner::Drain)
+            .unwrap()
+            .unwrap();
+        let mut exec = FakeExecutor::always_ok();
+        let result = drain(&fx.store, &fx.blobs, "alice", &mut exec, unix_now() + 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            exec.seen,
+            [star],
+            "the delete is in backoff, the star is not"
+        );
+        assert_eq!((result.completed, result.still_open), (1, 1));
+
+        let scope = SettleScope::open(&fx.store);
+        let mark_read = apply_set_read(
+            &fx.store,
+            "alice",
+            new,
+            true,
+            ServerOp::SetRead {
+                message_id: "<inbox-2@example.com>".to_string(),
+                mailbox: "INBOX".to_string(),
+                read: true,
+                copy: None,
+                graph_copy: None,
+            },
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &scope,
+            mark_read,
+            &mut CountingExecutor::new(&runs),
+            OlderOps::wait_for(Duration::ZERO, &nobody),
+        )
+        .await
+        .unwrap();
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let (_prev, archive) = apply_move(
+            &fx.store,
+            "alice",
+            new,
+            "archive",
+            move_op("<inbox-2@example.com>"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        let parked = refuse(&fx.store, &fx.blobs, delete, "NO refused", Refusal::Park).unwrap();
+        assert!(parked.is_empty(), "parked {parked:?} with the delete");
+        assert_eq!(queued_row(&fx.store, archive).attempts, 0);
+        assert_eq!(
+            read::find_by_id(&fx.store, new).unwrap().unwrap().mailbox,
+            "archive"
+        );
     }
 
     /// The CLI's synchronous settle: a succeeded op retires its row and the
