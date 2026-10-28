@@ -1864,6 +1864,10 @@ async fn append_once<M: SentMailbox>(
 /// otherwise a synthetic id derived from the Message-ID (the same trick the
 /// Graph path uses, [`crate::ingest::graph_uid`]), which the next real sync
 /// rebinds to the server UID through the `message_id` index.
+///
+/// Once the copy is committed it is numbered for the contacts index, when the
+/// send that made it claimed it ([`crate::contacts::window::sent_copy_stored`],
+/// PERSO-234).
 pub fn ingest_sent_copy(
     store: &Store,
     blobs: &BlobStore,
@@ -1889,6 +1893,7 @@ pub fn ingest_sent_copy(
             raw: Some(raw),
         },
     )?;
+    crate::contacts::window::sent_copy_stored(account, message_id);
     Ok(())
 }
 

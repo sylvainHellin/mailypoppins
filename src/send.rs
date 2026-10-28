@@ -3542,6 +3542,10 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
         ancestry.as_deref(),
     )?;
 
+    // Held to the contacts bump, so the Sent copy the outbox stores during
+    // the send is numbered as it is stored (PERSO-234).
+    let sent_copy =
+        crate::contacts::window::SentCopyClaim::claim(&ctx.account.name, &built.message_id);
     let report = match ctx.graph.as_ref() {
         // Graph files its own copy in Sent Items, so the outbox row never
         // carries a target mailbox; what it buys here is exactly-once
@@ -3571,7 +3575,7 @@ pub async fn send_draft(draft: &EmailDraft, ctx: &SendContext) -> Result<SentDra
         // Best-effort, no-op without a contacts cache; the message went out,
         // so the correspondent is worth remembering whether or not the file
         // could be retired.
-        contacts = crate::contacts::hooks::bump_after_send(&ctx.account, draft);
+        contacts = crate::contacts::hooks::bump_after_send(&ctx.account, draft, sent_copy.stored());
         mark_source_after_send(draft, ctx).await;
     }
     Ok(SentDraft {

@@ -11,10 +11,10 @@
 //!
 //! Every merge is one load-merge-save under the cache's lock, the lock a
 //! rebuild's commit takes too ([`crate::contacts::commit_rebuild_at`]). Which
-//! sync observations a rebuild already counted, and which ones its commit
-//! must carry over, is [`window`]'s business, decided by when each
-//! observation was made: a rebuild racing a sync loses no row, whatever ids
-//! SQLite reuses.
+//! sync and send observations a rebuild already counted, and which ones its
+//! commit must carry over, is [`window`]'s business, decided by when each
+//! observation was made: a rebuild racing a sync or a send loses no
+//! correspondent, whatever ids SQLite reuses.
 //! All errors are logged at warning level but never propagated, so a broken
 //! contacts index never fails a send or sync.
 
@@ -36,34 +36,52 @@ use log::{debug, warn};
 ///
 /// The draft is the Sent copy the rebuild will later read back: its `From:`,
 /// `To:`, `Cc:` and `Bcc:` under the `sent` role, observed now.
-pub fn bump_after_send(account: &AccountConfig, draft: &EmailDraft) -> Option<usize> {
+///
+/// `stored` is the number the outbox gave the Sent copy when it stored it
+/// ([`window::SentCopyClaim::stored`]), `None` when it stored none.
+pub fn bump_after_send(
+    account: &AccountConfig,
+    draft: &EmailDraft,
+    stored: Option<u64>,
+) -> Option<usize> {
+    bump_after_send_at(&account_dir(&account.name), account, draft, stored)
+}
+
+/// [`bump_after_send`] against the account directory `root`.
+///
+/// A stored copy is judged like a sync's observation of its row: dropped when
+/// the rebuild on disk walked it, merged otherwise, and logged into an open
+/// rebuild window either way (PERSO-234). A copy that was not stored is in no
+/// row a walk could have counted, so it is numbered now and always merged
+/// and logged.
+pub fn bump_after_send_at(
+    root: &Path,
+    account: &AccountConfig,
+    draft: &EmailDraft,
+    stored: Option<u64>,
+) -> Option<usize> {
     let front = &draft.frontmatter;
-    let addresses = MessageAddresses {
-        from: front.from.as_deref(),
-        to: front.to.as_deref(),
-        cc: front.cc.as_deref(),
-        bcc: front.bcc.as_deref(),
-    };
-    let blank = |h: Option<&str>| h.is_none_or(|h| h.trim().is_empty());
-    if blank(addresses.to) && blank(addresses.cc) && blank(addresses.bcc) {
+    let blank = |h: &Option<String>| h.as_deref().is_none_or(|h| h.trim().is_empty());
+    if blank(&front.to) && blank(&front.cc) && blank(&front.bcc) {
         return None;
     }
-    let now = Utc::now().to_rfc3339();
-    merge(
-        &account_dir(&account.name),
-        account,
-        "send",
-        |index, self_addr| {
-            observe_message(
-                &mut index.contacts,
-                self_addr,
-                &MailboxRole::Sent,
-                &addresses,
-                Some(&now),
-            );
-            1
-        },
-    )
+    let observation = FreshObservation {
+        sequence: stored.unwrap_or_else(window::next_sequence),
+        role: MailboxRole::Sent,
+        from: front.from.clone().unwrap_or_default(),
+        to: front.to.clone().unwrap_or_default(),
+        cc: front.cc.clone(),
+        bcc: front.bcc.clone(),
+        date: Utc::now().to_rfc3339(),
+    };
+    let observations = std::slice::from_ref(&observation);
+    with_cache_lock(root, || {
+        let fresh = match stored {
+            Some(_) => window::uncounted(root, observations),
+            None => observations.iter().collect(),
+        };
+        merge_and_log(root, account, "send", &fresh)
+    })
 }
 
 /// Merge the messages a sync just inserted into the account's contact index.
@@ -114,18 +132,31 @@ pub fn bump_after_sync_at(
     }
     with_cache_lock(root, || {
         let fresh = window::uncounted(root, observations);
-        if fresh.is_empty() {
-            return None;
-        }
-        let written = merge_locked(root, account, "sync", |index, self_addr| {
-            for obs in &fresh {
-                fold_observation(index, self_addr, obs);
-            }
-            fresh.len()
-        });
-        window::log(root, &fresh, written.is_some());
-        written
+        merge_and_log(root, account, "sync", &fresh)
     })
+}
+
+/// Merge `fresh` into the cache under `root` and log it into the account's
+/// open rebuild window, if any, whether or not it reached the disk, so the
+/// rebuild's commit carries it over ([`window`]). The caller holds the cache
+/// lock and has dropped what the rebuild on disk already counted.
+fn merge_and_log(
+    root: &Path,
+    account: &AccountConfig,
+    what: &str,
+    fresh: &[&FreshObservation],
+) -> Option<usize> {
+    if fresh.is_empty() {
+        return None;
+    }
+    let written = merge_locked(root, account, what, |index, self_addr| {
+        for obs in fresh {
+            fold_observation(index, self_addr, obs);
+        }
+        fresh.len()
+    });
+    window::log(root, fresh, written.is_some());
+    written
 }
 
 /// Fold one sync observation into `index`, through the rebuild's own rule.
@@ -144,19 +175,9 @@ pub(crate) fn fold_observation(index: &mut ContactIndex, self_addr: &str, obs: &
     );
 }
 
-/// [`merge_locked`] under the cache's lock ([`with_cache_lock`]), so no other
-/// merge and no rebuild commit lands between the load and the save.
-fn merge(
-    root: &Path,
-    account: &AccountConfig,
-    what: &str,
-    fold: impl FnOnce(&mut ContactIndex, &str) -> usize,
-) -> Option<usize> {
-    with_cache_lock(root, || merge_locked(root, account, what, fold))
-}
-
 /// Load the cache under `root`, let `fold` merge into it, and write it back;
-/// the caller holds the cache lock. `fold` answers how many messages it
+/// the caller holds the cache lock ([`with_cache_lock`]), so no other merge
+/// and no rebuild commit lands between the load and the save. `fold` answers how many messages it
 /// merged. `None` for a missing, stale or unreadable cache, for a fold that
 /// merged nothing, and for a write that failed.
 fn merge_locked(
@@ -417,7 +438,7 @@ mod tests {
         let account = mk_account();
         let draft = mk_draft("alice@example.com", None);
         // No cache file exists yet.
-        bump_after_send(&account, &draft);
+        bump_after_send(&account, &draft, None);
         // No cache should have been created.
         assert!(!cache_path(&f.account_root).exists());
     }
@@ -435,7 +456,7 @@ mod tests {
 
         let mut draft = mk_draft("Alice <alice@example.com>", Some("bob@example.com"));
         draft.frontmatter.bcc = Some("carol@example.com".into());
-        assert_eq!(bump_after_send(&account, &draft), Some(4));
+        assert_eq!(bump_after_send(&account, &draft, None), Some(4));
 
         let loaded = load_cache(&f.account_root).unwrap().unwrap();
         let alice = loaded.contacts.get("alice@example.com").expect("alice");
@@ -532,7 +553,7 @@ mod tests {
         save_cache(&f.account_root, &stale).unwrap();
 
         let draft = mk_draft("Alice <alice@example.com>", None);
-        assert_eq!(bump_after_send(&account, &draft), None);
+        assert_eq!(bump_after_send(&account, &draft, None), None);
         let kept = load_cache(&f.account_root).unwrap().unwrap();
         assert!(!kept.contacts.contains_key("alice@example.com"));
         assert_eq!(kept.extractor_version, 0, "left for the read to rebuild");
@@ -569,5 +590,128 @@ mod tests {
         });
         let loaded = load_cache(&f.account_root).unwrap().unwrap();
         assert_eq!(loaded.contacts["carol@example.com"].received, 4 * 40);
+    }
+
+    /// A rebuild's walk, under the window it opened first, as every rebuild
+    /// in the daemon runs it.
+    fn walk(account: &AccountConfig) -> (ContactIndex, window::RebuildWindow) {
+        let window = window::RebuildWindow::open(&account_dir(&account.name));
+        (build_index_for_account(account).unwrap(), window)
+    }
+
+    fn commit(account: &AccountConfig, (index, window): (ContactIndex, window::RebuildWindow)) {
+        let committed = crate::contacts::commit_rebuild_at(
+            &account_dir(&account.name),
+            account,
+            index,
+            window,
+            false,
+        )
+        .unwrap();
+        assert_eq!(committed.saved, crate::contacts::CacheSave::Written);
+    }
+
+    /// Store the Sent copy `message_id` of a message to Zed the way the
+    /// outbox does once a send is acknowledged
+    /// ([`crate::outbox::ingest_sent_copy`]). Claims are process-wide, by
+    /// account name and Message-ID, so every test sends its own.
+    fn store_sent_copy(account: &AccountConfig, message_id: &str) {
+        let raw = format!(
+            "From: me@example.com\r\nTo: Zed <zed@example.com>\r\nSubject: Hi\r\n\
+             Date: Wed, 07 Jan 2026 12:00:00 +0000\r\nMessage-ID: {message_id}\r\n\r\nbody\r\n"
+        );
+        let store = crate::store::Store::open(crate::config::store_path(&account.name)).unwrap();
+        let blobs = crate::store::BlobStore::new(crate::config::blobs_dir(&account.name));
+        crate::outbox::ingest_sent_copy(
+            &store,
+            &blobs,
+            &account.name,
+            crate::outbox::SENT_ROLE,
+            raw.as_bytes(),
+            message_id,
+            None,
+        )
+        .unwrap();
+    }
+
+    fn sent_to_zed(root: &Path) -> u32 {
+        let cached = load_cache(root).unwrap().expect("cached");
+        cached
+            .contacts
+            .get("zed@example.com")
+            .map_or(0, |c| c.sent_to)
+    }
+
+    /// PERSO-234 review: a send whose Sent copy is stored and bumped between a
+    /// rebuild's walk and its commit merges into the cache the commit
+    /// replaces; the commit must carry the new correspondent over.
+    #[test]
+    fn a_rebuild_keeps_a_correspondent_sent_to_during_its_walk() {
+        let f = fixture("testaccount");
+        let account = mk_account();
+        seed_cache_from_store(&account, &f.account_root, "Zoe <zoe@example.com>");
+
+        let sent_copy = window::SentCopyClaim::claim(&account.name, "<during-walk@x>");
+        let walked = walk(&account);
+        store_sent_copy(&account, "<during-walk@x>");
+        assert!(sent_copy.stored().is_some(), "numbered as it was stored");
+        let draft = mk_draft("Zed <zed@example.com>", None);
+        bump_after_send(&account, &draft, sent_copy.stored());
+        commit(&account, walked);
+
+        assert_eq!(sent_to_zed(&f.account_root), 1, "kept, once");
+    }
+
+    /// And a send whose bump lands after a rebuild whose walk read its stored
+    /// Sent copy does not count the correspondent twice.
+    #[test]
+    fn a_send_bump_after_a_rebuild_skips_a_copy_the_rebuild_counted() {
+        let f = fixture("testaccount");
+        let account = mk_account();
+        seed_cache_from_store(&account, &f.account_root, "Zoe <zoe@example.com>");
+
+        let sent_copy = window::SentCopyClaim::claim(&account.name, "<before-walk@x>");
+        store_sent_copy(&account, "<before-walk@x>");
+        commit(&account, walk(&account));
+        assert_eq!(sent_to_zed(&f.account_root), 1, "the walk read the copy");
+        let draft = mk_draft("Zed <zed@example.com>", None);
+        let late = bump_after_send(&account, &draft, sent_copy.stored());
+
+        assert_eq!(late, None, "nothing left to merge");
+        assert_eq!(sent_to_zed(&f.account_root), 1, "counted once");
+    }
+
+    /// A send whose Sent copy was not stored (the local ingest failed, or the
+    /// copy waits for an APPEND) is in no row a walk could count: its bump is
+    /// kept by a rebuild it races and merged after one that committed.
+    #[test]
+    fn a_send_without_a_stored_copy_is_never_dropped() {
+        let f = fixture("testaccount");
+        let account = mk_account();
+        seed_cache_from_store(&account, &f.account_root, "Zoe <zoe@example.com>");
+        let draft = mk_draft("Zed <zed@example.com>", None);
+
+        let sent_copy = window::SentCopyClaim::claim(&account.name, "<never-stored@x>");
+        let walked = walk(&account);
+        assert_eq!(sent_copy.stored(), None, "nothing stored");
+        bump_after_send(&account, &draft, sent_copy.stored());
+        commit(&account, walked);
+        assert_eq!(sent_to_zed(&f.account_root), 1, "kept through the commit");
+
+        commit(&account, walk(&account));
+        assert_eq!(sent_to_zed(&f.account_root), 0, "no row holds it");
+        bump_after_send(&account, &draft, None);
+        assert_eq!(sent_to_zed(&f.account_root), 1, "merged after a commit");
+    }
+
+    /// The outbox numbers only a copy a send claimed, and forgets the claim
+    /// with the send.
+    #[test]
+    fn an_unclaimed_sent_copy_is_not_numbered() {
+        let _f = fixture("testaccount");
+        let account = mk_account();
+        store_sent_copy(&account, "<unclaimed@x>");
+        let late = window::SentCopyClaim::claim(&account.name, "<unclaimed@x>");
+        assert_eq!(late.stored(), None, "stored before the claim");
     }
 }
