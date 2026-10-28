@@ -310,7 +310,7 @@ Archive a received email (server + local)
 Usage: mp archive [OPTIONS] <SELECTOR>
 
 Arguments:
-  <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>
+  <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>[/<uid>]
 
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in
@@ -323,7 +323,7 @@ Move a received email to another mailbox (server + local)
 Usage: mp move [OPTIONS] <SELECTOR> <MAILBOX>
 
 Arguments:
-  <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>
+  <SELECTOR>  Received selector: mp://<account>/<mailbox>/<message-id>[/<uid>]
   <MAILBOX>   Destination mailbox: role, slug or label (inbox, Junk, archive, ...)
 
 Options:
@@ -337,7 +337,7 @@ Delete a received email (server + local) or a local draft
 Usage: mp delete [OPTIONS] [SELECTOR]
 
 Arguments:
-  [SELECTOR]  Received (mp://<acct>/<mbox>/<id>) or drafts (mp://<acct>/drafts/<id>) selector; omit with --sent
+  [SELECTOR]  Received (mp://<acct>/<mbox>/<id>[/<uid>]) or drafts (mp://<acct>/drafts/<id>) selector; omit with --sent
 
 Options:
       --mailbox <MAILBOX>  Mailbox to resolve the selector in

@@ -219,7 +219,10 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
         command's own scope. <code>mp send 9f2c1ab30d5e4471</code> and
         <code>mp send mp://work/drafts/9f2c1ab30d5e4471</code> are the same command. A key that
         matches messages in two mailboxes is reported with both full selectors rather than
-        resolved by guesswork; <code>--mailbox</code> picks one. Every command that creates or
+        resolved by guesswork; <code>--mailbox</code> picks one. When one mailbox holds two
+        copies of a message, the refusal lists each with its UID appended,
+        <code>mp://&lt;account&gt;/&lt;mailbox&gt;/&lt;key&gt;/&lt;uid&gt;</code>, and that
+        selector names the one copy. Every command that creates or
         lists something prints the fully qualified form, which pastes straight into the next
         command, and <code>mp path &lt;selector&gt;</code> is the one way back to a filesystem path.
       </p>

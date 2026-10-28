@@ -41,8 +41,15 @@ struct Slice {
 
 impl Slice {
     fn start() -> Slice {
+        Slice::start_with(|_| {})
+    }
+
+    /// [`Slice::start`] with `extra` run over the seeded root before the
+    /// daemon starts.
+    fn start_with(extra: impl FnOnce(&std::path::Path)) -> Slice {
         let tmp = TempDir::new().expect("a temporary move root");
         fixture::seed(tmp.path());
+        extra(tmp.path());
         let daemon = DaemonFixture::start(tmp.path());
         Slice { daemon, tmp }
     }
@@ -215,6 +222,114 @@ fn mailbox_narrows_an_ambiguous_selector() {
 
     let out = slice.routed(&["move", "--mailbox", "inbox", fixture::SHARED, "sent"]);
     assert_refused(&out, fixture::CREDENTIALS_REFUSAL);
+}
+
+/// A second server copy of [`fixture::SHARED`] in archive, on UID 9 beside the
+/// seeded one on UID 1: two rows under one Message-ID in one mailbox, as a
+/// move that ran twice leaves them (PERSO-236).
+fn seed_second_archive_copy(root: &std::path::Path) {
+    let copy = support::read_fixture::email(
+        "list@example.com",
+        "sylvain@example.com",
+        "Copied everywhere",
+        "Sat, 27 Jun 2026 06:00:00 +0000",
+        "one message, two copies in archive\n",
+    );
+    support::read_fixture::ingest(root, fixture::ACCOUNT, "archive", 9, &copy);
+    // Ingest would rebind a second UID of a Message-ID onto the first row, so
+    // the copy is ingested under its own id and renamed to the shared one.
+    let store = fixture::store(root, fixture::ACCOUNT);
+    let renamed = store
+        .conn()
+        .execute(
+            "UPDATE messages SET message_id = ?1 WHERE account = ?2 AND mailbox = 'archive' AND uid = 9",
+            [format!("<{}>", fixture::SHARED), fixture::ACCOUNT.to_string()],
+        )
+        .expect("rename the second copy");
+    assert_eq!(renamed, 1);
+}
+
+/// Two copies of one Message-ID in one mailbox are refused as ambiguous with
+/// two *different* selectors, each ending in its copy's UID, and each of them
+/// resolves to its own row (PERSO-239). `--mailbox` cannot tell them apart,
+/// so the refusal asks for the selector instead.
+#[tokio::test]
+async fn two_copies_in_one_mailbox_are_listed_by_uid_and_each_resolves() {
+    let slice = Slice::start_with(seed_second_archive_copy);
+    let in_archive = fixture::message_selector(fixture::ACCOUNT, "archive", fixture::SHARED);
+
+    let out = slice.routed(&["move", &in_archive, "inbox"]);
+    assert_refused(
+        &out,
+        "shared@example.com matches 2 messages in alpha; name one by its selector:",
+    );
+    let listed: Vec<String> = stderr(&out)
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("mp://"))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        listed,
+        [format!("{in_archive}/1"), format!("{in_archive}/9")],
+        "{}",
+        stderr(&out)
+    );
+
+    // Each listed selector names one row: the CLI gets past the address to the
+    // missing credentials, for archive and delete as for move.
+    for selector in &listed {
+        let out = slice.routed(&["move", selector, "inbox"]);
+        assert_refused(&out, fixture::CREDENTIALS_REFUSAL);
+        let out = slice.routed(&["archive", selector]);
+        assert_refused(&out, fixture::CREDENTIALS_REFUSAL);
+        let out = slice.routed(&["delete", selector]);
+        assert_refused(&out, fixture::CREDENTIALS_REFUSAL);
+    }
+    let out = slice.routed(&["move", &format!("{in_archive}/4"), "inbox"]);
+    assert_refused(
+        &out,
+        "no match for shared@example.com at UID 4 in the received mail index of alpha/archive",
+    );
+
+    // And the move takes the copy the selector named: the row on UID 9 leaves
+    // archive, the row on UID 1 stays, and the queued server op names UID 9.
+    let mut conn = slice.connect().await;
+    tokio::time::timeout(
+        DEADLINE,
+        conn.call(
+            "message.move",
+            json!({
+                "account": fixture::ACCOUNT,
+                "selector": listed[1],
+                "destination": "inbox",
+                "settle": false,
+            }),
+        ),
+    )
+    .await
+    .expect("message.move within the deadline")
+    .unwrap_or_else(|e| panic!("message.move failed: {e:?}"));
+    let shared = format!("<{}>", fixture::SHARED);
+    let archived: Vec<i64> = slice
+        .rows()
+        .into_iter()
+        .filter(|(mailbox, _, id)| mailbox == "archive" && *id == shared)
+        .map(|(_, uid, _)| uid)
+        .collect();
+    assert_eq!(archived, [1], "the copy on UID 9 moved");
+    let store = fixture::store(slice.tmp.path(), fixture::ACCOUNT);
+    let owed = pending_ops::queued_ops(&store, fixture::ACCOUNT).expect("read the queue");
+    assert!(
+        matches!(
+            &owed[..],
+            [op] if matches!(
+                op.op,
+                mailypoppins::ops::ServerOp::Move { copy: Some(copy), .. } if copy.uid == 9
+            )
+        ),
+        "{owed:?}"
+    );
 }
 
 /// A draft is not a received message, so a drafts selector is refused rather

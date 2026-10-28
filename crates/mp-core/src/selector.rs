@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! selector := [ "mp://" account "/" ] [ mailbox "/" ] key
+//!           | [ "mp://" account "/" ] mailbox "/" key "/" uid
 //! ```
 //!
 //! and the canonical form every command *prints* is the fully qualified
@@ -13,6 +14,15 @@
 //! command's declared default scope. Segment counts alone decide what was
 //! elided, which works because the key is percent-encoded and therefore
 //! contains no raw `/`.
+//!
+//! The trailing `uid` names one copy when a mailbox holds two under one
+//! Message-ID (PERSO-239): `mp://<account>/<mailbox>/<key>/<uid>`, or
+//! `<mailbox>/<key>/<uid>` without the scheme. It is the store row's UID, the
+//! number the daemon's `<mailbox>/<uid>` message id already carries, so it
+//! needs the mailbox it is a UID in and is never elided into a shorter form.
+//! Only the received namespace has it, and only the ambiguity refusal prints
+//! it: the canonical form stays UID-free, since a UID changes when the message
+//! moves.
 //!
 //! The parser never inspects the string to decide *what kind of thing* it is.
 //! The [`Namespace`] is fixed by the command that called it: `mp archive` is
@@ -25,7 +35,8 @@
 //! stayed in the root crate because they read the store) is a single indexed
 //! lookup. Zero matches names the namespace searched; more than one match (the
 //! cross-mailbox copy) lists every fully qualified candidate and asks for
-//! `--mailbox`, and never picks one.
+//! `--mailbox`, and never picks one. Two candidates in one mailbox are listed
+//! with their `uid`, so every line of the refusal names a different message.
 //!
 //! # The effective account is the selector's, resolved before any store opens
 //!
@@ -113,6 +124,9 @@ pub struct Selector {
     pub account: String,
     pub mailbox: String,
     pub key: String,
+    /// The copy within the mailbox, for a key two rows share there
+    /// (PERSO-239); `None` in the canonical form.
+    pub uid: Option<i64>,
 }
 
 impl Selector {
@@ -125,6 +139,16 @@ impl Selector {
             account: account.into(),
             mailbox: mailbox.into(),
             key: key.into(),
+            uid: None,
+        }
+    }
+
+    /// The same selector narrowed to the copy at `uid` in its mailbox
+    /// (PERSO-239).
+    pub fn with_uid(self, uid: i64) -> Self {
+        Self {
+            uid: Some(uid),
+            ..self
         }
     }
 
@@ -152,7 +176,11 @@ impl fmt::Display for Selector {
             encode(&self.account),
             encode(&self.mailbox),
             encode(&self.key)
-        )
+        )?;
+        match self.uid {
+            Some(uid) => write!(f, "/{uid}"),
+            None => Ok(()),
+        }
     }
 }
 
@@ -163,6 +191,8 @@ pub struct SelectorParts {
     pub account: Option<String>,
     pub mailbox: Option<String>,
     pub key: String,
+    /// The trailing copy segment, which comes only with a mailbox.
+    pub uid: Option<i64>,
 }
 
 /// A parsed selector with its defaults applied: the question the resolver
@@ -175,14 +205,18 @@ pub struct SelectorQuery {
     pub account: String,
     pub mailbox: Option<String>,
     pub key: String,
+    /// The one copy in `mailbox` the selector names (PERSO-239).
+    pub uid: Option<i64>,
 }
 
 /// Parse a selector into its segments, applying no defaults.
 ///
 /// The grammar is positional. With the scheme, two segments are
-/// `account/key` and three are `account/mailbox/key`; without it, one segment
-/// is `key` and two are `mailbox/key`. Anything longer is rejected rather than
-/// re-split, because a key that needed a `/` should have been encoded.
+/// `account/key`, three are `account/mailbox/key` and four are
+/// `account/mailbox/key/uid`; without it, one segment is `key`, two are
+/// `mailbox/key` and three are `mailbox/key/uid`. A `uid` segment that is not
+/// an integer, and anything longer, is rejected rather than re-split, because
+/// a key that needed a `/` should have been encoded.
 pub fn parse(input: &str) -> Result<SelectorParts> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -208,30 +242,48 @@ pub fn parse(input: &str) -> Result<SelectorParts> {
         bail!("selector {trimmed} has an empty segment");
     }
 
+    let uid = |segment: &str| segment.parse::<i64>().ok();
     let parts = match (qualified, segments.len()) {
         (true, 2) => SelectorParts {
             account: Some(decode(segments[0])?),
             mailbox: None,
             key: decode(segments[1])?,
+            uid: None,
         },
         (true, 3) => SelectorParts {
             account: Some(decode(segments[0])?),
             mailbox: Some(decode(segments[1])?),
             key: decode(segments[2])?,
+            uid: None,
+        },
+        (true, 4) if uid(segments[3]).is_some() => SelectorParts {
+            account: Some(decode(segments[0])?),
+            mailbox: Some(decode(segments[1])?),
+            key: decode(segments[2])?,
+            uid: uid(segments[3]),
         },
         (false, 1) => SelectorParts {
             account: None,
             mailbox: None,
             key: decode(segments[0])?,
+            uid: None,
         },
         (false, 2) => SelectorParts {
             account: None,
             mailbox: Some(decode(segments[0])?),
             key: decode(segments[1])?,
+            uid: None,
+        },
+        (false, 3) if uid(segments[2]).is_some() => SelectorParts {
+            account: None,
+            mailbox: Some(decode(segments[0])?),
+            key: decode(segments[1])?,
+            uid: uid(segments[2]),
         },
         _ => bail!(
             "selector {trimmed} has {} segments: expected {SCHEME}<account>/<mailbox>/<key> \
-             or one of its elided forms (<mailbox>/<key>, <key>). A `/` inside a key must be \
+             or one of its elided forms (<mailbox>/<key>, <key>), with an optional /<uid> after \
+             the key of a form that names its mailbox. A `/` inside a key must be \
              percent-encoded as %2F",
             segments.len()
         ),
@@ -264,6 +316,12 @@ pub fn parse_in(
     let from_selector = parts.mailbox.is_some();
     let named_mailbox = parts.mailbox.or_else(|| mailbox_flag.map(str::to_string));
     let mailbox = match namespace {
+        Namespace::Drafts if parts.uid.is_some() => {
+            bail!(
+                "{input} ends in a UID, which names one copy of a received message; a draft \
+                 selector is {SCHEME}<account>/{DRAFTS_MAILBOX}/<id>"
+            );
+        }
         Namespace::Drafts => {
             if let Some(mb) = named_mailbox.as_deref() {
                 // The likeliest mistake is a received-mail selector handed to
@@ -310,6 +368,7 @@ pub fn parse_in(
         account,
         mailbox,
         key: parts.key,
+        uid: parts.uid,
     })
 }
 
@@ -325,6 +384,7 @@ pub fn draft_not_found(account: &str, key: &str) -> anyhow::Error {
         account: account.to_string(),
         mailbox: Some(DRAFTS_MAILBOX.to_string()),
         key: key.to_string(),
+        uid: None,
     })
 }
 
@@ -339,8 +399,12 @@ pub fn not_found(query: &SelectorQuery) -> anyhow::Error {
         Some(mailbox) => format!("{}/{mailbox}", query.account),
         None => query.account.clone(),
     };
+    let copy = match query.uid {
+        Some(uid) => format!(" at UID {uid}"),
+        None => String::new(),
+    };
     anyhow!(
-        "no match for {} in the {} index of {scope}",
+        "no match for {}{copy} in the {} index of {scope}",
         query.key,
         query.namespace.label()
     )
@@ -349,15 +413,39 @@ pub fn not_found(query: &SelectorQuery) -> anyhow::Error {
 /// The multiple-match error: every candidate fully qualified, and the flag
 /// that picks one.
 ///
+/// Two candidates in one mailbox are two copies `--mailbox` cannot tell
+/// apart, so they are listed with their UID (PERSO-239), and the refusal asks
+/// for the selector itself: every line it prints names a different message.
+///
 /// `pub` for the same reason as [`not_found`].
 #[doc(hidden)]
-pub fn ambiguous(query: &SelectorQuery, candidates: Vec<Selector>) -> anyhow::Error {
+pub fn ambiguous(query: &SelectorQuery, candidates: Vec<(Selector, i64)>) -> anyhow::Error {
+    let shares_mailbox = |s: &Selector| {
+        candidates
+            .iter()
+            .filter(|(other, _)| other.mailbox == s.mailbox)
+            .count()
+            > 1
+    };
+    let copies = candidates.iter().any(|(s, _)| shares_mailbox(s));
     let list = candidates
         .iter()
-        .map(|s| format!("\n  {s}"))
+        .map(|(s, uid)| {
+            let s = if shares_mailbox(s) {
+                s.clone().with_uid(*uid)
+            } else {
+                s.clone()
+            };
+            format!("\n  {s}")
+        })
         .collect::<String>();
+    let pick = if copies {
+        "name one by its selector"
+    } else {
+        "name one with --mailbox"
+    };
     anyhow!(
-        "{} matches {} messages in {}; name one with --mailbox:{list}",
+        "{} matches {} messages in {}; {pick}:{list}",
         query.key,
         candidates.len(),
         query.account
@@ -680,5 +768,89 @@ mod tests {
         assert!(decode("%4").is_err());
         assert!(decode("%zz").is_err());
         assert!(decode("ok%20fine").is_ok());
+    }
+
+    /// A selector that names one copy round-trips through the parser with its
+    /// UID, in the qualified and in the elided form; a draft has no copies
+    /// (PERSO-239).
+    #[test]
+    fn a_copy_selector_round_trips_with_its_uid() {
+        for key in hostile_keys() {
+            for uid in [1, 285, 4294967295, -17] {
+                let selector = Selector::new("work", "Some Folder/Sub", key.clone()).with_uid(uid);
+                let printed = selector.to_string();
+                assert!(printed.ends_with(&format!("/{uid}")), "{printed}");
+                let parts = parse(&printed).expect("a copy selector parses");
+                assert_eq!(parts.account.as_deref(), Some("work"));
+                assert_eq!(parts.mailbox.as_deref(), Some("Some Folder/Sub"));
+                assert_eq!(parts.key, key);
+                assert_eq!(parts.uid, Some(uid));
+            }
+        }
+        assert_eq!(
+            Selector::new("work", "archive", "a@x").to_string(),
+            "mp://work/archive/a@x",
+            "the canonical form carries no UID"
+        );
+
+        let q = parse_in("archive/a@x/285", Namespace::Received, "work", None).unwrap();
+        assert_eq!(
+            (q.mailbox.as_deref(), q.key.as_str(), q.uid),
+            (Some("archive"), "a@x", Some(285))
+        );
+        let q = parse_in("mp://home/archive/a@x", Namespace::Received, "work", None).unwrap();
+        assert_eq!(q.uid, None);
+
+        // A UID needs the mailbox it is a UID in, and is a number: anything
+        // else is the old segment-count refusal, which names the %2F escape.
+        for bad in [
+            "mp://work/archive/a@x/285/1",
+            "archive/a/b@x",
+            "mp://w/archive/a/b@x",
+        ] {
+            let err = parse(bad).unwrap_err().to_string();
+            assert!(err.contains("%2F"), "{bad}: {err}");
+        }
+        let err = parse_in("mp://work/drafts/d1/3", Namespace::Drafts, "work", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ends in a UID"), "{err}");
+    }
+
+    /// Two candidates in one mailbox are listed with their UID, so the refusal
+    /// names two different selectors and asks for one of them; candidates in
+    /// different mailboxes keep the canonical form and the --mailbox hint
+    /// (PERSO-239).
+    #[test]
+    fn an_ambiguity_lists_a_distinct_selector_per_candidate() {
+        let query = parse_in("a@x", Namespace::Received, "work", None).unwrap();
+        let err = ambiguous(
+            &query,
+            vec![
+                (Selector::new("work", "archive", "a@x"), 285),
+                (Selector::new("work", "archive", "a@x"), 289),
+                (Selector::new("work", "inbox", "a@x"), 3),
+            ],
+        )
+        .to_string();
+        assert_eq!(
+            err,
+            "a@x matches 3 messages in work; name one by its selector:\n  \
+             mp://work/archive/a@x/285\n  mp://work/archive/a@x/289\n  mp://work/inbox/a@x"
+        );
+
+        let err = ambiguous(
+            &query,
+            vec![
+                (Selector::new("work", "archive", "a@x"), 285),
+                (Selector::new("work", "inbox", "a@x"), 3),
+            ],
+        )
+        .to_string();
+        assert_eq!(
+            err,
+            "a@x matches 2 messages in work; name one with --mailbox:\n  \
+             mp://work/archive/a@x\n  mp://work/inbox/a@x"
+        );
     }
 }

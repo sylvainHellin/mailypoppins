@@ -304,7 +304,7 @@ enum Commands {
     },
     /// Archive a received email (server + local)
     Archive {
-        /// Received selector: mp://<account>/<mailbox>/<message-id>
+        /// Received selector: mp://<account>/<mailbox>/<message-id>[/<uid>]
         #[arg(value_name = "SELECTOR")]
         selector: String,
         /// Mailbox to resolve the selector in
@@ -313,7 +313,7 @@ enum Commands {
     },
     /// Move a received email to another mailbox (server + local)
     Move {
-        /// Received selector: mp://<account>/<mailbox>/<message-id>
+        /// Received selector: mp://<account>/<mailbox>/<message-id>[/<uid>]
         #[arg(value_name = "SELECTOR")]
         selector: String,
         /// Destination mailbox: role, slug or label (inbox, Junk, archive, ...)
@@ -330,7 +330,7 @@ enum Commands {
     // footgun `Sync` guards against. The drafts vs received split and the
     // --force/--sent rules are carried by the argument help below.
     Delete {
-        /// Received (mp://<acct>/<mbox>/<id>) or drafts (mp://<acct>/drafts/<id>) selector; omit with --sent
+        /// Received (mp://<acct>/<mbox>/<id>[/<uid>]) or drafts (mp://<acct>/drafts/<id>) selector; omit with --sent
         #[arg(value_name = "SELECTOR", required_unless_present = "sent")]
         selector: Option<String>,
         /// Mailbox to resolve the selector in
@@ -1904,7 +1904,9 @@ fn missing_from_store(
     let query =
         mailypoppins::selector::parse_in(selector, Namespace::Received, &account.name, mailbox)
             .ok()?;
-    if refused != mailypoppins::selector::not_found(&query).to_string() {
+    // A selector ending in a UID names one copy the store listed (PERSO-239):
+    // a fetch by Message-ID cannot promise that copy, so its miss stands.
+    if query.uid.is_some() || refused != mailypoppins::selector::not_found(&query).to_string() {
         return None;
     }
     // The selector's mailbox segment as typed: `message.fetch` resolves it on

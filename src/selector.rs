@@ -33,7 +33,9 @@ impl MessageRowRef for MessageRow {
 ///
 /// One indexed lookup on `messages_message_id`. Several rows is the normal
 /// cross-mailbox copy case, so it is reported with every candidate spelled out
-/// in full rather than resolved by a rule the user cannot see.
+/// in full rather than resolved by a rule the user cannot see; two rows in one
+/// mailbox (two server copies) are spelled with their UID, which a selector
+/// that ends in one narrows to (PERSO-239).
 pub fn resolve_received(store: &Store, query: &SelectorQuery) -> Result<(MessageRow, Selector)> {
     debug_assert_eq!(query.namespace, Namespace::Received);
     // Ingest stores the header verbatim, brackets and all, while the selector
@@ -48,6 +50,9 @@ pub fn resolve_received(store: &Store, query: &SelectorQuery) -> Result<(Message
     if let Some(mailbox) = query.mailbox.as_deref() {
         rows.retain(|row| row.mailbox == mailbox);
     }
+    if let Some(uid) = query.uid {
+        rows.retain(|row| row.uid == uid);
+    }
     match rows.len() {
         0 => Err(not_found(query)),
         1 => {
@@ -58,7 +63,7 @@ pub fn resolve_received(store: &Store, query: &SelectorQuery) -> Result<(Message
         _ => Err(ambiguous(
             query,
             rows.iter()
-                .map(|row| Selector::for_message(&query.account, row))
+                .map(|row| (Selector::for_message(&query.account, row), row.uid))
                 .collect(),
         )),
     }

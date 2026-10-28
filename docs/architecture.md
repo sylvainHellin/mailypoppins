@@ -662,6 +662,7 @@ A message is named by `[mp://<account>/][<mailbox>/]<key>`, and the canonical fo
 Elision is positional: without the scheme, the account comes from `-A/--account` or the default account and the mailbox from `--mailbox` or the command's declared default scope.
 The namespace (received mail or drafts) is fixed by the command, never sniffed from the string, so a Message-ID that happens to look like a draft id cannot be reinterpreted.
 Resolution is one indexed lookup; an ambiguous key lists every candidate and asks for `--mailbox` rather than picking one.
+Two copies of one Message-ID in one mailbox are listed as `mp://<account>/<mailbox>/<key>/<uid>`, the trailing UID naming the copy, since `--mailbox` cannot tell them apart (PERSO-239); the printed canonical form never carries it, because a UID changes when the message moves.
 The server op a move, delete or flag toggle queues carries the store row's UID (`ops::ServerCopy`, PERSO-238), so it acts on the row's own copy when a folder holds two under one Message-ID, rather than on whichever one a `Message-ID` search lists first.
 
 ## Performance-critical invariants
