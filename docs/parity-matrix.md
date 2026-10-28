@@ -571,6 +571,7 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Status: routed (P5-U6); GUI shipped (M2, #0131)
 - Note: a destination that is the message's own mailbox is refused by the daemon; the pickers never offer it, and `mp move` reports it.
 - Note: two copies of one Message-ID in one mailbox are named by a selector ending in the copy's UID, which the ambiguity refusal of `mp move`, `mp archive` and `mp delete` lists (PERSO-239, `tests/cli_move.rs`, `two_copies_in_one_mailbox_are_listed_by_uid_and_each_resolves`); the desktop and the TUI address the row by `row_id` and never meet the ambiguity.
+- Note: every listing names such a copy by that selector, `mp list-messages` and `mp search` as the TUI's and the desktop's `y` copy, since all of them print the `selector` the daemon renders into the row (PERSO-244, `tests/cli_move.rs`, `a_listing_names_each_of_two_copies_by_its_own_selector`).
 - Note: `destination` is a role, slug or sidebar label, resolved by the daemon; the client no longer checks the sidebar's `server_name`, because `find_server_name_for_role` is the same mapping read on the side that owns it.
   In the desktop a moved row leaves its list at once but shows in a destination list only after the drain's `state.invalidate` re-reads it.
 

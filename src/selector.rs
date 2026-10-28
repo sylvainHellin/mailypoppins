@@ -26,6 +26,10 @@ impl MessageRowRef for MessageRow {
     fn message_id(&self) -> &str {
         &self.message_id
     }
+
+    fn uid(&self) -> i64 {
+        self.uid
+    }
 }
 
 /// Resolve a received-mail query to exactly one row, plus its canonical

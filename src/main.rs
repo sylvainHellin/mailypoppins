@@ -400,8 +400,9 @@ enum Commands {
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
         /// Emit one JSON object {account, mailboxes: [{mailbox, label, total,
-        /// shown}], messages: [...]} on stdout; each message carries selector,
-        /// mailbox, message_id, from, to, cc, subject, date (ISO 8601, UTC),
+        /// shown}], messages: [...]} on stdout; each message carries selector
+        /// (ending in /<uid> for one of two copies its mailbox holds), mailbox,
+        /// message_id, from, to, cc, subject, date (ISO 8601, UTC),
         /// date_header, flags, has_attachments, invite
         #[arg(long)]
         json: bool,
@@ -1655,7 +1656,7 @@ async fn routed_list_messages(
             .map(|messages| {
                 messages
                     .iter()
-                    .map(|message| row_from_wire(message, &info.slug))
+                    .map(|message| row_from_wire(&account.name, message, &info.slug))
                     .collect()
             })
             .unwrap_or_default();
@@ -1672,7 +1673,8 @@ async fn routed_list_messages(
     Ok(())
 }
 
-/// One `message.list` entry as the row the renderer takes.
+/// One `message.list` entry as the row the renderer takes, with the selector
+/// the daemon rendered for it (PERSO-244).
 ///
 /// Decoded by `mp_client::queries::row_from_wire`, the one wire-row decoder
 /// every client shares, and mapped onto the store row `render_list` takes.
@@ -1683,10 +1685,22 @@ async fn routed_list_messages(
 /// string the store holds, so `MessageRow::flags` parses it back into the same
 /// three bits; the star is left off, as it always was on this path.
 fn row_from_wire(
+    account: &str,
     message: &serde_json::Value,
     mailbox: &str,
-) -> mailypoppins::store::read::MessageRow {
-    store_row(mp_client::queries::row_from_wire(message), mailbox)
+) -> mailypoppins::read_cmd::SelectedRow {
+    selected_row(account, mp_client::queries::row_from_wire(message), mailbox)
+}
+
+/// [`store_row`], beside the selector the daemon rendered for the row: the
+/// one that names its copy when its mailbox holds a twin (PERSO-244).
+fn selected_row(
+    account: &str,
+    row: mp_protocol::listing::MessageListRow,
+    mailbox: &str,
+) -> mailypoppins::read_cmd::SelectedRow {
+    let selector = mailypoppins::read_cmd::wire_selector(account, mailbox, &row);
+    (selector, store_row(row, mailbox))
 }
 
 /// [`row_from_wire`]'s mapping, from a row already decoded.
@@ -5104,7 +5118,12 @@ async fn main() -> Result<()> {
                 } else {
                     let rows: Vec<_> = hits
                         .into_iter()
-                        .map(|hit| (store_row(hit.row, &hit.mailbox), hit.body))
+                        .map(|hit| {
+                            (
+                                selected_row(&account_config.name, hit.row, &hit.mailbox),
+                                hit.body,
+                            )
+                        })
                         .collect();
                     print!(
                         "{}",

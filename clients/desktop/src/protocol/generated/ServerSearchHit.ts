@@ -36,7 +36,8 @@ message_id: string | null,
  */
 row_id: number | null,
 /**
- * The canonical selector of `row_id`'s row, `null` for a server-only hit.
+ * The selector of `row_id`'s row, the one a listing row carries for it
+ * (PERSO-244), `null` for a server-only hit.
  */
 selector: string | null,
 /**

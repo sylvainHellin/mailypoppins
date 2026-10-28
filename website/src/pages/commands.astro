@@ -271,7 +271,9 @@ const slug = (title) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
       <p>
         <code>mp list-messages</code> prints one line per message with its full selector, which
         pastes straight into <code>mp show</code>, <code>mp reply</code> or <code>mp archive</code>.
-        With no <code>--mailbox</code> it lists every mailbox of the account, grouped, and the
+        A mailbox that holds two copies of one message lists each with its UID appended
+        (<code>mp://&lt;account&gt;/&lt;mailbox&gt;/&lt;key&gt;/&lt;uid&gt;</code>), so every line
+        names its own copy; <code>mp search</code> does the same. With no <code>--mailbox</code> it lists every mailbox of the account, grouped, and the
         limit applies per mailbox so a busy inbox cannot hide the others. The order is the one the
         TUI's flat list shows (<code>tc</code> switches an account to it).
       </p>

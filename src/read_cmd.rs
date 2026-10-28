@@ -306,17 +306,24 @@ pub fn render_show(message: &ShownMessage) -> String {
     out
 }
 
+/// One row of a text listing: the selector the daemon rendered for it, which
+/// names its copy by UID when its mailbox holds a twin (PERSO-244), and the
+/// row the rest of the line is read from.
+pub type SelectedRow = (String, MessageRow);
+
 /// `mp list-messages`: one line per message, plus its subject, per mailbox.
 ///
 /// `rows` is one `(mailbox label, messages)` group per mailbox in listing
 /// order, already truncated to the limit by the caller, and `total` is how many
 /// the store holds for that group before truncation, so the header can say what
-/// was left out.
+/// was left out. Each row prints the selector it came with rather than one
+/// rendered here from the row, which could not know of a twin the limit left
+/// out.
 ///
 /// The shape follows `mp list` (the drafts listing) deliberately: the same
 /// rules, the same `[status] selector -> counterpart` line and the same dimmed
 /// subject underneath, because a user who has read one has read both.
-pub fn render_list(account: &str, groups: &[(String, usize, Vec<MessageRow>)]) -> String {
+pub fn render_list(account: &str, groups: &[(String, usize, Vec<SelectedRow>)]) -> String {
     let mut out = String::new();
     let mut line = |text: String| {
         out.push_str(&text);
@@ -335,7 +342,7 @@ pub fn render_list(account: &str, groups: &[(String, usize, Vec<MessageRow>)]) -
         line(String::new());
         line(format!("{} ({} of {}):", label.bold(), rows.len(), total));
         line("\u{2500}".repeat(RULE));
-        for row in rows {
+        for (selector, row) in rows {
             let flags = row.flags();
             let status = if flags.seen {
                 "read".dimmed()
@@ -345,7 +352,7 @@ pub fn render_list(account: &str, groups: &[(String, usize, Vec<MessageRow>)]) -
             line(format!(
                 "[{}] {} \u{2192} {}",
                 status,
-                Selector::for_message(account, row),
+                selector,
                 row.from.as_deref().unwrap_or("(unknown sender)")
             ));
             let mut second = String::new();
@@ -374,7 +381,7 @@ pub fn render_list(account: &str, groups: &[(String, usize, Vec<MessageRow>)]) -
 /// `mp list-messages` prints, with the mailbox in front of the sender so the
 /// scope of a hit is readable without parsing the selector, plus the body when
 /// `bodies` carries one (`--full`).
-pub fn render_search(account: &str, query: &str, hits: &[(MessageRow, Option<String>)]) -> String {
+pub fn render_search(account: &str, query: &str, hits: &[(SelectedRow, Option<String>)]) -> String {
     let mut out = String::new();
     let mut line = |text: String| {
         out.push_str(&text);
@@ -394,7 +401,7 @@ pub fn render_search(account: &str, query: &str, hits: &[(MessageRow, Option<Str
         if hits.len() == 1 { "" } else { "s" }
     ));
     line("\u{2500}".repeat(RULE));
-    for (row, body) in hits {
+    for ((selector, row), body) in hits {
         let flags = row.flags();
         let status = if flags.seen {
             "read".dimmed()
@@ -404,7 +411,7 @@ pub fn render_search(account: &str, query: &str, hits: &[(MessageRow, Option<Str
         line(format!(
             "[{}] {} \u{2192} {}",
             status,
-            Selector::for_message(account, row),
+            selector,
             row.from.as_deref().unwrap_or("(unknown sender)")
         ));
         let mut second = String::new();
@@ -503,18 +510,8 @@ impl ListedMessage {
         row: &mp_protocol::listing::MessageListRow,
         body: Option<String>,
     ) -> ListedMessage {
-        let selector = if row.selector.is_empty() {
-            Selector::new(
-                account,
-                mailbox,
-                crate::selector::message_key(&row.message_id),
-            )
-            .to_string()
-        } else {
-            row.selector.clone()
-        };
         ListedMessage {
-            selector: Some(selector),
+            selector: Some(wire_selector(account, mailbox, row)),
             account: account.to_string(),
             mailbox: Some(mailbox.to_string()),
             message_id: row.message_id.clone(),
@@ -585,6 +582,27 @@ impl ListedMessage {
             body,
             preview,
         }
+    }
+}
+
+/// The selector of a row the daemon listed: its own spelling, which names the
+/// copy when the mailbox holds a twin (PERSO-244), or, from a daemon that
+/// predates the field, the canonical one [`Selector::for_message`] would have
+/// rendered.
+pub fn wire_selector(
+    account: &str,
+    mailbox: &str,
+    row: &mp_protocol::listing::MessageListRow,
+) -> String {
+    if row.selector.is_empty() {
+        Selector::new(
+            account,
+            mailbox,
+            crate::selector::message_key(&row.message_id),
+        )
+        .to_string()
+    } else {
+        row.selector.clone()
     }
 }
 
@@ -1058,7 +1076,16 @@ mod tests {
         // The limit is applied by the caller over the store's own order, which
         // is the order the TUI list shows, so the listing is the first N of it
         // and the N+1th is absent.
-        let text = render_list("acct", &[("Inbox".into(), all.len(), all[..2].to_vec())]);
+        let selected =
+            |row: &MessageRow| (Selector::for_message("acct", row).to_string(), row.clone());
+        let text = render_list(
+            "acct",
+            &[(
+                "Inbox".into(),
+                all.len(),
+                all[..2].iter().map(selected).collect(),
+            )],
+        );
         assert!(text.contains("Inbox (2 of 3):"));
         for row in &all[..2] {
             assert!(text.contains(&Selector::for_message("acct", row).to_string()));
@@ -1080,10 +1107,12 @@ mod tests {
         let first = ingest(&fx, "inbox", 1, &email("ledger", "the quarterly ledger"));
         let second = ingest(&fx, "archive", 2, &email("lunch", "ledger of pizzas"));
 
+        let selected =
+            |row: &MessageRow| (Selector::for_message("acct", row).to_string(), row.clone());
         let text = render_search(
             "acct",
             "ledger",
-            &[(first.clone(), None), (second.clone(), None)],
+            &[(selected(&first), None), (selected(&second), None)],
         );
         assert!(text.contains("\"ledger\" in acct (2 hits):"));
         let at_first = text.find(&Selector::for_message("acct", &first).to_string());
@@ -1098,7 +1127,7 @@ mod tests {
         let full = render_search(
             "acct",
             "ledger",
-            &[(first, Some("the quarterly ledger".into()))],
+            &[(selected(&first), Some("the quarterly ledger".into()))],
         );
         assert!(full.contains("the quarterly ledger"));
         assert!(full.contains("(1 hit):"));

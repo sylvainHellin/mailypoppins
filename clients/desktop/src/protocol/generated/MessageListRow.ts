@@ -78,8 +78,10 @@ has_attachments: boolean,
 is_invite: boolean,
 /**
  * The canonical `mp://<account>/<mailbox>/<key>` of this message,
- * rendered daemon-side by `mp_core::selector::Selector::for_message`
- * (P5-U10c, `RD-07`).
+ * rendered daemon-side by `mp_core::selector::Selector::for_listed`
+ * (P5-U10c, `RD-07`), with `/<uid>` appended when its mailbox holds
+ * another row under the same Message-ID, so it names this copy
+ * (PERSO-244).
  *
  * `""` for a row a daemon older than P5-U10c produced, which is the only
  * way the field is ever absent: every row this build serves carries one,

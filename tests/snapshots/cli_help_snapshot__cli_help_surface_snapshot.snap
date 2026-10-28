@@ -409,7 +409,7 @@ Usage: mp list-messages [OPTIONS]
 Options:
       --mailbox <MAILBOX>  Mailbox to list (role, slug or sidebar label). Default: every mailbox of the account, grouped
   -n, --limit <LIMIT>      Max messages per mailbox listed [default: 20]
-      --json               Emit one JSON object {account, mailboxes: [{mailbox, label, total, shown}], messages: [...]} on stdout; each message carries selector, mailbox, message_id, from, to, cc, subject, date (ISO 8601, UTC), date_header, flags, has_attachments, invite
+      --json               Emit one JSON object {account, mailboxes: [{mailbox, label, total, shown}], messages: [...]} on stdout; each message carries selector (ending in /<uid> for one of two copies its mailbox holds), mailbox, message_id, from, to, cc, subject, date (ISO 8601, UTC), date_header, flags, has_attachments, invite
   -A, --account <ACCOUNT>  Account to use
   -h, --help               Print help
 

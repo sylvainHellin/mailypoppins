@@ -80,9 +80,9 @@ current: boolean,
  */
 draft_id?: string | null,
 /**
- * The canonical `mp://` selector of this member, the one a listing row
- * carries for the same copy: `mp://<account>/drafts/<id>` for a draft
- * member (#0142).
+ * The `mp://` selector of this member, the one a listing row carries
+ * for the same copy, a UID-qualified one included (PERSO-244):
+ * `mp://<account>/drafts/<id>` for a draft member (#0142).
  *
  * It is what `y` copies on an expanded member; spelled by the daemon so
  * every client applies the one encoding rule. `""` from a daemon older

@@ -111,8 +111,10 @@ pub struct MessageListRow {
     #[serde(default)]
     pub is_invite: bool,
     /// The canonical `mp://<account>/<mailbox>/<key>` of this message,
-    /// rendered daemon-side by `mp_core::selector::Selector::for_message`
-    /// (P5-U10c, `RD-07`).
+    /// rendered daemon-side by `mp_core::selector::Selector::for_listed`
+    /// (P5-U10c, `RD-07`), with `/<uid>` appended when its mailbox holds
+    /// another row under the same Message-ID, so it names this copy
+    /// (PERSO-244).
     ///
     /// `""` for a row a daemon older than P5-U10c produced, which is the only
     /// way the field is ever absent: every row this build serves carries one,
@@ -412,9 +414,9 @@ pub struct ThreadMessage {
     /// `date` as `date_display`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_id: Option<String>,
-    /// The canonical `mp://` selector of this member, the one a listing row
-    /// carries for the same copy: `mp://<account>/drafts/<id>` for a draft
-    /// member (#0142).
+    /// The `mp://` selector of this member, the one a listing row carries
+    /// for the same copy, a UID-qualified one included (PERSO-244):
+    /// `mp://<account>/drafts/<id>` for a draft member (#0142).
     ///
     /// It is what `y` copies on an expanded member; spelled by the daemon so
     /// every client applies the one encoding rule. `""` from a daemon older
@@ -483,7 +485,8 @@ pub struct ServerSearchHit {
     /// already showed arrives with the same `row_id` and is dropped.
     #[serde(default)]
     pub row_id: Option<i64>,
-    /// The canonical selector of `row_id`'s row, `null` for a server-only hit.
+    /// The selector of `row_id`'s row, the one a listing row carries for it
+    /// (PERSO-244), `null` for a server-only hit.
     #[serde(default)]
     pub selector: Option<String>,
     /// The `From:` header.

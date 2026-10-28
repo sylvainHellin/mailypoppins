@@ -332,6 +332,109 @@ async fn two_copies_in_one_mailbox_are_listed_by_uid_and_each_resolves() {
     );
 }
 
+/// The selectors of `out`'s stdout that name [`fixture::SHARED`], in the order
+/// they print.
+fn shared_selectors(out: &Output) -> Vec<String> {
+    stdout(out)
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c| c == '"' || c == ','))
+        .filter(|word| word.starts_with("mp://") && word.contains(fixture::SHARED))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The row a printed selector resolves to, through the resolver every
+/// received command uses: `(mailbox, uid)`.
+fn resolved(slice: &Slice, selector: &str) -> (String, i64) {
+    let store = fixture::store(slice.tmp.path(), fixture::ACCOUNT);
+    let query = mailypoppins::selector::parse_in(
+        selector,
+        mailypoppins::selector::Namespace::Received,
+        fixture::ACCOUNT,
+        None,
+    )
+    .unwrap_or_else(|e| panic!("{selector} parses: {e:#}"));
+    let (row, _) = mailypoppins::selector::resolve_received(&store, &query)
+        .unwrap_or_else(|e| panic!("{selector} resolves to one row: {e:#}"));
+    (row.mailbox, row.uid)
+}
+
+/// A listing of a mailbox that holds two copies of one Message-ID prints each
+/// copy under its own UID-qualified selector, which resolves to that copy's
+/// row, while a message alone in its mailbox keeps the plain selector
+/// (PERSO-244): `mp list-messages` as text and as JSON, a page that shows
+/// one copy of the two, `mp search --local` and `message.thread`.
+#[tokio::test]
+async fn a_listing_names_each_of_two_copies_by_its_own_selector() {
+    let slice = Slice::start_with(seed_second_archive_copy);
+    let in_archive = fixture::message_selector(fixture::ACCOUNT, "archive", fixture::SHARED);
+    let in_inbox = fixture::message_selector(fixture::ACCOUNT, "inbox", fixture::SHARED);
+    let both = [format!("{in_archive}/1"), format!("{in_archive}/9")];
+    let sorted = |mut selectors: Vec<String>| {
+        selectors.sort();
+        selectors
+    };
+
+    let text = slice.routed(&["list-messages", "--mailbox", "archive"]);
+    assert!(text.status.success(), "{}", stderr(&text));
+    assert_eq!(sorted(shared_selectors(&text)), both, "{}", stdout(&text));
+    let json = slice.routed(&["list-messages", "--mailbox", "archive", "--json"]);
+    assert!(json.status.success(), "{}", stderr(&json));
+    assert_eq!(sorted(shared_selectors(&json)), both, "{}", stdout(&json));
+    for (selector, uid) in both.iter().zip([1, 9]) {
+        assert_eq!(resolved(&slice, selector), ("archive".to_string(), uid));
+    }
+
+    // A page that shows one copy still names it, since its plain selector
+    // names the copy the limit left out too.
+    let page = slice.routed(&["list-messages", "--mailbox", "archive", "-n", "1"]);
+    assert!(page.status.success(), "{}", stderr(&page));
+    let shown = shared_selectors(&page);
+    assert!(
+        matches!(&shown[..], [one] if both.contains(one)),
+        "{}",
+        stdout(&page)
+    );
+
+    // The inbox holds the message once, and its line is the canonical one.
+    let inbox = slice.routed(&["list-messages", "--mailbox", "inbox", "--json"]);
+    assert!(inbox.status.success(), "{}", stderr(&inbox));
+    assert_eq!(shared_selectors(&inbox), std::slice::from_ref(&in_inbox));
+    assert_eq!(resolved(&slice, &in_inbox), ("inbox".to_string(), 5));
+
+    let hits = slice.routed(&["search", "--local", "Copied"]);
+    assert!(hits.status.success(), "{}", stderr(&hits));
+    assert_eq!(
+        sorted(shared_selectors(&hits)),
+        [both[0].clone(), both[1].clone(), in_inbox.clone()],
+        "{}",
+        stdout(&hits)
+    );
+
+    let mut conn = slice.connect().await;
+    let thread = tokio::time::timeout(
+        DEADLINE,
+        conn.call(
+            "message.thread",
+            json!({
+                "account": fixture::ACCOUNT,
+                "selector": both[0],
+                "prefer_mailbox": "archive",
+            }),
+        ),
+    )
+    .await
+    .expect("message.thread within the deadline")
+    .unwrap_or_else(|e| panic!("message.thread failed: {e:?}"));
+    let members: Vec<&str> = thread["messages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a member array: {thread}"))
+        .iter()
+        .filter_map(|member| member["selector"].as_str())
+        .collect();
+    assert_eq!(members, [both[0].as_str()], "{thread}");
+}
+
 /// A draft is not a received message, so a drafts selector is refused rather
 /// than moved.
 #[test]

@@ -1099,10 +1099,18 @@ fn to_hit(
     label: &str,
     email: &FetchedEmail,
 ) -> ServerSearchHit {
+    // Every row of the Message-ID, so the twins of the one the hit resolves
+    // to are among them (PERSO-244).
     let row =
         store.zip(email.message_id.as_deref()).and_then(
             |(store, id)| match read::find_by_message_id(store, account, id) {
-                Ok(rows) => rows.into_iter().next(),
+                Ok(rows) => {
+                    let twins = crate::selector::Twins::among(&rows);
+                    rows.into_iter().next().map(|row| {
+                        let selector = Selector::for_listed(account, &row, &twins).to_string();
+                        (row, selector)
+                    })
+                }
                 Err(e) => {
                     log::warn!("[search_server] resolving {id} in {account}: {e:#}");
                     None
@@ -1118,10 +1126,8 @@ fn to_hit(
         account: account.to_string(),
         mailbox: label.to_string(),
         message_id: email.message_id.clone(),
-        row_id: row.as_ref().map(|row| row.id),
-        selector: row
-            .as_ref()
-            .map(|row| Selector::for_message(account, row).to_string()),
+        row_id: row.as_ref().map(|(row, _)| row.id),
+        selector: row.map(|(_, selector)| selector),
         from: email.from.clone(),
         to: email.to.clone(),
         cc: email.cc.clone(),

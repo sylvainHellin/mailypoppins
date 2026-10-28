@@ -20,9 +20,10 @@
 //! `<mailbox>/<key>/<uid>` without the scheme. It is the store row's UID, the
 //! number the daemon's `<mailbox>/<uid>` message id already carries, so it
 //! needs the mailbox it is a UID in and is never elided into a shorter form.
-//! Only the received namespace has it, and only the ambiguity refusal prints
-//! it: the canonical form stays UID-free, since a UID changes when the message
-//! moves.
+//! Only the received namespace has it, and only a row that shares its
+//! mailbox and key with another is printed with it, by the ambiguity refusal
+//! and by every listing ([`Twins`], [`Selector::for_listed`], PERSO-244): the
+//! canonical form stays UID-free, since a UID changes when the message moves.
 //!
 //! The parser never inspects the string to decide *what kind of thing* it is.
 //! The [`Namespace`] is fixed by the command that called it: `mp archive` is
@@ -56,6 +57,7 @@
 //! bound to Y" rather than operate on the wrong account. No command silently
 //! resolves a selector against an account the selector did not name.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use anyhow::{anyhow, bail, Result};
@@ -64,7 +66,7 @@ use anyhow::{anyhow, bail, Result};
 ///
 /// The row itself is a store type and stayed in the root crate (#0126,
 /// P5-U10a), while the canonical selector of a row is a formatting decision
-/// and belongs to the grammar. One trait with two accessors is what lets
+/// and belongs to the grammar. One trait with three accessors is what lets
 /// `Selector::for_message` stay the inherent constructor it has always been,
 /// called exactly as before, without this crate knowing what a `MessageRow`
 /// is.
@@ -73,6 +75,8 @@ pub trait MessageRowRef {
     fn mailbox(&self) -> &str;
     /// The row's Message-ID, with or without its RFC 5322 angle brackets.
     fn message_id(&self) -> &str;
+    /// The row's UID in its mailbox, which names its copy (PERSO-239).
+    fn uid(&self) -> i64;
 }
 
 impl<T: MessageRowRef + ?Sized> MessageRowRef for &T {
@@ -81,6 +85,77 @@ impl<T: MessageRowRef + ?Sized> MessageRowRef for &T {
     }
     fn message_id(&self) -> &str {
         (**self).message_id()
+    }
+    fn uid(&self) -> i64 {
+        (**self).uid()
+    }
+}
+
+/// The mailbox-and-key pairs that more than one row holds: the copies a
+/// printed selector has to name by UID (PERSO-244).
+///
+/// A mailbox can hold two server copies under one Message-ID, one row each,
+/// and the canonical selector of either names both, so a listing that printed
+/// it would print one selector twice and the line would name neither copy.
+/// Every surface that prints a selector per row asks this set whether the
+/// row's pair is shared and, through [`Selector::for_listed`], prints the
+/// UID-qualified selector when it is and the canonical one otherwise; the
+/// ambiguity refusal asks it about its candidates ([`ambiguous`]).
+///
+/// The set holds the pairs that are shared *in the mailbox*, not in the
+/// listing: a page or a deduplicated conversation can show one copy while its
+/// twin is left out, and the canonical selector of the copy shown is no less
+/// ambiguous for it. [`Twins::among`] answers for the rows it is given, which
+/// is the mailbox when they are all of it; a caller holding fewer asks the
+/// store, which inserts what it finds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Twins(HashSet<(String, String)>);
+
+impl Twins {
+    /// The pairs more than one of `rows` holds.
+    pub fn among<'r, R: MessageRowRef + 'r>(rows: impl IntoIterator<Item = &'r R>) -> Twins {
+        Twins::of_pairs(
+            rows.into_iter()
+                .map(|row| (row.mailbox(), row.message_id())),
+        )
+    }
+
+    /// The pairs more than one of `pairs` (mailbox, Message-ID) holds.
+    pub fn of_pairs<'p>(pairs: impl IntoIterator<Item = (&'p str, &'p str)>) -> Twins {
+        let mut seen: HashMap<(&str, &str), bool> = HashMap::new();
+        for (mailbox, message_id) in pairs {
+            seen.entry((mailbox, message_key(message_id)))
+                .and_modify(|shared| *shared = true)
+                .or_insert(false);
+        }
+        Twins(
+            seen.into_iter()
+                .filter(|(_, shared)| *shared)
+                .map(|((mailbox, key), _)| (mailbox.to_string(), key.to_string()))
+                .collect(),
+        )
+    }
+
+    /// Record that `mailbox` holds more than one row under `message_id`.
+    pub fn insert(&mut self, mailbox: &str, message_id: &str) {
+        self.0
+            .insert((mailbox.to_string(), message_key(message_id).to_string()));
+    }
+
+    /// Whether `mailbox` holds more than one row under `message_id`.
+    pub fn holds(&self, mailbox: &str, message_id: &str) -> bool {
+        // A borrowed lookup would need a key type of its own; listings are
+        // rows by the thousand and twins by the handful, so the empty set,
+        // which is nearly every listing, answers without allocating.
+        !self.0.is_empty()
+            && self
+                .0
+                .contains(&(mailbox.to_string(), message_key(message_id).to_string()))
+    }
+
+    /// Whether no pair is shared.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -160,6 +235,19 @@ impl Selector {
     /// hand-typed one need shell quoting.
     pub fn for_message<R: MessageRowRef>(account: &str, row: &R) -> Self {
         Self::new(account, row.mailbox(), message_key(row.message_id()))
+    }
+
+    /// The selector a listing prints for `row` (PERSO-244): the canonical
+    /// one, narrowed to the row's UID when its mailbox holds another row
+    /// under the same Message-ID ([`Twins`]), so every line names its own
+    /// copy.
+    pub fn for_listed<R: MessageRowRef>(account: &str, row: &R, twins: &Twins) -> Self {
+        let selector = Self::for_message(account, row);
+        if twins.holds(row.mailbox(), row.message_id()) {
+            selector.with_uid(row.uid())
+        } else {
+            selector
+        }
     }
 
     /// The canonical selector of a draft.
@@ -420,18 +508,16 @@ pub fn not_found(query: &SelectorQuery) -> anyhow::Error {
 /// `pub` for the same reason as [`not_found`].
 #[doc(hidden)]
 pub fn ambiguous(query: &SelectorQuery, candidates: Vec<(Selector, i64)>) -> anyhow::Error {
-    let shares_mailbox = |s: &Selector| {
+    let twins = Twins::of_pairs(
         candidates
             .iter()
-            .filter(|(other, _)| other.mailbox == s.mailbox)
-            .count()
-            > 1
-    };
-    let copies = candidates.iter().any(|(s, _)| shares_mailbox(s));
+            .map(|(s, _)| (s.mailbox.as_str(), s.key.as_str())),
+    );
+    let copies = !twins.is_empty();
     let list = candidates
         .iter()
         .map(|(s, uid)| {
-            let s = if shares_mailbox(s) {
+            let s = if twins.holds(&s.mailbox, &s.key) {
                 s.clone().with_uid(*uid)
             } else {
                 s.clone()
@@ -851,6 +937,69 @@ mod tests {
             err,
             "a@x matches 2 messages in work; name one with --mailbox:\n  \
              mp://work/archive/a@x\n  mp://work/inbox/a@x"
+        );
+    }
+
+    /// A row as a listing holds it, for [`Twins`] and [`Selector::for_listed`].
+    struct Row(&'static str, &'static str, i64);
+
+    impl MessageRowRef for Row {
+        fn mailbox(&self) -> &str {
+            self.0
+        }
+        fn message_id(&self) -> &str {
+            self.1
+        }
+        fn uid(&self) -> i64 {
+            self.2
+        }
+    }
+
+    /// Two rows of one mailbox under one Message-ID each print the selector
+    /// of their own copy, which parses back to it; a row alone in its mailbox
+    /// prints the canonical form, the same Message-ID in another mailbox
+    /// included, and the brackets do not make two keys (PERSO-244).
+    #[test]
+    fn a_listing_names_each_twin_by_its_uid_and_a_lone_row_by_its_key() {
+        let rows = [
+            Row("archive", "<a@x>", 285),
+            Row("archive", "a@x", 289),
+            Row("inbox", "<a@x>", 3),
+            Row("archive", "<b@x>", 290),
+        ];
+        let twins = Twins::among(&rows);
+        let printed: Vec<String> = rows
+            .iter()
+            .map(|row| Selector::for_listed("work", row, &twins).to_string())
+            .collect();
+        assert_eq!(
+            printed,
+            [
+                "mp://work/archive/a@x/285",
+                "mp://work/archive/a@x/289",
+                "mp://work/inbox/a@x",
+                "mp://work/archive/b@x",
+            ]
+        );
+        let parts = parse(&printed[1]).unwrap();
+        assert_eq!(
+            (parts.mailbox.as_deref(), parts.key.as_str(), parts.uid),
+            (Some("archive"), "a@x", Some(289))
+        );
+
+        // A set filled from elsewhere (the store, for a page that shows one
+        // copy) narrows the one copy shown.
+        let lone = Row("inbox", "<c@x>", 7);
+        let mut twins = Twins::among([&lone]);
+        assert!(twins.is_empty());
+        assert_eq!(
+            Selector::for_listed("work", &lone, &twins).to_string(),
+            "mp://work/inbox/c@x"
+        );
+        twins.insert("inbox", "c@x");
+        assert_eq!(
+            Selector::for_listed("work", &lone, &twins).to_string(),
+            "mp://work/inbox/c@x/7"
         );
     }
 }

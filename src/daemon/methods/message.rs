@@ -52,7 +52,7 @@ use mp_protocol::{RpcError, MAX_RESPONSE_BYTES};
 use crate::config::AccountConfig;
 use crate::ops::Backend;
 use crate::pending_ops::{self, OpExecutor};
-use crate::selector::{Namespace, Selector, DRAFTS_MAILBOX};
+use crate::selector::{Namespace, Selector, Twins, DRAFTS_MAILBOX};
 use crate::store::read::{self, MessageRow};
 use crate::store::{BlobStore, Store};
 use crate::tui::app::resolve_date;
@@ -268,10 +268,24 @@ impl ListRead {
             .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
         let (rows, total) = read::list_mailbox_dated(&store, &name, &mailbox, limit)
             .map_err(|e| internal(format!("listing {name}/{mailbox}: {e:#}")))?;
+        // The twins of the mailbox (PERSO-244): the rows themselves answer
+        // when they are all of it, and the store when a limit cut a twin off.
+        let listed = rows.iter().map(|(row, _)| row);
+        let twins = if rows.len() == total {
+            Twins::among(listed)
+        } else {
+            read::twins_of(&store, &name, listed)
+                .map_err(|e| internal(format!("listing {name}/{mailbox}: {e:#}")))?
+        };
         let messages = rows
             .iter()
             .map(|(row, stamped)| {
-                serde_json::to_value(WireRow::new(&name, row, wire_date_sort(row, *stamped)))
+                serde_json::to_value(WireRow::new(
+                    &name,
+                    row,
+                    wire_date_sort(row, *stamped),
+                    &twins,
+                ))
             })
             .collect::<Result<Vec<Value>, _>>()
             .map_err(|e| internal(format!("serialising {name}/{mailbox}: {e}")))?;
@@ -351,7 +365,10 @@ fn wire_date_sort_of(date_display: Option<&str>, stamped: Option<i64>) -> String
 /// another message.
 ///
 /// `selector` is the canonical `mp://<account>/<mailbox>/<key>` of the row,
-/// rendered here by [`Selector::for_message`] rather than composed by a client
+/// narrowed to `/<uid>` when its mailbox holds another row under the same
+/// Message-ID (`twins`, PERSO-244), so two copies listed side by side never
+/// print one selector. It is
+/// rendered here by [`Selector::for_listed`] rather than composed by a client
 /// out of `message_id` and the answer's mailbox (`RD-07`, #0126). A client
 /// could compose it, since `mp_core::selector` is a shared module; it may not,
 /// because that would be a second implementation of the percent-encoding and
@@ -362,9 +379,9 @@ fn wire_date_sort_of(date_display: Option<&str>, stamped: Option<i64>) -> String
 /// A row read without its `date_sort` column, which is what a search hit is,
 /// takes it from [`resolve_date`]; a listing formats the column instead
 /// ([`ListRead::run`]). Both serialise the one [`WireRow`].
-pub fn to_json(account: &str, row: &MessageRow) -> Value {
+pub fn to_json(account: &str, row: &MessageRow, twins: &Twins) -> Value {
     let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
-    serde_json::to_value(WireRow::new(account, row, date_sort))
+    serde_json::to_value(WireRow::new(account, row, date_sort, twins))
         .expect("a row of strings, integers and booleans serialises")
 }
 
@@ -404,7 +421,7 @@ struct WireFlags {
 }
 
 impl<'a> WireRow<'a> {
-    fn new(account: &str, row: &'a MessageRow, date_sort: String) -> Self {
+    fn new(account: &str, row: &'a MessageRow, date_sort: String, twins: &Twins) -> Self {
         let flags = row.flags();
         WireRow {
             bcc: row.bcc.as_deref(),
@@ -423,7 +440,7 @@ impl<'a> WireRow<'a> {
             is_invite: row.is_invite,
             message_id: &row.message_id,
             reply_to: row.reply_to.as_deref(),
-            selector: Selector::for_message(account, row),
+            selector: Selector::for_listed(account, row, twins),
             subject: row.subject.as_deref().unwrap_or_default(),
             to: row.to.as_deref().unwrap_or_default(),
             uid: row.uid,
@@ -512,7 +529,14 @@ impl Method for MessageListStream {
             &self.config,
             &self.operations,
             self.chunk_bytes,
-            |name, mailbox, path| read_dated(name, mailbox, path).map(StreamRows::Flat),
+            |name, mailbox, path| {
+                read_dated(name, mailbox, path).map(|rows| {
+                    // The whole mailbox, so the rows name its twins
+                    // themselves (PERSO-244).
+                    let twins = Twins::among(rows.iter().map(|(row, _)| row));
+                    StreamRows::Flat(rows, twins)
+                })
+            },
         ))
     }
 }
@@ -558,9 +582,7 @@ impl Method for MessageListConversations {
             &self.config,
             &self.operations,
             self.chunk_bytes,
-            |name, mailbox, path| {
-                read_conversations(name, mailbox, path).map(StreamRows::Conversations)
-            },
+            read_conversations,
         ))
     }
 }
@@ -659,11 +681,7 @@ fn read_dated(name: &str, mailbox: &str, path: &Path) -> Result<Vec<read::DatedR
 
 /// Every conversation of one mailbox, newest first, `has_draft` set from the
 /// drafts index (#0142).
-fn read_conversations(
-    name: &str,
-    mailbox: &str,
-    path: &Path,
-) -> Result<Vec<read::Conversation>, RpcError> {
+fn read_conversations(name: &str, mailbox: &str, path: &Path) -> Result<StreamRows, RpcError> {
     let store =
         Store::open(path).map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
     let mut conversations = read::list_conversations(&store, name, mailbox).map_err(|e| {
@@ -672,7 +690,20 @@ fn read_conversations(
         ))
     })?;
     mark_drafts(&store, name, &mut conversations)?;
-    Ok(conversations)
+    // A conversation folds a Message-ID held twice into one member, so its
+    // latest row can be a copy whose twin it left out (PERSO-244); a
+    // conversation of one row has none, which keeps the probes to the
+    // conversations that hold more than one.
+    let twins = read::twins_of(
+        &store,
+        name,
+        conversations
+            .iter()
+            .filter(|conversation| conversation.member_ids.len() > 1)
+            .map(|conversation| &conversation.latest.0),
+    )
+    .map_err(|e| internal(format!("listing the twins of {name}/{mailbox}: {e:#}")))?;
+    Ok(StreamRows::Conversations(conversations, twins))
 }
 
 /// Set `has_draft` on every listed conversation an indexed draft answers or
@@ -712,25 +743,26 @@ fn mark_drafts(
 }
 
 /// What one stream carries, already read: the flat listing's rows or the
-/// conversation listing's conversations.
+/// conversation listing's conversations, each with the twins its selectors
+/// are narrowed by (PERSO-244).
 enum StreamRows {
-    Flat(Vec<read::DatedRow>),
-    Conversations(Vec<read::Conversation>),
+    Flat(Vec<read::DatedRow>, Twins),
+    Conversations(Vec<read::Conversation>, Twins),
 }
 
 impl StreamRows {
     fn len(&self) -> usize {
         match self {
-            StreamRows::Flat(rows) => rows.len(),
-            StreamRows::Conversations(rows) => rows.len(),
+            StreamRows::Flat(rows, _) => rows.len(),
+            StreamRows::Conversations(rows, _) => rows.len(),
         }
     }
 
     /// The notification method the stream's chunks travel under.
     fn method(&self) -> &'static str {
         match self {
-            StreamRows::Flat(_) => mp_protocol::METHOD_MESSAGE_ROWS,
-            StreamRows::Conversations(_) => mp_protocol::METHOD_MESSAGE_CONVERSATIONS,
+            StreamRows::Flat(..) => mp_protocol::METHOD_MESSAGE_ROWS,
+            StreamRows::Conversations(..) => mp_protocol::METHOD_MESSAGE_CONVERSATIONS,
         }
     }
 
@@ -742,12 +774,17 @@ impl StreamRows {
         chunks: &mut ChunkEncoder,
     ) -> Result<(), ChunkError> {
         match self {
-            StreamRows::Flat(rows) => {
+            StreamRows::Flat(rows, twins) => {
                 let (row, stamped) = &rows[index];
-                chunks.push(&WireRow::new(account, row, wire_date_sort(row, *stamped)))
+                chunks.push(&WireRow::new(
+                    account,
+                    row,
+                    wire_date_sort(row, *stamped),
+                    twins,
+                ))
             }
-            StreamRows::Conversations(rows) => {
-                chunks.push(&WireConversation::new(account, &rows[index]))
+            StreamRows::Conversations(rows, twins) => {
+                chunks.push(&WireConversation::new(account, &rows[index], twins))
             }
         }
     }
@@ -776,7 +813,7 @@ struct WireConversation<'a> {
 }
 
 impl<'a> WireConversation<'a> {
-    fn new(account: &str, conversation: &'a read::Conversation) -> Self {
+    fn new(account: &str, conversation: &'a read::Conversation, twins: &Twins) -> Self {
         let (latest, latest_stamp) = &conversation.latest;
         let date_display = conversation.date_display.as_deref();
         WireConversation {
@@ -786,7 +823,12 @@ impl<'a> WireConversation<'a> {
             flagged: conversation.flagged,
             has_attachments: conversation.has_attachments,
             has_draft: conversation.has_draft,
-            latest: WireRow::new(account, latest, wire_date_sort(latest, *latest_stamp)),
+            latest: WireRow::new(
+                account,
+                latest,
+                wire_date_sort(latest, *latest_stamp),
+                twins,
+            ),
             mailboxes: &conversation.mailboxes,
             member_ids: &conversation.member_ids,
             participants: &conversation.participants,
@@ -1203,6 +1245,10 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
     if rows.is_empty() {
         rows.push((row.clone(), None));
     }
+    // The fold keeps one copy per Message-ID, so a member's twin is asked of
+    // the store (PERSO-244).
+    let twins = read::twins_of(&store, &name, rows.iter().map(|(member, _)| member))
+        .map_err(|e| internal(format!("the twins of {thread_id} in {name}: {e:#}")))?;
 
     let mut members: Vec<(Option<i64>, ThreadMessage)> = rows
         .iter()
@@ -1229,7 +1275,7 @@ pub fn thread(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
                 },
                 current: member.message_id == row.message_id,
                 draft_id: None,
-                selector: Selector::for_message(&name, member).to_string(),
+                selector: Selector::for_listed(&name, member, &twins).to_string(),
                 path: None,
             };
             (*stamped, message)
@@ -1361,12 +1407,15 @@ pub fn search(params: &Value, accounts: &[AccountConfig]) -> Result<Value, RpcEr
 
     let wants_body = flag_param(params, "body", false)?;
     let blobs = BlobStore::new(crate::config::blobs_dir(&name));
+    // A hit's twin need not match, or be within the limit (PERSO-244).
+    let twins = read::twins_of(&store, &name, hits.iter().map(|hit| &hit.row))
+        .map_err(|e| internal(format!("the twins of the hits in {name}: {e:#}")))?;
     let hits: Vec<Value> = hits
         .iter()
         .map(|hit| {
             // A listing row plus the mailbox it was found in, which is what
-            // `Selector::for_message` needs to render the line.
-            let mut wire = to_json(&name, &hit.row);
+            // `Selector::for_listed` needs to render the line.
+            let mut wire = to_json(&name, &hit.row, &twins);
             wire["mailbox"] = json!(hit.row.mailbox);
             if wants_body {
                 wire["body"] = json!(read::load_body(&store, &blobs, hit.row.id));
@@ -2806,7 +2855,7 @@ mod tests {
             // `to_json`, which search answers through, is the same row too.
             for row in &rows {
                 assert_eq!(
-                    serde_json::to_string(&to_json("alpha", row)).unwrap(),
+                    serde_json::to_string(&to_json("alpha", row, &Twins::default())).unwrap(),
                     serde_json::to_string(&legacy_row("alpha", row)).unwrap()
                 );
             }
@@ -2844,8 +2893,13 @@ mod tests {
         let rows: Vec<Value> = rows
             .iter()
             .map(|row| {
-                serde_json::to_value(WireRow::new("alpha", row, wire_date_sort(row, Some(0))))
-                    .expect("a row serialises")
+                serde_json::to_value(WireRow::new(
+                    "alpha",
+                    row,
+                    wire_date_sort(row, Some(0)),
+                    &Twins::default(),
+                ))
+                .expect("a row serialises")
             })
             .collect();
         mp_protocol::frame::encode(&json!({
@@ -2875,7 +2929,12 @@ mod tests {
         let mut frames = Vec::new();
         for row in &rows {
             chunks
-                .push(&WireRow::new("alpha", row, wire_date_sort(row, Some(0))))
+                .push(&WireRow::new(
+                    "alpha",
+                    row,
+                    wire_date_sort(row, Some(0)),
+                    &Twins::default(),
+                ))
                 .expect("a small row fits");
             while let Some(frame) = chunks.next_frame() {
                 frames.push(frame);
@@ -2927,8 +2986,13 @@ mod tests {
         let encoded: Vec<Vec<u8>> = rows
             .iter()
             .map(|row| {
-                serde_json::to_vec(&WireRow::new("alpha", row, wire_date_sort(row, Some(0))))
-                    .expect("encodes")
+                serde_json::to_vec(&WireRow::new(
+                    "alpha",
+                    row,
+                    wire_date_sort(row, Some(0)),
+                    &Twins::default(),
+                ))
+                .expect("encodes")
             })
             .collect();
         let largest = encoded.iter().map(Vec::len).max().expect("rows");
@@ -2941,7 +3005,12 @@ mod tests {
         let mut offset = 0;
         for row in &rows {
             chunks
-                .push(&WireRow::new("alpha", row, wire_date_sort(row, Some(0))))
+                .push(&WireRow::new(
+                    "alpha",
+                    row,
+                    wire_date_sort(row, Some(0)),
+                    &Twins::default(),
+                ))
                 .expect("every row fits alone");
         }
         chunks.finish();
@@ -2962,7 +3031,12 @@ mod tests {
         );
         for row in &rows {
             chunks
-                .push(&WireRow::new("alpha", row, wire_date_sort(row, Some(0))))
+                .push(&WireRow::new(
+                    "alpha",
+                    row,
+                    wire_date_sort(row, Some(0)),
+                    &Twins::default(),
+                ))
                 .expect("fits");
         }
         let mut frames = 0;
@@ -2984,6 +3058,7 @@ mod tests {
                 "alpha",
                 &rows[0],
                 wire_date_sort(&rows[0], Some(0)),
+                &Twins::default(),
             ))
             .expect_err("the row does not fit in any frame");
         let ChunkError::TooLarge { limit, seen } = refused else {
@@ -3056,7 +3131,7 @@ mod tests {
         use mp_protocol::listing::{ConversationRowsChunk, MessageListRow};
 
         let conversations: Vec<read::Conversation> = (0..30).map(sample_conversation).collect();
-        let rows = StreamRows::Conversations(conversations.clone());
+        let rows = StreamRows::Conversations(conversations.clone(), Twins::default());
         assert_eq!(rows.method(), mp_protocol::METHOD_MESSAGE_CONVERSATIONS);
         let id = "3b7e90c2d14f4a8e9f6c0a5d2e8b1c47";
         let mut chunks = ChunkEncoder::new(rows.method(), id, 2000, MAX_RESPONSE_BYTES);
@@ -3079,7 +3154,10 @@ mod tests {
             let count = chunk.rows.len();
             let values: Vec<Value> = conversations[offset..offset + count]
                 .iter()
-                .map(|c| serde_json::to_value(WireConversation::new("alpha", c)).expect("a value"))
+                .map(|c| {
+                    serde_json::to_value(WireConversation::new("alpha", c, &Twins::default()))
+                        .expect("a value")
+                })
                 .collect();
             let expected = mp_protocol::frame::encode(&json!({
                 "jsonrpc": "2.0",
@@ -3098,6 +3176,7 @@ mod tests {
                         "alpha",
                         latest,
                         wire_date_sort(latest, *stamped),
+                        &Twins::default(),
                     ))
                     .expect("a value"),
                 )
@@ -3194,13 +3273,25 @@ mod tests {
         let (dated, _) = read::list_mailbox_dated(&store, "alpha", &resolved, None).expect("rows");
         let wire_only = sample(|| {
             for (row, stamped) in &dated {
-                std::hint::black_box(WireRow::new("alpha", row, wire_date_sort(row, *stamped)));
+                std::hint::black_box(WireRow::new(
+                    "alpha",
+                    row,
+                    wire_date_sort(row, *stamped),
+                    &Twins::default(),
+                ));
             }
         });
         let to_bytes = sample(|| {
             let rows: Vec<WireRow<'_>> = dated
                 .iter()
-                .map(|(row, stamped)| WireRow::new("alpha", row, wire_date_sort(row, *stamped)))
+                .map(|(row, stamped)| {
+                    WireRow::new(
+                        "alpha",
+                        row,
+                        wire_date_sort(row, *stamped),
+                        &Twins::default(),
+                    )
+                })
                 .collect();
             std::hint::black_box(serde_json::to_vec(&rows).expect("encodes"));
         });
@@ -3229,7 +3320,12 @@ mod tests {
             let mut frames = Vec::new();
             for (row, stamped) in dated {
                 chunks
-                    .push(&WireRow::new("alpha", row, wire_date_sort(row, *stamped)))
+                    .push(&WireRow::new(
+                        "alpha",
+                        row,
+                        wire_date_sort(row, *stamped),
+                        &Twins::default(),
+                    ))
                     .expect("a row fits");
                 while let Some(frame) = chunks.next_frame() {
                     frames.push(frame);
@@ -3249,8 +3345,7 @@ mod tests {
         // terms: the two-statement read, the fold and the drafts join, then
         // every conversation encoded into `message.conversations` frames. The
         // read moves into the rows as the handler moves it, with no copy.
-        let encode_conversations = |conversations: Vec<read::Conversation>| -> Vec<Vec<u8>> {
-            let rows = StreamRows::Conversations(conversations);
+        let encode_conversations = |rows: StreamRows| -> Vec<Vec<u8>> {
             let mut chunks = ChunkEncoder::new(
                 rows.method(),
                 "op-bench",
@@ -3278,16 +3373,20 @@ mod tests {
             std::hint::black_box(encode_conversations(conversations));
         });
         let conversations = read_conversations("alpha", &resolved, &path).expect("rows");
-        let conversation_frames = encode_conversations(conversations.clone());
-        let largest_conversation = conversations
+        let StreamRows::Conversations(listed, twins) = &conversations else {
+            unreachable!("read_conversations reads conversations")
+        };
+        let largest_conversation = listed
             .iter()
             .map(|c| {
-                serde_json::to_vec(&WireConversation::new("alpha", c))
+                serde_json::to_vec(&WireConversation::new("alpha", c, twins))
                     .expect("encodes")
                     .len()
             })
             .max()
             .unwrap_or(0);
+        let conversation_count = conversations.len();
+        let conversation_frames = encode_conversations(conversations);
         let largest_conversation_frame =
             conversation_frames.iter().map(Vec::len).max().unwrap_or(0);
         assert!(
@@ -3392,7 +3491,7 @@ mod tests {
         );
         eprintln!(
             "conversations: {} rows, {} frames, {} bytes, the largest {largest_conversation_frame}",
-            conversations.len(),
+            conversation_count,
             conversation_frames.len(),
             conversation_frames.iter().map(Vec::len).sum::<usize>()
         );

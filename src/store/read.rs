@@ -38,7 +38,7 @@
 //! [`load_invite_ics`] for the previewed message and by [`list_invites`] for
 //! the agenda (#0038 scope item 6).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -788,6 +788,53 @@ pub fn find_by_message_id(
     }
     Ok(out)
 }
+
+/// The [`Twins`](crate::selector::Twins) among `rows`, asked of the store
+/// rather than of the rows (PERSO-244): which of them share their mailbox
+/// with another row under the same `Message-ID`, whether or not that row is
+/// among `rows`.
+///
+/// For a listing that holds part of a mailbox (a page, search hits, a
+/// conversation folded to one copy per `Message-ID`), where a copy's twin can
+/// be left out of the rows while still making its canonical selector name
+/// two. One probe of `messages_message_id` per distinct pair, so the cost is
+/// the listing's length, not the mailbox's; a caller holding the whole
+/// mailbox asks [`Twins::among`](crate::selector::Twins::among) instead.
+///
+/// The probe is [`TWINS_SQL`], pinned to `messages_message_id`
+/// (`the_twins_probe_is_served_by_the_message_id_index`).
+pub fn twins_of<'r>(
+    store: &Store,
+    account: &str,
+    rows: impl IntoIterator<Item = &'r MessageRow>,
+) -> Result<crate::selector::Twins> {
+    let mut twins = crate::selector::Twins::default();
+    let mut asked: HashSet<(&str, &str)> = HashSet::new();
+    let mut stmt = store.conn().prepare_cached(TWINS_SQL)?;
+    for row in rows {
+        if !asked.insert((&row.mailbox, &row.message_id)) {
+            continue;
+        }
+        let shared: bool = stmt
+            .query_row((&row.message_id, account, &row.mailbox), |r| r.get(0))
+            .with_context(|| format!("counting the copies of {}", row.message_id))?;
+        if shared {
+            twins.insert(&row.mailbox, &row.message_id);
+        }
+    }
+    Ok(twins)
+}
+
+/// Whether a mailbox holds more than one row under a `Message-ID`: the probe of
+/// [`twins_of`].
+///
+/// Pinned to `messages_message_id`: left to itself, SQLite takes
+/// `messages_list` for the two equalities on `account` and `mailbox`, which
+/// walks the whole mailbox per probe and made a 10 000-row page of a 50 000-row
+/// mailbox take minutes, where the `Message-ID` lookup answers from a row or
+/// two. `INDEXED BY` fails at prepare time rather than fall back.
+const TWINS_SQL: &str = "SELECT COUNT(*) > 1 FROM messages INDEXED BY messages_message_id \
+     WHERE message_id = ?1 AND account = ?2 AND mailbox = ?3";
 
 /// The `In-Reply-To` and `References` header values one message carried, as
 /// ingest stored them, or `None` when the account holds no row for it
@@ -2078,6 +2125,65 @@ Content-Type: text/html; charset=utf-8\r\n\r\n<p>html inside the raw</p>\r\n";
                 "{sql} must not sort in a temp B-tree, got:\n{plan}"
             );
         }
+    }
+
+    /// The twins probe looks the `Message-ID` up rather than walking the
+    /// mailbox, which `messages_list` would do for its two equalities; and it
+    /// finds a twin whether or not the twin is among the rows asked about
+    /// (PERSO-244).
+    #[test]
+    fn the_twins_probe_is_served_by_the_message_id_index() {
+        let fx = fixture();
+        let lone = ingest(
+            &fx,
+            "inbox",
+            1,
+            &email("a", "Mon, 01 Jan 2024 09:00:00 +0000"),
+        );
+        let copy = ingest(
+            &fx,
+            "inbox",
+            2,
+            &email("b", "Mon, 01 Jan 2024 10:00:00 +0000"),
+        );
+        // A second copy of `b`, ingested under its own id and renamed, since
+        // ingest would rebind it onto `b`'s row.
+        let twin = ingest(
+            &fx,
+            "inbox",
+            3,
+            &email("c", "Mon, 01 Jan 2024 11:00:00 +0000"),
+        );
+        fx.store
+            .conn()
+            .execute(
+                "UPDATE messages SET message_id = '<b@example.com>' WHERE id = ?1",
+                [twin],
+            )
+            .unwrap();
+        let lone = find_by_id(&fx.store, lone).unwrap().unwrap();
+        let copy = find_by_id(&fx.store, copy).unwrap().unwrap();
+
+        let twins = twins_of(&fx.store, "alice", [&lone, &copy]).unwrap();
+        assert!(twins.holds("inbox", &copy.message_id));
+        assert!(!twins.holds("inbox", &lone.message_id));
+
+        let plan: Vec<String> = fx
+            .store
+            .conn()
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", super::TWINS_SQL))
+            .unwrap()
+            .query_map((&copy.message_id, "alice", "inbox"), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let plan = plan.join("\n");
+        assert!(
+            plan.contains("messages_message_id"),
+            "the probe must look the Message-ID up, got:\n{plan}"
+        );
     }
 
     /// A conversation read walks the messages_thread index in order rather

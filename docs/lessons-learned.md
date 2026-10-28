@@ -2700,6 +2700,10 @@ A TUI key handler reads its door off `app.session`, so the recording `Fixture` i
 
 SQLite reads it as a range over `messages_thread` and walks every threaded row of the account; pin the mailbox walk with `INDEXED BY messages_list`, which fails at prepare time rather than falling back if the index is ever missing (PERSO-138).
 
+## Equalities on `account` and `mailbox` beat a `Message-ID` lookup in the planner's eyes
+
+Asked `message_id = ? AND account = ? AND mailbox = ?`, SQLite picks `messages_list` for its two-column prefix over the one-column `messages_message_id`, so each probe walks the mailbox; the twins probe of a 10 000-row page of a 50 000-row mailbox then took minutes (`tests/daemon_conversations_cap.rs` timed out), and `INDEXED BY messages_message_id` brought it back to noise (PERSO-244).
+
 ## The grouped listing's cost was in the per-thread member reads
 
 On 50 000 one-message conversations reading every conversation's members through `messages_thread` cost 60 ms of SQL against the flat walk's 19 ms, and an extra index alone changed nothing because that query still fetched every member row.
