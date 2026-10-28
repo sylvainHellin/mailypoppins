@@ -350,14 +350,19 @@ impl std::error::Error for Departed {}
 /// knows why. An existing row and a rebind are never refused, and a refused
 /// copy that really is another one is ingested by the first pass whose
 /// listing postdates the departure.
+///
+/// Both sync paths ingest through it: the engine's (IMAP), with no `hints`,
+/// and the Graph pass's (PERSO-245), with the threading signals its download
+/// hands over ([`ingest_message_threaded`]).
 pub fn ingest_listed(
     store: &Store,
     blobs: &BlobStore,
     input: &IngestInput<'_>,
     rebind: &RebindPolicy<'_>,
+    hints: Option<&ThreadHints>,
     departed: &dyn Fn(&str) -> bool,
 ) -> Result<IngestOutcome> {
-    ingest_guarded(store, blobs, input, rebind, None, Some(departed))
+    ingest_guarded(store, blobs, input, rebind, hints, Some(departed))
 }
 
 /// The one ingest every entry point above shares.

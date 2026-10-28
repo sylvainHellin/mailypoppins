@@ -434,6 +434,9 @@ fn thread_hints(
 /// A downloaded Graph message and the threading signals ingest needs beside
 /// it, which a [`FetchedEmail`] has no field for.
 pub struct GraphFetched {
+    /// The Graph id it was downloaded by: the item in the folder it was
+    /// listed in, which the departures watch is asked about (PERSO-245).
+    pub graph_id: String,
     pub email: FetchedEmail,
     pub threading: crate::ingest::ThreadHints,
 }
@@ -1311,6 +1314,7 @@ impl GraphClient {
                         }
                     }
                     SubResponse::Message(msg) => emails.push(GraphFetched {
+                        graph_id: msg.id.clone(),
                         threading: thread_hints(
                             msg.conversation_id.as_deref(),
                             &msg.single_value_extended_properties,
@@ -2320,6 +2324,9 @@ struct WindowIngest {
     /// ([`crate::ingest::note_ingest_failure`] answered true): the pass did
     /// not write everything it downloaded.
     owed_failure: bool,
+    /// A message left out on purpose, as the item a local move or delete is
+    /// taking out of the folder (PERSO-245, [`crate::ingest::Departed`]).
+    withheld: bool,
 }
 
 /// Whether the folder is worth another quick pass at once (PERSO-172), given
@@ -2351,6 +2358,15 @@ fn owes_follow_up(backlog: bool, window: &WindowIngest) -> bool {
 /// insert hundreds of messages that are old to their owner; a message that
 /// arrives during the drain is the newest of its window and is still
 /// announced.
+///
+/// A message the store holds no row for, whose item `departures` says a local
+/// move or delete may be taking out of the folder while it was being listed,
+/// is not written (PERSO-245): it is the copy the user's own move is carrying
+/// away, and a row for it would be a stale duplicate of the moved one. The
+/// rule is the engine's ([`crate::ingest::ingest_listed`], PERSO-240).
+// Each argument is one thing the pass read before this folder's ingest; a
+// struct bundling them would be built at the one call site and the tests only.
+#[allow(clippy::too_many_arguments)]
 fn ingest_window(
     store: &crate::store::Store,
     blobs: &crate::store::BlobStore,
@@ -2358,6 +2374,7 @@ fn ingest_window(
     target: &SyncTarget,
     new_emails: &[GraphFetched],
     newest_held: Option<i64>,
+    departures: &crate::sync::departures::Watch,
     result: &mut SyncResult,
 ) -> WindowIngest {
     let mut window = WindowIngest::default();
@@ -2365,7 +2382,7 @@ fn ingest_window(
         let email = &fetched.email;
         let message_id = crate::ingest::resolve_message_id(email, None);
         let uid = crate::ingest::graph_uid(&message_id);
-        match crate::ingest::ingest_message_threaded(
+        match crate::ingest::ingest_listed(
             store,
             blobs,
             &crate::ingest::IngestInput {
@@ -2377,6 +2394,9 @@ fn ingest_window(
             },
             &crate::ingest::RebindPolicy::Always,
             Some(&fetched.threading),
+            &|message_id| {
+                departures.departed_item(&target.server_name, message_id, &fetched.graph_id)
+            },
         ) {
             Ok(outcome) => {
                 window.written += 1;
@@ -2397,6 +2417,16 @@ fn ingest_window(
                 if outcome.uid_rebound {
                     result.uid_rebound += 1;
                 }
+            }
+            // No failure: nothing is owed, so it neither counts against the
+            // retry budget nor holds the prune back. A copy still listed once
+            // the departure has landed is another one, and is ingested then.
+            Err(e) if e.downcast_ref::<crate::ingest::Departed>().is_some() => {
+                window.withheld = true;
+                info!(
+                    "[sync] '{}': not ingesting {message_id}: {e}",
+                    target.server_name
+                );
             }
             Err(e) => {
                 warn!(
@@ -2998,6 +3028,11 @@ pub async fn sync_mailboxes_graph(
         ..SyncResult::default()
     };
     span.mark("client_open");
+    // Opened before the pass reads which messages each folder already holds
+    // (PERSO-245): a listing taken below can be older than a local move or
+    // delete of a message out of the folder it lists, and the ingest asks the
+    // watch before it writes such a message as a new row (PERSO-240).
+    let departures = crate::sync::departures::Watch::open(&store, account_name)?;
 
     // Every prune this run will apply, collected here and applied after the
     // loop: see the second pass below for why it cannot run per target.
@@ -3191,6 +3226,7 @@ pub async fn sync_mailboxes_graph(
             target,
             &new_emails,
             newest_held,
+            &departures,
             &mut result,
         );
         let ingest_failed = window.owed_failure;
@@ -3275,7 +3311,14 @@ pub async fn sync_mailboxes_graph(
         // and wrote every message it found, and only alongside the folder id
         // it is bound to: a token with no identity could never be validated
         // again (#0042).
-        let earned = may_record_delta_token(complete, download_incomplete, ingest_failed);
+        // A withheld copy (PERSO-245) is listed and not held, so the token
+        // could not claim the store held the folder: a twin the departure
+        // covered by its Message-ID would never be listed by a delta again.
+        let earned = may_record_delta_token(
+            complete,
+            download_incomplete,
+            ingest_failed || window.withheld,
+        );
         let minted_a_token = token.is_some();
         let token_to_store = if earned { token } else { None };
 
@@ -4638,6 +4681,7 @@ impl GraphClient {
                 continue;
             }
             hits.push(GraphFetched {
+                graph_id: msg.id.clone(),
                 email: self.hydrate(msg).await,
                 threading: thread_hints(
                     msg.conversation_id.as_deref(),
@@ -5273,6 +5317,11 @@ mod tests {
         SyncTarget::new(role, server_name)
     }
 
+    /// A departures watch over `store` that no move or delete is in.
+    fn quiet(store: &crate::store::Store) -> crate::sync::departures::Watch {
+        crate::sync::departures::Watch::open(store, "acct").unwrap()
+    }
+
     /// A message as the Graph download hands it over, dated by its
     /// `receivedDateTime`.
     fn received(mid: &str, iso: &str) -> GraphFetched {
@@ -5283,6 +5332,7 @@ mod tests {
         email.body_text = format!("body of {mid}");
         email.date = iso_to_rfc2822(iso);
         GraphFetched {
+            graph_id: format!("id-of-{mid}"),
             email,
             threading: thread_hints(None, &[]),
         }
@@ -5526,6 +5576,7 @@ mod tests {
             &inbox,
             &[fetched, plain],
             None,
+            &quiet(&store),
             &mut result,
         );
         assert!(answered("<replied@x>"));
@@ -5632,6 +5683,7 @@ mod tests {
             &inbox,
             &[with("<p1@x>", "2026-10-21T20:12:00Z", None, "C1")],
             None,
+            &quiet(&store),
             &mut result,
         );
         ingest_window(
@@ -5646,6 +5698,7 @@ mod tests {
                 "other",
             )],
             None,
+            &quiet(&store),
             &mut result,
         );
         assert_eq!(thread_of("<r1@x>"), "<p1@x>", "the headers win");
@@ -5658,6 +5711,7 @@ mod tests {
             &inbox,
             &[with("<r2@x>", "2026-10-21T20:13:00Z", Some("<p2@x>"), "C2")],
             None,
+            &quiet(&store),
             &mut result,
         );
         assert_eq!(thread_of("<r2@x>"), "<r2@x>", "no parent stored yet");
@@ -5668,6 +5722,7 @@ mod tests {
             &inbox,
             &[with("<p2@x>", "2026-10-21T20:12:00Z", None, "C2")],
             None,
+            &quiet(&store),
             &mut result,
         );
         assert_eq!(thread_of("<p2@x>"), "<r2@x>");
@@ -5690,6 +5745,7 @@ mod tests {
             &inbox,
             &[with("<lone@x>", "2026-10-21T20:14:00Z", None, "")],
             None,
+            &quiet(&store),
             &mut result,
         );
         assert_eq!(
@@ -5718,7 +5774,16 @@ mod tests {
 
         for pass in 1..=4 {
             let mut result = SyncResult::default();
-            let window = ingest_window(&store, &blobs, "acct", &inbox, &emails, None, &mut result);
+            let window = ingest_window(
+                &store,
+                &blobs,
+                "acct",
+                &inbox,
+                &emails,
+                None,
+                &quiet(&store),
+                &mut result,
+            );
             assert_eq!(window.written, 0, "pass {pass} stored nothing");
             assert_eq!(
                 window.owed_failure,
@@ -5739,16 +5804,155 @@ mod tests {
     fn a_follow_up_is_owed_only_by_a_window_that_moved_the_drain_on() {
         let progressed = WindowIngest {
             written: 99,
-            owed_failure: false,
+            ..WindowIngest::default()
         };
         assert!(owes_follow_up(true, &progressed));
         assert!(!owes_follow_up(false, &progressed), "no backlog, no hurry");
         let retrying = WindowIngest {
             written: 99,
             owed_failure: true,
+            ..WindowIngest::default()
         };
         assert!(!owes_follow_up(true, &retrying));
         assert!(!owes_follow_up(true, &WindowIngest::default()));
+    }
+
+    /// The inbox row of `<moving@x>`, synced and bound to its Graph item, and
+    /// the move of it to Archive the user queued, still owed to the server.
+    fn a_move_out_of_the_inbox(
+        store: &crate::store::Store,
+        blobs: &crate::store::BlobStore,
+        runner: crate::pending_ops::Runner<'_>,
+    ) {
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        let moving = received("<moving@x>", "2026-10-28T09:00:00Z");
+        let mut result = SyncResult::default();
+        ingest_window(
+            store,
+            blobs,
+            "acct",
+            &inbox,
+            std::slice::from_ref(&moving),
+            None,
+            &quiet(store),
+            &mut result,
+        );
+        crate::ingest::bind_graph_ids(
+            store,
+            "acct",
+            "inbox",
+            [("<moving@x>", moving.graph_id.as_str())],
+        );
+        let row: i64 = store
+            .conn()
+            .query_row(
+                "SELECT id FROM messages WHERE message_id = '<moving@x>'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let queued = crate::mutations::queue_move(
+            store,
+            "acct",
+            &[row],
+            "archive",
+            "Inbox",
+            "Archive",
+            runner,
+        );
+        assert_eq!(queued.len(), 1);
+    }
+
+    /// The Message-IDs the store holds in `mailbox`.
+    fn held(store: &crate::store::Store, mailbox: &str) -> Vec<String> {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT message_id FROM messages WHERE mailbox = ?1 ORDER BY message_id")
+            .unwrap();
+        stmt.query_map([mailbox], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap()
+    }
+
+    /// PERSO-245: a Graph pass whose inbox listing predates the server half of
+    /// a local move, here one a caller is settling when the pass opens, does
+    /// not write the source item back as a second inbox row; a message that
+    /// is really new is ingested beside it, and the pass mints no delta token
+    /// over a listing it did not take whole.
+    #[test]
+    fn a_graph_pass_does_not_ingest_the_item_a_settling_move_takes_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
+        let scope = crate::pending_ops::SettleScope::open(&store);
+        a_move_out_of_the_inbox(&store, &blobs, crate::pending_ops::Runner::Caller(&scope));
+        assert_eq!(held(&store, "archive"), ["<moving@x>"]);
+
+        let departures = crate::sync::departures::Watch::open(&store, "acct").unwrap();
+        let listed = [
+            received("<moving@x>", "2026-10-28T09:00:00Z"),
+            received("<new@x>", "2026-10-28T09:05:00Z"),
+        ];
+        let mut result = SyncResult::default();
+        let window = ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &sync_target(MailboxRole::Inbox, "Inbox"),
+            &listed,
+            None,
+            &departures,
+            &mut result,
+        );
+        assert_eq!(held(&store, "inbox"), ["<new@x>"]);
+        assert_eq!(held(&store, "archive"), ["<moving@x>"]);
+        assert_eq!((window.written, window.withheld), (1, true));
+        assert!(!window.owed_failure, "a withheld item is no failure");
+        assert_eq!(result.saved, 1);
+    }
+
+    /// The same when the move commits while the pass is listing, after the
+    /// watch opened: the journal answers, and another item of the message in
+    /// the folder, which the move does not name, is ingested.
+    #[test]
+    fn a_graph_pass_does_not_ingest_the_item_a_move_committed_mid_pass_takes_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(tmp.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(tmp.path().join("blobs"));
+        let departures = crate::sync::departures::Watch::open(&store, "acct").unwrap();
+        a_move_out_of_the_inbox(&store, &blobs, crate::pending_ops::Runner::Drain);
+
+        let inbox = sync_target(MailboxRole::Inbox, "Inbox");
+        let mut result = SyncResult::default();
+        let source = received("<moving@x>", "2026-10-28T09:00:00Z");
+        let window = ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            std::slice::from_ref(&source),
+            None,
+            &departures,
+            &mut result,
+        );
+        assert!(held(&store, "inbox").is_empty());
+        assert!(window.withheld);
+
+        let mut twin = received("<moving@x>", "2026-10-28T09:00:00Z");
+        twin.graph_id = "a-twin-item".to_string();
+        let window = ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &[twin],
+            None,
+            &departures,
+            &mut result,
+        );
+        assert_eq!(held(&store, "inbox"), ["<moving@x>"]);
+        assert!(!window.withheld);
     }
 
     /// PERSO-172 review: a drain inserts a hundred old messages per pass, and
@@ -5778,7 +5982,16 @@ mod tests {
             received("<m2@x>", "2026-08-06T11:00:00Z"),
         ];
         let mut result = SyncResult::default();
-        ingest_window(&store, &blobs, "acct", &inbox, &first, None, &mut result);
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &first,
+            None,
+            &quiet(&store),
+            &mut result,
+        );
         assert_eq!(result.saved, 2);
         assert!(
             announced(&result).is_empty(),
@@ -5802,6 +6015,7 @@ mod tests {
             &inbox,
             &drain,
             newest_held,
+            &quiet(&store),
             &mut result,
         );
         assert_eq!(result.saved, 3, "the old ones are still stored");
@@ -5819,6 +6033,7 @@ mod tests {
             &archive,
             &later,
             newest_held,
+            &quiet(&store),
             &mut result,
         );
         assert_eq!(result.saved, 1);
@@ -5860,7 +6075,16 @@ mod tests {
         };
 
         let mut result = SyncResult::default();
-        ingest_window(&store, &blobs, "acct", &inbox, &window, None, &mut result);
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &window,
+            None,
+            &quiet(&store),
+            &mut result,
+        );
         assert_eq!(result.saved, 2);
         let (mut sequences, roles): (Vec<u64>, Vec<String>) = observed(&result).into_iter().unzip();
         assert_eq!(roles, ["inbox", "inbox"], "one per inserted row");
@@ -5869,7 +6093,16 @@ mod tests {
         assert_eq!(row_ids().len(), 2);
 
         let mut again = SyncResult::default();
-        ingest_window(&store, &blobs, "acct", &inbox, &window, None, &mut again);
+        ingest_window(
+            &store,
+            &blobs,
+            "acct",
+            &inbox,
+            &window,
+            None,
+            &quiet(&store),
+            &mut again,
+        );
         assert_eq!(again.saved, 0);
         assert!(
             observed(&again).is_empty(),
@@ -5895,6 +6128,7 @@ mod tests {
             &archive,
             &archived,
             None,
+            &quiet(&store),
             &mut result,
         );
 
@@ -5909,6 +6143,7 @@ mod tests {
             &inbox,
             &arrival,
             newest_held,
+            &quiet(&store),
             &mut result,
         );
         assert_eq!(result.new_inbox_mail.len(), 1);

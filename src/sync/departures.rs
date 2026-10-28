@@ -39,8 +39,16 @@
 //! One whose row had no UID yet (a row still on the `-id` sentinel of an
 //! earlier move, which is the back-to-back case) names none, and any copy of
 //! its `Message-ID` in the folder is taken as the departing one, so a genuine
-//! second copy listed in that window waits one pass. The journal lives in this process only, which is all it
-//! has to: only the daemon commits departures and only the daemon syncs, and a
+//! second copy listed in that window waits one pass.
+//!
+//! The Graph pass asks the same watch (PERSO-245), keyed on the Graph id
+//! instead of the UID ([`Watch::departed_item`]): a departure names the item
+//! its row was bound to ([`crate::ops::GraphCopy`]), or none when the row had
+//! no id (a row still on the sentinel of an earlier move, which a move clears
+//! the id of), and then any copy of its `Message-ID` in the folder is taken
+//! as the departing one, as above.
+//!
+//! The journal lives in this process only, which is all it has to: only the daemon commits departures and only the daemon syncs, and a
 //! watch never outlives the pass that opened it. It records nothing while no
 //! watch is open over the store and is dropped when the last one closes, so it
 //! never grows past the departures of one pass.
@@ -62,6 +70,8 @@ struct Leaving {
     message_id: String,
     /// The copy the op acts on, when its row knew its UID.
     copy: Option<ServerCopy>,
+    /// The Graph item the op acts on, when its row knew its id (PERSO-245).
+    item: Option<String>,
 }
 
 impl Leaving {
@@ -77,6 +87,16 @@ impl Leaving {
         self.message_id == message_id
             && same_folder(&self.source, listed.source)
             && self.copy.as_ref().is_none_or(|copy| departs(copy, listed))
+    }
+
+    /// Whether this departure may be what took the Graph item listed as
+    /// `graph_id` in `source`, carrying `message_id` (PERSO-245): a named
+    /// item only under its own id, an op that names none any item of the
+    /// `Message-ID`.
+    fn covers_item(&self, source: &str, message_id: &str, graph_id: &str) -> bool {
+        self.message_id == message_id
+            && same_folder(&self.source, source)
+            && self.item.as_deref().is_none_or(|item| item == graph_id)
     }
 }
 
@@ -157,17 +177,19 @@ fn departure_of(op: &ServerOp) -> Option<Leaving> {
             message_id,
             source_mailbox,
             copy,
+            graph_copy,
             ..
         }
         | ServerOp::Delete {
             message_id,
             source_mailbox,
             copy,
-            ..
+            graph_copy,
         } => Some(Leaving {
             source: source_mailbox.clone(),
             message_id: message_id.clone(),
             copy: copy.clone(),
+            item: graph_copy.as_ref().map(|item| item.id.clone()),
         }),
         _ => None,
     }
@@ -251,8 +273,19 @@ impl Watch {
     /// may be one a local move or delete is taking out of its folder: one
     /// whose server half may not have landed before the listing was taken.
     pub fn departed(&self, message_id: &str, listed: &Listed<'_>) -> bool {
-        let covers = |leaving: &Leaving| leaving.covers(message_id, listed);
-        self.owed.iter().any(covers)
+        self.any(|leaving| leaving.covers(message_id, listed))
+    }
+
+    /// [`Watch::departed`] for a Graph listing (PERSO-245): whether the item
+    /// this pass listed as `graph_id` in the server folder `source`, carrying
+    /// `message_id`, may be one a local move or delete is taking out of it.
+    pub fn departed_item(&self, source: &str, message_id: &str, graph_id: &str) -> bool {
+        self.any(|leaving| leaving.covers_item(source, message_id, graph_id))
+    }
+
+    /// Whether any departure this watch sees satisfies `covers`.
+    fn any(&self, covers: impl Fn(&Leaving) -> bool) -> bool {
+        self.owed.iter().any(&covers)
             || journals().get(&self.store).is_some_and(|journal| {
                 journal
                     .entries
@@ -525,5 +558,32 @@ mod tests {
             !watch.departed("<a@x>", &at("INBOX", 25, Some(7), Some(&beside_a_twin))),
             "a copy the server half cannot tell from the twin's"
         );
+    }
+
+    /// A Graph op that names its item (PERSO-245) departs that item only; one
+    /// that names none departs every item of its Message-ID in the folder.
+    #[test]
+    fn a_named_graph_item_departs_under_its_own_id_only() {
+        let (_dir, store) = store();
+        let watch = Watch::open(&store, "alice").unwrap();
+        record(
+            &store,
+            "alice",
+            &ServerOp::Delete {
+                message_id: "<a@x>".to_string(),
+                source_mailbox: "Inbox".to_string(),
+                copy: None,
+                graph_copy: Some(crate::ops::GraphCopy::of_row("AAMk-a".to_string(), [])),
+            },
+        );
+        record(&store, "alice", &move_op("<b@x>", "Inbox"));
+        assert!(watch.departed_item("Inbox", "<a@x>", "AAMk-a"));
+        assert!(
+            !watch.departed_item("Inbox", "<a@x>", "AAMk-twin"),
+            "another item"
+        );
+        assert!(!watch.departed_item("Archive", "<a@x>", "AAMk-a"));
+        assert!(watch.departed_item("Inbox", "<b@x>", "AAMk-any"));
+        assert!(!watch.departed_item("Inbox", "<c@x>", "AAMk-a"));
     }
 }

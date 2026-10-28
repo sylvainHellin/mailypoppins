@@ -787,6 +787,7 @@ A listing taken before the server half landed shows the source copy under a UID 
 Checking the queue at ingest is not enough, because the op is deleted the moment it retires, which can be between the listing and the ingest: the store then holds no trace of where the message was.
 What answers it is a watch the pass opens before its first store read: the moves and deletes owed at that moment, plus a journal of every one committed while it is open, written inside the committing transaction so ingest, asking inside its own, cannot see the row gone without the entry.
 The refusal is keyed on the folder the op takes the message out of and on the copy it names by UID, or on its Message-ID when the row was still on its move sentinel and the op names none, so a genuine second copy is ingested at once in the first case and at worst deferred to the next pass in the second, never hidden.
+The Graph pass has the same window, since its listing is also taken after it reads which messages a folder holds, and asks the same watch by Graph item id (PERSO-245); a pass that withheld an item must not mint a delta token, because the token claims the store held the whole folder, and a twin the departure covered by its Message-ID would then never be listed again.
 The watcher had the mirror-image blind spot: IDLE hears only what happens while it runs, so a change landing during the tick it woke was never heard; each round now compares its SELECT with the state the last round left.
 
 ## Naming a copy by UID turns a stale UID into a silent converge

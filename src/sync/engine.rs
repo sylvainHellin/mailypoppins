@@ -496,6 +496,7 @@ pub async fn run_sync(
                     raw: Some(&message.raw),
                 },
                 &RebindPolicy::UnlessListed(&server_uids),
+                None,
                 &|message_id| {
                     departures.departed(
                         message_id,
