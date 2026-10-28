@@ -3595,6 +3595,7 @@ mod tests {
                         message_id: "<inbox-1@example.com>".to_string(),
                         mailbox: "Archive".to_string(),
                         flagged: true,
+                        copy: None,
                     };
                     pending_ops::apply_set_flagged(
                         store,

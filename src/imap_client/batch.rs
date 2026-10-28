@@ -145,7 +145,12 @@ pub async fn add_flag_in_mailboxes(
     pooled.check(outcome)
 }
 
-/// SELECT + SEARCH + UID STORE `+FLAGS` on an existing session.
+/// SELECT + SEARCH + UID STORE `+FLAGS` on an existing session, on every copy
+/// the search lists.
+///
+/// The op names a message, not a row, and the bit records that the message
+/// was answered or forwarded, which is as true of a duplicate copy as of the
+/// first one listed (PERSO-238).
 async fn add_flag_on_session(
     session: &mut ImapSession,
     message_id: &str,
@@ -163,19 +168,29 @@ async fn add_flag_on_session(
         ))
         .await
         .map_err(|e| anyhow!("IMAP search failed: {}", e))?;
-    let Some(uid) = uids.iter().next().copied() else {
+    if uids.is_empty() {
         info!("Message-ID {message_id} not found in {mailbox}, skipping the {flag} write");
         return Ok(());
-    };
+    }
 
     session
-        .uid_store(&uid.to_string(), &format!("+FLAGS ({flag})"))
+        .uid_store(&uid_set(&uids), &format!("+FLAGS ({flag})"))
         .await
         .map_err(|e| anyhow!("Failed to set the {} flag: {}", flag, e))?
         .try_collect::<Vec<_>>()
         .await
         .map_err(|e| anyhow!("Failed to collect store response: {}", e))?;
     Ok(())
+}
+
+/// A UID sequence set naming every one of `uids`, in ascending order.
+fn uid_set(uids: &std::collections::HashSet<u32>) -> String {
+    let mut uids: Vec<u32> = uids.iter().copied().collect();
+    uids.sort_unstable();
+    uids.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Delete every message over one connection, index-aligned with `message_ids`.
@@ -281,7 +296,18 @@ fn must_poison(any_op_failed: bool, expunge_failed: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::must_poison;
+    use super::{must_poison, uid_set};
+
+    /// The post-send bit lands on every copy the search lists, named in one
+    /// sequence set (PERSO-238).
+    #[test]
+    fn the_post_send_flag_names_every_copy() {
+        assert_eq!(
+            uid_set(&[289, 285, 288].into_iter().collect()),
+            "285,288,289"
+        );
+        assert_eq!(uid_set(&[7].into_iter().collect()), "7");
+    }
 
     /// The review finding: all per-message ops succeeding does not clear the
     /// session if the trailing EXPUNGE (or its collect) failed, because a

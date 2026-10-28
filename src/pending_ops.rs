@@ -69,12 +69,12 @@
 //!
 //! `target_message_id` is the `messages` row id, for correlation with the store
 //! (#0039 amendment); the full server addressing rides in the JSON payload as a
-//! [`ServerOp`], which names the message by `Message-ID`. The row already knows
-//! the exact `(mailbox, uid)`, and carrying the uid on the op to skip the
-//! full-mailbox `UID SEARCH HEADER` is a latency refinement the amendment notes;
-//! this first cut keeps the Message-ID addressing the outbox's Sent dedup relies
-//! on, because it is the proven seam and needs no widening of the `imap_client`
-//! op signatures.
+//! [`ServerOp`], which names the message by `Message-ID` and, for a move, a
+//! delete and the two flag toggles, by the UID of the copy the row stood for
+//! when the op was queued ([`crate::ops::ServerCopy`], PERSO-238): a folder can
+//! hold two copies under one `Message-ID`, and the op acts on its own. A payload
+//! queued before that field existed decodes without it and falls back to the
+//! `Message-ID` search, so no queued row needs migrating.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -1558,6 +1558,7 @@ mod tests {
             message_id: message_id.to_string(),
             source_mailbox: "INBOX".to_string(),
             dest_mailbox: "Archive".to_string(),
+            copy: None,
         }
     }
 
@@ -1989,6 +1990,7 @@ mod tests {
             message_id: "<inbox-2@example.com>".to_string(),
             mailbox: "INBOX".to_string(),
             read: true,
+            copy: None,
         };
         apply_set_read(&fx.store, "alice", id, true, op, Runner::Drain).unwrap();
         assert!(read::find_by_id(&fx.store, id).unwrap().unwrap().is_read());
@@ -2023,6 +2025,7 @@ mod tests {
         let op = ServerOp::Delete {
             message_id: "<inbox-1@example.com>".to_string(),
             source_mailbox: "INBOX".to_string(),
+            copy: None,
         };
         apply_delete(&fx.store, &fx.blobs, "alice", id, op, Runner::Drain).unwrap();
         assert!(read::find_by_id(&fx.store, id).unwrap().is_none());
@@ -2122,6 +2125,7 @@ mod tests {
         let op = ServerOp::Delete {
             message_id: "<inbox-1@example.com>".to_string(),
             source_mailbox: "INBOX".to_string(),
+            copy: None,
         };
         let (_prev, op_id) = apply_delete(&fx.store, &fx.blobs, "alice", id, op, Runner::Drain)
             .unwrap()
@@ -2268,6 +2272,7 @@ mod tests {
             message_id: id.to_string(),
             mailbox: "INBOX".to_string(),
             flagged: true,
+            copy: None,
         };
         apply_move(
             &fx.store,
@@ -2282,6 +2287,7 @@ mod tests {
         let delete = ServerOp::Delete {
             message_id: "<inbox-2@example.com>".to_string(),
             source_mailbox: "INBOX".to_string(),
+            copy: None,
         };
         apply_delete(&fx.store, &fx.blobs, "alice", deleted, delete, caller)
             .unwrap()
@@ -2290,6 +2296,7 @@ mod tests {
             message_id: "<inbox-3@example.com>".to_string(),
             mailbox: "INBOX".to_string(),
             read: true,
+            copy: None,
         };
         apply_set_read(&fx.store, "alice", read_one, true, read_op, caller)
             .unwrap()
@@ -2451,6 +2458,7 @@ mod tests {
             message_id: "<inbox-1@example.com>".to_string(),
             mailbox: "Archive".to_string(),
             flagged: true,
+            copy: None,
         };
         apply_set_flagged(&fx.store, "alice", id, true, star.clone(), Runner::Drain)
             .unwrap()
@@ -2459,6 +2467,7 @@ mod tests {
             message_id: "<inbox-1@example.com>".to_string(),
             source_mailbox: "Archive".to_string(),
             dest_mailbox: "Receipts".to_string(),
+            copy: None,
         };
         apply_move(
             &fx.store,
@@ -2599,6 +2608,7 @@ mod tests {
             message_id: "<inbox-1@example.com>".to_string(),
             mailbox: mailbox.to_string(),
             flagged: true,
+            copy: None,
         }
     }
 
@@ -3167,6 +3177,7 @@ mod tests {
             ServerOp::Delete {
                 message_id: "<x@x>".to_string(),
                 source_mailbox: "INBOX".to_string(),
+                copy: None,
             },
             Runner::Drain
         )

@@ -210,6 +210,8 @@ fn an_open_marks_the_row_it_resolved_and_queues_one_server_op() {
             // addresses the row's mailbox rather than the open one.
             mailbox: "inbox".to_string(),
             read: true,
+            // The row's own server copy (PERSO-238).
+            copy: crate::ops::ServerCopy::of_row(1, None),
         }
     );
     drop(store);

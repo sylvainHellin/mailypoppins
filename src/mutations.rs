@@ -24,7 +24,7 @@
 //! TUI's `MessageRef` wrapper around it: the daemon addresses a row by that id
 //! on the wire (`row_id`, P5-U4) and this module is below both clients.
 
-use crate::ops::ServerOp;
+use crate::ops::{ServerCopy, ServerOp};
 use crate::pending_ops::{self, Runner};
 use crate::store::write;
 use crate::store::{BlobStore, Store};
@@ -43,25 +43,45 @@ pub struct Queued {
     pub op_id: i64,
 }
 
-/// The Message-ID a queued op names, read off the row before the op is built.
+/// How a queued op names its message, read off the row before the op is built:
+/// the Message-ID, and the server copy the row stands for (PERSO-238).
 ///
 /// The durable `apply_*` functions read the row's coordinates themselves inside
-/// their commit, but they take the [`ServerOp`] ready-made, and the op names the
-/// message by Message-ID; this is the one lightweight read that supplies it.
-/// `None` (with a log line) when the row is already gone, which is a skip rather
-/// than an error.
-fn message_id_of(store: &Store, row_id: i64, what: &str) -> Option<String> {
-    match write::row_coordinates(store, row_id) {
-        Ok(Some(row)) => Some(row.message_id),
+/// their commit, but they take the [`ServerOp`] ready-made; this is the one
+/// lightweight read that supplies its addressing. The copy is the row's UID
+/// with its mailbox's UIDVALIDITY, so the server op acts on this row's copy
+/// when the folder holds two under one Message-ID. `None` (with a log line)
+/// when the row is already gone, which is a skip rather than an error.
+fn addressing_of(
+    store: &Store,
+    account: &str,
+    row_id: i64,
+    what: &str,
+) -> Option<(String, Option<ServerCopy>)> {
+    let row = match write::row_coordinates(store, row_id) {
+        Ok(Some(row)) => row,
         Ok(None) => {
             log::warn!("[store] message {row_id} has no row to {what}");
-            None
+            return None;
         }
         Err(e) => {
             log::warn!("[store] reading message {row_id} to {what} failed: {e:#}");
-            None
+            return None;
         }
-    }
+    };
+    // An unreadable cursor costs the op its UIDVALIDITY check, not the op: the
+    // UID search still carries the Message-ID.
+    let uidvalidity = crate::ingest::load_mailbox_cursor(store, account, &row.mailbox)
+        .unwrap_or_else(|e| {
+            log::warn!(
+                "[store] reading the cursor of {account}/{}: {e:#}",
+                row.mailbox
+            );
+            None
+        })
+        .and_then(|cursor| cursor.uidvalidity);
+    let copy = ServerCopy::of_row(row.uid, uidvalidity);
+    Some((row.message_id, copy))
 }
 
 /// Move rows into `dest_mailbox` (the store's mailbox key) and queue the server
@@ -82,13 +102,14 @@ pub fn queue_move(
 ) -> Vec<Queued> {
     let mut moved = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
-        let Some(message_id) = message_id_of(store, row_id, "move") else {
+        let Some((message_id, copy)) = addressing_of(store, account, row_id, "move") else {
             continue;
         };
         let op = ServerOp::Move {
             message_id,
             source_mailbox: source_server.to_string(),
             dest_mailbox: dest_server.to_string(),
+            copy,
         };
         match pending_ops::apply_move(store, account, row_id, dest_mailbox, op, runner) {
             Ok(Some((_previous, op_id))) => moved.push(Queued { row_id, op_id }),
@@ -110,12 +131,13 @@ pub fn queue_delete(
 ) -> Vec<Queued> {
     let mut deleted = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
-        let Some(message_id) = message_id_of(store, row_id, "delete") else {
+        let Some((message_id, copy)) = addressing_of(store, account, row_id, "delete") else {
             continue;
         };
         let op = ServerOp::Delete {
             message_id,
             source_mailbox: source_server.to_string(),
+            copy,
         };
         match pending_ops::apply_delete(store, blobs, account, row_id, op, runner) {
             Ok(Some((_previous, op_id))) => deleted.push(Queued { row_id, op_id }),
@@ -138,13 +160,14 @@ pub fn queue_read_flag(
 ) -> Vec<Queued> {
     let mut out = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
-        let Some(message_id) = message_id_of(store, row_id, "flag") else {
+        let Some((message_id, copy)) = addressing_of(store, account, row_id, "flag") else {
             continue;
         };
         let op = ServerOp::SetRead {
             message_id,
             mailbox: server_mailbox.to_string(),
             read,
+            copy,
         };
         match pending_ops::apply_set_read(store, account, row_id, read, op, runner) {
             Ok(Some(op_id)) => out.push(Queued { row_id, op_id }),
@@ -167,13 +190,14 @@ pub fn queue_flag(
 ) -> Vec<Queued> {
     let mut out = Vec::with_capacity(rows.len());
     for row_id in rows.iter().copied() {
-        let Some(message_id) = message_id_of(store, row_id, "flag") else {
+        let Some((message_id, copy)) = addressing_of(store, account, row_id, "flag") else {
             continue;
         };
         let op = ServerOp::SetFlagged {
             message_id,
             mailbox: server_mailbox.to_string(),
             flagged,
+            copy,
         };
         match pending_ops::apply_set_flagged(store, account, row_id, flagged, op, runner) {
             Ok(Some(op_id)) => out.push(Queued { row_id, op_id }),
@@ -238,6 +262,7 @@ mod tests {
                 message_id: "<inbox-1@example.com>".to_string(),
                 source_mailbox: "INBOX".to_string(),
                 dest_mailbox: "Archive".to_string(),
+                copy: ServerCopy::of_row(1, None),
             }
         );
     }
@@ -266,6 +291,7 @@ mod tests {
             ServerOp::Delete {
                 message_id: "<archive-4@example.com>".to_string(),
                 source_mailbox: "Archive".to_string(),
+                copy: ServerCopy::of_row(4, None),
             }
         );
     }
@@ -293,6 +319,7 @@ mod tests {
                 message_id: "<inbox-2@example.com>".to_string(),
                 mailbox: "INBOX".to_string(),
                 read: true,
+                copy: ServerCopy::of_row(2, None),
             }
         );
     }
@@ -323,6 +350,7 @@ mod tests {
                 message_id: "<inbox-7@example.com>".to_string(),
                 mailbox: "INBOX".to_string(),
                 flagged: true,
+                copy: ServerCopy::of_row(7, None),
             }
         );
     }
@@ -460,5 +488,96 @@ mod tests {
         assert!(pending_ops::queued_ops(&fx.store, "alice")
             .unwrap()
             .is_empty());
+    }
+
+    /// Two rows sharing a Message-ID in one mailbox, the two server copies
+    /// PERSO-236 left behind, each queue an op that names its own UID and the
+    /// mailbox's UIDVALIDITY, so the server acts on the copy the user picked
+    /// (PERSO-238). A row a local move parked on its `-id` sentinel has no
+    /// server UID yet and names none.
+    #[test]
+    fn each_copy_of_a_shared_message_id_queues_an_op_naming_its_uid() {
+        let fx = fixture();
+        let first = fx.ingest_plain("archive", 285, "Copy");
+        let second = fx.ingest_plain("archive", 288, "Copy");
+        fx.store
+            .conn()
+            .execute(
+                "UPDATE messages SET message_id = '<dup@example.com>' WHERE id IN (?1, ?2)",
+                [first, second],
+            )
+            .unwrap();
+        crate::ingest::record_mailbox_cursor(
+            &fx.store,
+            "alice",
+            "archive",
+            &crate::ingest::MailboxCursor {
+                uidvalidity: Some(7),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        queue_flag(
+            &fx.store,
+            "alice",
+            &refs(&[second]),
+            true,
+            "Archive",
+            Runner::Drain,
+        );
+        queue_move(
+            &fx.store,
+            "alice",
+            &refs(&[first]),
+            "inbox",
+            "Archive",
+            "INBOX",
+            Runner::Drain,
+        );
+        let ops: Vec<ServerOp> = pending_ops::queued_ops(&fx.store, "alice")
+            .unwrap()
+            .into_iter()
+            .map(|row| row.op)
+            .collect();
+        let named = |uid| {
+            Some(ServerCopy {
+                uid,
+                uidvalidity: Some(7),
+            })
+        };
+        assert_eq!(
+            ops,
+            vec![
+                ServerOp::SetFlagged {
+                    message_id: "<dup@example.com>".to_string(),
+                    mailbox: "Archive".to_string(),
+                    flagged: true,
+                    copy: named(288),
+                },
+                ServerOp::Move {
+                    message_id: "<dup@example.com>".to_string(),
+                    source_mailbox: "Archive".to_string(),
+                    dest_mailbox: "INBOX".to_string(),
+                    copy: named(285),
+                },
+            ]
+        );
+
+        // The moved row now sits on its `-id` sentinel in inbox.
+        queue_read_flag(
+            &fx.store,
+            "alice",
+            &refs(&[first]),
+            true,
+            "INBOX",
+            Runner::Drain,
+        );
+        let queued = pending_ops::queued_ops(&fx.store, "alice").unwrap();
+        assert!(
+            matches!(&queued[2].op, ServerOp::SetRead { copy: None, .. }),
+            "{:?}",
+            queued[2].op
+        );
     }
 }

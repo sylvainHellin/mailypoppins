@@ -14,11 +14,12 @@
 //! `tui::mutations` re-exports it so the TUI call sites read unchanged.
 //!
 //! Every op names the message by `Message-ID`, the one handle both backends
-//! share and the one that survives the local row moving. The store row already
-//! knows the exact `(mailbox, uid)`, and #0039's amendment notes a uid fast
-//! path as a later refinement; the durable queue's first cut keeps the
-//! Message-ID addressing the outbox's Sent dedup already relies on, because it
-//! is the proven seam and needs no widening of the `imap_client` op signatures.
+//! share and the one that survives the local row moving. A move, a delete and
+//! the two flag toggles also carry the [`ServerCopy`] the store row stood for
+//! when the op was queued (PERSO-238): a folder can hold two copies under one
+//! `Message-ID`, and the IMAP arm acts on the row's own UID rather than on
+//! whichever copy a `HEADER Message-ID` search lists first. Graph has no UIDs
+//! and ignores it.
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -73,6 +74,38 @@ impl NotFoundOnServer {
     }
 }
 
+/// The one server copy a per-message op acts on (PERSO-238).
+///
+/// A folder can hold two copies of a message under one `Message-ID` (a move
+/// that ran twice, PERSO-236, or a client that copied it), and the store keeps
+/// one row per copy. The row's UID is what tells them apart, so the op carries
+/// it, with the folder's UIDVALIDITY when a sync had recorded one: a UID only
+/// names a message within one UIDVALIDITY.
+///
+/// Absent from an op whose row had no server UID yet (the `-id` sentinel of a
+/// local move, the 63-bit synthetic uid of a Graph row or of an APPEND without
+/// `APPENDUID`), and from a payload queued before the field existed: the IMAP
+/// arm then searches by `Message-ID` alone
+/// (`crate::imap_client::ops::resolve_copy` has the whole rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerCopy {
+    pub uid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uidvalidity: Option<u32>,
+}
+
+impl ServerCopy {
+    /// The copy a store row names: its `uid`, when that is a UID a server
+    /// issued, and the UIDVALIDITY its mailbox was last synced under.
+    pub fn of_row(uid: i64, uidvalidity: Option<i64>) -> Option<ServerCopy> {
+        let uid = u32::try_from(uid).ok().filter(|uid| *uid > 0)?;
+        Some(ServerCopy {
+            uid,
+            uidvalidity: uidvalidity.and_then(|v| u32::try_from(v).ok()),
+        })
+    }
+}
+
 /// What the background thread (or the queue drain) will ask the server to do.
 ///
 /// Serializable so the durable [`crate::pending_ops`] queue can persist it in a
@@ -81,19 +114,28 @@ impl NotFoundOnServer {
 pub enum ServerOp {
     /// Move between server folders. Archiving is this with the archive folder
     /// as destination, exactly as `move_email_on_server` has always framed it.
+    ///
+    /// `copy`, here and on the three ops below, is the copy in the source
+    /// folder the store row stood for ([`ServerCopy`], PERSO-238).
     Move {
         message_id: String,
         source_mailbox: String,
         dest_mailbox: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy: Option<ServerCopy>,
     },
     Delete {
         message_id: String,
         source_mailbox: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy: Option<ServerCopy>,
     },
     SetRead {
         message_id: String,
         mailbox: String,
         read: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy: Option<ServerCopy>,
     },
     /// Toggle the `\Flagged` star (#0007). Like [`ServerOp::SetRead`], the
     /// server is truth on the IMAP path, so a local toggle needs a UID STORE
@@ -102,6 +144,8 @@ pub enum ServerOp {
         message_id: String,
         mailbox: String,
         flagged: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy: Option<ServerCopy>,
     },
     /// The post-send bookkeeping bit on the source of a reply or a forward:
     /// `\Answered` when `answered`, `$Forwarded` otherwise (#TKT-0051, #0076).
@@ -241,11 +285,13 @@ async fn run_imap(config: &ImapConfig, op: &ServerOp) -> Result<()> {
             message_id,
             source_mailbox,
             dest_mailbox,
+            copy,
         } => {
             crate::imap_client::move_email_on_server(
                 config,
                 message_id,
                 source_mailbox,
+                *copy,
                 dest_mailbox,
             )
             .await
@@ -253,28 +299,36 @@ async fn run_imap(config: &ImapConfig, op: &ServerOp) -> Result<()> {
         ServerOp::Delete {
             message_id,
             source_mailbox,
-        } => crate::imap_client::delete_email_on_server(config, message_id, source_mailbox).await,
+            copy,
+        } => {
+            crate::imap_client::delete_email_on_server(config, message_id, source_mailbox, *copy)
+                .await
+        }
         ServerOp::SetRead {
             message_id,
             mailbox,
             read,
+            copy,
         } => {
             if *read {
-                crate::imap_client::mark_read_on_server(config, message_id, mailbox).await
+                crate::imap_client::mark_read_on_server(config, message_id, mailbox, *copy).await
             } else {
-                crate::imap_client::mark_unread_on_server(config, message_id, mailbox).await
+                crate::imap_client::mark_unread_on_server(config, message_id, mailbox, *copy).await
             }
         }
         ServerOp::SetFlagged {
             message_id,
             mailbox,
             flagged,
+            copy,
         } => {
             let flag = crate::types::FLAG_FLAGGED;
             if *flagged {
-                crate::imap_client::add_flag_on_server(config, message_id, mailbox, flag).await
+                crate::imap_client::add_flag_on_server(config, message_id, mailbox, *copy, flag)
+                    .await
             } else {
-                crate::imap_client::remove_flag_on_server(config, message_id, mailbox, flag).await
+                crate::imap_client::remove_flag_on_server(config, message_id, mailbox, *copy, flag)
+                    .await
             }
         }
         ServerOp::SetAnswered {
@@ -350,6 +404,7 @@ mod tests {
             message_id: id.to_string(),
             source_mailbox: source.to_string(),
             dest_mailbox: dest.to_string(),
+            copy: None,
         }
     }
 
@@ -357,6 +412,7 @@ mod tests {
         ServerOp::Delete {
             message_id: id.to_string(),
             source_mailbox: source.to_string(),
+            copy: None,
         }
     }
 
@@ -371,6 +427,7 @@ mod tests {
                 message_id: "<1@x>".to_string(),
                 mailbox: "INBOX".to_string(),
                 read: false,
+                copy: None,
             }
             .kind(),
             "set_read"
@@ -415,11 +472,19 @@ mod tests {
                 message_id: "<3@x>".to_string(),
                 mailbox: "INBOX".to_string(),
                 read: true,
+                copy: Some(ServerCopy {
+                    uid: 286,
+                    uidvalidity: Some(7),
+                }),
             },
             ServerOp::SetFlagged {
                 message_id: "<4@x>".to_string(),
                 mailbox: "INBOX".to_string(),
                 flagged: false,
+                copy: Some(ServerCopy {
+                    uid: 12,
+                    uidvalidity: None,
+                }),
             },
             ServerOp::SetAnswered {
                 message_id: "<5@x>".to_string(),
@@ -463,5 +528,57 @@ mod tests {
         };
         assert_eq!(serde_json::from_str::<ServerOp>(old).unwrap(), op);
         assert_eq!(serde_json::to_string(&op).unwrap(), old);
+    }
+
+    /// A move, delete or flag op queued before PERSO-238 carries no `copy` and
+    /// still decodes, as an op that searches by `Message-ID`; an op whose row
+    /// had no server UID writes the payload it always did, so nothing queued
+    /// needs migrating either way.
+    #[test]
+    fn an_op_queued_before_the_copy_existed_still_decodes() {
+        let old =
+            r#"{"Move":{"message_id":"<8@x>","source_mailbox":"INBOX","dest_mailbox":"Archive"}}"#;
+        let op = mv("<8@x>", "INBOX", "Archive");
+        assert_eq!(serde_json::from_str::<ServerOp>(old).unwrap(), op);
+        assert_eq!(serde_json::to_string(&op).unwrap(), old);
+
+        let with_copy = ServerOp::Delete {
+            message_id: "<9@x>".to_string(),
+            source_mailbox: "Archive".to_string(),
+            copy: Some(ServerCopy {
+                uid: 285,
+                uidvalidity: Some(1700000000),
+            }),
+        };
+        let json = serde_json::to_string(&with_copy).unwrap();
+        assert!(
+            json.contains(r#""copy":{"uid":285,"uidvalidity":1700000000}"#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<ServerOp>(&json).unwrap(), with_copy);
+    }
+
+    /// Only a UID a server issued names a copy: the `-id` sentinel of a local
+    /// move and a 63-bit synthetic uid fall back to the `Message-ID` search.
+    #[test]
+    fn a_row_names_a_server_copy_only_by_a_server_uid() {
+        assert_eq!(
+            ServerCopy::of_row(285, Some(7)),
+            Some(ServerCopy {
+                uid: 285,
+                uidvalidity: Some(7),
+            })
+        );
+        assert_eq!(
+            ServerCopy::of_row(285, None).map(|c| c.uidvalidity),
+            Some(None)
+        );
+        assert_eq!(ServerCopy::of_row(-5, Some(7)), None, "a local move");
+        assert_eq!(ServerCopy::of_row(0, Some(7)), None);
+        assert_eq!(
+            ServerCopy::of_row(crate::ingest::graph_uid("<a@x>"), None),
+            None,
+            "a synthetic uid"
+        );
     }
 }
