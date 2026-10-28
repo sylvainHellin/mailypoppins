@@ -19,9 +19,13 @@
 use std::fmt;
 use std::str::FromStr;
 
-use chrono::{DateTime, Months, NaiveDate, NaiveDateTime, NaiveTime, SecondsFormat, Utc};
-use chrono_tz::Tz;
+use chrono::{DateTime, Months, NaiveDate, NaiveDateTime, NaiveTime, SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+
+/// The zone type this module's API speaks, re-exported so a client that
+/// reads the model's times (the TUI's calendar grid) names the same type
+/// without a dependency of its own on `chrono-tz`.
+pub use chrono_tz::Tz;
 
 /// A calendar's server id, as its backend names it. Ids are plain strings
 /// across the protocol, and this alias only documents which one is meant.
@@ -260,6 +264,46 @@ pub enum Occupancy {
         start: NaiveDate,
         end: NaiveDate,
     },
+}
+
+/// The viewer's own zone: `TZ` when it names an IANA zone, else the zone
+/// `/etc/localtime` links to, else UTC. The daemon's default zone and the
+/// zone the CLI and the TUI lay their calendar views out in.
+pub fn local_zone() -> Tz {
+    if let Some(zone) = std::env::var("TZ")
+        .ok()
+        .and_then(|tz| parse_zone(tz.trim_start_matches(':')))
+    {
+        return zone;
+    }
+    std::fs::read_link("/etc/localtime")
+        .ok()
+        .and_then(|target| {
+            let target = target.to_string_lossy().into_owned();
+            target
+                .split_once("zoneinfo/")
+                .and_then(|(_, name)| parse_zone(name))
+        })
+        .unwrap_or(Tz::UTC)
+}
+
+/// An IANA zone by name.
+pub fn parse_zone(name: &str) -> Option<Tz> {
+    Tz::from_str(name.trim()).ok()
+}
+
+/// The instant `day` starts in `zone`: its midnight, or the first instant
+/// after it when a daylight-saving jump skips midnight there. A view's day
+/// runs from one of these to the next.
+pub fn day_start(zone: Tz, day: NaiveDate) -> DateTime<Utc> {
+    let midnight = day.and_time(NaiveTime::MIN);
+    (0..=3)
+        .find_map(|hour| {
+            zone.from_local_datetime(&(midnight + chrono::Duration::hours(hour)))
+                .earliest()
+        })
+        .map(|instant| instant.with_timezone(&Utc))
+        .unwrap_or_else(|| midnight.and_utc())
 }
 
 /// Midnight of `date` in `zone` as an instant, a midnight lost to a DST gap

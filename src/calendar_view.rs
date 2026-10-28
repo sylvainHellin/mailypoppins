@@ -17,7 +17,6 @@
 //! against one another: each is an entry in a calendar of its own.
 
 use std::collections::HashSet;
-use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -71,30 +70,9 @@ pub struct ViewFilter {
     pub include_hidden: bool,
 }
 
-/// The daemon's own zone: `TZ` when it names an IANA zone, else the zone
-/// `/etc/localtime` links to, else UTC.
-pub fn local_zone() -> Tz {
-    if let Some(zone) = std::env::var("TZ")
-        .ok()
-        .and_then(|tz| parse_zone(tz.trim_start_matches(':')))
-    {
-        return zone;
-    }
-    std::fs::read_link("/etc/localtime")
-        .ok()
-        .and_then(|target| {
-            let target = target.to_string_lossy().into_owned();
-            target
-                .split_once("zoneinfo/")
-                .and_then(|(_, name)| parse_zone(name))
-        })
-        .unwrap_or(Tz::UTC)
-}
-
-/// An IANA zone by name.
-pub fn parse_zone(name: &str) -> Option<Tz> {
-    Tz::from_str(name.trim()).ok()
-}
+/// The daemon's own zone and the parse of an IANA name, which the clients
+/// share from the neutral model.
+pub use crate::calendar_model::{local_zone, parse_zone};
 
 /// The event id of the invitation mail `row_id`.
 pub fn imip_event_id(row_id: i64) -> String {

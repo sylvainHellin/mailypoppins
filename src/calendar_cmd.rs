@@ -12,9 +12,7 @@
 //! week text ([`render_view`]), the calendar list ([`render_calendars`]) and
 //! the event card ([`render_event`]).
 
-use std::collections::HashMap;
-
-use chrono::{DateTime, Datelike, Days, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Days, NaiveDate, Utc};
 use chrono_tz::Tz;
 use colored::*;
 use mp_protocol::calendar::{CalendarEvent, CalendarEventTime, CalendarInfo, CalendarViewParams};
@@ -187,18 +185,7 @@ pub fn view_days(
     }
 }
 
-/// The instant `day` starts in `zone`: its midnight, or the first instant
-/// after it when a daylight-saving jump skips midnight there.
-pub fn day_start(zone: Tz, day: NaiveDate) -> DateTime<Utc> {
-    let midnight = day.and_time(chrono::NaiveTime::MIN);
-    (0..=3)
-        .find_map(|hour| {
-            zone.from_local_datetime(&(midnight + chrono::Duration::hours(hour)))
-                .earliest()
-        })
-        .map(|instant| instant.with_timezone(&Utc))
-        .unwrap_or_else(|| midnight.and_utc())
-}
+pub use mp_core::calendar_model::day_start;
 
 /// The `calendar.view` parameters of the days `first` to `last` in `zone`.
 pub fn view_params(
@@ -224,39 +211,7 @@ pub fn view_params(
 // The views
 // ---------------------------------------------------------------------------
 
-/// The calendars' names by account and id, for the tag an event line
-/// carries.
-pub type CalendarNames = HashMap<(String, String), String>;
-
-/// [`CalendarNames`] from a `calendar.list` answer.
-pub fn calendar_names(calendars: &[CalendarInfo]) -> CalendarNames {
-    calendars
-        .iter()
-        .map(|c| ((c.account.clone(), c.id.clone()), c.name.clone()))
-        .collect()
-}
-
-/// The `account/calendar` tag of an event, the calendar by name when the
-/// list names it.
-fn calendar_tag(event: &CalendarEvent, names: &CalendarNames) -> String {
-    let name = names
-        .get(&(event.account.clone(), event.calendar.clone()))
-        .map(String::as_str)
-        .unwrap_or(&event.calendar);
-    format!("{}/{}", event.account, name)
-}
-
-/// The one-character mark of the user's own answer.
-pub fn response_mark(own_response: &str) -> char {
-    match own_response {
-        "accepted" => '✓',
-        "tentative" => '~',
-        "declined" => '✗',
-        "needs-action" => '?',
-        "organizer" => '★',
-        _ => ' ',
-    }
-}
+pub use mp_client::format::{calendar_names, calendar_tag, response_mark, CalendarNames};
 
 fn instant(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)

@@ -400,11 +400,40 @@ pub fn message_invite(
     account: &str,
     row_id: i64,
 ) -> Result<Option<EventFrontmatter>> {
+    Ok(message_invite_card(q, account, row_id)?.map(|card| card.event))
+}
+
+/// One message's invitation card and the server event it stands for, through
+/// `message.invite`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InviteCard {
+    /// The folded card.
+    pub event: EventFrontmatter,
+    /// The server event the invitation names on an account with a calendar
+    /// backend (PERSO-200), `None` when the server names none or the account
+    /// has no backend.
+    pub event_id: Option<String>,
+}
+
+/// [`message_invite`] with the `event_id` the daemon names beside the card,
+/// which is what an answer goes to: the server event when there is one, else
+/// the invitation mail's own `imip:<row_id>`.
+pub fn message_invite_card(
+    q: &dyn Queries,
+    account: &str,
+    row_id: i64,
+) -> Result<Option<InviteCard>> {
     let params = json!({"account": account, "row_id": row_id});
     let answer = q.call("message.invite", params)?;
     match answer.get("event") {
         None | Some(Value::Null) => Ok(None),
-        Some(event) => Ok(Some(serde_json::from_value(event.clone())?)),
+        Some(event) => Ok(Some(InviteCard {
+            event: serde_json::from_value(event.clone())?,
+            event_id: answer
+                .get("event_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })),
     }
 }
 
