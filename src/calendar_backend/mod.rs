@@ -8,6 +8,7 @@
 //! [`fake::FakeCalendarBackend`] stands in for a server in tests.
 
 pub mod fake;
+pub mod graph;
 
 use std::fmt;
 use std::future::Future;
@@ -26,6 +27,23 @@ pub enum Response {
     Decline,
 }
 
+/// What a backend learned about a recurring series while syncing its
+/// occurrences, cached in the store so the next sync need not ask again.
+///
+/// Graph gives every occurrence an `iCalUId` of its own, so the `UID` the
+/// series shares (and the invitation mails about it carry) is only on the
+/// series master, which one extra request per series reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeriesInfo {
+    /// The server id of the series master.
+    pub master_id: EventId,
+    /// The iCalendar `UID` of the series.
+    pub uid: String,
+    /// The series rule as `RRULE` text, when the backend could express it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurrence: Option<String>,
+}
+
 /// What one sync of a calendar's window brought.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SyncResult {
@@ -41,6 +59,13 @@ pub struct SyncResult {
     /// or the server refused the one given (Graph's HTTP 410). The engine then
     /// replaces the calendar's cached window instead of merging into it.
     pub full_resync: bool,
+    /// How the backend reached the window, recorded beside the token so the
+    /// path a calendar syncs through is observable (Graph: `calendar-delta`,
+    /// `default-delta` or `calendar-view`).
+    pub path: Option<String>,
+    /// Series the backend resolved during this sync, for the store's series
+    /// cache ([`CalendarBackend::remember_series`] hands them back).
+    pub series: Vec<SeriesInfo>,
 }
 
 /// Why a backend call failed.
@@ -154,6 +179,11 @@ pub trait CalendarBackend {
         comment: Option<String>,
         send_response: bool,
     ) -> impl Future<Output = BackendResult<()>> + Send;
+
+    /// The series the store already knows, handed over before a sync so a
+    /// backend that resolves series (Graph) does not ask for them again. A
+    /// backend whose occurrences carry the series `UID` ignores it.
+    fn remember_series(&self, _known: Vec<SeriesInfo>) {}
 }
 
 #[cfg(test)]

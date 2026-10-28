@@ -579,8 +579,12 @@ pub const GRAPH_CLEANUPS_TABLE: &str = "graph_cleanups";
 /// build created gains its `message_id` column here too. `draft_absence`
 /// beside it holds what the last reconcile found missing; losing it delays a
 /// retirement by one reconcile.
-fn additive_tables() -> [(&'static str, String); 5] {
-    [
+///
+/// The calendar tables ([`super::calendar`], PERSO-200) are a disposable cache
+/// of the server calendar; losing them costs one baseline sync, and a hidden
+/// calendar shows again.
+fn additive_tables() -> Vec<(&'static str, String)> {
+    let mut tables = vec![
         (
             ATTACHMENT_REPAIRS_TABLE,
             format!(
@@ -613,7 +617,9 @@ fn additive_tables() -> [(&'static str, String); 5] {
             super::draft_sync::ABSENCE_TABLE,
             super::draft_sync::absence_create_sql(),
         ),
-    ]
+    ];
+    tables.extend(super::calendar::create_sql());
+    tables
 }
 
 /// Create the tables added after [`SCHEMA_VERSION`] was last bumped, on the

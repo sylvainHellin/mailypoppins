@@ -1,0 +1,50 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#Collection(event)",
+  "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/calendars/AAMkCal-default/calendarView/delta?$deltatoken=round1",
+  "value": [
+    {
+      "@odata.type": "#microsoft.graph.event",
+      "id": "AAMkEv-weekly-exc3",
+      "iCalUId": "040000008200E00074C5B7101A82E00807EA0B1100000000WEEKLY-EXC3",
+      "subject": "Weekly sync (moved)",
+      "start": { "dateTime": "2026-11-18T15:00:00.0000000", "timeZone": "UTC" },
+      "end": { "dateTime": "2026-11-18T16:00:00.0000000", "timeZone": "UTC" },
+      "originalStartTimeZone": "W. Europe Standard Time",
+      "originalEndTimeZone": "W. Europe Standard Time",
+      "isAllDay": false,
+      "responseStatus": { "response": "organizer", "time": "0001-01-01T00:00:00Z" },
+      "type": "exception",
+      "seriesMasterId": "AAMkEv-weekly",
+      "originalStart": "2026-11-17T13:00:00Z",
+      "isReminderOn": false,
+      "sensitivity": "normal",
+      "showAs": "busy",
+      "isOrganizer": true
+    },
+    {
+      "@odata.type": "#microsoft.graph.event",
+      "id": "AAMkEv-gone",
+      "@removed": { "reason": "deleted" }
+    },
+    {
+      "@odata.type": "#microsoft.graph.event",
+      "id": "AAMkEv-custom",
+      "iCalUId": "040000008200E00074C5B7101A82E00800000000CUSTOM",
+      "subject": "Call with a custom zone",
+      "start": { "dateTime": "2026-11-20T09:30:00.0000000", "timeZone": "UTC" },
+      "end": { "dateTime": "2026-11-20T10:00:00.0000000", "timeZone": "UTC" },
+      "originalStartTimeZone": "tzone://Microsoft/Custom",
+      "originalEndTimeZone": "tzone://Microsoft/Custom",
+      "isAllDay": false,
+      "responseStatus": { "response": "accepted", "time": "2026-10-22T08:00:00Z" },
+      "type": "singleInstance",
+      "isReminderOn": true,
+      "reminderMinutesBeforeStart": 10,
+      "onlineMeetingUrl": "https://meet.example.com/legacy",
+      "sensitivity": "confidential",
+      "showAs": "workingElsewhere",
+      "isCancelled": true,
+      "isOrganizer": false
+    }
+  ]
+}

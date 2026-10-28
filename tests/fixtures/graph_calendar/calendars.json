@@ -1,0 +1,45 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('sylvain%40evoqs.de')/calendars",
+  "value": [
+    {
+      "id": "AAMkCal-default",
+      "name": "Calendar",
+      "color": "auto",
+      "hexColor": "",
+      "isDefaultCalendar": true,
+      "changeKey": "ck-default",
+      "canShare": true,
+      "canViewPrivateItems": true,
+      "canEdit": true,
+      "isRemovable": false,
+      "isTallyingResponses": true,
+      "owner": { "name": "Sylvain Hellin", "address": "sylvain@evoqs.de" }
+    },
+    {
+      "id": "AAMkCal/holidays+1=",
+      "name": "Holidays",
+      "color": "lightGreen",
+      "hexColor": "",
+      "isDefaultCalendar": false,
+      "changeKey": "ck-holidays",
+      "canShare": false,
+      "canViewPrivateItems": true,
+      "canEdit": false,
+      "isRemovable": true,
+      "owner": { "name": "Sylvain Hellin", "address": "sylvain@evoqs.de" }
+    },
+    {
+      "id": "AAMkCal-team",
+      "name": "Team",
+      "color": "auto",
+      "hexColor": "#FF8C00",
+      "isDefaultCalendar": false,
+      "changeKey": "ck-team",
+      "canShare": true,
+      "canViewPrivateItems": true,
+      "canEdit": true,
+      "isRemovable": true,
+      "owner": { "name": "Sylvain Hellin", "address": "sylvain@evoqs.de" }
+    }
+  ]
+}

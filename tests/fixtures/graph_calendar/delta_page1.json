@@ -1,0 +1,106 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#Collection(event)",
+  "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/calendars/AAMkCal-default/calendarView/delta?$skiptoken=page2",
+  "value": [
+    {
+      "@odata.type": "#microsoft.graph.event",
+      "@odata.etag": "W/\"single\"",
+      "id": "AAMkEv-single",
+      "iCalUId": "040000008200E00074C5B7101A82E00800000000SINGLE",
+      "changeKey": "ck-single",
+      "subject": "Project review",
+      "bodyPreview": "Agenda: budget",
+      "body": {
+        "contentType": "html",
+        "content": "<html><body><p>Agenda: <b>budget</b></p></body></html>"
+      },
+      "start": { "dateTime": "2026-11-03T08:00:00.0000000", "timeZone": "UTC" },
+      "end": { "dateTime": "2026-11-03T09:00:00.0000000", "timeZone": "UTC" },
+      "originalStartTimeZone": "W. Europe Standard Time",
+      "originalEndTimeZone": "W. Europe Standard Time",
+      "isAllDay": false,
+      "location": { "displayName": "Room 1" },
+      "organizer": { "emailAddress": { "name": "Ada Lovelace", "address": "ada@example.com" } },
+      "attendees": [
+        {
+          "type": "required",
+          "status": { "response": "accepted", "time": "2026-10-20T10:00:00Z" },
+          "emailAddress": { "name": "Ada Lovelace", "address": "ada@example.com" }
+        },
+        {
+          "type": "optional",
+          "status": { "response": "none", "time": "0001-01-01T00:00:00Z" },
+          "emailAddress": { "name": "Sylvain Hellin", "address": "sylvain@evoqs.de" }
+        },
+        {
+          "type": "resource",
+          "status": { "response": "tentativelyAccepted", "time": "2026-10-20T10:01:00Z" },
+          "emailAddress": { "name": "Room 1", "address": "room1@evoqs.de" }
+        }
+      ],
+      "responseStatus": { "response": "notResponded", "time": "0001-01-01T00:00:00Z" },
+      "type": "singleInstance",
+      "seriesMasterId": null,
+      "recurrence": null,
+      "reminderMinutesBeforeStart": 15,
+      "isReminderOn": true,
+      "isOnlineMeeting": true,
+      "onlineMeeting": { "joinUrl": "https://teams.microsoft.com/l/meetup-join/abc" },
+      "onlineMeetingUrl": null,
+      "sensitivity": "normal",
+      "showAs": "tentative",
+      "isCancelled": false,
+      "isOrganizer": false,
+      "webLink": "https://outlook.office365.com/owa/?itemid=AAMkEv-single",
+      "lastModifiedDateTime": "2026-10-20T10:00:00.1234567Z"
+    },
+    {
+      "@odata.type": "#microsoft.graph.event",
+      "id": "AAMkEv-allday",
+      "iCalUId": "040000008200E00074C5B7101A82E00800000000ALLDAY",
+      "subject": "Holiday",
+      "bodyPreview": "",
+      "body": { "contentType": "text", "content": "" },
+      "start": { "dateTime": "2026-11-05T00:00:00.0000000", "timeZone": "UTC" },
+      "end": { "dateTime": "2026-11-07T00:00:00.0000000", "timeZone": "UTC" },
+      "originalStartTimeZone": "W. Europe Standard Time",
+      "originalEndTimeZone": "W. Europe Standard Time",
+      "isAllDay": true,
+      "location": { "displayName": "" },
+      "organizer": { "emailAddress": { "name": "Sylvain Hellin", "address": "sylvain@evoqs.de" } },
+      "attendees": [],
+      "responseStatus": { "response": "organizer", "time": "0001-01-01T00:00:00Z" },
+      "type": "singleInstance",
+      "reminderMinutesBeforeStart": 1080,
+      "isReminderOn": false,
+      "sensitivity": "private",
+      "showAs": "oof",
+      "isCancelled": false,
+      "isOrganizer": true,
+      "lastModifiedDateTime": "2026-10-21T09:00:00Z"
+    },
+    {
+      "@odata.type": "#microsoft.graph.event",
+      "id": "AAMkEv-weekly-occ2",
+      "iCalUId": "040000008200E00074C5B7101A82E00807EA0B0A00000000WEEKLY-OCC2",
+      "subject": "Weekly sync",
+      "start": { "dateTime": "2026-11-10T13:00:00.0000000", "timeZone": "UTC" },
+      "end": { "dateTime": "2026-11-10T14:00:00.0000000", "timeZone": "UTC" },
+      "originalStartTimeZone": "W. Europe Standard Time",
+      "originalEndTimeZone": "W. Europe Standard Time",
+      "isAllDay": false,
+      "organizer": { "emailAddress": { "name": "Sylvain Hellin", "address": "sylvain@evoqs.de" } },
+      "attendees": [],
+      "responseStatus": { "response": "organizer", "time": "0001-01-01T00:00:00Z" },
+      "type": "occurrence",
+      "seriesMasterId": "AAMkEv-weekly",
+      "originalStart": "2026-11-10T13:00:00Z",
+      "reminderMinutesBeforeStart": 15,
+      "isReminderOn": true,
+      "sensitivity": "normal",
+      "showAs": "busy",
+      "isCancelled": false,
+      "isOrganizer": true
+    }
+  ]
+}

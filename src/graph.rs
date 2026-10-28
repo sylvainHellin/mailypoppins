@@ -24,7 +24,7 @@ use crate::sync::{
 use crate::timing::TimingSpan;
 use crate::types::MailboxRole;
 
-const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
+pub(crate) const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
 /// The `$select` a full message fetch needs, shared by every endpoint that
 /// returns whole messages so they all hydrate the same [`FetchedEmail`].
@@ -247,6 +247,11 @@ const ID_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
     .add(b'{')
     .add(b'}');
 
+/// `id` escaped for a URL path segment with [`ID_ENCODE_SET`].
+pub(crate) fn encode_id(id: &str) -> String {
+    percent_encoding::utf8_percent_encode(id, ID_ENCODE_SET).to_string()
+}
+
 // ---------------------------------------------------------------------------
 // GraphClient
 // ---------------------------------------------------------------------------
@@ -321,6 +326,13 @@ impl GraphClient {
 
     fn bearer(&self) -> String {
         self.access_token.clone()
+    }
+
+    /// A request to `url` on this client's connection pool, signed with its
+    /// token: the base the Graph calendar adapter
+    /// ([`crate::calendar_backend::graph`]) builds its calls on.
+    pub(crate) fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        self.client.request(method, url).bearer_auth(self.bearer())
     }
 
     /// Refresh the access token in place, keeping the reqwest client and its
