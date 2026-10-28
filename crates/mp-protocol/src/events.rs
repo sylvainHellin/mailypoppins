@@ -213,6 +213,11 @@ pub const KIND_SIGNATURE_REMOVED: &str = "signature.removed";
 /// daemon leftovers, 2026-10-22).
 pub const KIND_CONTACT_CHANGED: &str = "contact.changed";
 
+/// The `kind` an account's calendars or events moved travels as (PERSO-200):
+/// a sync that changed the cache, an answer to an invitation, a calendar shown
+/// or hidden. The payload is [`crate::calendar::CalendarChanged`].
+pub const KIND_CALENDAR_CHANGED: &str = "calendar.changed";
+
 /// The `kind` one progress report of an operation travels as, with a payload
 /// carrying its `operation_id`.
 pub const KIND_OPERATION_PROGRESS: &str = "operation.progress";

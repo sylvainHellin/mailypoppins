@@ -1,0 +1,6 @@
+{
+  "id": 71,
+  "jsonrpc": "2.0",
+  "method": "calendar.list",
+  "params": {}
+}

@@ -62,7 +62,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use mp_protocol::calendar::{AgendaEvent, EventFrontmatter};
+use mp_protocol::calendar::{
+    AgendaEvent, CalendarEvent, CalendarInfo, CalendarListResult, CalendarViewParams,
+    CalendarViewResult, EventFrontmatter, EventGetResult, EventRespondParams,
+};
 use mp_protocol::draft::{DraftListing, DraftLocation};
 use mp_protocol::events::{KIND_INVALIDATE, KIND_REMOVE};
 use mp_protocol::listing::{
@@ -440,6 +443,67 @@ pub fn calendar_events(q: &dyn Queries, account: &str) -> Result<Vec<AgendaEvent
 }
 
 // ---------------------------------------------------------------------------
+// The server calendar (PERSO-200)
+// ---------------------------------------------------------------------------
+
+/// The calendars of every account, or of `account`, through
+/// `calendar.list`: the server calendars of an account with a backend, and
+/// the virtual `imip` calendar of an account with invitation mails.
+pub fn calendar_list(q: &dyn Queries, account: Option<&str>) -> Result<Vec<CalendarInfo>> {
+    let params = match account {
+        Some(account) => json!({"account": account}),
+        None => json!({}),
+    };
+    let answer: CalendarListResult = serde_json::from_value(q.call("calendar.list", params)?)?;
+    Ok(answer.calendars)
+}
+
+/// Show or hide one calendar, through `calendar.set_visibility`.
+pub fn calendar_set_visibility(
+    q: &dyn Queries,
+    account: &str,
+    calendar: &str,
+    visible: bool,
+) -> Result<()> {
+    let params = json!({"account": account, "calendar": calendar, "visible": visible});
+    q.call("calendar.set_visibility", params)?;
+    Ok(())
+}
+
+/// The events in a range, merged across accounts and sorted by start, through
+/// `calendar.view`.
+pub fn calendar_view(q: &dyn Queries, params: &CalendarViewParams) -> Result<CalendarViewResult> {
+    let answer = q.call("calendar.view", serde_json::to_value(params)?)?;
+    Ok(serde_json::from_value(answer)?)
+}
+
+/// One event, through `event.get`.
+pub fn event_get(q: &dyn Queries, account: &str, event: &str) -> Result<CalendarEvent> {
+    let answer = q.call("event.get", json!({"account": account, "event": event}))?;
+    let answer: EventGetResult = serde_json::from_value(answer)?;
+    Ok(answer.event)
+}
+
+/// The `params` of `event.respond`, an operation a client starts through its
+/// own operation path and watches to its `EventRespondResult`.
+pub fn event_respond_params(
+    account: &str,
+    event: &str,
+    response: &str,
+    comment: Option<&str>,
+    send_response: bool,
+) -> Value {
+    serde_json::to_value(EventRespondParams {
+        account: account.to_string(),
+        event: event.to_string(),
+        response: response.to_string(),
+        comment: comment.map(str::to_string),
+        send_response: Some(send_response),
+    })
+    .unwrap_or_else(|_| json!({"account": account, "event": event, "response": response}))
+}
+
+// ---------------------------------------------------------------------------
 // Row deltas
 // ---------------------------------------------------------------------------
 
@@ -614,6 +678,51 @@ mod tests {
         assert_eq!(
             rows[1].selector,
             "mp://work/inbox/Invoice-2025-114@example.com"
+        );
+    }
+
+    /// The server-calendar reads ask with the committed request shapes and
+    /// decode the committed answers.
+    #[test]
+    fn the_calendar_reads_decode_the_committed_answers() {
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/calendar.list.response.json"
+        )));
+        let calendars = calendar_list(&door, None).expect("calendars");
+        assert_eq!(calendars.len(), 3);
+        assert_eq!(door.seen.borrow()[0], ("calendar.list".into(), json!({})));
+
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/calendar.view.response.json"
+        )));
+        let request: Value = serde_json::from_str(include_str!(
+            "../../mp-protocol/fixtures/calendar.view.request.json"
+        ))
+        .unwrap();
+        let params: CalendarViewParams = serde_json::from_value(request["params"].clone()).unwrap();
+        let view = calendar_view(&door, &params).expect("a view");
+        assert_eq!(view.events.len(), 2);
+        assert_eq!(door.seen.borrow()[0].1, request["params"]);
+
+        let door = Canned::new(fixture_result(include_str!(
+            "../../mp-protocol/fixtures/event.get.response.json"
+        )));
+        let event = event_get(&door, "evoqs", "AAMkADev2").expect("an event");
+        assert_eq!(event.summary, "Holiday");
+
+        let request: Value = serde_json::from_str(include_str!(
+            "../../mp-protocol/fixtures/event.respond.request.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            event_respond_params(
+                "evoqs",
+                "AAMkADev1",
+                "tentative",
+                Some("I may be late"),
+                false
+            ),
+            request["params"]
         );
     }
 

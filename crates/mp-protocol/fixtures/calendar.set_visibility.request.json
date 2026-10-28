@@ -1,0 +1,10 @@
+{
+  "id": 72,
+  "jsonrpc": "2.0",
+  "method": "calendar.set_visibility",
+  "params": {
+    "account": "evoqs",
+    "calendar": "AAMkADcal2",
+    "visible": false
+  }
+}

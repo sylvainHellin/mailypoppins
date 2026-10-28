@@ -1,0 +1,87 @@
+{
+  "id": 73,
+  "jsonrpc": "2.0",
+  "result": {
+    "events": [
+      {
+        "account": "evoqs",
+        "attendees": [
+          {
+            "email": "sylvain@example.com",
+            "name": "Sylvain",
+            "role": "required",
+            "status": "needs-action"
+          }
+        ],
+        "calendar": "AAMkADcal1",
+        "cancelled": false,
+        "id": "AAMkADev1",
+        "is_organizer": false,
+        "last_modified": "2026-10-30T08:00:00Z",
+        "location": "Room 1",
+        "online_meeting_url": "https://teams.microsoft.com/l/meetup-join/abc",
+        "organizer": {
+          "email": "ada@example.com",
+          "name": "Ada Lovelace"
+        },
+        "own_response": "needs-action",
+        "reminder": 15,
+        "sensitivity": "normal",
+        "show_as": "busy",
+        "summary": "Project review",
+        "time": {
+          "end": "2026-11-03T10:00:00Z",
+          "kind": "timed",
+          "start": "2026-11-03T09:00:00Z",
+          "zone": "Europe/Berlin"
+        },
+        "uid": "040000008200E00074C5B7101A82E008",
+        "web_link": "https://outlook.office365.com/owa/?itemid=AAMkADev1"
+      },
+      {
+        "account": "perso",
+        "attendees": [
+          {
+            "email": "perso@example.com",
+            "role": "required",
+            "status": "needs-action"
+          }
+        ],
+        "calendar": "imip",
+        "cancelled": false,
+        "id": "imip:42",
+        "is_organizer": false,
+        "location": "Room 4.12",
+        "organizer": {
+          "email": "chair@tum.de"
+        },
+        "own_response": "needs-action",
+        "sensitivity": "normal",
+        "show_as": "busy",
+        "source": {
+          "kind": "imip",
+          "row_id": 42,
+          "selector": "mp://perso/inbox/invitation@example.com",
+          "subject": "Invitation: LOC Day planning"
+        },
+        "summary": "LOC Day planning",
+        "time": {
+          "end": "2026-11-05T13:00:00Z",
+          "kind": "timed",
+          "start": "2026-11-05T12:00:00Z",
+          "zone": "UTC"
+        },
+        "uid": "loc-day@tum.de"
+      }
+    ],
+    "range": {
+      "end": "2026-11-08T23:00:00Z",
+      "start": "2026-11-01T23:00:00Z"
+    },
+    "window": {
+      "end": "2027-11-28T00:00:00Z",
+      "start": "2026-10-28T00:00:00Z"
+    },
+    "zone": "Europe/Berlin"
+  }
+}
