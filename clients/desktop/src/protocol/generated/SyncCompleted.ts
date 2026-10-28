@@ -42,7 +42,9 @@ pruned: number,
  */
 prunes_deferred: number,
 /**
- * Rows rebound to a new UID after a UIDVALIDITY reset.
+ * Rows found through their Message-ID and moved onto the UID the server now
+ * gives their message: a row a local move left on its sentinel, reached in
+ * its destination, or a row a UIDVALIDITY reset renumbered.
  */
 uid_rebound: number,
 /**
