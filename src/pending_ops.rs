@@ -1127,24 +1127,31 @@ pub async fn resume_account_or_busy(account: &AccountConfig) -> Result<Resume> {
         return Ok(Resume::NothingQueued);
     }
     let store = Store::open(&path)?;
+    if owed_ops(&store, account)? == 0 {
+        return Ok(Resume::NothingQueued);
+    }
+    let blobs = BlobStore::for_account(&account.name);
+    let mut executor = AccountExecutor::resolve(account)?;
+    drain_account_or_busy(&store, &blobs, &account.name, &mut executor).await
+}
+
+/// How many ops of `account` a drain would find `queued` in `store`, once
+/// what is owed but not yet queued has joined them: the cheap gate that
+/// keeps a clean account off the server.
+fn owed_ops(store: &Store, account: &AccountConfig) -> Result<usize> {
     // The drafts mirror's owed pushes join the queue here, so every drain
     // point carries a save the watcher saw, or one nobody saw while no daemon
     // ran (#0143).
-    if let Err(e) = crate::draft_mirror::push::enqueue_owed(&store, account) {
+    if let Err(e) = crate::draft_mirror::push::enqueue_owed(store, account) {
         warn!(
             "[drafts] could not queue the owed pushes of {}: {e:#}",
             account.name
         );
     }
     // Before the count, so an op a caller left `settling` is owed here too.
-    recover_orphaned_settles(&store, &account.name)?;
-    let (queued, _failed) = counts(&store, &account.name)?;
-    if queued == 0 {
-        return Ok(Resume::NothingQueued);
-    }
-    let blobs = BlobStore::for_account(&account.name);
-    let mut executor = AccountExecutor::resolve(account)?;
-    drain_account_or_busy(&store, &blobs, &account.name, &mut executor).await
+    recover_orphaned_settles(store, &account.name)?;
+    let (queued, _failed) = counts(store, &account.name)?;
+    Ok(queued)
 }
 
 /// Run one just-enqueued op synchronously and settle its row, for a caller that
@@ -2399,6 +2406,35 @@ mod tests {
             1,
             "the caller's op is still the caller's"
         );
+    }
+
+    /// The resume's gate owes an op a dead caller left `settling`: counted
+    /// before it is handed back, the queue would read empty at every tick and
+    /// the op would never reach the drain that recovers it (PERSO-236).
+    #[test]
+    fn a_resume_owes_an_op_left_settling_by_a_dead_caller() {
+        let _data = crate::config::test_env::TestDataDir::new();
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let scope = SettleScope::open(&fx.store);
+        apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+        drop(scope);
+        let account = AccountConfig {
+            name: "alice".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(owed_ops(&fx.store, &account).unwrap(), 1);
+        assert_eq!(queued_ops(&fx.store, "alice").unwrap().len(), 1);
     }
 
     /// The post-send flag write (#0076) commits the local bit and one
