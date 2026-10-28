@@ -144,6 +144,7 @@ All notable changes to this project are documented in this file.
   A config that still names it loads: that account alone stays blocked, and the daemon, `mp sync` and `mp config show` say how to switch, while every other account keeps serving.
 - Desktop: the account wizard's "Microsoft 365 (OAuth2, IMAP and SMTP)" preset; Microsoft 365 is "Microsoft 365 (Graph API)", and Settings marks an account that still names the retired mode, with how to switch it and no sign-in button.
 - The obsolete `spikes/ipc-bench` benchmark.
+- The unused IMAP batch move and delete (`batch_move_on_server`, `batch_delete_on_server`), which acted on whichever copy of a twice-held message the server listed first; nothing called them since the mutation queue drains one op at a time (PERSO-238).
 - `mp fetch`: use `mp search --mailbox <name>` with the same filters (`--from`, `--to`, `--cc`, `--subject`, `--body`, `--after`/`--before`, `-n`, `--full`); the daemon's `message.list_server` went with it.
 
 ## [0.12.0] - 2026-10-22

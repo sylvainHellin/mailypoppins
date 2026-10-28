@@ -506,7 +506,7 @@ Changes on a non-active account set `has_unseen` in the TUI, which is the badge 
 | `search.rs` | `build_imap_search_query()`, `FetchCriteria` (the structured direct-lookup path; the user grammar moved to `crate::search`, and `normalize_message_id` / `bracketed_message_id` / `parse_date_to_imap` moved to `mp_core::imap_query` and are re-exported from here) |
 | `watch.rs` | `watch_mailbox()` (IMAP IDLE) |
 | `ops.rs` | Single-message server ops: move, delete, read flags |
-| `batch.rs` | `batch_move_on_server`, `batch_delete_on_server` |
+| `batch.rs` | `add_flag_in_mailboxes`: the post-send `\Answered` / `$Forwarded` bit on every copy of a message in several mailboxes, over one session |
 | `sent.rs` | `ImapSentMailbox`: the APPEND seam the outbox drives, faked in tests |
 | **`src/daemon/`** (the files the daemon section above does not name) | |
 | `sync_outcome.rs` | `from_sync_result`: an engine `SyncResult` to the wire's `SyncCompleted` (P3b-U6), plus the `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME` fake the sync-slice tests arm |

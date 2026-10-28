@@ -7,7 +7,7 @@ mod sent;
 mod store_sync;
 mod watch;
 
-pub use batch::{add_flag_in_mailboxes, batch_delete_on_server, batch_move_on_server};
+pub use batch::add_flag_in_mailboxes;
 pub use fetch::{
     fetch_new_raw_on_session, fetch_raw_by_message_id, fetch_uids_on_session,
     search_stubs_on_session, vanished_uids,
