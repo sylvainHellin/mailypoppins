@@ -54,6 +54,9 @@ All notable changes to this project are documented in this file.
 - `draft.set_headers` rewrites an existing draft's recipients and subject in the daemon (#0143).
 
 ### Changed
+- `mp delete`, and any delete a client asks to settle, of a message another client already moved or deleted before the next sync (the phone, Outlook) now succeeds and the message stays deleted, on IMAP and on Microsoft 365 (Graph) accounts, instead of failing with "not found" (PERSO-245).
+  `mp move` and `mp archive` of such a message still fail and put it back, now saying it was already moved or deleted elsewhere and that the next sync will show where.
+  On a Graph account this replaces the old behaviour, where such a move or delete succeeded without changing anything or acted on a copy of the message in another folder; a folder that still holds copies the command cannot tell apart still fails as before.
 - A forward follows Outlook instead of Gmail, in the CLI, the TUI and the desktop app: the subject takes `FW: ` unless it already opens with `FW:`, `Fwd:` or `WG:`, and the original opens with its From, Sent, To, Cc (left out when empty) and Subject one per line, set bold under a thin #B5C4DF top border in the HTML part, with no `---------- Forwarded message ----------` line; the Sent date reads as Outlook writes it, in the local time zone.
 - A forward as attachment (`mp forward --as-attachment`, `cF` in the TUI and the desktop app) has a body holding only the signature, as Outlook writes it, instead of the quoted original the attached `.eml` already carries (PERSO-174).
 - TUI: the mailbox sidebar, and the headers pane aligned with it, take at most a third of the column height, so an account with many folders no longer squeezes the email list to a few rows; the sidebar scrolls to the open mailbox as before.

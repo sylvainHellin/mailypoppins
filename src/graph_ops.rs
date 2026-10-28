@@ -11,6 +11,10 @@
 //! Every op touches nothing locally: the local half is the store row the caller
 //! wrote optimistically (`crate::store::write`), and the result here is what
 //! tells it whether to keep that write or put it back.
+//!
+//! Contract: a source folder with no copy left is a not-found with
+//! `none_left`, which a caller's settle counts as a delete done and fails as a
+//! move "already moved or deleted elsewhere" (`crate::pending_ops`, PERSO-245).
 
 use anyhow::{anyhow, Result};
 use log::info;
@@ -116,10 +120,12 @@ pub(crate) async fn resolve_item<G: GraphItems>(
 
 /// The typed not-found of an op whose item is gone, so the durable queue's
 /// drain converges a replay whose op already landed (#0039 review).
-fn not_found(message_id: &str, folder: Option<&str>) -> anyhow::Error {
+/// `none_left` is whether the folder holds no copy at all ([`Resolved::Gone`]).
+fn not_found(message_id: &str, folder: Option<&str>, none_left: bool) -> anyhow::Error {
     crate::ops::NotFoundOnServer {
         message_id: message_id.to_string(),
         mailbox: folder.map(str::to_string),
+        none_left,
     }
     .into()
 }
@@ -155,14 +161,14 @@ pub(crate) async fn item_to_move<G: GraphItems>(
 ) -> Result<String> {
     match resolve_item(graph, source, message_id, copy).await? {
         Resolved::Item(id) => Ok(id),
-        Resolved::Gone => Err(not_found(message_id, Some(source))),
+        Resolved::Gone => Err(not_found(message_id, Some(source), true)),
         Resolved::Missed { unbound: false }
             if !graph.folder_copies(dest, message_id).await?.is_empty() =>
         {
             info!(
                 "{message_id} is already in {dest} and its item left {source}: a move that landed"
             );
-            Err(not_found(message_id, Some(source)))
+            Err(not_found(message_id, Some(source), false))
         }
         Resolved::Missed { .. } => Err(unsettled(message_id, source, copy)),
     }
@@ -179,9 +185,8 @@ pub(crate) async fn item_to_delete<G: GraphItems>(
 ) -> Result<String> {
     match resolve_item(graph, source, message_id, copy).await? {
         Resolved::Item(id) => Ok(id),
-        Resolved::Gone | Resolved::Missed { unbound: false } => {
-            Err(not_found(message_id, Some(source)))
-        }
+        Resolved::Gone => Err(not_found(message_id, Some(source), true)),
+        Resolved::Missed { unbound: false } => Err(not_found(message_id, Some(source), false)),
         Resolved::Missed { unbound: true } => Err(unsettled(message_id, source, copy)),
     }
 }
@@ -224,7 +229,7 @@ async fn mark_read_on<G: GraphItems>(
 ) -> Result<()> {
     match resolve_item(graph, mailbox, message_id, copy).await? {
         Resolved::Item(id) => graph.set_read(&id, read).await,
-        Resolved::Gone => Err(not_found(message_id, None)),
+        Resolved::Gone => Err(not_found(message_id, None, true)),
         Resolved::Missed { .. } => Ok(()),
     }
 }
@@ -486,12 +491,17 @@ mod tests {
         assert_eq!(mailbox.ids_in("Inbox"), ["twin"]);
 
         // A delete replay converges too, and so does a source with no copy.
+        // Only the second has none left, which a caller's settle counts as
+        // a delete done: beside the twin, the message may not be gone
+        // (PERSO-245).
         let e = delete_on(&mailbox, DUP, "Inbox", Some(&copy))
             .await
             .unwrap_err();
         assert!(is_not_found(&e), "{e:#}");
+        assert!(NotFoundOnServer::none_left_in(&e).is_none(), "{e:#}");
         let e = delete_on(&mailbox, DUP, "Drafts", None).await.unwrap_err();
         assert!(is_not_found(&e), "{e:#}");
+        assert!(NotFoundOnServer::none_left_in(&e).is_some(), "{e:#}");
         assert_eq!(mailbox.acted(), ["MOVE mine Archive"]);
     }
 
@@ -543,6 +553,187 @@ mod tests {
         .unwrap();
         assert_eq!(mailbox.acted(), ["MOVE second Archive"]);
         assert_eq!(mailbox.ids_in("Inbox"), ["first"]);
+    }
+
+    /// A caller's settle (`mp delete`, `mp move`) over the in-memory mailbox:
+    /// the op the queue builds off the store row, run by
+    /// [`crate::pending_ops::run_and_settle`] against the real resolution, and
+    /// what the settle does with its answer (PERSO-245).
+    mod settle {
+        use super::*;
+        use crate::ops::ServerOp;
+        use crate::pending_ops::{self, OlderOps, OpExecutor, Runner, SettleScope};
+        use crate::reconcile::tests::{fixture, Fixture};
+        use crate::store::read;
+
+        /// The mailbox as the server a settle runs its op on.
+        struct Server<'a>(&'a Mailbox);
+
+        impl OpExecutor for Server<'_> {
+            async fn execute(&mut self, op: &ServerOp) -> Result<()> {
+                match op {
+                    ServerOp::Move {
+                        message_id,
+                        source_mailbox,
+                        dest_mailbox,
+                        graph_copy,
+                        ..
+                    } => {
+                        move_on(
+                            self.0,
+                            message_id,
+                            source_mailbox,
+                            graph_copy.as_ref(),
+                            dest_mailbox,
+                        )
+                        .await
+                    }
+                    ServerOp::Delete {
+                        message_id,
+                        source_mailbox,
+                        graph_copy,
+                        ..
+                    } => delete_on(self.0, message_id, source_mailbox, graph_copy.as_ref()).await,
+                    other => Err(anyhow!("no {} here", other.kind())),
+                }
+            }
+        }
+
+        /// The inbox row of [`DUP`], bound to the Graph item `bound` when
+        /// there is one.
+        fn row(bound: Option<&str>) -> (Fixture, i64) {
+            let fx = fixture();
+            let row = fx.ingest_plain("inbox", crate::ingest::graph_uid(DUP), "Dup");
+            fx.store
+                .conn()
+                .execute("UPDATE messages SET message_id = ?1", [DUP])
+                .unwrap();
+            if let Some(id) = bound {
+                assert_eq!(
+                    crate::ingest::bind_graph_ids(&fx.store, "alice", "inbox", [(DUP, id)]),
+                    1
+                );
+            }
+            (fx, row)
+        }
+
+        /// Commit `queue`'s op for the caller and settle it on `mailbox`.
+        async fn settled(
+            fx: &Fixture,
+            mailbox: &Mailbox,
+            queue: impl FnOnce(Runner<'_>) -> Vec<crate::mutations::Queued>,
+        ) -> Result<()> {
+            let scope = SettleScope::open(&fx.store);
+            let queued = queue(Runner::Caller(&scope));
+            let nudge = || {};
+            pending_ops::run_and_settle(
+                &fx.store,
+                &fx.blobs,
+                &scope,
+                queued[0].op_id,
+                &mut Server(mailbox),
+                OlderOps::wait(&nudge),
+            )
+            .await
+        }
+
+        async fn deleted(fx: &Fixture, row: i64, mailbox: &Mailbox) -> Result<()> {
+            settled(fx, mailbox, |runner| {
+                crate::mutations::queue_delete(
+                    &fx.store,
+                    &fx.blobs,
+                    "alice",
+                    &[row],
+                    "Inbox",
+                    runner,
+                )
+            })
+            .await
+        }
+
+        async fn archived(fx: &Fixture, row: i64, mailbox: &Mailbox) -> Result<()> {
+            settled(fx, mailbox, |runner| {
+                crate::mutations::queue_move(
+                    &fx.store,
+                    "alice",
+                    &[row],
+                    "archive",
+                    "Inbox",
+                    "Archive",
+                    runner,
+                )
+            })
+            .await
+        }
+
+        fn no_ops(fx: &Fixture) -> bool {
+            pending_ops::unsettled_ops(&fx.store, "alice")
+                .unwrap()
+                .is_empty()
+                && pending_ops::failed_ops(&fx.store, "alice")
+                    .unwrap()
+                    .is_empty()
+        }
+
+        /// The user deleted or moved the message on the phone before the next
+        /// sync: Inbox holds no copy. The delete's goal is reached, so it
+        /// succeeds and the local delete stands, where it used to fail with
+        /// a not-found; the copy in Archive is not touched.
+        #[tokio::test]
+        async fn a_delete_of_a_message_gone_from_its_folder_counts_as_done() {
+            let (fx, row) = row(Some("mine"));
+            let mailbox = Mailbox::with(&[("Archive", "filed", DUP)]);
+
+            deleted(&fx, row, &mailbox).await.unwrap();
+
+            assert!(read::find_by_id(&fx.store, row).unwrap().is_none());
+            assert!(no_ops(&fx));
+            assert!(mailbox.acted().is_empty(), "{:?}", mailbox.acted());
+            assert_eq!(mailbox.ids_in("Archive"), ["filed"]);
+        }
+
+        /// The same for a move: its destination is unknown, so it fails with
+        /// the message saying so and the row goes back to Inbox, where the
+        /// next sync finds where the message went.
+        #[tokio::test]
+        async fn a_move_of_a_message_gone_from_its_folder_fails_and_goes_home() {
+            let (fx, row) = row(Some("mine"));
+            let mailbox = Mailbox::with(&[("Receipts", "filed", DUP)]);
+
+            let err = archived(&fx, row, &mailbox).await.unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "Email with Message-ID {DUP} is no longer in Inbox on server: already moved \
+                     or deleted elsewhere; the next sync will show where"
+                )
+            );
+            let back = read::find_by_id(&fx.store, row).unwrap().unwrap();
+            assert_eq!(back.mailbox, "inbox");
+            assert!(no_ops(&fx));
+            assert!(mailbox.acted().is_empty(), "{:?}", mailbox.acted());
+        }
+
+        /// Inbox holds two copies and the row names neither, or names an
+        /// item Inbox does not hold beside a copy it does: the message is
+        /// not gone, and the delete still fails without touching either.
+        #[tokio::test]
+        async fn a_delete_that_cannot_tell_its_item_still_fails() {
+            let (fx, row) = self::row(None);
+            let mailbox = Mailbox::with(&[("Inbox", "first", DUP), ("Inbox", "second", DUP)]);
+            let err = deleted(&fx, row, &mailbox).await.unwrap_err();
+            assert!(err.to_string().contains("cannot be told apart"), "{err:#}");
+            assert!(mailbox.acted().is_empty(), "{:?}", mailbox.acted());
+            assert!(no_ops(&fx));
+
+            let (fx, row) = self::row(Some("stale"));
+            let mailbox = Mailbox::with(&[("Inbox", "other", DUP)]);
+            let err = deleted(&fx, row, &mailbox).await.unwrap_err();
+            assert!(err.to_string().contains("cannot be told apart"), "{err:#}");
+            assert!(mailbox.acted().is_empty(), "{:?}", mailbox.acted());
+            assert_eq!(mailbox.ids_in("Inbox"), ["other"]);
+        }
     }
 
     /// The new lookup is scoped to the source folder.

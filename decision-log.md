@@ -355,3 +355,11 @@ calcure (<https://github.com/anufrievroman/calcure>), a Python terminal calendar
 Rejected: agenda and day view only in the TUI, with the week grid in the desktop app only (cheaper, but the TUI loses the week overview).
 Source: report comment export of 2026-10-28 on `.sync/calendar-scoping`.
 Status: accepted
+
+## 2026-10-28 - A delete of a message already gone from its folder counts as done; a move of it fails with "already moved or deleted elsewhere"
+
+Why: the delete's goal is reached; a move's destination is unknown, so success would hide where the mail went.
+Gone means the source folder holds no copy of the message at all; a folder that still holds copies the op cannot tell apart keeps failing, on IMAP and Graph alike (PERSO-245).
+Rejected: keeping the error for delete; counting a move as done.
+Source: chat with Sylvain on 2026-10-28.
+Status: accepted

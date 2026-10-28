@@ -291,10 +291,14 @@ async fn select(session: &mut ImapSession, mailbox: &str) -> Result<Option<u32>>
 /// The typed not-found of a move or delete whose copy is gone, so the durable
 /// queue's drain can converge a replay whose op already landed (#0039 review);
 /// a direct CLI/TUI caller still sees the same message through `Display`.
-fn not_found(message_id: &str, mailbox: &str) -> anyhow::Error {
+/// `none_left` is whether the folder holds no copy at all
+/// ([`Resolved::Gone`]), which is what lets a caller's settle count a delete
+/// as done (PERSO-245).
+fn not_found(message_id: &str, mailbox: &str, none_left: bool) -> anyhow::Error {
     crate::ops::NotFoundOnServer {
         message_id: message_id.to_string(),
         mailbox: Some(mailbox.to_string()),
+        none_left,
     }
     .into()
 }
@@ -334,13 +338,13 @@ pub(super) async fn copy_to_move<S: UidSearch>(
 ) -> Result<u32> {
     match resolve_copy(session, message_id, copy, selected_uidvalidity).await? {
         Resolved::Copy(uid) => Ok(uid),
-        Resolved::Gone => Err(not_found(message_id, source_mailbox)),
+        Resolved::Gone => Err(not_found(message_id, source_mailbox, true)),
         Resolved::Missed { unbound: false } if session.holds(dest_mailbox, message_id).await? => {
             info!(
                 "{message_id} is already in {dest_mailbox} and its copy left {source_mailbox}: \
                  a move that landed"
             );
-            Err(not_found(message_id, source_mailbox))
+            Err(not_found(message_id, source_mailbox, false))
         }
         Resolved::Missed { .. } => Err(unsettled(message_id, source_mailbox, copy)),
     }
@@ -352,8 +356,11 @@ pub(super) async fn copy_to_move<S: UidSearch>(
 /// A [`Resolved::Missed`] whose remaining copies all stand for other rows is
 /// what a replay of a delete that landed leaves, with no destination to
 /// confirm it: it converges as not found, as a folder with no copy at all
-/// does. A miss with a copy no row stands for, which may be the op's own
-/// under a new UID, is [`unsettled`].
+/// does. Only the folder with no copy at all is the not-found a caller's
+/// settle counts as a delete done (PERSO-245); a copy another row stands for
+/// may be the one the user meant, so that settle still fails. A miss with a
+/// copy no row stands for, which may be the op's own under a new UID, is
+/// [`unsettled`].
 pub(super) async fn copy_to_delete<S: UidSearch>(
     session: &mut S,
     message_id: &str,
@@ -363,9 +370,8 @@ pub(super) async fn copy_to_delete<S: UidSearch>(
 ) -> Result<u32> {
     match resolve_copy(session, message_id, copy, selected_uidvalidity).await? {
         Resolved::Copy(uid) => Ok(uid),
-        Resolved::Gone | Resolved::Missed { unbound: false } => {
-            Err(not_found(message_id, source_mailbox))
-        }
+        Resolved::Gone => Err(not_found(message_id, source_mailbox, true)),
+        Resolved::Missed { unbound: false } => Err(not_found(message_id, source_mailbox, false)),
         Resolved::Missed { unbound: true } => Err(unsettled(message_id, source_mailbox, copy)),
     }
 }
@@ -809,6 +815,22 @@ mod tests {
 
         impl OpExecutor for Server {
             async fn execute(&mut self, op: &ServerOp) -> Result<()> {
+                if let ServerOp::Delete {
+                    message_id,
+                    source_mailbox,
+                    copy,
+                    ..
+                } = op
+                {
+                    self.selected = "INBOX";
+                    let uid =
+                        copy_to_delete(self, message_id, source_mailbox, copy.as_ref(), Some(7))
+                            .await?;
+                    let source = self.folders.get_mut(self.selected).unwrap();
+                    source.retain(|(u, _)| *u != uid);
+                    self.moved.push(format!("{uid} {source_mailbox} deleted"));
+                    return Ok(());
+                }
                 let ServerOp::Move {
                     message_id,
                     source_mailbox,
@@ -961,6 +983,126 @@ mod tests {
             let failed = pending_ops::failed_ops(&fx.store, "alice").unwrap();
             let error = failed[0].last_error.as_deref().unwrap_or_default();
             assert!(error.contains("cannot be told apart"), "{error}");
+        }
+
+        /// Commit `queue`'s op for the caller, as `mp delete` and `mp move`
+        /// do, and settle it on `server` (PERSO-245).
+        async fn settled(
+            fx: &Fixture,
+            server: &mut Server,
+            queue: impl FnOnce(Runner<'_>) -> Vec<crate::mutations::Queued>,
+        ) -> Result<()> {
+            let scope = pending_ops::SettleScope::open(&fx.store);
+            let queued = queue(Runner::Caller(&scope));
+            let nudge = || {};
+            pending_ops::run_and_settle(
+                &fx.store,
+                &fx.blobs,
+                &scope,
+                queued[0].op_id,
+                server,
+                pending_ops::OlderOps::wait(&nudge),
+            )
+            .await
+        }
+
+        async fn deleted(fx: &Fixture, id: i64, server: &mut Server) -> Result<()> {
+            settled(fx, server, |runner| {
+                crate::mutations::queue_delete(
+                    &fx.store,
+                    &fx.blobs,
+                    "alice",
+                    &[id],
+                    "INBOX",
+                    runner,
+                )
+            })
+            .await
+        }
+
+        fn no_ops(fx: &Fixture) -> bool {
+            pending_ops::unsettled_ops(&fx.store, "alice")
+                .unwrap()
+                .is_empty()
+                && pending_ops::failed_ops(&fx.store, "alice")
+                    .unwrap()
+                    .is_empty()
+        }
+
+        /// `mp delete` of a message another client moved or deleted before
+        /// the next sync: INBOX holds no copy. The delete's goal is reached,
+        /// so it succeeds and the local delete stands, where it used to fail
+        /// with a not-found; the copy in Archive is not touched.
+        #[tokio::test]
+        async fn a_settled_delete_of_a_message_gone_from_its_folder_counts_as_done() {
+            let (fx, id) = rows(None);
+            let mut server = Server::new(&[("INBOX", &[]), ("Archive", &[(40, MID)])]);
+
+            deleted(&fx, id, &mut server).await.unwrap();
+
+            assert!(read::find_by_id(&fx.store, id).unwrap().is_none());
+            assert!(no_ops(&fx));
+            assert!(server.moved.is_empty(), "{:?}", server.moved);
+            assert_eq!(server.folder("Archive"), [40]);
+        }
+
+        /// `mp archive` of the same: where the message went is unknown, so
+        /// the move fails saying so, and the row goes back to INBOX for the
+        /// next sync to place.
+        #[tokio::test]
+        async fn a_settled_move_of_a_message_gone_from_its_folder_fails_and_goes_home() {
+            let (fx, id) = rows(None);
+            let mut server = Server::new(&[("INBOX", &[]), ("Receipts", &[(40, MID)])]);
+
+            let err = settled(&fx, &mut server, |runner| {
+                queue_move(
+                    &fx.store,
+                    "alice",
+                    &[id],
+                    "archive",
+                    "INBOX",
+                    "Archive",
+                    runner,
+                )
+            })
+            .await
+            .unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "Email with Message-ID {MID} is no longer in INBOX on server: already moved \
+                     or deleted elsewhere; the next sync will show where"
+                )
+            );
+            let row = read::find_by_id(&fx.store, id).unwrap().unwrap();
+            assert_eq!((row.mailbox.as_str(), row.uid), ("inbox", 1), "rolled back");
+            assert!(no_ops(&fx));
+            assert!(server.moved.is_empty(), "{:?}", server.moved);
+        }
+
+        /// INBOX still holds the message, under copies the delete cannot
+        /// take for the row's: two no row stands for, or one the twin row
+        /// stands for. It is not gone, and the delete still fails, touching
+        /// neither.
+        #[tokio::test]
+        async fn a_settled_delete_that_cannot_tell_its_copy_still_fails() {
+            let (fx, id) = rows(None);
+            let mut server = Server::new(&[("INBOX", &[(301, MID), (302, MID)])]);
+            let err = deleted(&fx, id, &mut server).await.unwrap_err();
+            assert!(err.to_string().contains("cannot be told apart"), "{err:#}");
+            assert!(server.moved.is_empty(), "{:?}", server.moved);
+            assert!(no_ops(&fx));
+
+            let (fx, id) = rows(Some(2));
+            let mut server = Server::new(&[("INBOX", &[(2, MID)])]);
+            let err = deleted(&fx, id, &mut server).await.unwrap_err();
+            assert_eq!(
+                format!("{err:#}"),
+                format!("Email with Message-ID {MID} not found in INBOX on server")
+            );
+            assert!(server.moved.is_empty(), "{:?}", server.moved);
+            assert_eq!(server.folder("INBOX"), [2]);
         }
     }
 }

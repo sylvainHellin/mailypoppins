@@ -748,10 +748,11 @@ Test honesty matters here: a fake executor scripted to return `Ok` on replay val
 
 Wiring the consumers onto the queue (#0039 piece 4) surfaced that the not-found policy is caller-dependent, not a property of the op.
 The background drain (`pending_ops::drain`, used by the TUI and the sync-tick `resume_account`) converges a `NotFoundOnServer`, because it cannot tell a genuine miss from a crash-replay of an op whose server half already landed, and converging is the only choice that does not surface a succeeded op as failed.
-The CLI wants the opposite: `mp delete <id>` for a message the server no longer holds must print the not-found error, and a regression pins that string byte-identical.
-The resolution is that the CLI does not use the converging drain at all.
-`pending_ops::run_and_settle` enqueues, runs the single owed op, and returns its raw result, retiring on success and rolling the local half back on any failure including not-found, because a synchronous caller runs the op once in the process that enqueued it and so is never a crash-replay.
-So the queue is one seam with two settle policies (`drain` converges, `run_and_settle` reports), and the discriminator is which entry point the caller picked, not what the backend returned.
+The CLI cannot converge blindly: a synchronous caller runs the op once in the process that enqueued it, so its not-found is never a crash-replay, and it means something only once the op's goal is asked.
+So the CLI does not use the converging drain at all: `pending_ops::run_and_settle` enqueues, runs the single owed op, retires on success and rolls the local half back on failure.
+Its one exception is a source folder with no copy of the message left (`NotFoundOnServer::none_left`), which means another client moved or deleted it before the next sync (PERSO-245): a delete has reached its goal and counts as done, while a move fails with "already moved or deleted elsewhere; the next sync will show where", because success would hide where the mail went.
+The flag has to be set by the backend, not inferred from the not-found: a folder that still holds copies other rows stand for also returns a not-found, which the drain converges as a replay, but a settle there may be about to call a twin's delete done.
+So the queue is one seam with two settle policies (`drain` converges, `run_and_settle` reads the op's goal), and the discriminator is which entry point the caller picked plus what the backend saw in the folder.
 Keep `run_and_settle` testable offline by splitting the settle decision (`settle(store, blobs, row, outcome)`) from the one `await` that produces the outcome; the decision is what a not-found regression needs to exercise, and it needs no live backend.
 
 ## A settled op must be out of the drain's reach from the commit that creates it

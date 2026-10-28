@@ -4205,6 +4205,7 @@ pub async fn mark_last_verb_graph(
         return Err(crate::ops::NotFoundOnServer {
             message_id: internet_message_id.to_string(),
             mailbox: None,
+            none_left: true,
         }
         .into());
     }

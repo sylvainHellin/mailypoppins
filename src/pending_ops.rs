@@ -95,6 +95,12 @@
 //! explains the miss; the IMAP arm reports any other miss, such as a copy it
 //! cannot tell from a twin, as an ordinary error, which the drain retries and
 //! then rolls back (`crate::imap_client::ops::copy_to_move`).
+//!
+//! A caller's settle ([`run_and_settle`]) is never a replay, so it reads a
+//! not-found by the op's goal instead (PERSO-245): when the source folder
+//! holds no copy of the message at all, another client moved or deleted it
+//! since the last sync, which a delete counts as done and a move reports as
+//! an error and rolls back, since where the message went is unknown.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -1532,12 +1538,12 @@ impl<'a> OlderOps<'a> {
 /// server refusal, and the error says why.
 ///
 /// On success the row is retired; on any failure the local half is rolled back,
-/// the row is discarded, and the error is returned verbatim, so a
-/// [`crate::ops::NotFoundOnServer`] reaches the user byte-identical to the
-/// pre-queue path. Unlike [`drain`] this does **not** converge a not-found: a
-/// synchronous caller runs the op once, in the same process that enqueued it, so
-/// it is never a crash replay, and a message the server does not hold is a
-/// genuine error to report rather than a converged replay to swallow.
+/// the row is discarded, and the error is returned. Unlike [`drain`] this
+/// does not converge every not-found: a synchronous caller runs the op once,
+/// in the same process that enqueued it, so it is never a crash replay. A
+/// message its folder no longer holds at all was moved or deleted by another
+/// client since the last sync, and only the op's goal decides ([`settle`]):
+/// a delete has reached it, a move cannot tell where the message went.
 pub async fn run_and_settle<E: OpExecutor>(
     store: &Store,
     blobs: &BlobStore,
@@ -1675,7 +1681,16 @@ fn older_owed(store: &Store, account: &str, target: i64, before: i64) -> Result<
 }
 
 /// Retire a settled op on success, or roll its local half back and discard it
-/// on failure, returning the error verbatim.
+/// on failure, returning the error.
+///
+/// A message its source folder holds no copy of any more
+/// ([`crate::ops::NotFoundOnServer::none_left`]) was moved or deleted by
+/// another client before the next sync (PERSO-245). A delete counts that as
+/// done: its goal is reached, so the row is retired and the local delete
+/// stands. A move fails with [`moved_elsewhere`] and is rolled back: its
+/// destination is unknown, and a success would hide where the mail went. A
+/// folder that still holds copies other rows stand for, or copies the op
+/// cannot tell apart, is not that, and fails as before.
 ///
 /// A refused move takes the later ops still owed on its message with it, as
 /// in the drain ([`refuse`], PERSO-243): a star the TUI queued behind the
@@ -1686,16 +1701,40 @@ fn older_owed(store: &Store, account: &str, target: i64, before: i64) -> Result<
 /// Split from [`run_and_settle`] so the settle policy is unit-testable without a
 /// live backend: the execution is one `await`, this is the whole decision.
 fn settle(store: &Store, blobs: &BlobStore, row: &PendingOp, outcome: Result<()>) -> Result<()> {
-    match outcome {
-        Ok(()) => {
-            retire(store, row.id)?;
-            Ok(())
-        }
-        Err(e) => {
-            refuse(store, blobs, row.id, &format!("{e:#}"), Refusal::Discard)?;
-            Err(e)
+    let mut e = match outcome {
+        Ok(()) => return retire(store, row.id),
+        Err(e) => e,
+    };
+    if let Some(gone) = crate::ops::NotFoundOnServer::none_left_in(&e) {
+        match row.op {
+            ServerOp::Delete { .. } => {
+                info!(
+                    "[pending_ops] op {} (delete): {gone}, already moved or deleted elsewhere; \
+                     counted as done",
+                    row.id
+                );
+                return retire(store, row.id);
+            }
+            ServerOp::Move { .. } => e = moved_elsewhere(gone),
+            _ => {}
         }
     }
+    refuse(store, blobs, row.id, &format!("{e:#}"), Refusal::Discard)?;
+    Err(e)
+}
+
+/// The error a settled move reports when its source folder holds no copy of
+/// the message any more (PERSO-245), the same for IMAP and Graph.
+fn moved_elsewhere(gone: &crate::ops::NotFoundOnServer) -> anyhow::Error {
+    let folder = gone
+        .mailbox
+        .as_deref()
+        .map_or_else(String::new, |mailbox| format!(" in {mailbox}"));
+    anyhow::anyhow!(
+        "Email with Message-ID {} is no longer{folder} on server: already moved or deleted \
+         elsewhere; the next sync will show where",
+        gone.message_id
+    )
 }
 
 /// One decoded row by its `pending_ops.id`.
@@ -2004,6 +2043,7 @@ mod tests {
         Err(crate::ops::NotFoundOnServer {
             message_id: message_id.to_string(),
             mailbox: Some("INBOX".to_string()),
+            none_left: true,
         }
         .into())
     }
@@ -2704,12 +2744,12 @@ mod tests {
         );
     }
 
-    /// CLI outcome parity: unlike the background [`drain`], the synchronous
-    /// settle does **not** converge a not-found. A `mp delete` for a message the
-    /// server no longer holds reports the not-found error byte-identical to the
-    /// pre-queue path, because a synchronous caller is never a crash replay.
+    /// Unlike the background [`drain`], the synchronous settle does not
+    /// converge every not-found: a delete whose folder still holds copies
+    /// other rows stand for (a twin) may not have reached its goal, and
+    /// reports the not-found verbatim (PERSO-245).
     #[test]
-    fn settle_surfaces_a_not_found_verbatim_for_the_cli() {
+    fn settle_surfaces_a_not_found_beside_a_twin_verbatim() {
         let fx = fixture();
         let id = fx.ingest_invite("inbox", 1, "Standup", &invite_ics("uid-a", 0, &["a@x.com"]));
         let op = ServerOp::Delete {
@@ -2725,6 +2765,7 @@ mod tests {
         let not_found = crate::ops::NotFoundOnServer {
             message_id: "<inbox-1@example.com>".to_string(),
             mailbox: Some("INBOX".to_string()),
+            none_left: false,
         };
         let expected = not_found.to_string();
         let row = row_by_id(&fx.store, op_id).unwrap().unwrap();

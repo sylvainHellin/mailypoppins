@@ -51,6 +51,12 @@ pub struct NotFoundOnServer {
     /// Graph move or delete (PERSO-245). The Graph read toggle and post-send
     /// mark leave it out.
     pub mailbox: Option<String>,
+    /// Whether the folder holds no copy of the message at all, `false` when it
+    /// still holds copies that stand for other store rows, as a replay of a
+    /// move or delete that landed beside a twin leaves it. Only a folder with
+    /// none left tells a caller's settle that a delete's goal is reached, and
+    /// that a move's message went elsewhere ([`crate::pending_ops`], PERSO-245).
+    pub none_left: bool,
 }
 
 impl fmt::Display for NotFoundOnServer {
@@ -73,6 +79,13 @@ impl NotFoundOnServer {
     /// The drain uses this to converge a replay instead of failing it.
     pub fn is_in(err: &anyhow::Error) -> bool {
         err.downcast_ref::<NotFoundOnServer>().is_some()
+    }
+
+    /// The not-found `err` is, or wraps, when its folder holds no copy of the
+    /// message at all ([`NotFoundOnServer::none_left`]).
+    pub fn none_left_in(err: &anyhow::Error) -> Option<&NotFoundOnServer> {
+        err.downcast_ref::<NotFoundOnServer>()
+            .filter(|found| found.none_left)
     }
 }
 

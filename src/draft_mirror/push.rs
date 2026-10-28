@@ -225,6 +225,7 @@ pub async fn delete<F: DraftsFolder>(
         return Err(NotFoundOnServer {
             message_id: message_id.to_string(),
             mailbox: Some(mailbox.to_string()),
+            none_left: true,
         }
         .into());
     }
