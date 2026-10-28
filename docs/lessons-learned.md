@@ -3262,3 +3262,11 @@ Every client opens a new draft in an editor the moment `draft.create` returns, a
 Saving the buffer dropped the key, which the PERSO-192 row restore then wrote back under the buffer a second time; not saving dropped the edits.
 The key is now minted in `created()` before the path goes out, so the first push of a draft mp created reads the file and writes nothing.
 Bookkeeping a file must carry belongs in it before anyone else can open it; a write after hand-off races whatever editor holds the file, and the editor wins.
+
+## A contacts rebuild races every writer, and row ids cannot tell it what it counted (2026-10-28, PERSO-234)
+
+The daemon's sync tick never fed the contacts cache, so a correspondent seen only through it stayed unsearchable until `mp contacts rebuild`, and a reinstall never rebuilt an old cache.
+`messages.id` has no `AUTOINCREMENT`, so SQLite gives a deleted newest row's id to the next insert, and a "highest row id walked" watermark skipped that insert for good.
+Each observation is now numbered from a process-wide sequence drawn where its row commits, and a rebuild takes a window mark before its walk reads the store; a number drawn at merge time is always newer than any past mark and can never be recognised as already counted.
+A rebuild that replaces the cache carries over what every concurrent writer merged meanwhile, sends included, through that window.
+Only data actually in the stored row can be "already counted": the Sent copy has no Bcc header, so a send's Bcc recipients are always merged.
