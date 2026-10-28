@@ -280,7 +280,8 @@ impl Method for ConfigMethod {
                 }
                 "config.oauth2_login" => {
                     let work = plan_oauth2(&family.store.snapshot().accounts, &params)?;
-                    Ok(self.operation(ctx, move |handle| oauth2_login(work, handle)))
+                    let diagnostics = Arc::clone(&family.diagnostics);
+                    Ok(self.operation(ctx, move |handle| oauth2_login(work, diagnostics, handle)))
                 }
                 other => Err(DomainError::method_not_found(other)),
             }
@@ -1039,7 +1040,11 @@ fn plan_oauth2(
 /// `ACC-06`: the device-code flow, with the verification URL and the user code
 /// reported as the operation's first progress so the client can render them and
 /// open a browser (`INT-04`).
-async fn oauth2_login(work: OAuth2Work, handle: crate::daemon::operations::OperationHandle) {
+async fn oauth2_login(
+    work: OAuth2Work,
+    diagnostics: Arc<crate::daemon::diagnostics::Diagnostics>,
+    handle: crate::daemon::operations::OperationHandle,
+) {
     handle.set_running();
     // A candidate sign-in is a wizard starting: the sign-ins wizards staged
     // and abandoned more than a day ago go, so `candidates/` does not keep
@@ -1065,6 +1070,12 @@ async fn oauth2_login(work: OAuth2Work, handle: crate::daemon::operations::Opera
         &report,
     )
     .await;
+    // A new sign-in may have granted the calendar scope a stale token lacked
+    // (PERSO-200): its check is re-read now, so the prompt clears without
+    // waiting for the periodic sweep.
+    if acquired.is_ok() && !work.staged {
+        diagnostics.refresh();
+    }
     match acquired {
         Ok(_) => handle.succeed(json!({
             "stored": true,

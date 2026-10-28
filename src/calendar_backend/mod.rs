@@ -15,6 +15,7 @@ use std::future::Future;
 use serde::{Deserialize, Serialize};
 
 use crate::calendar_model::{Calendar, CalendarWindow, Event, EventId};
+use crate::config::{AccountConfig, AuthMethod, CalendarBackendKind};
 
 /// An answer to an invitation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +82,46 @@ impl From<anyhow::Error> for CalendarBackendError {
 
 pub type BackendResult<T> = Result<T, CalendarBackendError>;
 
+/// Whether `account`'s calendar is the Graph one, which signs in through the
+/// account's OAuth2 token: `auth_method = "graph"` and a `calendar_backend`
+/// that is (or defaults to) `graph`.
+pub fn uses_graph_calendar(account: &AccountConfig) -> bool {
+    account.auth_method == AuthMethod::Graph
+        && account.calendar_backend() == CalendarBackendKind::Graph
+}
+
+/// The scopes `account`'s calendar needs and its stored sign-in was not
+/// granted, by their short name (`Calendars.ReadWrite`). Empty for an account
+/// whose calendar is not Graph's, and for one with no readable token cache,
+/// which needs a sign-in for its mail first and says so through its token
+/// state.
+pub fn missing_scopes(account: &AccountConfig) -> Vec<String> {
+    if !uses_graph_calendar(account) {
+        return Vec::new();
+    }
+    missing_scopes_of(crate::oauth2::load_token_cache(&account.name).as_ref())
+}
+
+/// [`missing_scopes`] of a Graph calendar account over its token cache.
+fn missing_scopes_of(cache: Option<&crate::oauth2::TokenCache>) -> Vec<String> {
+    match cache {
+        Some(cache) if !cache.has_scope(crate::oauth2::CALENDAR_SCOPE) => {
+            vec![crate::oauth2::scope_name(crate::oauth2::CALENDAR_SCOPE).to_string()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The check a Graph calendar call runs before reaching the server: a token
+/// without the calendar scope is [`CalendarBackendError::MissingScope`], which
+/// the clients turn into a re-login prompt rather than a failing call.
+pub fn calendar_scope_check(account: &AccountConfig) -> BackendResult<()> {
+    match missing_scopes(account).into_iter().next() {
+        Some(scope) => Err(CalendarBackendError::MissingScope { scope }),
+        None => Ok(()),
+    }
+}
+
 /// One account's server calendar.
 ///
 /// Async in the shape of the Graph send seam (`GraphSendApi`): each
@@ -113,4 +154,65 @@ pub trait CalendarBackend {
         comment: Option<String>,
         send_response: bool,
     ) -> impl Future<Output = BackendResult<()>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oauth2::TokenCache;
+
+    fn account(auth: AuthMethod, backend: Option<CalendarBackendKind>) -> AccountConfig {
+        AccountConfig {
+            name: "work".to_string(),
+            auth_method: auth,
+            calendar_backend: backend,
+            ..Default::default()
+        }
+    }
+
+    fn cache(scopes: &[&str]) -> TokenCache {
+        TokenCache {
+            access_token: String::new(),
+            refresh_token: String::new(),
+            expires_at: 0,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// A token from before PERSO-200 records no scope and lacks the calendar;
+    /// one granted it, with or without the prefix, lacks nothing; no cache is
+    /// a missing sign-in rather than a missing scope.
+    #[test]
+    fn a_token_without_the_calendar_scope_misses_it() {
+        assert_eq!(
+            missing_scopes_of(Some(&cache(&[]))),
+            ["Calendars.ReadWrite"]
+        );
+        assert_eq!(
+            missing_scopes_of(Some(&cache(&["Mail.Read", "offline_access"]))),
+            ["Calendars.ReadWrite"]
+        );
+        assert!(missing_scopes_of(Some(&cache(&["Calendars.ReadWrite"]))).is_empty());
+        assert!(missing_scopes_of(Some(&cache(&[crate::oauth2::CALENDAR_SCOPE]))).is_empty());
+        assert!(missing_scopes_of(None).is_empty());
+    }
+
+    /// Only a Graph account whose calendar is Graph's is asked about the
+    /// scope; `calendar_backend = "none"` opts a Graph account out.
+    #[test]
+    fn only_a_graph_calendar_account_needs_the_scope() {
+        assert!(uses_graph_calendar(&account(AuthMethod::Graph, None)));
+        assert!(!uses_graph_calendar(&account(
+            AuthMethod::Graph,
+            Some(CalendarBackendKind::None)
+        )));
+        assert!(!uses_graph_calendar(&account(AuthMethod::Password, None)));
+        assert!(!uses_graph_calendar(&account(
+            AuthMethod::Password,
+            Some(CalendarBackendKind::Graph)
+        )));
+        let opted_out = account(AuthMethod::Graph, Some(CalendarBackendKind::None));
+        assert!(missing_scopes(&opted_out).is_empty());
+        assert!(calendar_scope_check(&opted_out).is_ok());
+    }
 }

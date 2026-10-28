@@ -3083,6 +3083,7 @@ impl Fixture {
                             "smtp_password": password.then(|| stored(name, "smtp")),
                             "imap_password": password.then(|| stored(name, "imap")),
                             "token": (auth == "graph").then_some("valid"),
+                            "missing_scopes": [],
                         })
                     })
                     .collect();

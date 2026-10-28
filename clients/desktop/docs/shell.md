@@ -930,12 +930,12 @@ A re-bootstrap from another daemon instance clears the banner, since that daemon
 
 ### Health checks
 
-The daemon's checks that are not ok (`config_loaded`, `store_open`, `socket_owner`, `log_writable`, `account:<name>`) are `state.health`, in `src/app/health.ts`.
+The daemon's checks that are not ok (`config_loaded`, `store_open`, `socket_owner`, `log_writable`, `account:<name>`, `calendar:<name>`) are `state.health`, in `src/app/health.ts`.
 A bootstrap sets it to the snapshot's `diagnostics`, the truth whichever instance answers; a `diagnostic.check_changed` replaces its check by name or joins the end, and one at `ok` leaves.
 A payload that is not a check is skipped, as the TUI skips it.
 
 Each check is a line under the connection banner, inside the same polite status region, so it is heard without interrupting: a `CircleAlert` in the warning colour for `warn` or the destructive one for `fail`, then the check's label and the daemon's sentence, wrapped rather than cut.
-The labels are "config.toml", "Account stores", "Daemon socket", "Daemon log" and "Account <name>".
+The labels are "config.toml", "Account stores", "Daemon socket", "Daemon log" and "Account <name>", the last for `calendar:<name>` too, whose sentence is the re-login prompt of a Graph account whose token lacks the calendar scope (PERSO-200); Settings shows the same account's "Calendar" line from `account.credentials`'s `missing_scopes`, next to its Sign in button.
 The `config_loaded` line has "Open config.toml", since a warning there, such as a key the load ignored (PERSO-118), is fixed in the file.
 While the config.toml banner shows, the `config_loaded` line does not: that banner says the same with the line and keeps its own button.
 Each line has a dismiss button, since an account blocked by another engine's lock is a normal state of a machine running two.

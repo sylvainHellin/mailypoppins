@@ -740,7 +740,8 @@ impl App {
 
 /// One `diagnostic.check_changed` payload, landed in the activity ring (P6-U8).
 ///
-/// One entry, `"{name}: {detail}"`, at the level the status maps to, and
+/// One entry, `"{name}: {detail}"` (`"{account}: {detail}"` for a
+/// `calendar:<account>` check), at the level the status maps to, and
 /// nothing else. `status_message` is deliberately **not** set: a check the user
 /// did not ask about may not overwrite the sentence his own last action put on
 /// the status line, which is why `apply_event` answers [`Applied::Ignored`] for
@@ -768,7 +769,10 @@ pub(super) fn land_check(app: &mut App, check: &HealthCheck) {
         // a warning the user keeps believing.
         CheckStatus::Ok => StatusLevel::Success,
     };
-    app.push_status(format!("{}: {}", check.name, check.detail), level);
+    // `calendar:<account>`'s detail already says it is the calendar, so its
+    // line opens on the account alone (PERSO-200).
+    let subject = check.name.strip_prefix("calendar:").unwrap_or(&check.name);
+    app.push_status(format!("{subject}: {}", check.detail), level);
 }
 
 /// The account of a `draft:<account>/<id>` resource, or `None` for a resource

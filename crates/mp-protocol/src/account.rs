@@ -45,6 +45,13 @@ pub struct AccountCredential {
     /// The token cache's verdict for a `graph` account, `null` for any
     /// other.
     pub token: Option<TokenState>,
+    /// The scopes the account's server calendar needs and its sign-in was
+    /// not granted, by short name (`Calendars.ReadWrite`): a token from
+    /// before the calendar joined the sign-in, which a new sign-in fixes.
+    /// Empty for every account whose calendar is not Graph's, and for one
+    /// with no readable token, whose `token` already says it needs a sign-in.
+    #[serde(default)]
+    pub missing_scopes: Vec<String>,
 }
 
 /// The `result` of `account.credentials`: every configured account in the

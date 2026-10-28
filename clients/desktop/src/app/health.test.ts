@@ -107,4 +107,12 @@ describe("health checks", () => {
     expect(checkLabel("account:home")).toBe("Account home");
     expect(checkLabel("something_new")).toBe("something_new");
   });
+
+  it("a missing calendar scope is the account's re-login prompt, in the banner and the log", () => {
+    const scope: HealthCheck = { name: "calendar:work", status: "warn", detail: "calendar needs a re-login (mp config oauth2-login -A work)" };
+    expect(checkLabel(scope.name)).toBe("Account work");
+    const s = run(initialState(), boot([]), envelope("diagnostic.check_changed", scope));
+    expect(shownChecks(s)).toEqual([scope]);
+    expect(lines(s)).toEqual([["warning", "work: calendar needs a re-login (mp config oauth2-login -A work)"]]);
+  });
 });

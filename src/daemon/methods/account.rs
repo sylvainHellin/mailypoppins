@@ -163,6 +163,7 @@ pub fn credentials(
                 smtp_password,
                 imap_password,
                 token,
+                missing_scopes: crate::calendar_backend::missing_scopes(account),
             }
         })
         .collect();

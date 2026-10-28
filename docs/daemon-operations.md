@@ -564,7 +564,7 @@ All three print the two lines `mp daemon status` prints when nothing answers, an
 
 `mp daemon health [--json]` prints a verdict line, a labelled block, one line per account and one line per check prefixed `✓`, `⚠` or `✗`.
 Every check `ok` is `✓ daemon healthy` and exit 0; a warning is `✓ daemon healthy, 1 check needs attention` and still exit 0, because a lock held elsewhere is a normal state of this machine; any failure is `✗ daemon unhealthy, 1 check failing` and exit 1, so a script running this as a probe learns something.
-The checks are `config_loaded`, `store_open`, `socket_owner`, `log_writable` and one `account:<name>` per configured account; `docs/daemon-protocol.md` fixes what each one means.
+The checks are `config_loaded`, `store_open`, `socket_owner`, `log_writable`, one `account:<name>` per configured account and one `calendar:<name>` per Graph calendar account; `docs/daemon-protocol.md` fixes what each one means.
 `config_loaded` re-reads the file on disk rather than reporting the live snapshot, which is why a `config.reload` refused with `-32007` leaves it failing while the daemon keeps serving the configuration it has.
 A file that loads but carries a key the load ignores, anywhere in it, makes `config_loaded` a warning whose detail names each key and its account (PERSO-118).
 

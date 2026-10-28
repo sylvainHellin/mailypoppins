@@ -43,7 +43,10 @@ No write takes a block naming it: the daemon's `account_block` refuses one.
   ```
 
 - Token cache: `<mailypoppins_data_dir>/tokens/<account>.enc` (encrypted with the same `encrypt_blob` / `decrypt_blob` as `secrets.enc`), refreshed automatically; when the refresh token expires after roughly 90 days of inactivity, re-run `mp config oauth2-login --account <name>`.
-- Scopes: `GRAPH_SCOPES` constant in `crates/mp-core/src/oauth2.rs` (`Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `offline_access`).
+- Scopes: `GRAPH_SCOPES` constant in `crates/mp-core/src/oauth2.rs` (`Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `offline_access`).
+  The token cache records the scopes each token response granted (`TokenCache::scopes`, empty in a cache written before PERSO-200).
+  A refresh asks for all of them, so a token whose user already consented to the calendar picks it up; when Entra refuses the calendar scope, the refresh is repeated without it and the mail keeps working.
+  A Graph calendar account whose token lacks `Calendars.ReadWrite` reports it as `missing_scopes` in `account.credentials` and as a `calendar:<name>` health check, which every client shows as a re-login prompt (`mp config oauth2-login -A <name>`).
 - `SmtpConfig::load()` and `ImapConfig::load()` return errors for Graph accounts. Use `GraphConfig::load()` instead.
 - All mail operations route through `src/graph.rs`: `list_folders`, `fetch_new_messages`, `sync_mailboxes_graph`, `GraphClient::send_mime`, `search_messages_threaded`; the per-message move, delete and read toggle through `src/graph_ops.rs` (`move_message`, `delete_message`, `mark_read`).
 - The TUI and the CLI hold no transport: they call the daemon over its socket, and the daemon picks Graph or IMAP/SMTP from the account's `auth_method`.

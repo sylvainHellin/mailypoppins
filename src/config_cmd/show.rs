@@ -75,7 +75,20 @@ fn token_line(credential: Option<&AccountCredential>) -> String {
     }
 }
 
-/// Print the config file path.
+/// The re-login prompt of an account whose sign-in lacks a scope its calendar
+/// needs (PERSO-200), `None` when the daemon reported nothing missing.
+fn missing_scope_line(account: &str, credential: Option<&AccountCredential>) -> Option<String> {
+    credential
+        .filter(|c| !c.missing_scopes.is_empty())
+        .map(|_| {
+            format!(
+                "{} {}",
+                "\u{26a0}".yellow(),
+                crate::oauth2::calendar_relogin_prompt(account)
+            )
+        })
+}
+
 /// The `calendar_backend` line (PERSO-200): the resolved backend, marked when
 /// it is the default the auth method implies and when this release cannot
 /// serve it yet.
@@ -91,6 +104,7 @@ fn calendar_backend_line(account: &AccountConfig) -> String {
     line
 }
 
+/// Print the config file path.
 pub fn cmd_config_path() {
     println!("{}", config_path().display());
 }
@@ -204,6 +218,11 @@ pub fn cmd_config_show(
         }
 
         println!("  {}", calendar_backend_line(account));
+        if let Some(line) =
+            missing_scope_line(&account.name, credential_of(credentials, &account.name))
+        {
+            println!("  {line}");
+        }
 
         if account.auth_method == AuthMethod::Graph {
             // Graph accounts don't use SMTP/IMAP -- show a note instead
@@ -378,7 +397,7 @@ pub fn cmd_config_show(
 
 #[cfg(test)]
 mod tests {
-    use super::{calendar_backend_line, folder_lines};
+    use super::{calendar_backend_line, folder_lines, missing_scope_line};
     use crate::config::{AccountConfig, AuthMethod, CalendarBackendKind};
     use mp_protocol::state::{FolderPolicy, MailboxRow};
 
@@ -408,6 +427,28 @@ mod tests {
             "calendar_backend = ews (not supported yet)"
         );
         assert_eq!(calendar_backend_line(&none), "calendar_backend = none");
+    }
+
+    /// PERSO-200: an account whose sign-in lacks the calendar scope gets the
+    /// re-login prompt under its calendar line; one lacking nothing gets none.
+    #[test]
+    fn a_missing_calendar_scope_prints_the_relogin_prompt() {
+        colored::control::set_override(false);
+        let mut credential = mp_protocol::account::AccountCredential {
+            account: "work".to_string(),
+            auth_method: "graph".to_string(),
+            smtp_password: None,
+            imap_password: None,
+            token: Some(mp_protocol::account::TokenState::Valid),
+            missing_scopes: vec!["Calendars.ReadWrite".to_string()],
+        };
+        assert_eq!(
+            missing_scope_line("work", Some(&credential)).as_deref(),
+            Some("\u{26a0} calendar needs a re-login (mp config oauth2-login -A work)")
+        );
+        credential.missing_scopes.clear();
+        assert_eq!(missing_scope_line("work", Some(&credential)), None);
+        assert_eq!(missing_scope_line("work", None), None);
     }
 
     /// #0141 follow-up: `[folders]` lists every folder the server listed,

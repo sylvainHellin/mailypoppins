@@ -273,14 +273,15 @@ Asking which accounts exist may not create or destroy a cache, so a file that fa
 
 ```json
 {"accounts": [
-  {"account": "work", "auth_method": "password", "smtp_password": true, "imap_password": false, "token": null},
-  {"account": "exchange", "auth_method": "graph", "smtp_password": null, "imap_password": null, "token": "expired"}
+  {"account": "work", "auth_method": "password", "smtp_password": true, "imap_password": false, "token": null, "missing_scopes": []},
+  {"account": "exchange", "auth_method": "graph", "smtp_password": null, "imap_password": null, "token": "expired", "missing_scopes": ["Calendars.ReadWrite"]}
 ]}
 ```
 
 It lists every configured account in the file's order, or the one `account` names; an unknown name is `-32005`.
 `smtp_password` and `imap_password` say whether `smtp-password-<account>` and `imap-password-<account>` are in the secrets backend, `null` for any account but a password one; `imap_password` is the IMAP key alone, and a client says "falls back to smtp" itself from the two booleans.
 `token` is `valid`, `expired`, `invalid` (a cache file that does not decrypt or parse) or `not_cached` for a `graph` account, and `null` for any other.
+`missing_scopes` lists, by short name, the scopes the account's server calendar needs and its token was not granted: `["Calendars.ReadWrite"]` for a `graph` account whose calendar is Graph's and whose token predates the calendar scope (PERSO-200), which a new sign-in fixes; it is `[]` for every other account and for one with no readable token, whose `token` already asks for a sign-in.
 An account whose config still names the retired `auth_method = "oauth2"` reports that word and `null` for all three.
 No value, length, prefix or key name travels.
 It is a query of its own rather than a field of `config.get`, which stays contracted never to look a secret up: a settings screen asks this question, and every configuration read would otherwise be a secret read.
@@ -1547,7 +1548,8 @@ P6-U8 added four methods to the `diagnostic.*` family, one event kind and one fi
 `version` and `protocol_version` are deliberately not `app_version` and `protocol`: `daemon.status` is the pre-handshake lifecycle probe and answers the daemon's *range*, while health is a support document and what a support case needs is the single integer this connection negotiated.
 An `accounts` entry is `{name, runtime, watcher, last_sync: {finished_at, outcome}}`, `runtime` being `daemon.status`'s `opening`/`ready`/`blocked` and `watcher` being `running` or `stopped`; `last_sync` is `{null, null}` until a tick lands.
 `store` is one entry and not one per account, because the only question a health report is asked about the store is whether the cache is large.
-`checks` is four fixed checks in this order - `config_loaded`, `store_open`, `socket_owner`, `log_writable` - then one `account:<name>` per configured account in configuration order, each `{name, status, detail}` with a `status` of `ok`, `warn` or `fail` and a `detail` that is never empty.
+`checks` is four fixed checks in this order - `config_loaded`, `store_open`, `socket_owner`, `log_writable` - then one `account:<name>` per configured account in configuration order, each followed by a `calendar:<name>` when the account is a `graph` one whose calendar is Graph's, each `{name, status, detail}` with a `status` of `ok`, `warn` or `fail` and a `detail` that is never empty.
+`calendar:<name>` is `warn` with the detail `calendar needs a re-login (mp config oauth2-login -A <name>)` while the account's token lacks `Calendars.ReadWrite` (PERSO-200), the prompt every client shows as `<name>: <detail>`, and `ok` otherwise; `config.oauth2_login` re-evaluates it once a sign-in succeeds, so the recovery reaches the clients without waiting for the sweep.
 An account blocked because another engine holds its lock is `warn` and one whose runtime never came up at all is `fail`: a second `mp` holding a lock is a normal state of a developer's machine, and a daemon that called it a failure would cry wolf.
 An account whose start is still in flight is `ok` ("opening its store") for its first 30 seconds and `warn` ("still opening its store after Ns") past them, so a normal start with several accounts publishes no warning and no recovery.
 `diagnostic.log_path` `{}` -> `{path}` names the file the daemon is writing, `<data_dir>/logs/mailypoppins-<date>.log`, which is the surface `docs/parity-matrix.md` `INT-02` and `OBS-05` reach the log through.
@@ -1622,7 +1624,7 @@ The method took `message.search`'s field filters, `from`, `to`, `cc`, `subject`,
 The key list in `tests/daemon_server_leg_slice.rs` is nine names.
 
 The daemon leftovers (2026-10-22) added nine methods, three optional parameters, one answer member and two event kinds, and retired one method; no field of a shape that stayed was renamed or dropped.
-`account.credentials` `{account?}` -> `{accounts: [{account, auth_method, smtp_password, imap_password, token}]}` is a query answering whether each password and token is stored, never a value; the types are `mp_protocol::account::{AccountCredentials, AccountCredential, TokenState}`.
+`account.credentials` `{account?}` -> `{accounts: [{account, auth_method, smtp_password, imap_password, token, missing_scopes}]}` is a query answering whether each password and token is stored, never a value; the types are `mp_protocol::account::{AccountCredentials, AccountCredential, TokenState}`.
 `config.probe` `{account, check, password?}` -> `{ok, mailboxes?}` or `{ok: false, error}` is a query that dials a candidate account for the setup wizards; `config.init` gained `replace`, and `config.oauth2_login` gained `candidate`.
 `signature.read`, `signature.create`, `signature.rename`, `signature.delete` and `signature.set_default` complete the `signature.*` family, with `mp_protocol::signature::SignatureFile`; the watcher publishes `signature.removed` `{name}` (`mp_protocol::events::SignatureRemoved`) for a signature file deleted or renamed away.
 `contact.vcard_draft` `{account, name, address, display_name}` -> `{draft, vcf}` (`mp_protocol::contact::VcardDraft`) is a command; `contact.search` gained `rebuild`, `null` or the `mp_protocol::contact::RefusedRebuild` of a build the cache guard refused; and every write of a contact index publishes `contact.changed` `{account, contacts}` (`mp_protocol::events::ContactChanged`).

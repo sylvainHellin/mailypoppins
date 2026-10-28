@@ -66,11 +66,45 @@ pub fn tenant_or_default(input: &str) -> String {
     }
 }
 
-/// Scopes required for Microsoft Graph API mail access.
+/// The scope a Graph account's calendar needs (PERSO-200).
+pub const CALENDAR_SCOPE: &str = "https://graph.microsoft.com/Calendars.ReadWrite";
+
+/// Scopes a Graph account signs in and refreshes with: mail, and the calendar
+/// since PERSO-200.
 pub const GRAPH_SCOPES: &str = "https://graph.microsoft.com/Mail.Read \
                                 https://graph.microsoft.com/Mail.ReadWrite \
                                 https://graph.microsoft.com/Mail.Send \
+                                https://graph.microsoft.com/Calendars.ReadWrite \
                                 offline_access";
+
+/// A scope without its resource prefix: `Calendars.ReadWrite` for
+/// `https://graph.microsoft.com/Calendars.ReadWrite`, `offline_access` for
+/// itself. Entra answers some scopes with the prefix and some without, so two
+/// scopes are compared by this name.
+pub fn scope_name(scope: &str) -> &str {
+    scope.rsplit('/').next().unwrap_or(scope)
+}
+
+/// The one line every client shows for a Graph account whose sign-in lacks
+/// the calendar scope: the `calendar:<account>` health check's detail, and
+/// the line `mp config show` prints.
+pub fn calendar_relogin_prompt(account: &str) -> String {
+    format!("calendar needs a re-login (mp config oauth2-login -A {account})")
+}
+
+/// `scopes` (space separated) without `scope`, compared by [`scope_name`].
+fn without_scope(scopes: &str, scope: &str) -> String {
+    scopes
+        .split_whitespace()
+        .filter(|s| !scope_name(s).eq_ignore_ascii_case(scope_name(scope)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The `scope` field of a token response, one entry per granted scope.
+fn granted_scopes(scope: &str) -> Vec<String> {
+    scope.split_whitespace().map(str::to_string).collect()
+}
 
 // ---------------------------------------------------------------------------
 // Token cache
@@ -82,9 +116,23 @@ pub struct TokenCache {
     pub refresh_token: String,
     /// Unix timestamp when the access token expires.
     pub expires_at: u64,
+    /// The scopes the last token response granted, as Entra spelled them.
+    /// Empty for a cache written before PERSO-200, which recorded none and so
+    /// counts as lacking every scope [`TokenCache::has_scope`] is asked about.
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 impl TokenCache {
+    /// Whether the token was granted `scope`, with or without its resource
+    /// prefix on either side.
+    pub fn has_scope(&self, scope: &str) -> bool {
+        let wanted = scope_name(scope);
+        self.scopes
+            .iter()
+            .any(|granted| scope_name(granted).eq_ignore_ascii_case(wanted))
+    }
+
     pub fn is_expired(&self) -> bool {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -247,6 +295,9 @@ struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: u64,
+    /// The granted scopes, space separated.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -358,6 +409,11 @@ pub async fn device_code_flow_reporting(
                 access_token: token.access_token,
                 refresh_token: token.refresh_token.unwrap_or_default(),
                 expires_at: now + token.expires_in,
+                scopes: token
+                    .scope
+                    .as_deref()
+                    .map(granted_scopes)
+                    .unwrap_or_default(),
             };
 
             save_token_cache(account_name, &cache)?;
@@ -402,15 +458,14 @@ pub async fn device_code_flow_reporting(
 // Token refresh
 // ---------------------------------------------------------------------------
 
-async fn refresh_token(
+/// One refresh request: the token response, or the body of a refusal.
+async fn request_refresh(
+    client: &reqwest::Client,
     client_id: &str,
     tenant_id: &str,
     refresh_token_value: &str,
-    account_name: &str,
     scopes: &str,
-) -> Result<TokenCache> {
-    let client = reqwest::Client::new();
-
+) -> Result<std::result::Result<TokenResponse, String>> {
     let resp = client
         .post(token_url(tenant_id))
         .form(&[
@@ -424,17 +479,56 @@ async fn refresh_token(
         .context("Failed to refresh OAuth2 token")?;
 
     if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!(
-            "Token refresh failed (the refresh token may have expired -- run `mp config oauth2-login`): {}",
-            body
-        ));
+        return Ok(Err(resp.text().await.unwrap_or_default()));
     }
-
     let token: TokenResponse = resp
         .json()
         .await
         .context("Failed to parse refresh response")?;
+    Ok(Ok(token))
+}
+
+/// Refresh `previous` with `scopes`, recording the scopes the answer grants.
+///
+/// A refresh token covers every permission the user already consented to, so
+/// asking for the calendar scope picks it up where consent exists and is
+/// refused where it does not (a token from before PERSO-200). That refusal
+/// may not cost the mail: the request is repeated without the calendar scope,
+/// and the cache then records a grant without it, which the daemon reports as
+/// a re-login prompt.
+async fn refresh_token(
+    client_id: &str,
+    tenant_id: &str,
+    previous: &TokenCache,
+    account_name: &str,
+    scopes: &str,
+) -> Result<TokenCache> {
+    let client = reqwest::Client::new();
+    let refresh_token_value = previous.refresh_token.as_str();
+
+    let mut answer =
+        request_refresh(&client, client_id, tenant_id, refresh_token_value, scopes).await?;
+    let mail_only = without_scope(scopes, CALENDAR_SCOPE);
+    if answer.is_err() && mail_only != scopes {
+        warn!(
+            "OAuth2 refresh with the calendar scope refused for '{}', retrying without it",
+            account_name
+        );
+        answer = request_refresh(
+            &client,
+            client_id,
+            tenant_id,
+            refresh_token_value,
+            &mail_only,
+        )
+        .await?;
+    }
+    let token = answer.map_err(|body| {
+        anyhow!(
+            "Token refresh failed (the refresh token may have expired -- run `mp config oauth2-login`): {}",
+            body
+        )
+    })?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -447,6 +541,12 @@ async fn refresh_token(
             .refresh_token
             .unwrap_or_else(|| refresh_token_value.to_string()),
         expires_at: now + token.expires_in,
+        // An answer that names no scope changed none.
+        scopes: token
+            .scope
+            .as_deref()
+            .map(granted_scopes)
+            .unwrap_or_else(|| previous.scopes.clone()),
     };
 
     save_token_cache(account_name, &cache)?;
@@ -468,7 +568,7 @@ pub async fn load_or_refresh_token(
 ) -> Result<String> {
     let cache = load_token_cache(account_name).ok_or_else(|| {
         anyhow!(
-            "No OAuth2 token cached for account '{}'. Run `mp config oauth2-login {}` first.",
+            "No OAuth2 token cached for account '{}'. Run `mp config oauth2-login -A {}` first.",
             account_name,
             account_name
         )
@@ -481,20 +581,13 @@ pub async fn load_or_refresh_token(
 
     if cache.refresh_token.is_empty() {
         return Err(anyhow!(
-            "OAuth2 token expired and no refresh token available. Run `mp config oauth2-login {}`.",
+            "OAuth2 token expired and no refresh token available. Run `mp config oauth2-login -A {}`.",
             account_name
         ));
     }
 
     warn!("OAuth2 token expired for '{}', refreshing...", account_name);
-    let new_cache = refresh_token(
-        client_id,
-        tenant_id,
-        &cache.refresh_token,
-        account_name,
-        scopes,
-    )
-    .await?;
+    let new_cache = refresh_token(client_id, tenant_id, &cache, account_name, scopes).await?;
     Ok(new_cache.access_token)
 }
 
@@ -581,6 +674,7 @@ mod tests {
             access_token: "token".to_string(),
             refresh_token: "refresh".to_string(),
             expires_at: 0, // long expired
+            scopes: Vec::new(),
         };
         assert!(cache.is_expired());
     }
@@ -595,6 +689,7 @@ mod tests {
             access_token: "token".to_string(),
             refresh_token: "refresh".to_string(),
             expires_at: now + 3600, // 1 hour from now
+            scopes: Vec::new(),
         };
         assert!(!cache.is_expired());
     }
@@ -610,6 +705,7 @@ mod tests {
             access_token: "token".to_string(),
             refresh_token: "refresh".to_string(),
             expires_at: now + 30,
+            scopes: Vec::new(),
         };
         assert!(cache.is_expired());
     }
@@ -620,12 +716,60 @@ mod tests {
             access_token: "access".to_string(),
             refresh_token: "refresh".to_string(),
             expires_at: 1700000000,
+            scopes: Vec::new(),
         };
         let json = serde_json::to_string(&cache).unwrap();
         let back: TokenCache = serde_json::from_str(&json).unwrap();
         assert_eq!(back.access_token, "access");
         assert_eq!(back.refresh_token, "refresh");
         assert_eq!(back.expires_at, 1700000000);
+    }
+
+    /// A cache written before PERSO-200 has no `scopes` key: it still loads,
+    /// and it counts as lacking the calendar scope.
+    #[test]
+    fn a_cache_without_recorded_scopes_loads_and_lacks_the_calendar() {
+        let old = r#"{"access_token":"a","refresh_token":"r","expires_at":1}"#;
+        let cache: TokenCache = serde_json::from_str(old).unwrap();
+        assert!(cache.scopes.is_empty());
+        assert!(!cache.has_scope(CALENDAR_SCOPE));
+    }
+
+    /// Entra answers with or without the resource prefix; either side may
+    /// carry it, and the case does not matter.
+    #[test]
+    fn a_scope_matches_with_or_without_its_resource_prefix() {
+        let token: TokenResponse = serde_json::from_str(
+            r#"{"access_token":"a","expires_in":3600,
+                "scope":"Mail.Read Mail.ReadWrite https://graph.microsoft.com/Calendars.ReadWrite offline_access"}"#,
+        )
+        .unwrap();
+        let cache = TokenCache {
+            access_token: token.access_token,
+            refresh_token: String::new(),
+            expires_at: 0,
+            scopes: granted_scopes(token.scope.as_deref().unwrap()),
+        };
+        assert!(cache.has_scope(CALENDAR_SCOPE));
+        assert!(cache.has_scope("calendars.readwrite"));
+        assert!(cache.has_scope("https://graph.microsoft.com/Mail.Read"));
+        assert!(cache.has_scope("offline_access"));
+        assert!(!cache.has_scope("https://graph.microsoft.com/Mail.Send"));
+    }
+
+    /// The sign-in asks for the calendar, and the mail-only retry of a refused
+    /// refresh keeps every other scope.
+    #[test]
+    fn the_mail_only_scopes_are_the_graph_scopes_minus_the_calendar() {
+        assert!(GRAPH_SCOPES.split_whitespace().any(|s| s == CALENDAR_SCOPE));
+        let mail_only = without_scope(GRAPH_SCOPES, "Calendars.ReadWrite");
+        assert_eq!(
+            mail_only,
+            "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite \
+             https://graph.microsoft.com/Mail.Send offline_access"
+        );
+        assert_eq!(without_scope(&mail_only, CALENDAR_SCOPE), mail_only);
+        assert_eq!(scope_name(CALENDAR_SCOPE), "Calendars.ReadWrite");
     }
 
     #[test]

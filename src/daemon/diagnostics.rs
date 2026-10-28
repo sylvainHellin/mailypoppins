@@ -7,7 +7,9 @@
 //!
 //! Four fixed checks in a fixed order - `config_loaded`, `store_open`,
 //! `socket_owner`, `log_writable` - then one `account:<name>` per configured
-//! account in configuration order. A [`Status`] is `ok`, `warn` or `fail`, and
+//! account in configuration order, each followed by a `calendar:<name>` when
+//! the account's calendar is Graph's (PERSO-200), which warns while its
+//! sign-in lacks the calendar scope. A [`Status`] is `ok`, `warn` or `fail`, and
 //! a detail is never empty, including on a passing check: the sentence is what
 //! a support case is read with and it is also what the TUI renders into its
 //! activity ring.
@@ -418,6 +420,12 @@ impl Diagnostics {
         ];
         for account in accounts.iter() {
             checks.push(self.account_check(&account.name));
+            if crate::calendar_backend::uses_graph_calendar(account) {
+                checks.push(calendar_check(
+                    &account.name,
+                    &crate::calendar_backend::missing_scopes(account),
+                ));
+            }
         }
         checks
     }
@@ -588,6 +596,24 @@ fn account_check(account: &str, health: RuntimeHealth, opening_for: std::time::D
         RuntimeHealth::Failed(reason) => {
             Check::new(name, Status::Fail, format!("no runtime at all: {reason}"))
         }
+    }
+}
+
+/// A Graph calendar account's sign-in, as the check `calendar:<name>`.
+///
+/// Always there for such an account, `ok` included, so the new sign-in that
+/// grants the scope publishes the recovery that clears the prompt. The detail
+/// is the prompt itself, which every client shows as it stands.
+fn calendar_check(account: &str, missing_scopes: &[String]) -> Check {
+    let name = format!("calendar:{account}");
+    if missing_scopes.is_empty() {
+        Check::new(name, Status::Ok, "no calendar scope is missing")
+    } else {
+        Check::new(
+            name,
+            Status::Warn,
+            crate::oauth2::calendar_relogin_prompt(account),
+        )
     }
 }
 
@@ -1191,6 +1217,20 @@ mod tests {
         assert_eq!(stuck.detail, "still opening its store after 31s");
         let failed = account_check("b", RuntimeHealth::Failed("boom".into()), Duration::ZERO);
         assert_eq!(failed.status, Status::Fail);
+    }
+
+    /// A Graph calendar account whose sign-in lacks the calendar scope warns
+    /// with the re-login prompt, and recovers to `ok` once nothing is missing.
+    #[test]
+    fn a_missing_calendar_scope_warns_with_the_relogin_prompt() {
+        let missing = calendar_check("work", &["Calendars.ReadWrite".to_string()]);
+        assert_eq!(missing.name, "calendar:work");
+        assert_eq!(missing.status, Status::Warn);
+        assert_eq!(
+            missing.detail,
+            "calendar needs a re-login (mp config oauth2-login -A work)"
+        );
+        assert_eq!(calendar_check("work", &[]).status, Status::Ok);
     }
 
     /// At `DEBUG` the writer adds the thread id and the module path, and both

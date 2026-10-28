@@ -30,4 +30,12 @@ imap_password: boolean | null,
  * The token cache's verdict for a `graph` account, `null` for any
  * other.
  */
-token: TokenState | null, };
+token: TokenState | null,
+/**
+ * The scopes the account's server calendar needs and its sign-in was
+ * not granted, by short name (`Calendars.ReadWrite`): a token from
+ * before the calendar joined the sign-in, which a new sign-in fixes.
+ * Empty for every account whose calendar is not Graph's, and for one
+ * with no readable token, whose `token` already says it needs a sign-in.
+ */
+missing_scopes: Array<string>, };

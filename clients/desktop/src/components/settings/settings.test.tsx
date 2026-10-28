@@ -7,6 +7,7 @@ import { StoreProvider, useAppState } from "@/app/store";
 import { PREFS_KEY } from "@/app/prefs";
 import type { AppState } from "@/app/state";
 import { RETIRED_OAUTH2_LINE } from "@/app/settings";
+import { calendarScopeLine } from "@/components/settings/SettingsView";
 import { shellReady } from "@/test/render";
 import { setWidth } from "@/test/setup";
 import { CONFIG_INVALID_AT, CONFIG_INVALID_MESSAGE, emitEnvelope, mock, MOCK_CONFIG_PATH, REDACTED, resetMock, simulateConfigAbsent } from "@/test/tauri-mock";
@@ -267,6 +268,7 @@ describe("the password dialog", () => {
     const home = card(view, "home");
     expect(within(home).queryByText("SMTP password")).toBeNull();
     expect(field(home, "Token")).toHaveTextContent("signed in");
+    expect(within(home).queryByText("Calendar")).toBeNull();
     expect(callsOf("account_credentials")).toHaveLength(1);
 
     await user.click(within(work).getByRole("button", { name: "Set SMTP password" }));
@@ -276,6 +278,13 @@ describe("the password dialog", () => {
     await waitFor(() => expect(field(card(view, "work"), "SMTP password")).toHaveTextContent("stored"));
     expect(field(card(view, "work"), "IMAP password")).toHaveTextContent("uses the SMTP password");
     expect(callsOf("account_credentials")).toHaveLength(2);
+  });
+
+  it("asks for a new sign-in when the token lacks the calendar scope", () => {
+    const graph = { account: "home", auth_method: "graph", smtp_password: null, imap_password: null, token: "valid" as const };
+    expect(calendarScopeLine({ ...graph, missing_scopes: ["Calendars.ReadWrite"] })).toBe("needs a new sign-in to grant calendar access");
+    expect(calendarScopeLine({ ...graph, missing_scopes: [] })).toBeNull();
+    expect(calendarScopeLine(undefined)).toBeNull();
   });
 
   it("a store that answers after the dialog closed leaves the overlay opened since alone", async () => {

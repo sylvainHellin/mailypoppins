@@ -104,6 +104,26 @@ fn a_warning_check_lands_in_the_activity_ring() {
     );
 }
 
+/// PERSO-200: a Graph account whose sign-in lacks the calendar scope lands
+/// as one warning that opens on the account and carries the re-login command.
+#[test]
+fn a_missing_calendar_scope_lands_as_the_relogin_prompt() {
+    let mut app = bootstrapped(Vec::new());
+
+    app.apply_event(&check_event(
+        "calendar:work",
+        "warn",
+        "calendar needs a re-login (mp config oauth2-login -A work)",
+    ));
+
+    let entry = last_entry(&app);
+    assert_eq!(
+        entry.0,
+        "work: calendar needs a re-login (mp config oauth2-login -A work)"
+    );
+    assert_eq!(entry.1, "Warning");
+}
+
 /// A check that failed is an error in the ring.
 #[test]
 fn a_failing_check_lands_as_an_error() {
