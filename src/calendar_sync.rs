@@ -8,15 +8,37 @@
 //! delta), so a moved window, or a baseline older than
 //! [`REBASELINE_AFTER`], starts a fresh baseline instead.
 //!
-//! Not on the daemon's tick yet: the next unit of PERSO-200 wires it in.
+//! The daemon runs [`poll_account`] after the mail pass of every tick, and
+//! [`sync_account`] again right after a write (`event.respond`). Both go
+//! through [`account_lock`], so a tick and a write never sync one account's
+//! cache side by side from the same token.
+//!
+//! [`invite_event`] answers which server event an invitation mail stands for,
+//! asking the backend once per mail and remembering the answer in the store.
+
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
-use log::{info, warn};
+use log::{debug, info, warn};
 
-use crate::calendar_backend::{BackendResult, CalendarBackend, CalendarBackendError};
-use crate::calendar_model::window_for;
+use crate::calendar_backend::{backend_for, BackendResult, CalendarBackend, CalendarBackendError};
+use crate::calendar_model::{window_for, EventId};
+use crate::config::AccountConfig;
 use crate::store::calendar as cache;
 use crate::store::Store;
+
+/// One async lock per account name, held across a whole sync.
+static ACCOUNT_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Mutex::default);
+
+/// The lock every sync of `account`'s calendar cache holds.
+pub fn account_lock(account: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = ACCOUNT_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(locks.entry(account.to_string()).or_default())
+}
 
 /// How old a calendar's last baseline may grow before the next sync takes a
 /// fresh one over the current window (the daily re-baseline of the plan's
@@ -38,6 +60,87 @@ pub struct SyncReport {
     pub baselines: usize,
     /// Calendars that failed, with why; the others synced regardless.
     pub failed: Vec<(String, String)>,
+}
+
+impl SyncReport {
+    /// Whether the sync moved the cache: an event written or removed, or a
+    /// window replaced. A clean incremental sync moved nothing.
+    pub fn changed(&self) -> bool {
+        self.upserts > 0 || self.removed > 0 || self.baselines > 0
+    }
+}
+
+/// The calendar half of a daemon tick on `account`: connect its backend and
+/// sync it, under [`account_lock`]. `true` when the cache moved.
+///
+/// An account without a backend does nothing. A token without the calendar
+/// scope is skipped quietly, since the diagnostics already prompt for the
+/// re-login, and every other failure is logged: the tick reports the mail
+/// pass, never the calendar.
+pub async fn poll_account(account: &AccountConfig, now: DateTime<Utc>) -> bool {
+    let name = account.name.as_str();
+    let result = async {
+        let Some(backend) = backend_for(account).await? else {
+            return Ok(None);
+        };
+        let store = Store::open(crate::config::store_path(name))?;
+        let lock = account_lock(name);
+        let _held = lock.lock().await;
+        sync_account(&store, &backend, name, now).await.map(Some)
+    }
+    .await;
+    match result {
+        Ok(report) => report.is_some_and(|report| report.changed()),
+        Err(CalendarBackendError::MissingScope { scope }) => {
+            debug!("[calendar] {name}: not syncing, the sign-in lacks {scope}");
+            false
+        }
+        Err(err) => {
+            warn!("[calendar] {name}: the calendar sync failed: {err}");
+            false
+        }
+    }
+}
+
+/// The server event the invitation mail `row_id` of `account` stands for.
+///
+/// Asked of the backend under the mail's server id (its Graph id) once, and
+/// remembered in the store, a miss included; a mail with no server id (an
+/// IMAP row, a row no listing has bound yet) stands for nothing known. A
+/// failed lookup is logged and not remembered, so the next `message.invite`
+/// asks again.
+pub async fn invite_event(account: &AccountConfig, row_id: i64) -> Option<EventId> {
+    let name = account.name.as_str();
+    let server_id = {
+        let store = Store::open(crate::config::store_path(name)).ok()?;
+        let server_id = crate::store::read::graph_id(&store, row_id).ok()??;
+        if let Ok(Some(known)) = cache::cached_invite_event(&store, name, row_id, &server_id) {
+            return known;
+        }
+        server_id
+    };
+    let looked_up = async {
+        match backend_for(account).await? {
+            Some(backend) => backend.event_for_message(&server_id).await,
+            None => Ok(None),
+        }
+    }
+    .await;
+    match looked_up {
+        Ok(event) => {
+            let remembered = Store::open(crate::config::store_path(name)).and_then(|store| {
+                cache::remember_invite_event(&store, name, row_id, &server_id, event.as_deref())
+            });
+            if let Err(err) = remembered {
+                warn!("[calendar] {name}: remembering an invitation's event: {err:#}");
+            }
+            event
+        }
+        Err(err) => {
+            warn!("[calendar] {name}: looking up the event of invitation row {row_id}: {err}");
+            None
+        }
+    }
 }
 
 /// Sync `account`'s calendars from `backend` into `store` as of `now`.

@@ -948,6 +948,19 @@ pub fn find_by_id(store: &Store, id: i64) -> Result<Option<MessageRow>> {
     Ok(row)
 }
 
+/// The Graph id a listing bound row `id` to (PERSO-245), `None` on an IMAP
+/// row and on one no listing has bound since it was synced or moved.
+pub fn graph_id(store: &Store, id: i64) -> Result<Option<String>> {
+    let graph_id = store
+        .conn()
+        .query_row("SELECT graph_id FROM messages WHERE id = ?1", [id], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .optional()
+        .context("reading a message's Graph id")?;
+    Ok(graph_id.flatten())
+}
+
 /// The row id of one message addressed the way a client holds it: the account,
 /// the mailbox it was listed in and its UID.
 ///

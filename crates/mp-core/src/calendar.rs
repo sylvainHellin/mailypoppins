@@ -215,7 +215,7 @@ fn partstat_to_str(part_stat: Option<PartStat>) -> &'static str {
 /// fold) is its first occurrence, and a time that never happens (the spring
 /// gap) is read with the offset in force before the gap, which lands it the
 /// gap's length later (02:30 in Berlin's spring gap is 03:30+02:00).
-pub(crate) fn resolve_local(
+pub fn resolve_local(
     tz: &chrono_tz::Tz,
     local: &chrono::NaiveDateTime,
 ) -> Option<chrono::DateTime<chrono_tz::Tz>> {

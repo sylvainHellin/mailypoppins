@@ -2,7 +2,7 @@
 //! "Event store").
 //!
 //! A disposable cache of the rolling window (D6): the server is the source of
-//! truth, so [`drop_calendar_cache`] and a resync lose nothing. Five tables,
+//! truth, so [`drop_calendar_cache`] and a resync lose nothing. Six tables,
 //! all created by [`super::schema::ensure_additive_tables`]:
 //!
 //! - [`CALENDARS_TABLE`]: the account's calendars as the server last listed
@@ -21,6 +21,12 @@
 //! - [`SERIES_TABLE`]: what a backend resolved about a recurring series
 //!   ([`SeriesInfo`]), so Graph asks for a series master once rather than at
 //!   every poll.
+//! - [`INVITES_TABLE`]: the server event an invitation mail stands for, by
+//!   its `messages.id` and the server id it was looked up under, so
+//!   `message.invite` asks the server once per invitation mail (a mail that
+//!   stands for no event is remembered too, with a `NULL` event).
+
+use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
@@ -30,17 +36,18 @@ use rusqlite::{params, OptionalExtension};
 
 use super::Store;
 use crate::calendar_backend::{SeriesInfo, SyncResult};
-use crate::calendar_model::{Calendar, CalendarWindow, Event, EventTime};
+use crate::calendar_model::{Calendar, CalendarWindow, Event, EventKey, EventTime};
 
 pub const CALENDARS_TABLE: &str = "calendars";
 pub const PREFS_TABLE: &str = "calendar_prefs";
 pub const EVENTS_TABLE: &str = "calendar_events";
 pub const SYNC_TABLE: &str = "calendar_sync";
 pub const SERIES_TABLE: &str = "calendar_series";
+pub const INVITES_TABLE: &str = "calendar_invite_events";
 
-/// The `CREATE` statements of the five tables and their indexes, as
+/// The `CREATE` statements of the six tables and their indexes, as
 /// `(table, statements)` for [`super::schema::ensure_additive_tables`].
-pub fn create_sql() -> [(&'static str, String); 5] {
+pub fn create_sql() -> [(&'static str, String); 6] {
     [
         (
             CALENDARS_TABLE,
@@ -124,6 +131,18 @@ pub fn create_sql() -> [(&'static str, String); 5] {
                     uid        TEXT NOT NULL,
                     recurrence TEXT,
                     PRIMARY KEY (account, master_id)
+                )"
+            ),
+        ),
+        (
+            INVITES_TABLE,
+            format!(
+                "CREATE TABLE IF NOT EXISTS {INVITES_TABLE} (
+                    account     TEXT NOT NULL,
+                    message_row INTEGER NOT NULL,
+                    server_id   TEXT NOT NULL,
+                    event_id    TEXT,
+                    PRIMARY KEY (account, message_row)
                 )"
             ),
         ),
@@ -217,6 +236,70 @@ pub fn set_calendar_visible(
             params![account, calendar_id, visible],
         )
         .context("writing a calendar's visibility")?;
+    Ok(())
+}
+
+/// Whether one calendar of `account` is shown: its preference, else visible.
+/// The one read for a calendar the server list does not carry, the virtual
+/// invitation calendar.
+pub fn calendar_visible(store: &Store, account: &str, calendar_id: &str) -> Result<bool> {
+    let visible: Option<bool> = store
+        .conn()
+        .query_row(
+            &format!("SELECT visible FROM {PREFS_TABLE} WHERE account = ?1 AND calendar_id = ?2"),
+            [account, calendar_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("reading a calendar's visibility")?;
+    Ok(visible.unwrap_or(true))
+}
+
+/// The server event remembered for the invitation mail `message_row`, when
+/// it was looked up under `server_id`: `Some(None)` for a mail remembered as
+/// standing for no event, `None` when it was never looked up (or under
+/// another server id, which a move gives it).
+pub fn cached_invite_event(
+    store: &Store,
+    account: &str,
+    message_row: i64,
+    server_id: &str,
+) -> Result<Option<Option<String>>> {
+    store
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT event_id FROM {INVITES_TABLE}
+                 WHERE account = ?1 AND message_row = ?2 AND server_id = ?3"
+            ),
+            params![account, message_row, server_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .context("reading an invitation's server event")
+}
+
+/// Remember the server event of the invitation mail `message_row`, looked up
+/// under `server_id`.
+pub fn remember_invite_event(
+    store: &Store,
+    account: &str,
+    message_row: i64,
+    server_id: &str,
+    event_id: Option<&str>,
+) -> Result<()> {
+    store
+        .conn()
+        .execute(
+            &format!(
+                "INSERT INTO {INVITES_TABLE} (account, message_row, server_id, event_id)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (account, message_row) DO UPDATE SET
+                    server_id = excluded.server_id, event_id = excluded.event_id"
+            ),
+            params![account, message_row, server_id, event_id],
+        )
+        .context("writing an invitation's server event")?;
     Ok(())
 }
 
@@ -420,6 +503,25 @@ pub fn events_in_range(
     Ok(events)
 }
 
+/// The dedup keys of every cached event of `account`, whatever its window
+/// or calendar: what an invitation mail's copy of an event is matched
+/// against.
+pub fn event_keys(store: &Store, account: &str) -> Result<HashSet<EventKey>> {
+    let mut stmt = store.conn().prepare(&format!(
+        "SELECT uid, recurrence_id FROM {EVENTS_TABLE} WHERE account = ?1"
+    ))?;
+    let keys = stmt
+        .query_map([account], |row| {
+            Ok(EventKey::new(
+                &row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?.as_deref(),
+            ))
+        })?
+        .collect::<rusqlite::Result<HashSet<_>>>()
+        .context("reading the cached event keys")?;
+    Ok(keys)
+}
+
 /// One cached event of `account` by its server id.
 pub fn get_event(store: &Store, account: &str, id: &str) -> Result<Option<Event>> {
     let json: Option<String> = store
@@ -575,11 +677,18 @@ fn write_series(conn: &rusqlite::Connection, account: &str, series: &SeriesInfo)
 }
 
 /// Drop everything the calendar cache of `account` holds (calendars, events,
-/// sync tokens, series), keeping the visibility preferences: the next sync
-/// rebuilds the rest from the server (`calendar.rebuild`).
+/// sync tokens, series, invitation lookups), keeping the visibility
+/// preferences: the next sync rebuilds the rest from the server
+/// (`calendar.rebuild`).
 pub fn drop_calendar_cache(store: &Store, account: &str) -> Result<()> {
     let tx = store.immediate_transaction()?;
-    for table in [CALENDARS_TABLE, EVENTS_TABLE, SYNC_TABLE, SERIES_TABLE] {
+    for table in [
+        CALENDARS_TABLE,
+        EVENTS_TABLE,
+        SYNC_TABLE,
+        SERIES_TABLE,
+        INVITES_TABLE,
+    ] {
         tx.execute(
             &format!("DELETE FROM {table} WHERE account = ?1"),
             [account],
@@ -695,6 +804,33 @@ mod tests {
                 .unwrap();
             assert!(present, "{table}");
         }
+    }
+
+    /// An invitation's lookup is remembered under the server id it was made
+    /// with, a miss included, and a rebuild forgets it; a preference outlives
+    /// both.
+    #[test]
+    fn an_invitation_lookup_is_remembered_per_server_id() {
+        let (_dir, store) = open();
+        assert_eq!(cached_invite_event(&store, "evoqs", 7, "m1").unwrap(), None);
+        remember_invite_event(&store, "evoqs", 7, "m1", Some("ev1")).unwrap();
+        remember_invite_event(&store, "evoqs", 8, "m2", None).unwrap();
+        assert_eq!(
+            cached_invite_event(&store, "evoqs", 7, "m1").unwrap(),
+            Some(Some("ev1".into()))
+        );
+        assert_eq!(
+            cached_invite_event(&store, "evoqs", 8, "m2").unwrap(),
+            Some(None)
+        );
+        // A move gave the row another server id: looked up again.
+        assert_eq!(cached_invite_event(&store, "evoqs", 7, "m9").unwrap(), None);
+
+        assert!(calendar_visible(&store, "evoqs", "imip").unwrap());
+        set_calendar_visible(&store, "evoqs", "imip", false).unwrap();
+        drop_calendar_cache(&store, "evoqs").unwrap();
+        assert_eq!(cached_invite_event(&store, "evoqs", 7, "m1").unwrap(), None);
+        assert!(!calendar_visible(&store, "evoqs", "imip").unwrap());
     }
 
     #[test]

@@ -86,7 +86,7 @@ fn addressing_of(store: &Store, account: &str, row_id: i64, what: &str) -> Optio
             None
         })
         .and_then(|cursor| cursor.uidvalidity);
-    let (graph_id, siblings) = match graph_id_of(store, row_id)
+    let (graph_id, siblings) = match crate::store::read::graph_id(store, row_id)
         .and_then(|graph_id| Ok((graph_id, siblings_of(store, account, &row)?)))
     {
         Ok(read) => read,
@@ -108,16 +108,6 @@ fn addressing_of(store: &Store, account: &str, row_id: i64, what: &str) -> Optio
         copy,
         graph_copy,
     })
-}
-
-/// The Graph id a listing bound the row to (PERSO-245), `None` on an IMAP row
-/// and on one no listing has bound since it was synced or moved.
-fn graph_id_of(store: &Store, row_id: i64) -> anyhow::Result<Option<String>> {
-    Ok(store.conn().query_row(
-        "SELECT graph_id FROM messages WHERE id = ?1",
-        [row_id],
-        |r| r.get(0),
-    )?)
 }
 
 /// The uids and Graph ids of the store's other rows of `row`'s message in its
