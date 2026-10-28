@@ -4856,7 +4856,7 @@ async fn main() -> Result<()> {
     // Load SMTP config from account config + keyring.
     //
     // Unused from P4-U14, when `mp invite` started submitting its reply through
-    // `calendar.rsvp`, and deleted with the rest of the direct engine paths by
+    // the daemon (`event.respond` since PERSO-200), and deleted with the rest of the direct engine paths by
     // P4-U15. The call itself stays: the two warning lines it prints when there
     // are no credentials are part of what every command has always printed.
     // A Graph account sends through Graph and has no SMTP transport by design,
