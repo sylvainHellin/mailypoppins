@@ -23,6 +23,7 @@ use tempfile::TempDir;
 
 use mp_client::{ClientError, ClientInfo, ClientKind, Connection, Identity};
 
+use mailypoppins::pending_ops;
 use mailypoppins::store::read;
 
 use support::mutation_fixture as fixture;
@@ -278,6 +279,18 @@ async fn message_move_lands_the_row_and_answers_the_new_selector() {
         .map(|(mailbox, _, _)| mailbox)
         .collect();
     assert_eq!(mailboxes_of_kickoff, ["archive"], "the row moved, once");
+
+    // `settle: false` commits the server move for the drain, `queued`, not
+    // `settling` for a caller that never runs it (PERSO-236): a drain leaves
+    // a `settling` row alone, so the move would never reach the server.
+    let store = fixture::store(slice.tmp.path(), fixture::ACCOUNT);
+    let owed = pending_ops::queued_ops(&store, fixture::ACCOUNT).expect("read the queue");
+    assert_eq!(
+        owed.iter().map(|op| op.kind.as_str()).collect::<Vec<_>>(),
+        ["move"],
+        "the move is the drain's: {owed:?}"
+    );
+    drop(store);
 
     // The selector `mp move` hands back resolves, so a caller can chain
     // `mp show` or `mp reply` on it.
