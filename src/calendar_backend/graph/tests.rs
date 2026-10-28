@@ -509,7 +509,7 @@ async fn another_calendar_without_its_own_delta_is_read_in_full_every_sync() {
 }
 
 #[tokio::test]
-async fn a_forbidden_answer_is_a_missing_scope() {
+async fn a_forbidden_calendar_list_is_a_missing_scope() {
     let fetch = ScriptedFetch::default().route(
         &format!("{BASE}/me/calendars"),
         status(
@@ -540,6 +540,33 @@ async fn another_failure_is_reported_and_leaves_the_token_alone() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("HTTP 503"), "{err}");
+}
+
+#[tokio::test]
+async fn a_forbidden_calendar_window_fails_that_calendar_alone() {
+    // A shared calendar its owner's ACL refuses answers 403 on its window:
+    // an ordinary failure the sync logs before the next calendar, not a
+    // missing scope that would stop the account with a re-login prompt.
+    let link = format!("{BASE}/me/calendars/AAMkCal-shared/calendarView/delta?$deltatoken=round1");
+    let fetch = ScriptedFetch::default().route(
+        &link,
+        status(
+            403,
+            r#"{"error":{"code":"ErrorAccessDenied","message":"Access is denied."}}"#,
+        ),
+    );
+    let backend = GraphCalendarBackend::with_fetch("evoqs", fetch);
+    let token = GraphToken {
+        path: SyncPath::CalendarDelta,
+        link: Some(link),
+    }
+    .encode();
+    let err = backend
+        .sync_window(&calendar("AAMkCal-shared", false), window(), Some(token))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CalendarBackendError::Other(_)), "{err:?}");
+    assert!(err.to_string().contains("HTTP 403"), "{err}");
 }
 
 #[tokio::test]

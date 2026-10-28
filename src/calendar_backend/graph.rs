@@ -993,6 +993,47 @@ impl<F: GraphFetch> GraphCalendarBackend<F> {
         self.walk(&url, false).await
     }
 
+    /// The pages of one `sync_window`: on from the delta link `token` holds,
+    /// or a fresh baseline when there is none or the server dropped it, with
+    /// whether the result replaces the calendar's cache.
+    async fn walk_window(
+        &self,
+        calendar: &Calendar,
+        window: CalendarWindow,
+        token: Option<String>,
+    ) -> Result<(SyncPath, Walked, bool), WalkError> {
+        match token.as_deref().and_then(GraphToken::decode) {
+            Some(GraphToken {
+                path: SyncPath::CalendarView,
+                ..
+            }) => Ok((
+                SyncPath::CalendarView,
+                self.view(calendar, window).await?,
+                true,
+            )),
+            Some(GraphToken {
+                path,
+                link: Some(link),
+            }) => match self.walk(&link, true).await {
+                Ok(walked) => Ok((path, walked, false)),
+                Err(WalkError::Reset(why)) => {
+                    info!(
+                        "[calendar] {}: Graph dropped the sync state of {} ({why}); \
+                         syncing the window afresh",
+                        self.account, calendar.name
+                    );
+                    let (path, walked) = self.baseline(calendar, window).await?;
+                    Ok((path, walked, true))
+                }
+                Err(err) => Err(err),
+            },
+            _ => {
+                let (path, walked) = self.baseline(calendar, window).await?;
+                Ok((path, walked, true))
+            }
+        }
+    }
+
     /// The series master `master_id`, read from the server.
     async fn fetch_series(&self, master_id: &str) -> anyhow::Result<SeriesInfo> {
         let url = format!(
@@ -1124,6 +1165,7 @@ fn window_query(window: CalendarWindow) -> String {
 
 impl<F: GraphFetch> CalendarBackend for GraphCalendarBackend<F> {
     async fn list_calendars(&self) -> BackendResult<Vec<Calendar>> {
+        // A 403 here is the token's scope, not one calendar's ACL.
         let url = format!("{GRAPH_BASE}/me/calendars");
         let mut calendars = Vec::new();
         let mut next = Some(url);
@@ -1155,37 +1197,21 @@ impl<F: GraphFetch> CalendarBackend for GraphCalendarBackend<F> {
         window: CalendarWindow,
         token: Option<String>,
     ) -> BackendResult<SyncResult> {
-        let token = token.as_deref().and_then(GraphToken::decode);
-        let (path, walked, full_resync) = match token {
-            Some(GraphToken {
-                path: SyncPath::CalendarView,
-                ..
-            }) => (
-                SyncPath::CalendarView,
-                self.view(calendar, window).await?,
-                true,
-            ),
-            Some(GraphToken {
-                path,
-                link: Some(link),
-            }) => match self.walk(&link, true).await {
-                Ok(walked) => (path, walked, false),
-                Err(WalkError::Reset(why)) => {
-                    info!(
-                        "[calendar] {}: Graph dropped the sync state of {} ({why}); \
-                         syncing the window afresh",
-                        self.account, calendar.name
-                    );
-                    let (path, walked) = self.baseline(calendar, window).await?;
-                    (path, walked, true)
-                }
-                Err(err) => return Err(err.into()),
-            },
-            _ => {
-                let (path, walked) = self.baseline(calendar, window).await?;
-                (path, walked, true)
-            }
-        };
+        let (path, walked, full_resync) =
+            self.walk_window(calendar, window, token)
+                .await
+                .map_err(|err| match err {
+                    // One calendar the account may not read (a shared calendar
+                    // its owner's ACL refuses) fails alone: the sync logs it
+                    // and goes on with the others, where a missing scope would
+                    // stop the account with a re-login prompt the sign-in
+                    // cannot fix. The scope itself shows on `list_calendars`.
+                    WalkError::Forbidden => CalendarBackendError::Other(anyhow!(
+                        "Graph refused access to the calendar {} (HTTP 403)",
+                        calendar.name
+                    )),
+                    other => other.into(),
+                })?;
         debug!(
             "[calendar] {}: synced {} through {}",
             self.account,
