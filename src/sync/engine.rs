@@ -441,6 +441,13 @@ pub async fn run_sync(
             } else {
                 fetched.listed.iter().map(|&uid| uid as i64).collect()
             };
+        // What the folder holds, for the departures watch to tell a departing
+        // op's stale UID from a live one (PERSO-246), under the same
+        // conditions: a reset or short listing cannot say.
+        let folder: Option<std::collections::HashSet<u32>> = (!fetched.uidvalidity_reset
+            && fetched.enumeration_complete
+            && !fetched.listed.is_empty())
+        .then(|| fetched.listed.iter().copied().collect());
 
         let mut unmet: Vec<u32> = Vec::new();
         // #0115: a UID the store has given up on drops out of `unmet`, which is
@@ -491,10 +498,13 @@ pub async fn run_sync(
                 &RebindPolicy::UnlessListed(&server_uids),
                 &|message_id| {
                     departures.departed(
-                        &target.server_name,
                         message_id,
-                        message.uid,
-                        state.uid_validity,
+                        &super::departures::Listed {
+                            source: &target.server_name,
+                            uid: message.uid,
+                            uidvalidity: state.uid_validity,
+                            folder: folder.as_ref(),
+                        },
                     )
                 },
             );
@@ -2766,5 +2776,107 @@ mod tests {
         assert_eq!(fx.rows_for("inbox", &mid("m")), vec![(row, 90)]);
         assert_eq!(result.uid_rebound, 1);
         assert_eq!(result.saved, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // PERSO-246: a departure whose UID went stale
+    // -----------------------------------------------------------------------
+
+    /// What `mp move` commits locally for a row whose op names `copy`.
+    fn local_move_of(store: &Store, row: i64, copy: crate::ops::ServerCopy) {
+        let op = crate::ops::ServerOp::Move {
+            message_id: mid("m"),
+            source_mailbox: "INBOX".to_string(),
+            dest_mailbox: "archive".to_string(),
+            copy: Some(copy),
+        };
+        crate::pending_ops::apply_move(
+            store,
+            "acct",
+            row,
+            "archive",
+            op,
+            crate::pending_ops::Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    /// Another client moved the message out of INBOX and back, so the server
+    /// gave it UID 25 while the row still says 10, and the user's move of it
+    /// commits while the pass lists INBOX. Its server half finds UID 10 empty
+    /// and takes the folder's one copy, UID 25 (`resolve_copy`), so the pass
+    /// must not write UID 25 as a new inbox row beside the moved one.
+    #[test]
+    fn a_renumbered_copy_a_move_is_taking_out_is_not_ingested() {
+        let fx = Fixture::new();
+        let targets = targets();
+        let mut backend = FakeBackend::default();
+        backend.script("INBOX", vec![Ok(fetch(vec![(10, raw("m"))]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        fx.run(&mut backend, &targets);
+        let row = row_of(&fx, "m");
+
+        let handle = second_handle(&fx);
+        backend.during_fetch = Some(Box::new(move || {
+            let copy = copy_of(&handle, row).expect("the row is on UID 10");
+            local_move_of(&handle, row, copy);
+        }));
+        backend.script("INBOX", vec![Ok(fetch(vec![(25, raw("m"))]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        let result = fx.run(&mut backend, &targets);
+
+        assert_eq!(
+            fx.rows_for("inbox", &mid("m")),
+            Vec::<(i64, i64)>::new(),
+            "the renumbered copy the move is taking off INBOX left no row behind"
+        );
+        assert_eq!(fx.rows_for("archive", &mid("m")), vec![(row, -row)]);
+        assert_eq!(result.saved, 0, "nothing new arrived");
+        assert!(result.new_inbox_mail.is_empty(), "and nothing is announced");
+    }
+
+    /// The same stale move with a twin row on UID 30 beside it, which the op
+    /// names as a sibling: the folder then holds two copies, the server half
+    /// takes neither, and the pass withholds neither. The twin keeps its row,
+    /// and the renumbered copy, which stays on the server, gets one.
+    #[test]
+    fn a_stale_move_beside_a_twin_row_withholds_nothing() {
+        let fx = Fixture::new();
+        let targets = targets();
+        let mut backend = FakeBackend::default();
+        backend.script(
+            "INBOX",
+            vec![Ok(fetch(vec![(10, raw("m")), (30, raw("m"))]))],
+        );
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        fx.run(&mut backend, &targets);
+        let rows = fx.rows_for("inbox", &mid("m"));
+        let [(moved, 10), (twin, 30)] = rows[..] else {
+            panic!("two rows, on UIDs 10 and 30: {rows:?}");
+        };
+
+        let copy = copy_of(&fx.store, moved)
+            .expect("the row is on UID 10")
+            .with_siblings([30]);
+        local_move_of(&fx.store, moved, copy);
+        backend.script(
+            "INBOX",
+            vec![Ok(fetch(vec![(25, raw("m")), (30, raw("m"))]))],
+        );
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        let result = fx.run(&mut backend, &targets);
+
+        let inbox = fx.rows_for("inbox", &mid("m"));
+        assert!(
+            inbox.contains(&(twin, 30)),
+            "the twin keeps its row: {inbox:?}"
+        );
+        assert_eq!(
+            inbox.iter().map(|(_, uid)| *uid).collect::<Vec<_>>(),
+            [25, 30],
+            "the copy no op takes gets a row of its own: {inbox:?}"
+        );
+        assert_eq!(result.saved, 1);
     }
 }

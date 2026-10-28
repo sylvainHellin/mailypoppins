@@ -29,6 +29,13 @@
 //! A departure names the copy it takes when its row knew its server UID
 //! ([`ServerCopy`], PERSO-238), and then only that UID departed: another copy
 //! under the same `Message-ID` stays on the server and is ingested as ever.
+//! When the listing no longer holds that UID, because another client moved
+//! the message out and back since the row was synced, the op's server half
+//! takes the folder's copy no twin row stands for
+//! (`imap_client::ops::resolve_copy`), and so the watch takes that copy for
+//! the departing one too, from the same listing (PERSO-246). The question is
+//! answered from what the pass listed rather than from what the server half
+//! acted on, because the server half may run after the ingest that asks.
 //! One whose row had no UID yet (a row still on the `-id` sentinel of an
 //! earlier move, which is the back-to-back case) names none, and any copy of
 //! its `Message-ID` in the folder is taken as the departing one, so a genuine
@@ -38,7 +45,7 @@
 //! watch is open over the store and is dropped when the last one closes, so it
 //! never grows past the departures of one pass.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
@@ -58,21 +65,62 @@ struct Leaving {
 }
 
 impl Leaving {
-    /// Whether this departure may be what took the copy listed as `uid` in
-    /// `source`, under `uidvalidity`, carrying `message_id`.
+    /// Whether this departure may be what took the copy `listed` names,
+    /// carrying `message_id`.
     ///
-    /// A named copy is the departing one only under its own UID, unless the
-    /// listing is under another UIDVALIDITY (a reset since the row was synced),
-    /// where its UID means nothing and the `Message-ID` decides, as it does for
-    /// an op that names no copy.
-    fn covers(&self, source: &str, message_id: &str, uid: u32, uidvalidity: Option<u32>) -> bool {
+    /// A named copy is the departing one under its own UID, and under any UID
+    /// when the listing is under another UIDVALIDITY (a reset since the row was
+    /// synced), where its UID means nothing and the `Message-ID` decides, as it
+    /// does for an op that names no copy. See [`departs`] for a UID the folder
+    /// no longer lists.
+    fn covers(&self, message_id: &str, listed: &Listed<'_>) -> bool {
         self.message_id == message_id
-            && same_folder(&self.source, source)
-            && self.copy.as_ref().is_none_or(|copy| {
-                copy.uid == uid
-                    || matches!((copy.uidvalidity, uidvalidity), (Some(a), Some(b)) if a != b)
-            })
+            && same_folder(&self.source, listed.source)
+            && self.copy.as_ref().is_none_or(|copy| departs(copy, listed))
     }
+}
+
+/// Whether an op naming `copy` takes the copy `listed` names out of its
+/// folder.
+///
+/// Its own UID, and any UID under another UIDVALIDITY, as [`Leaving::covers`]
+/// says. When the folder no longer lists the op's UID (PERSO-246), the
+/// server half finds the message by `Message-ID` and acts on the folder's
+/// copy when it is the only one (`imap_client::ops::resolve_copy`): the
+/// copy listed here, unless a copy a twin row stands for
+/// ([`ServerCopy::siblings`]) is listed beside it, which makes the folder hold
+/// two and the server half act on neither. That twin's own copy is therefore
+/// never taken for the departing one. Two copies no row stands for cannot be
+/// told apart from a listing either, so both wait while the op is owed, as a
+/// copy of an op that names none does; so does a new copy listed after the
+/// op's own already left, which the next pass ingests.
+///
+/// A listing that cannot say what the folder holds (a short enumeration)
+/// leaves the op's UID as the only one that departs.
+fn departs(copy: &ServerCopy, listed: &Listed<'_>) -> bool {
+    if copy.uid == listed.uid
+        || matches!((copy.uidvalidity, listed.uidvalidity), (Some(a), Some(b)) if a != b)
+    {
+        return true;
+    }
+    listed.folder.is_some_and(|folder| {
+        !folder.contains(&copy.uid) && !copy.siblings.iter().any(|uid| folder.contains(uid))
+    })
+}
+
+/// One copy a sync pass listed, as [`Watch::departed`] asks about it.
+#[derive(Debug, Clone, Copy)]
+pub struct Listed<'a> {
+    /// The server folder the copy was listed in.
+    pub source: &'a str,
+    /// The copy's UID there.
+    pub uid: u32,
+    /// The folder's UIDVALIDITY on this pass.
+    pub uidvalidity: Option<u32>,
+    /// Every UID the pass listed in the folder, when the enumeration covered
+    /// the whole folder under the UIDVALIDITY the store knows; `None` when it
+    /// cannot say what the folder holds.
+    pub folder: Option<&'a HashSet<u32>>,
 }
 
 /// One local departure, as the journal keeps it.
@@ -198,18 +246,11 @@ impl Watch {
         Ok(watch)
     }
 
-    /// Whether the copy this pass listed as `uid` in the server folder
-    /// `source`, under `uidvalidity`, carrying `message_id`, may be one a
-    /// local move or delete is taking out of it: one whose server half may not
-    /// have landed before the listing was taken.
-    pub fn departed(
-        &self,
-        source: &str,
-        message_id: &str,
-        uid: u32,
-        uidvalidity: Option<u32>,
-    ) -> bool {
-        let covers = |leaving: &Leaving| leaving.covers(source, message_id, uid, uidvalidity);
+    /// Whether the copy this pass listed (`listed`), carrying `message_id`,
+    /// may be one a local move or delete is taking out of its folder: one
+    /// whose server half may not have landed before the listing was taken.
+    pub fn departed(&self, message_id: &str, listed: &Listed<'_>) -> bool {
+        let covers = |leaving: &Leaving| leaving.covers(message_id, listed);
         self.owed.iter().any(covers)
             || journals().get(&self.store).is_some_and(|journal| {
                 journal
@@ -263,7 +304,23 @@ mod tests {
         /// [`Watch::departed`] for a copy listed at UID 1 under UIDVALIDITY 7,
         /// which an op naming no copy covers whatever its UID.
         fn left(&self, source: &str, message_id: &str) -> bool {
-            self.departed(source, message_id, 1, Some(7))
+            self.departed(message_id, &at(source, 1, Some(7), None))
+        }
+    }
+
+    /// A copy listed at `uid` in `source`, under `uidvalidity`, by a listing
+    /// that holds `folder`.
+    fn at<'a>(
+        source: &'a str,
+        uid: u32,
+        uidvalidity: Option<u32>,
+        folder: Option<&'a HashSet<u32>>,
+    ) -> Listed<'a> {
+        Listed {
+            source,
+            uid,
+            uidvalidity,
+            folder,
         }
     }
 
@@ -401,18 +458,66 @@ mod tests {
                 }),
             },
         );
-        assert!(watch.departed("INBOX", "<a@x>", 10, Some(7)));
+        // The folder still lists UID 10, so UID 11 is a second copy.
+        let listed: HashSet<u32> = [10, 11].into();
+        let folder = Some(&listed);
+        assert!(watch.departed("<a@x>", &at("INBOX", 10, Some(7), folder)));
         assert!(
-            !watch.departed("INBOX", "<a@x>", 11, Some(7)),
+            !watch.departed("<a@x>", &at("INBOX", 11, Some(7), folder)),
             "a second copy"
         );
         assert!(
-            watch.departed("INBOX", "<a@x>", 11, Some(8)),
+            !watch.departed("<a@x>", &at("INBOX", 11, Some(7), None)),
+            "a listing that cannot say UID 10 is gone"
+        );
+        assert!(
+            watch.departed("<a@x>", &at("INBOX", 11, Some(8), folder)),
             "a renumbered folder"
         );
         assert!(
-            watch.departed("INBOX", "<a@x>", 10, None),
+            watch.departed("<a@x>", &at("INBOX", 10, None, folder)),
             "no UIDVALIDITY to doubt"
+        );
+    }
+
+    /// An op whose UID went stale (PERSO-246): the folder no longer lists it,
+    /// so the server half takes the folder's one copy no twin row stands for,
+    /// and the watch takes that copy for the departing one. A copy a twin row
+    /// stands for is not taken, and neither is any copy listed beside one,
+    /// since the server half then acts on none.
+    #[test]
+    fn a_stale_copy_departs_under_the_uid_the_folder_now_gives_it() {
+        let (_dir, store) = store();
+        let watch = Watch::open(&store, "alice").unwrap();
+        record(
+            &store,
+            "alice",
+            &ServerOp::Move {
+                message_id: "<a@x>".to_string(),
+                source_mailbox: "INBOX".to_string(),
+                dest_mailbox: "Archive".to_string(),
+                copy: Some(ServerCopy {
+                    uid: 10,
+                    uidvalidity: Some(7),
+                    siblings: vec![30],
+                }),
+            },
+        );
+        let renumbered: HashSet<u32> = [25].into();
+        assert!(watch.departed("<a@x>", &at("INBOX", 25, Some(7), Some(&renumbered))));
+        assert!(
+            !watch.departed("<b@x>", &at("INBOX", 25, Some(7), Some(&renumbered))),
+            "another message"
+        );
+
+        let beside_a_twin: HashSet<u32> = [25, 30].into();
+        assert!(
+            !watch.departed("<a@x>", &at("INBOX", 30, Some(7), Some(&beside_a_twin))),
+            "the twin's own copy"
+        );
+        assert!(
+            !watch.departed("<a@x>", &at("INBOX", 25, Some(7), Some(&beside_a_twin))),
+            "a copy the server half cannot tell from the twin's"
         );
     }
 }

@@ -795,6 +795,8 @@ An op that names the row's copy by UID (PERSO-238) cannot be fooled by a twin, b
 The UID search then misses, the miss reads as not found, and the drain retires a not-found as a converged replay, so the local move stood, the server copy stayed and the next sync brought it back, where the old `Message-ID` search had simply found the copy.
 Falling back to that search is only safe with what the store knows: the op carries the UIDs bound to the row's twins in the folder, and takes the folder's copy only when it is the only one and no twin stands for it.
 A miss is a converged replay only when a completed run explains it; for a move that is the message already in the destination with nothing of the row's left in the source, and any other miss must surface as an ordinary error, which the drain retries and rolls back, rather than as a not-found.
+The departures watch had to learn the same fallback (PERSO-246): it withheld only the op's own UID, so a sync listing the renumbered copy wrote it as a new row until the move landed and a later pass pruned it.
+Recording the UID the server half acted on would not have closed it, because that half may resolve the copy after the ingest that asks, and is not even running when the op is merely owed; the watch has to answer from the listing the pass already holds, by the rule the server half will apply to the same folder: the op's UID is gone, and the copy is not one listed beside a twin row's.
 
 ## Not every queued op has a rollback, and the post-send flag is the one that must not
 
