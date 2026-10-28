@@ -21,6 +21,7 @@ pub use mp_core::contacts::{
 
 mod extractor;
 pub mod hooks;
+pub mod window;
 
 pub use extractor::{
     build_index_for_account, build_index_for_account_until, build_index_in, commit_rebuild_at,

@@ -68,6 +68,7 @@ use mp_protocol::events::{ContactChanged, KIND_CONTACT_CHANGED};
 use mp_protocol::RpcError;
 
 use crate::config::{AccountConfig, EmailSettings};
+use crate::contacts::window::RebuildWindow;
 use crate::contacts::{
     build_index_in, cache_path, commit_rebuild_at, contact_to_vcard, load_cache, search,
     vcard_file_stem, CacheSave, Contact, ContactIndex, ContactSource, MatchResult,
@@ -353,9 +354,10 @@ async fn load_index_in(root: PathBuf, account: AccountConfig) -> Result<Loaded, 
         if let Some(index) = current_cache(&root)? {
             return Ok(Loaded::served(index));
         }
+        let window = RebuildWindow::open(&root);
         let index = build_index_in(&root, &account, || false)?
             .expect("a walk nothing stops always finishes");
-        settle_built(&root, &account, index)
+        settle_built(&root, &account, index, window)
     })
     .await
     .map_err(blocking)?
@@ -417,8 +419,9 @@ fn settle_built(
     root: &Path,
     account: &AccountConfig,
     index: ContactIndex,
+    window: RebuildWindow,
 ) -> anyhow::Result<Loaded> {
-    let committed = commit_rebuild_at(root, account, index, true)?;
+    let committed = commit_rebuild_at(root, account, index, window, true)?;
     let (saved, contacts, kept) = match committed.saved {
         CacheSave::Written => {
             return Ok(Loaded {
@@ -561,13 +564,21 @@ async fn rebuild(account: AccountConfig, handle: OperationHandle) {
     });
     let token = handle.token.clone();
     let root = crate::config::account_dir(&account.name);
+    // One rebuild of an account at a time, a read's included, so a read
+    // that arrives meanwhile is served what this one writes.
+    let gate = build_gate(&root);
+    let _turn = gate.lock().await;
     let walk_root = root.clone();
     let walked = tokio::task::spawn_blocking(move || {
+        // Before the walk lists the store: the window is what tells this
+        // rebuild's commit, and the merges after it, which sync observations
+        // the walk saw (PERSO-234).
+        let window = RebuildWindow::open(&walk_root);
         build_index_in(&walk_root, &account, || token.is_cancelled())
-            .map(|index| index.map(|index| (account, index)))
+            .map(|index| index.map(|index| (account, index, window)))
     })
     .await;
-    let (account, index) = match walked {
+    let (account, index, window) = match walked {
         Ok(Ok(Some(built))) => built,
         Ok(Ok(None)) => return,
         Ok(Err(e)) => return handle.fail(DomainError::internal(format!("{e:#}"))),
@@ -576,7 +587,8 @@ async fn rebuild(account: AccountConfig, handle: OperationHandle) {
     if !commit_point("contact.rebuild", &handle.token).await {
         return;
     }
-    let saved = tokio::task::spawn_blocking(move || save_blocking(&root, &account, index)).await;
+    let saved =
+        tokio::task::spawn_blocking(move || save_blocking(&root, &account, index, window)).await;
     match saved {
         Ok(Ok(result)) => {
             if result["saved"] == "written" {
@@ -595,15 +607,17 @@ async fn rebuild(account: AccountConfig, handle: OperationHandle) {
 
 /// The blocking commit: offer the ranked index to the cache.
 ///
-/// Through [`commit_rebuild_at`], which folds in the rows a sync inserted
-/// while the walk ran and holds the cache's lock to the save (PERSO-234).
+/// Through [`commit_rebuild_at`], which folds in what the syncs that merged
+/// during the walk logged into `window`, and holds the cache's lock to the
+/// save (PERSO-234).
 fn save_blocking(
     root: &Path,
     account: &AccountConfig,
     index: ContactIndex,
+    window: RebuildWindow,
 ) -> anyhow::Result<Value> {
     let rebuilt = index.contacts.len();
-    let committed = commit_rebuild_at(root, account, index, false)?;
+    let committed = commit_rebuild_at(root, account, index, window, false)?;
     let (saved, contacts, kept) = match committed.saved {
         CacheSave::Written => ("written", committed.index.contacts.len(), 0),
         CacheSave::RefusedEmpty { kept } => ("refused_empty", rebuilt, kept),
@@ -640,7 +654,6 @@ mod tests {
                 contacts: Default::default(),
                 built_at: String::new(),
                 extractor_version: crate::contacts::EXTRACTOR_VERSION,
-                rows_through: 0,
             };
             for i in 0..n {
                 let address = format!("c{i}@example.com");
@@ -661,7 +674,8 @@ mod tests {
             index
         };
         save_cache(dir.path(), &index(10)).expect("another writer's index");
-        let loaded = settle_built(dir.path(), &account, index(1)).expect("settled");
+        let window = RebuildWindow::open(dir.path());
+        let loaded = settle_built(dir.path(), &account, index(1), window).expect("settled");
         assert_eq!(loaded.index.contacts.len(), 10, "the kept index answers");
         assert_eq!(loaded.written, None);
         assert_eq!(
@@ -674,7 +688,8 @@ mod tests {
         );
 
         let fresh = tempfile::tempdir().expect("tempdir");
-        let written = settle_built(fresh.path(), &account, index(3)).expect("settled");
+        let window = RebuildWindow::open(fresh.path());
+        let written = settle_built(fresh.path(), &account, index(3), window).expect("settled");
         assert_eq!(written.written, Some(3));
         assert_eq!(written.refused, None);
     }

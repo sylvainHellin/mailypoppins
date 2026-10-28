@@ -129,10 +129,10 @@ impl SyncTarget {
 /// counts each row once (PERSO-234).
 #[derive(Debug, Clone)]
 pub struct FreshObservation {
-    /// `messages.id` of the inserted row, which is what lets a merge skip a
-    /// row the cache's rebuild already walked
-    /// ([`ContactIndex::rows_through`](crate::contacts::ContactIndex::rows_through)).
-    pub row_id: i64,
+    /// When the observation was made, from the process-wide counter of
+    /// [`crate::contacts::window`]: what tells a merge whether the rebuild
+    /// whose index is on disk already counted the row (PERSO-234).
+    pub sequence: u64,
     /// The mailbox the message was ingested into.
     pub role: MailboxRole,
     pub from: String,
@@ -144,15 +144,14 @@ pub struct FreshObservation {
 }
 
 impl FreshObservation {
-    /// The observation of `email`, just inserted under `role` as row
-    /// `row_id`: the headers a rebuild reads back from the row ingest wrote.
-    pub fn of(
-        row_id: i64,
-        role: &MailboxRole,
-        email: &crate::parse::FetchedEmail,
-    ) -> FreshObservation {
+    /// The observation of `email`, just inserted under `role`: the headers a
+    /// rebuild reads back from the row ingest wrote, numbered now. Make it
+    /// right after the insert returns, never before: an observation numbered
+    /// before its row was committed could be taken for one a rebuild's walk
+    /// had seen when it had not.
+    pub fn of(role: &MailboxRole, email: &crate::parse::FetchedEmail) -> FreshObservation {
         FreshObservation {
-            row_id,
+            sequence: crate::contacts::window::next_sequence(),
             role: role.clone(),
             from: email.from.clone(),
             to: email.to.clone(),

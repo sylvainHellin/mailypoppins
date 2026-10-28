@@ -10,12 +10,11 @@
 //! which already holds the rows the hook would have merged.
 //!
 //! Every merge is one load-merge-save under the cache's lock, the lock a
-//! rebuild's commit takes too ([`crate::contacts::commit_rebuild_at`]): that
-//! commit folds in every row inserted after its walk before it saves, and
-//! stamps the index with the highest row it folded
-//! ([`ContactIndex::rows_through`]), so a sync merge that waited for it skips
-//! the rows it already counted. A rebuild racing a sync neither loses a row
-//! nor counts one twice.
+//! rebuild's commit takes too ([`crate::contacts::commit_rebuild_at`]). Which
+//! sync observations a rebuild already counted, and which ones its commit
+//! must carry over, is [`window`]'s business, decided by when each
+//! observation was made: a rebuild racing a sync loses no row, whatever ids
+//! SQLite reuses.
 //! All errors are logged at warning level but never propagated, so a broken
 //! contacts index never fails a send or sync.
 
@@ -23,7 +22,8 @@ use std::path::Path;
 
 use crate::config::{account_dir, AccountConfig};
 use crate::contacts::{
-    load_cache, observe_message, save_cache, with_cache_lock, ContactIndex, MessageAddresses,
+    load_cache, observe_message, save_cache, window, with_cache_lock, ContactIndex,
+    MessageAddresses,
 };
 use crate::sync::FreshObservation;
 use crate::types::{EmailDraft, MailboxRole};
@@ -98,6 +98,12 @@ pub async fn bump_after_sync_off_reactor(
 
 /// [`bump_after_sync`] against the account directory `root`, which a caller
 /// that runs it off its own thread resolves first.
+///
+/// Under the cache lock: the observations the rebuild on disk already counted
+/// are dropped ([`window::uncounted`]), the rest are merged, and they are
+/// logged into the account's open rebuild window, if any, whether or not they
+/// reached the disk, so the rebuild's commit carries them over
+/// ([`window`], PERSO-234).
 pub fn bump_after_sync_at(
     root: &Path,
     account: &AccountConfig,
@@ -106,85 +112,99 @@ pub fn bump_after_sync_at(
     if observations.is_empty() {
         return None;
     }
-    merge(root, account, "sync", |index, self_addr| {
-        // A row at or below the watermark is one the rebuild that wrote this
-        // cache walked: it raced this sync and has counted it already.
-        let fresh: Vec<&FreshObservation> = observations
-            .iter()
-            .filter(|obs| obs.row_id > index.rows_through)
-            .collect();
-        for obs in &fresh {
-            observe_message(
-                &mut index.contacts,
-                self_addr,
-                &obs.role,
-                &MessageAddresses {
-                    from: Some(obs.from.as_str()),
-                    to: Some(obs.to.as_str()),
-                    cc: obs.cc.as_deref(),
-                    bcc: obs.bcc.as_deref(),
-                },
-                Some(obs.date.as_str()),
-            );
+    with_cache_lock(root, || {
+        let fresh = window::uncounted(root, observations);
+        if fresh.is_empty() {
+            return None;
         }
-        fresh.len()
+        let written = merge_locked(root, account, "sync", |index, self_addr| {
+            for obs in &fresh {
+                fold_observation(index, self_addr, obs);
+            }
+            fresh.len()
+        });
+        window::log(root, &fresh, written.is_some());
+        written
     })
 }
 
-/// Load the cache under `root`, let `fold` merge into it, and write it back,
-/// all under the cache's lock ([`with_cache_lock`]), so no other merge and no
-/// rebuild commit lands between the load and the save (PERSO-234).
-/// `fold` answers how many messages it merged. `None` for a missing, stale or
-/// unreadable cache, for a fold that merged nothing, and for a write that
-/// failed.
+/// Fold one sync observation into `index`, through the rebuild's own rule.
+pub(crate) fn fold_observation(index: &mut ContactIndex, self_addr: &str, obs: &FreshObservation) {
+    observe_message(
+        &mut index.contacts,
+        self_addr,
+        &obs.role,
+        &MessageAddresses {
+            from: Some(obs.from.as_str()),
+            to: Some(obs.to.as_str()),
+            cc: obs.cc.as_deref(),
+            bcc: obs.bcc.as_deref(),
+        },
+        Some(obs.date.as_str()),
+    );
+}
+
+/// [`merge_locked`] under the cache's lock ([`with_cache_lock`]), so no other
+/// merge and no rebuild commit lands between the load and the save.
 fn merge(
     root: &Path,
     account: &AccountConfig,
     what: &str,
     fold: impl FnOnce(&mut ContactIndex, &str) -> usize,
 ) -> Option<usize> {
-    with_cache_lock(root, || {
-        let mut index = match load_cache(root) {
-            Ok(Some(index)) if index.is_current() => index,
-            Ok(Some(index)) => {
-                debug!(
-                    "contacts hook: the cache for '{}' is from extractor version {}, skipping the {what} bump until a read rebuilds it",
-                    account.name, index.extractor_version
-                );
-                return None;
-            }
-            Ok(None) => {
-                debug!(
-                    "contacts hook: no cache for account '{}', skipping the {what} bump",
-                    account.name
-                );
-                return None;
-            }
-            Err(e) => {
-                warn!(
-                    "contacts hook: failed to load cache for '{}': {}",
-                    account.name, e
-                );
-                return None;
-            }
-        };
-        let merged = fold(&mut index, &account.own_address());
-        if merged == 0 {
+    with_cache_lock(root, || merge_locked(root, account, what, fold))
+}
+
+/// Load the cache under `root`, let `fold` merge into it, and write it back;
+/// the caller holds the cache lock. `fold` answers how many messages it
+/// merged. `None` for a missing, stale or unreadable cache, for a fold that
+/// merged nothing, and for a write that failed.
+fn merge_locked(
+    root: &Path,
+    account: &AccountConfig,
+    what: &str,
+    fold: impl FnOnce(&mut ContactIndex, &str) -> usize,
+) -> Option<usize> {
+    let mut index = match load_cache(root) {
+        Ok(Some(index)) if index.is_current() => index,
+        Ok(Some(index)) => {
+            debug!(
+                "contacts hook: the cache for '{}' is from extractor version {}, skipping the {what} bump until a read rebuilds it",
+                account.name, index.extractor_version
+            );
             return None;
         }
-        if let Err(e) = save_cache(root, &index) {
+        Ok(None) => {
+            debug!(
+                "contacts hook: no cache for account '{}', skipping the {what} bump",
+                account.name
+            );
+            return None;
+        }
+        Err(e) => {
             warn!(
-                "contacts hook: failed to save cache for '{}': {}",
+                "contacts hook: failed to load cache for '{}': {}",
                 account.name, e
             );
             return None;
         }
-        debug!(
-            "contacts hook: merged {merged} messages into '{}' index after a {what}",
-            account.name
+    };
+    let merged = fold(&mut index, &account.own_address());
+    if merged == 0 {
+        return None;
+    }
+    if let Err(e) = save_cache(root, &index) {
+        warn!(
+            "contacts hook: failed to save cache for '{}': {}",
+            account.name, e
         );
-        Some(index.contacts.len())
-    })
+        return None;
+    }
+    debug!(
+        "contacts hook: merged {merged} messages into '{}' index after a {what}",
+        account.name
+    );
+    Some(index.contacts.len())
 }
 
 #[cfg(test)]
@@ -434,7 +454,7 @@ mod tests {
 
         let observations = vec![
             FreshObservation {
-                row_id: 2,
+                sequence: 0,
                 role: "inbox".into(),
                 from: "Carol <carol@example.com>".into(),
                 to: "me@example.com".into(),
@@ -443,7 +463,7 @@ mod tests {
                 date: "Mon, 01 Jan 2026 12:00:00 +0000".into(),
             },
             FreshObservation {
-                row_id: 3,
+                sequence: 0,
                 role: "sent".into(),
                 from: "me@example.com".into(),
                 to: "Dave <dave@example.com>".into(),
@@ -481,11 +501,7 @@ mod tests {
         for (uid, (mailbox, message)) in (10..).zip(meeting_reply_and_own_forward(&account)) {
             let outcome = ingest(&account, mailbox, uid, &message);
             assert!(outcome.inserted);
-            observations.push(FreshObservation::of(
-                outcome.row_id,
-                &MailboxRole::from(mailbox),
-                &message,
-            ));
+            observations.push(FreshObservation::of(&MailboxRole::from(mailbox), &message));
         }
         bump_after_sync(&account, &observations).expect("the hook wrote the cache");
 
@@ -533,12 +549,12 @@ mod tests {
         seed_cache_from_store(&account, &f.account_root, "Zoe <zoe@example.com>");
         const PER_THREAD: i64 = 40;
         std::thread::scope(|scope| {
-            for thread in 0..4i64 {
+            for _ in 0..4 {
                 let (root, account) = (&f.account_root, &account);
                 scope.spawn(move || {
-                    for n in 0..PER_THREAD {
+                    for _ in 0..PER_THREAD {
                         let observation = FreshObservation {
-                            row_id: 100 + thread * PER_THREAD + n,
+                            sequence: crate::contacts::window::next_sequence(),
                             role: "inbox".into(),
                             from: "Carol <carol@example.com>".into(),
                             to: "me@example.com".into(),

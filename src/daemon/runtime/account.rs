@@ -1840,11 +1840,9 @@ mod tests {
                 for (uid, (mailbox, message)) in (10..).zip(meeting_reply_and_own_forward(&cfg)) {
                     let outcome = ingest(&cfg, mailbox, uid, &message);
                     if outcome.inserted {
-                        result.fresh_observations.push(FreshObservation::of(
-                            outcome.row_id,
-                            &MailboxRole::from(mailbox),
-                            &message,
-                        ));
+                        result
+                            .fresh_observations
+                            .push(FreshObservation::of(&MailboxRole::from(mailbox), &message));
                     }
                 }
                 // A failed pass never hands its result over: the rows it

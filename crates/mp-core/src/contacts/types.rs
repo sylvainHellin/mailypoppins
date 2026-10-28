@@ -65,13 +65,6 @@ pub struct ContactIndex {
     /// the stamp existed reads as 0, which no rule ever had, so it is stale.
     #[serde(default)]
     pub extractor_version: u32,
-    /// The highest `messages.id` the rebuild that wrote this index folded in
-    /// (PERSO-234). A sync hook skips an inserted row at or below it, which a
-    /// rebuild that raced the sync has already counted; a merge never moves
-    /// it, because merges arrive out of row order. 0 for a cache written
-    /// before the watermark existed, under which every row is new.
-    #[serde(default)]
-    pub rows_through: i64,
 }
 
 impl ContactIndex {

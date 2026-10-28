@@ -514,7 +514,6 @@ pub fn decode_contacts(account: &str, answer: &Value) -> ContactsAnswer {
         contacts,
         built_at: String::new(),
         extractor_version: mp_core::contacts::EXTRACTOR_VERSION,
-        rows_through: 0,
     });
     ContactsAnswer { index, refused }
 }

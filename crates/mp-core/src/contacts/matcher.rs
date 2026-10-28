@@ -94,7 +94,6 @@ mod tests {
             contacts: map,
             built_at: "2026-04-08T00:00:00Z".into(),
             extractor_version: crate::contacts::EXTRACTOR_VERSION,
-            rows_through: 0,
         }
     }
 

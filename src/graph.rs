@@ -2383,11 +2383,9 @@ fn ingest_window(
                 crate::ingest::clear_ingest_failure(store, account_name, target.role.as_str(), uid);
                 if outcome.inserted {
                     result.saved += 1;
-                    result.fresh_observations.push(FreshObservation::of(
-                        outcome.row_id,
-                        &target.role,
-                        email,
-                    ));
+                    result
+                        .fresh_observations
+                        .push(FreshObservation::of(&target.role, email));
                     if target.role.is_inbox()
                         && crate::ingest::arrived_after(newest_held, &email.date)
                     {
@@ -5856,9 +5854,9 @@ mod tests {
         assert!(announced(&result).is_empty());
     }
 
-    /// PERSO-234: only a row the window inserted feeds the contacts hook, under
-    /// the row id ingest gave it. The same window again updates rows the index
-    /// already counted, and a rebuild counts each row once.
+    /// PERSO-234: only a row the window inserted feeds the contacts hook, one
+    /// observation per row, each numbered apart. The same window again updates
+    /// rows the index already counted, and a rebuild counts each row once.
     #[test]
     fn only_an_inserted_row_is_observed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5869,12 +5867,12 @@ mod tests {
             received("<m2@x>", "2026-08-06T11:00:00Z"),
             received("<m1@x>", "2026-08-06T10:00:00Z"),
         ];
-        let observed = |result: &SyncResult| -> Vec<(i64, String)> {
-            let mut out: Vec<(i64, String)> = result
+        let observed = |result: &SyncResult| -> Vec<(u64, String)> {
+            let mut out: Vec<(u64, String)> = result
                 .fresh_observations
                 .take()
                 .into_iter()
-                .map(|o| (o.row_id, o.role.as_str().to_string()))
+                .map(|o| (o.sequence, o.role.as_str().to_string()))
                 .collect();
             out.sort();
             out
@@ -5893,11 +5891,11 @@ mod tests {
         let mut result = SyncResult::default();
         ingest_window(&store, &blobs, "acct", &inbox, &window, None, &mut result);
         assert_eq!(result.saved, 2);
-        let inserted: Vec<(i64, String)> = row_ids()
-            .into_iter()
-            .map(|id| (id, "inbox".to_string()))
-            .collect();
-        assert_eq!(observed(&result), inserted, "one per inserted row, by id");
+        let (mut sequences, roles): (Vec<u64>, Vec<String>) = observed(&result).into_iter().unzip();
+        assert_eq!(roles, ["inbox", "inbox"], "one per inserted row");
+        sequences.dedup();
+        assert_eq!(sequences.len(), 2, "each numbered apart");
+        assert_eq!(row_ids().len(), 2);
 
         let mut again = SyncResult::default();
         ingest_window(&store, &blobs, "acct", &inbox, &window, None, &mut again);

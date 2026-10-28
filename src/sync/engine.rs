@@ -493,11 +493,9 @@ pub async fn run_sync(
                     );
                     if outcome.inserted {
                         result.saved += 1;
-                        result.fresh_observations.push(FreshObservation::of(
-                            outcome.row_id,
-                            &target.role,
-                            &email,
-                        ));
+                        result
+                            .fresh_observations
+                            .push(FreshObservation::of(&target.role, &email));
                     }
                     if outcome.uid_rebound {
                         result.uid_rebound += 1;
