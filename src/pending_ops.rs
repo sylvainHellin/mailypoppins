@@ -47,7 +47,8 @@
 //!   ([`orders_later_ops`]). A move refused for good rolls back the later
 //!   ops on its message with it, newest first, since they were committed
 //!   against the folder its rollback takes the message out of, `queued` and
-//!   `settling` alike, in the one transaction that settles it ([`refuse`],
+//!   `settling` alike, whether the drain parks it or its caller's settle
+//!   discards it, in the one transaction that settles it ([`refuse`],
 //!   PERSO-249), so a command committing meanwhile lands before the refusal
 //!   or after its rollbacks. Any other op refused for good changes no folder
 //!   and releases the later ops to run, and a refused flag toggle puts back
@@ -1215,8 +1216,8 @@ fn refuse(store: &Store, blobs: &BlobStore, id: i64, err: &str, how: Refusal) ->
     // Only a move puts the later ops on a state its rollback undoes: they
     // name the folder it put the message in. After a refused flag toggle
     // they stand as committed and run once it is parked (PERSO-243).
-    let later = match (how, &row.op) {
-        (Refusal::Park, ServerOp::Move { .. }) => later_on_message(&tx, &row)?,
+    let later = match &row.op {
+        ServerOp::Move { .. } => later_on_message(&tx, &row)?,
         _ => Vec::new(),
     };
     #[cfg(test)]
@@ -1675,6 +1676,12 @@ fn older_owed(store: &Store, account: &str, target: i64, before: i64) -> Result<
 
 /// Retire a settled op on success, or roll its local half back and discard it
 /// on failure, returning the error verbatim.
+///
+/// A refused move takes the later ops still owed on its message with it, as
+/// in the drain ([`refuse`], PERSO-243): a star the TUI queued behind the
+/// settle names the folder the move was taking the message to, and once the
+/// move is undone it would search that folder, find nothing and be retired
+/// as a converged not-found, leaving a local star the server never got.
 ///
 /// Split from [`run_and_settle`] so the settle policy is unit-testable without a
 /// live backend: the execution is one `await`, this is the whole decision.
@@ -2634,6 +2641,67 @@ mod tests {
             "inbox"
         );
         assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+    }
+
+    /// PERSO-243: `mp archive` is refused while a star the TUI queued on the
+    /// same message waits behind it. The settle rolled back only the
+    /// archive, and the star then searched the archive folder, found nothing
+    /// and was retired as a converged not-found, leaving a local star the
+    /// server never got. The star is rolled back with the archive instead,
+    /// first, and parked unrun.
+    #[test]
+    fn a_refused_settled_move_rolls_back_a_later_queued_star() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let scope = SettleScope::open(&fx.store);
+        let (_prev, archive) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+        let star = apply_set_flagged(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            star_op("Archive"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+
+        let row = row_by_id(&fx.store, archive).unwrap().unwrap();
+        let err = settle(
+            &fx.store,
+            &fx.blobs,
+            &row,
+            Err(anyhow::anyhow!("NO refused")),
+        )
+        .unwrap_err();
+
+        assert_eq!(format!("{err:#}"), "NO refused");
+        let message = read::find_by_id(&fx.store, id).unwrap().unwrap();
+        assert_eq!(message.mailbox, "inbox");
+        assert!(!message.is_flagged(), "the star was not rolled back");
+        assert!(row_by_id(&fx.store, archive).unwrap().is_none());
+        assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+        let failed = failed_ops(&fx.store, "alice").unwrap();
+        assert_eq!(failed.iter().map(|op| op.id).collect::<Vec<_>>(), [star]);
+        assert_eq!(failed[0].attempts, 0);
+        assert!(
+            failed[0]
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains(&format!("op {archive}, move")),
+            "{:?}",
+            failed[0].last_error
+        );
     }
 
     /// CLI outcome parity: unlike the background [`drain`], the synchronous
