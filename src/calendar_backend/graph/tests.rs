@@ -501,6 +501,18 @@ async fn another_calendar_without_its_own_delta_is_read_in_full_every_sync() {
         .await
         .unwrap();
     assert!(second.full_resync);
+    // Read in full every time, the same window moves the cache once.
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path().join("store.sqlite3")).unwrap();
+    let apply = |result: &SyncResult, at: DateTime<Utc>| {
+        crate::store::calendar::apply_sync(&store, "evoqs", &holidays.id, result, window(), at)
+            .unwrap()
+    };
+    assert!(apply(&first, utc(1, 8, 0)));
+    assert!(
+        !apply(&second, utc(1, 8, 5)),
+        "an identical read moved the cache"
+    );
     let urls: Vec<String> = backend.fetch.sent().into_iter().map(|s| s.url).collect();
     assert_eq!(urls[0], delta_url(id));
     assert_eq!(urls[1], view);

@@ -58,15 +58,18 @@ pub struct SyncReport {
     pub removed: usize,
     /// Calendars whose window was replaced by a baseline.
     pub baselines: usize,
+    /// Calendars whose cached rows the sync moved ([`cache::apply_sync`]).
+    pub moved: usize,
     /// Calendars that failed, with why; the others synced regardless.
     pub failed: Vec<(String, String)>,
 }
 
 impl SyncReport {
-    /// Whether the sync moved the cache: an event written or removed, or a
-    /// window replaced. A clean incremental sync moved nothing.
+    /// Whether the sync moved the cache: an event added, removed or changed.
+    /// A baseline, a refused token included, that reads back what the cache
+    /// held moved nothing, and neither did a clean incremental sync.
     pub fn changed(&self) -> bool {
-        self.upserts > 0 || self.removed > 0 || self.baselines > 0
+        self.moved > 0
     }
 }
 
@@ -174,7 +177,8 @@ pub async fn sync_account<B: CalendarBackend>(
                 // A sync asked for without a token is a baseline whatever the
                 // backend says: the rows of a former window must go.
                 result.full_resync |= baseline;
-                cache::apply_sync(store, account, &calendar.id, &result, window, now)?;
+                let moved = cache::apply_sync(store, account, &calendar.id, &result, window, now)?;
+                report.moved += usize::from(moved);
                 report.upserts += result.upserts.len();
                 report.removed += result.removed.len();
                 report.baselines += usize::from(result.full_resync);
@@ -191,11 +195,12 @@ pub async fn sync_account<B: CalendarBackend>(
     }
     info!(
         "[calendar] {account}: {} calendar(s), {} event(s) written, {} removed, {} baseline(s), \
-         {} failed",
+         {} moved, {} failed",
         report.calendars,
         report.upserts,
         report.removed,
         report.baselines,
+        report.moved,
         report.failed.len()
     );
     Ok(report)
@@ -330,6 +335,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.baselines, 2);
+        assert_eq!(report.moved, 1, "only cal-main lost a row");
+        assert!(report.changed());
         assert_eq!(
             cached(&store, false),
             ["ev-meeting", "ev-holiday", "ev-weekly-2"]
@@ -338,6 +345,49 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(state.baselined_at, at(1, 9));
+    }
+
+    #[tokio::test]
+    async fn a_sync_that_reads_back_the_cache_changes_nothing() {
+        let (_dir, store) = open();
+        let fake = FakeCalendarBackend::canned();
+        let first = sync_account(&store, &fake, "evoqs", at(1, 8))
+            .await
+            .unwrap();
+        assert!(first.changed());
+
+        let second = sync_account(&store, &fake, "evoqs", at(1, 9))
+            .await
+            .unwrap();
+        assert_eq!(second.baselines, 0);
+        assert!(!second.changed(), "{second:?}");
+
+        // A baseline over the same rows, as a refused token or a calendar read
+        // in full on every sync brings, moves nothing either.
+        fake.expire_tokens();
+        let rebaselined = sync_account(&store, &fake, "evoqs", at(1, 10))
+            .await
+            .unwrap();
+        assert_eq!(rebaselined.baselines, 2);
+        assert_eq!(rebaselined.upserts, 3);
+        assert!(!rebaselined.changed(), "{rebaselined:?}");
+        assert_eq!(
+            cached(&store, false),
+            ["ev-meeting", "ev-holiday", "ev-weekly-2"]
+        );
+        let state = cache::load_sync_state(&store, "evoqs", "cal-main")
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.baselined_at, at(1, 10));
+
+        let mut meeting = event(&fake, "ev-meeting");
+        meeting.summary = "Project review, moved".into();
+        fake.put_event(meeting);
+        let edited = sync_account(&store, &fake, "evoqs", at(1, 11))
+            .await
+            .unwrap();
+        assert_eq!(edited.moved, 1);
+        assert!(edited.changed());
     }
 
     #[tokio::test]

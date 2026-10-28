@@ -26,7 +26,7 @@
 //!   `message.invite` asks the server once per invitation mail (a mail that
 //!   stands for no event is remembered too, with a `NULL` event).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
@@ -335,6 +335,12 @@ pub fn list_calendars(store: &Store, account: &str) -> Result<Vec<Calendar>> {
 /// transaction: a `full_resync` replaces every cached event of the calendar,
 /// anything else merges its upserts and removals. A baseline stamps
 /// `baselined_at` with `now`; an incremental sync keeps the stamp it had.
+///
+/// `true` when the calendar's rows moved: an event added, removed, or written
+/// with a stored form that differs from the cached one. A baseline that reads
+/// back what the cache holds moves nothing, which keeps a calendar read in
+/// full on every sync (Graph's `calendarView` fallback) from announcing a
+/// change on every tick.
 pub fn apply_sync(
     store: &Store,
     account: &str,
@@ -342,25 +348,46 @@ pub fn apply_sync(
     result: &SyncResult,
     window: CalendarWindow,
     now: DateTime<Utc>,
-) -> Result<()> {
+) -> Result<bool> {
     let tx = store.immediate_transaction()?;
-    if result.full_resync {
-        tx.execute(
-            &format!("DELETE FROM {EVENTS_TABLE} WHERE account = ?1 AND calendar_id = ?2"),
-            [account, calendar_id],
-        )?;
-    }
-    for id in &result.removed {
+    let mut cached = cached_rows(&tx, account, calendar_id)?;
+    let mut changed = false;
+    let delete = |id: &str| {
         tx.execute(
             &format!(
                 "DELETE FROM {EVENTS_TABLE}
                  WHERE account = ?1 AND calendar_id = ?2 AND event_id = ?3"
             ),
             [account, calendar_id, id],
-        )?;
+        )
+    };
+    if result.full_resync {
+        let incoming: HashSet<&str> = result.upserts.iter().map(|e| e.id.as_str()).collect();
+        let stale: Vec<String> = cached
+            .keys()
+            .filter(|id| !incoming.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for id in stale {
+            delete(&id)?;
+            cached.remove(&id);
+            changed = true;
+        }
+    }
+    for id in &result.removed {
+        if delete(id)? > 0 {
+            changed = true;
+        }
+        cached.remove(id);
     }
     for event in &result.upserts {
-        write_event(&tx, account, calendar_id, event)?;
+        let json = serde_json::to_string(event).context("serialising a calendar event")?;
+        if cached.get(&event.id) == Some(&json) {
+            continue;
+        }
+        write_event(&tx, account, calendar_id, event, &json)?;
+        cached.insert(event.id.clone(), json);
+        changed = true;
     }
     for series in &result.series {
         write_series(&tx, account, series)?;
@@ -384,14 +411,34 @@ pub fn apply_sync(
             path: result.path.clone(),
         },
     )?;
-    tx.commit().context("applying a calendar sync")
+    tx.commit().context("applying a calendar sync")?;
+    Ok(changed)
 }
 
+/// The cached events of one calendar, as their stored JSON by event id.
+fn cached_rows(
+    conn: &rusqlite::Connection,
+    account: &str,
+    calendar_id: &str,
+) -> Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT event_id, event_json FROM {EVENTS_TABLE}
+         WHERE account = ?1 AND calendar_id = ?2"
+    ))?;
+    let rows = stmt
+        .query_map([account, calendar_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()
+        .context("reading a calendar's cached events")?;
+    Ok(rows)
+}
+
+/// Write `event`, whose stored form is `json`, into the cache.
 fn write_event(
     conn: &rusqlite::Connection,
     account: &str,
     calendar_id: &str,
     event: &Event,
+    json: &str,
 ) -> Result<()> {
     let (start_utc, end_utc, start_date, end_date, zone) = match &event.time {
         EventTime::Timed { start, end, zone } => (*start, *end, None, None, Some(zone.as_str())),
@@ -406,7 +453,6 @@ fn write_event(
             )
         }
     };
-    let json = serde_json::to_string(event).context("serialising a calendar event")?;
     conn.execute(
         &format!(
             "INSERT INTO {EVENTS_TABLE}
