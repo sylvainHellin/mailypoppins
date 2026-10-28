@@ -240,8 +240,10 @@ pub(crate) fn resolve_local(
 ///
 /// - UTC times → `...Z`-equivalent offset (`+00:00`).
 /// - `TZID` times → resolved against the IANA zone, preserving the wall-clock
-///   offset (e.g. `+02:00`). If the `TZID` is unknown, fall back to the naive
-///   local time with no offset (still a useful, if offset-less, timestamp).
+///   offset (e.g. `+02:00`). A Windows zone name, which Outlook writes
+///   (`W. Europe Standard Time`), is mapped to its IANA zone first. If the
+///   `TZID` is still unknown, fall back to the naive local time with no
+///   offset (still a useful, if offset-less, timestamp).
 /// - Floating times → naive local time, no offset.
 /// - Date-only values → midnight naive local time.
 fn format_date_perhaps_time(dpt: DatePerhapsTime) -> Option<String> {
@@ -254,7 +256,11 @@ fn format_date_perhaps_time(dpt: DatePerhapsTime) -> Option<String> {
             Some(naive.format("%Y-%m-%dT%H:%M:%S").to_string())
         }
         DatePerhapsTime::DateTime(CalendarDateTime::WithTimezone { date_time, tzid }) => {
-            if let Ok(tz) = tzid.parse::<chrono_tz::Tz>() {
+            let zone = tzid.parse::<chrono_tz::Tz>().ok().or_else(|| {
+                crate::windows_zones::windows_zone_to_iana(tzid.trim())
+                    .and_then(|iana| iana.parse().ok())
+            });
+            if let Some(tz) = zone {
                 if let Some(zoned) = resolve_local(&tz, &date_time) {
                     return Some(zoned.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
                 }
@@ -500,15 +506,26 @@ END:VCALENDAR\r
         assert_eq!(ev.summary.as_deref(), Some("LOC Day planning"));
         assert_eq!(ev.location.as_deref(), Some("Room 4.12"));
         assert_eq!(ev.organizer.as_deref(), Some("chair@tum.de"));
-        // W. Europe Standard Time is not a valid IANA zone, so we keep the
-        // naive wall-clock time (no offset) rather than dropping the field.
-        assert_eq!(ev.start.as_deref(), Some("2026-07-20T14:00:00"));
-        assert_eq!(ev.end.as_deref(), Some("2026-07-20T15:00:00"));
+        // W. Europe Standard Time is Outlook's Windows name for Berlin: it is
+        // mapped to the IANA zone, so the times carry Berlin's offset.
+        assert_eq!(ev.start.as_deref(), Some("2026-07-20T14:00:00+02:00"));
+        assert_eq!(ev.end.as_deref(), Some("2026-07-20T15:00:00+02:00"));
         assert_eq!(ev.attendees.len(), 2);
         assert_eq!(ev.attendees[0].address, "a@example.com");
         assert_eq!(ev.attendees[0].status, "needs-action");
         assert_eq!(ev.attendees[1].address, "b@example.com");
         assert_eq!(ev.attendees[1].status, "accepted");
+    }
+
+    /// A `TZID` that is neither IANA nor a Windows name CLDR lists (a custom
+    /// zone Outlook built) keeps the naive wall-clock time rather than
+    /// dropping the field.
+    #[test]
+    fn parse_unknown_tzid_keeps_the_wall_clock() {
+        let ics = OUTLOOK_REQUEST.replace("W. Europe Standard Time", "Customized Time Zone");
+        let ev = parse_ics(ics.as_bytes()).unwrap();
+        assert_eq!(ev.start.as_deref(), Some("2026-07-20T14:00:00"));
+        assert_eq!(ev.end.as_deref(), Some("2026-07-20T15:00:00"));
     }
 
     #[test]

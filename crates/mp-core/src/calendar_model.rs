@@ -360,8 +360,9 @@ pub struct Event {
     /// invitation mails about it.
     pub uid: String,
     /// The iCalendar `RECURRENCE-ID` of an occurrence: its original start,
-    /// RFC 3339, or a date for an all-day series. `None` for a single event
-    /// and for a series master.
+    /// RFC 3339 in UTC, or a bare date (`2026-07-20`) for an all-day series.
+    /// `None` for a single event and for a series master. [`EventKey`] reads
+    /// the iMIP parser's spellings of the same values as these.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recurrence_id: Option<String>,
     /// The server id of the series master, on an occurrence.
@@ -434,10 +435,21 @@ impl Event {
 /// sources on" (`docs/plans/calendar.md`, "Invitations on an account with a
 /// backend").
 ///
-/// The `RECURRENCE-ID` is normalised to a UTC instant when it carries an
-/// offset, so `2026-07-20T14:00:00+02:00` from an iMIP mail and
-/// `2026-07-20T12:00:00Z` from a server name the same occurrence; a date or a
-/// floating time is kept as written.
+/// The `RECURRENCE-ID` is normalised to one canonical form per kind of value:
+///
+/// - a time with an offset becomes its UTC instant, so
+///   `2026-07-20T14:00:00+02:00` from an iMIP mail and `2026-07-20T12:00:00Z`
+///   from a server name the same occurrence;
+/// - a date stays the bare date, and so does an offset-less midnight
+///   (`2026-07-20T00:00:00`), which is how [`crate::calendar::parse_ics`]
+///   spells a `VALUE=DATE` `RECURRENCE-ID`: an all-day occurrence from a mail
+///   and from a server (which [`Event::recurrence_id`] names by its date)
+///   meet on `2026-07-20`;
+/// - any other floating time is kept as written.
+///
+/// A midnight with an offset stays an instant: without knowing whether the
+/// series is all-day, `2026-07-20T00:00:00+02:00` is as likely a timed
+/// occurrence at local midnight, which a server names in UTC.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EventKey {
     pub uid: String,
@@ -456,12 +468,17 @@ impl EventKey {
 
 fn normalise_recurrence_id(raw: &str) -> String {
     let raw = raw.trim();
-    match DateTime::parse_from_rfc3339(raw) {
-        Ok(instant) => instant
+    if let Ok(instant) = DateTime::parse_from_rfc3339(raw) {
+        return instant
             .with_timezone(&Utc)
-            .to_rfc3339_opts(SecondsFormat::Secs, true),
-        Err(_) => raw.to_string(),
+            .to_rfc3339_opts(SecondsFormat::Secs, true);
     }
+    if let Ok(floating) = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S") {
+        if floating.time() == NaiveTime::MIN {
+            return floating.date().to_string();
+        }
+    }
+    raw.to_string()
 }
 
 /// The rolling window a calendar cache holds, half-open in UTC.
@@ -699,6 +716,32 @@ mod tests {
                 .as_deref(),
             Some("2026-07-20")
         );
+        // An offset-less midnight is the parser's spelling of a date; a
+        // floating time of day and a zoned midnight are not.
+        let key = |rid: &str| EventKey::new("uid-1", Some(rid)).recurrence_id.unwrap();
+        assert_eq!(key("2026-07-20T00:00:00"), "2026-07-20");
+        assert_eq!(key("2026-07-20T09:30:00"), "2026-07-20T09:30:00");
+        assert_eq!(key("2026-07-20T00:00:00+02:00"), "2026-07-19T22:00:00Z");
+    }
+
+    /// An all-day occurrence invitation, read by the real iMIP parser, keys
+    /// to the same occurrence the model names by its date.
+    #[test]
+    fn an_all_day_occurrence_from_a_mail_matches_the_server_copy() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nMETHOD:REQUEST\r\n\
+                   BEGIN:VEVENT\r\nUID:uid-1\r\nSEQUENCE:1\r\nDTSTAMP:20260701T090000Z\r\n\
+                   RECURRENCE-ID;VALUE=DATE:20260720\r\n\
+                   DTSTART;VALUE=DATE:20260721\r\nDTEND;VALUE=DATE:20260722\r\n\
+                   SUMMARY:Offsite (moved)\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let parsed = crate::calendar::parse_ics(ics.as_bytes()).expect("the invitation parses");
+        let from_mail = EventKey::new(
+            parsed.uid.as_deref().unwrap(),
+            parsed.recurrence_id.as_deref(),
+        );
+
+        let mut server = event(EventTime::all_day(date(2026, 7, 21), date(2026, 7, 22)).unwrap());
+        server.recurrence_id = Some("2026-07-20".into());
+        assert_eq!(server.dedup_key(), from_mail);
     }
 
     #[test]
