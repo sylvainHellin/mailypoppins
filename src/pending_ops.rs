@@ -1173,38 +1173,72 @@ fn owed_ops(store: &Store, account: &AccountConfig) -> Result<usize> {
 }
 
 /// How long a caller settling an op waits for the older ops on its message to
-/// reach the server before it gives up on its own (PERSO-241).
+/// reach the server, counted only while the account's engine turn is free,
+/// before it gives up on its own (PERSO-241).
 ///
-/// Long enough for the debounced drain ([`crate::daemon::runtime::drainer`],
-/// 1.5 s of quiet) and a few of its refused-turn retries, or a sync tick that
-/// drains the account at its head; short against the five minutes the CLI
-/// gives a routed mutation, so the refusal reaches the user as an answer and
-/// not as a client timeout.
+/// The drain that runs them is the debounced one
+/// ([`crate::daemon::runtime::drainer`], 1.5 s of quiet) or a sync tick's, and
+/// both need the account's turn. A tick holds that turn for its whole body,
+/// which is unbounded (a full sync was seen at 160 s), and drains only at its
+/// head and its tail: an op queued after the head drain waits for the tail or
+/// for the debounced drain after the tick. That wait is the tick's, not the
+/// queue's, so it spends none of this patience ([`OlderOps::paused_while`]);
+/// what is left measures a drain that could run and has not, long enough for
+/// the debounce and a few of its refused-turn retries.
 pub const SETTLE_PATIENCE: Duration = Duration::from_secs(60);
+
+/// How long a caller settling an op waits for the older ops on its message in
+/// all, a held turn included (PERSO-241).
+///
+/// The bound a held turn needs once it stops spending [`SETTLE_PATIENCE`]: a
+/// tick that never ends would otherwise keep the caller waiting forever. Short
+/// against the five minutes the CLI gives a routed mutation, so the refusal
+/// reaches the user as an answer and not as a client timeout.
+pub const SETTLE_CEILING: Duration = Duration::from_secs(240);
 
 /// How often a waiting caller looks at the queue again.
 const SETTLE_POLL: Duration = Duration::from_millis(100);
 
 /// How a caller settling an op waits for the older ops on its message
-/// (PERSO-241): how long, and how it asks for the drain that runs them.
+/// (PERSO-241): how long, how it asks for the drain that runs them, and how it
+/// tells that the drain cannot run yet.
 pub struct OlderOps<'a> {
     patience: Duration,
+    ceiling: Duration,
     nudge: &'a dyn Fn(),
+    turn_held: Option<&'a dyn Fn() -> bool>,
 }
 
 impl<'a> OlderOps<'a> {
     /// Wait up to [`SETTLE_PATIENCE`], calling `nudge` once to ask the
     /// account's drainer to run them.
     pub fn wait(nudge: &'a dyn Fn()) -> OlderOps<'a> {
-        OlderOps {
-            patience: SETTLE_PATIENCE,
-            nudge,
-        }
+        OlderOps::wait_for(SETTLE_PATIENCE, nudge)
     }
 
     /// The same, with a patience of the caller's choosing.
     pub fn wait_for(patience: Duration, nudge: &'a dyn Fn()) -> OlderOps<'a> {
-        OlderOps { patience, nudge }
+        OlderOps {
+            patience,
+            ceiling: SETTLE_CEILING,
+            nudge,
+            turn_held: None,
+        }
+    }
+
+    /// Spend no patience while `turn_held` says the account's engine turn is
+    /// taken, by a sync tick above all, since no drain can run the older ops
+    /// until it is free; the wait as a whole still ends at the ceiling.
+    pub fn paused_while(self, turn_held: &'a dyn Fn() -> bool) -> OlderOps<'a> {
+        OlderOps {
+            turn_held: Some(turn_held),
+            ..self
+        }
+    }
+
+    /// End the wait after `ceiling` in all, instead of [`SETTLE_CEILING`].
+    pub fn within(self, ceiling: Duration) -> OlderOps<'a> {
+        OlderOps { ceiling, ..self }
     }
 }
 
@@ -1225,8 +1259,8 @@ impl<'a> OlderOps<'a> {
 /// of them itself: a `queued` op is the drain's, and an older `settling` op
 /// another caller's, so each still runs exactly once. It asks for the drain
 /// through `older.nudge` and polls. An older op the server has already
-/// refused once, or one still owed after `older.patience`, makes the caller
-/// give up instead: its own op is rolled back and discarded unrun, like a
+/// refused once, or one still owed after `older.patience` of a free turn or
+/// after its ceiling, makes the caller give up instead: its own op is rolled back and discarded unrun, like a
 /// server refusal, and the error says why.
 ///
 /// On success the row is retired; on any failure the local half is rolled back,
@@ -1269,11 +1303,17 @@ pub async fn run_and_settle<E: OpExecutor>(
 /// op is never seen parked `failed` here, since parking takes
 /// [`MAX_ATTEMPTS`] refusals; an op parked `failed` before `row` was committed
 /// is not owed and holds nothing back, because its rollback already ran.
+///
+/// The patience is spent only while the account's turn is free
+/// ([`OlderOps::paused_while`]): each poll interval counts when the turn was
+/// free at its end, so a tick holding the turn for minutes costs none of it.
 async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) -> Result<()> {
     let Some(target) = row.target_message_id else {
         return Ok(());
     };
-    let deadline = tokio::time::Instant::now() + older.patience;
+    let started = tokio::time::Instant::now();
+    let mut checked = started;
+    let mut spent = Duration::ZERO;
     let mut nudged = false;
     loop {
         let ahead = older_owed(store, &row.account, target, row.id)?;
@@ -1289,7 +1329,12 @@ async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) ->
                 refused.last_error.as_deref().unwrap_or("no error recorded")
             );
         }
-        if tokio::time::Instant::now() >= deadline {
+        let now = tokio::time::Instant::now();
+        if !older.turn_held.is_some_and(|held| held()) {
+            spent += now - checked;
+        }
+        checked = now;
+        if spent >= older.patience || now - started >= older.ceiling {
             anyhow::bail!(
                 "an earlier change to this message (op {}, {}) has not reached the server yet; \
                  nothing was changed, try again in a moment",
@@ -1306,7 +1351,10 @@ async fn wait_for_older(store: &Store, row: &PendingOp, older: &OlderOps<'_>) ->
             (older.nudge)();
             nudged = true;
         }
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let left = older
+            .patience
+            .saturating_sub(spent)
+            .min(older.ceiling.saturating_sub(now - started));
         tokio::time::sleep(SETTLE_POLL.min(left)).await;
     }
 }
@@ -2872,6 +2920,61 @@ mod tests {
             "inbox"
         );
         assert_eq!(queued_ops(&fx.store, "alice").unwrap().len(), 1);
+    }
+
+    /// A held turn spends none of the patience: a settle whose patience is a
+    /// fraction of the wait still waits while the turn is held, and only the
+    /// ceiling ends it (PERSO-241).
+    #[tokio::test]
+    async fn a_held_turn_spends_no_patience_and_the_ceiling_still_ends_the_wait() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let star = apply_set_flagged(
+            &fx.store,
+            "alice",
+            id,
+            true,
+            star_op("INBOX"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        let scope = SettleScope::open(&fx.store);
+        let (_prev, archive) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+
+        let held = || true;
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = std::time::Instant::now();
+        let err = run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &scope,
+            archive,
+            &mut CountingExecutor::new(&runs),
+            OlderOps::wait_for(Duration::from_millis(50), &nobody)
+                .paused_while(&held)
+                .within(Duration::from_millis(400)),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(400),
+            "gave up after {:?}, inside the ceiling",
+            started.elapsed()
+        );
+        let err = format!("{err:#}");
+        assert!(err.contains(&format!("op {star}, set_flagged")), "{err}");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// A settle waits only for ops still owed on its own message: an older op

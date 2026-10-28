@@ -1680,9 +1680,14 @@ async fn mutate(
     kind: Kind,
     runtimes: &super::super::server::RuntimeTable,
 ) -> Result<(Value, String), RpcError> {
-    mutate_with(params, snapshot, kind, runtimes, |account| {
-        resolve_backend(snapshot, account)
-    })
+    mutate_with(
+        params,
+        snapshot,
+        kind,
+        runtimes,
+        pending_ops::SETTLE_PATIENCE,
+        |account| resolve_backend(snapshot, account),
+    )
     .await
 }
 
@@ -1705,11 +1710,14 @@ fn resolve_backend(
 /// the seam a test drives the `settle: true` path through without a live
 /// server (PERSO-242). `resolve` is called exactly where the live backend is
 /// resolved, before the store is touched, and never for `settle: false`.
+/// `patience` is how long the settle waits for the older ops on its message
+/// while the account's turn is free ([`pending_ops::SETTLE_PATIENCE`] live).
 async fn mutate_with<E: OpExecutor>(
     params: &Value,
     snapshot: &super::super::config::Snapshot,
     kind: Kind,
     runtimes: &super::super::server::RuntimeTable,
+    patience: std::time::Duration,
     resolve: impl FnOnce(&AccountConfig) -> Result<E, RpcError>,
 ) -> Result<(Value, String), RpcError> {
     let name = string_param(params, "account")?;
@@ -1869,9 +1877,13 @@ async fn mutate_with<E: OpExecutor>(
                 runtime.request_drain();
             }
         };
+        // A tick holds the account's turn for its whole body, and no drain
+        // runs until it ends: that wait spends none of the settle's patience.
+        let turn_held = || runtimes.get(&name).is_some_and(|r| r.turn_held());
         // The ops committed earlier on this message reach the server first
         // (PERSO-241): the settle waits for the drain it asks for here.
-        let older = pending_ops::OlderOps::wait(&ask_for_drain);
+        let older =
+            pending_ops::OlderOps::wait_for(patience, &ask_for_drain).paused_while(&turn_held);
         let settled = settle(&store, &blobs, &scope, queued.op_id, &mut backend, older).await;
         drop(scope);
         // A drain that ran while this op was on the server held back the ops
@@ -3416,6 +3428,20 @@ mod tests {
         }
 
         fn seeded() -> Seeded {
+            // Hooks that do nothing: no test here runs a tick, and the drain a
+            // request asks for is run by hand, so its order is observable.
+            let idle = || -> crate::daemon::runtime::account::DrainHook {
+                Arc::new(|_ctx| async { String::new() }.boxed())
+            };
+            seeded_with(TickHooks {
+                outbox: idle(),
+                mutations: idle(),
+                body: Arc::new(|_ctx| async { Ok(()) }.boxed()),
+            })
+        }
+
+        /// [`seeded`], with a runtime whose ticks run `hooks`.
+        fn seeded_with(hooks: TickHooks) -> Seeded {
             let data = TestDataDir::new();
             let dir = crate::config::account_dir("alice");
             let fx = fixture_in(&dir);
@@ -3429,16 +3455,6 @@ mod tests {
                 state: ConfigState::Ok,
                 config: Arc::new(crate::config::GlobalConfig::default()),
                 accounts: Arc::new(vec![account.clone()]),
-            };
-            // Hooks that do nothing: no test here runs a tick, and the drain a
-            // request asks for is run by hand, so its order is observable.
-            let idle = || -> crate::daemon::runtime::account::DrainHook {
-                Arc::new(|_ctx| async { String::new() }.boxed())
-            };
-            let hooks = TickHooks {
-                outbox: idle(),
-                mutations: idle(),
-                body: Arc::new(|_ctx| async { Ok(()) }.boxed()),
             };
             let runtime =
                 Arc::new(AccountRuntime::start_at_with_hooks(&dir, account, 1, hooks).unwrap());
@@ -3461,7 +3477,28 @@ mod tests {
                 params: Value,
                 server: impl FnOnce(&AccountConfig) -> Result<E, RpcError>,
             ) -> Result<(Value, String), RpcError> {
-                mutate_with(&params, &self.snapshot, kind, &self.runtimes, server).await
+                self.call_within(pending_ops::SETTLE_PATIENCE, kind, params, server)
+                    .await
+            }
+
+            /// [`Seeded::call`], whose settle spends `patience` at most on
+            /// the older ops of its message while the turn is free.
+            async fn call_within<E: OpExecutor>(
+                &self,
+                patience: Duration,
+                kind: Kind,
+                params: Value,
+                server: impl FnOnce(&AccountConfig) -> Result<E, RpcError>,
+            ) -> Result<(Value, String), RpcError> {
+                mutate_with(
+                    &params,
+                    &self.snapshot,
+                    kind,
+                    &self.runtimes,
+                    patience,
+                    server,
+                )
+                .await
             }
 
             /// Every pending op of `alice`, oldest first.
@@ -3678,6 +3715,102 @@ mod tests {
             assert_eq!(drained.unwrap().completed, 1);
             assert_eq!(*log.lock().unwrap(), ["drain set_flagged", "caller move"]);
             assert!(daemon.ops().is_empty());
+            let row = read::find_by_id(&daemon.fx.store, daemon.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.mailbox, "archive");
+            assert!(row.is_flagged());
+        }
+
+        /// A sync tick holds the account's turn for its whole body, and a star
+        /// the TUI queued after the tick's head drain waits for its tail
+        /// drain. That wait is the tick's: the archive behind the star spends
+        /// none of its patience on it and reaches the server after the star,
+        /// where it used to refuse once its patience ran out mid-tick
+        /// (PERSO-241).
+        #[tokio::test]
+        async fn a_tick_holding_the_turn_spends_none_of_the_settle_patience() {
+            use crate::daemon::runtime::account::{off_thread, BodyHook, DrainHook, TickKind};
+            use std::path::PathBuf;
+            use std::sync::OnceLock;
+
+            let log: Arc<Mutex<Vec<String>>> = Arc::default();
+            // The store and the blob root, known once the daemon is seeded.
+            let paths: Arc<OnceLock<(PathBuf, PathBuf)>> = Arc::default();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let drain: DrainHook = {
+                let (log, paths) = (Arc::clone(&log), Arc::clone(&paths));
+                Arc::new(move |_ctx| {
+                    let (log, paths) = (Arc::clone(&log), Arc::clone(&paths));
+                    async move {
+                        let (store, blobs) = paths.get().cloned().expect("seeded");
+                        off_thread("the test drain", move || async move {
+                            let store = Store::open(&store).unwrap();
+                            let mut drainer = FakeServer::new("drain", &log, &store);
+                            pending_ops::drain(
+                                &store,
+                                &BlobStore::new(blobs),
+                                "alice",
+                                &mut drainer,
+                                crate::outbox::unix_now(),
+                            )
+                            .await
+                            .unwrap();
+                        })
+                        .await
+                        .unwrap();
+                        String::new()
+                    }
+                    .boxed()
+                })
+            };
+            // A body that holds the turn five times the archive's patience.
+            let body: BodyHook = {
+                let entered = Arc::clone(&entered);
+                Arc::new(move |_ctx| {
+                    let entered = Arc::clone(&entered);
+                    async move {
+                        entered.notify_one();
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                        Ok(())
+                    }
+                    .boxed()
+                })
+            };
+            let daemon = seeded_with(TickHooks {
+                outbox: Arc::new(|_ctx| async { String::new() }.boxed()),
+                mutations: drain,
+                body,
+            });
+            paths
+                .set((
+                    daemon.fx.store.path().to_path_buf(),
+                    daemon.fx.blobs.root().to_path_buf(),
+                ))
+                .unwrap();
+            let server = FakeServer::new("caller", &log, &daemon.fx.store);
+            let mut star = by_row(daemon.id);
+            star["flagged"] = json!(true);
+            star["settle"] = json!(false);
+
+            let mutations = async {
+                entered.notified().await;
+                daemon.call(Kind::SetFlag, star, no_server).await.unwrap();
+                daemon
+                    .call_within(
+                        Duration::from_millis(300),
+                        Kind::Archive,
+                        by_row(daemon.id),
+                        |_| Ok(server),
+                    )
+                    .await
+            };
+            let (tick, archived) = tokio::join!(daemon.runtime.tick(TickKind::Quick), mutations);
+
+            assert_eq!(tick.error, None);
+            archived.unwrap();
+            assert_eq!(*log.lock().unwrap(), ["drain set_flagged", "caller move"]);
+            assert!(daemon.ops().is_empty(), "{:?}", daemon.ops());
             let row = read::find_by_id(&daemon.fx.store, daemon.id)
                 .unwrap()
                 .unwrap();

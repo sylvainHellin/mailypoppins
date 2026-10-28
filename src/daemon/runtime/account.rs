@@ -619,6 +619,18 @@ impl AccountRuntime {
             .send_modify(|count| *count = count.wrapping_add(1));
     }
 
+    /// Whether a tick, a drain, a drafts reconcile or a send holds the
+    /// account's engine turn right now, so no drain can start until it ends.
+    ///
+    /// What a caller settling an op asks while it waits for the older ops on
+    /// its message (PERSO-241): a tick holds the turn for its whole body, and
+    /// that wait spends none of its patience
+    /// ([`crate::pending_ops::OlderOps::paused_while`]). A probe only: the
+    /// turn is released at once when it was free.
+    pub fn turn_held(&self) -> bool {
+        self.turn.try_lock().is_err()
+    }
+
     /// A receiver that changes on every [`AccountRuntime::request_drain`], and
     /// closes when the runtime is dropped: what the drainer waits on.
     ///

@@ -766,6 +766,8 @@ Taking an op out of the drain's queue also takes it out of the drain's ordering:
 The ordering has to hold in both directions: an older `queued` op on the message must reach the server before the newer settled one (PERSO-241).
 The caller waits for it rather than running it, because the drain claims nothing per row, and a caller that took a `queued` row over could run it while a drain that had already listed it runs it too.
 In a test of such a wait, bound the stand-in drainer's wait for the nudge (`tokio::time::timeout`), so that with the fix reverted the test fails on the server order instead of hanging.
+The wait's clock has to stop while no drain can run: a sync tick holds the account's turn for its whole body (160 s on a full sync) and drains only at its head and its tail, so a settle that counted its 60 s from the nudge refused an op the tick's tail drain was about to run.
+The settle probes the turn (`AccountRuntime::turn_held`, a `try_lock`) and spends patience only while it is free, under an overall ceiling, since a held turn can last as long as the tick does.
 
 ## A listing is older than the store's own moves, and the op that would say so may already be gone
 
