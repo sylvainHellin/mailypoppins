@@ -264,6 +264,9 @@ A sync backend hands raw messages to `src/ingest.rs`, the only writer on the rec
 One transaction per message writes the `messages` row, its blob references and its FTS entry, so a crash leaves whole messages behind and never half of one.
 Re-ingesting a UID is an UPSERT that keeps the row `id`, its thread assignment and the blob references whose content did not change.
 After a UIDVALIDITY reset the row is found by Message-ID and rebound to the new UID in place.
+The sync engine ingests through `ingest::ingest_listed`, which refuses to write a listed UID as a new row when it may be the copy a local move or delete is taking out of the mailbox, with a server half that may not have landed when the listing was taken (PERSO-240): the op's own copy UID when it names one (`ops::ServerCopy`), any copy of its Message-ID when its row was still on the move sentinel.
+The pass opens a `sync::departures::Watch` before it reads its skip lists: it holds the moves and deletes still `queued` or `settling` then, and journals every one `apply_move` and `apply_delete` commit while it is open, inside their transaction, because such an op may retire (delete its row) before ingest asks.
+A refused copy is no ingest failure and holds no prune back; a copy still listed after the departure landed is a second one, and the next pass ingests it.
 A message with no `Message-ID` header gets a deterministic `sha256-<hex16>@local.invalid` synthetic id.
 
 ### Threading
@@ -746,7 +749,7 @@ All of them run offline, the plain selection in a few seconds.
 - `insta` snapshots cover `markdown_to_html`, the whole `mp --help` surface (`tests/cli_help_snapshot.rs`) and the TUI golden frames (`clients/tui/src/ui/golden_frames.rs`).
 `cargo insta review` approves changes; a diff there is a decision, not an approval reflex.
 - The store side is fixture-driven: `tests/store_ingest_integration.rs` ingests real RFC822 bytes and asserts rows, blobs, refcounts and FTS state; `tests/store_search_integration.rs` asserts the search itself (ranking, phrases, prefixes, unicode, mailbox and account scope) and that the index does not drift across re-ingest, a UIDVALIDITY rebind, a move, a delete and a prune; `tests/outbox_integration.rs` drives the state machine against a fake Sent mailbox.
-- The sync engine (`src/sync/engine.rs`) is tested offline against a fake `SyncBackend` (#0059): ingest and cursor advance, the #0074 arrival mark and its give-up bound, the UIDVALIDITY reset, the deferred prune pass and its account-wide coverage gate, `dry_run`, and the flag application.
+- The sync engine (`src/sync/engine.rs`) is tested offline against a fake `SyncBackend` (#0059): ingest and cursor advance, the #0074 arrival mark and its give-up bound, the UIDVALIDITY reset, the deferred prune pass and its account-wide coverage gate, `dry_run`, the flag application, and the departures gate, whose fake backend commits moves and deletes while the server is being listed (PERSO-240).
   `ops.rs` and `batch.rs` still have none: their seam is `ops::run_op`, not this one.
   The Graph orchestrator still has none either, because it does not run on the engine yet.
 - There is no IMAP/SMTP mock server.

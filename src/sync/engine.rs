@@ -313,6 +313,12 @@ pub async fn run_sync(
     // The skip list travels with the UIDVALIDITY it was recorded under, so the
     // fetch can throw it away when the server has renumbered; carrying it
     // across a reset would skip bodies that were never downloaded.
+    //
+    // The departures watch opens first (PERSO-240): the listing the transport
+    // takes below can be older than a local move or delete of a message out
+    // of the mailbox it lists, and ingest asks the watch before it writes a
+    // listed UID as a new row.
+    let departures = super::departures::Watch::open(store, account)?;
     let mut knowns = Vec::with_capacity(targets.len());
     for target in targets {
         knowns.push(ingest::known_uids_with_cursor(
@@ -443,6 +449,10 @@ pub async fn run_sync(
         // again under the same fingerprint: a permanent repeat over a state
         // #0074 declares expected. The flag is what keeps the detector off it.
         let mut gave_up = false;
+        // A pass that refused a departed copy (PERSO-240) wrote less than it
+        // downloaded on purpose, and the next pass may download the copy again
+        // while its move is still owed, so it says nothing about convergence.
+        let mut withheld = false;
         let mut note_failure = |uid: u32, error: &str| {
             if note_ingest_failure(
                 store,
@@ -468,7 +478,7 @@ pub async fn run_sync(
             };
             email.flags = message.flags;
 
-            let outcome = ingest::ingest_message_with_policy(
+            let outcome = ingest::ingest_listed(
                 store,
                 blobs,
                 &IngestInput {
@@ -479,6 +489,14 @@ pub async fn run_sync(
                     raw: Some(&message.raw),
                 },
                 &RebindPolicy::UnlessListed(&server_uids),
+                &|message_id| {
+                    departures.departed(
+                        &target.server_name,
+                        message_id,
+                        message.uid,
+                        state.uid_validity,
+                    )
+                },
             );
             match outcome {
                 Ok(outcome) => {
@@ -505,6 +523,20 @@ pub async fn run_sync(
                             .new_inbox_mail
                             .push(crate::notify::NewMailMeta::new(&email.from, &email.subject));
                     }
+                }
+                // The copy a local move or delete is taking off the server
+                // (PERSO-240). No failure: nothing is owed, so it neither
+                // counts against the retry budget nor holds the prune back,
+                // since the message's own row is where the user put it, or
+                // gone because the user deleted it. A copy that is still
+                // listed once the departure has landed is a second one, and
+                // the pass that sees it then ingests it.
+                Err(e) if e.downcast_ref::<ingest::Departed>().is_some() => {
+                    withheld = true;
+                    info!(
+                        "[sync] '{}': not ingesting UID {}: {e}",
+                        target.server_name, message.uid
+                    );
                 }
                 Err(e) => {
                     warn!(
@@ -602,7 +634,8 @@ pub async fn run_sync(
             && bodies_complete
             && !fetched.uidvalidity_reset
             && unmet.is_empty()
-            && !gave_up;
+            && !gave_up
+            && !withheld;
         if qualifies {
             let uids: Vec<u32> = new_messages.iter().map(|m| m.uid).collect();
             if note_download_fingerprint(store, account, target, &uids).is_some() {
@@ -730,6 +763,10 @@ mod tests {
         /// what a *stale skip-list entry* costs has to be handed the mailbox
         /// instead (#0117).
         honour_skip_list: bool,
+        /// Run once at the start of the next fetch, after the engine has read
+        /// its skip lists and before it ingests: what the daemon commits while
+        /// the server is being listed (PERSO-240).
+        during_fetch: Option<Box<dyn FnOnce() + Send>>,
     }
 
     impl FakeBackend {
@@ -745,6 +782,9 @@ mod tests {
             limit: usize,
             knowns: Vec<crate::ingest::KnownUids>,
         ) -> Vec<Result<MailboxFetch>> {
+            if let Some(during_fetch) = self.during_fetch.take() {
+                during_fetch();
+            }
             let mut out = Vec::with_capacity(targets.len());
             for (target, known) in targets.iter().zip(knowns) {
                 self.seen
@@ -2419,5 +2459,312 @@ mod tests {
         assert_eq!(mark_below_unmet(Some(100), &[]), Some(100));
         // The bottom of the mailbox: every listed UID is an arrival.
         assert_eq!(mark_below_unmet(None, &[1]), Some(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // PERSO-240: a listing older than a local move or delete
+    // -----------------------------------------------------------------------
+
+    /// The `Message-ID` [`raw`] gives `name`.
+    fn mid(name: &str) -> String {
+        format!("<{name}@example.com>")
+    }
+
+    /// The id of the one row carrying `name`'s message, wherever it is.
+    fn row_of(fx: &Fixture, name: &str) -> i64 {
+        fx.store
+            .conn()
+            .query_row(
+                "SELECT id FROM messages WHERE message_id = ?1",
+                [mid(name)],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The copy an op on `row` names, as `mutations::queue_move` builds it:
+    /// none while the row waits on its move sentinel.
+    fn copy_of(store: &Store, row: i64) -> Option<crate::ops::ServerCopy> {
+        let uid: i64 = store
+            .conn()
+            .query_row("SELECT uid FROM messages WHERE id = ?1", [row], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        crate::ops::ServerCopy::of_row(uid, Some(7))
+    }
+
+    /// What `mp move` commits locally: the row moves into `dest` and its
+    /// server move is owed, `queued` for the drain. Returns the op's id.
+    fn local_move(store: &Store, row: i64, name: &str, from: (&str, &str), dest: &str) -> i64 {
+        let op = crate::ops::ServerOp::Move {
+            message_id: mid(name),
+            source_mailbox: from.1.to_string(),
+            dest_mailbox: dest.to_string(),
+            copy: copy_of(store, row),
+        };
+        let (previous, op_id) = crate::pending_ops::apply_move(
+            store,
+            "acct",
+            row,
+            dest,
+            op,
+            crate::pending_ops::Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(previous.mailbox, from.0);
+        op_id
+    }
+
+    /// The server half of an op landed and the op retired, which deletes its
+    /// row: from here on the queue holds no trace of the move.
+    fn retire(store: &Store, op_id: i64) {
+        store
+            .conn()
+            .execute("DELETE FROM pending_ops WHERE id = ?1", [op_id])
+            .unwrap();
+    }
+
+    /// A second connection to the fixture's store, the way the daemon's
+    /// request handler holds one beside the engine's.
+    fn second_handle(fx: &Fixture) -> Store {
+        Store::open(fx.store.path()).unwrap()
+    }
+
+    /// The reported case: two `mp move` legs back to back. Leg one took the
+    /// message from Archive to INBOX, where the server gave it UID 90; leg two
+    /// has moved the row back to archive and its server move is still on the
+    /// wire when the pass lists INBOX, which therefore still shows UID 90. The
+    /// move lands (and its op retires) before ingest. The pass must not write
+    /// UID 90 as a new inbox row beside the moved one.
+    #[test]
+    fn a_copy_whose_move_out_was_owed_when_the_pass_started_is_not_ingested() {
+        let fx = Fixture::new();
+        let targets = targets();
+        let mut backend = FakeBackend::default();
+        backend.script("INBOX", vec![Ok(fetch(vec![]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![(50, raw("m"))]))]);
+        fx.run(&mut backend, &targets);
+        let row = row_of(&fx, "m");
+
+        // Leg one, landed: the row waits on its sentinel in inbox.
+        let leg_one = local_move(&fx.store, row, "m", ("archive", "Archive"), "inbox");
+        retire(&fx.store, leg_one);
+        // Leg two, committed and still owed when the pass starts.
+        let leg_two = local_move(&fx.store, row, "m", ("inbox", "INBOX"), "archive");
+        let handle = second_handle(&fx);
+        backend.during_fetch = Some(Box::new(move || retire(&handle, leg_two)));
+
+        backend.script("INBOX", vec![Ok(fetch(vec![(90, raw("m"))]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![(91, raw("m"))]))]);
+        let result = fx.run(&mut backend, &targets);
+
+        assert_eq!(
+            fx.rows_for("inbox", &mid("m")),
+            Vec::<(i64, i64)>::new(),
+            "the copy leg two was taking off INBOX left no row behind"
+        );
+        assert_eq!(
+            fx.rows_for("archive", &mid("m")),
+            vec![(row, 91)],
+            "the moved row follows its message onto Archive's new UID"
+        );
+        assert_eq!(result.saved, 0, "nothing new arrived");
+        assert!(result.new_inbox_mail.is_empty(), "and nothing is announced");
+        assert_eq!(
+            ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 90),
+            0,
+            "a withheld copy is no ingest failure"
+        );
+    }
+
+    /// The same race with both legs committed while the server is being
+    /// listed, and both retired before ingest: nothing in the queue says where
+    /// the message was by then, and the departure journal has to.
+    #[test]
+    fn a_copy_moved_out_while_the_server_was_listed_is_not_ingested() {
+        let fx = Fixture::new();
+        let targets = targets();
+        let mut backend = FakeBackend::default();
+        backend.script("INBOX", vec![Ok(fetch(vec![]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![(50, raw("m"))]))]);
+        fx.run(&mut backend, &targets);
+        let row = row_of(&fx, "m");
+
+        let handle = second_handle(&fx);
+        backend.during_fetch = Some(Box::new(move || {
+            let leg_one = local_move(&handle, row, "m", ("archive", "Archive"), "inbox");
+            retire(&handle, leg_one);
+            let leg_two = local_move(&handle, row, "m", ("inbox", "INBOX"), "archive");
+            retire(&handle, leg_two);
+        }));
+        // Archive was listed after leg two's copy had not landed yet either.
+        backend.script("INBOX", vec![Ok(fetch(vec![(90, raw("m"))]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        let result = fx.run(&mut backend, &targets);
+
+        assert_eq!(
+            fx.rows_for("inbox", &mid("m")),
+            Vec::<(i64, i64)>::new(),
+            "no inbox row for the copy the second leg took away"
+        );
+        assert_eq!(fx.rows_for("archive", &mid("m")), vec![(row, -row)]);
+        assert_eq!(result.saved, 0);
+    }
+
+    /// A delete committed while the server is being listed: the listed copy is
+    /// the one being deleted, and writing it would bring the message back.
+    #[test]
+    fn a_copy_deleted_while_the_server_was_listed_is_not_ingested() {
+        let fx = Fixture::new();
+        let targets = targets();
+        let mut backend = FakeBackend::default();
+        backend.script("INBOX", vec![Ok(fetch(vec![]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![(50, raw("m"))]))]);
+        fx.run(&mut backend, &targets);
+        let row = row_of(&fx, "m");
+        // The row is in inbox on its sentinel, so the pass's skip list does not
+        // hold the UID the server gave it there.
+        let moved = local_move(&fx.store, row, "m", ("archive", "Archive"), "inbox");
+        retire(&fx.store, moved);
+
+        let handle = second_handle(&fx);
+        let blobs = BlobStore::new(fx._tmp.path().join("blobs"));
+        backend.during_fetch = Some(Box::new(move || {
+            let op = crate::ops::ServerOp::Delete {
+                message_id: mid("m"),
+                source_mailbox: "INBOX".to_string(),
+                copy: copy_of(&handle, row),
+            };
+            let (_, op_id) = crate::pending_ops::apply_delete(
+                &handle,
+                &blobs,
+                "acct",
+                row,
+                op,
+                crate::pending_ops::Runner::Drain,
+            )
+            .unwrap()
+            .unwrap();
+            retire(&handle, op_id);
+        }));
+        backend.script("INBOX", vec![Ok(fetch(vec![(90, raw("m"))]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        let result = fx.run(&mut backend, &targets);
+
+        assert_eq!(fx.rows_for("inbox", &mid("m")), Vec::<(i64, i64)>::new());
+        assert_eq!(result.saved, 0, "the deleted message does not come back");
+    }
+
+    /// A genuine second copy is real mail. One that lands beside a row the
+    /// mailbox holds is ingested as ever, and so is one listed while a move
+    /// that names another copy (by its UID, PERSO-238) is still owed: only
+    /// the named copy is withheld.
+    #[test]
+    fn a_copy_beside_a_named_departure_is_ingested_at_once() {
+        let fx = Fixture::new();
+        let targets = targets();
+        let mut backend = FakeBackend::default();
+        backend.script("INBOX", vec![Ok(fetch(vec![(10, raw("m"))]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        fx.run(&mut backend, &targets);
+        let row = row_of(&fx, "m");
+
+        // A second copy beside the row the mailbox still holds: no departure
+        // at all, so nothing to withhold.
+        backend.script(
+            "INBOX",
+            vec![Ok(fetch(vec![(10, raw("m")), (11, raw("m"))]))],
+        );
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        let result = fx.run(&mut backend, &targets);
+        assert_eq!(result.saved, 1, "the second copy is a row of its own");
+        assert_eq!(fx.rows("inbox"), vec![10, 11]);
+
+        // The user archives the copy on UID 10, and its move is still owed
+        // when the next pass lists INBOX, where a third copy has arrived.
+        local_move(&fx.store, row, "m", ("inbox", "INBOX"), "archive");
+        backend.script(
+            "INBOX",
+            vec![Ok(fetch(vec![
+                (10, raw("m")),
+                (11, raw("m")),
+                (12, raw("m")),
+            ]))],
+        );
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        let result = fx.run(&mut backend, &targets);
+        assert_eq!(
+            fx.rows("inbox"),
+            vec![11, 12],
+            "UID 10 is the departing copy and gets no row; 11 keeps its own and 12 is new"
+        );
+        assert_eq!(result.saved, 1);
+    }
+
+    /// A move of a row still on its sentinel names no copy, so any copy of its
+    /// `Message-ID` listed while it is owed is withheld, the genuine one
+    /// included. That one is deferred by a pass, never hidden: the first pass
+    /// whose listing postdates the move ingests it.
+    #[test]
+    fn a_copy_withheld_beside_an_unnamed_departure_is_ingested_next_pass() {
+        let fx = Fixture::new();
+        let targets = targets();
+        let mut backend = FakeBackend::default();
+        backend.script("INBOX", vec![Ok(fetch(vec![]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![(50, raw("m"))]))]);
+        fx.run(&mut backend, &targets);
+        let row = row_of(&fx, "m");
+        let landed = local_move(&fx.store, row, "m", ("archive", "Archive"), "inbox");
+        retire(&fx.store, landed);
+        let owed = local_move(&fx.store, row, "m", ("inbox", "INBOX"), "archive");
+        assert_eq!(copy_of(&fx.store, row), None, "the row was on its sentinel");
+
+        // 90 is the copy the first move delivered and the second is taking
+        // away; 95 is a copy someone else put there meanwhile.
+        backend.script(
+            "INBOX",
+            vec![Ok(fetch(vec![(90, raw("m")), (95, raw("m"))]))],
+        );
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        let result = fx.run(&mut backend, &targets);
+        assert_eq!(result.saved, 0, "both withheld while the move is owed");
+        assert_eq!(fx.rows("inbox"), Vec::<i64>::new());
+
+        // The move lands and takes 90. 95 is still listed, and is ingested.
+        retire(&fx.store, owed);
+        backend.script("INBOX", vec![Ok(fetch(vec![(95, raw("m"))]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        let result = fx.run(&mut backend, &targets);
+        assert_eq!(
+            result.saved, 1,
+            "the other copy is ingested once the move landed"
+        );
+        assert_eq!(fx.rows("inbox"), vec![95]);
+    }
+
+    /// A departure out of *another* folder says nothing about this one: the
+    /// copy an owed Archive-to-INBOX move delivered to INBOX is the moved
+    /// row's own, and is rebound onto it as ever.
+    #[test]
+    fn a_departure_from_another_folder_withholds_nothing() {
+        let fx = Fixture::new();
+        let targets = targets();
+        let mut backend = FakeBackend::default();
+        backend.script("INBOX", vec![Ok(fetch(vec![]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![(50, raw("m"))]))]);
+        fx.run(&mut backend, &targets);
+        let row = row_of(&fx, "m");
+
+        // Archive to INBOX, still owed: INBOX's listing shows the copy the
+        // move delivered, which is the row's own and is rebound onto it.
+        local_move(&fx.store, row, "m", ("archive", "Archive"), "inbox");
+        backend.script("INBOX", vec![Ok(fetch(vec![(90, raw("m"))]))]);
+        backend.script("Archive", vec![Ok(fetch(vec![]))]);
+        let result = fx.run(&mut backend, &targets);
+        assert_eq!(fx.rows_for("inbox", &mid("m")), vec![(row, 90)]);
+        assert_eq!(result.uid_rebound, 1);
+        assert_eq!(result.saved, 0);
     }
 }

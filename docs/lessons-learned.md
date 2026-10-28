@@ -767,6 +767,14 @@ The ordering has to hold in both directions: an older `queued` op on the message
 The caller waits for it rather than running it, because the drain claims nothing per row, and a caller that took a `queued` row over could run it while a drain that had already listed it runs it too.
 In a test of such a wait, bound the stand-in drainer's wait for the nudge (`tokio::time::timeout`), so that with the fix reverted the test fails on the server order instead of hanging.
 
+## A listing is older than the store's own moves, and the op that would say so may already be gone
+
+The sync reads its skip lists, lists the server, then ingests; a local move or delete can commit anywhere in between, and its server half lands later still (PERSO-240).
+A listing taken before the server half landed shows the source copy under a UID no row holds any more, so ingest wrote it as a new row: two `mp move` legs back to back left a stale inbox row beside the moved one, and a delete in the window brought the message back.
+Checking the queue at ingest is not enough, because the op is deleted the moment it retires, which can be between the listing and the ingest: the store then holds no trace of where the message was.
+What answers it is a watch the pass opens before its first store read: the moves and deletes owed at that moment, plus a journal of every one committed while it is open, written inside the committing transaction so ingest, asking inside its own, cannot see the row gone without the entry.
+The refusal is keyed on the folder the op takes the message out of and on the copy it names by UID, or on its Message-ID when the row was still on its move sentinel and the op names none, so a genuine second copy is ingested at once in the first case and at worst deferred to the next pass in the second, never hidden.
+
 ## Not every queued op has a rollback, and the post-send flag is the one that must not
 
 The durable queue's failure policy is "roll the local half back to the server's truth and park the row as `failed`", which is right for a move or a read toggle: the user asserted a wish, the server refused it, so the wish is withdrawn.

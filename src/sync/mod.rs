@@ -19,6 +19,7 @@
 //! serving both transports, is parked with the Graph backend: `graph.rs` still
 //! runs its own loop, and the engine below is driven by the IMAP backend only.
 
+pub mod departures;
 pub mod engine;
 pub mod tick;
 

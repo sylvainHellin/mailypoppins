@@ -356,6 +356,7 @@ pub fn apply_move(
         &Rollback::Move(previous.clone()),
         state,
     )?;
+    crate::sync::departures::record(store, account, &op);
     tx.commit().context("committing the move and its op")?;
     info!(
         "[pending_ops] queued a {} for row {id} as op {op_id}",
@@ -389,6 +390,7 @@ pub fn apply_delete(
         blobs.release(&tx, hash)?;
     }
     let op_id = insert(&tx, account, Some(id), &op, &Rollback::None, state)?;
+    crate::sync::departures::record(store, account, &op);
     tx.commit().context("committing the delete and its op")?;
     info!("[pending_ops] queued a delete for row {id} as op {op_id}");
     Ok(Some((previous, op_id)))
@@ -579,6 +581,15 @@ pub fn apply_post_send_flag(
 /// Every `queued` row for `account`, oldest first: what a drain works through.
 pub fn queued_ops(store: &Store, account: &str) -> Result<Vec<PendingOp>> {
     rows_in_state(store, account, STATE_QUEUED)
+}
+
+/// Every `queued` or `settling` row for `account`, oldest first: the ops whose
+/// server half is still owed, whoever runs it (PERSO-240).
+pub fn unsettled_ops(store: &Store, account: &str) -> Result<Vec<PendingOp>> {
+    let mut owed = rows_in_state(store, account, STATE_QUEUED)?;
+    owed.extend(rows_in_state(store, account, STATE_SETTLING)?);
+    owed.sort_by_key(|row| row.id);
+    Ok(owed)
 }
 
 /// Every `failed` row for `account`, oldest first: what the UI surfaces so a

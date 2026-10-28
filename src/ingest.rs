@@ -279,7 +279,8 @@ pub fn ingest_message(
 ///
 /// A second entry point rather than a field on [`IngestInput`]: the struct is
 /// built at some thirty call sites and exactly one of them, the sync engine,
-/// holds a server listing to decide with.
+/// holds a server listing to decide with. The engine itself goes through
+/// [`ingest_listed`], which adds the one other question its listing raises.
 pub fn ingest_message_with_policy(
     store: &Store,
     blobs: &BlobStore,
@@ -303,6 +304,69 @@ pub fn ingest_message_threaded(
     input: &IngestInput<'_>,
     rebind: &RebindPolicy<'_>,
     hints: Option<&ThreadHints>,
+) -> Result<IngestOutcome> {
+    ingest_guarded(store, blobs, input, rebind, hints, None)
+}
+
+/// A listed message ingest refused to write as a new row, because its
+/// `Message-ID` left the mailbox locally while the listing was being taken
+/// (PERSO-240, [`ingest_listed`]).
+///
+/// Returned as the error of [`ingest_listed`], so a caller tells it from a
+/// failure with `downcast_ref`: it is no failure, and must not count as one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Departed {
+    pub uid: i64,
+    pub message_id: String,
+}
+
+impl std::fmt::Display for Departed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "UID {} holds {}, which a local move or delete took out of this mailbox while \
+             the server was listing it",
+            self.uid, self.message_id
+        )
+    }
+}
+
+impl std::error::Error for Departed {}
+
+/// [`ingest_message_with_policy`], for a caller whose listing may be older
+/// than the store's own moves and deletes (PERSO-240).
+///
+/// `departed` answers, for the message's `Message-ID`, whether the listed copy
+/// may be one a local move or delete is taking out of this mailbox, with a
+/// server half that may not have landed when the listing was taken
+/// ([`crate::sync::departures::Watch`], which also knows the copy's UID). A
+/// message that would be written as a new row and departed is that copy: it
+/// is refused with [`Departed`] and nothing is written.
+///
+/// The question is asked inside the ingest transaction, after the row lookups
+/// it decides on: a departure journals itself before it commits its row
+/// change, so lookups that no longer find the row always meet an answer that
+/// knows why. An existing row and a rebind are never refused, and a refused
+/// copy that really is another one is ingested by the first pass whose
+/// listing postdates the departure.
+pub fn ingest_listed(
+    store: &Store,
+    blobs: &BlobStore,
+    input: &IngestInput<'_>,
+    rebind: &RebindPolicy<'_>,
+    departed: &dyn Fn(&str) -> bool,
+) -> Result<IngestOutcome> {
+    ingest_guarded(store, blobs, input, rebind, None, Some(departed))
+}
+
+/// The one ingest every entry point above shares.
+fn ingest_guarded(
+    store: &Store,
+    blobs: &BlobStore,
+    input: &IngestInput<'_>,
+    rebind: &RebindPolicy<'_>,
+    hints: Option<&ThreadHints>,
+    departed: Option<&dyn Fn(&str) -> bool>,
 ) -> Result<IngestOutcome> {
     let mut span = TimingSpan::with_context(
         "store_ingest",
@@ -382,7 +446,7 @@ pub fn ingest_message_threaded(
             conversation_id,
         },
         &refs,
-        rebind,
+        &Gates { rebind, departed },
     )?;
     tx.commit().context("committing ingest transaction")?;
     span.mark("committed");
@@ -441,6 +505,14 @@ struct Threading<'a> {
     conversation_id: Option<&'a str>,
 }
 
+/// What the caller lets [`ingest_in_tx`] do with a message the store holds no
+/// row for on its UID: rebind a row found by `Message-ID` ([`RebindPolicy`]),
+/// and write a new one ([`ingest_listed`]).
+struct Gates<'a, 'b> {
+    rebind: &'a RebindPolicy<'b>,
+    departed: Option<&'a dyn Fn(&str) -> bool>,
+}
+
 /// The database half of [`ingest_message`], so the transaction boundary stays
 /// visible in one place.
 fn ingest_in_tx(
@@ -450,8 +522,9 @@ fn ingest_in_tx(
     message_id: &str,
     threading: &Threading<'_>,
     refs: &[BlobRef],
-    rebind: &RebindPolicy<'_>,
+    gates: &Gates<'_, '_>,
 ) -> Result<IngestOutcome> {
+    let Gates { rebind, departed } = *gates;
     let email = input.email;
     let Threading {
         in_reply_to,
@@ -515,6 +588,17 @@ fn ingest_in_tx(
             by_mid
         }
     };
+
+    // The listing this UID came from may predate a local move or delete of
+    // its message out of this mailbox (PERSO-240): see `ingest_listed`. The
+    // transaction is dropped, so the squatter unbind above goes with it.
+    if existing.is_none() && departed.is_some_and(|departed| departed(message_id)) {
+        return Err(Departed {
+            uid: input.uid,
+            message_id: message_id.to_string(),
+        }
+        .into());
+    }
 
     // 2. Thread assignment: an existing row keeps the thread it was put in,
     //    a new one inherits from its parent and otherwise starts its own.
