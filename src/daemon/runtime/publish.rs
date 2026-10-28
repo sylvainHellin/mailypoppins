@@ -193,6 +193,7 @@ mod tests {
             error: error.map(str::to_string),
             sync: None,
             contacts: None,
+            calendar_changed: false,
         }
     }
 

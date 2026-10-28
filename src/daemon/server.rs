@@ -539,8 +539,10 @@ pub async fn tick_and_commit_until(
     if !cancel.is_cancelled() {
         commit_outcome(canonical, account, &outcome);
     } else {
-        // The index was written whether or not the sync is reported.
+        // The index and the calendar cache were written whether or not the
+        // sync is reported.
         publish_contacts(canonical, account, &outcome);
+        publish_calendar(canonical, account, &outcome);
     }
     Some(outcome)
 }
@@ -559,13 +561,23 @@ pub async fn commit_tick(
     outcome
 }
 
-/// Publish a tick's `sync.completed`, when it carries one, and the
-/// `contact.changed` of the index it wrote.
+/// Publish a tick's `sync.completed`, when it carries one, the
+/// `contact.changed` of the index it wrote and the `calendar.changed` of the
+/// calendar cache it moved.
 fn commit_outcome(canonical: &CanonicalState, account: &str, outcome: &TickOutcome) {
     if let Some(sync) = outcome.sync.clone() {
         canonical.apply(Change::SyncCompleted(sync));
     }
     publish_contacts(canonical, account, outcome);
+    publish_calendar(canonical, account, outcome);
+}
+
+/// The `calendar.changed` of a tick whose calendar sync moved the account's
+/// calendar cache (PERSO-200).
+fn publish_calendar(canonical: &CanonicalState, account: &str, outcome: &TickOutcome) {
+    if outcome.calendar_changed {
+        canonical.publish(super::methods::calendar::calendar_changed(account));
+    }
 }
 
 /// The `contact.changed` of a tick that folded its pass into the account's

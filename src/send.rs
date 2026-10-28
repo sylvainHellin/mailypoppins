@@ -2565,7 +2565,7 @@ pub async fn send_rsvp(
     rsvp: crate::invite::Rsvp,
     smtp_config: &SmtpConfig,
 ) -> Result<RsvpOutcome> {
-    prepare_rsvp(ics, account_address, rsvp)?
+    prepare_rsvp(ics, account_address, rsvp, None)?
         .submit(account_config, smtp_config)
         .await
 }
@@ -2580,11 +2580,14 @@ pub struct PreparedRsvp {
 }
 
 /// Build the `METHOD:REPLY` and its message, exactly as [`send_rsvp`] does
-/// before it submits.
+/// before it submits. A `comment` (`event.respond`, PERSO-200) follows the
+/// reply's one-line body after a blank line; the payload carries no `COMMENT`
+/// property, which not every organizer's client shows.
 pub fn prepare_rsvp(
     ics: &[u8],
     account_address: &str,
     rsvp: crate::invite::Rsvp,
+    comment: Option<&str>,
 ) -> Result<PreparedRsvp> {
     let account_address = crate::parse::extract_email_address(account_address);
     if account_address.is_empty() {
@@ -2596,7 +2599,11 @@ pub fn prepare_rsvp(
 
     let summary = ctx.summary.as_deref().unwrap_or("(no subject)");
     let subject = format!("{}: {}", rsvp.subject_verb(), summary);
-    let plain_body = format!("{} the invitation: {}", rsvp.subject_verb(), summary);
+    let mut plain_body = format!("{} the invitation: {}", rsvp.subject_verb(), summary);
+    if let Some(comment) = comment.map(str::trim).filter(|c| !c.is_empty()) {
+        plain_body.push_str("\n\n");
+        plain_body.push_str(comment);
+    }
 
     let built = build_reply_message(
         &account_address,

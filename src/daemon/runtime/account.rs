@@ -197,6 +197,12 @@ pub struct TickOutcome {
     /// no index; the committer announces it as `contact.changed`. `None` on a
     /// joiner too, for the reason `sync` is.
     pub contacts: Option<usize>,
+    /// Whether the calendar sync that follows the mail pass moved the
+    /// account's calendar cache (PERSO-200); the committer announces it as
+    /// `calendar.changed`. `false` on a joiner, for the reason `sync` is
+    /// `None`, and on a runtime built with injected hooks, which syncs no
+    /// calendar.
+    pub calendar_changed: bool,
 }
 
 /// What one [`AccountRuntime::drain`] did.
@@ -368,6 +374,10 @@ pub struct AccountRuntime {
     /// [`AccountRuntime::reconcile_drafts`] runs under the turn. `None` for a
     /// runtime built with injected tick hooks and no drafts hook.
     drafts: Option<DraftsHook>,
+    /// Whether a tick syncs the account's calendar after its mail pass
+    /// (PERSO-200): set by the production constructors, off for a runtime
+    /// built with injected tick hooks, whose test has no calendar to reach.
+    calendar: bool,
 }
 
 /// The drafts reconcile [`AccountRuntime::reconcile_drafts`] runs: the
@@ -420,6 +430,7 @@ impl AccountRuntime {
         runtime.report = report;
         runtime.draft_watch = draft_watch;
         runtime.drafts = Some(drafts);
+        runtime.calendar = true;
         Ok(runtime)
     }
 
@@ -482,6 +493,7 @@ impl AccountRuntime {
             report: TickReport::default(),
             draft_watch: DraftWatchCell::default(),
             drafts: None,
+            calendar: false,
         })
     }
 
@@ -729,6 +741,7 @@ impl AccountRuntime {
                 error: None,
                 sync: None,
                 contacts: None,
+                calendar_changed: false,
             };
         }
 
@@ -750,6 +763,7 @@ impl AccountRuntime {
                     error: None,
                     sync: None,
                     contacts: None,
+                    calendar_changed: false,
                 };
             }
             match running.as_ref() {
@@ -774,6 +788,7 @@ impl AccountRuntime {
                         // reports the same tick and must not commit it twice.
                         outcome.sync = None;
                         outcome.contacts = None;
+                        outcome.calendar_changed = false;
                         return outcome;
                     }
                     if receiver.changed().await.is_err() {
@@ -793,6 +808,7 @@ impl AccountRuntime {
                             ),
                             sync: None,
                             contacts: None,
+                            calendar_changed: false,
                         };
                     }
                 }
@@ -816,6 +832,7 @@ impl AccountRuntime {
                     error: None,
                     sync: None,
                     contacts: None,
+                    calendar_changed: false,
                 }
             } else {
                 let outcome = self.run_tick(kind, stop).await;
@@ -826,6 +843,13 @@ impl AccountRuntime {
                 outcome
             }
         };
+        // The calendar after the turn is released: its sync reaches its own
+        // server API and touches no mail queue, so a drain an interactive
+        // mutation asked for does not wait behind it.
+        let mut outcome = outcome;
+        if !outcome.blocked {
+            outcome.calendar_changed = self.sync_calendar().await;
+        }
         // Cleared first: the next `tick()` after this one returns must start a
         // fresh body rather than join a run that is over.
         *lock(&self.running) = None;
@@ -941,7 +965,27 @@ impl AccountRuntime {
             )),
             error,
             contacts,
+            calendar_changed: false,
         }
+    }
+
+    /// The calendar half of the tick (PERSO-200): after the mail pass and
+    /// whatever it did, since the calendar reaches its own server API, and
+    /// off the reactor, since the sync holds a store across its awaits.
+    /// `true` when the account's calendar cache moved.
+    async fn sync_calendar(&self) -> bool {
+        if !self.calendar {
+            return false;
+        }
+        let cfg = Arc::clone(&self.config);
+        off_thread("the calendar sync", move || async move {
+            crate::calendar_sync::poll_account(&cfg, chrono::Utc::now()).await
+        })
+        .await
+        .unwrap_or_else(|e| {
+            warn!("[calendar] {e:#}");
+            false
+        })
     }
 
     /// Fold the correspondents a tick's pass inserted into the account's
