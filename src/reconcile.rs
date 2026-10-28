@@ -122,19 +122,28 @@ pub(crate) mod tests {
     /// writes. Shared with the calendar loader's tests, which need the same
     /// "ingest an invite" primitive.
     pub(crate) struct Fixture {
-        _dir: TempDir,
+        _dir: Option<TempDir>,
         pub(crate) store: Store,
         pub(crate) blobs: BlobStore,
     }
 
     pub(crate) fn fixture() -> Fixture {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
-        let blobs = BlobStore::new(dir.path().join("blobs"));
+        let mut fixture = fixture_in(dir.path());
+        fixture._dir = Some(dir);
+        fixture
+    }
+
+    /// The same fixture over the account directory `dir`, laid out as
+    /// [`crate::config::account_dir`] is (`store.sqlite3`, `blobs/`), which
+    /// the caller keeps alive: a test that points the data directory at a
+    /// tempdir seeds `alice` where the daemon's methods open her store.
+    pub(crate) fn fixture_in(dir: &std::path::Path) -> Fixture {
+        std::fs::create_dir_all(dir).unwrap();
         Fixture {
-            _dir: dir,
-            store,
-            blobs,
+            _dir: None,
+            store: Store::open(dir.join("store.sqlite3")).unwrap(),
+            blobs: BlobStore::new(dir.join("blobs")),
         }
     }
 

@@ -51,7 +51,7 @@ use mp_protocol::{RpcError, MAX_RESPONSE_BYTES};
 
 use crate::config::AccountConfig;
 use crate::ops::Backend;
-use crate::pending_ops;
+use crate::pending_ops::{self, OpExecutor};
 use crate::selector::{Namespace, Selector, DRAFTS_MAILBOX};
 use crate::store::read::{self, MessageRow};
 use crate::store::{BlobStore, Store};
@@ -1680,6 +1680,38 @@ async fn mutate(
     kind: Kind,
     runtimes: &super::super::server::RuntimeTable,
 ) -> Result<(Value, String), RpcError> {
+    mutate_with(params, snapshot, kind, runtimes, |account| {
+        resolve_backend(snapshot, account)
+    })
+    .await
+}
+
+/// The live server a settled mutation runs its op on, or the secret store's
+/// own refusal when the account's credentials cannot be loaded.
+fn resolve_backend(
+    snapshot: &super::super::config::Snapshot,
+    account: &AccountConfig,
+) -> Result<Backend, RpcError> {
+    // Startup opened the secrets backend if a configuration had loaded; a
+    // first run had none to select one from, so it opens here, as
+    // `config.set_password` does. The opener is idempotent.
+    if let Err(e) = crate::secrets::init(snapshot.config.secrets_backend) {
+        return Err(credentials(&account.name, &anyhow::anyhow!("{e}")));
+    }
+    Backend::resolve(account).map_err(|e| credentials(&account.name, &e))
+}
+
+/// [`mutate`], with the server a settled op runs on resolved by `resolve`:
+/// the seam a test drives the `settle: true` path through without a live
+/// server (PERSO-242). `resolve` is called exactly where the live backend is
+/// resolved, before the store is touched, and never for `settle: false`.
+async fn mutate_with<E: OpExecutor>(
+    params: &Value,
+    snapshot: &super::super::config::Snapshot,
+    kind: Kind,
+    runtimes: &super::super::server::RuntimeTable,
+    resolve: impl FnOnce(&AccountConfig) -> Result<E, RpcError>,
+) -> Result<(Value, String), RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(&snapshot.accounts, &name)?;
 
@@ -1726,13 +1758,7 @@ async fn mutate(
     let source_server = catalogue.server_for_key(&row.mailbox);
 
     let backend = if settle_owed {
-        // Startup opened the secrets backend if a configuration had loaded;
-        // a first run had none to select one from, so it opens here, as
-        // `config.set_password` does. The opener is idempotent.
-        if let Err(e) = crate::secrets::init(snapshot.config.secrets_backend) {
-            return Err(credentials(&name, &anyhow::anyhow!("{e}")));
-        }
-        Some(Backend::resolve(account).map_err(|e| credentials(&name, &e))?)
+        Some(resolve(account)?)
     } else {
         None
     };
@@ -1877,12 +1903,12 @@ fn bool_param(params: &Value, name: &str) -> Result<bool, RpcError> {
 }
 
 /// Run the owed op and settle it, reporting the server's refusal verbatim.
-async fn settle(
+async fn settle<E: OpExecutor>(
     store: &Store,
     blobs: &BlobStore,
     scope: &pending_ops::SettleScope,
     op_id: i64,
-    backend: &mut Backend,
+    backend: &mut E,
 ) -> Result<(), RpcError> {
     pending_ops::run_and_settle(store, blobs, scope, op_id, backend)
         .await
@@ -3350,5 +3376,258 @@ mod tests {
             show(conversations_daemon),
             conversations_daemon.0 / stream_daemon.0
         );
+    }
+
+    /// The `settle: true` path of the mutations, which only a server call
+    /// reaches, driven without one (PERSO-242): `alice`'s store under a
+    /// tempdir data directory, a ready runtime for her in the table so a drain
+    /// request is observable, and an executor standing in for the server
+    /// through [`mutate_with`]'s seam.
+    mod settle {
+        use super::*;
+        use std::sync::Mutex;
+
+        use futures::FutureExt as _;
+
+        use crate::config::test_env::TestDataDir;
+        use crate::daemon::config::{ConfigState, Snapshot};
+        use crate::daemon::runtime::account::{AccountRuntime, TickHooks};
+        use crate::daemon::server::RuntimeTable;
+        use crate::ops::ServerOp;
+        use crate::reconcile::tests::{fixture_in, Fixture};
+
+        /// One seeded daemon: fields drop in order, the data directory last.
+        struct Seeded {
+            fx: Fixture,
+            /// The message every test mutates, `inbox/1`.
+            id: i64,
+            snapshot: Snapshot,
+            runtime: Arc<AccountRuntime>,
+            runtimes: RuntimeTable,
+            _data: TestDataDir,
+        }
+
+        fn seeded() -> Seeded {
+            let data = TestDataDir::new();
+            let dir = crate::config::account_dir("alice");
+            let fx = fixture_in(&dir);
+            let id = fx.ingest_plain("inbox", 1, "Receipt");
+            let account = AccountConfig {
+                name: "alice".to_string(),
+                ..Default::default()
+            };
+            let snapshot = Snapshot {
+                revision: 0,
+                state: ConfigState::Ok,
+                config: Arc::new(crate::config::GlobalConfig::default()),
+                accounts: Arc::new(vec![account.clone()]),
+            };
+            // Hooks that do nothing: no test here runs a tick, and the drain a
+            // request asks for is run by hand, so its order is observable.
+            let idle = || -> crate::daemon::runtime::account::DrainHook {
+                Arc::new(|_ctx| async { String::new() }.boxed())
+            };
+            let hooks = TickHooks {
+                outbox: idle(),
+                mutations: idle(),
+                body: Arc::new(|_ctx| async { Ok(()) }.boxed()),
+            };
+            let runtime =
+                Arc::new(AccountRuntime::start_at_with_hooks(&dir, account, 1, hooks).unwrap());
+            let runtimes = RuntimeTable::default();
+            runtimes.insert(Arc::clone(&runtime));
+            Seeded {
+                fx,
+                id,
+                snapshot,
+                runtime,
+                runtimes,
+                _data: data,
+            }
+        }
+
+        impl Seeded {
+            async fn call<E: OpExecutor>(
+                &self,
+                kind: Kind,
+                params: Value,
+                server: impl FnOnce(&AccountConfig) -> Result<E, RpcError>,
+            ) -> Result<(Value, String), RpcError> {
+                mutate_with(&params, &self.snapshot, kind, &self.runtimes, server).await
+            }
+
+            /// Every pending op of `alice`, oldest first.
+            fn ops(&self) -> Queue {
+                ops_in(&self.fx.store)
+            }
+        }
+
+        /// The pending ops of a store as `(kind, state)`, oldest first.
+        type Queue = Vec<(String, String)>;
+
+        /// What another client does while an op is on the server.
+        type Meanwhile = Box<dyn FnOnce(&Store) + Send>;
+
+        fn ops_in(store: &Store) -> Queue {
+            let mut stmt = store
+                .conn()
+                .prepare("SELECT kind, state FROM pending_ops ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+
+        /// The server, as far as a mutation can tell: it logs each op it is
+        /// handed and the queue as it stood at that moment, and runs what
+        /// another client did meanwhile once, while the first op is on it.
+        struct FakeServer {
+            name: &'static str,
+            log: Arc<Mutex<Vec<String>>>,
+            store: std::path::PathBuf,
+            queue: Arc<Mutex<Vec<Queue>>>,
+            meanwhile: Option<Meanwhile>,
+        }
+
+        impl FakeServer {
+            fn new(name: &'static str, log: &Arc<Mutex<Vec<String>>>, store: &Store) -> Self {
+                FakeServer {
+                    name,
+                    log: Arc::clone(log),
+                    store: store.path().to_path_buf(),
+                    queue: Arc::default(),
+                    meanwhile: None,
+                }
+            }
+        }
+
+        impl OpExecutor for FakeServer {
+            async fn execute(&mut self, op: &ServerOp) -> anyhow::Result<()> {
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} {}", self.name, op.kind()));
+                let store = Store::open(&self.store)?;
+                self.queue.lock().unwrap().push(ops_in(&store));
+                if let Some(meanwhile) = self.meanwhile.take() {
+                    meanwhile(&store);
+                }
+                Ok(())
+            }
+        }
+
+        fn by_row(id: i64) -> Value {
+            json!({"account": "alice", "row_id": id})
+        }
+
+        /// A refused resolution, for a call that must not resolve a server.
+        fn no_server(_: &AccountConfig) -> Result<FakeServer, RpcError> {
+            panic!("settle: false resolved a server")
+        }
+
+        /// `mp archive`: the op is committed `settling`, run by the caller
+        /// once, and retired, and the row lands in the archive. Committed
+        /// for the drain instead, the settle would refuse it as the drain's
+        /// and every `mp move`, `mp archive` and `mp delete` would fail
+        /// with the op left queued (PERSO-242).
+        #[tokio::test]
+        async fn a_settled_mutation_runs_its_op_as_the_caller_and_lands() {
+            let daemon = seeded();
+            let log = Arc::default();
+            let server = FakeServer::new("caller", &log, &daemon.fx.store);
+            let queue = Arc::clone(&server.queue);
+
+            let (result, _) = daemon
+                .call(Kind::Archive, by_row(daemon.id), |_| Ok(server))
+                .await
+                .unwrap();
+
+            assert_eq!(result["moved_to"]["mailbox"], "archive");
+            assert_eq!(*log.lock().unwrap(), ["caller move"]);
+            assert_eq!(
+                *queue.lock().unwrap(),
+                [[("move".to_string(), "settling".to_string())]],
+                "on the server, the op was the caller's"
+            );
+            assert!(daemon.ops().is_empty(), "retired: {:?}", daemon.ops());
+            let row = read::find_by_id(&daemon.fx.store, daemon.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.mailbox, "archive");
+        }
+
+        /// `settle: false`, the TUI's call: the op is committed `queued` for
+        /// the drain and no server is resolved.
+        #[tokio::test]
+        async fn a_queued_mutation_commits_its_op_for_the_drain() {
+            let daemon = seeded();
+            let mut params = by_row(daemon.id);
+            params["settle"] = json!(false);
+
+            daemon.call(Kind::Archive, params, no_server).await.unwrap();
+
+            assert_eq!(daemon.ops(), [("move".to_string(), "queued".to_string())]);
+        }
+
+        /// A star the TUI queues while `mp archive` is on the server is held
+        /// back behind the archive (PERSO-236). The settle asks for the drain
+        /// once the archive is done, so the star runs after the debounce and
+        /// not at the next periodic tick (PERSO-242).
+        #[tokio::test]
+        async fn a_settled_mutation_asks_for_the_drain_an_op_held_behind_it_waits_for() {
+            let daemon = seeded();
+            let mut requests = daemon.runtime.drain_requests();
+            let asked_before = *requests.borrow_and_update();
+            let log = Arc::default();
+            let id = daemon.id;
+            let server = FakeServer {
+                meanwhile: Some(Box::new(move |store: &Store| {
+                    let star = ServerOp::SetFlagged {
+                        message_id: "<inbox-1@example.com>".to_string(),
+                        mailbox: "Archive".to_string(),
+                        flagged: true,
+                    };
+                    pending_ops::apply_set_flagged(
+                        store,
+                        "alice",
+                        id,
+                        true,
+                        star,
+                        pending_ops::Runner::Drain,
+                    )
+                    .unwrap()
+                    .unwrap();
+                })),
+                ..FakeServer::new("caller", &log, &daemon.fx.store)
+            };
+
+            daemon
+                .call(Kind::Archive, by_row(daemon.id), |_| Ok(server))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                *requests.borrow_and_update(),
+                asked_before + 1,
+                "the settle asked for one drain"
+            );
+            assert_eq!(
+                daemon.ops(),
+                [("set_flagged".to_string(), "queued".to_string())]
+            );
+            let mut drainer = FakeServer::new("drain", &log, &daemon.fx.store);
+            let drained = pending_ops::drain(
+                &daemon.fx.store,
+                &daemon.fx.blobs,
+                "alice",
+                &mut drainer,
+                crate::outbox::unix_now(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(drained.completed, 1);
+            assert_eq!(*log.lock().unwrap(), ["caller move", "drain set_flagged"]);
+        }
     }
 }
