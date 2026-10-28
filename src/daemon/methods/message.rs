@@ -1570,8 +1570,10 @@ impl Method for MessageMutationMethod {
             // scheduler would be a change to what the command promises. The
             // drain's own I/O still runs on the daemon's runtime, through the
             // handle this thread blocks on.
+            let runtimes = Arc::clone(&self.runtimes);
             let done = tokio::task::spawn_blocking(move || {
-                tokio::runtime::Handle::current().block_on(mutate(&params, &snapshot, kind))
+                tokio::runtime::Handle::current()
+                    .block_on(mutate(&params, &snapshot, kind, &runtimes))
             })
             .await;
             let (result, resource) = match done {
@@ -1676,6 +1678,7 @@ async fn mutate(
     params: &Value,
     snapshot: &super::super::config::Snapshot,
     kind: Kind,
+    runtimes: &super::super::server::RuntimeTable,
 ) -> Result<(Value, String), RpcError> {
     let name = string_param(params, "account")?;
     let account = super::account::ready_account(&snapshot.accounts, &name)?;
@@ -1835,7 +1838,19 @@ async fn mutate(
         return Err(gone());
     };
     if let Some((mut backend, scope)) = settler {
-        settle(&store, &blobs, &scope, queued.op_id, &mut backend).await?;
+        let settled = settle(&store, &blobs, &scope, queued.op_id, &mut backend).await;
+        drop(scope);
+        // A drain that ran while this op was on the server held back the ops
+        // queued after it on the same message (PERSO-236). They are owed now,
+        // whether the op landed or was rolled back, and a drain is asked for
+        // rather than left to the next tick.
+        let waiting = pending_ops::counts(&store, &name).map_or(true, |(queued, _)| queued > 0);
+        if waiting {
+            if let Some(runtime) = runtimes.get(&name) {
+                runtime.request_drain();
+            }
+        }
+        settled?;
     }
     Ok((result, resource))
 }

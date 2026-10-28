@@ -916,7 +916,11 @@ pub struct DrainResult {
 ///
 /// A `settling` row is a caller's to run ([`run_and_settle`]) and is never
 /// run here; one its caller left behind is first handed back as `queued`
-/// ([`recover_orphaned_settles`]).
+/// ([`recover_orphaned_settles`]). A `queued` row on a message that has an
+/// older `settling` row waits for it ([`settling_targets`]), counted as still
+/// open with no attempt spent: the ops on one message run in the order they
+/// were committed, which the drain kept when every op was `queued`. The
+/// settle that retires the older row asks for the drain that runs it.
 ///
 /// `pub(crate)`, not `pub`: the only lock-guarded entry point is
 /// [`drain_account`], and draining outside that lock is the race the engine
@@ -930,7 +934,21 @@ pub(crate) async fn drain<E: OpExecutor>(
 ) -> Result<DrainResult> {
     let mut result = DrainResult::default();
     recover_orphaned_settles(store, account)?;
-    for row in queued_ops(store, account)? {
+    // The queue before the settling rows: a row committed after this read
+    // has a larger id than every row in `queued`, so it can defer none of
+    // them, while one committed between the two reads would be missed the
+    // other way round.
+    let queued = queued_ops(store, account)?;
+    let settling = settling_targets(store, account)?;
+    for row in queued {
+        let waits = row
+            .target_message_id
+            .and_then(|target| settling.get(&target))
+            .is_some_and(|&oldest| oldest < row.id);
+        if waits {
+            result.still_open += 1;
+            continue;
+        }
         if row.updated + backoff_secs(row.attempts) > now {
             result.still_open += 1;
             continue;
@@ -995,6 +1013,28 @@ pub(crate) async fn drain<E: OpExecutor>(
         }
     }
     Ok(result)
+}
+
+/// The oldest `settling` op id of every message of `account` a caller is
+/// settling an op on, keyed by `target_message_id` (PERSO-236).
+///
+/// The `messages` row id is the key because it is what names one message
+/// across its ops: a move keeps the row id and changes only its mailbox and
+/// uid, so a move, a star and a second move of one message all carry the
+/// same target, while the `Message-ID` in the [`ServerOp`] is shared by every
+/// copy of a message in other folders. A drafts-mirror op has no target and
+/// is never deferred.
+fn settling_targets(store: &Store, account: &str) -> Result<HashMap<i64, i64>> {
+    let mut stmt = store.conn().prepare(
+        "SELECT target_message_id, MIN(id) FROM pending_ops
+         WHERE account = ?1 AND state = ?2 AND target_message_id IS NOT NULL
+         GROUP BY target_message_id",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![account, STATE_SETTLING], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    rows.collect::<rusqlite::Result<HashMap<i64, i64>>>()
+        .context("listing the messages a caller is settling an op on")
 }
 
 /// Take the engine lock and drain, or do nothing when another process holds it.
@@ -2229,6 +2269,135 @@ mod tests {
             read::find_by_id(&fx.store, id).unwrap().unwrap().mailbox,
             "inbox",
             "a refused commit leaves the row where it was"
+        );
+    }
+
+    /// The ops on one message run in the order they were committed when the
+    /// first of them is a caller's (PERSO-236): a star and a second move
+    /// queued while `mp archive` is on the server wait for it, rather than
+    /// running against the folder the message has not reached yet, where the
+    /// star finds nothing and is retired as done. Once the archive is
+    /// settled they run, in order.
+    #[tokio::test]
+    async fn a_queued_op_waits_for_an_older_settling_op_on_its_message() {
+        let fx = fixture();
+        let id = fx.ingest_plain("inbox", 1, "Receipt");
+        let scope = SettleScope::open(&fx.store);
+        let (_prev, archive) = apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+        let star = ServerOp::SetFlagged {
+            message_id: "<inbox-1@example.com>".to_string(),
+            mailbox: "Archive".to_string(),
+            flagged: true,
+        };
+        apply_set_flagged(&fx.store, "alice", id, true, star.clone(), Runner::Drain)
+            .unwrap()
+            .unwrap();
+        let onwards = ServerOp::Move {
+            message_id: "<inbox-1@example.com>".to_string(),
+            source_mailbox: "Archive".to_string(),
+            dest_mailbox: "Receipts".to_string(),
+        };
+        apply_move(
+            &fx.store,
+            "alice",
+            id,
+            "receipts",
+            onwards.clone(),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut ticking = FakeExecutor::always_ok();
+        let result = drain(&fx.store, &fx.blobs, "alice", &mut ticking, unix_now() + 10)
+            .await
+            .unwrap();
+
+        assert!(ticking.seen.is_empty(), "ran {:?}", ticking.seen);
+        assert_eq!(
+            result,
+            DrainResult {
+                still_open: 2,
+                ..DrainResult::default()
+            }
+        );
+        let waiting = queued_ops(&fx.store, "alice").unwrap();
+        assert_eq!(waiting.len(), 2);
+        assert!(
+            waiting.iter().all(|row| row.attempts == 0),
+            "waiting is not a failed attempt"
+        );
+
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        run_and_settle(
+            &fx.store,
+            &fx.blobs,
+            &scope,
+            archive,
+            &mut CountingExecutor::new(&runs),
+        )
+        .await
+        .unwrap();
+        let result = drain(&fx.store, &fx.blobs, "alice", &mut ticking, unix_now() + 10)
+            .await
+            .unwrap();
+
+        assert_eq!(ticking.seen, [star, onwards], "in the order committed");
+        assert_eq!(result.completed, 2);
+        assert!(queued_ops(&fx.store, "alice").unwrap().is_empty());
+    }
+
+    /// A caller settling an op on one message holds back no op on another.
+    #[tokio::test]
+    async fn a_settling_op_defers_no_op_on_another_message() {
+        let fx = fixture();
+        let settled = fx.ingest_plain("inbox", 1, "Settled");
+        let other = fx.ingest_plain("inbox", 2, "Other");
+        let scope = SettleScope::open(&fx.store);
+        apply_move(
+            &fx.store,
+            "alice",
+            settled,
+            "archive",
+            move_op("<inbox-1@example.com>"),
+            Runner::Caller(&scope),
+        )
+        .unwrap()
+        .unwrap();
+        apply_move(
+            &fx.store,
+            "alice",
+            other,
+            "archive",
+            move_op("<inbox-2@example.com>"),
+            Runner::Drain,
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut ticking = FakeExecutor::always_ok();
+        let result = drain(&fx.store, &fx.blobs, "alice", &mut ticking, unix_now() + 10)
+            .await
+            .unwrap();
+
+        assert_eq!(ticking.seen, [move_op("<inbox-2@example.com>")]);
+        assert_eq!(result.completed, 1);
+        assert_eq!(result.still_open, 0);
+        assert_eq!(
+            rows_in_state(&fx.store, "alice", STATE_SETTLING)
+                .unwrap()
+                .len(),
+            1,
+            "the caller's op is still the caller's"
         );
     }
 
